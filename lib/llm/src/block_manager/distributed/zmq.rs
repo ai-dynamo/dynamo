@@ -22,11 +22,17 @@ use tmq::{
 use tokio::sync::{Mutex, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use bincode;
 use futures_util::{SinkExt, StreamExt};
+use std::cmp::min;
 
 struct PendingMessage {
     remaining_workers: usize,
-    completion_indicator: oneshot::Sender<()>,
+    completion_indicator: Option<oneshot::Sender<()>>,
+    // If true, collect one payload (bytes) from each worker reply.
+    want_payload: bool,
+    // Collected raw payloads (one per worker), if want_payload == true
+    payloads: Option<Vec<Vec<u8>>>,
 }
 
 pub struct LeaderSockets {
@@ -36,18 +42,16 @@ pub struct LeaderSockets {
     pub ack_url: String,
 }
 
-pub fn new_leader_sockets(url: &str) -> Result<LeaderSockets> {
-    let url = format!("{}:0", url);
-
+pub fn new_leader_sockets(pub_url: &str, ack_url: &str) -> Result<LeaderSockets> {
     let context = Context::new();
-    let pub_socket = publish(&context).bind(url.as_str())?;
+    let pub_socket = publish(&context).bind(pub_url)?;
     let pub_url = pub_socket
         .get_socket()
         .get_last_endpoint()
         .unwrap()
         .unwrap();
 
-    let ack_socket = pull(&context).bind(url.as_str())?;
+    let ack_socket = pull(&context).bind(ack_url)?;
     let ack_url = ack_socket
         .get_socket()
         .get_last_endpoint()
@@ -78,12 +82,18 @@ pub struct ZmqActiveMessageLeader {
 }
 
 impl ZmqActiveMessageLeader {
-    pub async fn new(
+    /// Handshake-first constructor: collects WorkerMetaData, broadcasts LeaderMetadata,
+    /// waits for allocation ACKs, then runs the final ping loop.
+    pub async fn new_with_handshake<F>(
         leader_sockets: LeaderSockets,
         num_workers: usize,
-        timeout: Duration,
+        overall_timeout: Duration,
         cancel_token: CancellationToken,
-    ) -> Result<Self> {
+        make_leader_meta: F,
+    ) -> Result<Self>
+    where
+        F: Fn(&[WorkerMetadata]) -> LeaderMetadata + Send + Sync + 'static,
+    {
         let pub_socket = Arc::new(Mutex::new(leader_sockets.pub_socket));
         let pull_socket = leader_sockets.ack_socket;
 
@@ -94,48 +104,128 @@ impl ZmqActiveMessageLeader {
         );
 
         let pending_messages = Arc::new(Mutex::new(HashMap::new()));
-
         let pending_messages_clone = pending_messages.clone();
         CriticalTaskExecutionHandle::new(
-            |cancel_token| Self::pull_worker(pull_socket, pending_messages_clone, cancel_token),
-            cancel_token,
+            |ct| Self::pull_worker(pull_socket, pending_messages_clone, ct),
+            cancel_token.clone(),
             "ZmqActiveMessageLeader: Pull worker",
         )?
         .detach();
 
-        let self_ = Self {
+        let this = Self {
             pub_socket,
             message_id: Arc::new(Mutex::new(0)),
             pending_messages,
             num_workers: Arc::new(num_workers),
         };
 
-        // Ping our workers.
-        let start = Instant::now();
-        loop {
-            if start.elapsed() > timeout {
-                return Err(anyhow::anyhow!("Timed out waiting for workers."));
+        let deadline = Instant::now() + overall_timeout;
+
+        // 1) Collect KvbmWorkerData from ALL workers in a single round.
+        // Keep rebroadcasting until we get exactly `num_workers` replies to the SAME broadcast.
+        let workers_payloads: Vec<Vec<u8>> = loop {
+            if Instant::now() >= deadline {
+                return Err(anyhow::anyhow!(
+                    "Handshake timed out (device-config collection)."
+                ));
             }
+            let remain = deadline.saturating_duration_since(Instant::now());
+            let round_to = min(Duration::from_secs(2), remain);
 
-            // Try to send a ping to all workers.
-            tracing::info!("ZmqActiveMessageLeader: Pinging workers...");
-            let ping_receiver = self_.broadcast(ZMQ_PING_MESSAGE, vec![]).await?;
+            tracing::info!("Handshake: requesting worker device configs...");
+            match this
+                .broadcast_collect(
+                    ZMQ_WORKER_METADATA_MESSAGE,
+                    &[],
+                    /* want_payload */ true,
+                    round_to,
+                )
+                .await
+            {
+                Ok(payloads) if payloads.len() == num_workers => {
+                    tracing::info!(
+                        "Handshake: received {} worker metadata replies in this round.",
+                        payloads.len()
+                    );
+                    break payloads;
+                }
+                Ok(payloads) => {
+                    tracing::warn!(
+                        "Handshake: got {} / {} worker metadata replies; rebroadcasting...",
+                        payloads.len(),
+                        num_workers
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "Handshake: worker metadata round timed out/failed: {e}; retrying..."
+                    );
+                    continue;
+                }
+            }
+        };
 
-            tokio::select! {
-                // If we receive an ACK from every worker, we're done.
-                _ = ping_receiver => {
-                    tracing::info!("ZmqActiveMessageLeader: Worker ping successful. Startup complete.");
+        let workers: Vec<WorkerMetadata> = workers_payloads
+            .into_iter()
+            .map(|b| bincode::deserialize::<WorkerMetadata>(&b))
+            .collect::<std::result::Result<_, _>>()?;
+
+        // 2) Compute & broadcast LeaderMetadata; wait for ALL acks in the SAME round.
+        let leader_meta = make_leader_meta(&workers);
+        let leader_meta_bytes = bincode::serialize(&leader_meta)?;
+
+        loop {
+            if Instant::now() >= deadline {
+                return Err(anyhow::anyhow!(
+                    "Handshake timed out (allocation-config broadcast)."
+                ));
+            }
+            let remain = deadline.saturating_duration_since(Instant::now());
+            let round_to = min(Duration::from_secs(2), remain);
+
+            tracing::info!("Handshake: broadcasting allocation config to workers...");
+            match this
+                .broadcast_collect(
+                    ZMQ_LEADER_METADATA_MESSAGE,
+                    std::slice::from_ref(&leader_meta_bytes),
+                    /* want_payload */ false,
+                    round_to,
+                )
+                .await
+            {
+                Ok(_) => {
+                    // Success: all workers acked in this round.
+                    tracing::info!("Handshake: all workers acked allocation config.");
                     break;
                 }
-                // Wait for 1 second before pinging again.
-                _ = tokio::time::sleep(Duration::from_millis(1000)) => {
-                    tracing::info!("ZmqActiveMessageLeader: Ping timed out. Retrying...");
+                Err(e) => {
+                    tracing::warn!(
+                        "Handshake: allocation-config round incomplete: {e}; rebroadcasting..."
+                    );
                     continue;
                 }
             }
         }
 
-        Ok(self_)
+        // 3) Final readiness ping loop (workers only ACK after allocation ready)
+        let ping_deadline = deadline;
+        loop {
+            if Instant::now() >= ping_deadline {
+                return Err(anyhow::anyhow!(
+                    "Timed out waiting for ping readiness after handshake."
+                ));
+            }
+            tracing::info!("Handshake: final readiness ping...");
+            let ping = this.broadcast(ZMQ_PING_MESSAGE, vec![]).await?;
+            tokio::select! {
+                _ = ping => break,
+                _ = tokio::time::sleep(Duration::from_millis(500)) => continue,
+                _ = cancel_token.cancelled() => return Err(anyhow::anyhow!("Startup canceled")),
+            }
+        }
+
+        Ok(this)
     }
 
     /// Broadcast a message to all workers.
@@ -157,7 +247,9 @@ impl ZmqActiveMessageLeader {
         let pending_message = PendingMessage {
             // We start with the number of workers we're waiting for.
             remaining_workers: *self.num_workers,
-            completion_indicator,
+            completion_indicator: Some(completion_indicator),
+            want_payload: false,
+            payloads: None,
         };
 
         // Add the message to the pending messages map.
@@ -187,7 +279,68 @@ impl ZmqActiveMessageLeader {
         Ok(completion_receiver)
     }
 
-    /// Pull worker is responsible for receiving ACKs from workers.
+    /// Generic broadcast that can collect one reply payload from each worker.
+    /// - `function`: handler name on workers
+    /// - `data_frames`: optional extra frames after [id, function]
+    /// - `want_payload`: if true, expects replies shaped as [id, function, payload]
+    ///   Returns payloads (empty if want_payload == false).
+    pub async fn broadcast_collect(
+        &self,
+        function: &str,
+        data_frames: &[Vec<u8>],
+        want_payload: bool,
+        timeout: Duration,
+    ) -> Result<Vec<Vec<u8>>> {
+        // Generate a unique id.
+        let id = {
+            let mut id = self.message_id.lock().await;
+            *id += 1;
+            *id
+        };
+
+        let (completion_indicator, completion_receiver) = oneshot::channel();
+        let pending_message = PendingMessage {
+            remaining_workers: *self.num_workers,
+            completion_indicator: Some(completion_indicator),
+            want_payload,
+            payloads: want_payload.then(|| Vec::with_capacity(*self.num_workers)),
+        };
+        self.pending_messages
+            .lock()
+            .await
+            .insert(id, pending_message);
+
+        // Build message: [id, function, ...data]
+        let mut message: VecDeque<Message> = VecDeque::with_capacity(2 + data_frames.len());
+        message.push_back(id.to_be_bytes().as_slice().into());
+        message.push_back(function.into());
+        for df in data_frames {
+            message.push_back(df.clone().into());
+        }
+        self.pub_socket
+            .lock()
+            .await
+            .send(Multipart(message))
+            .await?;
+
+        // Await all replies or timeout.
+        tokio::select! {
+            _ = completion_receiver => { /* done */ }
+            _ = tokio::time::sleep(timeout) => {
+                let mut map = self.pending_messages.lock().await;
+                map.remove(&id);
+                return Err(anyhow::anyhow!("Timed out waiting for '{}' responses", function));
+            }
+        }
+
+        // Extract payloads (if any).
+        let mut map = self.pending_messages.lock().await;
+        let entry = map
+            .remove(&id)
+            .ok_or_else(|| anyhow::anyhow!("pending entry missing"))?;
+        Ok(entry.payloads.unwrap_or_default())
+    }
+
     async fn pull_worker(
         mut pull_socket: Pull,
         pending_messages: Arc<Mutex<HashMap<usize, PendingMessage>>>,
@@ -196,65 +349,42 @@ impl ZmqActiveMessageLeader {
         loop {
             tokio::select! {
                 Some(Ok(message)) = pull_socket.next() => {
-                    // The leader should only ever receive ACKs.
-                    // ACKs have no data.
-                    if message.len() != 1 {
-                        tracing::error!(
-                            "Received message with unexpected length: {:?}",
-                            message.len()
-                        );
-                        continue;
-                    }
-
-                    // TODO: This looks ugly.
-                    let arr: [u8; std::mem::size_of::<usize>()] = (*message[0]).try_into()?;
-                    let id = usize::from_be_bytes(arr);
-
-                    let mut pending_messages = pending_messages.lock().await;
-                    // TODO: Should we error if we can't find the pending message?
-                    // if let std::collections::hash_map::Entry::Occupied(mut entry) =
-                    //     pending_messages.entry(id)
-                    // {
-                    //     entry.get_mut().remaining_workers -= 1;
-                    //     tracing::debug!(
-                    //         "ZmqActiveMessageLeader: Received ACK for message with id: {}. There are {} remaining workers.",
-                    //         id,
-                    //         entry.get().remaining_workers
-                    //     );
-                    //     // If all workers have ACKed, notify the completion indicator.
-                    //     if entry.get().remaining_workers == 0 {
-                    //         let e = entry.remove();
-                    //         tracing::debug!(
-                    //             "ZmqActiveMessageLeader: Message with id: {} completed.",
-                    //             id
-                    //         );
-                    //         // It's possible that the receiver has already been dropped,
-                    //         // so ignore any send error here.
-                    //         let _ = e.completion_indicator.send(());
-                    //     }
-                    // }
-
-                    match pending_messages.entry(id) {
-                        std::collections::hash_map::Entry::Occupied(mut entry) => {
-                            let pending_message = entry.get_mut();
-                            debug_assert!(pending_message.remaining_workers > 0);
-                            pending_message.remaining_workers -= 1;
-                            tracing::debug!(
-                                "ZmqActiveMessageLeader: Received ACK for message with id: {}. There are {} remaining workers.",
-                                id,
-                                pending_message.remaining_workers
-                            );
-                            if pending_message.remaining_workers == 0 {
-                                let e = entry.remove();
-                                tracing::debug!("ZmqActiveMessageLeader: Message with id: {} completed.", id);
-                                let _ = e.completion_indicator.send(());
-                            }
-                        }
-                        std::collections::hash_map::Entry::Vacant(_) => {
-                            tracing::error!("Received ACK for unknown message with id: {}", id);
-                        }
-                    }
+                if message.is_empty() {
+                    tracing::error!("Leader PULL: empty message");
+                    continue;
                 }
+                let arr: [u8; std::mem::size_of::<usize>()] = (*message[0]).try_into()?;
+                let id = usize::from_be_bytes(arr);
+
+                let mut map = pending_messages.lock().await;
+
+                if let Some(pm) = map.get_mut(&id) {
+                    // payload reply or pure ACK?
+                    if message.len() == 1 {
+                        if pm.remaining_workers > 0 { pm.remaining_workers -= 1; }
+                    } else {
+                        if pm.want_payload && message.len() >= 3
+                            && let Some(bufs) = pm.payloads.as_mut() {
+                                bufs.push((*message[2]).to_vec());
+                            }
+                        if pm.remaining_workers > 0 { pm.remaining_workers -= 1; }
+                    }
+
+                    tracing::debug!(
+                        "Leader PULL: got {} for id {} (remaining={})",
+                        if message.len()==1 { "ACK" } else { "REPLY" }, id, pm.remaining_workers
+                    );
+
+                    // IMPORTANT: do NOT remove here; just notify completion.
+                    if pm.remaining_workers == 0
+                        && let Some(tx) = pm.completion_indicator.take() {
+                            let _ = tx.send(());
+                        }
+                } else {
+                    // Late reply for a round we've already collected/removed.
+                    tracing::debug!("Leader PULL: late/unknown id {}", id);
+                }
+            }
                 _ = cancel_token.cancelled() => {
                     tracing::info!("ZmqActiveMessageLeader: Pull worker cancelled.");
                     break;
@@ -269,10 +399,10 @@ impl ZmqActiveMessageLeader {
 /// A message handle is used to track a message.
 /// It contains a way to ACK the message, as well as the data.
 pub struct MessageHandle {
-    message_id: usize,
+    pub message_id: usize,
     function: String,
     pub data: Vec<Vec<u8>>,
-    push_handle: Arc<Mutex<Push>>,
+    pub push_handle: Arc<Mutex<Push>>,
     acked: bool,
 }
 
@@ -321,6 +451,36 @@ impl MessageHandle {
         tracing::debug!("ZmqActiveMessageWorker: ACKed message with id: {}", id);
         Ok(())
     }
+
+    /// Reply to the leader with arbitrary payload frames and mark as acked.
+    /// Frames shape: [id, function, payload_0, payload_1, ...]
+    pub async fn reply(
+        &mut self,
+        function: &str,
+        payload_frames: &[Vec<u8>],
+    ) -> anyhow::Result<()> {
+        let mut frames: std::collections::VecDeque<tmq::Message> =
+            std::collections::VecDeque::with_capacity(2 + payload_frames.len());
+        frames.push_back(self.message_id.to_be_bytes().as_slice().into());
+        frames.push_back(function.into());
+        for p in payload_frames {
+            frames.push_back(p.clone().into());
+        }
+        self.push_handle
+            .lock()
+            .await
+            .send(tmq::Multipart(frames))
+            .await?;
+        // Mark as acked so Drop won't panic; leader treats the reply as the "ack".
+        self.acked = true;
+        Ok(())
+    }
+
+    /// Mark this message as handled locally without sending an ACK/reply.
+    /// Use when intentionally ignoring a message (e.g. ping before readiness).
+    pub fn mark_handled(&mut self) {
+        self.acked = true;
+    }
 }
 
 /// We must always ACK a message.
@@ -340,21 +500,6 @@ pub trait Handler: Send + Sync {
     async fn handle(&self, message: MessageHandle) -> Result<()>;
 }
 
-/// A super simple handler that responds to a ping.
-/// This is used in the startup sequence to check worker liveness.
-struct Ping;
-
-#[async_trait]
-impl Handler for Ping {
-    async fn handle(&self, mut message: MessageHandle) -> Result<()> {
-        if !message.data.is_empty() {
-            return Err(anyhow::anyhow!("Ping message should not have data."));
-        }
-        message.ack().await?;
-        Ok(())
-    }
-}
-
 type MessageHandlers = HashMap<String, Arc<dyn Handler>>;
 
 /// The ActiveMessageWorker receives commands from the leader, and ACKs them.
@@ -364,7 +509,7 @@ impl ZmqActiveMessageWorker {
     pub fn new(
         sub_url: &str,
         push_url: &str,
-        mut message_handlers: MessageHandlers,
+        message_handlers: MessageHandlers,
         cancel_token: CancellationToken,
     ) -> Result<Self> {
         let context = Context::new();
@@ -380,8 +525,6 @@ impl ZmqActiveMessageWorker {
             push_url
         );
 
-        // Add our ping handler.
-        message_handlers.insert(ZMQ_PING_MESSAGE.to_string(), Arc::new(Ping));
         let message_handlers = Arc::new(message_handlers);
 
         CriticalTaskExecutionHandle::new(
