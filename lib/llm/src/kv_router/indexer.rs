@@ -277,10 +277,16 @@ impl RadixTree {
         let mut scores = OverlapScores::new();
         let mut current = self.root.clone();
         let now = Instant::now();
-        for block_hash in sequence {
+
+        tracing::trace!(
+            "RadixTree::find_matches: looking for sequence={:?}",
+            sequence.iter().map(|h| h.0).collect::<Vec<_>>()
+        );
+
+        for (idx, block_hash) in sequence.iter().enumerate() {
             let next_block = {
                 let current_borrow = current.borrow();
-                current_borrow.children.get(&block_hash).cloned()
+                current_borrow.children.get(block_hash).cloned()
             };
             if let Some(block) = next_block {
                 scores.update_scores(&block.borrow().workers);
@@ -305,9 +311,16 @@ impl RadixTree {
 
                 current = block;
             } else {
+                tracing::trace!(
+                    "RadixTree::find_matches: block not found at index {} for hash {}",
+                    idx,
+                    block_hash.0
+                );
                 break;
             }
         }
+
+        tracing::trace!("RadixTree::find_matches: final scores={:?}", scores.scores);
 
         scores
     }
@@ -348,6 +361,13 @@ impl RadixTree {
                 };
 
                 for block_id in op.blocks {
+                    tracing::trace!(
+                        "RadixTree::apply_event: storing block for worker {}, tokens_hash={}, block_hash={}",
+                        worker_id,
+                        block_id.tokens_hash.0,
+                        block_id.block_hash.0
+                    );
+
                     let mut inner = current.borrow_mut();
                     let block = match inner.children.get(&block_id.tokens_hash) {
                         Some(block) => block.clone(),
