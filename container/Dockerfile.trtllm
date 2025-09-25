@@ -96,7 +96,8 @@ RUN apt-get update && \
         # System utilities
         ca-certificates \
         curl \
-        jq && \
+        jq \
+        wget && \
     rm -rf /var/lib/apt/lists/*
 
 # Install prometheus
@@ -190,6 +191,9 @@ COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash
 COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/triton ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/triton
 COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info
 
+
+ENV ENV=${ENV:-/etc/shinit_v2}
+
 # Install TensorRT-LLM and related dependencies
 ARG HAS_TRTLLM_CONTEXT
 ARG TENSORRTLLM_PIP_WHEEL
@@ -199,7 +203,17 @@ ARG TENSORRTLLM_INDEX_URL
 # because there might be mismatched versions of TensorRT between the NGC PyTorch
 # and the TRTLLM wheel.
 RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
+    # Clean up any existing conflicting CUDA repository configurations and GPG keys
+    rm -f /etc/apt/sources.list.d/cuda*.list && \
+    rm -f /usr/share/keyrings/cuda-archive-keyring.gpg && \
+    rm -f /etc/apt/trusted.gpg.d/cuda*.gpg && \
     if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
+        # Download and run install_tensorrt.sh from TensorRT-LLM GitHub before installing the wheel
+        TRTLLM_COMMIT=$(cat /trtllm_wheel/commit.txt | awk -F'_' '{print $2}') && \
+        curl -fsSL --retry 5 --retry-delay 10 --max-time 1800 -o /tmp/install_tensorrt.sh "https://github.com/NVIDIA/TensorRT-LLM/raw/${TRTLLM_COMMIT}/docker/common/install_tensorrt.sh" && \
+        # Modify the script to use virtual environment pip instead of system pip3
+        sed -i 's/pip3 install/uv pip install/g' /tmp/install_tensorrt.sh && \
+        bash /tmp/install_tensorrt.sh && \
         # Install from local wheel directory in build context
         WHEEL_FILE=$(find /trtllm_wheel -name "*.whl" | head -n 1); \
         if [ -n "$WHEEL_FILE" ]; then \
@@ -209,6 +223,12 @@ RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
             exit 1; \
         fi; \
     else \
+        # Download and run install_tensorrt.sh from TensorRT-LLM GitHub before installing the wheel
+        TRTLLM_VERSION=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -n 's/.*==\([0-9a-zA-Z\.\-]*\).*/\1/p') && \
+        curl -fsSL --retry 5 --retry-delay 10 --max-time 1800 -o /tmp/install_tensorrt.sh "https://github.com/NVIDIA/TensorRT-LLM/raw/v${TRTLLM_VERSION}/docker/common/install_tensorrt.sh" && \
+        # Modify the script to use virtual environment pip instead of system pip3
+        sed -i 's/pip3 install/uv pip install/g' /tmp/install_tensorrt.sh && \
+        bash /tmp/install_tensorrt.sh && \
         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
         uv pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}"; \
     fi

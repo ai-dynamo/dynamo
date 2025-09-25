@@ -213,7 +213,8 @@ class HandlerBase:
                     )
                     yield final_out
 
-            if not res.outputs:
+            # If we are not done generating, but there are no outputs, return an error
+            if not res.outputs and not res.finished:
                 yield {"finish_reason": "error", "token_ids": []}
                 break
 
@@ -236,6 +237,12 @@ class HandlerBase:
                 out["disaggregated_params"] = asdict(
                     DisaggregatedParamsCodec.encode(output.disaggregated_params)
                 )
+
+            if res.finished and not out.get("finish_reason"):
+                logging.warning(
+                    "Request finished with no finish reason set - this indicates a possible bug"
+                )
+
             # Yield the chunk to the client and update the token count for the next iteration.
             yield out
             num_output_tokens_so_far = next_total_toks
