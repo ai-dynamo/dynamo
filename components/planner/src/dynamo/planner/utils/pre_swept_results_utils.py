@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class NpzFile:
     """Handler for NumPy compressed archive (.npz) files containing performance data.
 
-    Provides utilities to load, manipulate, and save performance benchmark results
+    Provides utilities to load, manipulate, and save benchmark results
     stored in NumPy's compressed archive format.
 
     Attributes:
