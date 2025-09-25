@@ -76,15 +76,10 @@ pub(crate) struct ErrorMessage {
     code: u16,
 }
 
-fn map_error_code_to_error_type(code: u16) -> String {
-    match code {
-        404 => "NotFoundError".to_string(),
-        503 => "ServiceUnavailableError".to_string(),
-        500 => "InternalServerError".to_string(),
-        501 => "NotImplementedError".to_string(),
-        422 => "UnprocessableEntityError".to_string(),
-        400 => "BadRequestError".to_string(),
-        _ => "UnknownError".to_string(),
+fn map_error_code_to_error_type(code: StatusCode) -> String {
+    match code.canonical_reason() {
+        Some(reason) => reason.to_string(),
+        None => "UnknownError".to_string(),
     }
 }
 
@@ -92,24 +87,30 @@ impl ErrorMessage {
     /// Not Found Error
     pub fn model_not_found() -> ErrorResponse {
         let code = StatusCode::NOT_FOUND;
-        let error_type = map_error_code_to_error_type(code.as_u16());
-        (code, Json(ErrorMessage {
-            message: "Model not found".to_string(),
-            error_type,
-            code: code.as_u16(),
-        }))
+        let error_type = map_error_code_to_error_type(code);
+        (
+            code,
+            Json(ErrorMessage {
+                message: "Model not found".to_string(),
+                error_type,
+                code: code.as_u16(),
+            }),
+        )
     }
 
     /// Service Unavailable
     /// This is returned when the service is live, but not ready.
     pub fn _service_unavailable() -> ErrorResponse {
         let code = StatusCode::SERVICE_UNAVAILABLE;
-        let error_type = map_error_code_to_error_type(code.as_u16());
-        (code, Json(ErrorMessage {
-            message: "Service is not ready".to_string(),
-            error_type,
-            code: code.as_u16(),
-        }))
+        let error_type = map_error_code_to_error_type(code);
+        (
+            code,
+            Json(ErrorMessage {
+                message: "Service is not ready".to_string(),
+                error_type,
+                code: code.as_u16(),
+            }),
+        )
     }
 
     /// Internal Service Error
@@ -119,12 +120,15 @@ impl ErrorMessage {
     pub fn internal_server_error(msg: &str) -> ErrorResponse {
         tracing::error!("Internal server error: {msg}");
         let code = StatusCode::INTERNAL_SERVER_ERROR;
-        let error_type = map_error_code_to_error_type(code.as_u16());
-        (code, Json(ErrorMessage {
-            message: msg.to_string(),
-            error_type,
-            code: code.as_u16(),
-        }))
+        let error_type = map_error_code_to_error_type(code);
+        (
+            code,
+            Json(ErrorMessage {
+                message: msg.to_string(),
+                error_type,
+                code: code.as_u16(),
+            }),
+        )
     }
 
     /// Not Implemented Error
@@ -133,12 +137,15 @@ impl ErrorMessage {
     pub fn not_implemented_error(msg: &str) -> ErrorResponse {
         tracing::error!("Not Implemented error: {msg}");
         let code = StatusCode::NOT_IMPLEMENTED;
-        let error_type = map_error_code_to_error_type(code.as_u16());
-        (code, Json(ErrorMessage {
-            message: msg.to_string(),
-            error_type,
-            code: code.as_u16(),
-        }))
+        let error_type = map_error_code_to_error_type(code);
+        (
+            code,
+            Json(ErrorMessage {
+                message: msg.to_string(),
+                error_type,
+                code: code.as_u16(),
+            }),
+        )
     }
 
     /// The OAI endpoints call an [`dynamo.runtime::engine::AsyncEngine`] which are specialized to return
@@ -154,11 +161,14 @@ impl ErrorMessage {
                 dynamo_runtime::pipeline::error::PipelineError::ServiceOverloaded(_)
             )
         {
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(ErrorMessage {
-                message: pipeline_err.to_string(),
-                error_type: map_error_code_to_error_type(StatusCode::SERVICE_UNAVAILABLE.as_u16()),
-                code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
-            }));
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorMessage {
+                    message: pipeline_err.to_string(),
+                    error_type: map_error_code_to_error_type(StatusCode::SERVICE_UNAVAILABLE),
+                    code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                }),
+            );
         }
 
         // Then check for HttpError
@@ -174,11 +184,14 @@ impl ErrorMessage {
             return ErrorMessage::internal_server_error(&err.message);
         }
         match StatusCode::from_u16(err.code) {
-            Ok(code) => (code, Json(ErrorMessage {
-                message: err.message,
-                error_type: map_error_code_to_error_type(code.as_u16()),
-                code: code.as_u16(),
-            })),
+            Ok(code) => (
+                code,
+                Json(ErrorMessage {
+                    message: err.message,
+                    error_type: map_error_code_to_error_type(code),
+                    code: code.as_u16(),
+                }),
+            ),
             Err(_) => ErrorMessage::internal_server_error(&err.message),
         }
     }
@@ -188,7 +201,9 @@ impl From<HttpError> for ErrorMessage {
     fn from(err: HttpError) -> Self {
         ErrorMessage {
             message: err.message,
-            error_type: map_error_code_to_error_type(err.code),
+            error_type: map_error_code_to_error_type(
+                StatusCode::from_u16(err.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            ),
             code: err.code,
         }
     }
@@ -206,12 +221,15 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
             .await
             .unwrap_or_default();
         let error_message = String::from_utf8_lossy(&body_bytes).to_string();
-        (StatusCode::BAD_REQUEST, Json(ErrorMessage {
-            message: error_message,
-            error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST.as_u16()),
-            code: StatusCode::BAD_REQUEST.as_u16(),
-        }))
-        .into_response()
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorMessage {
+                message: error_message,
+                error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
+                code: StatusCode::BAD_REQUEST.as_u16(),
+            }),
+        )
+            .into_response()
     } else {
         // Pass through if it is not a 422
         response
