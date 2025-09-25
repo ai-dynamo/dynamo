@@ -1,0 +1,27 @@
+name: 'Pytest'
+description: 'Run pytest on pre-built container images'
+inputs:
+  pytest_marks:
+    description: 'Pytest marks'
+    required: true
+    default: 'e2e and vllm and gpu_1 and not slow'
+  image_tag:
+    description: 'Image Tag to run tests on'
+    required: true
+
+
+runs:
+  using: "composite"
+  steps:
+    - name: Run tests
+      shell: bash
+      env:
+        CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
+        PYTEST_XML_FILE: pytest_test_report.xml
+        HF_HOME: /runner/_work/_temp
+      run: |
+        docker run --runtime=nvidia --rm --gpus all -w /workspace \
+          --network host \
+          --name ${{ env.CONTAINER_ID }}_pytest \
+          ${{ inputs.image_tag }} \
+          bash -c "pytest -xsv --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ inputs.pytest_marks }}\""
