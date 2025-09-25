@@ -49,7 +49,7 @@ PYTHON_PACKAGE_VERSION=${current_tag:-$latest_tag.dev+$commit_id}
 # dependencies are specified in the /container/deps folder and
 # installed within framework specific sections of the Dockerfile.
 
-declare -A FRAMEWORKS=(["VLLM"]=1 ["TRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4)
+declare -A FRAMEWORKS=(["VLLM"]=1 ["TRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4 ["SGLANG_WIDEEP"]=5)
 
 DEFAULT_FRAMEWORK=VLLM
 
@@ -114,6 +114,8 @@ NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+SGLANG_WIDEEP_BASE_IMAGE="$SGLANG_BASE_IMAGE"
+SGLANG_WIDEEP_BASE_IMAGE_TAG="$SGLANG_BASE_IMAGE_TAG"
 
 NIXL_REF=0.4.1
 NIXL_UCX_REF=v1.19.0
@@ -368,6 +370,7 @@ get_options() {
 
     if [ -n "$FRAMEWORK" ]; then
         FRAMEWORK=${FRAMEWORK^^}
+        FRAMEWORK=${FRAMEWORK//-/_}
 
         if [[ -z "${FRAMEWORKS[$FRAMEWORK]}" ]]; then
             error 'ERROR: Unknown framework: ' "$FRAMEWORK"
@@ -508,6 +511,8 @@ elif [[ $FRAMEWORK == "NONE" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile
 elif [[ $FRAMEWORK == "SGLANG" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang
+elif [[ $FRAMEWORK == "SGLANG_WIDEEP" ]]; then
+    DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang-wideep
 fi
 
 # Add NIXL_REF as a build argument
