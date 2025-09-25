@@ -361,7 +361,12 @@ use dynamo_llm::entrypoint::input::worker_selection_pipeline::{
 };
 use dynamo_llm::kv_router::KvRouterConfig;
 use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
-use dynamo_llm::types::{Annotated, openai::chat_completions::NvCreateChatCompletionRequest};
+use dynamo_llm::types::{
+    Annotated,
+    openai::chat_completions::{
+        NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+    },
+};
 use dynamo_runtime::pipeline::{ManyOut, RouterMode, ServiceEngine, SingleIn};
 
 /// Opaque handle exposed to C — now *owns* its own Worker/runtime and engine.
@@ -369,11 +374,12 @@ pub struct WorkerSelectionPipeline {
     // Keep the runtime alive as long as this handle lives.
     wk: Worker,
     // The actual pipeline/engine we query.
-    engine:
-        ServiceEngine<SingleIn<NvCreateChatCompletionRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
+    engine: ServiceEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+    >,
 }
 
-#[unsafe(no_mangle)]
 /// Create a worker-selection pipeline ("generate" endpoint) and return an opaque handle.
 ///
 /// # Safety

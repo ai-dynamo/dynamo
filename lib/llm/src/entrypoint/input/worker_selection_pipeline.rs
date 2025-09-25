@@ -45,7 +45,12 @@ use crate::{
     preprocessor::OpenAIPreprocessor,
     protocols::{
         common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
-        openai::{chat_completions::NvCreateChatCompletionRequest, nvext::NvExt},
+        openai::{
+            chat_completions::{
+                NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+            },
+            nvext::NvExt,
+        },
     },
     types::Annotated,
 };
@@ -62,7 +67,7 @@ use dynamo_runtime::{
 /// Helper function to extract worker selection information from the annotation stream
 /// This demonstrates how to process the annotations returned by the router
 pub async fn extract_worker_selection_from_stream(
-    mut stream: Pin<Box<dyn AsyncEngineStream<Annotated<LLMEngineOutput>>>>,
+    mut stream: Pin<Box<dyn AsyncEngineStream<Annotated<NvCreateChatCompletionStreamResponse>>>>,
 ) -> anyhow::Result<(i64, Vec<u32>)> {
     use futures::StreamExt;
 
@@ -232,7 +237,7 @@ pub fn add_token_data_annotation<'a>(
 pub async fn query_worker_selection_and_annotate(
     engine: &ServiceEngine<
         SingleIn<NvCreateChatCompletionRequest>,
-        ManyOut<Annotated<LLMEngineOutput>>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
     >,
     mut original_request: NvCreateChatCompletionRequest,
 ) -> anyhow::Result<(i64, Vec<u32>, NvCreateChatCompletionRequest)> {
@@ -266,7 +271,10 @@ pub async fn build_worker_selection_pipeline_chat(
     chooser: Option<Arc<KvRouter>>,
     hf_tokenizer: tokenizers::Tokenizer,
 ) -> anyhow::Result<
-    ServiceEngine<SingleIn<NvCreateChatCompletionRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
+    ServiceEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+    >,
 > {
     use crate::backend::Backend;
     use crate::migration::Migration;
@@ -278,7 +286,7 @@ pub async fn build_worker_selection_pipeline_chat(
 
     let frontend = SegmentSource::<
         SingleIn<NvCreateChatCompletionRequest>,
-        ManyOut<Annotated<LLMEngineOutput>>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
     >::new();
     let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
@@ -305,14 +313,18 @@ pub async fn build_worker_selection_pipeline_chat(
         }
     };
 
-    // Build pipeline - forward path only (router handles query_instance_id and returns annotations)
-    frontend
+    // Build bidirectional pipeline (router processes query_instance_id and returns annotations via backward path)
+    let engine = frontend
         .link(preprocessor_op.forward_edge())?
         .link(backend.forward_edge())?
         .link(migration.forward_edge())?
-        .link(service_backend)?;
+        .link(service_backend)?
+        .link(migration.backward_edge())?
+        .link(backend.backward_edge())?
+        .link(preprocessor_op.backward_edge())?
+        .link(frontend)?;
 
-    Ok(frontend)
+    Ok(engine)
 }
 
 /// Helper function to create worker selection pipeline for OpenAI Chat Completion requests
@@ -338,7 +350,10 @@ pub async fn create_worker_selection_pipeline_chat(
     busy_threshold: Option<f64>,
     kv_router_config: Option<KvRouterConfig>,
 ) -> anyhow::Result<
-    ServiceEngine<SingleIn<NvCreateChatCompletionRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
+    ServiceEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+    >,
 > {
     use crate::{discovery::ModelManager, model_card::ModelDeploymentCard};
     use anyhow::Context;
