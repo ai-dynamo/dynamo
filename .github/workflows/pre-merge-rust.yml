@@ -33,7 +33,7 @@ jobs:
   pre-merge-rust:
     runs-on: ubuntu-latest
     strategy:
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run'] }
     permissions:
       contents: read
     steps:
@@ -54,21 +54,6 @@ jobs:
         echo "Disk space after:"
         df -h
 
-    # TODO: Caching target/ dir handles most of the build caching improvements
-    #       currently, so sccache artifacts are mostly duplicates wasting disk space.
-    #       Revisit this to see if sccache can improve current caching behavior.
-    # TODO: Consider single target/ directory for all subdirectories/crates instead.
-    - name: Cache cargo artifacts
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          ${{ matrix.dir }}/target/
-        key: ${{ runner.os }}-cargo-${{ matrix.dir }}-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: ${{ runner.os }}-cargo-${{ matrix.dir }}-
 
     - name: Install Rust in dev environment
       # Install Rust only to run GitHub Local Actions in (dev environment) using the `ACT` environment variable.
@@ -95,11 +80,11 @@ jobs:
     # Have an explicit step to build tests first to separate time spent on build vs execution.
     - name: Compile Tests
       working-directory: ${{ matrix.dir }}
-      run: cargo test --locked --no-run --target-dir ${HOME}/tmp || df -h
+      run: cargo test --locked --no-run
     - name: Run Doc Tests
       working-directory: ${{ matrix.dir }}
       run: cargo doc --no-deps && cargo test --locked --doc
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
-      run: cargo test --locked --all-targets --target-dir ${HOME}/tmp
+      run: cargo test --locked --all-targets
