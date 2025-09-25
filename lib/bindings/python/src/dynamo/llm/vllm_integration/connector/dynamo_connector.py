@@ -85,9 +85,10 @@ class DynamoConnector(KVConnectorBase_V1):
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         return self._scheduler.request_finished(request, block_ids)
 
-    @classmethod
-    def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> Optional[str]:
-        return "NHD"
+    # TODO(ziqif): comment out for now since MultiConnector does not allow different layouts for different connectors
+    # @classmethod
+    # def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> Optional[str]:
+    #     return "NHD"
 
     # Worker
 
