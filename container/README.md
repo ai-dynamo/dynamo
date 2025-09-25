@@ -302,19 +302,54 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 &
 ```
 
 ### CI/CD Workflow
+
+#### 1. Build image for CI
 ```bash
-# 1. Build image for CI
 ./build.sh --framework vllm --no-cache
+```
 
-# 2. Run tests with network isolation for reproducible results
+#### 2. Run tests with network isolation for reproducible results
+```
 ./run.sh --image dynamo:latest-vllm --mount-workspace --network bridge -v $HOME/.cache:/home/ubuntu/.cache -- python -m pytest tests/
+```
 
-**Note:** When using `--network bridge`, services are only accessible inside the container. To run the full Dynamo stack for testing, execute these commands inside the container:
+**Note:** When using `--network bridge`, all the services launched inside the container are accessible by each other.
+
+#### 3. Start services
+
+When inside the container with bridge networking, make sure you start nats-server & etcd. These will only be accessible from the same container -- it will not collide with the host ports:
 
 ```bash
-# Inside the container with bridge networking, make sure you start nats-server & etcd:
 $ nats-server -js &
 $ etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd &
 $ python -m dynamo.frontend &
-$ DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 --enforce-eager --no-enable-prefix-caching --max-num-seqs 64 &
+```
+
+#### 4. Start the worker backends:
+
+**vLLM:**
+- `--gpu-memory-utilization 0.20`: Use 20% of GPU memory
+- `--enforce-eager`: Disable CUDA graphs for lower memory usage
+- `--no-enable-prefix-caching`: Disable prefix caching to save memory
+- `--max-num-seqs 64`: Maximum concurrent sequences
+
+```bash
+DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 --enforce-eager --no-enable-prefix-caching --max-num-seqs 64 &
+```
+
+**SGLang:**
+- `--mem-fraction-static 0.20`: Use 20% of GPU memory for static allocation
+- `--max-running-requests 64`: Maximum concurrent running requests
+
+```bash
+DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 python -m dynamo.sglang --model Qwen/Qwen3-0.6B --mem-fraction-static 0.20 --max-running-requests 64 &
+```
+
+**TensorRT-LLM:**
+- `--free-gpu-memory-fraction 0.20`: Reserve 20% of GPU memory
+- `--max-num-tokens 8192`: Maximum number of tokens in batch
+- `--max-batch-size 64`: Maximum batch size
+
+```bash
+DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 python -m dynamo.trtllm --model Qwen/Qwen3-0.6B --free-gpu-memory-fraction 0.20 --max-num-tokens 8192 --max-batch-size 64 &
 ```
