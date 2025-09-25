@@ -25,6 +25,7 @@ This `agg_router.yaml` is adpated from vLLM deployment [example](https://github.
 - Mounted a local cache folder `/YOUR/LOCAL/CACHE/FOLDER` for model artifacts reuse
 - Created 4 replicas for this model deployment by setting `replicas: 4`
 - Added `debug` flag environment variable for observability
+
 Create a K8S secret with your Huggingface token and then deploy the models
 ```sh
 export HF_TOKEN=YOUR_HF_TOKEN
@@ -43,7 +44,7 @@ and use following request to test the deployed model
 curl localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen/Qwen3-0.6B",
+    "model": "Qwen/Qwen2.5-1.5B-Instruct",
     "messages": [
     {
         "role": "user",
@@ -55,3 +56,23 @@ curl localhost:8000/v1/chat/completions \
   }'
   ```
 You can also benchmark the performance of the endpoint by [GenAI-Perf](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/perf_analyzer/genai-perf/README.html)
+
+## 2. Deploy Single-Node-Sized Models using AIConfigurator
+AIConfigurator helps users to find a strong starting configuration for disaggregated serving. We can use it as a guidance for the SNS (Single-Node-Sized) Model's serving.
+1. Install AI Configurator
+```sh
+pip3 install aiconfigurator
+```
+2. Assume we have 2 GPU nodes with 16 H200 in total, and we want to deploy Llama 3.1-70B-Instruct model with an optimal disagregated serving configuration. Run AI configurator for this model
+```sh
+aiconfigurator cli --model LLAMA3.1_70B --total_gpus 16 --system h200_sxm
+```
+and from the output, you can see the Pareto curve with suggest P/D settings
+![text](images/pareto.png)
+3. Start the serving with 1 prefill workers with tensor parallem 4 and 1 decoding worker with tensor parallem 8 as AI Configurator suggested
+![text](images/settings.png)
+```sh
+kubectl apply -f disagg_router.yaml --namespace ${NAMESPACE}
+```
+
+4. Forward the port and test out the performance as described in the section above.
