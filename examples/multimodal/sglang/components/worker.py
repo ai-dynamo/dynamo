@@ -104,25 +104,6 @@ class EmbeddingsProcessor:
         if not request.embeddings_shape or len(request.embeddings_shape) < 2:
             raise ValueError(f"Invalid embeddings shape: {request.embeddings_shape}")
 
-        # Count expected image tokens in the token sequence
-        image_token_id = self._get_image_token_id(request)
-        expected_image_tokens = sum(
-            1 for token_id in request.request.token_ids if token_id == image_token_id
-        )
-        embedding_tokens = request.embeddings_shape[1]  # Number of patches
-
-        logger.debug(
-            f"Expected image tokens: {expected_image_tokens}, embedding tokens: {embedding_tokens}"
-        )
-
-        # Validate alignment between token count and embedding dimensions
-        if expected_image_tokens != embedding_tokens:
-            logger.warning(
-                f"Token/embedding mismatch: {expected_image_tokens} image tokens in sequence, "
-                f"but {embedding_tokens} tokens from embedding shape {request.embeddings_shape}"
-            )
-            # This warning is informational - sglang might handle some mismatches internally
-
         embeddings = torch.empty(
             request.embeddings_shape,
             dtype=MultimodalConfig.EMBEDDINGS_DTYPE,
@@ -146,30 +127,6 @@ class EmbeddingsProcessor:
         await read_op.wait_for_completion()
 
         return embeddings, descriptor
-
-    def _get_image_token_id(self, request: SglangMultimodalRequest) -> int:
-        """Get the image token ID for validation purposes"""
-        # This is a simplified approach - in practice, you'd get this from the tokenizer
-        # For now, we'll try to infer it from the token sequence
-        token_counts = {}
-        for token_id in request.request.token_ids:
-            token_counts[token_id] = token_counts.get(token_id, 0) + 1
-
-        # Find the most frequent special token (likely the image token)
-        # This is a heuristic and may need refinement based on your specific tokenizer
-        if token_counts:
-            # Look for tokens that appear multiple times (likely image tokens)
-            candidates = [
-                (count, token_id)
-                for token_id, count in token_counts.items()
-                if count > 1
-            ]
-            if candidates:
-                # Return the token ID with the highest count
-                return max(candidates)[1]
-
-        # Fallback - return a default image token ID (this should be improved)
-        return request.request.token_ids[0] if request.request.token_ids else 0
 
     @staticmethod
     def create_multimodal_item(
@@ -326,7 +283,7 @@ class BaseSglangWorkerHandler(ABC):
         self.model = config.model
 
     @abstractmethod
-    async def generate(self, request: SglangMultimodalRequest):
+    async def generate(self, request: SglangMultimodalRequest) -> AsyncIterator[str]:
         pass
 
     def cleanup(self):

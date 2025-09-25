@@ -20,6 +20,7 @@ import signal
 import time
 import uuid
 from enum import Enum
+from typing import Any, Dict
 
 import uvloop
 from transformers import AutoTokenizer
@@ -143,15 +144,20 @@ class SglangProcessor:
 
                 # Create OpenAI-compatible response (following vLLM-like pattern but for SGLang)
                 if text_content or is_finished:
-                    choice = {"index": 0, "delta": {}, "finish_reason": None}
+                    choice: Dict[str, Any] = {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": None,
+                    }
+                    delta: Dict[str, str] = choice["delta"]  # Type-safe access
 
                     # Add role for first message or when there's content
                     if text_content and not finished_sent:
-                        choice["delta"]["role"] = "assistant"
+                        delta["role"] = "assistant"
 
                     # Add content if available
                     if text_content:
-                        choice["delta"]["content"] = text_content
+                        delta["content"] = text_content
 
                     # Set finish reason if completed
                     if is_finished:
@@ -160,7 +166,7 @@ class SglangProcessor:
                         )
                         if not finished_sent and not text_content:
                             # Final chunk needs role if it's the first chunk
-                            choice["delta"]["role"] = "assistant"
+                            delta["role"] = "assistant"
 
                     response_json = {
                         "id": f"chatcmpl-{request_id}",
