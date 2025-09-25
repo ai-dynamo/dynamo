@@ -94,6 +94,28 @@ pub mod frontend_service {
     /// Inter-token latency in seconds
     pub const INTER_TOKEN_LATENCY_SECONDS: &str = "inter_token_latency_seconds";
 
+    /// Model configuration metrics
+    ///
+    /// Runtime config metrics (from ModelRuntimeConfig):
+    /// Total KV blocks available for a worker serving the model
+    pub const MODEL_TOTAL_KV_BLOCKS: &str = "model_total_kv_blocks";
+
+    /// Maximum number of sequences for a worker serving the model (runtime config)
+    pub const MODEL_MAX_NUM_SEQS: &str = "model_max_num_seqs";
+
+    /// Maximum number of batched tokens for a worker serving the model (runtime config)
+    pub const MODEL_MAX_NUM_BATCHED_TOKENS: &str = "model_max_num_batched_tokens";
+
+    /// MDC metrics (from ModelDeploymentCard):
+    /// Maximum context length for a worker serving the model (MDC)
+    pub const MODEL_CONTEXT_LENGTH: &str = "model_context_length";
+
+    /// KV cache block size for a worker serving the model (MDC)
+    pub const MODEL_KV_CACHE_BLOCK_SIZE: &str = "model_kv_cache_block_size";
+
+    /// Request migration limit for a worker serving the model (MDC)
+    pub const MODEL_MIGRATION_LIMIT: &str = "model_migration_limit";
+
     /// Status label values
     pub mod status {
         /// Value for successful requests
@@ -421,6 +443,33 @@ pub fn build_component_metric_name(metric_name: &str) -> String {
     format!("{}_{}", name_prefix::COMPONENT, sanitized_name)
 }
 
+/// Safely converts a u64 value to i64 for Prometheus metrics
+///
+/// Since Prometheus IntGaugeVec uses i64 but our data types use u64,
+/// this function clamps large u64 values to i64::MAX to prevent overflow
+/// and ensure metrics remain positive.
+///
+/// # Arguments
+/// * `value` - The u64 value to convert
+///
+/// # Returns
+/// An i64 value, clamped to i64::MAX if the input exceeds i64::MAX
+///
+/// # Examples
+/// ```
+/// use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
+///
+/// assert_eq!(clamp_u64_to_i64(100), 100);
+/// assert_eq!(clamp_u64_to_i64(u64::MAX), i64::MAX);
+/// ```
+pub fn clamp_u64_to_i64(value: u64) -> i64 {
+    if value > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        value as i64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,5 +693,21 @@ mod tests {
     fn test_build_component_metric_name_panics_on_empty_input() {
         // Test that empty input panics with clear message
         build_component_metric_name("");
+    }
+
+    #[test]
+    fn test_clamp_u64_to_i64() {
+        // Test normal values within i64 range
+        assert_eq!(clamp_u64_to_i64(0), 0);
+        assert_eq!(clamp_u64_to_i64(100), 100);
+        assert_eq!(clamp_u64_to_i64(1000000), 1000000);
+
+        // Test maximum i64 value
+        assert_eq!(clamp_u64_to_i64(i64::MAX as u64), i64::MAX);
+
+        // Test values that exceed i64::MAX
+        assert_eq!(clamp_u64_to_i64(u64::MAX), i64::MAX);
+        assert_eq!(clamp_u64_to_i64((i64::MAX as u64) + 1), i64::MAX);
+        assert_eq!(clamp_u64_to_i64((i64::MAX as u64) + 1000), i64::MAX);
     }
 }

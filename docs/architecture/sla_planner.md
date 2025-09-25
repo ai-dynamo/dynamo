@@ -110,7 +110,7 @@ Finally, SLA planner applies the change by scaling up/down the number of prefill
 
 ### K8s Deployment
 
-For detailed deployment instructions including setup, configuration, troubleshooting, and architecture overview, see the [SLA Planner Deployment Guide](../guides/dynamo_deploy/sla_planner_deployment.md).
+For detailed deployment instructions including setup, configuration, troubleshooting, and architecture overview, see the [SLA Planner Deployment Guide](../kubernetes/sla_planner_deployment.md).
 
 **To deploy SLA Planner:**
 ```bash

@@ -21,7 +21,7 @@ Deploy and manage Dynamo inference graphs on Kubernetes with automated orchestra
 
 ## Quick Start Paths
 
-Platform is installed using Dynamo Kubernetes Platform [helm chart](../../../deploy/cloud/helm/platform/README.md).
+Platform is installed using Dynamo Kubernetes Platform [helm chart](/deploy/cloud/helm/platform/README.md).
 
 **Path A: Production Install**
 Install from published artifacts on your existing cluster → [Jump to Path A](#path-a-production-install)
@@ -31,6 +31,20 @@ Set up Minikube first → [Minikube Setup](minikube.md) → Then follow Path A
 
 **Path C: Custom Development**
 Build from source for customization → [Jump to Path C](#path-c-custom-development)
+
+All helm install commands could be overridden by either setting the values.yaml file or by passing in your own values.yaml:
+
+```bash
+helm install ...
+  -f your-values.yaml
+```
+
+and/or setting values as flags to the helm install command, as follows:
+
+```bash
+helm install ...
+  --set "your-value=your-value"
+```
 
 ## Prerequisites
 
@@ -55,7 +69,7 @@ Install from [NGC published artifacts](https://catalog.ngc.nvidia.com/orgs/nvidi
 
 ```bash
 # 1. Set environment
-export NAMESPACE=dynamo-kubernetes
+export NAMESPACE=dynamo-system
 export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
 
 # 2. Install CRDs
@@ -68,7 +82,9 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 ```
 
 > [!TIP]
-> By default, Grove and Kai Scheduler are NOT installed. You can enable them by setting the following flags in the helm install command:
+> For multinode deployments, you need to enable Grove and Kai Scheduler.
+> You might chose to install them manually or through the dynamo-platform helm install command.
+> When using the dynamo-platform helm install command, Grove and Kai Scheduler are NOT installed by default. You can enable their installation by setting the following flags in the helm install command:
 
 ```bash
 --set "grove.enabled=true"
@@ -83,6 +99,15 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 --set "dynamo-operator.modelExpressURL=http://model-express-server.model-express.svc.cluster.local:8080"
 ```
 
+> [!TIP]
+> By default, Dynamo Operator is installed cluster-wide and will monitor all namespaces.
+> If you wish to restrict the operator to monitor only a specific namespace (the helm release namespace by default), you can set the namespaceRestriction.enabled to true.
+> You can also change the restricted namespace by setting the targetNamespace property.
+
+```bash
+--set "dynamo-operator.namespaceRestriction.enabled=true"
+--set "dynamo-operator.namespaceRestriction.targetNamespace=dynamo-namespace" # optional
+```
 
 → [Verify Installation](#verify-installation)
 
@@ -92,7 +117,7 @@ Build and deploy from source for customization.
 
 ```bash
 # 1. Set environment
-export NAMESPACE=dynamo-cloud
+export NAMESPACE=dynamo-system
 export DOCKER_SERVER=nvcr.io/nvidia/ai-dynamo/  # or your registry
 export DOCKER_USERNAME='$oauthtoken'
 export DOCKER_PASSWORD=<YOUR_NGC_CLI_API_KEY>
@@ -111,7 +136,7 @@ docker build -t $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG . && docker push $DOCK
 
 cd -
 
-# 3. Create namespace and secrets to be able to pull the operator image
+# 3. Create namespace and secrets to be able to pull the operator image (only needed if you pushed the operator image to a private registry)
 kubectl create namespace ${NAMESPACE}
 kubectl create secret docker-registry docker-imagepullsecret \
   --docker-server=${DOCKER_SERVER} \
@@ -123,9 +148,8 @@ kubectl create secret docker-registry docker-imagepullsecret \
 helm upgrade --install dynamo-crds ./crds/ --namespace default
 
 # 5. Install Platform
-helm repo add bitnami https://charts.bitnami.com/bitnami
 helm dep build ./platform/
-helm upgrade --install dynamo-platform ./platform/ \
+helm install dynamo-platform ./platform/ \
   --namespace ${NAMESPACE} \
   --set dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator \
   --set dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG} \
@@ -158,9 +182,9 @@ kubectl get pods -n ${NAMESPACE}
    ```
 
 2. **Explore Backend Guides**
-   - [vLLM Deployments](../../../components/backends/vllm/deploy/README.md)
-   - [SGLang Deployments](../../../components/backends/sglang/deploy/README.md)
-   - [TensorRT-LLM Deployments](../../../components/backends/trtllm/deploy/README.md)
+   - [vLLM Deployments](/components/backends/vllm/deploy/README.md)
+   - [SGLang Deployments](/components/backends/sglang/deploy/README.md)
+   - [TensorRT-LLM Deployments](/components/backends/trtllm/deploy/README.md)
 
 3. **Optional:**
    - [Set up Prometheus & Grafana](metrics.md)
@@ -200,7 +224,7 @@ just add the following to the helm install command:
 
 ## Advanced Options
 
-- [Helm Chart Configuration](../../../deploy/cloud/helm/platform/README.md)
+- [Helm Chart Configuration](/deploy/cloud/helm/platform/README.md)
 - [GKE-specific setup](gke_setup.md)
 - [Create custom deployments](create_deployment.md)
 - [Dynamo Operator details](dynamo_operator.md)
