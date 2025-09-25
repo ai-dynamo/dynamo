@@ -15,17 +15,13 @@ pub mod prompt;
 pub mod tools;
 
 use anyhow::Result;
-use dynamo_async_openai::types::ChatCompletionToolChoiceOption;
-use dynamo_async_openai::types::EncodingFormat;
+use dynamo_async_openai::types::{ChatCompletionToolChoiceOption, EncodingFormat};
+use futures::Stream;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
-
-use dynamo_parsers::tool_calling::{
-    parsers::detect_tool_call_start, try_tool_call_parse_aggregate,
-};
 
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::prompt::OAIChatLikeRequest;
@@ -42,7 +38,9 @@ use crate::protocols::{
     common::{OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
     openai::{
         DeltaGeneratorExt,
-        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
+        chat_completions::{
+            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse, jail::JailedStream,
+        },
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
         nvext::NvExtProvider,
@@ -60,36 +58,11 @@ use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
 pub const ANNOTATION_FORMATTED_PROMPT: &str = "formatted_prompt";
 pub const ANNOTATION_TOKEN_IDS: &str = "token_ids";
 pub const ANNOTATION_LLM_METRICS: &str = "llm_metrics";
-pub const ANNOTATION_POSSIBLE_TOOL_CALL: &str = "possible_tool_call";
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LLMMetricAnnotation {
     pub input_tokens: usize,
     pub output_tokens: usize,
     pub chunk_tokens: usize,
-}
-
-#[derive(Debug)]
-pub struct JailState {
-    stream: ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-    is_jailed: bool,
-    tool_call_parser: Option<String>,
-    accumulated_content: HashMap<u32, String>, // choice index -> accumulated content
-    last_response_metadata: Option<NvCreateChatCompletionStreamResponse>, // for response structure
-    finished: bool,                            // Add this flag to track if stream is finished
-}
-
-pub fn maybe_enable_tool_call(
-    parser_str: Option<&str>,
-    request: &NvCreateChatCompletionRequest,
-) -> bool {
-    // Enable tool call if the below two conditions are satisfied
-    // 1. parser_str is not None
-    // 2. tool_choice is not None
-    parser_str.is_some()
-        && !matches!(
-            request.inner.tool_choice,
-            Some(ChatCompletionToolChoiceOption::None)
-        )
 }
 
 impl LLMMetricAnnotation {
@@ -117,41 +90,6 @@ impl LLMMetricAnnotation {
         }
         let metrics: LLMMetricAnnotation = serde_json::from_str(&comments[0])?;
         Ok(Some(metrics))
-    }
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PossibleToolCallAnnotation {
-    pub possible_tokens: usize,
-    pub possible_content: String,
-    pub parser_used: Option<String>,
-}
-
-impl PossibleToolCallAnnotation {
-    /// Convert this possible tool call annotation to an Annotated event
-    pub fn to_annotation<T>(&self) -> Result<Annotated<T>, serde_json::Error> {
-        Annotated::from_annotation(ANNOTATION_POSSIBLE_TOOL_CALL, self)
-    }
-
-    /// Extract possible tool call info from an Annotated event, if present
-    pub fn from_annotation<T>(
-        annotation: &Annotated<T>,
-    ) -> Result<Option<PossibleToolCallAnnotation>, Box<dyn std::error::Error>> {
-        if annotation.event.is_none() {
-            return Ok(None);
-        }
-        if annotation.event.as_ref().unwrap() != ANNOTATION_POSSIBLE_TOOL_CALL {
-            return Ok(None);
-        }
-        let comments = annotation
-            .comment
-            .as_ref()
-            .ok_or("missing comments block")?;
-        if comments.len() != 1 {
-            return Err("malformed comments block - expected exactly 1 comment".into());
-        }
-        let possible_info: PossibleToolCallAnnotation = serde_json::from_str(&comments[0])?;
-        Ok(Some(possible_info))
     }
 }
 
@@ -482,36 +420,43 @@ impl OpenAIPreprocessor {
         Ok((builder.build()?, annotations))
     }
 
-    pub fn transform_postprocessor_stream<Resp: Send + Sync + 'static + std::fmt::Debug>(
-        stream: ManyOut<Annotated<BackendOutput>>,
+    pub fn transform_postprocessor_stream<S, Resp>(
+        stream: S,
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
-    ) -> ManyOut<Annotated<Resp>> {
-        let context = stream.context();
-
-        struct State<Resp: Send + Sync + 'static + std::fmt::Debug> {
-            response_stream: ManyOut<Annotated<BackendOutput>>,
+        context: Arc<dyn AsyncEngineContext>,
+    ) -> impl Stream<Item = Annotated<Resp>> + Send
+    where
+        S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
+        Resp: Send + Sync + 'static + std::fmt::Debug,
+    {
+        struct State<Resp>
+        where
+            Resp: Send + Sync + 'static + std::fmt::Debug,
+        {
+            response_stream: Pin<Box<dyn Stream<Item = Annotated<BackendOutput>> + Send>>,
             response_generator: Box<dyn DeltaGeneratorExt<Resp>>,
             context: Arc<dyn AsyncEngineContext>,
             cancelled: bool,
             cumulative_output_tokens: usize,
             finish_reason_sent: bool,
             usage_chunk_sent: bool,
-            finished: bool, // Add this flag to track if stream is finished
+            finished: bool,
         }
 
         let state = State {
-            response_stream: stream,
+            response_stream: Box::pin(stream),
             response_generator: generator,
             context: context.clone(),
             cancelled: false,
             cumulative_output_tokens: 0,
             finish_reason_sent: false,
             usage_chunk_sent: false,
-            finished: false, // Initialize as not finished
+            finished: false,
         };
 
         // transform the common response stream into a chat response stream
-        let stream = stream::unfold(state, |mut inner| {
+
+        stream::unfold(state, |mut inner| {
             async move {
                 // If already finished, return None immediately
                 if inner.finished {
@@ -628,19 +573,18 @@ impl OpenAIPreprocessor {
                     }
                 }
             }
-        });
-
-        ResponseStream::new(Box::pin(stream), context)
+        })
     }
 
     /// Transform engine embedding output stream to OpenAI embedding response stream
-    pub fn transform_embedding_postprocessor_stream(
-        stream: ManyOut<Annotated<EmbeddingsEngineOutput>>,
+    pub fn transform_embedding_postprocessor_stream<S>(
+        stream: S,
         original_request: NvCreateEmbeddingRequest,
-    ) -> ManyOut<Annotated<NvCreateEmbeddingResponse>> {
-        let context = stream.context();
-
-        let transformed_stream = stream.map(move |output| {
+    ) -> impl Stream<Item = Annotated<NvCreateEmbeddingResponse>> + Send
+    where
+        S: Stream<Item = Annotated<EmbeddingsEngineOutput>> + Send + 'static,
+    {
+        stream.map(move |output| {
             output.map_data(|engine_output| {
                 // Convert engine output to OpenAI response format
                 let embeddings: Vec<dynamo_async_openai::types::Embedding> = engine_output
@@ -668,262 +612,62 @@ impl OpenAIPreprocessor {
 
                 Ok(response)
             })
-        });
-
-        ResponseStream::new(Box::pin(transformed_stream), context)
+        })
     }
 
-    /// Apply tool calling jail to the stream using the preprocessor's tool call parser
-    pub async fn apply_tool_calling_jail_with_parser(
-        &self,
-        stream: ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-    ) -> ManyOut<Annotated<NvCreateChatCompletionStreamResponse>> {
-        apply_tool_calling_jail_internal(stream, self.tool_call_parser.clone()).await
+    /// Determine if we should apply the tool calling jail based on configuration
+    /// Returns Ok(true) if jail should be applied, Ok(false) if not, or Err if invalid config
+    pub fn should_apply_tool_jail(
+        tool_call_parser: Option<&String>,
+        tool_choice: Option<&ChatCompletionToolChoiceOption>,
+        has_tools: bool,
+    ) -> std::result::Result<bool, Error> {
+        match (tool_call_parser, tool_choice, has_tools) {
+            // No parser but tools requested - error cases
+            (None, Some(ChatCompletionToolChoiceOption::Required), true) => {
+                tracing::warn!(
+                    "Tool choice 'required' specified but no tool parser configured; proceeding without jailing"
+                );
+                Ok(false)
+            }
+            (None, Some(ChatCompletionToolChoiceOption::Auto), true) => {
+                tracing::warn!(
+                    "Tool choice 'auto' specified but no tool parser configured; proceeding without jailing"
+                );
+                Ok(false)
+            }
+            (None, Some(ChatCompletionToolChoiceOption::Named(_)), _) => {
+                tracing::warn!(
+                    "Named tool choice specified but no tool parser configured; proceeding without jailing"
+                );
+                Ok(false)
+            }
+
+            // Parser exists and tools might be called
+            (Some(_), Some(ChatCompletionToolChoiceOption::None), _) => {
+                Ok(false) // Explicitly disabled
+            }
+            (Some(_), Some(_), true) => Ok(true), // Any other tool_choice with tools
+            (Some(_), None, true) => Ok(true),    // Default behavior when tools present
+
+            // No tools or no parser
+            _ => Ok(false),
+        }
     }
-}
 
-/// Apply tool calling jail to the stream - stops/jails the stream under certain conditions
-/// When jailed, the stream will be unjailed when the input stream ends
-pub async fn apply_tool_calling_jail_internal(
-    stream: ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-    tool_call_parser: Option<String>,
-) -> ManyOut<Annotated<NvCreateChatCompletionStreamResponse>> {
-    let context = stream.context();
-
-    let jail_state = JailState {
-        stream,
-        is_jailed: false,
-        tool_call_parser,
-        accumulated_content: HashMap::new(),
-        last_response_metadata: None,
-        finished: false,
-    };
-
-    // Transform the stream using unfold to maintain state
-    // Input: ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>
-    // Returns None if the stream is finished
-    // Returns Some((Annotated<NvCreateChatCompletionStreamResponse>, JailState)) if the stream is not finished
-    // End output: ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>
-    let jailed_stream = stream::unfold(jail_state, |mut state| async move {
-        // If already finished, return None immediately
-        if state.finished {
-            return None;
-        }
-
-        if let Some(response) = state.stream.next().await {
-            // Check if we should jail the stream
-            if !state.is_jailed {
-                // Handle the case where response.data is Option<T>
-                if let Some(ref chat_response) = response.data {
-                    // Store metadata for potential tool call parsing later
-                    state.last_response_metadata = Some(chat_response.clone());
-
-                    // Extract text content from the response
-                    if let Some(choice) = chat_response.choices.first()
-                        && let Some(ref content) = choice.delta.content
-                    {
-                        // Check for tool call start
-                        match detect_tool_call_start(content, state.tool_call_parser.as_deref()) {
-                            Ok(should_jail) => {
-                                if should_jail {
-                                    tracing::debug!("Tool call detected, jailing stream");
-                                    state.is_jailed = true;
-
-                                    // Start accumulating content for this choice
-                                    state
-                                        .accumulated_content
-                                        .insert(choice.index, content.clone());
-
-                                    // Create possible tool call annotation with token information
-                                    let possible_annotation = PossibleToolCallAnnotation {
-                                        possible_tokens: 1, // This chunk contains tokens being processed
-                                        possible_content: content.clone(),
-                                        parser_used: state.tool_call_parser.clone(),
-                                    };
-
-                                    // Create annotated response instead of empty response
-                                    let mut annotated_response = response.clone();
-                                    if let Ok(possible_annotated) =
-                                        possible_annotation
-                                            .to_annotation::<NvCreateChatCompletionStreamResponse>()
-                                    {
-                                        // Set annotation event and comment
-                                        annotated_response.event = possible_annotated.event;
-                                        annotated_response.comment = possible_annotated.comment;
-                                    }
-
-                                    // Modify the response to have empty content but keep metadata
-                                    annotated_response =
-                                        annotated_response.map_data(|mut chat_response| {
-                                            // Clear the content but keep choice structure for ITL measurement
-                                            for choice in &mut chat_response.choices {
-                                                choice.delta.content = Some(String::new()); // Empty content
-                                            }
-                                            Ok(chat_response)
-                                        });
-
-                                    return Some((annotated_response, state));
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("Error detecting tool call start: {}", e);
-                            }
-                        }
-                    }
-                }
-            } else if state.is_jailed {
-                // If already jailed, continue to jail but with annotations and accumulate content
-                if let Some(ref chat_response) = response.data {
-                    // Extract content for annotation and accumulation
-                    for choice in &chat_response.choices {
-                        if let Some(ref content) = choice.delta.content
-                            && !content.is_empty()
-                        {
-                            // Accumulate content for this choice
-                            state
-                                .accumulated_content
-                                .entry(choice.index)
-                                .or_default()
-                                .push_str(content);
-
-                            // Create possible tool call annotation
-                            let possible_annotation = PossibleToolCallAnnotation {
-                                possible_tokens: 1,
-                                possible_content: content.clone(),
-                                parser_used: state.tool_call_parser.clone(),
-                            };
-
-                            // Create annotated response
-                            let mut annotated_response = response.clone();
-                            if let Ok(possible_annotated) = possible_annotation
-                                .to_annotation::<NvCreateChatCompletionStreamResponse>(
-                            ) {
-                                annotated_response.event = possible_annotated.event;
-                                annotated_response.comment = possible_annotated.comment;
-                            }
-
-                            // Clear content but keep structure
-                            annotated_response =
-                                annotated_response.map_data(|mut chat_response| {
-                                    for choice in &mut chat_response.choices {
-                                        choice.delta.content = Some(String::new());
-                                    }
-                                    Ok(chat_response)
-                                });
-
-                            return Some((annotated_response, state));
-                        }
-                    }
-                }
-            }
-
-            // If not jailed or jailing condition not met, return the response as-is
-            Some((response, state))
-        } else {
-            // Stream ended - if we were jailed, we should unjail now and parse tool calls
-            if state.is_jailed {
-                tracing::debug!("Stream ended, unjailing and parsing accumulated content");
-                state.is_jailed = false;
-
-                // Parse accumulated content for tool calls
-                if !state.accumulated_content.is_empty()
-                    && let Some(base_response) = state.last_response_metadata.take()
-                {
-                    // Try to parse tool calls from accumulated content for each choice
-                    let mut final_response = base_response.clone();
-
-                    for (choice_index, accumulated_text) in &state.accumulated_content {
-                        if let Ok((tool_calls, normal_text)) = try_tool_call_parse_aggregate(
-                            accumulated_text,
-                            state.tool_call_parser.as_deref(),
-                        )
-                        .await
-                        {
-                            // Found tool calls, create a final response with them
-                            tracing::debug!(
-                                "Parsed {} tool calls from accumulated content",
-                                tool_calls.len()
-                            );
-                            for tool_call in &tool_calls {
-                                tracing::debug!(
-                                    tool_call_id = %tool_call.id,
-                                    function_name = %tool_call.function.name,
-                                    arguments = %tool_call.function.arguments,
-                                    "Parsed structured tool call from accumulated content in jail"
-                                );
-                            }
-
-                            // Convert ChatCompletionMessageToolCall to ChatCompletionMessageToolCallChunk for streaming
-                            let tool_call_chunks: Vec<
-                                dynamo_async_openai::types::ChatCompletionMessageToolCallChunk,
-                            > = tool_calls
-                                .into_iter()
-                                .enumerate()
-                                .map(|(idx, tool_call)| {
-                                    dynamo_async_openai::types::ChatCompletionMessageToolCallChunk {
-                                        index: idx as u32,
-                                        id: Some(tool_call.id),
-                                        r#type: Some(tool_call.r#type),
-                                        function: Some(
-                                            dynamo_async_openai::types::FunctionCallStream {
-                                                name: Some(tool_call.function.name),
-                                                arguments: Some(tool_call.function.arguments),
-                                            },
-                                        ),
-                                    }
-                                })
-                                .collect();
-
-                            // Create a choice with tool calls
-                            #[allow(deprecated)]
-                            let final_choice = dynamo_async_openai::types::ChatChoiceStream {
-                                index: *choice_index,
-                                delta:
-                                    dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
-                                        role: Some(dynamo_async_openai::types::Role::Assistant),
-                                        content: normal_text.filter(|t| !t.is_empty()),
-                                        tool_calls: Some(tool_call_chunks.clone()),
-                                        function_call: None,
-                                        refusal: None,
-                                        reasoning_content: None,
-                                    },
-                                finish_reason: Some(
-                                    dynamo_async_openai::types::FinishReason::ToolCalls,
-                                ),
-                                logprobs: None,
-                            };
-
-                            // Update the response choices
-                            final_response.choices = vec![final_choice];
-
-                            // Create final annotated response
-                            let final_annotated = Annotated {
-                                data: Some(final_response),
-                                id: None,
-                                event: None,
-                                comment: None,
-                            };
-
-                            state.finished = true; // Mark as finished before returning
-                            return Some((final_annotated, state));
-                        }
-                    }
-                }
-            }
-            state.finished = true; // Mark as finished
-            None
-        }
-    });
-
-    // Jailed Stream contains empty content chunks with annotation event "possible_tool_call" whenever the stream is jailed
-    // This is a bad UX for the user, as they have to see a lot of empty content chunks
-    // Filter out the empty content chunks with annotation event "possible_tool_call"
-    let filtered_stream = jailed_stream.filter(|annotated| {
-        let keep = annotated.event.as_deref() != Some(ANNOTATION_POSSIBLE_TOOL_CALL);
-        async move { keep }
-    });
-
-    ResponseStream::new(Box::pin(filtered_stream), context)
+    /// Apply tool calling jail to the stream if needed
+    pub fn apply_tool_calling_jail<S>(
+        tool_call_parser: String,
+        stream: S,
+    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        let jail = JailedStream::builder()
+            .tool_call_parser(tool_call_parser)
+            .build();
+        jail.apply(stream)
+    }
 }
 
 // for pals, we do not want to add the generation prompt to the formatted prompt
@@ -952,14 +696,14 @@ impl
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
+
+        // convert the chat completion request to a common completion request
+        let (common_request, annotations) = self.preprocess_request(&request)?;
+
         let mut response_generator = Box::new(response_generator);
 
         // set the runtime configuration
         response_generator.set_reasoning_parser(self.runtime_config.clone());
-        let enable_tool_calling =
-            maybe_enable_tool_call(self.tool_call_parser.as_deref(), &request);
-        // convert the chat completion request to a common completion request
-        let (common_request, annotations) = self.preprocess_request(&request)?;
 
         // update isl
         response_generator.update_isl(common_request.token_ids.len() as u32);
@@ -977,21 +721,43 @@ impl
         // forward the common completion request to the next operator
         let response_stream = next.generate(common_request).await?;
 
-        // transform the postprocessor stream
-        let stream = Self::transform_postprocessor_stream(response_stream, response_generator);
+        // Extract context once
+        let context = response_stream.context();
 
-        // Apply tool calling jail to the stream if tool call parser is present
-        let stream = if enable_tool_calling {
-            self.apply_tool_calling_jail_with_parser(stream).await
+        // transform the postprocessor stream (no boxing yet)
+        let stream = Self::transform_postprocessor_stream(
+            response_stream,
+            response_generator,
+            context.clone(),
+        );
+
+        // Check if tools are present and if we should apply jail
+        let has_tools =
+            request.inner.tools.is_some() && !request.inner.tools.as_ref().unwrap().is_empty();
+
+        // Context was already extracted above from response_stream
+
+        // Determine if we should apply jail (do this before moving request)
+        let should_jail = Self::should_apply_tool_jail(
+            self.tool_call_parser.as_ref(),
+            request.inner.tool_choice.as_ref(),
+            has_tools,
+        )?;
+
+        // Apply jail conditionally
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
+            if let Some(parser) = self.tool_call_parser.clone() {
+                Box::pin(Self::apply_tool_calling_jail(parser, stream))
+            } else {
+                Box::pin(stream) // Should not happen due to should_jail check
+            }
         } else {
-            stream
+            Box::pin(stream)
         };
-
-        let context = stream.context();
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(stream);
 
-        // return the response stream
+        // return the response stream - single boxing at the end
         Ok(ResponseStream::new(Box::pin(stream), context))
     }
 }
@@ -1039,9 +805,15 @@ impl
         // forward the common completion request to the next operator
         let response_stream = next.generate(common_request).await?;
 
+        // Extract context once
+        let context = response_stream.context();
+
         // transform the postprocessor stream
-        let stream = Self::transform_postprocessor_stream(response_stream, response_generator);
-        let context = stream.context();
+        let stream = Self::transform_postprocessor_stream(
+            response_stream,
+            response_generator,
+            context.clone(),
+        );
 
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(stream);
@@ -1082,9 +854,11 @@ impl
         let preprocessed_request = context.map(|_| preprocessed_request);
         let response_stream = next.generate(preprocessed_request).await?;
 
+        // Extract context once
+        let context = response_stream.context();
+
         // Transform response stream back to OpenAI format
         let stream = Self::transform_embedding_postprocessor_stream(response_stream, request);
-        let context = stream.context();
 
         // Prepend annotations
         let annotations_stream = stream::iter(
@@ -1098,3 +872,5 @@ impl
         Ok(ResponseStream::new(Box::pin(combined_stream), context))
     }
 }
+
+// Note: tests for jailing and parser detection live in `lib/llm/tests/test_jail.rs`

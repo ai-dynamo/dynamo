@@ -50,12 +50,13 @@ Quickstart
    :hidden:
    :caption: Kubernetes Deployment
 
-   Quickstart (K8s) <../guides/dynamo_deploy/README.md>
-   Dynamo Operator <../guides/dynamo_deploy/dynamo_operator.md>
-   Metrics <../guides/dynamo_deploy/metrics.md>
-   Logging <../guides/dynamo_deploy/logging.md>
-   Multinode <../guides/dynamo_deploy/multinode-deployment.md>
-   Minikube Setup <../guides/dynamo_deploy/minikube.md>
+   Quickstart (K8s) <../kubernetes/README.md>
+   Detailed Installation Guide <../kubernetes/installation_guide.md>
+   Dynamo Operator <../kubernetes/dynamo_operator.md>
+   Metrics <../kubernetes/metrics.md>
+   Logging <../kubernetes/logging.md>
+   Multinode <../kubernetes/multinode-deployment.md>
+   Minikube Setup <../kubernetes/minikube.md>
 
 .. toctree::
    :hidden:
@@ -70,6 +71,10 @@ Quickstart
    :hidden:
    :caption: Developer Guide
 
+   Benchmarking Guide <benchmarks/benchmarking.md>
+   Planner Benchmark Example <guides/planner_benchmark/README.md>
+   Logging <guides/logging.md>
+   Health Checks <guides/health_check.md>
    Tuning Disaggregated Serving Performance <guides/disagg_perf_tuning.md>
    Writing Python Workers in Dynamo <guides/backend.md>
    Glossary <dynamo_glossary.md>

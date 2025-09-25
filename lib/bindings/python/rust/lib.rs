@@ -3,10 +3,10 @@
 
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
+use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyStopAsyncIteration;
 use pyo3::types::PyBytes;
 use pyo3::types::{PyDict, PyList, PyString};
-use pyo3::IntoPyObjectExt;
 use pyo3::{exceptions::PyException, prelude::*};
 use rand::seq::IteratorRandom as _;
 use rs::pipeline::network::Ingress;
@@ -19,8 +19,8 @@ use tokio::sync::Mutex;
 use dynamo_runtime::{
     self as rs, logging,
     pipeline::{
-        context::Context as RsContext, network::egress::push_router::RouterMode as RsRouterMode,
-        EngineStream, ManyOut, SingleIn,
+        EngineStream, ManyOut, SingleIn, context::Context as RsContext,
+        network::egress::push_router::RouterMode as RsRouterMode,
     },
     protocols::annotated::Annotated as RsAnnotated,
     traits::DistributedRuntimeProvider,
@@ -116,6 +116,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::WorkerStats>()?;
     m.add_class::<llm::kv::KvStats>()?;
     m.add_class::<llm::kv::SpecDecodeStats>()?;
+    m.add_class::<llm::kv::KvRouter>()?;
     m.add_class::<llm::kv::KvPushRouter>()?;
     m.add_class::<llm::kv::KvPushRouterStream>()?;
     m.add_class::<RouterMode>()?;
@@ -164,6 +165,7 @@ fn register_llm<'p>(
     let model_input = match model_input {
         ModelInput::Text => llm_rs::model_type::ModelInput::Text,
         ModelInput::Tokens => llm_rs::model_type::ModelInput::Tokens,
+        ModelInput::Tensor => llm_rs::model_type::ModelInput::Tensor,
     };
 
     let model_type_obj = model_type.inner;
@@ -297,6 +299,10 @@ impl ModelType {
     const Embedding: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Embedding,
     };
+    #[classattr]
+    const TensorBased: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::TensorBased,
+    };
 
     fn __or__(&self, other: &Self) -> Self {
         ModelType {
@@ -314,6 +320,7 @@ impl ModelType {
 enum ModelInput {
     Text = 1,
     Tokens = 2,
+    Tensor = 3,
 }
 
 #[pymethods]
@@ -446,9 +453,9 @@ impl DistributedRuntime {
                         Ok(sock) => sockets.push(sock),
                         Err(e) => {
                             tracing::error!(
-                            "Failed to bind to port block starting at {start_port} (attempt {}): {e}",
-                            attempt_idx + 1,
-                        );
+                                "Failed to bind to port block starting at {start_port} (attempt {}): {e}",
+                                attempt_idx + 1,
+                            );
                             bind_failed = true;
                             break;
                         }
@@ -504,7 +511,8 @@ impl DistributedRuntime {
             }
 
             Err(PyErr::new::<PyException, _>(format!(
-            "Failed to allocate and reserve a port block of size {block_size} from range {min}-{max} after {candidate_count} attempts")))
+                "Failed to allocate and reserve a port block of size {block_size} from range {min}-{max} after {candidate_count} attempts"
+            )))
         })
     }
 
@@ -735,12 +743,12 @@ impl Endpoint {
             })?;
 
         // Require an object/dict
-        if let Some(ref payload) = health_payload_json {
-            if !payload.is_object() {
-                return Err(pyo3::exceptions::PyTypeError::new_err(
-                    "health_check_payload must be a JSON object (dict)",
-                ));
-            }
+        if let Some(ref payload) = health_payload_json
+            && !payload.is_object()
+        {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "health_check_payload must be a JSON object (dict)",
+            ));
         }
 
         let mut builder = self
@@ -1087,11 +1095,10 @@ async fn process_stream(
         // Convert the response to a PyObject using Python's GIL
         let annotated: RsAnnotated<serde_json::Value> = response;
         let annotated: RsAnnotated<PyObject> = annotated.map_data(|data| {
-            let result = Python::with_gil(|py| match pythonize::pythonize(py, &data) {
+            Python::with_gil(|py| match pythonize::pythonize(py, &data) {
                 Ok(pyobj) => Ok(pyobj.into()),
                 Err(e) => Err(e.to_string()),
-            });
-            result
+            })
         });
 
         let is_error = annotated.is_error();
