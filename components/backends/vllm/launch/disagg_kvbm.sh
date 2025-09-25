@@ -8,15 +8,18 @@ trap 'echo Cleaning up...; kill 0' EXIT
 python -m dynamo.frontend --router-mode kv --http-port=8000 &
 
 # run decode worker on GPU 0, without enabling KVBM
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B &
+# NOTE: remove --enforce-eager for production use
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager &
 
 # wait for decode worker to initialize
 sleep 20
 
 # run prefill worker on GPU 1 with KVBM
+# NOTE: remove --enforce-eager for production use
 DYN_KVBM_CPU_CACHE_GB=4 \
 CUDA_VISIBLE_DEVICES=1 \
   python3 -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
     --is-prefill-worker \
-    --connector kvbm nixl
+    --connector kvbm nixl \
+    --enforce-eager
