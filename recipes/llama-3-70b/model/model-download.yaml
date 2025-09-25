@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-download-llama-3-70b
+spec:
+  backoffLimit: 3
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: model-download-llama-3-70b
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: model-download
+          image: python:3.10-slim
+          command: ["sh", "-c"]
+          resources:
+            requests:
+              cpu: "10"
+              memory: "5Gi"
+            limits:
+              cpu: "10"
+              memory: "5Gi"
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          env:
+            - name: MODEL_NAME
+              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+          args:
+            - |
+              set -eux
+              pip install --no-cache-dir huggingface_hub hf_transfer
+              export HF_HUB_ENABLE_HF_TRANSFER=1
+              huggingface-cli download $MODEL_NAME
+          volumeMounts:
+            - name: model-cache
+              mountPath: /root/.cache/huggingface/hub
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache-llama-3-70b
