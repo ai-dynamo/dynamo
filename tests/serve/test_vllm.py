@@ -168,7 +168,7 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["rabbit"],
+                expected_response=["animals"],
             )
         ],
     ),
