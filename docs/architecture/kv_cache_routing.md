@@ -71,13 +71,13 @@ graph TD
     JS -->|Consume as Durable Consumer| R2
     JS -->|Periodic Snapshot| OS
 
-    style JS fill:#e1f5fe
-    style OS fill:#e8f5e9
-    style E1 fill:#fff3e0
-    style E2 fill:#fff3e0
-    style E3 fill:#fff3e0
-    style R1 fill:#f3e5f5
-    style R2 fill:#f3e5f5
+    style JS fill:#e1f5fe,color:#006400
+    style OS fill:#e8f5e9,color:#006400
+    style E1 fill:#fff3e0,color:#006400
+    style E2 fill:#fff3e0,color:#006400
+    style E3 fill:#fff3e0,color:#006400
+    style R1 fill:#f3e5f5,color:#006400
+    style R2 fill:#f3e5f5,color:#006400
 ```
 
 ### Local Active Block Management with Replica Sync
