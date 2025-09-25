@@ -11,7 +11,6 @@ use pythonize::{depythonize, pythonize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
-use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 
 pub use dynamo_runtime::{
     CancellationToken, Error, Result,

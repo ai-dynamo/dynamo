@@ -1098,7 +1098,8 @@ impl Client {
                 Some(context) => {
                     let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
 
-                    let span = get_span_for_direct_context(&context, "direct", &instance_id);
+                    let span =
+                        get_span_for_direct_context(&context, "direct", &instance_id.to_string());
                     let stream_future = client.direct(request_ctx, instance_id).instrument(span);
 
                     let stream = stream_future.await.map_err(to_pyerr)?;
