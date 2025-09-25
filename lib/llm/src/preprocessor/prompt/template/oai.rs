@@ -125,6 +125,12 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     fn model(&self) -> String {
         self.inner.model.clone()
     }
+    fn reasoning_effort(&self) -> Option<String> {
+        self.inner
+            .reasoning_effort
+            .as_ref()
+            .map(|effort| format!("{effort:?}").to_lowercase())
+    }
 
     fn messages(&self) -> Value {
         let messages_json = serde_json::to_value(&self.inner.messages).unwrap();
@@ -270,11 +276,12 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
             eos_token => self.config.eos_tok(),
             unk_token => self.config.unk_tok(),
             add_generation_prompt => add_generation_prompt,
+            reasoning_effort => req.reasoning_effort(),
             ..mixins
         };
 
         // Merge any additional args into the context last so they take precedence
-        let ctx = if let Some(args) = req.chat_template_args() {
+        let ctx = if let Some(args) = req.reasoning_effort() {
             let extra = Value::from_serialize(args);
             context! { ..ctx, ..extra }
         } else {

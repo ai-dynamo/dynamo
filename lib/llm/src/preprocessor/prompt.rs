@@ -48,6 +48,9 @@ pub enum PromptInput {
 /// Trait that defines a request that can map to an OpenAI-like request.
 pub trait OAIChatLikeRequest {
     fn model(&self) -> String;
+    fn reasoning_effort(&self) -> Option<String> {
+        None
+    }
     fn messages(&self) -> Value;
     fn tools(&self) -> Option<Value> {
         None
