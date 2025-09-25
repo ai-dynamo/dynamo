@@ -208,8 +208,6 @@ pub struct KvRouter {
     block_size: u32,
 
     kv_router_config: KvRouterConfig,
-
-    cancellation_token: tokio_util::sync::CancellationToken,
 }
 
 impl KvRouter {
@@ -308,7 +306,6 @@ impl KvRouter {
             scheduler,
             block_size,
             kv_router_config,
-            cancellation_token,
         })
     }
 
