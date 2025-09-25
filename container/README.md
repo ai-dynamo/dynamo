@@ -212,13 +212,13 @@ The `run.sh` script supports different networking modes via the `--network` flag
 - High-performance ML inference (default for GPU workloads)
 - Services that need direct host port access
 - Maximum network performance with minimal overhead
+- Sharing services with the host machine (NATS, etcd, etc.)
+
+**⚠️ Port Sharing Limitation:** Host networking shares all ports with the host machine, which means you can only run **one instance** of services like NATS (port 4222) or etcd (port 2379) across all containers and the host.
 
 #### Bridge Networking (Isolated)
 ```bash
-# Same with local user permissions
-./run.sh --image dynamo:latest-vllm-local-dev --network bridge
-
-# Development with bridge networking and host cache sharing
+# Development/testing with bridge networking and host cache sharing
 ./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace --network bridge -v $HOME/.cache:/home/ubuntu/.cache
 ```
 **Use cases:**
@@ -244,7 +244,6 @@ The `run.sh` script supports different networking modes via the `--network` flag
 **Very limited use cases:**
 - Pre-downloaded models with purely local processing
 - Air-gapped security environments (models must be pre-staged)
-- CI/CD pipelines requiring complete isolation
 
 #### Container Network Sharing
 Use `--network container:name` to share the network namespace with another container.
@@ -267,13 +266,13 @@ See Docker documentation for custom network creation and management.
 
 #### Network Mode Comparison
 
-| Mode | Performance | Security | Use Case | Dynamo Compatibility |
-|------|-------------|----------|----------|---------------------|
-| `host` | Highest | Lower | ML/GPU workloads, high-performance services | ✅ Full |
-| `bridge` | Good | Higher | General web services, controlled port exposure | ✅ Full |
-| `none` | N/A | Highest | Air-gapped environments only | ⚠️ **Very Limited** |
-| `container:name` | Good | Medium | Sidecar patterns, shared network stacks | ✅ Full |
-| Custom networks | Good | Medium | Multi-container applications | ✅ Full |
+| Mode | Performance | Security | Use Case | Dynamo Compatibility | Port Sharing |
+|------|-------------|----------|----------|---------------------|---------------|
+| `host` | Highest | Lower | ML/GPU workloads, high-performance services | ✅ Full | ⚠️ **Shared with host** (one NATS/etcd only) |
+| `bridge` | Good | Higher | General web services, controlled port exposure | ✅ Full | ✅ Isolated ports |
+| `none` | N/A | Highest | Air-gapped environments only | ⚠️ **Very Limited** | ✅ No network |
+| `container:name` | Good | Medium | Sidecar patterns, shared network stacks | ✅ Full | ⚠️ Shared with target container |
+| Custom networks | Good | Medium | Multi-container applications | ✅ Full | ✅ Isolated ports |
 
 ## Workflow Examples
 
@@ -290,7 +289,7 @@ See Docker documentation for custom network creation and management.
 python -m dynamo.frontend &
 
 # Start backend (vLLM example)
-python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.50 &
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 &
 ```
 
 ### Production Workflow
@@ -298,8 +297,8 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.50 &
 # 1. Build production image
 ./build.sh --framework vllm --release-build
 
-# 2. Run production container
-./run.sh --image dynamo:latest-vllm-local-dev --gpus all
+# 2. Run production container (runs as root)
+./run.sh --image dynamo:latest-vllm --gpus all
 ```
 
 ### CI/CD Workflow
@@ -308,12 +307,12 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.50 &
 ./build.sh --framework vllm --no-cache
 
 # 2. Run tests with network isolation for reproducible results
-./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace --network bridge -v $HOME/.cache:/home/ubuntu/.cache -- python -m pytest tests/
+./run.sh --image dynamo:latest-vllm --mount-workspace --network bridge -v $HOME/.cache:/home/ubuntu/.cache -- python -m pytest tests/
 
 **Note:** When using `--network bridge`, services are only accessible inside the container. To run the full Dynamo stack for testing, execute these commands inside the container:
 
 ```bash
-# Inside the container with bridge networking:
+# Inside the container with bridge networking, make sure you start nats-server & etcd:
 $ nats-server -js &
 $ etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd &
 $ python -m dynamo.frontend &
