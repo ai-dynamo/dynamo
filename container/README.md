@@ -167,16 +167,19 @@ The `run.sh` script launches Docker containers with the appropriate configuratio
 - **GPU Management**: Automatic GPU detection and allocation
 - **Volume Mounting**: Workspace and HuggingFace cache mounting
 - **User Management**: Root or user-based container execution
-- **Network Configuration**: Host networking for service communication
+- **Network Configuration**: Configurable networking modes (host, bridge, none, container sharing)
 - **Resource Limits**: Memory, file descriptors, and IPC configuration
 
 **Common Usage Examples:**
 
 ```bash
-# Basic container launch (inference/production)
+# Basic container launch (inference/production, runs as root user)
 ./run.sh --image dynamo:latest-vllm
 
-# Mount workspace for development (use local-dev image for local user permissions)
+# Basic container launch with local host user permissions
+./run.sh --image dynamo:latest-vllm-local-dev
+
+# Mount workspace for development (use local-dev image for local host user permissions)
 ./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace
 
 # Use specific image and framework for development
@@ -188,15 +191,89 @@ The `run.sh` script launches Docker containers with the appropriate configuratio
 # Development with custom environment variables
 ./run.sh --image dynamo:latest-vllm-local-dev -e CUDA_VISIBLE_DEVICES=0,1 --mount-workspace
 
-# Production inference without GPU access
-./run.sh --image dynamo:latest-vllm --gpus none
-
 # Dry run to see docker command
 ./run.sh --dry-run
 
 # Development with custom volume mounts
 ./run.sh --image dynamo:latest-vllm-local-dev -v /host/path:/container/path --mount-workspace
 ```
+
+### Network Configuration Options
+
+The `run.sh` script supports different networking modes via the `--network` flag (defaults to `host`):
+
+#### Host Networking (Default)
+```bash
+# Same examples with local host user permissions
+./run.sh --image dynamo:latest-vllm-local-dev --network host
+./run.sh --image dynamo:latest-vllm-local-dev
+```
+**Use cases:**
+- High-performance ML inference (default for GPU workloads)
+- Services that need direct host port access
+- Maximum network performance with minimal overhead
+
+#### Bridge Networking (Isolated)
+```bash
+# Same with local user permissions
+./run.sh --image dynamo:latest-vllm-local-dev --network bridge
+
+# Development with bridge networking and host cache sharing
+./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace --network bridge -v $HOME/.cache:/home/ubuntu/.cache
+```
+**Use cases:**
+- Secure isolation from host network
+- CI/CD pipelines requiring complete isolation
+- When you need absolute control of ports
+
+#### No Networking ⚠️ **LIMITED FUNCTIONALITY**
+```bash
+# Complete network isolation - no external connectivity
+./run.sh --image dynamo:latest-vllm --network none --mount-workspace
+
+# Same with local user permissions
+./run.sh --image dynamo:latest-vllm-local-dev --network none --mount-workspace
+```
+**⚠️ WARNING: `--network none` severely limits Dynamo functionality:**
+- **No model downloads** - HuggingFace models cannot be downloaded
+- **No API access** - Cannot reach external APIs or services
+- **No distributed inference** - Multi-node setups won't work
+- **No monitoring/logging** - External monitoring systems unreachable
+- **Limited debugging** - Cannot access external debugging tools
+
+**Very limited use cases:**
+- Pre-downloaded models with purely local processing
+- Air-gapped security environments (models must be pre-staged)
+- CI/CD pipelines requiring complete isolation
+
+#### Container Network Sharing
+Use `--network container:name` to share the network namespace with another container.
+
+**Use cases:**
+- Sidecar patterns (logging, monitoring, caching)
+- Service mesh architectures
+- Sharing network namespaces between related containers
+
+See Docker documentation for `--network container:name` usage.
+
+#### Custom Networks
+Use custom Docker networks for multi-container applications. Create with `docker network create` and specify with `--network network-name`.
+
+**Use cases:**
+- Multi-container applications
+- Service discovery by container name
+
+See Docker documentation for custom network creation and management.
+
+#### Network Mode Comparison
+
+| Mode | Performance | Security | Use Case | Dynamo Compatibility |
+|------|-------------|----------|----------|---------------------|
+| `host` | Highest | Lower | ML/GPU workloads, high-performance services | ✅ Full |
+| `bridge` | Good | Higher | General web services, controlled port exposure | ✅ Full |
+| `none` | N/A | Highest | Air-gapped environments only | ⚠️ **Very Limited** |
+| `container:name` | Good | Medium | Sidecar patterns, shared network stacks | ✅ Full |
+| Custom networks | Good | Medium | Multi-container applications | ✅ Full |
 
 ## Workflow Examples
 
@@ -225,11 +302,20 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.50 &
 ./run.sh --image dynamo:latest-vllm-local-dev --gpus all
 ```
 
-### Testing Workflow
+### CI/CD Workflow
 ```bash
-# 1. Build with no cache for clean build
+# 1. Build image for CI
 ./build.sh --framework vllm --no-cache
 
-# 2. Test container functionality (--image defaults to dynamo:latest-vllm)
-./run.sh --mount-workspace -it -- python -m pytest tests/
+# 2. Run tests with network isolation for reproducible results
+./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace --network bridge -v $HOME/.cache:/home/ubuntu/.cache -- python -m pytest tests/
+
+**Note:** When using `--network bridge`, services are only accessible inside the container. To run the full Dynamo stack for testing, execute these commands inside the container:
+
+```bash
+# Inside the container with bridge networking:
+$ nats-server -js &
+$ etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd &
+$ python -m dynamo.frontend &
+$ DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 --enforce-eager --no-enable-prefix-caching --max-num-seqs 64 &
 ```

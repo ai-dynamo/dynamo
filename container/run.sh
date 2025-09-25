@@ -43,6 +43,7 @@ INTERACTIVE=
 USE_NIXL_GDS=
 RUNTIME=nvidia
 WORKDIR=/workspace
+NETWORK=host
 
 get_options() {
     while :; do
@@ -164,6 +165,14 @@ get_options() {
             ;;
         --use-nixl-gds)
             USE_NIXL_GDS=TRUE
+            ;;
+        --network)
+            if [ "$2" ]; then
+                NETWORK=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
             ;;
         --dry-run)
             RUN_PREFIX="echo"
@@ -304,6 +313,10 @@ show_help() {
     echo "  [--hf-cache directory to volume mount as the hf cache, default is NONE unless mounting workspace]"
     echo "  [--gpus gpus to enable, default is 'all', 'none' disables gpu support]"
     echo "  [--use-nixl-gds add volume mounts and capabilities needed for NVIDIA GPUDirect Storage]"
+    echo "  [--network network mode for container, default is 'host']"
+    echo "           Options: 'host' (default), 'bridge', 'none', 'container:name'"
+    echo "           Examples: --network bridge (isolated), --network none (no network - WARNING: breaks most functionality)"
+    echo "                    --network container:redis (share network with 'redis' container)"
     echo "  [-v add volume mount]"
     echo "  [-e add environment variable]"
     echo "  [--mount-workspace set up for local development]"
@@ -335,7 +348,7 @@ ${RUN_PREFIX} docker run \
     ${GPU_STRING} \
     ${INTERACTIVE} \
     ${RM_STRING} \
-    --network host \
+    --network "$NETWORK" \
     ${RUNTIME:+--runtime "$RUNTIME"} \
     --shm-size=10G \
     --ulimit memlock=-1 \
