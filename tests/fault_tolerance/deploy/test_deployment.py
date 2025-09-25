@@ -152,7 +152,7 @@ async def test_fault_scenario(
             if scenario.backend == "vllm":
                 model = scenario.deployment["VllmDecodeWorker"].model
             elif scenario.backend == "sglang":
-                model = scenario.deployment["decode"].model_path
+                model = scenario.deployment["decode"].model
             else:
                 model = None
         except (KeyError, AttributeError):
@@ -161,7 +161,6 @@ async def test_fault_scenario(
     model = model or "Qwen/Qwen3-0.6B"
 
     scenario.deployment.set_logging(True, "info")
-    logger.info(f"[DEBUG] Model: {model}")
 
     async with ManagedDeployment(
         namespace=namespace,

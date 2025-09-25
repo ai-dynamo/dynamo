@@ -4,12 +4,11 @@
 import asyncio
 import logging
 import os
-import random
 import re
 import shlex
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional, List
+from typing import Any, List, Optional
 
 import kr8s
 import kubernetes
@@ -60,7 +59,7 @@ class ServiceSpec:
 
     @property
     def model(self) -> Optional[str]:
-        """Model being served by this service"""
+        """Model being served by this service (checks both --model and --model-path)"""
         try:
             args_list = self._spec["extraPodSpec"]["mainContainer"]["args"]
         except KeyError:
@@ -68,7 +67,7 @@ class ServiceSpec:
         args_str = " ".join(args_list)
         parts = shlex.split(args_str)
         for i, part in enumerate(parts):
-            if part == "--model":
+            if part in ["--model", "--model-path"]:
                 return parts[i + 1] if i + 1 < len(parts) else None
         return None
 
@@ -83,9 +82,10 @@ class ServiceSpec:
         args_str = " ".join(args_list)
         parts = shlex.split(args_str)
 
+        # Try to update --model first, then --model-path
         model_index = None
         for i, part in enumerate(parts):
-            if part == "--model":
+            if part in ["--model", "--model-path"]:
                 model_index = i
                 break
 
@@ -676,7 +676,7 @@ class ManagedDeployment:
 
     def port_forward(self, pod, remote_port, max_connection_attempts=3):
         """Attempt to connect to a pod and return the port-forward object on success.
-        
+
         Note: Port forwards run in background threads. When pods are terminated,
         the async cleanup may fail, which is expected and can be safely ignored.
         """
@@ -692,16 +692,20 @@ class ManagedDeployment:
 
             # Try to connect with exponential backoff
             backoff_delay = 0.5  # Start with 500ms
-            
+
             for attempt in range(max_connection_attempts):
                 time.sleep(backoff_delay)
-                backoff_delay = min(backoff_delay * 1.5, 5.0)  # Double delay, max 5 seconds
-                
+                backoff_delay = min(
+                    backoff_delay * 1.5, 5.0
+                )  # Double delay, max 5 seconds
+
                 # Check if port is assigned
                 if port_forward.local_port == 0:
-                    self._logger.debug(f"Port not yet assigned for pod {pod.name} (attempt {attempt+1}/{max_connection_attempts})")
+                    self._logger.debug(
+                        f"Port not yet assigned for pod {pod.name} (attempt {attempt+1}/{max_connection_attempts})"
+                    )
                     continue
-                
+
                 # Try to connect to the port forwarded service
                 test_url = f"http://localhost:{port_forward.local_port}/"
                 try:
@@ -711,8 +715,10 @@ class ManagedDeployment:
                         self._active_port_forwards.append(port_forward)
                         return port_forward
                 except (requests.ConnectionError, requests.Timeout) as e:
-                    self._logger.warning(f"Connection test failed for pod {pod.name} (attempt {attempt+1}/{max_connection_attempts}): {e}")
-                    
+                    self._logger.warning(
+                        f"Connection test failed for pod {pod.name} (attempt {attempt+1}/{max_connection_attempts}): {e}"
+                    )
+
                 # Restart port-forward for next attempt (except on last attempt)
                 if attempt == max_connection_attempts - 1:
                     continue
@@ -720,39 +726,49 @@ class ManagedDeployment:
                     port_forward.stop()
                     port_forward.start()
                 except Exception as e:
-                    self._logger.debug(f"Error restarting port forward for pod {pod.name}: {e}")
+                    self._logger.debug(
+                        f"Error restarting port forward for pod {pod.name}: {e}"
+                    )
                     break
 
             # All attempts failed
-            self._logger.warning(f"Port forward failed after {max_connection_attempts} attempts for pod {pod.name}")
+            self._logger.warning(
+                f"Port forward failed after {max_connection_attempts} attempts for pod {pod.name}"
+            )
             try:
                 port_forward.stop()
             except Exception:
                 pass  # Ignore errors during cleanup
             return None
-            
+
         except Exception as e:
-            self._logger.warning(f"Failed to create port forward for pod {pod.name}: {e}")
+            self._logger.warning(
+                f"Failed to create port forward for pod {pod.name}: {e}"
+            )
             return None
 
     async def _cleanup(self):
         try:
-            self._logger.info(f"Cleaning up {len(self._active_port_forwards)} active port forwards")
+            # Collect logs/metrics first; any PFs opened here will be tracked and stopped below.
+            self._get_service_logs()
+            self._logger.info(
+                f"Cleaning up {len(self._active_port_forwards)} active port forwards"
+            )
             for port_forward in self._active_port_forwards:
                 try:
                     port_forward.stop()
                 except RuntimeError as e:
-                    # Expected error when pod is terminated: 
+                    # Expected error when pod is terminated:
                     # "anext(): asynchronous generator is already running"
                     if "anext()" in str(e) or "already running" in str(e):
                         self._logger.debug(f"Port forward cleanup: {e}")
                     else:
-                        self._logger.warning(f"Unexpected error stopping port forward: {e}")
+                        self._logger.warning(
+                            f"Unexpected error stopping port forward: {e}"
+                        )
                 except Exception as e:
                     self._logger.debug(f"Error stopping port forward: {e}")
             self._active_port_forwards.clear()
-            
-            self._get_service_logs()
         finally:
             await self._delete_deployment()
 

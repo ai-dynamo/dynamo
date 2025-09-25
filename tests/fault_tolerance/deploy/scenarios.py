@@ -18,6 +18,17 @@ from typing import Optional
 
 from tests.utils.managed_deployment import DeploymentSpec
 
+WORKER_MAP = {
+    "vllm": {
+        "decode": "VllmDecodeWorker",
+        "prefill": "VllmPrefillWorker",
+    },
+    "sglang": {
+        "decode": "decode",
+        "prefill": "prefill",
+    },
+}
+
 
 @dataclass
 class Load:
@@ -61,134 +72,88 @@ def _set_replicas(deployment_spec, backend, deploy_type, replicas):
     # Frontend is common for all backends
     spec["Frontend"].replicas = replicas
 
-    if backend == "vllm":
-        if deploy_type == "agg":
-            spec["VllmDecodeWorker"].replicas = replicas
-        elif deploy_type == "disagg":
-            spec["VllmDecodeWorker"].replicas = replicas
-            spec["VllmPrefillWorker"].replicas = replicas
-    elif backend == "sglang":
-        if deploy_type == "agg":
-            spec["decode"].replicas = replicas
-        elif deploy_type == "disagg":
-            spec["decode"].replicas = replicas
-            spec["prefill"].replicas = replicas
+    if backend in WORKER_MAP:
+        # always scale decode
+        spec[WORKER_MAP[backend]["decode"]].replicas = replicas
+        # scale prefill only for disagg
+        if deploy_type == "disagg":
+            spec[WORKER_MAP[backend]["prefill"]].replicas = replicas
 
 
 def _set_tensor_parallel(deployment_spec, backend, deploy_type, tp_size):
     """Set tensor parallel size for worker components."""
     spec = deployment_spec["spec"]
 
-    if backend == "vllm":
+    if backend in WORKER_MAP:
+        decode_worker = WORKER_MAP[backend]["decode"]
+        prefill_worker = WORKER_MAP[backend]["prefill"]
+
         if deploy_type == "agg":
-            spec.set_tensor_parallel(tp_size, ["VllmDecodeWorker"])
-        elif deploy_type == "disagg":
-            spec["VllmPrefillWorker"].tensor_parallel_size = tp_size
-            spec["VllmDecodeWorker"].tensor_parallel_size = tp_size
-    elif backend == "sglang":
-        if deploy_type == "agg":
-            # SGLang might use different method, adjust as needed
             if hasattr(spec, "set_tensor_parallel"):
-                spec.set_tensor_parallel(tp_size, ["decode"])
+                spec.set_tensor_parallel(tp_size, [decode_worker])
             else:
-                spec["decode"].tensor_parallel_size = tp_size
+                spec[decode_worker].tensor_parallel_size = tp_size
         elif deploy_type == "disagg":
-            spec["prefill"].tensor_parallel_size = tp_size
-            spec["decode"].tensor_parallel_size = tp_size
+            spec[prefill_worker].tensor_parallel_size = tp_size
+            spec[decode_worker].tensor_parallel_size = tp_size
 
 
-def _create_vllm_deployments():
-    """Create all vLLM deployment specifications."""
-    vllm_deployments = {}
+def _create_deployments_for_backend(backend):
+    """Create all deployment specifications for a given backend."""
+    deployments = {}
 
-    # Base deployments
-    vllm_deployments["vllm-agg-tp-1-dp-1"] = _create_deployment_spec(
-        "vllm", "agg", "components/backends/vllm/deploy/agg.yaml"
-    )
-    vllm_deployments["vllm-disagg-tp-1-dp-1"] = _create_deployment_spec(
-        "vllm", "disagg", "components/backends/vllm/deploy/disagg.yaml"
-    )
+    # Define the yaml files for agg and disagg deployments
+    yaml_files = {
+        "agg": f"components/backends/{backend}/deploy/agg.yaml",
+        "disagg": f"components/backends/{backend}/deploy/disagg.yaml",
+    }
 
-    # TP-2 scenarios
-    vllm_deployments["vllm-agg-tp-2-dp-1"] = _create_deployment_spec(
-        "vllm", "agg", "components/backends/vllm/deploy/agg.yaml"
-    )
-    _set_tensor_parallel(vllm_deployments["vllm-agg-tp-2-dp-1"], "vllm", "agg", 2)
+    # Define the different configurations to test
+    configurations = [
+        {"tp": 1, "dp": 1},
+        {"tp": 1, "dp": 2},
+        {"tp": 2, "dp": 1},
+        {"tp": 4, "dp": 1},
+    ]
 
-    vllm_deployments[
-        "vllm-disagg-prefill-tp-2-decode-tp-2-dp-1"
-    ] = _create_deployment_spec(
-        "vllm", "disagg", "components/backends/vllm/deploy/disagg.yaml"
-    )
-    _set_tensor_parallel(
-        vllm_deployments["vllm-disagg-prefill-tp-2-decode-tp-2-dp-1"],
-        "vllm",
-        "disagg",
-        2,
-    )
+    for deploy_type in ["agg", "disagg"]:
+        for config in configurations:
+            tp_size = config["tp"]
+            dp_replicas = config["dp"]
+            # Skip creating disagg scenarios for TP > 1 if DP is also > 1 (uncommon case)
+            if deploy_type == "disagg" and tp_size > 1 and dp_replicas > 1:
+                continue
 
-    # TP-4 scenarios
-    vllm_deployments["vllm-agg-tp-4-dp-1"] = _create_deployment_spec(
-        "vllm", "agg", "components/backends/vllm/deploy/agg.yaml"
-    )
-    _set_tensor_parallel(vllm_deployments["vllm-agg-tp-4-dp-1"], "vllm", "agg", 4)
+            # Construct the scenario name
+            name_parts = [backend, deploy_type]
 
-    vllm_deployments[
-        "vllm-disagg-prefill-tp-4-decode-tp-4-dp-1"
-    ] = _create_deployment_spec(
-        "vllm", "disagg", "components/backends/vllm/deploy/disagg.yaml"
-    )
-    _set_tensor_parallel(
-        vllm_deployments["vllm-disagg-prefill-tp-4-decode-tp-4-dp-1"],
-        "vllm",
-        "disagg",
-        4,
-    )
+            if deploy_type == "agg":
+                name_parts.append(f"tp-{tp_size}")
+            elif deploy_type == "disagg":
+                name_parts.append(f"prefill-tp-{tp_size}-decode-tp-{tp_size}")
 
-    # DP-2 scenarios (increased replicas)
-    vllm_deployments["vllm-agg-tp-1-dp-2"] = _create_deployment_spec(
-        "vllm", "agg", "components/backends/vllm/deploy/agg.yaml"
-    )
-    _set_replicas(vllm_deployments["vllm-agg-tp-1-dp-2"], "vllm", "agg", 2)
+            name_parts.append(f"dp-{dp_replicas}")
 
-    vllm_deployments["vllm-disagg-tp-1-dp-2"] = _create_deployment_spec(
-        "vllm", "disagg", "components/backends/vllm/deploy/disagg.yaml"
-    )
-    _set_replicas(vllm_deployments["vllm-disagg-tp-1-dp-2"], "vllm", "disagg", 2)
+            scenario_name = "-".join(name_parts)
 
-    return vllm_deployments
+            # Create and configure the deployment
+            deployment = _create_deployment_spec(
+                backend, deploy_type, yaml_files[deploy_type]
+            )
+            if tp_size > 1:
+                _set_tensor_parallel(deployment, backend, deploy_type, tp_size)
+            if dp_replicas > 1:
+                _set_replicas(deployment, backend, deploy_type, dp_replicas)
 
+            deployments[scenario_name] = deployment
 
-def _create_sglang_deployments():
-    """Create all SGLang deployment specifications."""
-    sglang_deployments = {}
-
-    # Base deployments
-    sglang_deployments["sglang-agg-tp-1-dp-1"] = _create_deployment_spec(
-        "sglang", "agg", "components/backends/sglang/deploy/agg-debug.yaml"
-    )
-    sglang_deployments["sglang-disagg-tp-1-dp-1"] = _create_deployment_spec(
-        "sglang", "disagg", "components/backends/sglang/deploy/disagg.yaml"
-    )
-
-    # DP-2 scenarios (increased replicas)
-    sglang_deployments["sglang-agg-tp-1-dp-2"] = _create_deployment_spec(
-        "sglang", "agg", "components/backends/sglang/deploy/agg.yaml"
-    )
-    _set_replicas(sglang_deployments["sglang-agg-tp-1-dp-2"], "sglang", "agg", 2)
-
-    sglang_deployments["sglang-disagg-tp-1-dp-2"] = _create_deployment_spec(
-        "sglang", "disagg", "components/backends/sglang/deploy/disagg.yaml"
-    )
-    _set_replicas(sglang_deployments["sglang-disagg-tp-1-dp-2"], "sglang", "disagg", 2)
-
-    return sglang_deployments
+    return deployments
 
 
 # Create all deployment specifications
 deployment_specs = {}
-deployment_specs.update(_create_vllm_deployments())
-deployment_specs.update(_create_sglang_deployments())
+deployment_specs.update(_create_deployments_for_backend("vllm"))
+deployment_specs.update(_create_deployments_for_backend("sglang"))
 
 
 # Each failure scenaro contains a list of failure injections
@@ -201,44 +166,46 @@ deployment_specs.update(_create_sglang_deployments())
 #   "prefill_worker": [Failure(30, "VllmPrefillWorker", "dynamo.vllm", "SIGKILL")],
 #
 # terminates 1 prefill worker after 30 seconds
+def _create_backend_failures(backend):
+    """Generate backend-specific failure scenarios."""
+    workers = WORKER_MAP[backend]
+    decode_worker = workers["decode"]
+    prefill_worker = workers["prefill"]
+    process_name = f"dynamo.{backend}"
 
-# vLLM-specific failures
-vllm_failures = {
-    "frontend": [Failure(30, "Frontend", "dynamo.frontend")],
-    "frontend_pod": [Failure(30, "Frontend", "delete_pod")],
-    "decode_worker": [Failure(30, "VllmDecodeWorker", "dynamo.vllm", "SIGKILL")],
-    "decode_worker_pod": [Failure(30, "VllmDecodeWorker", "delete_pod")],
-    "prefill_worker": [Failure(30, "VllmPrefillWorker", "dynamo.vllm", "SIGKILL")],
-    "prefill_worker_pod": [Failure(30, "VllmPrefillWorker", "delete_pod")],
-    "vllm_decode_engine_core": [
-        Failure(30, "VllmDecodeWorker", "VLLM::EngineCore", "SIGKILL")
-    ],
-    "vllm_prefill_engine_core": [
-        Failure(30, "VllmPrefillWorker", "VLLM::EngineCore", "SIGKILL")
-    ],
-    "none": [],
-}
+    failures = {
+        "frontend": [Failure(30, "Frontend", "dynamo.frontend")],
+        "frontend_pod": [Failure(30, "Frontend", "delete_pod")],
+        "decode_worker": [Failure(30, decode_worker, process_name, "SIGKILL")],
+        "decode_worker_pod": [Failure(30, decode_worker, "delete_pod")],
+        "prefill_worker": [Failure(30, prefill_worker, process_name, "SIGKILL")],
+        "prefill_worker_pod": [Failure(30, prefill_worker, "delete_pod")],
+        "none": [],
+    }
 
-# SGLang-specific failures
-sglang_failures = {
-    "frontend": [Failure(30, "Frontend", "dynamo.frontend")],
-    "frontend_pod": [Failure(30, "Frontend", "delete_pod")],
-    "decode_worker": [Failure(30, "decode", "dynamo.sglang", "SIGKILL")],
-    "decode_worker_pod": [Failure(30, "decode", "delete_pod")],
-    "prefill_worker": [Failure(30, "prefill", "dynamo.sglang", "SIGKILL")],
-    "prefill_worker_pod": [Failure(30, "prefill", "delete_pod")],
-    "sglang_decode_scheduler": [Failure(30, "decode", "sglang::scheduler", "SIGKILL")],
-    "sglang_decode_detokenizer": [
-        Failure(30, "decode", "sglang::detokenizer", "SIGKILL")
-    ],
-    "sglang_prefill_scheduler": [
-        Failure(30, "prefill", "sglang::scheduler", "SIGKILL")
-    ],
-    "sglang_prefill_detokenizer": [
-        Failure(30, "prefill", "sglang::detokenizer", "SIGKILL")
-    ],
-    "none": [],
-}
+    if backend == "vllm":
+        failures["vllm_decode_engine_core"] = [
+            Failure(30, decode_worker, "VLLM::EngineCore", "SIGKILL")
+        ]
+        failures["vllm_prefill_engine_core"] = [
+            Failure(30, prefill_worker, "VLLM::EngineCore", "SIGKILL")
+        ]
+    elif backend == "sglang":
+        failures["sglang_decode_scheduler"] = [
+            Failure(30, decode_worker, "sglang::scheduler", "SIGKILL")
+        ]
+        failures["sglang_decode_detokenizer"] = [
+            Failure(30, decode_worker, "sglang::detokenizer", "SIGKILL")
+        ]
+        failures["sglang_prefill_scheduler"] = [
+            Failure(30, prefill_worker, "sglang::scheduler", "SIGKILL")
+        ]
+        failures["sglang_prefill_detokenizer"] = [
+            Failure(30, prefill_worker, "sglang::detokenizer", "SIGKILL")
+        ]
+
+    return failures
+
 
 load = Load()
 
@@ -252,8 +219,8 @@ scenarios = {}
 
 # Map of backend to failure definitions
 backend_failure_map = {
-    "vllm": vllm_failures,
-    "sglang": sglang_failures,
+    "vllm": _create_backend_failures("vllm"),
+    "sglang": _create_backend_failures("sglang"),
 }
 
 for deployment_name, deployment_info in deployment_specs.items():
