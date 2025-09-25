@@ -1353,7 +1353,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-async-openai"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-openai-macros",
  "backoff",
@@ -1379,9 +1379,10 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "ahash",
+ "aho-corasick",
  "akin",
  "anyhow",
  "async-nats",
@@ -1458,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "dynamo-async-openai",
@@ -1476,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-py3"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1512,7 +1513,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "arc-swap",

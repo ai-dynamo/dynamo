@@ -849,11 +849,11 @@ class HttpAsyncEngine:
     ...
 
 class ModelInput:
-    """What type of request this model needs: Text or Tokens"""
+    """What type of request this model needs: Text, Tokens or Tensor"""
     ...
 
 class ModelType:
-    """What type of request this model needs: Chat, Completions or Embedding"""
+    """What type of request this model needs: Chat, Completions, Embedding or Tensor"""
     ...
 
 class RouterMode:

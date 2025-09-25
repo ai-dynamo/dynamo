@@ -26,27 +26,30 @@ class TestProfileSlaAiconfigurator:
     @pytest.fixture
     def trtllm_args(self):
         class Args:
-            backend = "trtllm"
-            config = "components/backends/trtllm/deploy/disagg.yaml"
-            output_dir = "/tmp/test_profiling_results"
-            namespace = "test-namespace"
-            min_num_gpus_per_engine = 1
-            max_num_gpus_per_engine = 8
-            skip_existing_results = False
-            force_rerun = False
-            isl = 3000
-            osl = 500
-            ttft = 50
-            itl = 10
-            max_context_length = 16384
-            prefill_interpolation_granularity = 16
-            decode_interpolation_granularity = 6
-            service_name = ""
-            dry_run = False
-            use_ai_configurator = True
-            aic_system = "h200_sxm"
-            aic_model_name = "QWEN3_32B"
-            backend_version = "0.20.0"
+            def __init__(self):
+                self.backend = "trtllm"
+                self.config = "components/backends/trtllm/deploy/disagg.yaml"
+                self.output_dir = "/tmp/test_profiling_results"
+                self.namespace = "test-namespace"
+                self.min_num_gpus_per_engine = 1
+                self.max_num_gpus_per_engine = 8
+                self.skip_existing_results = False
+                self.force_rerun = False
+                self.isl = 3000
+                self.osl = 500
+                self.ttft = 50
+                self.itl = 10
+                self.max_context_length = 16384
+                self.prefill_interpolation_granularity = 16
+                self.decode_interpolation_granularity = 6
+                self.service_name = ""
+                self.is_moe_model = False
+                self.dry_run = False
+                self.use_ai_configurator = True
+                self.aic_system = "h200_sxm"
+                self.aic_model_name = "QWEN3_32B"
+                self.backend_version = "0.20.0"
+                self.num_gpus_per_node = 8
 
         return Args()
 

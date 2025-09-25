@@ -14,7 +14,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
-    SGLangDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       dynamoNamespace: sglang-disagg
       componentType: worker
@@ -41,7 +41,7 @@ spec:
               --disaggregation-mode decode
               --disaggregation-transfer-backend nixl
 
-    SGLangPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       dynamoNamespace: sglang-disagg
       componentType: worker

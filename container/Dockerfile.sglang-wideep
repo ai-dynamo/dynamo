@@ -58,7 +58,7 @@ ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
 
 # Dynamo
 WORKDIR /sgl-workspace
-RUN git clone https://github.com/ai-dynamo/dynamo.git
+COPY . /sgl-workspace/dynamo
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
@@ -86,6 +86,10 @@ RUN cd dynamo/lib/bindings/python && \
     pip install --break-system-packages .
 
 RUN pip install --break-system-packages sglang-router==0.1.9
+
+# Install dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    pip install --break-system-packages --requirement /tmp/requirements.txt
 
 RUN wget --tries=3 --waitretry=5 \
       https://github.com/nats-io/nats-server/releases/download/v2.10.28/\

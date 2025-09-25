@@ -212,6 +212,7 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
         Endpoint::ChatCompletions => 1,
         Endpoint::Embeddings => todo!(),
         Endpoint::Responses => todo!(),
+        Endpoint::Tensor => todo!(),
     };
 
     let request_type = match request_type {
@@ -531,12 +532,7 @@ async fn test_http_service() {
         .await
         .unwrap();
 
-    assert_eq!(
-        response.status(),
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{:?}",
-        response
-    );
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{:?}", response);
 
     // =========== Query /metrics endpoint ===========
     let response = client

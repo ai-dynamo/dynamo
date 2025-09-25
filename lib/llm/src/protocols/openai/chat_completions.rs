@@ -19,6 +19,7 @@ use super::{
 
 pub mod aggregator;
 mod delta;
+pub mod jail;
 
 pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
