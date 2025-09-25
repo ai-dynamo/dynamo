@@ -5,8 +5,6 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: sglang-disagg-planner
-  annotations:
-    nvidia.com/enable-grove: "false" # temporarily disable grove because current k8s connector does not work with grove
 spec:
   envs:
     - name: DYNAMO_SERVICE_CONFIG
@@ -20,7 +18,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
+          image: my-registry/sglang-runtime:my-tag
     Planner:
       dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
@@ -48,10 +46,10 @@ spec:
       pvc:
         create: false
         name: dynamo-pvc # Must be pre-created before deployment and SLA profiler must have been run
-        mountPoint: /workspace/profiling_results
+        mountPoint: /data
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
+          image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/planner/src/dynamo/planner
           command:
             - /bin/sh
@@ -62,7 +60,7 @@ spec:
               --environment=kubernetes
               --backend=sglang
               --adjustment-interval=60
-              --profile-results-dir=/workspace/profiling_results
+              --profile-results-dir=/data/profiling_results
     Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
       dynamoNamespace: dynamo
       componentType: frontend
@@ -91,14 +89,14 @@ spec:
         failureThreshold: 10
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
+          image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           command:
             - /bin/sh
             - -c
           args:
             - "python3 -m dynamo.planner.prometheus"
-    SGLangDecodeWorker:
+    decode:
       dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
       componentType: worker
@@ -108,7 +106,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
+          image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           command:
             - python3
@@ -129,7 +127,7 @@ spec:
             - decode
             - --disaggregation-transfer-backend
             - nixl
-    SGLangPrefillWorker:
+    prefill:
       dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
       componentType: worker
@@ -139,7 +137,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
+          image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           command:
             - python3

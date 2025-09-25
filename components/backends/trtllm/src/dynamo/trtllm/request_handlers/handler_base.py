@@ -21,8 +21,8 @@ from enum import Enum
 from typing import Optional, Union
 
 import torch
-from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
+from tensorrt_llm.llmapi.llm import SamplingParams
 
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
@@ -212,9 +212,6 @@ class HandlerBase:
                         request_id, model_name
                     )
                     yield final_out
-                else:
-                    yield {"finish_reason": "stop", "token_ids": []}
-                break
 
             if not res.outputs:
                 yield {"finish_reason": "error", "token_ids": []}

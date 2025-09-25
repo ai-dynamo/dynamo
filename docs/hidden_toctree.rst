@@ -24,26 +24,30 @@
    API/nixl_connect/write_operation.md
    API/nixl_connect/README.md
 
-   guides/dynamo_deploy/create_deployment.md
-   guides/dynamo_deploy/sla_planner_deployment.md
-   guides/dynamo_deploy/gke_setup.md
-   guides/dynamo_deploy/grove.md
-   guides/dynamo_deploy/k8s_metrics.md
-   guides/dynamo_deploy/model_caching_with_fluid.md
-   guides/dynamo_deploy/README.md
+   kubernetes/api_reference.md
+   kubernetes/create_deployment.md
+
+   kubernetes/fluxcd.md
+   kubernetes/gke_setup.md
+   kubernetes/grove.md
+   kubernetes/model_caching_with_fluid.md
+   kubernetes/README.md
    guides/dynamo_run.md
+   kubernetes/sla_planner_deployment.md
    guides/metrics.md
    guides/run_kvbm_in_vllm.md
+   guides/run_kvbm_in_trtllm.md
 
    architecture/kv_cache_routing.md
    architecture/load_planner.md
    architecture/request_migration.md
+   architecture/request_cancellation.md
 
    components/backends/trtllm/multinode/multinode-examples.md
    components/backends/sglang/docs/multinode-examples.md
 
    examples/README.md
-   examples/runtime/hello_world/README.md
+   examples/custom_backend/hello_world/README.md
 
    architecture/distributed_runtime.md
    architecture/dynamo_flow.md

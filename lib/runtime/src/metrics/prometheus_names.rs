@@ -6,6 +6,34 @@
 //! This module provides centralized Prometheus metric name constants and sanitization functions
 //! for various components to ensure consistency and avoid duplication across the codebase.
 //!
+//! ## Naming Conventions
+//!
+//! All metric names should follow: `{prefix}_{name}_{suffix}`
+//!
+//! **Prefix**: Component identifier (`dynamo_component_`, `dynamo_frontend_`, etc.)
+//! **Name**: Descriptive snake_case name indicating what is measured
+//! **Suffix**:
+//!   - Units: `_seconds`, `_bytes`, `_ms`, `_percent`
+//!   - Counters: `_total` (not `total_` prefix)
+//!   - Note: Do not use `_counter`, `_gauge`, `_time`, or `_size` in Prometheus names (too vague)
+//!
+//! **Common Transformations**:
+//! - ❌ `_counter` → ✅ `_total`
+//! - ❌ `_time` → ✅ `_seconds`, `_ms`, `_hours`, `_duration_seconds`
+//! - ❌ `_size` → ✅ `_bytes`, `_total`, `_length`
+//! - ❌ `_gauge` → ✅ (no suffix needed for current values)
+//! - ❌ `_rate` → ✅ `_per_second`, `_per_minute`
+//!
+//! **Examples**:
+//! - ✅ `dynamo_frontend_requests_total` - Total request counter (not `incoming_requests`)
+//! - ✅ `dynamo_frontend_request_duration_seconds` - Request duration histogram (not `response_time`)
+//! - ✅ `dynamo_component_errors_total` - Total error counter (not `total_errors`)
+//! - ✅ `dynamo_component_memory_usage_bytes` - Memory usage gauge
+//! - ✅ `dynamo_frontend_inflight_requests_total` - Current inflight requests gauge
+//! - ✅ `nats_client_connection_duration_ms` - Connection time in milliseconds
+//! - ✅ `dynamo_component_cpu_usage_percent` - CPU usage percentage
+//! - ✅ `dynamo_frontend_tokens_per_second` - Token generation rate
+//!
 //! ## Key Differences: Prometheus Metric Names vs Prometheus Label Names
 //!
 //! **Metric names**: Allow colons and `__` anywhere. **Label names**: No colons, no `__` prefix.
@@ -45,8 +73,11 @@ pub mod frontend_service {
     /// Total number of LLM requests processed
     pub const REQUESTS_TOTAL: &str = "requests_total";
 
-    /// Number of inflight requests
-    pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
+    /// Number of requests waiting in HTTP queue before receiving the first response.
+    pub const QUEUED_REQUESTS_TOTAL: &str = "queued_requests_total";
+
+    /// Number of inflight requests going to the engine (vLLM, SGLang, ...)
+    pub const INFLIGHT_REQUESTS_TOTAL: &str = "inflight_requests_total";
 
     /// Duration of LLM requests
     pub const REQUEST_DURATION_SECONDS: &str = "request_duration_seconds";
@@ -62,6 +93,28 @@ pub mod frontend_service {
 
     /// Inter-token latency in seconds
     pub const INTER_TOKEN_LATENCY_SECONDS: &str = "inter_token_latency_seconds";
+
+    /// Model configuration metrics
+    ///
+    /// Runtime config metrics (from ModelRuntimeConfig):
+    /// Total KV blocks available for a worker serving the model
+    pub const MODEL_TOTAL_KV_BLOCKS: &str = "model_total_kv_blocks";
+
+    /// Maximum number of sequences for a worker serving the model (runtime config)
+    pub const MODEL_MAX_NUM_SEQS: &str = "model_max_num_seqs";
+
+    /// Maximum number of batched tokens for a worker serving the model (runtime config)
+    pub const MODEL_MAX_NUM_BATCHED_TOKENS: &str = "model_max_num_batched_tokens";
+
+    /// MDC metrics (from ModelDeploymentCard):
+    /// Maximum context length for a worker serving the model (MDC)
+    pub const MODEL_CONTEXT_LENGTH: &str = "model_context_length";
+
+    /// KV cache block size for a worker serving the model (MDC)
+    pub const MODEL_KV_CACHE_BLOCK_SIZE: &str = "model_kv_cache_block_size";
+
+    /// Request migration limit for a worker serving the model (MDC)
+    pub const MODEL_MIGRATION_LIMIT: &str = "model_migration_limit";
 
     /// Status label values
     pub mod status {
@@ -279,6 +332,12 @@ pub const KVSTATS_METRICS: &[&str] = &[
     kvstats::GPU_PREFIX_CACHE_HIT_RATE,
 ];
 
+// KvRouter (including KvInexer) Prometheus metric names
+pub mod kvrouter {
+    /// Number of KV cache events applied to the index (including status)
+    pub const KV_CACHE_EVENTS_APPLIED: &str = "kv_cache_events_applied";
+}
+
 // Shared regex patterns for Prometheus sanitization
 static METRIC_INVALID_CHARS_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[^a-zA-Z0-9_:]").unwrap());
@@ -382,6 +441,33 @@ pub fn build_component_metric_name(metric_name: &str) -> String {
     let sanitized_name =
         sanitize_prometheus_name(metric_name).expect("metric name should be valid or sanitizable");
     format!("{}_{}", name_prefix::COMPONENT, sanitized_name)
+}
+
+/// Safely converts a u64 value to i64 for Prometheus metrics
+///
+/// Since Prometheus IntGaugeVec uses i64 but our data types use u64,
+/// this function clamps large u64 values to i64::MAX to prevent overflow
+/// and ensure metrics remain positive.
+///
+/// # Arguments
+/// * `value` - The u64 value to convert
+///
+/// # Returns
+/// An i64 value, clamped to i64::MAX if the input exceeds i64::MAX
+///
+/// # Examples
+/// ```
+/// use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
+///
+/// assert_eq!(clamp_u64_to_i64(100), 100);
+/// assert_eq!(clamp_u64_to_i64(u64::MAX), i64::MAX);
+/// ```
+pub fn clamp_u64_to_i64(value: u64) -> i64 {
+    if value > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        value as i64
+    }
 }
 
 #[cfg(test)]
@@ -607,5 +693,21 @@ mod tests {
     fn test_build_component_metric_name_panics_on_empty_input() {
         // Test that empty input panics with clear message
         build_component_metric_name("");
+    }
+
+    #[test]
+    fn test_clamp_u64_to_i64() {
+        // Test normal values within i64 range
+        assert_eq!(clamp_u64_to_i64(0), 0);
+        assert_eq!(clamp_u64_to_i64(100), 100);
+        assert_eq!(clamp_u64_to_i64(1000000), 1000000);
+
+        // Test maximum i64 value
+        assert_eq!(clamp_u64_to_i64(i64::MAX as u64), i64::MAX);
+
+        // Test values that exceed i64::MAX
+        assert_eq!(clamp_u64_to_i64(u64::MAX), i64::MAX);
+        assert_eq!(clamp_u64_to_i64((i64::MAX as u64) + 1), i64::MAX);
+        assert_eq!(clamp_u64_to_i64((i64::MAX as u64) + 1000), i64::MAX);
     }
 }

@@ -25,6 +25,8 @@ import (
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
 
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secret"
+
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -66,12 +68,13 @@ type DynamoGraphDeploymentReconciler struct {
 	Recorder              record.EventRecorder
 	DockerSecretRetriever dockerSecretRetriever
 	ScaleClient           scale.ScalesGetter
+	MPISecretReplicator   *secret.SecretReplicator
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/finalizers,verbs=update
-// +kubebuilder:rbac:groups=grove.io,resources=podgangsets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=grove.io,resources=podcliquesets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
@@ -167,6 +170,15 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	// Determine if any service is multinode
 	hasMultinode := dynamoDeployment.HasAnyMultinodeService()
 
+	// Always ensure MPI SSH secret is available in this namespace
+	if r.MPISecretReplicator != nil {
+		err := r.MPISecretReplicator.Replicate(ctx, dynamoDeployment.Namespace)
+		if err != nil {
+			logger.Error(err, "Failed to replicate MPI secret", "namespace", dynamoDeployment.Namespace)
+			return "", "", "", fmt.Errorf("failed to replicate MPI secret: %w", err)
+		}
+	}
+
 	if enableGrove && r.Config.Grove.Enabled {
 		logger.Info("Reconciling Grove resources", "enableGrove", enableGrove, "groveEnabled", r.Config.Grove.Enabled, "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled)
 		return r.reconcileGroveResources(ctx, dynamoDeployment)
@@ -258,12 +270,12 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (State, Reason, Message, error) {
 	logger := log.FromContext(ctx)
 	// generate the dynamoComponentsDeployments from the config
-	groveGangSet, err := dynamo.GenerateGrovePodGangSet(ctx, dynamoDeployment, r.Config, r.DockerSecretRetriever)
+	groveGangSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.DockerSecretRetriever)
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return "", "", "", fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
-	_, syncedGroveGangSet, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*grovev1alpha1.PodGangSet, bool, error) {
+	_, syncedGroveGangSet, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*grovev1alpha1.PodCliqueSet, bool, error) {
 		return groveGangSet, false, nil
 	})
 	if err != nil {
@@ -421,7 +433,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		})).
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config))
 	if r.Config.Grove.Enabled {
-		ctrlBuilder = ctrlBuilder.Owns(&grovev1alpha1.PodGangSet{}, builder.WithPredicates(predicate.Funcs{
+		ctrlBuilder = ctrlBuilder.Owns(&grovev1alpha1.PodCliqueSet{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the pod gang set
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },

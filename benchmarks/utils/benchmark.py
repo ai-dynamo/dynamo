@@ -4,68 +4,74 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import asyncio
+import re
 import sys
-from typing import Tuple
+from urllib.parse import urlsplit
 
-from benchmarks.utils.workflow import categorize_inputs, run_benchmark_workflow
+from benchmarks.utils.workflow import has_http_scheme, run_benchmark_workflow
+from deploy.utils.kubernetes import is_running_in_cluster
 
 
-def parse_input(input_str: str) -> Tuple[str, str]:
-    """Parse input string in format key=value with additional validation"""
-    if "=" not in input_str:
-        raise ValueError(
-            f"Invalid input format. Expected: <label>=<manifest_path_or_endpoint>, got: {input_str}"
-        )
+def validate_endpoint(endpoint: str) -> None:
+    """Validate that endpoint is HTTP endpoint or internal service URL when running in cluster"""
+    v = endpoint.strip()
+    if is_running_in_cluster():
+        # Allow HTTP(S) or internal service URLs like host[:port][/path]
+        if has_http_scheme(v):
+            pass
+        else:
+            parts = urlsplit(f"//{v}")
+            host_ok = bool(parts.hostname)
+            port_ok = parts.port is None or (1 <= parts.port <= 65535)
+            if not (host_ok and port_ok):
+                raise ValueError(
+                    f"Endpoint must be HTTP(S) or internal service URL. Got: {endpoint}"
+                )
+    else:
+        if not has_http_scheme(v):
+            raise ValueError(f"Endpoint must be HTTP endpoint. Got: {endpoint}")
 
-    parts = input_str.split("=", 1)  # Split on first '=' only
-    if len(parts) != 2:
-        raise ValueError(
-            f"Invalid input format. Expected: <label>=<manifest_path_or_endpoint>, got: {input_str}"
-        )
 
-    label, value = parts
+def validate_benchmark_name(name: str) -> None:
+    """Validate benchmark name"""
+    if not name.strip():
+        raise ValueError("Benchmark name cannot be empty")
 
-    if not label.strip():
-        raise ValueError("Label cannot be empty")
-    if not value.strip():
-        raise ValueError("Value cannot be empty")
+    name = name.strip()
 
-    label = label.strip()
-    value = value.strip()
+    # Validate name characters
+    if not re.match(r"^[a-zA-Z0-9_-]+$", name):
+        raise ValueError(f"Invalid benchmark name: {name}")
 
-    # Validate label characters
-    import re
-
-    if not re.match(r"^[a-zA-Z0-9_-]+$", label):
-        raise ValueError(
-            f"Label must contain only letters, numbers, hyphens, and underscores. Invalid label: {label}"
-        )
-
-    return label, value
+    # Validate reserved names
+    if name.lower() == "plots":
+        raise ValueError("Benchmark name 'plots' is reserved")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark Orchestrator")
     parser.add_argument(
-        "--input",
-        action="append",
-        dest="inputs",
-        help="Input in format <label>=<manifest_path_or_endpoint>. Can be specified multiple times for comparisons.",
+        "--benchmark-name",
+        required=True,
+        help="Name/label for this benchmark (used in plots and results)",
     )
-    parser.add_argument("--namespace", required=True, help="Kubernetes namespace")
-    parser.add_argument("--isl", type=int, default=200, help="Input sequence length")
+    parser.add_argument(
+        "--endpoint-url",
+        required=True,
+        help="Endpoint to benchmark: HTTP(S) URL (e.g., http://localhost:8000) or in-cluster service URL host[:port]",
+    )
+    parser.add_argument("--isl", type=int, default=2000, help="Input sequence length")
     parser.add_argument(
         "--std",
         type=int,
         default=10,
         help="Input sequence standard deviation",
     )
-    parser.add_argument("--osl", type=int, default=200, help="Output sequence length")
+    parser.add_argument("--osl", type=int, default=256, help="Output sequence length")
     parser.add_argument(
         "--model",
-        default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        help="Model name",
+        default="Qwen/Qwen3-0.6B",
+        help="Model name (must match the model deployed at the endpoint)",
     )
     parser.add_argument(
         "--output-dir", type=str, default="benchmarks/results", help="Output directory"
@@ -73,52 +79,21 @@ def main() -> int:
     args = parser.parse_args()
 
     # Validate inputs
-    if not args.inputs:
-        print("ERROR: At least one --input must be specified")
-        return 1
-
-    # Parse inputs
     try:
-        parsed_inputs = {}
-        for input_str in args.inputs:
-            label, value = parse_input(input_str)
-            if label in parsed_inputs:
-                print(
-                    f"ERROR: Duplicate label '{label}' found. Each label must be unique."
-                )
-                return 1
-            parsed_inputs[label] = value
-
-        # Check for plotting limitations
-        if len(parsed_inputs) > 12:
-            print(
-                f"WARNING: You provided {len(parsed_inputs)} inputs, but the plotting system supports up to 12 inputs."
-            )
-            print(
-                "Consider running separate benchmark sessions or grouping related comparisons together."
-            )
-            print(
-                "Continuing with benchmark, but some inputs may not appear in plots..."
-            )
-            print()
-
-        endpoints, manifests = categorize_inputs(parsed_inputs)
-
-    except (ValueError, FileNotFoundError) as e:
+        validate_benchmark_name(args.benchmark_name)
+        validate_endpoint(args.endpoint_url)
+    except ValueError as e:
         print(f"ERROR: {e}")
         return 1
 
     # Run the benchmark workflow with the parsed inputs
-    asyncio.run(
-        run_benchmark_workflow(
-            namespace=args.namespace,
-            inputs=parsed_inputs,
-            isl=args.isl,
-            std=args.std,
-            osl=args.osl,
-            model=args.model,
-            output_dir=args.output_dir,
-        )
+    run_benchmark_workflow(
+        inputs={args.benchmark_name: args.endpoint_url},
+        isl=args.isl,
+        std=args.std,
+        osl=args.osl,
+        model=args.model,
+        output_dir=args.output_dir,
     )
     return 0
 

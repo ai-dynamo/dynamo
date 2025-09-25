@@ -9,9 +9,11 @@ import time
 
 import pytest
 import requests
-from huggingface_hub import snapshot_download
 
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.payloads import check_health_generate, check_models_api
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +56,7 @@ class DynamoWorkerProcess(ManagedProcess):
             "-m",
             "dynamo.vllm",
             "--model",
-            "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+            FAULT_TOLERANCE_MODEL_NAME,
             "--enforce-eager",
             "--gpu-memory-utilization",
             "0.45",
@@ -64,12 +66,18 @@ class DynamoWorkerProcess(ManagedProcess):
             "3",
         ]
 
-        # Add prefill worker flag if needed
-        if is_prefill:
-            command.append("--is-prefill-worker")
+        health_check_urls = [
+            (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
+            (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
+        ]
 
         # Set port based on worker type
         port = "8082" if is_prefill else "8081"
+
+        # Add prefill worker flag if needed
+        if is_prefill:
+            command.append("--is-prefill-worker")
+            health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
 
         # Set debug logging environment
         env = os.environ.copy()
@@ -93,10 +101,17 @@ class DynamoWorkerProcess(ManagedProcess):
         super().__init__(
             command=command,
             env=env,
-            health_check_urls=[(f"http://localhost:{port}/health", self.is_ready)],
+            health_check_urls=health_check_urls,
             timeout=300,
             display_output=True,
             terminate_existing=False,
+            # Ensure any orphaned vLLM engine cores or child helpers are cleaned up
+            stragglers=[
+                "VLLM::EngineCore",
+            ],
+            straggler_commands=[
+                "-m dynamo.vllm",
+            ],
             log_dir=log_dir,
         )
 
@@ -122,47 +137,12 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-def download_model() -> None:
-    """
-    Download the DeepSeek-R1-Distill-Llama-8B model from HuggingFace Hub if not already cached.
-    """
-    model_id = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-    logger.info(f"Caching model {model_id}...")
-
-    max_retries = 5
-    retry_delay = 30  # seconds
-
-    for attempt in range(max_retries):
-        try:
-            # Download the model to the default cache directory
-            # This will skip download if the model is already cached
-            snapshot_download(
-                repo_id="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-                repo_type="model",
-                local_files_only=False,
-            )
-            logger.info(f"Model {model_id} is ready for use")
-            return  # Success, exit the function
-        except Exception as e:
-            if attempt < max_retries - 1:  # Not the last attempt
-                logger.warning(
-                    f"Failed to download model {model_id} (attempt {attempt + 1}/{max_retries}): {e}"
-                )
-                logger.info(f"Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-            else:  # Last attempt failed
-                logger.error(
-                    f"Failed to download model {model_id} after {max_retries} attempts: {e}"
-                )
-                raise
-
-
 def send_completion_request(
-    prompt: str, max_tokens: int, timeout: int = 120
+    prompt: str, max_tokens: int, timeout: int | float = 120
 ) -> requests.Response:
     """Send a completion request to the frontend"""
     payload = {
-        "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+        "model": FAULT_TOLERANCE_MODEL_NAME,
         "prompt": prompt,
         "max_tokens": max_tokens,
     }
@@ -192,11 +172,11 @@ def send_completion_request(
 
 
 def send_chat_completion_request(
-    prompt: str, max_tokens: int, timeout: int = 120, stream: bool = False
+    prompt: str, max_tokens: int, timeout: int | float = 120, stream: bool = False
 ) -> requests.Response:
     """Send a chat completion request to the frontend"""
     payload = {
-        "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+        "model": FAULT_TOLERANCE_MODEL_NAME,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "stream": stream,
@@ -227,11 +207,18 @@ def send_chat_completion_request(
         raise
 
 
-def send_request_and_cancel(request_type: str = "completion", timeout: int = 1):
+def send_request_and_cancel(
+    request_type: str = "completion",
+    timeout: int | float = 1,
+    use_long_prompt: bool = False,
+):
     """Send a request with short timeout to trigger cancellation"""
     logger.info(f"Sending {request_type} request to be cancelled...")
 
     prompt = "Tell me a very long and detailed story about the history of artificial intelligence, including all major milestones, researchers, and breakthroughs?"
+    if use_long_prompt:
+        prompt += " Make sure it is" + " long" * 8000 + "!"
+
     try:
         if request_type == "completion":
             response = send_completion_request(prompt, 8000, timeout)
@@ -288,7 +275,7 @@ def verify_request_cancelled(
     prefill_worker_process: DynamoWorkerProcess | None = None,
     frontend_log_offset: int = 0,
     worker_log_offset: int = 0,
-    prefill_worker_log_offset: int = 0,
+    assert_cancel_at_prefill: bool = False,
 ) -> tuple[int, int]:
     """Verify that the worker and frontend logs contain cancellation messages
 
@@ -300,14 +287,14 @@ def verify_request_cancelled(
     worker_log_content = read_log_content(worker_process._log_path)
     new_worker_content = worker_log_content[worker_log_offset:]
 
-    # Find request ID from "New Request ID: <id>" line
+    # Find the LAST occurrence of "New Request ID: <id>" line (health checks may log earlier ones)
     request_id = None
-    for line in new_worker_content.split("\n"):
+    for line in reversed(new_worker_content.split("\n")):
         # Strip ANSI codes and whitespace for pattern matching
         clean_line = strip_ansi_codes(line).strip()
         if "New Request ID: " in clean_line:
-            # Extract ID from the end of the line
-            parts = clean_line.split("New Request ID: ")
+            # Extract ID from the last delimiter occurrence on the line
+            parts = clean_line.rsplit("New Request ID: ", 1)
             if len(parts) > 1:
                 request_id = parts[-1].strip()
                 break
@@ -316,7 +303,11 @@ def verify_request_cancelled(
 
     # Check if the same request ID was cancelled
     has_worker_cancellation = False
-    cancellation_pattern = f"Aborted Request ID: {request_id}"
+    cancellation_pattern = (
+        f"Aborted Remote Prefill Request ID: {request_id}"
+        if assert_cancel_at_prefill
+        else f"Aborted Request ID: {request_id}"
+    )
     for line in new_worker_content.split("\n"):
         # Strip ANSI codes and whitespace for pattern matching
         clean_line = strip_ansi_codes(line).strip()
@@ -324,28 +315,38 @@ def verify_request_cancelled(
             has_worker_cancellation = True
             break
     if not has_worker_cancellation:
-        pytest.fail(
-            f"Could not find 'Aborted Request ID: {request_id}' pattern in worker log"
-        )
+        pytest.fail(f"Could not find '{cancellation_pattern}' pattern in worker log")
 
-    # Check if the same request ID was remote prefilled
+    # Check prefill worker log if provided
     if prefill_worker_process is not None:
         prefill_worker_log_content = read_log_content(prefill_worker_process._log_path)
-        new_prefill_worker_content = prefill_worker_log_content[
-            prefill_worker_log_offset:
-        ]
 
+        # Check if the same request ID was remote prefilled
         has_remote_prefill = False
         remote_prefill_pattern = f"New Prefill Request ID: {request_id}"
-        for line in new_prefill_worker_content.split("\n"):
+        for line in prefill_worker_log_content.split("\n"):
             clean_line = strip_ansi_codes(line).strip()
             if clean_line.endswith(remote_prefill_pattern):
                 has_remote_prefill = True
                 break
         if not has_remote_prefill:
             pytest.fail(
-                f"Could not find 'New Prefill Request ID: {request_id}' pattern in prefill worker log"
+                f"Could not find '{remote_prefill_pattern}' pattern in prefill worker log"
             )
+
+        # Check for remote prefill cancellation
+        if assert_cancel_at_prefill:
+            has_prefill_cancellation = False
+            prefill_cancellation_pattern = f"Aborted Prefill Request ID: {request_id}"
+            for line in prefill_worker_log_content.split("\n"):
+                clean_line = strip_ansi_codes(line).strip()
+                if clean_line.endswith(prefill_cancellation_pattern):
+                    has_prefill_cancellation = True
+                    break
+            if not has_prefill_cancellation:
+                pytest.fail(
+                    f"Could not find '{prefill_cancellation_pattern}' pattern in prefill worker log"
+                )
 
     # Check frontend log for cancellation issued pattern
     frontend_log_content = read_log_content(frontend_process._log_path)
@@ -368,8 +369,8 @@ def verify_request_cancelled(
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
-@pytest.mark.slow
-def test_request_cancellation_vllm(request, runtime_services):
+@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+def test_request_cancellation_vllm(request, runtime_services, predownload_models):
     """
     End-to-end test for request cancellation functionality.
 
@@ -380,8 +381,6 @@ def test_request_cancellation_vllm(request, runtime_services):
     2. Chat completion request (non-streaming)
     3. Chat completion request (streaming)
     """
-    # Step 0: Download the model from HuggingFace if not already cached
-    download_model()
 
     # Step 1: Start the frontend
     with DynamoFrontendProcess(request) as frontend:
@@ -393,10 +392,6 @@ def test_request_cancellation_vllm(request, runtime_services):
 
         with worker:
             logger.info(f"Worker PID: {worker.get_pid()}")
-
-            # TODO: Why the model is not immediately available at the frontend after health check
-            #       returns success.
-            time.sleep(2)
 
             # Step 3: Test request cancellation
             frontend_log_offset, worker_log_offset = 0, 0
@@ -417,7 +412,7 @@ def test_request_cancellation_vllm(request, runtime_services):
                 logger.info(
                     "Checking for cancellation messages in worker and frontend logs..."
                 )
-                time.sleep(0.5)  # Make sure logs are written before proceeding
+                time.sleep(0.05)  # time for cancellation to propagate
                 frontend_log_offset, worker_log_offset = verify_request_cancelled(
                     frontend,
                     worker,
@@ -427,16 +422,14 @@ def test_request_cancellation_vllm(request, runtime_services):
 
                 logger.info(f"{description} detected successfully")
 
-            logger.info(
-                "All request cancellation tests completed successfully - request cancellation is working correctly"
-            )
-
 
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
-@pytest.mark.slow
-def test_request_cancellation_vllm_decode(request, runtime_services):
+@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+def test_request_cancellation_vllm_decode(
+    request, runtime_services, predownload_models
+):
     """
     End-to-end test for request cancellation functionality with remote prefill.
 
@@ -444,8 +437,6 @@ def test_request_cancellation_vllm_decode(request, runtime_services):
     the system properly handles the cancellation and cleans up resources
     on the decode worker side in a disaggregated setup.
     """
-    # Step 0: Download the model from HuggingFace if not already cached
-    download_model()
 
     # Step 1: Start the frontend
     with DynamoFrontendProcess(request) as frontend:
@@ -465,37 +456,26 @@ def test_request_cancellation_vllm_decode(request, runtime_services):
             with decode_worker:
                 logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
 
-                # TODO: Why the model is not immediately available at the frontend after health check
-                #       returns success.
-                time.sleep(2)
-
                 # Step 4: Test request cancellation for completion scenario only
                 logger.info(
-                    "Testing completion request cancellation in disaggregated mode..."
+                    "Testing completion request cancellation in decode worker..."
                 )
                 send_request_and_cancel("completion")
 
                 logger.info(
-                    "Checking for cancellation messages in decode worker, prefill worker, and frontend logs..."
+                    "Checking for cancellation messages in decode and prefill worker and frontend logs..."
                 )
-                time.sleep(0.5)  # Make sure logs are written before proceeding
+                time.sleep(0.05)  # time for cancellation to propagate
                 verify_request_cancelled(frontend, decode_worker, prefill_worker)
 
-                logger.info(
-                    "Completion request cancellation detected successfully in disaggregated mode"
-                )
 
-                logger.info(
-                    "Request cancellation test completed successfully in disaggregated mode - request cancellation is working correctly"
-                )
-
-
-@pytest.mark.skip(reason="require cancel support before receiving 1st response")
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
-@pytest.mark.slow
-def test_request_cancellation_vllm_prefill(request, runtime_services):
+@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+def test_request_cancellation_vllm_prefill(
+    request, runtime_services, predownload_models
+):
     """
     End-to-end test for request cancellation on remote prefill.
 
@@ -504,3 +484,38 @@ def test_request_cancellation_vllm_prefill(request, runtime_services):
     resources on the prefill worker and decode worker sides in a disaggregated
     setup.
     """
+
+    # Step 1: Start the frontend
+    with DynamoFrontendProcess(request) as frontend:
+        logger.info("Frontend started successfully")
+
+        # Step 2: Start the prefill worker
+        logger.info("Starting prefill worker...")
+        prefill_worker = DynamoWorkerProcess(request, is_prefill=True)
+
+        with prefill_worker:
+            logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
+
+            # Step 3: Start the decode worker
+            logger.info("Starting decode worker...")
+            decode_worker = DynamoWorkerProcess(request, is_prefill=False)
+
+            with decode_worker:
+                logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
+
+                # Step 4: Test request cancellation for completion scenario only
+                logger.info(
+                    "Testing completion request cancellation in prefill worker..."
+                )
+                send_request_and_cancel("completion", timeout=0.1, use_long_prompt=True)
+
+                logger.info(
+                    "Checking for cancellation messages in decode and prefill worker and frontend logs..."
+                )
+                time.sleep(0.05)  # time for cancellation to propagate
+                verify_request_cancelled(
+                    frontend,
+                    decode_worker,
+                    prefill_worker,
+                    assert_cancel_at_prefill=True,
+                )

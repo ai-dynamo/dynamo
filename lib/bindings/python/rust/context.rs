@@ -3,9 +3,9 @@
 
 // Context is a wrapper around the AsyncEngineContext to allow for Python bindings.
 
-use dynamo_runtime::pipeline::context::Controller;
-pub use dynamo_runtime::pipeline::AsyncEngineContext;
 use dynamo_runtime::logging::DistributedTraceContext;
+pub use dynamo_runtime::pipeline::AsyncEngineContext;
+use dynamo_runtime::pipeline::context::Controller;
 use pyo3::prelude::*;
 use std::sync::Arc;
 
@@ -31,9 +31,12 @@ impl Context {
     #[must_use]
     pub fn with_trace_context(
         inner: Arc<dyn AsyncEngineContext>,
-        trace_context: Option<DistributedTraceContext>
+        trace_context: Option<DistributedTraceContext>,
     ) -> Self {
-        Self { inner, trace_context }
+        Self {
+            inner,
+            trace_context,
+        }
     }
 
     // Get trace context for Rust-side usage
@@ -108,7 +111,9 @@ impl Context {
 
     #[getter]
     fn parent_span_id(&self) -> Option<String> {
-        self.trace_context.as_ref().and_then(|ctx| ctx.parent_id.clone())
+        self.trace_context
+            .as_ref()
+            .and_then(|ctx| ctx.parent_id.clone())
     }
 }
 

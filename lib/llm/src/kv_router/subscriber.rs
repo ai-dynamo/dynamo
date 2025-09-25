@@ -68,10 +68,12 @@ impl SnapshotResources {
 }
 
 /// Start a unified background task for event consumption and optional snapshot management
+#[allow(clippy::too_many_arguments)]
 pub async fn start_kv_router_background(
     component: Component,
     consumer_uuid: String,
     kv_events_tx: mpsc::Sender<RouterEvent>,
+    remove_worker_tx: mpsc::Sender<crate::kv_router::indexer::WorkerId>,
     snapshot_tx: Option<mpsc::Sender<DumpRequest>>,
     cancellation_token: CancellationToken,
     router_snapshot_threshold: Option<u32>,
@@ -119,7 +121,7 @@ pub async fn start_kv_router_background(
         ))?;
 
         match nats_client
-            .object_store_download_data::<Vec<RouterEvent>>(url)
+            .object_store_download_data::<Vec<RouterEvent>>(&url)
             .await
         {
             Ok(events) => {
@@ -156,6 +158,13 @@ pub async fn start_kv_router_background(
         .dissolve();
     let cleanup_lock_name = format!("{}/{}", ROUTER_CLEANUP_LOCK, component.subject());
 
+    // Get the generate endpoint and watch for instance deletions
+    let generate_endpoint = component.endpoint("generate");
+    let (_instance_prefix, _instance_watcher, mut instance_event_rx) = etcd_client
+        .kv_get_and_watch_prefix(generate_endpoint.etcd_root())
+        .await?
+        .dissolve();
+
     // Only set up snapshot-related resources if snapshot_tx is provided and threshold is set
     let snapshot_resources = if snapshot_tx.is_some() && router_snapshot_threshold.is_some() {
         let lock_name = format!("{}/{}", ROUTER_SNAPSHOT_LOCK, component.subject());
@@ -186,6 +195,30 @@ pub async fn start_kv_router_background(
                         tracing::warn!("Failed to shutdown NatsQueue: {e}");
                     }
                     break;
+                }
+
+                // Handle generate endpoint instance deletion events
+                Some(event) = instance_event_rx.recv() => {
+                    let WatchEvent::Delete(kv) = event else {
+                        continue;
+                    };
+
+                    let key = String::from_utf8_lossy(kv.key());
+
+                    let Some(worker_id_str) = key.split('/').next_back() else {
+                        tracing::warn!("Could not extract worker ID from instance key: {}", key);
+                        continue;
+                    };
+
+                    let Ok(worker_id) = worker_id_str.parse::<i64>() else {
+                        tracing::warn!("Could not parse worker ID from instance key: {}", key);
+                        continue;
+                    };
+
+                    tracing::info!("Generate endpoint instance deleted, removing worker {}", worker_id);
+                    if let Err(e) = remove_worker_tx.send(worker_id).await {
+                        tracing::warn!("Failed to send worker removal for worker {}: {}", worker_id, e);
+                    }
                 }
 
                 // Handle event consumption
@@ -244,7 +277,7 @@ pub async fn start_kv_router_background(
                     };
 
                     // Perform snapshot upload and purge
-                    match perform_snapshot_and_purge(
+                    match purge_then_snapshot(
                         &mut nats_queue,
                         snapshot_tx,
                         resources
@@ -322,15 +355,19 @@ pub async fn start_kv_router_background(
 }
 
 /// Perform snapshot upload and purge operations
-async fn perform_snapshot_and_purge(
+async fn purge_then_snapshot(
     nats_queue: &mut NatsQueue,
     snapshot_tx: &mpsc::Sender<DumpRequest>,
     resources: &SnapshotResources,
 ) -> anyhow::Result<()> {
-    // Snapshot before purge ensures we capture the current state before removing any messages.
-    // This guarantees the snapshot matches what has been acknowledged up to this point.
+    // Purge before snapshot ensures new/warm-restarted routers won't replay already-acknowledged messages.
+    // Since KV events are idempotent, this ordering reduces unnecessary reprocessing while maintaining
+    // at-least-once delivery guarantees. The snapshot will capture the clean state after purge.
 
-    // First, request a snapshot from the indexer
+    // First, purge acknowledged messages from the stream
+    nats_queue.purge_acknowledged().await?;
+
+    // Now request a snapshot from the indexer (which reflects the post-purge state)
     let (resp_tx, resp_rx) = oneshot::channel();
     let dump_req = DumpRequest { resp: resp_tx };
 
@@ -353,7 +390,7 @@ async fn perform_snapshot_and_purge(
 
     resources
         .nats_client
-        .object_store_upload_data(&events, url)
+        .object_store_upload_data(&events, &url)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to upload snapshot: {e:?}"))?;
 
@@ -362,9 +399,6 @@ async fn perform_snapshot_and_purge(
         events.len(),
         resources.bucket_name
     );
-
-    // Now purge acknowledged messages from the stream
-    nats_queue.purge_acknowledged().await?;
 
     Ok(())
 }

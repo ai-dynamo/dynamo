@@ -11,13 +11,14 @@ from typing import Optional
 
 from prometheus_client import Gauge, start_http_server
 
-from dynamo.planner import KubernetesConnector
+from dynamo.planner import KubernetesConnector, VirtualConnector
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SLAPlannerDefaults
 from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
 from dynamo.planner.utils.perf_interpolation import (
     DecodeInterpolator,
     PrefillInterpolator,
 )
+from dynamo.planner.utils.pre_swept_results_utils import PreSweptResultsHelper
 from dynamo.planner.utils.prometheus import PrometheusAPIClient
 from dynamo.planner.utils.trace_data_extractor import extract_metrics_from_mooncake
 from dynamo.runtime import DistributedRuntime
@@ -64,11 +65,15 @@ class Planner:
 
         if not self.dryrun:
             self.runtime = runtime
-            self.namespace = SLAPlannerDefaults.namespace
+            self.namespace = args.namespace
 
             if not args.no_operation:
                 if args.environment == "kubernetes":
                     self.connector = KubernetesConnector(self.namespace)
+                elif args.environment == "virtual":
+                    self.connector = VirtualConnector(
+                        runtime, self.namespace, args.backend
+                    )
                 else:
                     raise ValueError(f"Invalid environment: {args.environment}")
 
@@ -86,8 +91,35 @@ class Planner:
             window_size=args.load_prediction_window_size,
         )
 
-        self.prefill_interpolator = PrefillInterpolator(args.profile_results_dir)
-        self.decode_interpolator = DecodeInterpolator(args.profile_results_dir)
+        if "use-pre-swept-results" in args.profile_results_dir:
+            config_list = args.profile_results_dir.split(":")
+            configs = {
+                "gpu_type": config_list[1],
+                "model": config_list[2],
+                "framework": config_list[3],
+                "framework_version": config_list[4],
+                "tp": int(config_list[5]),
+                "dp": int(config_list[6]),
+                "pp": int(config_list[7]),
+                "block_size": int(config_list[8]),
+                "max_batch_size": int(config_list[9]),
+                "gpu_count": int(config_list[10]),
+            }
+            if self.dryrun:
+                pre_swept_results_helper = PreSweptResultsHelper(
+                    configs["gpu_type"], configs["framework"], configs["model"]
+                )
+                raw_data = pre_swept_results_helper.select_data("prefill", configs)
+                self.prefill_interpolator = PrefillInterpolator(raw_data=raw_data)
+                raw_data = pre_swept_results_helper.select_data("decode", configs)
+                self.decode_interpolator = DecodeInterpolator(raw_data=raw_data)
+            else:
+                raise ValueError(
+                    "Cannot set profile_results_dir to 'use-pre-swept-results' in non-dryrun mode"
+                )
+        else:
+            self.prefill_interpolator = PrefillInterpolator(args.profile_results_dir)
+            self.decode_interpolator = DecodeInterpolator(args.profile_results_dir)
 
         if not self.dryrun:
             self.prefill_client = None
@@ -125,6 +157,15 @@ class Planner:
             self.no_correction = True
         else:
             self.no_correction = args.no_correction
+
+    async def _async_init(self):
+        """Async initialization for components that need it"""
+        if (
+            not self.dryrun
+            and hasattr(self, "connector")
+            and hasattr(self.connector, "_async_init")
+        ):
+            await self.connector._async_init()
 
     async def get_workers_info(self):
         if self.runtime is None:
@@ -538,4 +579,5 @@ class Planner:
 
 async def start_sla_planner(runtime: DistributedRuntime, args: argparse.Namespace):
     planner = Planner(runtime, args)
+    await planner._async_init()
     await planner.run()

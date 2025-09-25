@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.10.0
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -35,8 +36,6 @@ ARG ARCH_ALT=x86_64
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET=""
 ARG SCCACHE_REGION=""
-ARG AWS_ACCESS_KEY_ID=""
-ARG AWS_SECRET_ACCESS_KEY=""
 
 # NIXL configuration
 ARG NIXL_UCX_REF=v1.19.0
@@ -58,8 +57,6 @@ ARG PYTHON_VERSION
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET
 ARG SCCACHE_REGION
-ARG AWS_ACCESS_KEY_ID
-ARG AWS_SECRET_ACCESS_KEY
 ARG NIXL_UCX_REF
 ARG NIXL_REF
 
@@ -96,7 +93,7 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.89.0
+    RUST_VERSION=1.90.0
 
 # Define Rust target based on ARCH_ALT ARG
 ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
@@ -164,7 +161,9 @@ ENV PATH=/usr/local/bin/etcd/:$PATH
 ##################################
 
 # Build and install UCX
-RUN rm -rf /opt/hpcx/ucx && \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    rm -rf /opt/hpcx/ucx && \
     rm -rf /usr/local/ucx && \
     echo "Building UCX with reference $NIXL_UCX_REF" && \
     cd /usr/local/src && \
@@ -214,7 +213,9 @@ ENV NIXL_SRC_DIR=/opt/nixl \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins
 
 # Build and install NIXL
-RUN git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
     cd ${NIXL_SRC_DIR} && \
     if [ "$ARCH" = "arm64" ]; then \
         nixl_build_args="-Ddisable_gds_backend=true"; \
@@ -230,7 +231,9 @@ RUN git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.
 
 # Build NIXL Python module
 # TODO OPS-590: Move gds_path selection based on arch into NIXL build and re-enable gds backend for arm64
-RUN if [ "$ARCH" = "arm64" ]; then \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    if [ "$ARCH" = "arm64" ]; then \
         cd ${NIXL_SRC_DIR} && uv build . --out-dir /opt/dynamo/wheelhouse/nixl \
         --config-settings=setup-args="-Ddisable_gds_backend=true"; \
     else \
@@ -272,8 +275,6 @@ ARG ENABLE_KVBM
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET
 ARG SCCACHE_REGION
-ARG AWS_ACCESS_KEY_ID
-ARG AWS_SECRET_ACCESS_KEY
 
 WORKDIR /opt/dynamo
 
@@ -289,9 +290,27 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
 # Install system dependencies
 ARG PYTHON_VERSION
 RUN dnf update -y \
-    && dnf install -y llvm-toolset protobuf-compiler python${PYTHON_VERSION}-devel wget \
+    && dnf install -y llvm-toolset protobuf-compiler python${PYTHON_VERSION}-devel wget unzip \
     && dnf clean all \
     && rm -rf /var/cache/dnf
+
+# Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
+RUN set -eux; \
+    PROTOC_VERSION=25.3; \
+    case "${ARCH_ALT}" in \
+      x86_64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-x86_64.zip" ;; \
+      aarch64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-aarch_64.zip" ;; \
+      *) echo "Unsupported architecture: ${ARCH_ALT}" >&2; exit 1 ;; \
+    esac; \
+    wget --tries=3 --waitretry=5 -O /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${PROTOC_ZIP}"; \
+    rm -f /usr/local/bin/protoc /usr/bin/protoc; \
+    unzip -o /tmp/protoc.zip -d /usr/local bin/protoc include/*; \
+    chmod +x /usr/local/bin/protoc; \
+    ln -s /usr/local/bin/protoc /usr/bin/protoc; \
+    protoc --version
+
+# Point build tools explicitly at the modern protoc
+ENV PROTOC=/usr/local/bin/protoc
 
 # Copy artifacts from base stage
 COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
@@ -317,7 +336,9 @@ COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
 # Build wheels
-RUN uv build --wheel --out-dir /opt/dynamo/dist && \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
     uv pip install maturin[patchelf] && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
