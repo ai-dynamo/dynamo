@@ -111,14 +111,25 @@ pub async fn extract_worker_selection_from_stream(
                                 "!![DEBUG] extract_worker_selection_from_stream: First comment: '{}'",
                                 first_comment
                             );
-                            // Try JSON deserialization first (handles quoted strings like "1732646935200805498")
-                            match serde_json::from_str::<i64>(first_comment) {
-                                Ok(parsed_id) => {
-                                    worker_id = parsed_id;
+                            // Try JSON deserialization as string first (handles quoted strings like "1732646935200805498")
+                            match serde_json::from_str::<String>(first_comment) {
+                                Ok(id_string) => {
                                     println!(
-                                        "!![DEBUG] extract_worker_selection_from_stream: Successfully JSON-parsed worker_id: {}",
-                                        worker_id
+                                        "!![DEBUG] extract_worker_selection_from_stream: JSON-deserialized string: '{}'",
+                                        id_string
                                     );
+                                    if let Ok(parsed_id) = id_string.parse::<i64>() {
+                                        worker_id = parsed_id;
+                                        println!(
+                                            "!![DEBUG] extract_worker_selection_from_stream: Successfully parsed worker_id from JSON string: {}",
+                                            worker_id
+                                        );
+                                    } else {
+                                        println!(
+                                            "!![DEBUG] extract_worker_selection_from_stream: Failed to parse number from JSON string: '{}'",
+                                            id_string
+                                        );
+                                    }
                                 }
                                 Err(_) => {
                                     // Fallback to direct parsing (handles unquoted numbers)
