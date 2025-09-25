@@ -1,13 +1,13 @@
 {
     "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
     "copyright": [
-        "SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
+        "SPDX-FileCopyrightText: Copyright (c) {{ current_year }} NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
         "SPDX-License-Identifier: Apache-2.0"
     ],
-    "name": "NVIDIA Dynamo Dev Container Development",
+    "name": "Dynamo {{ framework.upper() }} Dev Container",
     "remoteUser": "ubuntu", // Matches our container user
     "updateRemoteUserUID": true, // Updates the UID of the remote user to match the host user, avoids permission errors
-    "image": "dynamo:latest-vllm-local-dev", // Use the latest VLLM dev image
+    "image": "dynamo:latest-{{ framework }}-local-dev", // Use the latest {{ framework.upper() }} dev image
     "runArgs": [
         "--gpus=all",
         "--network=host",
