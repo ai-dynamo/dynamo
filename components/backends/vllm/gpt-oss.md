@@ -109,8 +109,50 @@ The server exposes a standard OpenAI-compatible API endpoint that accepts JSON r
 
 ### 4. Reasoning and Tool Calling
 
-Dynamo has supported reasoning and tool calling in OpenAI Chat Completion endpoint, below is an example
-of sending multi-round request to complete a user query with reasoning and tool calling:
+Dynamo has supported reasoning and tool calling in OpenAI Chat Completion endpoint. A typical workflow for application built on top of Dynamo
+is that the application has a set of tools to aid the assistant provide accurate answer, and it is ususally
+multi-turn as it involves tool selection and generation based on the tool result. Below is an example
+of sending multi-round requests to complete a user query with reasoning and tool calling:
+
+**Application setup (pseudocode)**
+```Python
+# The tool defined by the application
+def get_system_health():
+    for component in system.components:
+        if not component.health():
+            return False
+    return True
+
+# The JSON representation of the declaration in ChatCompletion tool style
+tool_choice = '{
+  "type": "function",
+  "function": {
+    "name": "get_system_health",
+    "description": "Returns the current health status of the LLM runtime—use before critical operations to verify the service is live.",
+    "parameters": {
+      "type": "object",
+      "properties": {}
+    }
+  }
+}'
+
+# On user query, perform below workflow.
+def user_query(app_request):
+    # first round
+    # create chat completion with prompt and tool choice
+    request = ...
+    response = send(request)
+
+    if response["finish_reason"] == "tool_calls":
+        # second round
+        function, params = parse_tool_call(response)
+        function_result = function(params)
+        # create request with prompt, assistant response, and function result
+        request = ...
+        response = send(request)
+    return app_response(response)
+```
+
 
 **First request with tools**
 ```bash
@@ -187,7 +229,7 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
       "role": "assistant",
       "tool_calls": [
         {
-          "id": "call_29b23452",
+          "id": "call-1",
           "type": "function",
           "function": {
             "name": "get_system_health",
@@ -198,7 +240,7 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
     },
     {
       "role": "tool",
-      "tool_call_id": "call_29b23452",
+      "tool_call_id": "call-1",
       "content": "{\"status\":\"ok\",\"uptime_seconds\":372045}"
     }
   ],
