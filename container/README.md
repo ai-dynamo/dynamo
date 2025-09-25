@@ -174,28 +174,25 @@ The `run.sh` script launches Docker containers with the appropriate configuratio
 
 ```bash
 # Basic container launch (inference/production, runs as root user)
-./run.sh --image dynamo:latest-vllm
-
-# Basic container launch with local host user permissions
-./run.sh --image dynamo:latest-vllm-local-dev
+./run.sh --image dynamo:latest-vllm -v $HOME/.cache:/home/ubuntu/.cache
 
 # Mount workspace for development (use local-dev image for local host user permissions)
-./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace
+./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache
 
 # Use specific image and framework for development
-./run.sh --image v0.1.0.dev.08cc44965-vllm-local-dev --framework vllm --mount-workspace
+./run.sh --image v0.1.0.dev.08cc44965-vllm-local-dev --framework vllm --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache
 
 # Interactive development shell with workspace mounted
-./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -it -- bash
+./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache -it -- bash
 
 # Development with custom environment variables
-./run.sh --image dynamo:latest-vllm-local-dev -e CUDA_VISIBLE_DEVICES=0,1 --mount-workspace
+./run.sh --image dynamo:latest-vllm-local-dev -e CUDA_VISIBLE_DEVICES=0,1 --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache
 
 # Dry run to see docker command
 ./run.sh --dry-run
 
 # Development with custom volume mounts
-./run.sh --image dynamo:latest-vllm-local-dev -v /host/path:/container/path --mount-workspace
+./run.sh --image dynamo:latest-vllm-local-dev -v /host/path:/container/path --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache
 ```
 
 ### Network Configuration Options
@@ -205,8 +202,8 @@ The `run.sh` script supports different networking modes via the `--network` flag
 #### Host Networking (Default)
 ```bash
 # Same examples with local host user permissions
-./run.sh --image dynamo:latest-vllm-local-dev --network host
-./run.sh --image dynamo:latest-vllm-local-dev
+./run.sh --image dynamo:latest-vllm-local-dev --network host -v $HOME/.cache:/home/ubuntu/.cache
+./run.sh --image dynamo:latest-vllm-local-dev -v $HOME/.cache:/home/ubuntu/.cache
 ```
 **Use cases:**
 - High-performance ML inference (default for GPU workloads)
@@ -218,21 +215,24 @@ The `run.sh` script supports different networking modes via the `--network` flag
 
 #### Bridge Networking (Isolated)
 ```bash
-# Development/testing with bridge networking and host cache sharing
-./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace --network bridge -v $HOME/.cache:/home/ubuntu/.cache
+# CI/testing with isolated bridge networking and host cache sharing
+./run.sh --image dynamo:latest-vllm --mount-workspace --network bridge -v $HOME/.cache:/home/ubuntu/.cache
 ```
 **Use cases:**
 - Secure isolation from host network
 - CI/CD pipelines requiring complete isolation
 - When you need absolute control of ports
+- Exposing specific services to host while maintaining isolation
+
+**Note:** For port sharing with the host, use the `--port` or `-p` option with format `host_port:container_port` (e.g., `--port 8000:8000` or `-p 9081:8081`) to expose specific container ports to the host.
 
 #### No Networking ⚠️ **LIMITED FUNCTIONALITY**
 ```bash
 # Complete network isolation - no external connectivity
-./run.sh --image dynamo:latest-vllm --network none --mount-workspace
+./run.sh --image dynamo:latest-vllm --network none --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache
 
 # Same with local user permissions
-./run.sh --image dynamo:latest-vllm-local-dev --network none --mount-workspace
+./run.sh --image dynamo:latest-vllm-local-dev --network none --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache
 ```
 **⚠️ WARNING: `--network none` severely limits Dynamo functionality:**
 - **No model downloads** - HuggingFace models cannot be downloaded
@@ -266,13 +266,13 @@ See Docker documentation for custom network creation and management.
 
 #### Network Mode Comparison
 
-| Mode | Performance | Security | Use Case | Dynamo Compatibility | Port Sharing |
-|------|-------------|----------|----------|---------------------|---------------|
-| `host` | Highest | Lower | ML/GPU workloads, high-performance services | ✅ Full | ⚠️ **Shared with host** (one NATS/etcd only) |
-| `bridge` | Good | Higher | General web services, controlled port exposure | ✅ Full | ✅ Isolated ports |
-| `none` | N/A | Highest | Air-gapped environments only | ⚠️ **Very Limited** | ✅ No network |
-| `container:name` | Good | Medium | Sidecar patterns, shared network stacks | ✅ Full | ⚠️ Shared with target container |
-| Custom networks | Good | Medium | Multi-container applications | ✅ Full | ✅ Isolated ports |
+| Mode | Performance | Security | Use Case | Dynamo Compatibility | Port Sharing | Port Publishing |
+|------|-------------|----------|----------|---------------------|---------------|-----------------|
+| `host` | Highest | Lower | ML/GPU workloads, high-performance services | ✅ Full | ⚠️ **Shared with host** (one NATS/etcd only) | ❌ Not needed |
+| `bridge` | Good | Higher | General web services, controlled port exposure | ✅ Full | ✅ Isolated ports | ✅ `-p host:container` |
+| `none` | N/A | Highest | Air-gapped environments only | ⚠️ **Very Limited** | ✅ No network | ❌ No network |
+| `container:name` | Good | Medium | Sidecar patterns, shared network stacks | ✅ Full | ⚠️ Shared with target container | ❌ Use target's ports |
+| Custom networks | Good | Medium | Multi-container applications | ✅ Full | ✅ Isolated ports | ✅ `-p host:container` |
 
 ## Workflow Examples
 
@@ -282,7 +282,7 @@ See Docker documentation for custom network creation and management.
 ./build.sh --framework vllm --target local-dev
 
 # 2. Run development container using the local-dev image
-./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -it
+./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache -it
 
 # 3. Inside container, run inference (requires both frontend and backend)
 # Start frontend

@@ -36,6 +36,7 @@ DEFAULT_HF_CACHE=${SOURCE_DIR}/.cache/huggingface
 GPUS="all"
 PRIVILEGED=
 VOLUME_MOUNTS=
+PORT_MAPPINGS=
 MOUNT_WORKSPACE=
 ENVIRONMENT_VARIABLES=
 REMAINING_ARGS=
@@ -144,6 +145,14 @@ get_options() {
         -v)
             if [ "$2" ]; then
                 VOLUME_MOUNTS+=" -v $2 "
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        -p|--port)
+            if [ "$2" ]; then
+                PORT_MAPPINGS+=" -p $2 "
                 shift
             else
                 missing_requirement "$1"
@@ -318,6 +327,7 @@ show_help() {
     echo "           Examples: --network bridge (isolated), --network none (no network - WARNING: breaks most functionality)"
     echo "                    --network container:redis (share network with 'redis' container)"
     echo "  [-v add volume mount]"
+    echo "  [-p|--port add port mapping (host_port:container_port)]"
     echo "  [-e add environment variable]"
     echo "  [--mount-workspace set up for local development]"
     echo "  [-- stop processing and pass remaining args as command to docker run]"
@@ -356,6 +366,7 @@ ${RUN_PREFIX} docker run \
     --ulimit nofile=65536:65536 \
     ${ENVIRONMENT_VARIABLES} \
     ${VOLUME_MOUNTS} \
+    ${PORT_MAPPINGS} \
     -w "$WORKDIR" \
     --cap-add CAP_SYS_PTRACE \
     ${NIXL_GDS_CAPS} \
