@@ -3,7 +3,7 @@
     "containerDefinitions": [
         {
             "name": "dynamo-vllm-frontend",
-            "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.0",
+            "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag",
             "repositoryCredentials": {
                 "credentialsParameter": "arn:aws:secretsmanager:us-east-2:AWS_ID:secret:ngc_nvcr_access"
             },

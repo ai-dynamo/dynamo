@@ -15,6 +15,7 @@ use crate::discovery::{KV_ROUTERS_ROOT_PATH, ModelEntry};
 use crate::kv_router::{KvRouterConfig, scheduler::DefaultWorkerSelector};
 use crate::{
     kv_router::KvRouter,
+    types::generic::tensor::TensorStreamingEngine,
     types::openai::{
         chat_completions::OpenAIChatCompletionsStreamingEngine,
         completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
@@ -36,6 +37,7 @@ pub struct ModelManager {
     completion_engines: RwLock<ModelEngines<OpenAICompletionsStreamingEngine>>,
     chat_completion_engines: RwLock<ModelEngines<OpenAIChatCompletionsStreamingEngine>>,
     embeddings_engines: RwLock<ModelEngines<OpenAIEmbeddingsStreamingEngine>>,
+    tensor_engines: RwLock<ModelEngines<TensorStreamingEngine>>,
 
     // These two are Mutex because we read and write rarely and equally
     entries: Mutex<HashMap<String, ModelEntry>>,
@@ -54,6 +56,7 @@ impl ModelManager {
             completion_engines: RwLock::new(ModelEngines::default()),
             chat_completion_engines: RwLock::new(ModelEngines::default()),
             embeddings_engines: RwLock::new(ModelEngines::default()),
+            tensor_engines: RwLock::new(ModelEngines::default()),
             entries: Mutex::new(HashMap::new()),
             kv_choosers: Mutex::new(HashMap::new()),
         }
@@ -73,6 +76,7 @@ impl ModelManager {
             .into_iter()
             .chain(self.list_completions_models())
             .chain(self.list_embeddings_models())
+            .chain(self.list_tensor_models())
             .collect()
     }
 
@@ -86,6 +90,10 @@ impl ModelManager {
 
     pub fn list_embeddings_models(&self) -> Vec<String> {
         self.embeddings_engines.read().list()
+    }
+
+    pub fn list_tensor_models(&self) -> Vec<String> {
+        self.tensor_engines.read().list()
     }
 
     pub fn add_completions_model(
@@ -115,6 +123,15 @@ impl ModelManager {
         clients.add(model, engine)
     }
 
+    pub fn add_tensor_model(
+        &self,
+        model: &str,
+        engine: TensorStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let mut clients = self.tensor_engines.write();
+        clients.add(model, engine)
+    }
+
     pub fn remove_completions_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let mut clients = self.completion_engines.write();
         clients.remove(model)
@@ -127,6 +144,11 @@ impl ModelManager {
 
     pub fn remove_embeddings_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let mut clients = self.embeddings_engines.write();
+        clients.remove(model)
+    }
+
+    pub fn remove_tensor_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let mut clients = self.tensor_engines.write();
         clients.remove(model)
     }
 
@@ -157,6 +179,17 @@ impl ModelManager {
         model: &str,
     ) -> Result<OpenAIChatCompletionsStreamingEngine, ModelManagerError> {
         self.chat_completion_engines
+            .read()
+            .get(model)
+            .cloned()
+            .ok_or(ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
+    pub fn get_tensor_engine(
+        &self,
+        model: &str,
+    ) -> Result<TensorStreamingEngine, ModelManagerError> {
+        self.tensor_engines
             .read()
             .get(model)
             .cloned()

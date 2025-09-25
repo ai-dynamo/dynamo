@@ -920,7 +920,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Name:    "main",
 										Image:   "test-image:latest",
 										Command: []string{"sh", "-c"},
-										Args:    []string{"ray start --address=${LWS_LEADER_ADDRESS}:6379 --block"},
+										Args:    []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
 										Env: []corev1.EnvVar{
 											{Name: "DYN_NAMESPACE", Value: "default"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
