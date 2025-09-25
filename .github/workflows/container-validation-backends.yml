@@ -23,8 +23,8 @@ jobs:
           - { name: sglang, target: runtime, pytest_marks: "e2e and sglang and gpu_1 and not slow" }
           - { name: trtllm, target: runtime, pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow" }
         platform:
-          - { arch: "linux/amd64", runner: gpu-l40-amd64  }
-          - { arch: "linux/arm64", runner: cpu-arm-r8g-4xlarge }
+          - { arch: "linux/amd64", runner: gpu-l40-amd64, short_name: amd64  }
+          - { arch: "linux/arm64", runner: cpu-arm-r8g-4xlarge, short_name: arm64 }
 
     name: build-test (${{matrix.framework.name }}, ${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
@@ -49,6 +49,7 @@ jobs:
         run: |
           docker system prune -af
       - name: Build image
+        id: build-image
         env:
           ARCH: ${{ matrix.platform.arch }}
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
@@ -59,7 +60,9 @@ jobs:
         run: |
           # Turns linux/arm64 into linux-arm64
           export PLATFORM_TAG=${ARCH//\//-}
-          ./container/build.sh --tag ${{ matrix.framework.name }}:${PLATFORM_TAG} \
+          export IMAGE_TAG=${{ matrix.framework.name }}:${PLATFORM_TAG}
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          ./container/build.sh --tag ${IMAGE_TAG} \
             --platform ${{ matrix.platform.arch }} \
             --target ${{ matrix.framework.target }} \
             --framework ${{ matrix.framework.name }} \
@@ -72,15 +75,23 @@ jobs:
         env:
           ARCH: ${{ matrix.platform.arch }}
           HF_HOME: /runner/_work/_temp
+          IMAGE_TAG: ${{ steps.build-image.outputs.IMAGE_TAG }}
         run: |
-          # Turns linux/arm64 into linux-arm64
-          export PLATFORM_TAG=${ARCH//\//-}
           docker run --runtime=nvidia --rm --gpus all -w /workspace \
             --network host \
             --name ${{ env.CONTAINER_ID }}_pytest \
-            ${{ matrix.framework.name }}:${PLATFORM_TAG} \
+            ${IMAGE_TAG} \
             bash -c "pytest -xsv --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\""
       - name: Docker Tag and Push
         if: ${{ github.ref_name == 'main' }}
-        run: |
-          docker tag ${{ matrix.framework.name }}:${{ matrix.platform.arch }} ${{ matrix.framework.name }}:${{ github.sha }}-${{ matrix.platform.arch }}
+        uses: ./.github/docker-tag-push
+        with:
+          local_image: ${{ steps.build-image.outputs.IMAGE_TAG }}
+          push_tag: ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.short_name }}
+          aws_push: 'true'
+          aks_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: us-west-2
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
