@@ -443,8 +443,6 @@ async fn test_http_service() {
         .await
         .unwrap();
 
-    println!("{:?}", request);
-    println!("{:?}", response);
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     inc_counter(
         Endpoint::ChatCompletions,

@@ -66,7 +66,7 @@ fn get_body_limit() -> usize {
         .unwrap_or(45 * 1024 * 1024)
 }
 
-pub type ErrorResponse = Json<ErrorMessage>;
+pub type ErrorResponse = ErrorMessage;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct ErrorMessage {
@@ -76,24 +76,40 @@ pub(crate) struct ErrorMessage {
     code: u16,
 }
 
+fn map_error_code_to_error_type(code: u16) -> String {
+    match code {
+        404 => "NotFoundError".to_string(),
+        503 => "ServiceUnavailableError".to_string(),
+        500 => "InternalServerError".to_string(),
+        501 => "NotImplementedError".to_string(),
+        422 => "UnprocessableEntityError".to_string(),
+        400 => "BadRequestError".to_string(),
+        _ => "UnknownError".to_string(),
+    }
+}
+
 impl ErrorMessage {
     /// Not Found Error
     pub fn model_not_found() -> ErrorResponse {
-        Json(ErrorMessage {
+        let code = StatusCode::NOT_FOUND.as_u16();
+        let error_type = map_error_code_to_error_type(code);
+        ErrorMessage {
             message: "Model not found".to_string(),
-            error_type: "invalid_request_error".to_string(),
-            code: StatusCode::NOT_FOUND.as_u16(),
-        })
+            error_type,
+            code,
+        }
     }
 
     /// Service Unavailable
     /// This is returned when the service is live, but not ready.
     pub fn _service_unavailable() -> ErrorResponse {
-        Json(ErrorMessage {
+        let code = StatusCode::SERVICE_UNAVAILABLE.as_u16();
+        let error_type = map_error_code_to_error_type(code);
+        ErrorMessage {
             message: "Service is not ready".to_string(),
-            error_type: "server_error".to_string(),
-            code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
-        })
+            error_type,
+            code,
+        }
     }
 
     /// Internal Service Error
@@ -102,11 +118,13 @@ impl ErrorMessage {
     /// Internal Services errors are the result of misconfiguration or bugs in the service.
     pub fn internal_server_error(msg: &str) -> ErrorResponse {
         tracing::error!("Internal server error: {msg}");
-        Json(ErrorMessage {
+        let code = StatusCode::INTERNAL_SERVER_ERROR.as_u16();
+        let error_type = map_error_code_to_error_type(code);
+        ErrorMessage {
             message: msg.to_string(),
-            error_type: "server_error".to_string(),
-            code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-        })
+            error_type,
+            code,
+        }
     }
 
     /// Not Implemented Error
@@ -114,11 +132,13 @@ impl ErrorMessage {
     /// This should be used for features that are planned but not available.
     pub fn not_implemented_error(msg: &str) -> ErrorResponse {
         tracing::error!("Not Implemented error: {msg}");
-        Json(ErrorMessage {
+        let code = StatusCode::NOT_IMPLEMENTED.as_u16();
+        let error_type = map_error_code_to_error_type(code);
+        ErrorMessage {
             message: msg.to_string(),
-            error_type: "invalid_request_error".to_string(),
-            code: StatusCode::NOT_IMPLEMENTED.as_u16(),
-        })
+            error_type,
+            code,
+        }
     }
 
     /// The OAI endpoints call an [`dynamo.runtime::engine::AsyncEngine`] which are specialized to return
@@ -134,11 +154,11 @@ impl ErrorMessage {
                 dynamo_runtime::pipeline::error::PipelineError::ServiceOverloaded(_)
             )
         {
-            return Json(ErrorMessage {
+            return ErrorMessage {
                 message: pipeline_err.to_string(),
-                error_type: "server_error".to_string(),
+                error_type: map_error_code_to_error_type(StatusCode::SERVICE_UNAVAILABLE.as_u16()),
                 code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
-            });
+            };
         }
 
         // Then check for HttpError
@@ -154,11 +174,11 @@ impl ErrorMessage {
             return ErrorMessage::internal_server_error(&err.message);
         }
         match StatusCode::from_u16(err.code) {
-            Ok(_) => Json(ErrorMessage { 
+            Ok(_) => ErrorMessage {
                 message: err.message,
-                error_type: "invalid_request_error".to_string(),
+                error_type: map_error_code_to_error_type(err.code),
                 code: err.code,
-            }),
+            },
             Err(_) => ErrorMessage::internal_server_error(&err.message),
         }
     }
@@ -166,9 +186,9 @@ impl ErrorMessage {
 
 impl From<HttpError> for ErrorMessage {
     fn from(err: HttpError) -> Self {
-        ErrorMessage { 
+        ErrorMessage {
             message: err.message,
-            error_type: "invalid_request_error".to_string(),
+            error_type: map_error_code_to_error_type(err.code),
             code: err.code,
         }
     }
@@ -176,11 +196,11 @@ impl From<HttpError> for ErrorMessage {
 
 impl IntoResponse for ErrorMessage {
     fn into_response(self) -> Response {
-        let status_code = StatusCode::from_u16(self.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let status_code =
+            StatusCode::from_u16(self.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         (status_code, Json(self)).into_response()
     }
 }
-
 
 // Problem: Currently we are using JSON from axum as the request validator. Whenever there is an invalid JSON, it will return a 422.
 // But all the downstream apps that relies on openai based APIs, expects to get 400 for all these cases otherwise they fail badly
@@ -194,12 +214,12 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
             .await
             .unwrap_or_default();
         let error_message = String::from_utf8_lossy(&body_bytes).to_string();
-        Json(ErrorMessage {
+        ErrorMessage {
             message: error_message,
-            error_type: "invalid_request_error".to_string(),
+            error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST.as_u16()),
             code: StatusCode::BAD_REQUEST.as_u16(),
-        })
-            .into_response()
+        }
+        .into_response()
     } else {
         // Pass through if it is not a 422
         response
