@@ -152,7 +152,9 @@ def parse_args(component: str, args_list: Optional[List[str]] = None) -> Config:
         logging.error(
             f"Invalid endpoint format: '{endpoint}'. Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
         )
-        sys.exit(1)
+        raise ValueError(
+            f"Invalid endpoint format: '{endpoint}'. Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
+        )
 
     parsed_namespace, parsed_component_name, parsed_endpoint_name = endpoint_parts
 

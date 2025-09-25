@@ -63,11 +63,11 @@ class SglangUtils:
         sampling_options = request.request.sampling_options
         stop_conditions = request.request.stop_conditions
 
-        if sampling_options.temperature:
+        if sampling_options.temperature is not None:
             sampling_params["temperature"] = sampling_options.temperature
-        if sampling_options.top_p:
+        if sampling_options.top_p is not None:
             sampling_params["top_p"] = sampling_options.top_p
-        if sampling_options.top_k:
+        if sampling_options.top_k is not None:
             sampling_params["top_k"] = sampling_options.top_k
         if stop_conditions.max_tokens:
             sampling_params["max_new_tokens"] = stop_conditions.max_tokens
@@ -101,7 +101,7 @@ class EmbeddingsProcessor:
         logger.debug(f"Processing embeddings with shape: {request.embeddings_shape}")
 
         # Validate embeddings shape
-        if not request.embeddings_shape or len(request.embeddings_shape) < 2:
+        if request.embeddings_shape is None or len(request.embeddings_shape) < 2:
             raise ValueError(f"Invalid embeddings shape: {request.embeddings_shape}")
 
         embeddings = torch.empty(
