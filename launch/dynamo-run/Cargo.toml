@@ -3,13 +3,12 @@
 
 [package]
 name = "dynamo-run"
-version.workspace = true
-edition.workspace = true
-authors.workspace = true
-homepage.workspace = true
-license.workspace = true
-repository.workspace = true
-readme.workspace = true
+version = "0.5.1"
+edition = "2024"
+authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
+homepage = "https://github.com/ai-dynamo/dynamo"
+license = "Apache-2.0"
+repository = "https://github.com/ai-dynamo/dynamo.git"
 description = "Dynamo Run CLI"
 
 [features]
@@ -26,27 +25,27 @@ openmp = ["dynamo-engine-llamacpp/openmp"]
 tokio-console = ["dynamo-runtime/tokio-console"]
 
 [dependencies]
-dynamo-llm = { workspace = true }
-dynamo-runtime = { workspace = true }
+dynamo-llm = { path = "../../lib/llm", version = "0.5.1" }
+dynamo-runtime = { path = "../../lib/runtime", version = "0.5.1" }
 
 dynamo-engine-llamacpp = { path = "../../lib/engines/llamacpp", optional = true }
 dynamo-engine-mistralrs = { path = "../../lib/engines/mistralrs", optional = true }
 
-anyhow = { workspace = true }
-dynamo-async-openai = { workspace = true }
-async-stream = { workspace = true }
-async-trait = { workspace = true }
-either = { workspace = true }
-futures = { workspace = true }
-libc = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tempfile = { workspace = true }
-tokio = { workspace = true }
-tokio-util = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-uuid = { workspace = true }
+anyhow = { version = "1" }
+dynamo-async-openai = { path = "../../lib/async-openai", version = "0.5.1", features = ["byot", "rustls"] }
+async-stream = { version = "0.3" }
+async-trait = { version = "0.1" }
+either = { version = "1.13", features = ["serde"] }
+futures = { version = "0.3" }
+libc = { version = "0.2" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec", "net", "rt"] }
+tracing = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json"] }
+uuid = { version = "1.17", features = ["v4", "serde"] }
 
 clap = { version = "4.5", features = ["derive", "env"] }
 futures-util = { version = "0.3" }
@@ -54,4 +53,4 @@ regex = "1"
 
 [build-dependencies]
 vergen-gitcl = "1.0"
-anyhow = { workspace = true }
+anyhow = { version = "1" }

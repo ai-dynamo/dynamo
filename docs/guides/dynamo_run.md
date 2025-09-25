@@ -218,6 +218,12 @@ source $HOME/.cargo/env
 
 ### Step 3: Build
 
+Since dynamo-run is excluded from the default workspace build, you need to build it explicitly from its directory:
+
+```bash
+cd launch/dynamo-run
+```
+
 - Linux with GPU and CUDA (tested on Ubuntu):
 ```
 cargo build --features cuda
@@ -233,11 +239,10 @@ cargo build --features metal
 cargo build
 ```
 
-Optionally you can run `cargo build` from any location with arguments:
+Alternatively, you can build from the repository root by specifying the manifest path:
 
 ```
---target-dir /path/to/target_directory # specify target_directory with write privileges
---manifest-path /path/to/project/Cargo.toml # if cargo build is run outside of `launch/` directory
+cargo build --manifest-path launch/dynamo-run/Cargo.toml --features cuda
 ```
 
 The binary is called `dynamo-run` in `target/debug`
@@ -270,16 +275,18 @@ If you have multiple GPUs, `mistral.rs` does automatic tensor parallelism. You d
 
 ### llamacpp
 
-[llama.cpp](https://github.com/ggml-org/llama.cpp) is built for CPU by default. For an optimized build pass the appropriate feature flag (highly recommended):
+[llama.cpp](https://github.com/ggml-org/llama.cpp) is built for CPU by default. For an optimized build pass the appropriate feature flag (highly recommended). Since dynamo-run is excluded from the default workspace, build from its directory:
 
-```
-cargo build --features cuda|metal|vulkan -p dynamo-run
+```bash
+cd launch/dynamo-run
+cargo build --features cuda  # or metal|vulkan
 ```
 
 For GNU OpenMP support add the `openmp` feature. On Ubuntu this requires `libgomp1` (part of `build-essential`) at build and runtime.
 
-```
-cargo build --features cuda,openmp -p dynamo-run
+```bash
+cd launch/dynamo-run
+cargo build --features cuda,openmp
 ```
 
 ```
@@ -446,8 +453,9 @@ More fully-featured Python engines are in `components/backends`.
 ## Debugging
 
 `dynamo-run` and `dynamo-runtime` support [tokio-console](https://github.com/tokio-rs/console). Build with the feature to enable:
-```
-cargo build --features cuda,tokio-console -p dynamo-run
+```bash
+cd launch/dynamo-run
+cargo build --features cuda,tokio-console
 ```
 
 The listener uses the default tokio console port, and all interfaces (0.0.0.0).
