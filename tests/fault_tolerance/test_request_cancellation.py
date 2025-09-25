@@ -370,7 +370,6 @@ def verify_request_cancelled(
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-@pytest.mark.skip(reason="DYN-1083: Qwen3ForCausalLM model loading fails in vLLM")
 def test_request_cancellation_vllm(request, runtime_services, predownload_models):
     """
     End-to-end test for request cancellation functionality.
