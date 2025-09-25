@@ -15,75 +15,51 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Example: Multi-node TRTLLM Workers with Dynamo on Slurm
+# Example: Multi-node TRTLLM Workers with Dynamo
 
 To run a single Dynamo+TRTLLM Worker that spans multiple nodes (ex: TP16),
 the set of nodes need to be launched together in the same MPI world, such as
-via `mpirun` or `srun`. This is true regardless of whether the worker is
+via `mpirun`. This is true regardless of whether the worker is
 aggregated, prefill-only, or decode-only.
 
-In this document we will demonstrate two examples launching multinode workers
-on a slurm cluster with `srun`:
+This document provides examples for launching multinode workers using MPI:
 1. Deploying an aggregated nvidia/DeepSeek-R1 model as a multi-node TP16/EP16
    worker across 4 GB200 nodes
 2. Deploying a disaggregated nvidia/DeepSeek-R1 model with a multi-node
    TP16/EP16 prefill worker (4 nodes) and a multi-node TP16/EP16 decode
    worker (4 nodes) across a total of 8 GB200 nodes.
 
-NOTE: Some of the scripts used in this example like `start_frontend_services.sh` and
+NOTE: The scripts used in this example like `start_frontend_services.sh` and
 `start_trtllm_worker.sh` should be translatable to other environments like Kubernetes, or
 using `mpirun` directly, with relative ease.
 
 ## Setup
 
-For simplicity of the example, we will make some assumptions about your slurm cluster:
-1. First, we assume you have access to a slurm cluster with multiple GPU nodes
+For simplicity of the example, we will make some assumptions about your cluster setup:
+1. First, we assume you have access to a cluster with multiple GPU nodes
    available. For functional testing, most setups should be fine. For performance
    testing, you should aim to allocate groups of nodes that are performantly
    inter-connected, such as those in an NVL72 setup.
-2. Second, we assume this slurm cluster has the [Pyxis](https://github.com/NVIDIA/pyxis)
-   SPANK plugin setup. In particular, the `srun_aggregated.sh` script in this
-   example will use `srun` arguments like `--container-image`,
-   `--container-mounts`, and `--container-env` that are added to `srun` by Pyxis.
-   If your cluster supports similar container based plugins, you may be able to
-   modify the script to use that instead.
-3. Third, we assume you have already built a recent Dynamo+TRTLLM container image as
+2. Second, we assume you have already built a recent Dynamo+TRTLLM container image as
    described [here](https://github.com/ai-dynamo/dynamo/tree/main/components/backends/trtllm#build-docker).
    This is the image that can be set to the `IMAGE` environment variable in later steps.
-4. Fourth, we assume you pre-allocate a group of nodes using `salloc`. We
-   will allocate 8 nodes below as a reference command to have enough capacity
-   to run both examples. If you plan to only run the aggregated example, you
+3. Third, we assume you have access to a group of nodes with MPI support. You
+   will need 8 nodes to run both examples. If you plan to only run the aggregated example, you
    will only need 4 nodes. If you customize the configurations to require a
    different number of nodes, you can adjust the number of allocated nodes
-   accordingly. Pre-allocating nodes is technically not a requirement,
-   but it makes iterations of testing/experimenting easier.
-
-   Make sure to set your `PARTITION` and `ACCOUNT` according to your slurm cluster setup:
-    ```bash
-    # Set partition manually based on your slurm cluster's partition names
-    PARTITION=""
-    # Set account manually if this command doesn't work on your cluster
-    ACCOUNT="$(sacctmgr -nP show assoc where user=$(whoami) format=account)"
-    salloc \
-      --partition="${PARTITION}" \
-      --account="${ACCOUNT}" \
-      --job-name="${ACCOUNT}-dynamo.trtllm" \
-      -t 05:00:00 \
-      --nodes 8
-    ```
-5. Lastly, we will assume you are inside an interactive shell on one of your allocated
-   nodes, which may be the default behavior after executing the `salloc` command above
-   depending on the cluster setup. If not, then you should SSH into one of the allocated nodes.
+   accordingly.
+4. Lastly, we will assume you are inside an interactive shell on one of your allocated
+   nodes with access to the other nodes via SSH or similar.
 
 ### Environment Variable Setup
 
 This example aims to automate as much of the environment setup as possible,
-but all slurm clusters and environments are different, and you may need to
+but all cluster environments are different, and you may need to
 dive into the scripts to make modifications based on your specific environment.
 
-Assuming you have already allocated your nodes via `salloc`, and are
+Assuming you have already allocated your nodes and are
 inside an interactive shell on one of the allocated nodes, set the
-following environment variables based:
+following environment variables:
 ```bash
 # NOTE: IMAGE must be set manually for now
 # To build an iamge, see the steps here:
@@ -99,7 +75,7 @@ export IMAGE="<dynamo_trtllm_image>"
 #
 # NOTE: Currently, this example assumes that the local bash scripts and configs
 # referenced are mounted into into /mnt inside the container. If you want to
-# customize the location of the scripts, make sure to modify `srun_aggregated.sh`
+# customize the location of the scripts, make sure to modify the launch scripts
 # accordingly for the new locations of `start_frontend_services.sh` and
 # `start_trtllm_worker.sh`.
 #
@@ -150,7 +126,7 @@ follow these steps below to launch an **aggregated** deployment across 4 nodes:
 # Launches:
 # - frontend + etcd/nats on current (head) node
 # - one large aggregated trtllm worker across multiple nodes via MPI tasks
-./srun_aggregated.sh
+# Note: You will need to create your own launch script using mpirun or similar
 ```
 
 ## Disaggregated WideEP
@@ -183,7 +159,7 @@ deployment across 8 nodes:
 # - frontend + etcd/nats on current (head) node.
 # - one large prefill trtllm worker across multiple nodes via MPI tasks
 # - one large decode trtllm worker across multiple nodes via MPI tasks
-./srun_disaggregated.sh
+# Note: You will need to create your own launch script using mpirun or similar
 ```
 
 > [!Tip]
@@ -192,20 +168,17 @@ deployment across 8 nodes:
 
 ## Understanding the Output
 
-1. The `srun_aggregated.sh` launches two `srun` jobs. The first launches
+1. The launch script should launch two jobs. The first launches
    etcd, NATS, and the OpenAI frontend on the head node only
    called "node1" in the example output below. The second launches
    a single TP16 Dynamo+TRTLLM worker spread across 4 nodes, each node
    using 4 GPUs each.
     ```
     # Frontend/etcd/nats services
-    srun: launching StepId=453374.17 on host node1, 1 tasks: 0
+    mpirun -n 1 --host node1 ...
     ...
     # TP16 TRTLLM worker split across 4 nodes with 4 gpus each
-    srun: launching StepId=453374.18 on host node1, 4 tasks: [0-3]
-    srun: launching StepId=453374.18 on host node2, 4 tasks: [4-7]
-    srun: launching StepId=453374.18 on host node3, 4 tasks: [8-11]
-    srun: launching StepId=453374.18 on host node4, 4 tasks: [12-15]
+    mpirun -n 16 --host node1,node2,node3,node4 ...
    ```
 2. The OpenAI frontend will listen for and dynamically discover workers as
    they register themselves with Dynamo's distributed runtime:
@@ -234,8 +207,8 @@ deployment across 8 nodes:
     ```
 5. At this point, with the worker fully initialized and detected by the frontend,
    it is now ready for inference.
-6. For `srun_disaggregated.sh`, it follows a very similar flow, but instead launches
-   three srun jobs instead of two. One for frontend, one for prefill worker,
+6. For the disaggregated setup, it follows a very similar flow, but instead launches
+   three jobs instead of two. One for frontend, one for prefill worker,
    and one for decode worker.
 
 ## Example Request
@@ -263,10 +236,10 @@ curl -w "%{http_code}" ${HOST}:${PORT}/v1/chat/completions \
 
 ## Cleanup
 
-To cleanup background `srun` processes launched by `srun_aggregated.sh` or
-`srun_disaggregated.sh`, you can run:
+To cleanup background processes launched by your launch scripts, you can run:
 ```bash
-pkill srun
+pkill -f dynamo
+pkill -f trtllm
 ```
 
 ## Known Issues
