@@ -44,16 +44,16 @@ jobs:
         sudo apt-get update -y
         sudo apt-get install -y protobuf-compiler
 
-    # - name: Free runner disk space
-    #   run: |
-    #     echo "Disk space before:"
-    #     df -h
-    #     sudo rm -rf \
-    #       /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-    #       /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup \
-    #       /usr/lib/jvm /opt/hostedtoolcache
-    #     echo "Disk space after:"
-    #     df -h
+    - name: Free runner disk space
+      run: |
+        echo "Disk space before:"
+        df -h
+        sudo rm -rf \
+          /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+          /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup \
+          /usr/lib/jvm /opt/hostedtoolcache
+        echo "Disk space after:"
+        df -h
 
     # TODO: Caching target/ dir handles most of the build caching improvements
     #       currently, so sccache artifacts are mostly duplicates wasting disk space.
