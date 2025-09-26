@@ -82,7 +82,7 @@ pub const BEST_OF_RANGE: (u8, u8) = (MIN_BEST_OF, MAX_BEST_OF);
 pub const MAX_STOP_SEQUENCES: usize = 4;
 /// Maximum allowed number of tools
 pub const MAX_TOOLS: usize = 128;
-/// Metadata validation constants removed - we are no longer restricting the metadata field char limits
+// Metadata validation constants removed - we are no longer restricting the metadata field char limits
 /// Maximum allowed length for function names
 pub const MAX_FUNCTION_NAME_LENGTH: usize = 64;
 /// Maximum allowed value for Prompt IntegerArray elements

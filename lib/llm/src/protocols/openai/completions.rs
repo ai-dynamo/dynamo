@@ -36,7 +36,7 @@ pub struct NvCreateCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
 
-    /// metadata - passthrough parameter without restrictions
+    // metadata - passthrough parameter without restrictions
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
 }
