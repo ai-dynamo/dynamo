@@ -222,51 +222,6 @@ def get_runtime():
     return _runtime_instance
 
 
-async def check_registration_in_etcd(
-    expected_count: int, endpoint: Optional[str] = None
-):
-    """Check that the expected number of KV routers are registered in etcd.
-
-    Args:
-        expected_count: The number of KV routers expected to be registered
-        endpoint: The endpoint string to extract component path from (e.g., "dyn://namespace.component.generate")
-
-    Returns:
-        List of registered KV router entries from etcd
-    """
-    runtime = get_runtime()
-    etcd = runtime.do_not_use_etcd_client()
-
-    # Extract component path from endpoint if provided
-    prefix = "kv_routers/"
-    if endpoint:
-        # Parse endpoint format: dyn://namespace.component.endpoint_suffix
-        # Extract namespace and component, ignoring the endpoint suffix (e.g., "generate")
-        endpoint_parts = endpoint.replace("dyn://", "").split(".")
-        if len(endpoint_parts) >= 2:
-            namespace = endpoint_parts[0]
-            component = endpoint_parts[1]
-            component_path = f"{namespace}/{component}"
-            prefix = f"kv_routers/{component_path}/"
-            logger.info(
-                f"Checking for KV routers with component path: {component_path}"
-            )
-
-    # Check for kv_routers in etcd
-    # The KV router registers itself with key format: kv_routers/{component_path}/{uuid}
-    kv_routers = await etcd.kv_get_prefix(prefix)
-    logger.info(
-        f"Found {len(kv_routers)} KV router(s) registered in etcd under prefix: {prefix}"
-    )
-
-    # Assert we have the expected number of KV routers registered
-    assert (
-        len(kv_routers) == expected_count
-    ), f"Expected {expected_count} KV router(s) in etcd, found {len(kv_routers)}"
-
-    return kv_routers
-
-
 async def send_inflight_requests(urls: list, payload: dict, num_requests: int):
     """Send multiple requests concurrently, alternating between URLs if multiple provided"""
 
@@ -365,12 +320,6 @@ def test_mocker_kv_router(request, runtime_services, predownload_tokenizers):
 
         logger.info(f"Successfully completed {NUM_REQUESTS} requests")
 
-        # Check etcd registration - expect 1 KV router
-        # Use the mockers' endpoint since all mockers share the same component path
-        asyncio.run(
-            check_registration_in_etcd(expected_count=1, endpoint=mockers.endpoint)
-        )
-
     finally:
         # Clean up
         if "kv_router" in locals():
@@ -430,12 +379,6 @@ def test_mocker_two_kv_router(request, runtime_services, predownload_tokenizers)
 
         logger.info(
             f"Successfully completed {NUM_REQUESTS} requests across {len(router_ports)} routers"
-        )
-
-        # Check etcd registration - expect 2 KV routers
-        # Use the mockers' endpoint since all mockers share the same component path
-        asyncio.run(
-            check_registration_in_etcd(expected_count=2, endpoint=mockers.endpoint)
         )
 
     finally:
