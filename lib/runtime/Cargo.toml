@@ -17,6 +17,7 @@ default = []
 integration = []
 testing-etcd = [] # Tests that require an active ETCD server
 tokio-console = ["dep:console-subscriber", "tokio/tracing"]
+compute-validation = [] # Enable validation and timing for compute macros
 
 [dependencies]
 # Use workspace dependencies where available
@@ -63,11 +64,14 @@ nid = { version = "3.0.0", features = ["serde"] }
 nix = { version = "0.29", features = ["signal"] }
 nuid = { version = "0.5" }
 once_cell = { version = "1" }
+rayon = { version = "1.10" }
 regex = { version = "1" }
 socket2 = { version = "0.5.8" }
+tokio-rayon = { version = "2.1" }
 
 [dev-dependencies]
 assert_matches = { version = "1.5.0" }
+criterion = { version = "0.5", features = ["async_tokio"] }
 env_logger = { version = "0.11" }
 reqwest = { workspace = true }
 rstest = { version = "0.23.0" }
@@ -75,3 +79,7 @@ temp-env = { version = "0.3.6" , features=["async_closure"] }
 stdio-override = {version= "0.2.0"}
 jsonschema = {version = "0.17"}
 tempfile = { workspace = true }
+
+[[bench]]
+name = "compute_pool_overhead"
+harness = false
