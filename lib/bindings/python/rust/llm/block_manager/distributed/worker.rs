@@ -10,8 +10,8 @@ use llm_rs::block_manager::distributed::{
     BlockTransferHandler as RustBlockTransferHandler, KvbmWorker as KvbmWorkerImpl,
     KvbmWorkerConfig,
 };
-use llm_rs::block_manager::storage::torch::{TorchDevice, TorchTensor};
 use llm_rs::block_manager::layout::LayoutType;
+use llm_rs::block_manager::storage::torch::{TorchDevice, TorchTensor};
 
 /// A wrapper around a layout type.
 /// This is used to convert between the Python and Rust layout types.
@@ -181,16 +181,20 @@ impl KvbmWorker {
             .device_id(device_id)
             .dtype_width_bytes(dtype_width_bytes)
             .barrier_id_prefix(barrier_id_prefix)
-            .device_layout_type(device_layout_type.map(|py_layout| py_layout.into()).unwrap_or(LayoutType::FullyContiguous))
+            .device_layout_type(
+                device_layout_type
+                    .map(|py_layout| py_layout.into())
+                    .unwrap_or(LayoutType::FullyContiguous),
+            )
             .host_layout_type(
                 host_layout_type
                     .map(|py_layout| py_layout.into())
-                    .unwrap_or(LayoutType::FullyContiguous)
+                    .unwrap_or(LayoutType::FullyContiguous),
             )
             .disk_layout_type(
                 disk_layout_type
                     .map(|py_layout| py_layout.into())
-                    .unwrap_or(LayoutType::FullyContiguous)
+                    .unwrap_or(LayoutType::FullyContiguous),
             )
             .build()
             .map_err(to_pyerr)?;

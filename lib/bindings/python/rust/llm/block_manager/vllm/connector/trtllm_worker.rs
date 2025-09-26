@@ -19,10 +19,10 @@ use crate::{
 
 use anyhow;
 use dynamo_llm::block_manager::distributed::{KvbmWorker, KvbmWorkerConfig};
+use dynamo_llm::block_manager::layout::LayoutType;
 use dynamo_llm::block_manager::storage::torch::TorchTensor;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
-use dynamo_llm::block_manager::layout::LayoutType;
 
 pub trait Worker: Send + Sync {
     fn register_kv_caches(

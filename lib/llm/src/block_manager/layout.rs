@@ -984,7 +984,7 @@ impl<S: Storage> LayerSeparate<S> {
             let aligned_addr = storage_addr + base_offset;
 
             // Check alignment
-            if alignment > 1 && aligned_addr % alignment != 0 {
+            if alignment > 1 && !aligned_addr.is_multiple_of(alignment) {
                 return Err(LayoutError::InvalidConfig(format!(
                     "Layer {} storage not properly aligned: addr {} + offset {} = {} is not {} byte aligned",
                     layer_idx, storage_addr, base_offset, aligned_addr, alignment

@@ -18,13 +18,13 @@ use crate::{
 };
 use dynamo_runtime::metrics::prometheus_names::kvbm_connector;
 
+use crate::llm::block_manager::distributed::PyLayoutType;
 use anyhow;
 use dynamo_llm::block_manager::distributed::{KvbmWorker, KvbmWorkerConfig};
+use dynamo_llm::block_manager::layout::LayoutType;
 use dynamo_llm::block_manager::storage::torch::TorchTensor;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
-use dynamo_llm::block_manager::layout::LayoutType;
-use crate::llm::block_manager::distributed::PyLayoutType;
 
 pub trait Worker: Send + Sync {
     fn register_kv_caches(
@@ -181,11 +181,18 @@ impl Worker for KvConnectorWorker {
                 if let Some(ref shape) = first_tensor_shape {
                     match LayoutType::layer_separate_auto(shape, num_device_blocks) {
                         Ok(detected) => {
-                            tracing::info!("Auto-detected device layout from tensor shape: {:?}", detected);
+                            tracing::info!(
+                                "Auto-detected device layout from tensor shape: {:?}",
+                                detected
+                            );
                             detected
                         }
                         Err(e) => {
-                            tracing::warn!("Failed to auto-detect layout from shape {:?}: {}. Using default.", shape, e);
+                            tracing::warn!(
+                                "Failed to auto-detect layout from shape {:?}: {}. Using default.",
+                                shape,
+                                e
+                            );
                             LayoutType::layer_separate_auto_default()
                         }
                     }

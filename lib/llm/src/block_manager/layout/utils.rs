@@ -59,6 +59,12 @@ pub struct WorkerLayoutVerifier {
     stats: LayoutVerificationStats,
 }
 
+impl Default for WorkerLayoutVerifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[allow(dead_code)]
 impl WorkerLayoutVerifier {
     /// Creates a new layout verifier with clean statistics.
