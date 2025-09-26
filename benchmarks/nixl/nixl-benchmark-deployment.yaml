@@ -18,7 +18,7 @@ spec:
         - name: nvcr-imagepullsecret
       containers:
       - name: nixl-benchmark
-        image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:nixlbench-e42c07a8
+        image: my-registry/vllm-runtime:nixlbench-e42c07a8
         command: ["sh", "-c"]
         args:
           - "nixlbench -etcd_endpoints http://dynamo-platform-etcd:2379 --target_seg_type VRAM --initiator_seg_type VRAM && sleep infinity"

@@ -19,7 +19,7 @@ Grove enables disaggregated serving by breaking down large language model infere
 
 Grove implements disaggregated serving through several custom Kubernetes resources that provide declarative composition of role-based pod groups:
 
-### PodGangSet
+### PodCliqueSet
 The top-level Grove object that defines a group of components managed and colocated together. Key features include:
 - Support for autoscaling
 - Topology-aware spread of replicas for availability
@@ -39,10 +39,10 @@ A set of PodCliques that scale and are scheduled together, ideal for tightly cou
 Grove provides several specialized features that make it particularly well-suited for disaggregated serving:
 
 ### Flexible Gang Scheduling
-PodCliques and PodCliqueScalingGroups allow users to specify flexible gang-scheduling requirements at multiple levels within a PodGangSet to prevent resource deadlocks and ensure all components of a disaggregated system start together.
+PodCliques and PodCliqueScalingGroups allow users to specify flexible gang-scheduling requirements at multiple levels within a PodCliqueSet to prevent resource deadlocks and ensure all components of a disaggregated system start together.
 
 ### Multi-level Horizontal Auto-Scaling
-Supports pluggable horizontal auto-scaling solutions to scale PodGangSet, PodClique, and PodCliqueScalingGroup custom resources independently based on their specific metrics and requirements.
+Supports pluggable horizontal auto-scaling solutions to scale PodCliqueSet, PodClique, and PodCliqueScalingGroup custom resources independently based on their specific metrics and requirements.
 
 ### Network Topology-Aware Scheduling
 Allows specifying network topology pack and spread constraints to optimize for both network performance and service availability, crucial for disaggregated systems where components need efficient inter-node communication.

@@ -12,8 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+{{/*
+Only create leader election RBAC when leader election is enabled.
+When namespaceRestriction.enabled=true, leader election is disabled (--leader-elect=false),
+so these permissions are not needed.
+*/}}
+{{- if not .Values.namespaceRestriction.enabled }}
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+kind: ClusterRole
 metadata:
   name: {{ include "dynamo-operator.fullname" . }}-leader-election-role
   labels:
@@ -55,7 +61,7 @@ rules:
   - patch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
+kind: ClusterRoleBinding
 metadata:
   name: {{ include "dynamo-operator.fullname" . }}-leader-election-rolebinding
   labels:
@@ -65,9 +71,10 @@ metadata:
   {{- include "dynamo-operator.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: Role
+  kind: ClusterRole
   name: '{{ include "dynamo-operator.fullname" . }}-leader-election-role'
 subjects:
 - kind: ServiceAccount
   name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'
   namespace: '{{ .Release.Namespace }}'
+{{- end }}

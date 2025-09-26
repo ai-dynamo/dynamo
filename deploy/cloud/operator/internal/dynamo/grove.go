@@ -25,11 +25,12 @@ type GroveMultinodeDeployer struct {
 }
 
 func (d *GroveMultinodeDeployer) GetLeaderHostname(serviceName string) string {
-	return fmt.Sprintf("${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-%s-%s-0.${GROVE_HEADLESS_SERVICE}", serviceName, commonconsts.GroveRoleSuffixLeader)
+	return fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-0.$(GROVE_HEADLESS_SERVICE)", serviceName, commonconsts.GroveRoleSuffixLeader)
 }
 
-func (d *GroveMultinodeDeployer) GetNodeRank() string {
-	return "$((GROVE_PCLQ_POD_INDEX + 1))"
+func (d *GroveMultinodeDeployer) GetNodeRank() (string, bool) {
+	// This requires shell expansion for arithmetic expression
+	return "$((GROVE_PCLQ_POD_INDEX + 1))", true
 }
 
 func (d *GroveMultinodeDeployer) GetHostNames(serviceName string, numberOfNodes int32) []string {
@@ -38,7 +39,7 @@ func (d *GroveMultinodeDeployer) GetHostNames(serviceName string, numberOfNodes 
 	hostnames = append(hostnames, leaderHostname)
 	// Add worker hostnames
 	for i := int32(0); i < numberOfNodes-1; i++ {
-		workerHostname := fmt.Sprintf("${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-%s-%s-%d.${GROVE_HEADLESS_SERVICE}",
+		workerHostname := fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-%d.$(GROVE_HEADLESS_SERVICE)",
 			serviceName, commonconsts.GroveRoleSuffixWorker, i)
 		hostnames = append(hostnames, workerHostname)
 	}

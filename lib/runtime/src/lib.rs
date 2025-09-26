@@ -21,6 +21,7 @@ mod config;
 pub use config::RuntimeConfig;
 
 pub mod component;
+pub mod compute;
 pub mod discovery;
 pub mod engine;
 pub mod health_check;
@@ -73,6 +74,8 @@ pub struct Runtime {
     cancellation_token: CancellationToken,
     endpoint_shutdown_token: CancellationToken,
     graceful_shutdown_tracker: Arc<GracefulShutdownTracker>,
+    compute_pool: Option<Arc<compute::ComputePool>>,
+    block_in_place_permits: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 /// Type alias for runtime callback functions to reduce complexity

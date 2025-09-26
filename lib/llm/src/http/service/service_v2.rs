@@ -294,7 +294,8 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let state = Arc::new(State::new_with_etcd(model_manager, config.etcd_client));
+        let etcd_client = config.etcd_client;
+        let state = Arc::new(State::new_with_etcd(model_manager, etcd_client));
 
         state
             .flags
@@ -312,6 +313,8 @@ impl HttpServiceConfigBuilder {
         // enable prometheus metrics
         let registry = metrics::Registry::new();
         state.metrics_clone().register(&registry)?;
+
+        // Note: Metrics polling task will be started in run() method to have access to cancellation token
 
         let mut router = axum::Router::new();
 

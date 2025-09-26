@@ -93,10 +93,14 @@ class VllmComponentName:
 
 
 class SGLangComponentName:
-    prefill_worker_k8s_name = "SGLangPrefillWorker"
+    prefill_worker_k8s_name = (
+        "prefill"  # use short name to stay within k8s limits with grove
+    )
     prefill_worker_component_name = "prefill"
     prefill_worker_endpoint = "generate"
-    decode_worker_k8s_name = "SGLangDecodeWorker"
+    decode_worker_k8s_name = (
+        "decode"  # use short name to stay within k8s limits with grove
+    )
     decode_worker_component_name = "backend"
     decode_worker_endpoint = "generate"
 
