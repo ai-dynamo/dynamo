@@ -30,7 +30,7 @@ on:
     - 'Cargo.lock'
 
 env:
-  APT_CACHE_DIR: ${{ github.workspace }}/.apt-cache
+  APT_CACHE_DIR: ${HOME}/tmp/apt-cache
 
 jobs:
   pre-merge-rust:
