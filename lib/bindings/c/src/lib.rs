@@ -47,7 +47,7 @@ pub unsafe extern "C" fn dynamo_llm_init(
     let wk = match WK.get_or_try_init(Worker::from_settings) {
         Ok(wk) => wk.clone(),
         Err(e) => {
-            eprintln!("Failed to initialize runtime: {:?}", e);
+            tracing::error!(error = ?e, "Failed to initialize runtime (Worker::from_settings)");
             return DynamoLlmResult::ERR;
         }
     };
@@ -61,7 +61,7 @@ pub unsafe extern "C" fn dynamo_llm_init(
         {
             Ok(_) => Ok(()),
             Err(e) => {
-                eprintln!("Failed to initialize distributed runtime: {:?}", e);
+                tracing::error!(error = ?e, "Failed to initialize distributed runtime");
                 Err(DynamoLlmResult::ERR)
             }
         }
@@ -69,7 +69,7 @@ pub unsafe extern "C" fn dynamo_llm_init(
     let namespace = match unsafe { CStr::from_ptr(namespace_c_str) }.to_str() {
         Ok(s) => s.to_string(),
         Err(e) => {
-            eprintln!("Failed to convert C string to Rust string: {:?}", e);
+            tracing::error!(error = ?e, "Failed to convert C string to Rust string (namespace)");
             return DynamoLlmResult::ERR;
         }
     };
@@ -77,38 +77,10 @@ pub unsafe extern "C" fn dynamo_llm_init(
     let component = match unsafe { CStr::from_ptr(component_c_str) }.to_str() {
         Ok(s) => s.to_string(),
         Err(e) => {
-            eprintln!("Failed to convert C string to Rust string: {:?}", e);
+            tracing::error!(error = ?e, "Failed to convert C string to Rust string (component)");
             return DynamoLlmResult::ERR;
         }
     };
-
-    // TODO rm
-    if let Some(drt) = DRT.get() {
-        match drt.namespace(namespace.clone()) {
-            Ok(ns) => {
-                match ns.component(component.clone()) {
-                    Ok(comp) => {
-                        eprintln!(
-                            "!!! drt: component resolved: {}/{}",
-                            comp.namespace().name(),
-                            comp.name()
-                        );
-                        // NOTE: we can't list endpoints here; use a preflight call (below) to prove wiring.
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "!!! drt: missing component {}/{}: {:?}",
-                            namespace, component, e
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("!!! drt: missing namespace {}: {:?}", namespace, e);
-            }
-        }
-    }
-    //end of TODO
 
     match result {
         Ok(_) => match KV_PUB.get_or_try_init(move || {
@@ -116,7 +88,7 @@ pub unsafe extern "C" fn dynamo_llm_init(
         }) {
             Ok(_) => DynamoLlmResult::OK,
             Err(e) => {
-                eprintln!("Failed to initialize distributed runtime: {:?}", e);
+                tracing::error!(error = ?e, "Failed to initialize distributed runtime");
                 DynamoLlmResult::ERR
             }
         },
@@ -129,7 +101,7 @@ pub extern "C" fn dynamo_llm_shutdown() -> DynamoLlmResult {
     let wk = match WK.get() {
         Some(wk) => wk,
         None => {
-            eprintln!("Runtime not initialized");
+            tracing::error!("Runtime not initialized");
             return DynamoLlmResult::ERR;
         }
     };
@@ -383,22 +355,16 @@ use dynamo_runtime::{
     engine::AsyncEngineStream,
     pipeline::{ManyOut, RouterMode, ServiceEngine, SingleIn},
 };
-/// Opaque handle exposed to C — now *owns* its own Worker/runtime and engine.
+/// Opaque handle exposed to C — it owns its own Worker/runtime and engine.
 pub struct WorkerSelectionPipeline {
-    // Keep the runtime alive as long as this handle lives.
     wk: Worker,
-    // The actual pipeline/engine we query.
     engine: ServiceEngine<
         SingleIn<NvCreateChatCompletionRequest>,
         ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
     >,
 }
 
-/// Create a worker-selection pipeline ("generate" endpoint) and return an opaque handle.
-///
-/// # Safety
-/// - All `*_c_str` must be valid, nul-terminated C strings.
-/// - `pipeline_out` must be a valid non-null pointer to receive the handle.
+/// Create a worker-selection pipeline ("generate" endpoint).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
     namespace_c_str: *const c_char,
@@ -413,37 +379,36 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
     pipeline_out: *mut *mut WorkerSelectionPipeline,
 ) -> DynamoLlmResult {
     if pipeline_out.is_null() {
-        eprintln!("pipeline_out pointer is null");
+        tracing::error!("pipeline_out pointer is null");
         return DynamoLlmResult::ERR;
     }
 
-    // ⬇️ Reuse the globally initialized Worker from dynamo_llm_init()
     let wk = match WK.get() {
         Some(w) => w.clone(),
         None => {
-            eprintln!("Worker not initialized. Call dynamo_llm_init first.");
+            tracing::error!("Worker not initialized. Call dynamo_llm_init first.");
             return DynamoLlmResult::ERR;
         }
     };
 
-    let namespace = match CStr::from_ptr(namespace_c_str).to_str() {
+    let namespace = match unsafe { CStr::from_ptr(namespace_c_str) }.to_str() {
         Ok(s) => s.to_owned(),
         Err(e) => {
-            eprintln!("bad namespace: {e:?}");
+            tracing::error!(error = ?e, "bad namespace");
             return DynamoLlmResult::ERR;
         }
     };
-    let component = match CStr::from_ptr(component_c_str).to_str() {
+    let component = match unsafe { CStr::from_ptr(component_c_str) }.to_str() {
         Ok(s) => s.to_owned(),
         Err(e) => {
-            eprintln!("bad component: {e:?}");
+            tracing::error!(error = ?e, "bad component");
             return DynamoLlmResult::ERR;
         }
     };
-    let model = match CStr::from_ptr(model_name_c_str).to_str() {
+    let model = match unsafe { CStr::from_ptr(model_name_c_str) }.to_str() {
         Ok(s) => s.to_owned(),
         Err(e) => {
-            eprintln!("bad model: {e:?}");
+            tracing::error!(error = ?e, "bad model");
             return DynamoLlmResult::ERR;
         }
     };
@@ -457,7 +422,6 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
         } else {
             RouterMode::RoundRobin
         };
-        eprintln!("!!! router_mode={router_mode:?} (force_rr={force_rr})");
 
         let kv_router_config = if use_kv_routing {
             Some(KvRouterConfig::new(
@@ -487,13 +451,15 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
     let engine = match wk.runtime().secondary().block_on(make_engine()) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("create_worker_selection_pipeline_chat failed: {e:?}");
+            tracing::error!(error = ?e, "create_worker_selection_pipeline_chat failed");
             return DynamoLlmResult::ERR;
         }
     };
 
     let handle = Box::new(WorkerSelectionPipeline { wk, engine });
-    *pipeline_out = Box::into_raw(handle);
+    unsafe {
+        *pipeline_out = Box::into_raw(handle);
+    }
     DynamoLlmResult::OK
 }
 
@@ -503,10 +469,6 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
 /// - token_ids_out (malloc'ed array, caller must free via `dynamo_free_worker_selection_result`)
 /// - token_count_out
 /// - annotated_request_json_out (CString*, caller frees via same free fn)
-///
-/// # Safety
-/// - `pipeline` must be a valid pointer returned by `dynamo_create_worker_selection_pipeline`.
-/// - `request_json_c_str` must be a valid, nul-terminated C string containing valid JSON.
 pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
     pipeline: *mut WorkerSelectionPipeline,
     request_json_c_str: *const c_char,
@@ -516,7 +478,7 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
     annotated_request_json_out: *mut *mut c_char,
 ) -> DynamoLlmResult {
     if pipeline.is_null() {
-        eprintln!("Pipeline pointer is null");
+        tracing::error!("Pipeline pointer is null");
         return DynamoLlmResult::ERR;
     }
     if worker_instance_id_out.is_null()
@@ -524,61 +486,60 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         || token_count_out.is_null()
         || annotated_request_json_out.is_null()
     {
-        eprintln!("One or more output pointers are null");
+        tracing::error!("One or more output pointers are null");
         return DynamoLlmResult::ERR;
     }
 
-    let req_str = match CStr::from_ptr(request_json_c_str).to_str() {
+    let req_str = match unsafe { CStr::from_ptr(request_json_c_str) }.to_str() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("bad request json: {e:?}");
+            tracing::error!(error = ?e, "bad request json");
             return DynamoLlmResult::ERR;
         }
     };
     let request: NvCreateChatCompletionRequest = match serde_json::from_str(req_str) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("parse request failed: {e:?}");
+            tracing::error!(error = ?e, "parse request failed");
             return DynamoLlmResult::ERR;
         }
     };
 
-    // Use the *same* engine and the *same* worker runtime contained in the handle.
     let pl = unsafe { &*pipeline };
-    eprintln!("!!! query using engine {:p}", &pl.engine);
-
     let fut = async { query_worker_selection_and_annotate(&pl.engine, request).await };
     let (worker_id, tokens, annotated_req) = match pl.wk.runtime().secondary().block_on(fut) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("query_worker_selection_and_annotate failed: {e:?}");
+            tracing::error!(error = ?e, "query_worker_selection_and_annotate failed");
             return DynamoLlmResult::ERR;
         }
     };
 
-    // Marshal tokens to heap memory (C-side will free via our free function).
     let tokens_ptr = if tokens.is_empty() {
         std::ptr::null_mut()
     } else {
         let len = tokens.len();
         let layout = std::alloc::Layout::array::<u32>(len).unwrap();
-        let ptr = std::alloc::alloc(layout) as *mut u32;
+        let ptr = unsafe { std::alloc::alloc(layout) as *mut u32 };
         if ptr.is_null() {
-            eprintln!("alloc tokens failed");
+            tracing::error!("alloc tokens failed");
             return DynamoLlmResult::ERR;
         }
-        std::ptr::copy_nonoverlapping(tokens.as_ptr(), ptr, len);
+        unsafe {
+            std::ptr::copy_nonoverlapping(tokens.as_ptr(), ptr, len);
+        }
         ptr
     };
 
-    // Serialize annotated request JSON to a C string.
     let annotated_json = match serde_json::to_string(&annotated_req) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("serialize annotated req failed: {e:?}");
-            if !tokens_ptr.is_null() {
-                let layout = std::alloc::Layout::array::<u32>(tokens.len()).unwrap();
+            let layout = std::alloc::Layout::array::<u32>(tokens.len()).unwrap();
+            unsafe {
                 std::alloc::dealloc(tokens_ptr as *mut u8, layout);
+            }
+            if !tokens_ptr.is_null() {
+                tracing::error!(error = ?e, "serialize annotated request failed");
             }
             return DynamoLlmResult::ERR;
         }
@@ -586,44 +547,39 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
     let cjson = match std::ffi::CString::new(annotated_json) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("cstr annotated failed: {e:?}");
+            tracing::error!(error = ?e, "CString::new for annotated JSON failed");
             if !tokens_ptr.is_null() {
                 let layout = std::alloc::Layout::array::<u32>(tokens.len()).unwrap();
-                std::alloc::dealloc(tokens_ptr as *mut u8, layout);
+                unsafe {
+                    std::alloc::dealloc(tokens_ptr as *mut u8, layout);
+                }
             }
             return DynamoLlmResult::ERR;
         }
     };
-
-    *worker_instance_id_out = worker_id;
-    *token_ids_out = tokens_ptr;
-    *token_count_out = tokens.len();
-    *annotated_request_json_out = cjson.into_raw();
+    unsafe {
+        *worker_instance_id_out = worker_id;
+        *token_ids_out = tokens_ptr;
+        *token_count_out = tokens.len();
+        *annotated_request_json_out = cjson.into_raw();
+    }
     DynamoLlmResult::OK
 }
 
 #[unsafe(no_mangle)]
 /// Destroy a previously created pipeline.
-///
-/// # Safety
-/// - `pipeline` must be a valid pointer returned by `dynamo_create_worker_selection_pipeline`.
 pub unsafe extern "C" fn dynamo_destroy_worker_selection_pipeline(
     pipeline: *mut WorkerSelectionPipeline,
 ) -> DynamoLlmResult {
     if pipeline.is_null() {
-        eprintln!("Pipeline pointer is null");
+        tracing::error!("Pipeline pointer is null");
         return DynamoLlmResult::ERR;
     }
-    // Take ownership and drop wk + engine together.
-    let _boxed: Box<WorkerSelectionPipeline> = Box::from_raw(pipeline);
+    let _boxed: Box<WorkerSelectionPipeline> = unsafe { Box::from_raw(pipeline) };
     DynamoLlmResult::OK
 }
 
 #[unsafe(no_mangle)]
-/// Free buffers allocated by `dynamo_query_worker_selection_and_annotate`.
-///
-/// # Safety
-/// - `token_ids`/`annotated_request_json` must be pointers returned by the query function.
 pub unsafe extern "C" fn dynamo_free_worker_selection_result(
     token_ids: *mut u32,
     token_count: usize,
@@ -631,78 +587,48 @@ pub unsafe extern "C" fn dynamo_free_worker_selection_result(
 ) -> DynamoLlmResult {
     if !token_ids.is_null() && token_count > 0 {
         if let Ok(layout) = std::alloc::Layout::array::<u32>(token_count) {
-            std::alloc::dealloc(token_ids as *mut u8, layout);
+            unsafe {
+                std::alloc::dealloc(token_ids as *mut u8, layout);
+            }
         }
     }
     if !annotated_request_json.is_null() {
-        let _ = std::ffi::CString::from_raw(annotated_request_json);
+        unsafe {
+            drop(std::ffi::CString::from_raw(annotated_request_json));
+        }
     }
     DynamoLlmResult::OK
 }
 
 /// Helper function to extract worker selection information from the annotation stream
-/// This demonstrates how to process the annotations returned by the router
 pub async fn extract_worker_selection_from_stream(
     mut stream: Pin<Box<dyn AsyncEngineStream<Annotated<NvCreateChatCompletionStreamResponse>>>>,
 ) -> anyhow::Result<(i64, Vec<u32>)> {
     use futures::StreamExt;
 
-    println!("!![DEBUG] extract_worker_selection_from_stream: Starting stream processing");
     let mut worker_id = 0i64;
     let mut tokens = Vec::<u32>::new();
-    let mut response_count = 0;
-
     while let Some(response) = stream.next().await {
-        response_count += 1;
-        println!(
-            "!![DEBUG] extract_worker_selection_from_stream: Processing response #{}",
-            response_count
-        );
-        println!(
-            "!![DEBUG] extract_worker_selection_from_stream: Response event: {:?}",
-            response.event
-        );
-        println!(
-            "!![DEBUG] extract_worker_selection_from_stream: Response comment: {:?}",
-            response.comment
-        );
-        println!(
-            "!![DEBUG] extract_worker_selection_from_stream: Response data: {:?}",
-            response.data.is_some()
-        );
-
         if let Some(event) = &response.event {
             match event.as_str() {
                 "worker_instance_id" => {
-                    println!(
-                        "!![DEBUG] extract_worker_selection_from_stream: Found worker_instance_id event"
+                    tracing::debug!(
+                        "extract_worker_selection_from_stream: Found worker_instance_id event"
                     );
                     if let Some(comments) = &response.comment {
-                        println!(
-                            "!![DEBUG] extract_worker_selection_from_stream: Comments array: {:?}",
-                            comments
-                        );
                         if let Some(first_comment) = comments.first() {
-                            println!(
-                                "!![DEBUG] extract_worker_selection_from_stream: First comment: '{}'",
-                                first_comment
-                            );
                             // Try JSON deserialization as string first (handles quoted strings like "1732646935200805498")
                             match serde_json::from_str::<String>(first_comment) {
                                 Ok(id_string) => {
-                                    println!(
-                                        "!![DEBUG] extract_worker_selection_from_stream: JSON-deserialized string: '{}'",
-                                        id_string
-                                    );
                                     if let Ok(parsed_id) = id_string.parse::<i64>() {
                                         worker_id = parsed_id;
-                                        println!(
-                                            "!![DEBUG] extract_worker_selection_from_stream: Successfully parsed worker_id from JSON string: {}",
+                                        tracing::debug!(
+                                            "extract_worker_selection_from_stream: Successfully parsed worker_id from JSON string: {}",
                                             worker_id
                                         );
                                     } else {
-                                        println!(
-                                            "!![DEBUG] extract_worker_selection_from_stream: Failed to parse number from JSON string: '{}'",
+                                        tracing::error!(
+                                            "extract_worker_selection_from_stream: Failed to parse number from JSON string: '{}'",
                                             id_string
                                         );
                                     }
@@ -711,87 +637,62 @@ pub async fn extract_worker_selection_from_stream(
                                     // Fallback to direct parsing (handles unquoted numbers)
                                     if let Ok(parsed_id) = first_comment.parse::<i64>() {
                                         worker_id = parsed_id;
-                                        println!(
+                                        tracing::debug!(
                                             "!![DEBUG] extract_worker_selection_from_stream: Successfully direct-parsed worker_id: {}",
                                             worker_id
                                         );
                                     } else {
-                                        println!(
+                                        tracing::error!(
                                             "!![DEBUG] extract_worker_selection_from_stream: Failed to parse worker_id from: '{}'",
                                             first_comment
                                         );
                                     }
                                 }
                             }
-                        } else {
-                            println!(
-                                "!![DEBUG] extract_worker_selection_from_stream: Comments array is empty"
-                            );
                         }
-                    } else {
-                        println!(
-                            "!![DEBUG] extract_worker_selection_from_stream: No comments field in response"
-                        );
                     }
                 }
                 "token_data" => {
-                    println!(
-                        "!![DEBUG] extract_worker_selection_from_stream: Found token_data event"
-                    );
+                    tracing::debug!("extract_worker_selection_from_stream: Found token_data event");
                     if let Some(comments) = &response.comment {
-                        println!(
-                            "!![DEBUG] extract_worker_selection_from_stream: Token comments array: {:?}",
-                            comments
-                        );
                         if let Some(first_comment) = comments.first() {
-                            println!(
-                                "!![DEBUG] extract_worker_selection_from_stream: Token comment: '{}'",
+                            tracing::debug!(
+                                "extract_worker_selection_from_stream: Token comment: '{}'",
                                 first_comment
                             );
                             match serde_json::from_str::<Vec<u32>>(first_comment) {
                                 Ok(parsed_tokens) => {
                                     tokens = parsed_tokens;
-                                    println!(
-                                        "!![DEBUG] extract_worker_selection_from_stream: Successfully parsed {} tokens",
+                                    tracing::debug!(
+                                        "extract_worker_selection_from_stream: Successfully parsed {} tokens",
                                         tokens.len()
                                     );
                                 }
                                 Err(e) => {
-                                    println!(
-                                        "!![DEBUG] extract_worker_selection_from_stream: Failed to parse tokens from '{}': {}",
-                                        first_comment, e
+                                    tracing::error!(
+                                        "extract_worker_selection_from_stream: Failed to parse tokens from '{}': {}",
+                                        first_comment,
+                                        e
                                     );
                                 }
                             }
-                        } else {
-                            println!(
-                                "!![DEBUG] extract_worker_selection_from_stream: Token comments array is empty"
-                            );
                         }
-                    } else {
-                        println!(
-                            "!![DEBUG] extract_worker_selection_from_stream: No comments field in token_data response"
-                        );
                     }
                 }
                 _ => {
-                    println!(
-                        "!![DEBUG] extract_worker_selection_from_stream: Unknown event type: '{}'",
+                    tracing::debug!(
+                        "extract_worker_selection_from_stream: Unknown event type: '{}'",
                         event
                     );
                 }
             }
         } else {
-            println!("!![DEBUG] extract_worker_selection_from_stream: Response has no event field");
+            tracing::error!("extract_worker_selection_from_stream: Response has no event field");
         }
     }
 
-    println!(
-        "!![DEBUG] extract_worker_selection_from_stream: Finished processing {} responses",
-        response_count
-    );
-    println!(
-        "!![DEBUG] extract_worker_selection_from_stream: Final worker_id={}, tokens.len()={}",
+    tracing::info!(
+        "Final worker_id={}, tokens.len()={}",
         worker_id,
         tokens.len()
     );
@@ -925,12 +826,6 @@ pub fn add_token_data_annotation<'a>(
 /// # Returns
 /// A tuple containing (worker_instance_id, tokens, modified_original_request)
 /// where the modified_original_request has worker_instance_id and token_data annotations added
-///
-/// # Example
-/// ```rust,ignore
-/// let (worker_id, tokens, annotated_request) =
-///     query_worker_selection_and_annotate(&engine, original_request).await?;
-/// ```
 pub async fn query_worker_selection_and_annotate(
     engine: &ServiceEngine<
         SingleIn<NvCreateChatCompletionRequest>,
@@ -938,26 +833,11 @@ pub async fn query_worker_selection_and_annotate(
     >,
     mut original_request: NvCreateChatCompletionRequest,
 ) -> anyhow::Result<(i64, Vec<u32>, NvCreateChatCompletionRequest)> {
-    // Clone the request and add query_instance_id annotation
     let mut query_request = original_request.clone();
     add_query_instance_id(&mut query_request);
-
-    // Create SingleIn and generate
     let single_in = SingleIn::new(query_request);
     let response_stream = engine.generate(single_in).await?;
-
-    // Extract worker selection from stream
-    println!(
-        "!![DEBUG] query_worker_selection_and_annotate: About to extract worker selection from stream"
-    );
     let (worker_id, tokens) = extract_worker_selection_from_stream(response_stream).await?;
-    println!(
-        "!![DEBUG] query_worker_selection_and_annotate: Extracted worker_id={}, tokens.len()={}",
-        worker_id,
-        tokens.len()
-    );
-
-    // Add worker_instance_id and tokens to original request's nvext
     add_worker_instance_id_annotation(&mut original_request, worker_id);
     add_token_data_annotation(&mut original_request, &tokens);
 
@@ -1025,12 +905,6 @@ pub async fn create_worker_selection_pipeline_chat(
         ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
     >,
 > {
-    // Create a fresh Runtime + DistributedRuntime, then *leak* the DistributedRuntime
-    // so it won't be dropped inside an async context (which triggers Tokio's panic).
-    //
-    // This is acceptable here because this function is typically called once at startup;
-    // if it's called multiple times, you'll leak once per call. If that's a concern,
-    // switch to a global OnceCell/OnceLock to cache one instance instead.
     let runtime = Runtime::from_settings()?;
     let dst_config = DistributedConfig::from_settings(false);
     let drt_owned = DistributedRuntime::new(runtime, dst_config).await?;
