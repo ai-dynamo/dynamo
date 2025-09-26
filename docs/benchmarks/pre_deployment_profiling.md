@@ -310,8 +310,8 @@ In addition to passing the `--use-ai-configurator` flag, you must also provide t
 
 Example command:
 ```bash
-python3 profile_sla.py \
-   --config ../../components/backends/trtllm/deploy/disagg.yaml \
+python3 -m benchmarks.profiler.profile_sla \
+   --config ./components/backends/trtllm/deploy/disagg.yaml \
    --use-ai-configurator \
    --aic-system h200_sxm \
    --aic-model-name QWEN3_32B \
