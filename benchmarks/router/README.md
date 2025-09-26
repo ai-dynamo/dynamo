@@ -49,7 +49,7 @@ Make sure you have 8 GPUs for these examples, unless you are using mockers (see 
     --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 
 # Example: 4 vLLM workers with larger model using tensor parallelism (2 GPUs per worker)
-# NOTE: this would likely require having H100 GPUs or later
+# NOTE: this requires having Hopper or later GPU SKUs to support MXFP4 precision.
 ./run_engines.sh \
     --num-workers 4 \
     --model-path openai/gpt-oss-120b \
