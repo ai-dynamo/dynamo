@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# VLLM compilation cache PVC
+# This PVC is used by VLLM backends to store compilation artifacts
+# and reduce cold start times
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dynamo-compilation-cache
+  namespace: ${NAMESPACE}
+spec:
+  accessModes:
+    - ReadWriteMany  # Shared across multiple pods/replicas
+  storageClassName: ${STORAGE_CLASS_NAME:-fast-ssd}
+  resources:
+    requests:
+      storage: ${CACHE_SIZE:-50Gi}  # Adjust based on your models and usage

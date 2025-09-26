@@ -37,6 +37,11 @@ type PVC struct {
 	MountPoint       *string                           `json:"mountPoint,omitempty"`
 }
 
+// CompilationCachePVC defines a dedicated PVC for backend compilation caches
+type CompilationCachePVC struct {
+	PVC `json:",inline"`
+}
+
 type Autoscaling struct {
 	Enabled     bool                                           `json:"enabled,omitempty"`
 	MinReplicas int                                            `json:"minReplicas,omitempty"`

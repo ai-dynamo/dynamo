@@ -7,6 +7,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 )
 
 func TestVLLMBackend_UpdateContainer(t *testing.T) {
@@ -121,6 +122,108 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 				g.Expect(container.LivenessProbe).To(gomega.BeNil())
 				g.Expect(container.ReadinessProbe).To(gomega.BeNil())
 				g.Expect(container.StartupProbe).To(gomega.BeNil())
+			}
+		})
+	}
+}
+
+func TestVLLMBackend_UpdateContainer_CompilationCache(t *testing.T) {
+	backend := &VLLMBackend{}
+
+	tests := []struct {
+		name                  string
+		component             *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		expectedEnvVars       []corev1.EnvVar
+		expectCacheEnvVar     bool
+		expectCacheEnvVarName string
+		expectCacheEnvVarVal  string
+	}{
+		{
+			name: "VLLM with compilation cache enabled",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					CompilationCache: &v1alpha1.CompilationCachePVC{
+						PVC: v1alpha1.PVC{
+							MountPoint: ptr.To("/root/.cache/vllm"),
+						},
+					},
+				},
+			},
+			expectCacheEnvVar:     true,
+			expectCacheEnvVarName: "VLLM_CACHE_ROOT",
+			expectCacheEnvVarVal:  "/root/.cache/vllm",
+		},
+		{
+			name: "VLLM with compilation cache at custom mount point",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					CompilationCache: &v1alpha1.CompilationCachePVC{
+						PVC: v1alpha1.PVC{
+							MountPoint: ptr.To("/custom/cache/path"),
+						},
+					},
+				},
+			},
+			expectCacheEnvVar:     true,
+			expectCacheEnvVarName: "VLLM_CACHE_ROOT",
+			expectCacheEnvVarVal:  "/custom/cache/path",
+		},
+		{
+			name: "VLLM without compilation cache",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					CompilationCache: nil,
+				},
+			},
+			expectCacheEnvVar: false,
+		},
+		{
+			name: "VLLM with compilation cache but no mount point",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					CompilationCache: &v1alpha1.CompilationCachePVC{
+						PVC: v1alpha1.PVC{
+							MountPoint: nil,
+						},
+					},
+				},
+			},
+			expectCacheEnvVar: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+
+			// Create a container with initial state
+			container := &corev1.Container{
+				Env: []corev1.EnvVar{},
+			}
+
+			// Call UpdateContainer
+			backend.UpdateContainer(container, 1, RoleMain, tt.component, "test-service", &GroveMultinodeDeployer{})
+
+			if tt.expectCacheEnvVar {
+				// Check that the VLLM_CACHE_ROOT environment variable is set
+				found := false
+				for _, env := range container.Env {
+					if env.Name == tt.expectCacheEnvVarName {
+						found = true
+						g.Expect(env.Value).To(gomega.Equal(tt.expectCacheEnvVarVal))
+						break
+					}
+				}
+				if !found {
+					t.Errorf("Expected environment variable %s not found in container", tt.expectCacheEnvVarName)
+				}
+			} else {
+				// Check that no cache environment variable is set
+				for _, env := range container.Env {
+					if env.Name == "VLLM_CACHE_ROOT" {
+						t.Errorf("Unexpected environment variable VLLM_CACHE_ROOT found: %s", env.Value)
+					}
+				}
 			}
 		})
 	}

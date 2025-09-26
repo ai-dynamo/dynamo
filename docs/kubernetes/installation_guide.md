@@ -151,9 +151,9 @@ helm upgrade --install dynamo-crds ./crds/ --namespace default
 helm dep build ./platform/
 helm install dynamo-platform ./platform/ \
   --namespace ${NAMESPACE} \
-  --set dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator \
-  --set dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG} \
-  --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
+  --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
+  --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
+  --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret"
 ```
 
 → [Verify Installation](#verify-installation)
