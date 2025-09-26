@@ -3,6 +3,7 @@
 
 [workspace]
 members = [
+    "active_message",
     "hello_world",
     "service_metrics",
     "system_metrics",

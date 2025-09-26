@@ -2239,6 +2239,7 @@ dependencies = [
  "temp-env",
  "tempfile",
  "thiserror 2.0.16",
+ "tmq",
  "tokio",
  "tokio-stream",
  "tokio-util",

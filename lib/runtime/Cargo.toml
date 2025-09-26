@@ -57,6 +57,7 @@ bincode = { version = "1" }
 console-subscriber = { version = "0.4", optional = true }
 educe = { version = "0.6.0" }
 figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }
+jsonschema = { version = "0.17" }
 local-ip-address = { version = "0.6.3" }
 log = { version = "0.4" }
 nid = { version = "3.0.0", features = ["serde"] }
@@ -65,6 +66,7 @@ nuid = { version = "0.5" }
 once_cell = { version = "1" }
 regex = { version = "1" }
 socket2 = { version = "0.5.8" }
+tmq = { version = "0.5.0" }
 
 [dev-dependencies]
 assert_matches = { version = "1.5.0" }
@@ -73,5 +75,4 @@ reqwest = { workspace = true }
 rstest = { version = "0.23.0" }
 temp-env = { version = "0.3.6" , features=["async_closure"] }
 stdio-override = {version= "0.2.0"}
-jsonschema = {version = "0.17"}
 tempfile = { workspace = true }
