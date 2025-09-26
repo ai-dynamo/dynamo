@@ -23,13 +23,11 @@ pub struct CommonExt {
     /// Integer that controls the number of top tokens to consider. Set to -1 to consider all tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
-    //#[validate(custom(function = "validate_top_k"))]
     pub top_k: Option<i32>,
 
     /// Relative probability floor
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
-    //#[validate(range(min = 0.0, max = 1.0))]
     pub min_p: Option<f32>,
 
     /// How much to penalize tokens based on how frequently they occur in the text.
