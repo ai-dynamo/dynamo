@@ -1,0 +1,50 @@
+docs: &docs
+  - 'docs/**'
+  - '**/*.md'
+  - '**/*.rst'
+
+ci: &ci
+  - '.github/workflows/**'
+  - '.github/filters.yaml'
+  - '.github/actions/**'
+
+has_code_changes:
+  - *ci
+  - 'benchmarks/**'
+  - 'components/**'
+  - 'container/**'
+  - 'deploy/**'
+  - 'examples/**'
+  - 'launch/**'
+  - 'lib/**'
+  - 'recipes/**'
+  - 'tests/**'
+  - '*.toml'
+  - '*.lock'
+  - '*.py'
+  - '*.rs'
+
+vllm: &vllm
+  - 'container/Dockerfile.vllm'
+  - 'container/deps/requirements.vllm.txt'
+  - 'container/deps/vllm/**'
+  - 'components/backends/vllm/**'
+  - 'tests/serve/test_vllm.py'
+
+sglang: &sglang
+  - 'container/Dockerfile.sglang'
+  - 'container/Dockerfile.sglang-wideep'
+  - 'components/backends/sglang/**'
+  - 'container/build.sh'
+  - 'tests/serve/test_sglang.py'
+
+trtllm: &trtllm
+  - 'container/Dockerfile.trtllm'
+  - 'components/backends/trtllm/**'
+  - 'container/build.sh'
+  - 'container/build_trtllm_wheel.sh'
+  - 'container/deps/**'
+  - 'tests/serve/test_trtllm.py'
+
+sdk:
+  - 'deploy/**'
