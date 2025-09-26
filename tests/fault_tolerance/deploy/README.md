@@ -71,15 +71,16 @@ The test suite is organized around three core components: **Deployments**, **Cli
 
 Deployments represent specific graphs that are deployed using the Dynamo Kubernetes Platform.
 
-The following deployment configurations are defined in `scenarios.py`:
+Below are some representative examples of the generated scenarios:
 
-| Deployment Name         | Description                                                                 |
-|-------------------------|-----------------------------------------------------------------------------|
-| `agg-tp-1-dp-1`         | Aggregated worker with 1 replica for each service (frontend, decode).                          |
-| `agg-tp-1-dp-2`         | Aggregated worker with 2 replicas for each service (frontend, decode).                   |
-| `disagg-tp-1-dp-1`      | Disaggregated deployment with 1 replica for each service (frontend, decode, prefill).                   |
-| `disagg-tp-1-dp-2`      | Disaggregated deployment with 2 replicas for each service (frontend, decode, prefill). |
+| Example Scenario Name                         | Backend | Type   | TP | DP | Description                                             |
+|-----------------------------------------------|---------|--------|----|----|---------------------------------------------------------|
+| `vllm-agg-tp-1-dp-1`                          | vllm    | agg    | 1  | 1  | Basic aggregated worker.                                |
+| `vllm-agg-tp-1-dp-2`                          | vllm    | agg    | 1  | 2  | Aggregated worker with Data Parallelism.                |
+| `sglang-agg-tp-4-dp-1`                        | sglang  | agg    | 4  | 1  | Aggregated SGLang worker with Tensor Parallelism.       |
+| `sglang-disagg-prefill-tp-2-decode-tp-2-dp-1`   | sglang  | disagg | 2  | 1  | Disaggregated SGLang workers with Tensor Parallelism.   |
 
+The full test matrix is generated from these parameters, creating comprehensive test coverage across all configurations.
 
 #### Client Load
 
@@ -95,26 +96,30 @@ sending signals to specified processes.
 
 The following failure types are defined in `scenarios.py`:
 
-| Failure Name             | Description                                                                 | Injection Method                           |
-|--------------------------|-----------------------------------------------------------------------------|--------------------------------------------|
-| `none`                   | No failure injection.                                                      | N/A                                        |
-| `frontend`               | Terminate frontend process/pod.                                            | `SIGINT` signal to `dynamo.frontend`.           |
-| `frontend_pod`           | Delete frontend pod.                                                       | Kubernetes API pod deletion.               |
-| `decode_worker`          | Terminate decode worker process/pod.                                        | `SIGINT` signal to `dynamo.vllm`           |
-| `decode_worker_pod`      | Delete decode worker pod.                                                  | Kubernetes API pod deletion.               |
-| `prefill_worker`         | Terminate prefill worker process/pod.                                        | `SIGINT` signal to`dynamo.vllm`           |
-| `prefill_worker_pod`     | Delete prefill worker pod.                                                 | Kubernetes API pod deletion.               |
-| `vllm_decode_engine_core`| Terminate VLLM decode engine core process.                                   | `SIGKILL` signal to `VLLM::EngineCore`        |
-| `vllm_prefill_engine_core`| Terminate VLLM prefill engine core process.                              | `SIGKILL` signal to `VLLM::EngineCore`       |
-
+| Failure Name                  | Description                                        | Injection Method              | Applicable Backends |
+|-------------------------------|----------------------------------------------------|-------------------------------|---------------------|
+| `none`                        | No failure injection (baseline).                   | N/A                           | All                 |
+| `frontend`                    | Terminate frontend process.                        | `SIGINT` to `dynamo.frontend` | All                 |
+| `frontend_pod`                | Delete frontend pod.                               | Kubernetes API pod deletion   | All                 |
+| `decode_worker`               | Terminate decode worker process.                   | `SIGKILL` to `dynamo.<backend>` | All                 |
+| `decode_worker_pod`           | Delete decode worker pod.                          | Kubernetes API pod deletion   | All                 |
+| `prefill_worker`              | Terminate prefill worker process.                  | `SIGKILL` to `dynamo.<backend>` | All                 |
+| `prefill_worker_pod`          | Delete prefill worker pod.                         | Kubernetes API pod deletion   | All                 |
+| `vllm_decode_engine_core`     | Terminate VLLM decode engine core process.         | `SIGKILL` to `VLLM::EngineCore` | vllm only           |
+| `vllm_prefill_engine_core`    | Terminate VLLM prefill engine core process.        | `SIGKILL` to `VLLM::EngineCore` | vllm only           |
+| `sglang_decode_scheduler`     | Terminate SGLang decode scheduler process.         | `SIGKILL` to `sglang::scheduler`| sglang only         |
+| `sglang_decode_detokenizer`   | Terminate SGLang decode detokenizer process.       | `SIGKILL` to `sglang::detokenizer`| sglang only         |
+| `sglang_prefill_scheduler`    | Terminate SGLang prefill scheduler process.        | `SIGKILL` to `sglang::scheduler`| sglang only         |
+| `sglang_prefill_detokenizer`  | Terminate SGLang prefill detokenizer process.      | `SIGKILL` to `sglang::detokenizer`| sglang only         |
 
 #### Example Scenario Breakdown
 
-**Scenario**: `agg-tp-2-dp-1-decode_worker`
+**Scenario**: `sglang-agg-tp-2-dp-1-decode_worker`
 
-- **Deployment**: Aggregation with 1 decoder worker replica (`agg-tp-2-dp-1`).
+- **Backend**: `sglang`
+- **Deployment**: Aggregation with 1 decoder worker replica, using 2 GPUs for tensor parallelism (`agg-tp-2-dp-1`).
 - **Client Load**: 10 clients, 100 requests each, max request rate 1/sec.
-- **Failure**: Terminates 1 decoder worker process 10 seconds into the test.
+- **Failure**: Terminates 1 decoder worker process 30 seconds into the test.
 
 #### Example Scenario Execution:
 

@@ -108,4 +108,4 @@ opt-level = 3
 [profile.release]
 # These make the build much slower but shrink the binary, and could help performance
 codegen-units = 1
-lto = true
+lto = "thin"
