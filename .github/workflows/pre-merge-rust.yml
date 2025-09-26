@@ -89,6 +89,8 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+    - name: Fix permissions APT cache dir for upload
+      run: sudo chown -R ${USER} ${{ env.APT_CACHE_DIR }}/archives/partial
 
   clippy:
     runs-on:
@@ -99,18 +101,6 @@ jobs:
       contents: read
     steps:
     - uses: actions/checkout@v4
-    - name: Prepare APT cache dir
-      run: mkdir -p ${{ env.APT_CACHE_DIR }}/archives/partial
-    - name: Cache APT
-      uses: actions/cache@v4
-      with:
-        path: ${{ env.APT_CACHE_DIR }}
-        key: ${{ runner.os }}-apt-cache
-    - name: Set up system dependencies
-      run: |
-        sudo apt-get update -y
-        sudo apt-get install -y -o Dir::Cache=${{ env.APT_CACHE_DIR }} protobuf-compiler
-
     - name: Cache cargo artifacts
       uses: actions/cache@v4
       with:
@@ -124,3 +114,4 @@ jobs:
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
+
