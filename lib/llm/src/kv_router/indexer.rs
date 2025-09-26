@@ -333,7 +333,7 @@ impl RadixTree {
     pub fn apply_event(&mut self, event: RouterEvent) -> Result<(), KvCacheEventError> {
         let (worker_id, event) = (event.worker_id, event.event);
         let (id, op) = (event.event_id, event.data);
-        tracing::trace!(id, "Store operation: {:?}", op);
+        tracing::trace!(id, "RadixTree::apply_event: Store operation: {:?}", op);
 
         let worker_lookup = self.lookup.entry(worker_id).or_default();
 
@@ -361,13 +361,6 @@ impl RadixTree {
                 };
 
                 for block_id in op.blocks {
-                    tracing::trace!(
-                        "RadixTree::apply_event: storing block for worker {}, tokens_hash={}, block_hash={}",
-                        worker_id,
-                        block_id.tokens_hash.0,
-                        block_id.block_hash.0
-                    );
-
                     let mut inner = current.borrow_mut();
                     let block = match inner.children.get(&block_id.tokens_hash) {
                         Some(block) => block.clone(),

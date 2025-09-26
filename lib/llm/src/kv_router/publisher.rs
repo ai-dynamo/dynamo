@@ -416,7 +416,7 @@ pub fn create_stored_block_from_parts(
     _lora_id: u64,
 ) -> KvCacheStoredBlockData {
     let tokens_hash = compute_block_hash_for_seq(token_ids, kv_block_size)[0];
-    tracing::debug!(
+    tracing::trace!(
         "Creating stored block: external_block_hash={}, tokens_hash={}, token_ids={:?}, kv_block_size={}",
         block_hash,
         tokens_hash.0,
