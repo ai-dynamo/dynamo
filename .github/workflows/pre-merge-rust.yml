@@ -47,6 +47,8 @@ jobs:
       contents: read
     steps:
     - uses: actions/checkout@v4
+    - name: Prepare APT cache dir
+      run: mkdir -p ${{ env.APT_CACHE_DIR }}/archives/partial
     - name: Cache APT
       uses: actions/cache@v4
       with:
@@ -97,6 +99,8 @@ jobs:
       contents: read
     steps:
     - uses: actions/checkout@v4
+    - name: Prepare APT cache dir
+      run: mkdir -p ${{ env.APT_CACHE_DIR }}/archives/partial
     - name: Cache APT
       uses: actions/cache@v4
       with:
