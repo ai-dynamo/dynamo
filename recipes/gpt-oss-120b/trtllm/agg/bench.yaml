@@ -11,40 +11,27 @@ spec:
   template:
     metadata:
       labels:
-        app: oss-gpt120b
+        app: oss-gpt120b-bench
     spec:
-      restartPolicy: Never
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: nvidia.com/dynamo-graph-deployment-name
+                    operator: In
+                    values:
+                      - gpt-oss-agg
+              topologyKey: kubernetes.io/hostname
       containers:
-      - name: perf
-        image: my-registry/vllm-runtime:my-tag
-        workingDir: /workspace/components/backends/vllm
-        env:
-          - name: TARGET_MODEL
-            value: openai/gpt-oss-120b
-          - name: ENDPOINT
-            value: gpt-oss-agg-trtllmworker:8000
-          - name: CONCURRENCIES
-            value: "13000 13500 1400"
-          - name: ISL
-            value: "16"
-          - name: OSL
-            value: "1000"
-          - name: DEPLOYMENT_MODE
-            value: "agg"
-          - name: DEPLOYMENT_GPU_COUNT
-            value: "32"
-          - name: JOB_NAME
-            valueFrom:
-              fieldRef:
-                fieldPath: metadata.labels['job-name']
-          - name: ROOT_ARTIFACT_DIR
-            value: /root/.cache/huggingface/hub/perf
-        command:
+      - command:
         - /bin/sh
         - -c
         - |
           #TODO: this can be baked into the aiperf image
-          apt-get update && apt-get install -y curl jq
+          apt-get update && apt-get install -y curl jq procps
+          sysctl -w net.ipv4.ip_local_port_range="1024 65000"
+          cat /proc/sys/net/ipv4/ip_local_port_range
           export COLUMNS=200
           EPOCH=$(date +%s)
           ## utility functions -- can be moved to a bash script / configmap
@@ -81,12 +68,12 @@ spec:
                 --extra-inputs "{\"ignore_eos\":true}" \
                 --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
                 --concurrency $concurrency \
-                --request-count $((3*concurrency)) \
+                --request-count $((2*concurrency)) \
                 --warmup-request-count $concurrency \
                 --conversation-num 1 \
                 --random-seed 100 \
                 --request-rate 100000 \
-                --workers-max 128 \
+                --workers-max 252 \
                 -H 'Authorization: Bearer NOT USED' \
                 -H 'Accept: text/event-stream'\
                 --record-processors 32 \
@@ -113,11 +100,45 @@ spec:
             run_perf $concurrency $ISL $OSL
             sleep 10
           done
+        env:
+        - name: TARGET_MODEL
+          value: openai/gpt-oss-120b
+        - name: ENDPOINT
+          value: gpt-oss-agg-frontend:8000
+        - name: CONCURRENCIES
+          value: "130000"
+        - name: ISL
+          value: "16"
+        - name: OSL
+          value: "1000"
+        - name: DEPLOYMENT_MODE
+          value: agg
+        - name: DEPLOYMENT_GPU_COUNT
+          value: "72"
+        - name: AIPERF_HTTP_CONNECTION_LIMIT
+          value: "252"
+        - name: JOB_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.labels['job-name']
+        - name: ROOT_ARTIFACT_DIR
+          value: /root/.cache/huggingface/hub/perf
+        image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:aiperf-lim-2-31b447d6
+        imagePullPolicy: IfNotPresent
+        name: perf
+        resources: {}
+        securityContext:
+          privileged: true
         volumeMounts:
         - name: model-cache
-          mountPath: /root/.cache/huggingface
+          mountPath: /root/.cache/huggingface/hub
+        workingDir: /workspace/components/backends/vllm
+      dnsPolicy: ClusterFirst
       imagePullSecrets:
-        - name: nvcrimagepullsecret
+      - name: nvcrimagepullsecret
+      restartPolicy: Never
+      schedulerName: default-scheduler
       volumes:
       - name: model-cache
         persistentVolumeClaim:
