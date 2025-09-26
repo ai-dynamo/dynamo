@@ -40,7 +40,10 @@ runs:
   using: "composite"
   steps:
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
+      with:
+        install: true # alias `docker build` to `docker buildx build`
+        driver-opts: ["--driver-opt=cpus=10"]
     - name: Login to NGC
       if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
       shell: bash
@@ -72,6 +75,7 @@ runs:
         ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \
           --framework ${{ inputs.framework }} \
+          --cpus=10 \
           --use-sccache \
           --sccache-bucket "$SCCACHE_S3_BUCKET" \
           --sccache-region "$AWS_DEFAULT_REGION"
