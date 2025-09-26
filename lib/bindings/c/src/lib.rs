@@ -329,8 +329,6 @@ pub extern "C" fn dynamo_kv_event_publish_removed(
  * ------------------------------------------------------------------------ */
 use std::{pin::Pin, sync::Arc};
 
-use serde_json;
-
 const GENERATE_ENDPOINT: &str = "generate";
 
 use anyhow::Context;
@@ -365,6 +363,20 @@ pub struct WorkerSelectionPipeline {
 }
 
 /// Create a worker-selection pipeline ("generate" endpoint).
+///
+/// # Safety
+/// - `namespace_c_str`, `component_c_str`, and `model_name_c_str` must be **non-null** pointers to
+///   **NUL-terminated** C strings that contain **valid UTF-8**. They must remain valid for the
+///   duration of this call.
+/// - `pipeline_out` must be **non-null** and point to writable memory for a `*mut WorkerSelectionPipeline`.
+///   On success this function writes exactly once to `*pipeline_out`. The caller becomes the owner of
+///   that pointer and **must** later free it by calling `dynamo_destroy_worker_selection_pipeline`.
+/// - Must be called **after** a successful `dynamo_llm_init()`; otherwise behavior is undefined.
+/// - This function is not signal-safe and must not be called from a signal handler.
+/// - This function may block internally; do not call it from contexts that forbid blocking.
+///
+/// # Errors
+/// Returns `DynamoLlmResult::ERR` on failure and does not write to `pipeline_out`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
     namespace_c_str: *const c_char,
@@ -460,12 +472,56 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
     DynamoLlmResult::OK
 }
 
-#[unsafe(no_mangle)]
 /// Query worker selection on an existing pipeline and return:
-/// - worker_instance_id_out (i64)
-/// - token_ids_out (malloc'ed array, caller must free via `dynamo_free_worker_selection_result`)
-/// - token_count_out
-/// - annotated_request_json_out (CString*, caller frees via same free fn)
+/// - `worker_instance_id_out` (`i64`)
+/// - `token_ids_out` (heap-allocated `*mut u32`; caller must free via
+///   `dynamo_free_worker_selection_result`)
+/// - `token_count_out` (`usize`)
+/// - `annotated_request_json_out` (`*mut c_char` to a NUL-terminated C string;
+///   caller frees via the same free function)
+///
+/// # Safety
+/// - `pipeline`
+///   - Must be a **non-null** pointer previously returned by
+///     `dynamo_create_worker_selection_pipeline` and not yet passed to
+///     `dynamo_destroy_worker_selection_pipeline`.
+///   - Must remain valid for the entire duration of this call.
+///   - **Do not** call this function concurrently on the same `pipeline` pointer
+///     from multiple threads unless the surrounding code guarantees synchronization.
+/// - `request_json_c_str`
+///   - Must be a **non-null**, **NUL-terminated** C string containing **valid UTF-8**.
+///   - The JSON must represent a valid `NvCreateChatCompletionRequest`; otherwise this
+///     function returns `DynamoLlmResult::ERR`.
+///   - Must remain valid for the duration of this call.
+/// - Output pointers:
+///   - `worker_instance_id_out`, `token_ids_out`, `token_count_out`,
+///     and `annotated_request_json_out` must each be **non-null** and point to
+///     writable memory for their respective types. On success, this function
+///     writes to all four outputs exactly once.
+///   - On **error**, outputs are left unmodified.
+/// - Ownership & deallocation:
+///   - On success, if there are zero tokens, `*token_ids_out` may be set to `NULL`
+///     and `*token_count_out` set to `0`.
+///   - If non-null, the buffer written to `*token_ids_out` is allocated with the
+///     Rust global allocator and **must** be freed by calling
+///     `dynamo_free_worker_selection_result` with the same `token_count_out` value.
+///   - The pointer written to `*annotated_request_json_out` is a `CString` allocated
+///     by Rust and **must** be freed by calling `dynamo_free_worker_selection_result`.
+///   - **Do not** free these with `free(3)` or any other allocator; doing so is
+///     undefined behavior.
+/// - Blocking & context:
+///   - This function may **block** internally while it performs async work; do not
+///     call it from contexts that forbid blocking (e.g., signal handlers).
+/// - Process/ABI assumptions:
+///   - The caller and callee must run in the same process and use the same Rust
+///     global allocator for the paired allocation/free described above.
+///   - This function is not signal-safe.
+///
+/// # Errors
+/// Returns `DynamoLlmResult::ERR` if any precondition fails (null/invalid pointers,
+/// malformed UTF-8/JSON, pipeline errors, allocation failures, etc.). On error, no
+/// output pointer is written.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
     pipeline: *mut WorkerSelectionPipeline,
     request_json_c_str: *const c_char,
@@ -563,6 +619,33 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
     DynamoLlmResult::OK
 }
 
+/// Destroy a previously created pipeline.
+///
+/// # Safety
+/// - `pipeline`
+///   - **Must** be a non-null pointer that was **originally returned by**
+///     `dynamo_create_worker_selection_pipeline` (i.e., obtained via
+///     `Box::into_raw` on a `WorkerSelectionPipeline`).
+///   - **Must not** have been passed to this function (or otherwise freed)
+///     before. Passing the same pointer twice is a **double free** and is
+///     undefined behavior.
+///   - **Must not** be used by any other thread while this function runs.
+///     Ensure no concurrent calls are in flight that read or write through
+///     this handle (e.g., `dynamo_query_worker_selection_and_annotate`).
+///   - After a successful call, the pointer is **invalid** and must not be
+///     dereferenced or used again in any way.
+/// - Allocator/ABI
+///   - The caller and callee must be in the same process and share the same
+///     allocator; this function reclaims the allocation that was created by
+///     Rust for the handle.
+/// - Lifetime/FFI
+///   - Do not call from contexts that forbid blocking or running destructors
+///     (e.g., signal handlers).
+///
+/// # Errors
+/// - Returns `DynamoLlmResult::ERR` if `pipeline` is null.
+/// - On `OK`, ownership of `pipeline` is taken and the underlying resources
+///   are dropped; using the pointer after return is undefined behavior.
 #[unsafe(no_mangle)]
 /// Destroy a previously created pipeline.
 pub unsafe extern "C" fn dynamo_destroy_worker_selection_pipeline(
@@ -576,17 +659,43 @@ pub unsafe extern "C" fn dynamo_destroy_worker_selection_pipeline(
     DynamoLlmResult::OK
 }
 
+/// Free buffers allocated by `dynamo_query_worker_selection_and_annotate`.
+///
+/// # Safety
+/// - `token_ids` and `annotated_request_json` **must come from this library**:
+///   - `token_ids` must be the exact pointer previously returned by
+///     `dynamo_query_worker_selection_and_annotate` for the tokens buffer,
+///     allocated with Rust’s global allocator in this process.
+///   - `annotated_request_json` must be the exact pointer previously returned by
+///     `CString::into_raw` inside `dynamo_query_worker_selection_and_annotate`.
+/// - **Call at most once** per pointer. Passing the same pointer again is a
+///   double-free and is undefined behavior.
+/// - Pointer/length invariants:
+///   - If `token_ids` is non-null, `token_count` **must** be the exact length
+///     originally returned. Mismatched lengths cause invalid deallocation.
+///   - If `token_ids` is null, `token_count` should be `0`.
+///   - Passing a non-null `token_ids` with `token_count == 0` will leak in this
+///     implementation (we only dealloc when `token_count > 0`).
+/// - After return, the pointers are **invalid** and must not be used again.
+/// - The caller and callee must be in the same process and share the same
+///   allocator/ABI (these deallocations use Rust’s global allocator).
+/// - Ensure no other threads are concurrently reading/writing these buffers when
+///   freeing them.
+/// - Do not call from contexts that forbid running destructors (e.g., signal handlers).
+///
+/// Returns `DynamoLlmResult::OK` on success.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dynamo_free_worker_selection_result(
     token_ids: *mut u32,
     token_count: usize,
     annotated_request_json: *mut c_char,
 ) -> DynamoLlmResult {
-    if !token_ids.is_null() && token_count > 0 {
-        if let Ok(layout) = std::alloc::Layout::array::<u32>(token_count) {
-            unsafe {
+    if token_count > 0 {
+        match std::alloc::Layout::array::<u32>(token_count) {
+            Ok(layout) if !token_ids.is_null() => unsafe {
                 std::alloc::dealloc(token_ids as *mut u8, layout);
-            }
+            },
+            _ => {}
         }
     }
     if !annotated_request_json.is_null() {
@@ -612,66 +721,48 @@ pub async fn extract_worker_selection_from_stream(
                     tracing::debug!(
                         "extract_worker_selection_from_stream: Found worker_instance_id event"
                     );
-                    if let Some(comments) = &response.comment {
-                        if let Some(first_comment) = comments.first() {
-                            // Try JSON deserialization as string first (handles quoted strings like "1732646935200805498")
-                            match serde_json::from_str::<String>(first_comment) {
-                                Ok(id_string) => {
-                                    if let Ok(parsed_id) = id_string.parse::<i64>() {
-                                        worker_id = parsed_id;
-                                        tracing::debug!(
-                                            "extract_worker_selection_from_stream: Successfully parsed worker_id from JSON string: {}",
-                                            worker_id
-                                        );
-                                    } else {
-                                        tracing::error!(
-                                            "extract_worker_selection_from_stream: Failed to parse number from JSON string: '{}'",
-                                            id_string
-                                        );
-                                    }
-                                }
-                                Err(_) => {
-                                    // Fallback to direct parsing (handles unquoted numbers)
-                                    if let Ok(parsed_id) = first_comment.parse::<i64>() {
-                                        worker_id = parsed_id;
-                                        tracing::debug!(
-                                            "!![DEBUG] extract_worker_selection_from_stream: Successfully direct-parsed worker_id: {}",
-                                            worker_id
-                                        );
-                                    } else {
-                                        tracing::error!(
-                                            "!![DEBUG] extract_worker_selection_from_stream: Failed to parse worker_id from: '{}'",
-                                            first_comment
-                                        );
-                                    }
-                                }
+                    if let Some(first_comment) = response.comment.as_ref().and_then(|v| v.first()) {
+                        // Try JSON string first (e.g., "1732646935200805498")
+                        if let Ok(id_string) = serde_json::from_str::<String>(first_comment) {
+                            if let Ok(parsed_id) = id_string.parse::<i64>() {
+                                worker_id = parsed_id;
+                                tracing::debug!("parsed worker_id from JSON string: {}", worker_id);
+                            } else {
+                                tracing::error!(
+                                    "failed to parse number from JSON string: '{}'",
+                                    id_string
+                                );
                             }
+                        } else if let Ok(parsed_id) = first_comment.parse::<i64>() {
+                            // Fallback: unquoted number
+                            worker_id = parsed_id;
+                            tracing::debug!("parsed worker_id directly: {}", worker_id);
+                        } else {
+                            tracing::error!("failed to parse worker_id from: '{}'", first_comment);
                         }
                     }
                 }
                 "token_data" => {
                     tracing::debug!("extract_worker_selection_from_stream: Found token_data event");
-                    if let Some(comments) = &response.comment {
-                        if let Some(first_comment) = comments.first() {
-                            tracing::debug!(
-                                "extract_worker_selection_from_stream: Token comment: '{}'",
-                                first_comment
-                            );
-                            match serde_json::from_str::<Vec<u32>>(first_comment) {
-                                Ok(parsed_tokens) => {
-                                    tokens = parsed_tokens;
-                                    tracing::debug!(
-                                        "extract_worker_selection_from_stream: Successfully parsed {} tokens",
-                                        tokens.len()
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        "extract_worker_selection_from_stream: Failed to parse tokens from '{}': {}",
-                                        first_comment,
-                                        e
-                                    );
-                                }
+                    if let Some(first_comment) = response.comment.as_ref().and_then(|v| v.first()) {
+                        tracing::debug!(
+                            "extract_worker_selection_from_stream: Token comment: '{}'",
+                            first_comment
+                        );
+                        match serde_json::from_str::<Vec<u32>>(first_comment) {
+                            Ok(parsed_tokens) => {
+                                tokens = parsed_tokens;
+                                tracing::debug!(
+                                    "extract_worker_selection_from_stream: Successfully parsed {} tokens",
+                                    tokens.len()
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "extract_worker_selection_from_stream: Failed to parse tokens from '{}': {}",
+                                    first_comment,
+                                    e
+                                );
                             }
                         }
                     }
