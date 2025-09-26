@@ -100,12 +100,11 @@ class KubernetesConnector(PlannerConnector):
     ):
         self.kube_api = KubernetesAPI(k8s_namespace)
 
+        self.user_provided_model_name: Optional[str] = None
         if model_name:
             self.user_provided_model_name = (
                 model_name.lower()
             )  # normalize model name to lowercase (MDC)
-        else:
-            self.user_provided_model_name = None
 
         graph_deployment_name = os.getenv("DYN_PARENT_DGD_K8S_NAME")
         if not graph_deployment_name:
@@ -251,6 +250,9 @@ class KubernetesConnector(PlannerConnector):
                 raise UserProvidedModelNameMismatchError(
                     model_name, self.user_provided_model_name
                 )
+
+        if not model_name:
+            raise ModelNameNotFoundError()
 
         return model_name
 
