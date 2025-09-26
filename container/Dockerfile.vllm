@@ -12,22 +12,21 @@ ARG RELEASE_BUILD
 ARG ENABLE_KVBM=false
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
+ARG CUDA_VERSION="12.8"
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG VLLM_REF="1da94e673c257373280026f75ceb4effac80e892"  # from v0.10.1.1
+ARG VLLM_REF="v0.10.2"
+# FlashInfer only respected when building vLLM from source, ie when VLLM_REF does not start with 'v' or for arm64 builds
+ARG FLASHINF_REF="v0.3.0"
 ARG TORCH_BACKEND="cu128"
+
+# If left blank, then we will fallback to vLLM defaults
+ARG DEEPGEMM_REF=""
 
 # sccache configuration - inherit from base build
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET=""
 ARG SCCACHE_REGION=""
-
-# Match 0.10.1.1 vLLM release
-# https://github.com/vllm-project/vllm/releases/tag/v0.10.1.1
-# Pinned to commit before https://github.com/deepseek-ai/DeepGEMM/pull/112 for DeepGEMM which seems to break on H100:
-# "RuntimeError: Failed: CUDA runtime error csrc/jit/kernel_runtime.hpp:108 '98'"
-ARG DEEPGEMM_REF="f85ec64"
-ARG FLASHINF_REF="v0.2.11"
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -108,6 +107,7 @@ ARG VLLM_GIT_URL
 ARG DEEPGEMM_REF
 ARG FLASHINF_REF
 ARG TORCH_BACKEND
+ARG CUDA_VERSION
 
 ARG MAX_JOBS=16
 ENV MAX_JOBS=$MAX_JOBS
@@ -138,17 +138,14 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
     --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
-        # TODO - split vllm, DeepEP, DeepGeMM, PPLX installs
-        # Should be able to select how you want your build to go
         cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
         chmod +x /tmp/install_vllm.sh && \
-        /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt --deepgemm-ref $DEEPGEMM_REF --flashinf-ref $FLASHINF_REF --torch-backend $TORCH_BACKEND && \
+        /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} --torch-backend $TORCH_BACKEND --cuda-version $CUDA_VERSION && \
         /tmp/use-sccache.sh show-stats "vLLM";
 
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
 $LD_LIBRARY_PATH
-
 
 ##################################################
 ########## Runtime Image ########################

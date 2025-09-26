@@ -321,9 +321,25 @@ impl Client {
         Ok(())
     }
 
+    /// Like kv_get_and_watch_prefix but only for new changes, does not include existing values.
+    pub async fn kv_watch_prefix(
+        &self,
+        prefix: impl AsRef<str> + std::fmt::Display,
+    ) -> Result<PrefixWatcher> {
+        self.watch_internal(prefix, false).await
+    }
+
     pub async fn kv_get_and_watch_prefix(
         &self,
         prefix: impl AsRef<str> + std::fmt::Display,
+    ) -> Result<PrefixWatcher> {
+        self.watch_internal(prefix, true).await
+    }
+
+    async fn watch_internal(
+        &self,
+        prefix: impl AsRef<str> + std::fmt::Display,
+        include_existing: bool,
     ) -> Result<PrefixWatcher> {
         let mut kv_client = self.client.kv_client();
         let mut watch_client = self.client.watch_client();
@@ -352,16 +368,23 @@ impl Client {
             )
             .await?;
 
-        let kvs = get_response.take_kvs();
-        tracing::trace!("initial kv count: {:?}", kvs.len());
+        let kvs = if include_existing {
+            let kvs = get_response.take_kvs();
+            tracing::trace!("initial kv count: {:?}", kvs.len());
+            kvs
+        } else {
+            vec![]
+        };
 
         let (tx, rx) = mpsc::channel(32);
 
         self.rt.spawn(async move {
-            for kv in kvs {
-                if tx.send(WatchEvent::Put(kv)).await.is_err() {
-                    // receiver is already closed
-                    return;
+            if include_existing {
+                for kv in kvs {
+                    if tx.send(WatchEvent::Put(kv)).await.is_err() {
+                        // receiver is already closed
+                        return;
+                    }
                 }
             }
 
@@ -519,7 +542,7 @@ impl KvCache {
         }
 
         // Start watching for changes
-        // we won't miss events bewteen the initial push and the watcher starting because
+        // we won't miss events between the initial push and the watcher starting because
         // client.kv_get_and_watch_prefix() will get all kv pairs and put them back again
         let watcher = client.kv_get_and_watch_prefix(&prefix).await?;
 
