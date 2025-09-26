@@ -4,7 +4,7 @@
 [workspace]
 members = [
     "components/metrics",
-    "launch/*",
+    "launch/dynamo-run",
     "lib/llm",
     "lib/runtime",
     "lib/tokens",
@@ -13,9 +13,10 @@ members = [
     "lib/bindings/c",
     "lib/engines/*",
 ]
-# Exclude launch/dynamo-run from default build, but maintain
-# ability to explicitly build the package 'cargo build -p dynamo-run'
-# and share workspace versions.
+# Exclude certain packages that are slow to build and we don't ship as flagship
+# features from default build, but keep them in workspace for convenience.
+# - launch/dynamo-run
+# - lib/engines/*
 default-members = [
     "components/metrics",
     "lib/llm",
@@ -24,7 +25,6 @@ default-members = [
     "lib/async-openai",
     "lib/parsers",
     "lib/bindings/c",
-    "lib/engines/*",
 ]
 resolver = "3"
 
