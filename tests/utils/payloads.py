@@ -20,6 +20,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
+from dynamo._core import prometheus_names
+
 logger = logging.getLogger(__name__)
 
 
@@ -163,23 +165,26 @@ class MetricsPayload(BasePayload):
         return response.text
 
     def validate(self, response: Any, content: str) -> None:
-        pattern = r'dynamo_component_requests_total\{[^}]*model="[^"]*"[^}]*\}\s+(\d+)'
+        requests_total_name = prometheus_names.work_handler.requests_total
+        pattern = (
+            rf'{re.escape(requests_total_name)}\{{[^}}]*model="[^"]*"[^}}]*\}}\s+(\d+)'
+        )
         matches = re.findall(pattern, content)
         if not matches:
             raise AssertionError(
-                "Metric 'dynamo_component_requests_total' with model label not found in metrics output"
+                f"Metric '{requests_total_name}' with model label not found in metrics output"
             )
 
         for match in matches:
             request_count = int(match)
             if request_count >= self.min_num_requests:
                 logger.info(
-                    f"SUCCESS: Found dynamo_component_requests_total with count: {request_count}"
+                    f"SUCCESS: Found {requests_total_name} with count: {request_count}"
                 )
                 return
 
         raise AssertionError(
-            f"dynamo_component_requests_total exists but has count {request_count} which is less than required {self.min_num_requests}"
+            f"{requests_total_name} exists but has count {request_count} which is less than required {self.min_num_requests}"
         )
 
 
