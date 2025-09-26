@@ -633,9 +633,10 @@ impl Slot for VllmConnectorSlot {
         }
 
         let num_candidate_blocks = if is_new_request && computed_position > 0 {
-            ((computed_position + 1) / self.block_size) - block_ids.len() - self.evaluated_blocks
+            ((computed_position + 1) / self.block_size)
+                .saturating_sub(block_ids.len() + self.evaluated_blocks)
         } else {
-            ((computed_position + 1) / self.block_size) - self.evaluated_blocks
+            ((computed_position + 1) / self.block_size).saturating_sub(self.evaluated_blocks)
         };
 
         if num_candidate_blocks > 0 {
