@@ -50,15 +50,14 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/components/planner/src/dynamo/planner
           command:
-            - /bin/sh
-            - -c
+          - python3
+          - -m
+          - planner_sla
           args:
-            - >-
-              python3 -m planner_sla
-              --environment=kubernetes
-              --backend=vllm
-              --adjustment-interval=60
-              --profile-results-dir=/data/profiling_results
+            - --environment=kubernetes
+            - --backend=vllm
+            - --adjustment-interval=60
+            - --profile-results-dir=/data/profiling_results
     VllmDecodeWorker:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret

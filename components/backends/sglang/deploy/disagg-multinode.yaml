@@ -37,19 +37,27 @@ spec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
-          command: ["sh", "-c"]
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
           args:
-            - >-
-              python3 -m dynamo.sglang
-              --model-path Qwen/Qwen3-0.6B
-              --served-model-name Qwen/Qwen3-0.6B
-              --tp-size 8
-              --trust-remote-code
-              --skip-tokenizer-init
-              --disaggregation-mode decode
-              --disaggregation-transfer-backend nixl
-              --disaggregation-bootstrap-port 30001
-              --mem-fraction-static 0.82
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --tp-size
+            - "8"
+            - --trust-remote-code
+            - --skip-tokenizer-init
+            - --disaggregation-mode
+            - decode
+            - --disaggregation-transfer-backend
+            - nixl
+            - --disaggregation-bootstrap-port
+            - "30001"
+            - --mem-fraction-static
+            - "0.82"
     prefill:
       multinode:
         nodeCount: 2
@@ -64,16 +72,24 @@ spec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
-          command: ["sh", "-c"]
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
           args:
-            - >-
-              python3 -m dynamo.sglang
-              --model-path Qwen/Qwen3-0.6B
-              --served-model-name Qwen/Qwen3-0.6B
-              --tp-size 8
-              --trust-remote-code
-              --skip-tokenizer-init
-              --disaggregation-mode prefill
-              --disaggregation-transfer-backend nixl
-              --disaggregation-bootstrap-port 30001
-              --mem-fraction-static 0.82
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --tp-size
+            - "8"
+            - --trust-remote-code
+            - --skip-tokenizer-init
+            - --disaggregation-mode
+            - prefill
+            - --disaggregation-transfer-backend
+            - nixl
+            - --disaggregation-bootstrap-port
+            - "30001"
+            - --mem-fraction-static
+            - "0.82"
