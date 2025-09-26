@@ -21,6 +21,7 @@ runs:
         HF_HOME: /runner/_work/_temp
       run: |
         docker run --runtime=nvidia --rm --gpus all -w /workspace \
+          --cpus=10 \
           --network host \
           --name ${{ env.CONTAINER_ID }}_pytest \
           ${{ inputs.image_tag }} \

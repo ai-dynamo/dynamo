@@ -75,7 +75,6 @@ runs:
         ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \
           --framework ${{ inputs.framework }} \
-          --cpus=10 \
           --use-sccache \
           --sccache-bucket "$SCCACHE_S3_BUCKET" \
           --sccache-region "$AWS_DEFAULT_REGION"
