@@ -31,7 +31,7 @@ Each engine provides launch scripts for different deployment patterns in their r
 
 ## Core Components
 
-### [Backends](backends/)
+### [Backends](src/dynamo/)
 
 The backends directory contains inference engine integrations and implementations, with a key focus on:
 
@@ -40,7 +40,7 @@ The backends directory contains inference engine integrations and implementation
 - **TensorRT-LLM** - TensorRT-LLM integration with disaggregated serving capabilities
 
 
-### [Frontend](frontend/)
+### [Frontend](src/dynamo/frontend/)
 
 The frontend component provides the HTTP API layer and request processing:
 
@@ -49,7 +49,7 @@ The frontend component provides the HTTP API layer and request processing:
 - **Router** - Routes requests to appropriate workers based on load and KV cache state
 - **Auto-discovery** - Automatically discovers and registers available workers
 
-### [Planner](planner/)
+### [Planner](src/dynamo/planner/)
 
 The planner component monitors system state and dynamically adjusts worker allocation:
 

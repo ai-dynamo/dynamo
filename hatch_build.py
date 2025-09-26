@@ -7,13 +7,13 @@ import subprocess
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
 COMPONENTS = [
-    "frontend/src/dynamo/frontend",
-    "backends/vllm/src/dynamo/vllm",
-    "backends/sglang/src/dynamo/sglang",
-    "backends/trtllm/src/dynamo/trtllm",
-    "backends/mocker/src/dynamo/mocker",
-    "backends/llama_cpp/src/dynamo/llama_cpp",
-    "planner/src/dynamo/planner",
+    "frontend",
+    "vllm",
+    "sglang",
+    "trtllm",
+    "mocker",
+    "llama_cpp",
+    "planner",
 ]
 
 
@@ -46,7 +46,7 @@ class VersionWriterHook(BuildHookInterface):
 
         for component in COMPONENTS:
             version_file_path = os.path.join(
-                self.root, f"components/{component}/_version.py"
+                self.root, f"components/src/dynamo/{component}/_version.py"
             )
             with open(version_file_path, "w") as f:
                 f.write(version_content)

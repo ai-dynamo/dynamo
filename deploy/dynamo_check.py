@@ -2228,20 +2228,9 @@ def show_pythonpath_recommendation():
     # Collect all component source paths
     comp_path = os.path.join(workspace_dir, "components")
     if os.path.exists(comp_path):
-        for item in os.listdir(comp_path):
-            if item == "backends":
-                continue  # Handle backends separately
-            src_path = os.path.join(comp_path, item, "src")
-            if os.path.exists(src_path):
-                paths.append(src_path)
-
-    # Collect all backend source paths
-    backend_path = os.path.join(workspace_dir, "components", "backends")
-    if os.path.exists(backend_path):
-        for item in os.listdir(backend_path):
-            src_path = os.path.join(backend_path, item, "src")
-            if os.path.exists(src_path):
-                paths.append(src_path)
+        src_path = os.path.join(comp_path, "src")
+        if os.path.exists(src_path):
+            paths.append(src_path)
 
     # Also add runtime path
     runtime_path = os.path.join(workspace_dir, "lib/bindings/python/src")
