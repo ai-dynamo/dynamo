@@ -283,7 +283,7 @@ class BaseSglangWorkerHandler(ABC):
         self.model = config.model
 
     @abstractmethod
-    async def generate(self, request: SglangMultimodalRequest) -> AsyncIterator[str]:
+    def generate(self, request: SglangMultimodalRequest) -> AsyncIterator[str]:
         pass
 
     def cleanup(self):
