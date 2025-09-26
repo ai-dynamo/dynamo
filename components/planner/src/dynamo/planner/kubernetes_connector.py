@@ -101,11 +101,11 @@ class KubernetesConnector(PlannerConnector):
         self.kube_api = KubernetesAPI(k8s_namespace)
 
         if model_name:
-            self.model_name = (
+            self.user_provided_model_name = (
                 model_name.lower()
             )  # normalize model name to lowercase (MDC)
         else:
-            self.model_name = None
+            self.user_provided_model_name = None
 
         graph_deployment_name = os.getenv("DYN_PARENT_DGD_K8S_NAME")
         if not graph_deployment_name:
@@ -237,18 +237,20 @@ class KubernetesConnector(PlannerConnector):
                 model_name = prefill_model_name
 
         except PlannerError as e:
-            if self.model_name:
+            if self.user_provided_model_name:
                 logger.warning(
-                    f"Failed to get model name from deployment with error: {e}, using provided model name: {self.model_name}"
+                    f"Failed to get model name from deployment with error: {e}, using provided model name: {self.user_provided_model_name}"
                 )
-                model_name = self.model_name
+                model_name = self.user_provided_model_name
             else:
                 raise e
 
         # If user provided a model name and it doesn't match the model name from the deployment, raise an error
-        if self.model_name:
-            if model_name != self.model_name:
-                raise UserProvidedModelNameMismatchError(model_name, self.model_name)
+        if self.user_provided_model_name:
+            if model_name != self.user_provided_model_name:
+                raise UserProvidedModelNameMismatchError(
+                    model_name, self.user_provided_model_name
+                )
 
         return model_name
 
