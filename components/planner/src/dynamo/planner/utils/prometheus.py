@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import logging
+import math
 
 from prometheus_api_client import PrometheusConnect
 
@@ -50,7 +51,11 @@ class PrometheusAPIClient:
             if not result:
                 # No data available yet (no requests made) - return 0 silently
                 return 0
-            return float(result[0]["value"][1])
+            value = float(result[0]["value"][1])
+            # Handle NaN case (0/0 division when no requests) - return 0
+            if math.isnan(value):
+                return 0
+            return value
         except Exception as e:
             logger.error(f"Error getting {operation_name}: {e}")
             return 0
