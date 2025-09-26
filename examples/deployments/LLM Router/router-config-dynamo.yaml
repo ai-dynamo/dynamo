@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# LLM Router Configuration for NVIDIA Dynamo Integration
+# This configuration routes requests to the official NVIDIA Dynamo Cloud Platform
+# deployment using the proper service endpoints
+#
+# Based on: https://docs.nvidia.com/dynamo/latest/guides/dynamo_deploy/dynamo_cloud.html
+# API Key pattern follows: https://github.com/NVIDIA-AI-Blueprints/llm-router/blob/main/deploy/helm/llm-router/templates/router-controller-configmap.yaml
+#
+# IMPORTANT: This config references the 3 models for intelligent routing:
+# - meta-llama/Llama-3.1-8B-Instruct   (Fast model for simple tasks)
+# - meta-llama/Llama-3.1-70B-Instruct  (Powerful model for complex tasks)
+# - mistralai/Mixtral-8x22B-Instruct-v0.1 (Creative model for conversational tasks)
+#
+# To add more models:
+# 1. Deploy the model using the pattern in Step 2 of README.md
+# 2. Add router entries below following the same format
+#
+# NOTE: Environment variables are resolved at runtime:
+# - ${DYNAMO_API_BASE}: Points to the Dynamo service endpoint
+# - ${DYNAMO_API_KEY}: API key for authenticating with Dynamo services
+#
+# These variables are populated from:
+# - ConfigMap: DYNAMO_API_BASE (defined in llm-router-values-override.yaml)
+# - Secret: DYNAMO_API_KEY (created during deployment setup)
+
+policies:
+  - name: "task_router"
+    url: http://llm-router-router-server.llm-router.svc.cluster.local:8000/v2/models/task_router_ensemble/infer
+    llms:
+      - name: Brainstorming
+        api_base: ${DYNAMO_API_BASE}
+        api_key: ${DYNAMO_API_KEY}
+        model: meta-llama/Llama-3.1-70B-Instruct
+      - name: Chatbot
+        api_base: ${DYNAMO_API_BASE}
+        api_key: ${DYNAMO_API_KEY}
+        model: mistralai/Mixtral-8x22B-Instruct-v0.1
+      - name: Classification
+        api_base: ${DYNAMO_API_BASE}
+        api_key: ${DYNAMO_API_KEY}
+        model: meta-llama/Llama-3.1-8B-Instruct
+      - name: Closed QA
+        api_base: ${DYNAMO_API_BASE}
+        api_key: ${DYNAMO_API_KEY}
+        model: meta-llama/Llama-3.1-70B-Instruct
+      - name: Code Generation
+        api_base: ${DYNAMO_API_BASE}
+        api_key: ${DYNAMO_API_KEY}
+        model: meta-llama/Llama-3.1-70B-Instruct
+      - name: Extraction
+        api_base: ${DYNAMO_API_BASE}
+        api_key: ${DYNAMO_API_KEY}
+        model: meta-llama/Llama-3.1-8B-Instruct
+      - name: Open QA
+        api_base: ${DYNAMO_API_BASE}
+        api_key: ${DYNAMO_API_KEY}
+        model: meta-llama/Llama-3.1-70B-Instruct
+      - name: Other
+        api_base: ${DYNAMO_API_BASE}
+        api_key: ${DYNAMO_API_KEY}
+        model: mistralai/Mixtral-8x22B-Instruct-v0.1
+      - name: Rewrite
+        api_base: ${DYNAMO_API_BASE}
+        api_key: ${DYNAMO_API_KEY}
+        model: meta-llama/Llama-3.1-8B-Instruct
+      - name: Summarization
+        api_base: ${DYNAMO_API_BASE}
+        api_key: ${DYNAMO_API_KEY}
+        model: meta-llama/Llama-3.1-70B-Instruct
+      - name: Text Generation
+        api_base: ${DYNAMO_API_BASE}
+        api_key: ${DYNAMO_API_KEY}
+        model: mistralai/Mixtral-8x22B-Instruct-v0.1
+      - name: Unknown
+        api_base: ${DYNAMO_API_BASE}
+        api_key: ${DYNAMO_API_KEY}
+        model: meta-llama/Llama-3.1-8B-Instruct
+  - name: "complexity_router"
+    url: http://llm-router-router-server.llm-router.svc.cluster.local:8000/v2/models/complexity_router_ensemble/infer
+    llms:
+      - name: Creativity
+        api_base: ${DYNAMO_API_BASE}
+        api_key: ${DYNAMO_API_KEY}
+        model: meta-llama/Llama-3.1-70B-Instruct
+      - name: Reasoning
+        api_base: ${DYNAMO_API_BASE}
+        api_key: ${DYNAMO_API_KEY}
+        model: meta-llama/Llama-3.1-70B-Instruct
+      - name: Contextual-Knowledge
+        api_base: ${DYNAMO_API_BASE}
+        api_key: ${DYNAMO_API_KEY}
+        model: meta-llama/Llama-3.1-8B-Instruct
+      - name: Few-Shot
+        api_base: ${DYNAMO_API_BASE}
+        api_key: ${DYNAMO_API_KEY}
+        model: meta-llama/Llama-3.1-70B-Instruct
+      - name: Domain-Knowledge
+        api_base: ${DYNAMO_API_BASE}
+        api_key: ${DYNAMO_API_KEY}
+        model: mistralai/Mixtral-8x22B-Instruct-v0.1
+      - name: No-Label-Reason
+        api_base: ${DYNAMO_API_BASE}
+        api_key: ${DYNAMO_API_KEY}
+        model: meta-llama/Llama-3.1-8B-Instruct
+      - name: Constraint
+        api_base: ${DYNAMO_API_BASE}
+        api_key: ${DYNAMO_API_KEY}
+        model: meta-llama/Llama-3.1-8B-Instruct
