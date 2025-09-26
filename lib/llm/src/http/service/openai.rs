@@ -711,12 +711,6 @@ pub fn validate_chat_completion_unsupported_fields(
 ) -> Result<(), ErrorResponse> {
     let inner = &request.inner;
 
-    if inner.parallel_tool_calls == Some(true) {
-        return Err(ErrorMessage::not_implemented_error(
-            "`parallel_tool_calls: true` is not supported.",
-        ));
-    }
-
     if inner.function_call.is_some() {
         return Err(ErrorMessage::not_implemented_error(
             "`function_call` is deprecated. Please migrate to use `tool_choice` instead.",
