@@ -1093,6 +1093,15 @@ func (r *DynamoComponentDeploymentReconciler) generateHPA(opt generateResourceOp
 		return kubeHpa, true, nil
 	}
 
+	if hpaConf.MinReplicas < 0 {
+		return nil, false, fmt.Errorf("minReplicas must be at least 0, got %d", hpaConf.MinReplicas)
+	}
+
+	if hpaConf.MaxReplicas < hpaConf.MinReplicas {
+		return nil, false, fmt.Errorf("maxReplicas (%d) must be greater than or equal to minReplicas (%d)",
+			hpaConf.MaxReplicas, hpaConf.MinReplicas)
+	}
+
 	minReplica := int32(hpaConf.MinReplicas)
 
 	kubeHpa.Spec = autoscalingv2.HorizontalPodAutoscalerSpec{
