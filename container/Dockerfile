@@ -290,9 +290,27 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
 # Install system dependencies
 ARG PYTHON_VERSION
 RUN dnf update -y \
-    && dnf install -y llvm-toolset protobuf-compiler python${PYTHON_VERSION}-devel wget \
+    && dnf install -y llvm-toolset protobuf-compiler python${PYTHON_VERSION}-devel wget unzip \
     && dnf clean all \
     && rm -rf /var/cache/dnf
+
+# Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
+RUN set -eux; \
+    PROTOC_VERSION=25.3; \
+    case "${ARCH_ALT}" in \
+      x86_64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-x86_64.zip" ;; \
+      aarch64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-aarch_64.zip" ;; \
+      *) echo "Unsupported architecture: ${ARCH_ALT}" >&2; exit 1 ;; \
+    esac; \
+    wget --tries=3 --waitretry=5 -O /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${PROTOC_ZIP}"; \
+    rm -f /usr/local/bin/protoc /usr/bin/protoc; \
+    unzip -o /tmp/protoc.zip -d /usr/local bin/protoc include/*; \
+    chmod +x /usr/local/bin/protoc; \
+    ln -s /usr/local/bin/protoc /usr/bin/protoc; \
+    protoc --version
+
+# Point build tools explicitly at the modern protoc
+ENV PROTOC=/usr/local/bin/protoc
 
 # Copy artifacts from base stage
 COPY --from=base $RUSTUP_HOME $RUSTUP_HOME

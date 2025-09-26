@@ -24,7 +24,7 @@ Currently, these setups are only supported with the kGateway based Inference Gat
 
 ### 1. Install Dynamo Platform ###
 
-[See Quickstart Guide](../../docs/guides/dynamo_deploy/README.md) to install Dynamo Cloud.
+[See Quickstart Guide](../../docs/kubernetes/README.md) to install Dynamo Cloud.
 
 
 ### 2. Deploy Inference Gateway ###

@@ -24,5 +24,4 @@ python3 -m dynamo.sglang \
   --served-model-name Qwen/Qwen3-0.6B \
   --page-size 16 \
   --tp 1 \
-  --trust-remote-code \
-  --skip-tokenizer-init
+  --trust-remote-code
