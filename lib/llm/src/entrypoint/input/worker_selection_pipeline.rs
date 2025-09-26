@@ -491,7 +491,6 @@ pub async fn create_worker_selection_pipeline_chat(
         traits::DistributedRuntimeProvider,
     };
 
-    // --- IMPORTANT CHANGE ---
     // Create a fresh Runtime + DistributedRuntime, then *leak* the DistributedRuntime
     // so it won't be dropped inside an async context (which triggers Tokio's panic).
     //

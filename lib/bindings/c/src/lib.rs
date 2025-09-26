@@ -360,7 +360,6 @@ use dynamo_llm::entrypoint::input::worker_selection_pipeline::{
     create_worker_selection_pipeline_chat, query_worker_selection_and_annotate,
 };
 use dynamo_llm::kv_router::KvRouterConfig;
-use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 use dynamo_llm::types::{
     Annotated,
     openai::chat_completions::{
