@@ -51,6 +51,7 @@ chrono = { workspace = true }
 derive_builder = { workspace = true }
 either = { workspace = true }
 etcd-client = { workspace = true }
+flate2 = { workspace = true }
 futures = { workspace = true }
 futures-util = "0.3.31"
 hf-hub = { workspace = true }
@@ -75,9 +76,10 @@ uuid = { workspace = true }
 xxhash-rust = { workspace = true }
 modelexpress-client = { workspace = true }
 modelexpress-common = { workspace = true }
+ahash = "0.8"  # Purpose: Fast hash map implementation for GGUF tokenizer
 akin = "0.4.0"
 bitflags = { version = "2.4", features = ["serde"] }
-blake3 = { version = "1.8", features = ["mmap", "rayon"] }
+blake3 = { workspace = true }
 bytemuck = "1.22"
 candle-core = { version = "0.9.1" }
 derive-getters = "0.5"
@@ -136,13 +138,12 @@ minijinja-contrib = { version = "2.10.2", features = ["pycompat"] }
 json-five = { version = "0.3" }
 
 # GGUF
-ggus = "0.4.0"
+ggus = "0.5.1"
 memmap2 = "0.9.5"
 
 # Publishers
 zeromq = "0.4.1"
 rmp-serde = "1.3"
-ahash = "0.8.12"
 
 [dev-dependencies]
 approx = "0.5"

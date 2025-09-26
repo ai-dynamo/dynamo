@@ -182,7 +182,7 @@ where
                                 message: http_error_instance.message.clone(),
                             })?
                         } else {
-                            Err(error!("Python Error: {}", py_err.to_string()))
+                            Err(error!("Python Error: {}", py_err))
                         }
                     })
                 } else {

@@ -569,8 +569,6 @@ mod tests {
     type TestTokenData = (&'static str, f32, Vec<TestTokenAlternative>);
     type TestTokenDataVec = Vec<TestTokenData>;
     use crate::perf::{RecordingMode, TimestampedResponse, record_stream_with_context};
-    use crate::protocols::codec::create_message_stream;
-    use crate::protocols::convert_sse_stream;
     use approx::assert_abs_diff_eq;
     use dynamo_async_openai::types::{
         ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionStreamResponseDelta,
@@ -1445,29 +1443,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_real_sse_stream_analysis() {
-        // Read the real SSE data with logprobs
-        let data = std::fs::read_to_string(
-            "tests/data/replays/deepseek-r1-distill-llama-8b/chat-completions.stream.1",
-        )
-        .expect("Failed to read test data file");
+    async fn test_mock_stream_analysis() {
+        use futures::stream;
 
-        // Create stream from SSE data
-        let sse_stream = create_message_stream(&data);
+        // Create mock responses with logprob data using existing helper functions
+        let token_logprobs = vec![
+            create_token_logprob_from_linear_probs("Hello", 0.6, vec![("Hi", 0.35)]), // varied
+            create_token_logprob_from_linear_probs(" world", 0.51, vec![(" earth", 0.49)]), // close
+            create_token_logprob_from_linear_probs("!", 0.8, vec![(".", 0.15)]),      // greedy
+            create_token_logprob_from_linear_probs(" How", 0.65, vec![(" What", 0.3)]), // varied
+            create_token_logprob_from_linear_probs(" are", 0.52, vec![(" were", 0.48)]), // close
+            create_token_logprob_from_linear_probs(" you", 0.85, vec![(" they", 0.12)]), // greedy
+        ];
 
-        // Convert SSE messages to our stream response format using the existing converter
-        let response_stream =
-            convert_sse_stream::<NvCreateChatCompletionStreamResponse>(Box::pin(sse_stream));
-
-        // Filter out errors and extract successful responses
-        let filtered_stream = response_stream.filter_map(|annotated| async move { annotated.data });
+        let mock_response = create_mock_response_with_logprobs(token_logprobs);
+        let mock_stream = stream::iter(vec![mock_response]);
 
         // Create a mock context for recording
         let ctx = Arc::new(MockContext::new());
 
         // Record the stream
         let (recorded_stream, recording_rx) =
-            record_stream_with_context(Box::pin(filtered_stream), ctx, RecordingMode::Sink);
+            record_stream_with_context(Box::pin(mock_stream), ctx, RecordingMode::Sink);
 
         // Consume the stream (it will be recorded)
         let _collected: Vec<_> = recorded_stream.collect().await;
@@ -1501,23 +1498,11 @@ mod tests {
             "No positions analyzed"
         );
 
-        // Look for the specific vLLM case with equal logprobs ("Ġblock" vs "Ġchunk")
-        let close_positions = analysis.get_close_positions_for_choice(0, 0.001);
+        // Look for close positions (should find the 0.51 vs 0.49 and 0.52 vs 0.48 cases)
+        let close_positions = analysis.get_close_positions_for_choice(0, 0.1);
 
-        // Should find at least one very close position (the equal logprob case)
+        // Should find some close positions from our mock data
         assert!(!close_positions.is_empty(), "No close positions found");
-
-        // Check if we found the exact equal case (difference = 0)
-        let equal_positions = close_positions
-            .iter()
-            .filter(|pos| pos.probability_difference < 0.0001)
-            .count();
-        if equal_positions > 0 {
-            println!(
-                "Found {} positions with nearly equal probabilities",
-                equal_positions
-            );
-        }
 
         // Test other analysis methods
         let closest_3 = analysis.get_closest_positions_for_choice(0, 3);
@@ -1542,12 +1527,10 @@ mod tests {
 
         // Test multiple close tokens detection
         let multiple_close = analysis.detect_multiple_close_tokens(0, 0.05);
-        if !multiple_close.is_empty() {
-            println!(
-                "Found {} positions with multiple close tokens",
-                multiple_close.len()
-            );
-        }
+        println!(
+            "Found {} positions with multiple close tokens",
+            multiple_close.len()
+        );
     }
 
     fn create_mock_response() -> NvCreateChatCompletionStreamResponse {

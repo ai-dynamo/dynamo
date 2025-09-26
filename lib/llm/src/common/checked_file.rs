@@ -7,6 +7,7 @@ use std::{
     str::FromStr,
 };
 
+use anyhow::Context;
 use either::Either;
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
@@ -166,16 +167,13 @@ impl<'de> Deserialize<'de> for CheckedFile {
 fn b3sum<T: AsRef<Path> + std::fmt::Debug>(path: T) -> anyhow::Result<String> {
     let path = path.as_ref();
     let metadata = std::fs::metadata(path)?;
-    let filesize = metadata.len();
+    let _filesize = metadata.len();
     let mut hasher = blake3::Hasher::new();
 
-    if filesize > 128_000 {
-        // multithreaded. blake3 recommend this above 128 KiB.
-        hasher.update_mmap_rayon(path)?;
-    } else {
-        // Uses mmap above 16 KiB, normal load otherwise.
-        hasher.update_mmap(path)?;
-    }
+    // Read the file and update the hasher
+    let file_contents = std::fs::read(path)
+        .with_context(|| format!("Failed to read file for hashing: {}", path.display()))?;
+    hasher.update(&file_contents);
 
     let hash = hasher.finalize();
     Ok(hash.to_string())

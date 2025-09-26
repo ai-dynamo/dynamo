@@ -56,6 +56,7 @@ derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
 either = { version = "1.13", features = ["serde"] }
 etcd-client = { version = "0.16", features = ["tls"] }
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }  # Purpose: Pure Rust gzip compression/decompression
 futures = { version = "0.3" }
 hf-hub = { version = "0.4.2", default-features = false, features = [
     "tokio",
@@ -78,7 +79,7 @@ reqwest = { version = "0.12.22", default-features = false, features = [
     "rustls-tls",
 ] }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1" }
+serde_json = { version = "1.0.141" }
 strum = { version = "0.27", features = ["derive"] }
 tempfile = "3"
 thiserror = { version = "2.0.11" }
@@ -102,8 +103,16 @@ xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
 insta.opt-level = 3
 
 [profile.dev]
-# release level optimizations otherwise everything feels slow
-opt-level = 3
+# NOTE: users that wish for better dev perf should put the following settings in their
+# ~/.cargo or project's workspace
+# opt-level = 3
+
+[profile.ci]
+inherits = "dev"
+debug = 0            # No debug symbols
+opt-level = 1        # Some optimizations
+codegen-units = 4    # Faster compilation
+incremental = false  # Smaller artifacts, slower rebuild
 
 [profile.release]
 # These make the build much slower but shrink the binary, and could help performance
