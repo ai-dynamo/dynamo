@@ -17,13 +17,13 @@ spec:
         fsGroup: 1000
       containers:
       - name: benchmark-runner
+        # TODO: update to latest public image in next release
         image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
             drop:
             - ALL
-          readOnlyRootFilesystem: true
           runAsNonRoot: true
         resources:
           requests:
@@ -50,11 +50,10 @@ spec:
           - "256"
           - --output-dir
           - /data/results
-          - --input
-          - "qwen-vllm-agg=vllm-agg-frontend:8000"
-          # add more copies of lines 58-59 for each additional service if you want to benchmark multiple services
-          # - --input
-          # - "name=service-url:port"
+          - --benchmark-name
+          - "qwen3-0p6b-vllm-agg"
+          - --endpoint-url
+          - "vllm-agg-frontend:8000"
         volumeMounts:
           - name: data-volume
             mountPath: /data

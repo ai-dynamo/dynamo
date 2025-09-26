@@ -272,6 +272,7 @@ impl KvEventPublisher {
         lora_id: u64,
         parent_hash: Option<i64>,
     ) -> PyResult<()> {
+        let block_hashes_u64: Vec<u64> = block_hashes.iter().map(|&h| h as u64).collect();
         let event = KvCacheEvent {
             event_id,
             data: KvCacheEventData::Stored(KvCacheStoreData {
@@ -280,7 +281,7 @@ impl KvEventPublisher {
                     self.kv_block_size as u32,
                     &token_ids,
                     &num_block_tokens,
-                    &block_hashes,
+                    &block_hashes_u64,
                     lora_id,
                     &self.warning_count,
                 ),
@@ -292,8 +293,8 @@ impl KvEventPublisher {
 
     fn publish_removed(&self, _py: Python, event_id: u64, block_hashes: Vec<i64>) -> PyResult<()> {
         let block_hashes: Vec<ExternalSequenceBlockHash> = block_hashes
-            .iter()
-            .map(|&h| ExternalSequenceBlockHash::from(h))
+            .into_iter()
+            .map(ExternalSequenceBlockHash::from)
             .collect();
         let event = KvCacheEvent {
             event_id,
