@@ -29,6 +29,8 @@ export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://gi
 # 2. Install CRDs
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-${RELEASE_VERSION}.tgz
 helm install dynamo-crds dynamo-crds-${RELEASE_VERSION}.tgz --namespace default
+# If CRDs have been previously installed, upgrade helm chart to the target version
+helm upgrade dynamo-crds dynamo-crds-${RELEASE_VERSION}.tgz --namespace default
 
 # 3. Install Platform
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz
