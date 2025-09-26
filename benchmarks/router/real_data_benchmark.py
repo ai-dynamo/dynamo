@@ -27,12 +27,11 @@ logger.addHandler(console_handler)
 def get_genai_perf_cmd_for_trace(
     model,
     tokenizer,
-    input_file,
+    input_dataset,
     artifact_dir,
     seed,
     url="http://localhost:8888",
 ):
-    """Build genai-perf command for trace file input"""
     return [
         "genai-perf",
         "profile",
@@ -48,7 +47,7 @@ def get_genai_perf_cmd_for_trace(
         "--url",
         url,
         "--input-file",
-        input_file,
+        f"payload:{input_dataset}",
         "--random-seed",
         str(seed),
         "--artifact-dir",
@@ -67,22 +66,22 @@ def get_genai_perf_cmd_for_trace(
 def run_benchmark_with_trace(
     model,
     tokenizer,
-    trace_file,
+    trace_dataset,
     artifact_dir,
     url,
     seed,
 ):
-    """Run genai-perf benchmark with a trace file"""
+    """Run genai-perf benchmark with a trace dataset"""
     genai_perf_cmd = get_genai_perf_cmd_for_trace(
         model,
         tokenizer,
-        trace_file,
+        trace_dataset,
         artifact_dir,
         seed,
         url,
     )
 
-    logger.info(f"Running genai-perf with trace file: {trace_file}")
+    logger.info(f"Running genai-perf with trace dataset: {trace_dataset}")
     logger.info(f"Command: {' '.join(genai_perf_cmd)}")
 
     try:
@@ -128,12 +127,12 @@ def main():
         help="Output directory for results",
     )
 
-    # Trace file and synthesis configuration (similar to synthesizer.py)
+    # Trace dataset and synthesis configuration (similar to synthesizer.py)
     parser.add_argument(
-        "--input-file",
+        "--input-dataset",
         type=str,
         default="mooncake_trace.jsonl",
-        help="Path to the input mooncake-style trace file",
+        help="Path to the input mooncake-style trace dataset file",
     )
     parser.add_argument(
         "--num-requests",
@@ -205,15 +204,15 @@ def main():
     )
 
     if not needs_synthesis:
-        # No synthesis needed, use original file
-        trace_file_path = args.input_file
+        # No synthesis needed, use original dataset
+        trace_dataset_path = args.input_dataset
         logger.info(
-            f"Using original trace file (no synthesis parameters modified): {trace_file_path}"
+            f"Using original trace dataset (no synthesis parameters modified): {trace_dataset_path}"
         )
     else:
-        # Generate synthetic data based on input file
+        # Generate synthetic data based on input dataset
         logger.info("Generating synthetic trace data...")
-        logger.info(f"  Base file: {args.input_file}")
+        logger.info(f"  Base dataset: {args.input_dataset}")
         logger.info(
             f"  Num requests: {args.num_requests if args.num_requests else 'all'}"
         )
@@ -229,7 +228,7 @@ def main():
 
         # Create synthesizer
         synthesizer = Synthesizer(
-            args.input_file,
+            args.input_dataset,
             block_size=args.block_size,
             speedup_ratio=args.speedup_ratio,
             prefix_len_multiplier=args.prefix_len_multiplier,
@@ -239,10 +238,10 @@ def main():
 
         # Determine number of requests
         if args.num_requests is None:
-            # Count requests in original file
-            with open(args.input_file, "r") as f:
+            # Count requests in original dataset
+            with open(args.input_dataset, "r") as f:
                 num_requests = sum(1 for _ in f)
-            logger.info(f"Using all {num_requests} requests from input file")
+            logger.info(f"Using all {num_requests} requests from input dataset")
         else:
             num_requests = args.num_requests
 
@@ -252,23 +251,23 @@ def main():
 
         # Save synthetic data to a permanent file in output directory
         synthetic_trace_filename = "synthetic_trace.jsonl"
-        trace_file_path = os.path.join(args.output_dir, synthetic_trace_filename)
+        trace_dataset_path = os.path.join(args.output_dir, synthetic_trace_filename)
 
         # Write synthetic data to file
-        with open(trace_file_path, "w") as f:
+        with open(trace_dataset_path, "w") as f:
             for request in requests:
                 f.write(json.dumps(request) + "\n")
 
-        logger.info(f"Synthetic trace data saved to: {trace_file_path}")
+        logger.info(f"Synthetic trace data saved to: {trace_dataset_path}")
 
-    # Run benchmark with the trace file
+    # Run benchmark with the trace dataset
     artifact_dir = os.path.join(args.output_dir, "genai_perf_artifacts")
     os.makedirs(artifact_dir, exist_ok=True)
 
     run_benchmark_with_trace(
         args.model,
         args.tokenizer,
-        trace_file_path,
+        trace_dataset_path,
         artifact_dir,
         args.url,
         args.seed,
