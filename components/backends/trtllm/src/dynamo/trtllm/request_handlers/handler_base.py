@@ -13,17 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import copy
 import logging
 import os
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from enum import Enum
-from typing import Optional, Union
+from typing import Any, AsyncGenerator, Optional, Union
 
 import torch
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
 
+from dynamo._core import Context
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -100,14 +103,71 @@ class HandlerBase:
                 result["finish_reason"] == "stop" or result["finish_reason"] == "error"
             )
 
+    async def _handle_cancellation(self, generation_result: Any, context: Context):
+        """Background task to handle cancellation by monitoring context state."""
+        try:
+            # Wait asynchronously for cancellation signal instead of polling
+            await context.async_killed_or_stopped()
+            # Call abort_request on the executor through the LLM instance
+            if hasattr(self.engine.llm, "_executor") and self.engine.llm._executor:
+                # Get the internal request ID from the generation result
+                internal_request_id = getattr(generation_result, "request_id", None)
+                if internal_request_id is not None:
+                    # TODO: Can this be an official abort method in TRT-LLM?
+                    self.engine.llm._executor.abort_request(internal_request_id)
+                    logging.debug(f"Aborted Request ID: {context.id()}")
+                else:
+                    logging.error(
+                        f"Could not retrieve internal request ID for abort: {context.id()}"
+                    )
+            else:
+                logging.error(
+                    f"TensorRT-LLM executor not found for abort request: {context.id()}"
+                )
+        except asyncio.CancelledError:
+            # Task was cancelled, which is expected when generation completes
+            pass
+
+    @asynccontextmanager
+    async def _cancellation_monitor(
+        self, generation_result: Any, context: Context
+    ) -> AsyncGenerator[asyncio.Task, None]:
+        """
+        Context manager for monitoring request cancellation.
+
+        Automatically creates a background task to monitor for cancellation and
+        cleans it up when the context exits.
+
+        Yields:
+            asyncio.Task: The cancellation monitoring task
+        """
+        cancellation_task = asyncio.create_task(
+            self._handle_cancellation(generation_result, context)
+        )
+
+        try:
+            yield cancellation_task
+        finally:
+            # Clean up the background cancellation task
+            if not cancellation_task.done():
+                cancellation_task.cancel()
+                try:
+                    await cancellation_task
+                except asyncio.CancelledError:
+                    pass
+
     async def generate_locally(
-        self, request: dict, embeddings: Optional[Union[torch.Tensor, dict]] = None
+        self,
+        request: dict,
+        context: Context,
+        embeddings: Optional[Union[torch.Tensor, dict]] = None,
     ):
         """
         Generate responses based on the disaggregation mode in the request.
 
         Args:
             request: The request dictionary containing generation parameters
+            context: Context object for cancellation handling
             embeddings: Optional tensor or dict containing embeddings for multimodal processing
         """
         logging.debug(f"Request: {request}")
@@ -192,50 +252,57 @@ class HandlerBase:
             sampling_params.logits_processor = adapters
 
         # NEW: Updated engine call to include multimodal data
-        async for res in self.engine.llm.generate_async(
+        generation_result = self.engine.llm.generate_async(
             inputs=processed_input,  # Use the correctly extracted inputs
             sampling_params=sampling_params,
             disaggregated_params=disaggregated_params,
             streaming=streaming,
-        ):
-            # TRTLLM engine needs to start generating tokens first before stats
-            # can be retrieved.
-            if self.first_generation and self.publisher:
-                self.publisher.start()
-                self.first_generation = False
+        )
 
-            # Upon completion, send a final chunk with "stop" as the finish reason.
-            # This signals to the client that the stream has ended.
-            if res.finished and self.disaggregation_mode != DisaggregationMode.PREFILL:
+        # Use the context manager to handle cancellation monitoring
+        async with self._cancellation_monitor(generation_result, context):
+            async for res in generation_result:
+                # TRTLLM engine needs to start generating tokens first before stats
+                # can be retrieved.
+                if self.first_generation and self.publisher:
+                    self.publisher.start()
+                    self.first_generation = False
+
+                # Upon completion, send a final chunk with "stop" as the finish reason.
+                # This signals to the client that the stream has ended.
+                if (
+                    res.finished
+                    and self.disaggregation_mode != DisaggregationMode.PREFILL
+                ):
+                    if self.multimodal_processor:
+                        final_out = self.multimodal_processor.get_stop_response(
+                            request_id, model_name
+                        )
+                        yield final_out
+
+                if not res.outputs:
+                    yield {"finish_reason": "error", "token_ids": []}
+                    break
+
+                output = res.outputs[0]
+                # The engine returns all tokens generated so far. We must calculate the new
+                # tokens generated in this iteration to create the "delta".
+                next_total_toks = len(output.token_ids)
                 if self.multimodal_processor:
-                    final_out = self.multimodal_processor.get_stop_response(
-                        request_id, model_name
+                    out = self.multimodal_processor.create_response_chunk(
+                        output, num_output_tokens_so_far, request_id, model_name
                     )
-                    yield final_out
-
-            if not res.outputs:
-                yield {"finish_reason": "error", "token_ids": []}
-                break
-
-            output = res.outputs[0]
-            # The engine returns all tokens generated so far. We must calculate the new
-            # tokens generated in this iteration to create the "delta".
-            next_total_toks = len(output.token_ids)
-            if self.multimodal_processor:
-                out = self.multimodal_processor.create_response_chunk(
-                    output, num_output_tokens_so_far, request_id, model_name
-                )
-            else:
-                out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
-            if output.finish_reason:
-                out["finish_reason"] = output.finish_reason
-            if output.stop_reason:
-                out["stop_reason"] = output.stop_reason
-            if self.disaggregation_mode == DisaggregationMode.PREFILL:
-                # Return the disaggregated params only when operating in prefill mode.
-                out["disaggregated_params"] = asdict(
-                    DisaggregatedParamsCodec.encode(output.disaggregated_params)
-                )
-            # Yield the chunk to the client and update the token count for the next iteration.
-            yield out
-            num_output_tokens_so_far = next_total_toks
+                else:
+                    out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+                if output.finish_reason:
+                    out["finish_reason"] = output.finish_reason
+                if output.stop_reason:
+                    out["stop_reason"] = output.stop_reason
+                if self.disaggregation_mode == DisaggregationMode.PREFILL:
+                    # Return the disaggregated params only when operating in prefill mode.
+                    out["disaggregated_params"] = asdict(
+                        DisaggregatedParamsCodec.encode(output.disaggregated_params)
+                    )
+                # Yield the chunk to the client and update the token count for the next iteration.
+                yield out
+                num_output_tokens_so_far = next_total_toks
