@@ -80,6 +80,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                         router_config.busy_threshold,
                         target_namespace,
                         Arc::new(http_service.clone()),
+                        http_service.state().metrics_clone(),
                     )
                     .await?;
                 }
@@ -217,7 +218,11 @@ async fn run_watcher(
     busy_threshold: Option<f64>,
     target_namespace: Option<String>,
     http_service: Arc<HttpService>,
+    metrics: Arc<crate::http::service::metrics::Metrics>,
 ) -> anyhow::Result<()> {
+    // Clone model_manager before it's moved into ModelWatcher
+    let model_manager_clone = model_manager.clone();
+
     let mut watch_obj = ModelWatcher::new(
         runtime,
         model_manager,
@@ -234,11 +239,22 @@ async fn run_watcher(
 
     watch_obj.set_notify_on_model_update(tx);
 
-    // Spawn a task to watch for model type changes and update HTTP service endpoints
+    // Spawn a task to watch for model type changes and update HTTP service endpoints and metrics
     let _endpoint_enabler_task = tokio::spawn(async move {
         while let Some(model_type) = rx.recv().await {
             tracing::debug!("Received model type update: {:?}", model_type);
+
+            // Update HTTP endpoints (existing functionality)
             update_http_endpoints(http_service.clone(), model_type);
+
+            // Update metrics (only for added models)
+            update_model_metrics(
+                model_type,
+                model_manager_clone.clone(),
+                metrics.clone(),
+                Some(etcd_client.clone()),
+            )
+            .await;
         }
     });
 
@@ -268,6 +284,49 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
             for endpoint_type in model_type.as_endpoint_types() {
                 service.enable_model_endpoint(endpoint_type, false);
             }
+        }
+    }
+}
+
+/// Updates metrics for model type changes
+async fn update_model_metrics(
+    model_type: ModelUpdate,
+    model_manager: Arc<ModelManager>,
+    metrics: Arc<crate::http::service::metrics::Metrics>,
+    etcd_client: Option<etcd::Client>,
+) {
+    match model_type {
+        ModelUpdate::Added(model_type) => {
+            tracing::debug!("Updating metrics for added model type: {:?}", model_type);
+
+            // Get all model entries and update metrics for matching types
+            let model_entries = model_manager.get_model_entries();
+            for entry in model_entries {
+                if entry.model_type == model_type {
+                    // Update runtime config metrics if available
+                    if let Some(runtime_config) = &entry.runtime_config {
+                        metrics.update_runtime_config_metrics(&entry.name, runtime_config);
+                    }
+
+                    // Update MDC metrics if etcd is available
+                    if let Some(ref etcd) = etcd_client
+                        && let Err(e) = metrics
+                            .update_metrics_from_model_entry_with_mdc(&entry, etcd)
+                            .await
+                    {
+                        tracing::debug!(
+                            model = %entry.name,
+                            error = %e,
+                            "Failed to update MDC metrics for newly added model"
+                        );
+                    }
+                }
+            }
+        }
+        ModelUpdate::Removed(model_type) => {
+            tracing::debug!("Model type removed: {:?}", model_type);
+            // Note: Metrics are typically not removed to preserve historical data
+            // This matches the behavior in the polling task
         }
     }
 }
