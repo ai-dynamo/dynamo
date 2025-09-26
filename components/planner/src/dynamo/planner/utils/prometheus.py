@@ -17,6 +17,7 @@ import logging
 
 from prometheus_api_client import PrometheusConnect
 
+from dynamo._core import prometheus_names
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
@@ -28,14 +29,14 @@ class PrometheusAPIClient:
         self.prom = PrometheusConnect(url=url, disable_ssl=True)
 
     def _get_average_metric(
-        self, metric_name: str, interval: str, operation_name: str
+        self, full_metric_name: str, interval: str, operation_name: str
     ) -> float:
         """
         Helper method to get average metrics using the pattern:
         increase(metric_sum[interval])/increase(metric_count[interval])
 
         Args:
-            metric_name: Base metric name (e.g., 'inter_token_latency_seconds')
+            full_metric_name: Full metric name (e.g., 'dynamo_frontend_inter_token_latency_seconds')
             interval: Time interval for the query (e.g., '60s')
             operation_name: Human-readable name for error logging
 
@@ -43,8 +44,6 @@ class PrometheusAPIClient:
             Average metric value or 0 if no data/error
         """
         try:
-            # TODO: use prometheus_names.rs
-            full_metric_name = f"dynamo_frontend_{metric_name}"
             query = f"increase({full_metric_name}_sum[{interval}])/increase({full_metric_name}_count[{interval}])"
             result = self.prom.custom_query(query=query)
             if not result:
@@ -57,21 +56,21 @@ class PrometheusAPIClient:
 
     def get_avg_inter_token_latency(self, interval: str):
         return self._get_average_metric(
-            "inter_token_latency_seconds",
+            prometheus_names.frontend.inter_token_latency_seconds,
             interval,
             "avg inter token latency",
         )
 
     def get_avg_time_to_first_token(self, interval: str):
         return self._get_average_metric(
-            "time_to_first_token_seconds",
+            prometheus_names.frontend.time_to_first_token_seconds,
             interval,
             "avg time to first token",
         )
 
     def get_avg_request_duration(self, interval: str):
         return self._get_average_metric(
-            "request_duration_seconds",
+            prometheus_names.frontend.request_duration_seconds,
             interval,
             "avg request duration",
         )
@@ -79,8 +78,9 @@ class PrometheusAPIClient:
     def get_avg_request_count(self, interval: str):
         # This function follows a different query pattern than the other metrics
         try:
+            requests_total_metric = prometheus_names.frontend.requests_total
             raw_res = self.prom.custom_query(
-                query=f"increase(dynamo_frontend_requests_total[{interval}])"
+                query=f"increase({requests_total_metric}[{interval}])"
             )
             total_count = 0.0
             for res in raw_res:
@@ -93,14 +93,14 @@ class PrometheusAPIClient:
 
     def get_avg_input_sequence_tokens(self, interval: str):
         return self._get_average_metric(
-            "input_sequence_tokens",
+            prometheus_names.frontend.input_sequence_tokens,
             interval,
             "avg input sequence tokens",
         )
 
     def get_avg_output_sequence_tokens(self, interval: str):
         return self._get_average_metric(
-            "output_sequence_tokens",
+            prometheus_names.frontend.output_sequence_tokens,
             interval,
             "avg output sequence tokens",
         )

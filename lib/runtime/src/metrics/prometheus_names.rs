@@ -6,6 +6,13 @@
 //! This module provides centralized Prometheus metric name constants and sanitization functions
 //! for various components to ensure consistency and avoid duplication across the codebase.
 //!
+//! ⚠️  **CRITICAL: SYNC WITH PYTHON BINDINGS** ⚠️
+//! When modifying constants in this file, you MUST also update:
+//! `lib/bindings/python/rust/prometheus_names.rs`
+//!
+//! The Python bindings expose these constants to Python code and must stay in sync.
+//! Any changes here should be reflected in the Python bindings immediately.
+//!
 //! ## Naming Conventions
 //!
 //! All metric names should follow: `{prefix}_{name}_{suffix}`
@@ -64,6 +71,9 @@ pub mod labels {
 }
 
 /// Frontend service metrics (LLM HTTP service)
+///
+/// ⚠️  SYNC ALERT: These constants are exposed to Python via:
+/// `lib/bindings/python/rust/prometheus_names.rs` - FrontendService class
 pub mod frontend_service {
     // TODO: Move DYN_METRICS_PREFIX and other environment variable names to environment_names.rs
     // for centralized environment variable constant management across the codebase
