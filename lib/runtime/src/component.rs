@@ -64,11 +64,13 @@ mod client;
 #[allow(clippy::module_inception)]
 mod component;
 mod endpoint;
+mod local_client;
 mod namespace;
 mod registry;
 pub mod service;
 
 pub use client::{Client, InstanceSource};
+pub use local_client::LocalClient;
 
 /// The root etcd path where each instance registers itself in etcd.
 /// An instance is namespace+component+endpoint+lease_id and must be unique.
@@ -87,6 +89,8 @@ pub enum TransportType {
 pub struct RegistryInner {
     services: HashMap<String, Service>,
     stats_handlers: HashMap<String, Arc<std::sync::Mutex<HashMap<String, EndpointStatsHandler>>>>,
+    /// Service-level flag to enable local registry for endpoints
+    pub(crate) service_enable_local_registry: HashMap<String, bool>,
 }
 
 #[derive(Clone)]
@@ -140,6 +144,10 @@ pub struct Component {
     // A static component's endpoints cannot be discovered via etcd, they are
     // fixed at startup time.
     is_static: bool,
+
+    /// Flag to enable local engine registry for endpoints
+    #[builder(default = "true")]
+    pub(crate) enable_local_registry: bool,
 }
 
 impl Hash for Component {
@@ -427,6 +435,18 @@ impl Endpoint {
 
     pub fn component(&self) -> &Component {
         &self.component
+    }
+
+    /// Create a local client for this endpoint
+    pub async fn local_client<Req, Resp, E>(
+        &self,
+    ) -> Result<local_client::LocalClient<Req, Resp, E>>
+    where
+        Req: crate::engine::Data,
+        Resp: crate::engine::StreamData + crate::engine::AsyncEngineContextProvider,
+        E: crate::engine::Data,
+    {
+        local_client::LocalClient::from_endpoint(self).await
     }
 
     // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers

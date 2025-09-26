@@ -25,12 +25,28 @@ pub struct ServiceConfig {
     /// Description
     #[builder(default)]
     description: Option<String>,
+
+    /// Whether to enable local engine registry for endpoints
+    #[builder(default = "true")]
+    pub(crate) enable_local_registry: bool,
 }
 
 impl ServiceConfigBuilder {
+    /// Enable local engine registry for endpoints (default)
+    pub fn with_local_registry(mut self) -> Self {
+        self.enable_local_registry = Some(true);
+        self
+    }
+
+    /// Disable local engine registry for endpoints
+    pub fn without_local_registry(mut self) -> Self {
+        self.enable_local_registry = Some(false);
+        self
+    }
+
     /// Create the [`Component`]'s service and store it in the registry.
     pub async fn create(self) -> Result<Component> {
-        let (component, description) = self.build_internal()?.dissolve();
+        let (component, description, enable_local_registry) = self.build_internal()?.dissolve();
 
         let version = "0.0.1".to_string();
 
@@ -82,7 +98,12 @@ impl ServiceConfigBuilder {
         // insert the stats handler into the registry
         guard
             .stats_handlers
-            .insert(service_name, stats_handler_registry_clone);
+            .insert(service_name.clone(), stats_handler_registry_clone);
+
+        // Store the enable_local_registry flag for this service
+        guard
+            .service_enable_local_registry
+            .insert(service_name.clone(), enable_local_registry);
 
         // drop the guard to unlock the mutex
         drop(guard);
