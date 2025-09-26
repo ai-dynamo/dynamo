@@ -55,9 +55,6 @@ spec:
       envFromSecret: hf-token-secret
       componentType: planner
       replicas: 1
-      envs:
-        - name: PROMETHEUS_PORT
-          value: "8000"
       livenessProbe:
         exec:
           command:
@@ -98,47 +95,11 @@ spec:
               --adjustment-interval=60
               --prometheus-port=9085
               --no-correction
-    Prometheus:
-      dynamoNamespace: vllm-disagg-planner
-      componentType: main
-      replicas: 1
-      envs:
-        - name: PYTHONPATH
-          value: "/workspace/components/planner/src"
-        - name: PROMETHEUS_PORT
-          value: "8000"
-      livenessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        initialDelaySeconds: 30
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      extraPodSpec:
-        mainContainer:
-          image: my-registry/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
-          command:
-            - /bin/sh
-            - -c
-          args:
-            - "python3 -m dynamo.planner.prometheus"
     VllmDecodeWorker:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
+      subComponentType: decode
       replicas: 1
       livenessProbe:
         httpGet:
@@ -195,6 +156,7 @@ spec:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
+      subComponentType: prefill
       replicas: 1
       livenessProbe:
         httpGet:

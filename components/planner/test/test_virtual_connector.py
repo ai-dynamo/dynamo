@@ -11,7 +11,7 @@ import logging
 import pytest
 
 from dynamo._core import DistributedRuntime, VirtualConnectorClient
-from dynamo.planner import VirtualConnector
+from dynamo.planner import SubComponentType, TargetReplica, VirtualConnector
 
 pytestmark = pytest.mark.pre_merge
 logger = logging.getLogger(__name__)
@@ -49,7 +49,10 @@ def test_main():
 
 async def next_scaling_decision(c):
     """Move the second decision in to a separate task so we can `.wait` for it."""
-    replicas = {"prefill": 5, "decode": 8}
+    replicas = [
+        TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=5),
+        TargetReplica(sub_component_type=SubComponentType.DECODE, desired_replicas=8),
+    ]
     await c.set_component_replicas(replicas, blocking=False)
 
 
@@ -57,7 +60,10 @@ async def async_internal(distributed_runtime):
     # This is Dynamo Planner
     c = VirtualConnector(distributed_runtime, NAMESPACE, "sglang")
     await c._async_init()
-    replicas = {"prefill": 1, "decode": 2}
+    replicas = [
+        TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=1),
+        TargetReplica(sub_component_type=SubComponentType.DECODE, desired_replicas=2),
+    ]
     await c.set_component_replicas(replicas, blocking=False)
 
     # This is the client
@@ -86,7 +92,10 @@ async def async_internal(distributed_runtime):
     await c._wait_for_scaling_completion()
 
     # Now scale to zero
-    replicas = {"prefill": 0, "decode": 0}
+    replicas = [
+        TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=0),
+        TargetReplica(sub_component_type=SubComponentType.DECODE, desired_replicas=0),
+    ]
     await c.set_component_replicas(replicas, blocking=False)
     event = await client.get()
     assert event.num_prefill_workers == 0

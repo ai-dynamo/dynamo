@@ -14,7 +14,7 @@ spec:
   podMetricsEndpoints:
     - port: metrics
       path: /metrics
-      interval: 2s
+      interval: 5s
   namespaceSelector:
     matchNames:
       - $NAMESPACE

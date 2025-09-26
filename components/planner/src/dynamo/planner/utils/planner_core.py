@@ -11,7 +11,12 @@ from typing import Optional
 
 from prometheus_client import Gauge, start_http_server
 
-from dynamo.planner import KubernetesConnector, VirtualConnector
+from dynamo.planner import (
+    KubernetesConnector,
+    SubComponentType,
+    TargetReplica,
+    VirtualConnector,
+)
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SLAPlannerDefaults
 from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
 from dynamo.planner.utils.perf_interpolation import (
@@ -63,22 +68,30 @@ class Planner:
         self.args = args
         self.dryrun = dryrun
 
+        # Rely on getting model name from connector
+        self.model_name: Optional[str] = None
+
         if not self.dryrun:
             self.runtime = runtime
             self.namespace = args.namespace
 
             if not args.no_operation:
                 if args.environment == "kubernetes":
-                    self.connector = KubernetesConnector(self.namespace)
+                    self.connector = KubernetesConnector(
+                        self.namespace, self.model_name
+                    )
                 elif args.environment == "virtual":
                     self.connector = VirtualConnector(
-                        runtime, self.namespace, args.backend
+                        runtime,
+                        self.namespace,
+                        args.model_name,
                     )
                 else:
                     raise ValueError(f"Invalid environment: {args.environment}")
 
             self.prometheus_api_client = PrometheusAPIClient(
-                SLAPlannerDefaults.prometheus_endpoint
+                SLAPlannerDefaults.prometheus_endpoint,
+                args.namespace,
             )
 
         self.num_req_predictor = LOAD_PREDICTORS[args.load_predictor](
@@ -120,6 +133,13 @@ class Planner:
         else:
             self.prefill_interpolator = PrefillInterpolator(args.profile_results_dir)
             self.decode_interpolator = DecodeInterpolator(args.profile_results_dir)
+
+        self.prefill_component_name = WORKER_COMPONENT_NAMES[
+            self.args.backend
+        ].prefill_worker_k8s_name
+        self.decode_component_name = WORKER_COMPONENT_NAMES[
+            self.args.backend
+        ].decode_worker_k8s_name
 
         if not self.dryrun:
             self.prefill_client = None
@@ -230,27 +250,33 @@ class Planner:
             self.num_d_workers_gauge.set(len(self.d_endpoints))
 
         self.last_metrics.ttft = self.prometheus_api_client.get_avg_time_to_first_token(
-            f"{self.args.adjustment_interval}s"
+            f"{self.args.adjustment_interval}s",
+            self.model_name,
         )
         self.last_metrics.itl = self.prometheus_api_client.get_avg_inter_token_latency(
-            f"{self.args.adjustment_interval}s"
+            f"{self.args.adjustment_interval}s",
+            self.model_name,
         )
         self.last_metrics.num_req = self.prometheus_api_client.get_avg_request_count(
-            f"{self.args.adjustment_interval}s"
+            f"{self.args.adjustment_interval}s",
+            self.model_name,
         )
         self.last_metrics.request_duration = (
             self.prometheus_api_client.get_avg_request_duration(
-                f"{self.args.adjustment_interval}s"
+                f"{self.args.adjustment_interval}s",
+                self.model_name,
             )
         )
         self.last_metrics.isl = (
             self.prometheus_api_client.get_avg_input_sequence_tokens(
-                f"{self.args.adjustment_interval}s"
+                f"{self.args.adjustment_interval}s",
+                self.model_name,
             )
         )
         self.last_metrics.osl = (
             self.prometheus_api_client.get_avg_output_sequence_tokens(
-                f"{self.args.adjustment_interval}s"
+                f"{self.args.adjustment_interval}s",
+                self.model_name,
             )
         )
 
@@ -429,18 +455,42 @@ class Planner:
                 return
 
         if not self.args.no_operation:
-            target_replicas = {
-                WORKER_COMPONENT_NAMES[
-                    self.args.backend
-                ].prefill_worker_k8s_name: next_num_p,
-                WORKER_COMPONENT_NAMES[
-                    self.args.backend
-                ].decode_worker_k8s_name: next_num_d,
-            }
+            target_replicas = [
+                TargetReplica(
+                    sub_component_type=SubComponentType.PREFILL,
+                    component_name=self.prefill_component_name,
+                    desired_replicas=next_num_p,
+                ),
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    component_name=self.decode_component_name,
+                    desired_replicas=next_num_d,
+                ),
+            ]
             await self.connector.set_component_replicas(target_replicas, blocking=False)
 
     async def run(self):
         """Main loop for the planner"""
+
+        if not self.args.no_operation:
+            # Fail fast if the deployment is not valid
+            logger.info("Validating deployment...")
+
+            # TODO: still supporting framework component names for backwards compatibility
+            # Should be deprecated in favor of service subComponentType
+            await self.connector.validate_deployment(
+                prefill_component_name=self.prefill_component_name,
+                decode_component_name=self.decode_component_name,
+            )
+            logger.info("Successfully validated the deployment")
+
+            await self.connector.wait_for_deployment_ready()
+
+            model_name = self.connector.get_model_name()
+            logger.info(f"Detected model name from deployment: {model_name}")
+            self.model_name = (
+                model_name.lower()
+            )  # normalize model name to lowercase (MDC)
 
         self.last_adjustment_time = time.time()
 
@@ -453,6 +503,7 @@ class Planner:
             ):
                 self.last_adjustment_time = time.time()
                 logger.info("New adjustment interval started!")
+
                 await self.observe_metrics()
                 await self.make_adjustments()
 

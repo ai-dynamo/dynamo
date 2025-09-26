@@ -6,8 +6,9 @@ import os
 from typing import Optional
 
 from dynamo._core import VirtualConnectorCoordinator
-from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
+from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.planner_connector import PlannerConnector
+from dynamo.planner.utils.exceptions import EmptyTargetReplicasError
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -32,7 +33,10 @@ class VirtualConnector(PlannerConnector):
     """
 
     def __init__(
-        self, runtime: DistributedRuntime, dynamo_namespace: str, backend: str
+        self,
+        runtime: DistributedRuntime,
+        dynamo_namespace: str,
+        model_name: Optional[str] = None,
     ):
         self.connector = VirtualConnectorCoordinator(
             runtime,
@@ -42,8 +46,12 @@ class VirtualConnector(PlannerConnector):
             SCALING_MAX_RETRIES,
         )
 
-        self.backend = backend
-        self.worker_component_names = WORKER_COMPONENT_NAMES[backend]
+        if model_name is None:
+            raise ValueError("Model name is required for virtual connector")
+
+        self.model_name = model_name.lower()  # normalize model name to lowercase (MDC)
+
+        self.dynamo_namespace = dynamo_namespace
 
     async def _async_init(self):
         """Async initialization that must be called after __init__"""
@@ -59,47 +67,32 @@ class VirtualConnector(PlannerConnector):
         """Wait for the deployment environment to report that scaling is complete"""
         await self.connector.wait_for_scaling_completion()
 
-    def _component_to_worker_type(self, component_name: str) -> Optional[str]:
-        """Map component name to worker type (prefill or decode)"""
-        if component_name == self.worker_component_names.prefill_worker_k8s_name:
-            return "prefill"
-        elif component_name == self.worker_component_names.decode_worker_k8s_name:
-            return "decode"
-        else:
-            return None
-
-    async def add_component(self, component_name: str, blocking: bool = True):
+    async def add_component(
+        self, sub_component_type: SubComponentType, blocking: bool = True
+    ):
         """Add a component by increasing its replica count by 1"""
-        worker_type = self._component_to_worker_type(component_name)
-        if worker_type is None:
-            logger.warning(f"Unknown component name: {component_name}, skipping")
-            return
-
         state = self.connector.read_state()
 
-        if worker_type == "prefill":
+        if sub_component_type == SubComponentType.PREFILL:
             await self._update_scaling_decision(
                 num_prefill=state.num_prefill_workers + 1
             )
-        elif worker_type == "decode":
+        elif sub_component_type == SubComponentType.DECODE:
             await self._update_scaling_decision(num_decode=state.num_decode_workers + 1)
 
         if blocking:
             await self._wait_for_scaling_completion()
 
-    async def remove_component(self, component_name: str, blocking: bool = True):
+    async def remove_component(
+        self, sub_component_type: SubComponentType, blocking: bool = True
+    ):
         """Remove a component by decreasing its replica count by 1"""
-        worker_type = self._component_to_worker_type(component_name)
-        if worker_type is None:
-            logger.warning(f"Unknown component name: {component_name}, skipping")
-            return
-
         state = self.connector.read_state()
 
-        if worker_type == "prefill":
+        if sub_component_type == SubComponentType.PREFILL:
             new_count = max(0, state.num_prefill_workers - 1)
             await self._update_scaling_decision(num_prefill=new_count)
-        elif worker_type == "decode":
+        elif sub_component_type == SubComponentType.DECODE:
             new_count = max(0, state.num_decode_workers - 1)
             await self._update_scaling_decision(num_decode=new_count)
 
@@ -107,25 +100,20 @@ class VirtualConnector(PlannerConnector):
             await self._wait_for_scaling_completion()
 
     async def set_component_replicas(
-        self, target_replicas: dict[str, int], blocking: bool = True
+        self, target_replicas: list[TargetReplica], blocking: bool = True
     ):
         """Set the replicas for multiple components at once"""
         if not target_replicas:
-            raise ValueError("target_replicas cannot be empty")
+            raise EmptyTargetReplicasError()
 
         num_prefill = None
         num_decode = None
 
-        for component_name, replicas in target_replicas.items():
-            worker_type = self._component_to_worker_type(component_name)
-            if worker_type is None:
-                logger.warning(f"Unknown component name: {component_name}, skipping")
-                continue
-
-            if worker_type == "prefill":
-                num_prefill = replicas
-            elif worker_type == "decode":
-                num_decode = replicas
+        for target_replica in target_replicas:
+            if target_replica.sub_component_type == SubComponentType.PREFILL:
+                num_prefill = target_replica.desired_replicas
+            elif target_replica.sub_component_type == SubComponentType.DECODE:
+                num_decode = target_replica.desired_replicas
 
         if num_prefill is None and num_decode is None:
             return
@@ -137,3 +125,19 @@ class VirtualConnector(PlannerConnector):
 
         if blocking:
             await self._wait_for_scaling_completion()
+
+    async def validate_deployment(
+        self,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ):
+        """Validate the deployment"""
+        pass
+
+    async def wait_for_deployment_ready(self):
+        """Wait for the deployment to be ready"""
+        await self._wait_for_scaling_completion()
+
+    async def get_model_name(self) -> str:
+        """Get the model name from the deployment"""
+        return self.model_name

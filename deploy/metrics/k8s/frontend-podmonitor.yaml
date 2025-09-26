@@ -14,7 +14,12 @@ spec:
   podMetricsEndpoints:
     - port: http
       path: /metrics
-      interval: 2s
+      interval: 5s
+      relabelings:
+      - action: replace
+        sourceLabels:
+        - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace
+        targetLabel: dynamo_namespace
   namespaceSelector:
     matchNames:
       - ${NAMESPACE}

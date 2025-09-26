@@ -100,10 +100,6 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	if err = r.Get(ctx, req.NamespacedName, dynamoDeployment); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	if err != nil {
-		// not found, nothing to do
-		return ctrl.Result{}, nil
-	}
 
 	defer func() {
 		if err != nil {
@@ -129,7 +125,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 
 		err = r.Status().Update(ctx, dynamoDeployment)
 		if err != nil {
-			logger.Error(err, "Unable to update the CRD status", "crd", req.NamespacedName)
+			logger.Error(err, "Unable to update the CRD status", "crd", req.NamespacedName, "state", state, "reason", reason, "message", message)
 		}
 		logger.Info("Reconciliation done")
 	}()
