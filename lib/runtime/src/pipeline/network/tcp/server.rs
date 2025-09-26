@@ -324,8 +324,7 @@ async fn tcp_listener(
             }
         }
 
-        // Increase linger timeout to allow worker responses to complete // ANNA TODO rm was 0!
-        match stream.set_linger(Some(std::time::Duration::from_secs(30))) {
+        match stream.set_linger(Some(std::time::Duration::from_secs(0))) {
             Ok(_) => (),
             Err(e) => {
                 tracing::warn!("failed to set tcp stream to linger: {}", e);
@@ -338,26 +337,10 @@ async fn tcp_listener(
     // #[instrument(level = "trace"), skip(state)]
     // todo - clone before spawn and trace process_stream
     async fn handle_connection(stream: tokio::net::TcpStream, state: Arc<Mutex<State>>) {
-        let peer_addr = stream.peer_addr().ok();
-        println!(
-            "!![TCP] handle_connection: New connection from {:?}",
-            peer_addr
-        );
-
         let result = process_stream(stream, state).await;
         match result {
-            Ok(_) => {
-                println!(
-                    "!![TCP] handle_connection: Successfully processed tcp connection from {:?}",
-                    peer_addr
-                );
-                tracing::trace!("successfully processed tcp connection");
-            }
+            Ok(_) => tracing::trace!("successfully processed tcp connection"),
             Err(e) => {
-                println!(
-                    "!![TCP] handle_connection: Failed to handle tcp connection from {:?}: {}",
-                    peer_addr, e
-                );
                 tracing::warn!("failed to handle tcp connection: {}", e);
                 #[cfg(debug_assertions)]
                 eprintln!("failed to handle tcp connection: {}", e);
