@@ -647,7 +647,6 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
 /// - On `OK`, ownership of `pipeline` is taken and the underlying resources
 ///   are dropped; using the pointer after return is undefined behavior.
 #[unsafe(no_mangle)]
-/// Destroy a previously created pipeline.
 pub unsafe extern "C" fn dynamo_destroy_worker_selection_pipeline(
     pipeline: *mut WorkerSelectionPipeline,
 ) -> DynamoLlmResult {
