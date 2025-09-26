@@ -67,26 +67,13 @@ struct DecoderUnfoldState {
 
 impl Backend {
     pub fn from_tokenizer(tokenizer: HfTokenizer) -> Arc<Self> {
-        println!("!![DEBUG] Backend::from_tokenizer: Starting backend creation from tokenizer");
-
-        println!("!![DEBUG] Backend::from_tokenizer: Creating HuggingFaceTokenizer wrapper");
         let tokenizer = HuggingFaceTokenizer::from_tokenizer(tokenizer);
-        println!(
-            "!![DEBUG] Backend::from_tokenizer: Successfully created HuggingFaceTokenizer wrapper"
-        );
-
-        println!("!![DEBUG] Backend::from_tokenizer: Creating Tokenizer from HuggingFaceTokenizer");
         let tokenizer = Tokenizer::from(Arc::new(tokenizer));
-        println!("!![DEBUG] Backend::from_tokenizer: Successfully created Tokenizer");
 
-        println!("!![DEBUG] Backend::from_tokenizer: Creating Backend struct");
-        let backend = Arc::new(Self {
+        Arc::new(Self {
             tokenizer: Some(tokenizer),
             validate_engine_decode: false,
-        });
-        println!("!![DEBUG] Backend::from_tokenizer: Successfully created Backend struct");
-
-        backend
+        })
     }
 
     pub fn from_mdc(mdc: &ModelDeploymentCard) -> Arc<Self> {
