@@ -136,7 +136,7 @@ impl TcpStreamServer {
 
     pub async fn new_with_resolver<R: IpResolver>(
         options: ServerOptions,
-        resolver: R
+        resolver: R,
     ) -> Result<Arc<Self>, PipelineError> {
         let local_ip = match options.interface {
             Some(interface) => {
@@ -645,8 +645,8 @@ fn process_control_message(message: Bytes) -> Result<ControlAction> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::Context;
     use crate::engine::AsyncEngineContextProvider;
+    use crate::pipeline::Context;
 
     // Mock resolver that always fails to simulate the fallback scenario
     struct FailingIpResolver;
@@ -668,7 +668,10 @@ mod tests {
         let options = ServerOptions::default();
         let result = TcpStreamServer::new(options).await;
 
-        assert!(result.is_ok(), "TcpStreamServer::new should succeed with default options");
+        assert!(
+            result.is_ok(),
+            "TcpStreamServer::new should succeed with default options"
+        );
 
         let server = result.unwrap();
 
@@ -695,9 +698,15 @@ mod tests {
         let socket_addr = tcp_info.address.parse::<std::net::SocketAddr>().unwrap();
 
         // Should have a valid port assigned
-        assert!(socket_addr.port() > 0, "Server should be assigned a valid port number");
+        assert!(
+            socket_addr.port() > 0,
+            "Server should be assigned a valid port number"
+        );
 
-        println!("Server created successfully with address: {}", tcp_info.address);
+        println!(
+            "Server created successfully with address: {}",
+            tcp_info.address
+        );
     }
 
     #[tokio::test]
@@ -705,14 +714,14 @@ mod tests {
         // Test fallback behavior using a mock resolver that always fails
         // This guarantees the fallback logic is triggered
 
-        let options = ServerOptions::builder()
-            .port(0)
-            .build()
-            .unwrap();
+        let options = ServerOptions::builder().port(0).build().unwrap();
 
         // Use the failing resolver to force the fallback
         let result = TcpStreamServer::new_with_resolver(options, FailingIpResolver).await;
-        assert!(result.is_ok(), "Server creation should succeed with fallback even when IP detection fails");
+        assert!(
+            result.is_ok(),
+            "Server creation should succeed with fallback even when IP detection fails"
+        );
 
         let server = result.unwrap();
 
@@ -738,11 +747,18 @@ mod tests {
 
         // With the failing resolver, fallback should ALWAYS be used
         let ip = socket_addr.ip();
-        assert!(ip.is_loopback(), "Should use loopback when IP detection fails");
+        assert!(
+            ip.is_loopback(),
+            "Should use loopback when IP detection fails"
+        );
 
         // Verify it's specifically 127.0.0.1 (the fallback value from the patch)
-        assert_eq!(ip, std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
-            "Fallback should use exactly 127.0.0.1, got: {}", ip);
+        assert_eq!(
+            ip,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            "Fallback should use exactly 127.0.0.1, got: {}",
+            ip
+        );
 
         println!("SUCCESS: Fallback to 127.0.0.1 was confirmed: {}", ip);
 
