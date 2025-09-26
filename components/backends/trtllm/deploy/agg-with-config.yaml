@@ -58,11 +58,13 @@ spec:
             mountPath: /workspace/components/backends/trtllm/engine_configs
             readOnly: true
           command:
-            - /bin/sh
-            - -c
+          - python3
+          - -m
+          - dynamo.trtllm
           args:
-            - >-
-              python3 -m dynamo.trtllm
-              --model-path Qwen/Qwen3-0.6B
-              --served-model-name Qwen/Qwen3-0.6B
-              --extra-engine-args engine_configs/agg.yaml
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --extra-engine-args
+            - engine_configs/agg.yaml

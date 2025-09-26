@@ -52,15 +52,14 @@ spec:
           image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/planner/src/dynamo/planner
           command:
-            - /bin/sh
-            - -c
+          - python3
+          - -m
+          - planner_sla
           args:
-            - >-
-              python3 -m planner_sla
-              --environment=kubernetes
-              --backend=sglang
-              --adjustment-interval=60
-              --profile-results-dir=/data/profiling_results
+            - --environment=kubernetes
+            - --backend=sglang
+            - --adjustment-interval=60
+            - --profile-results-dir=/data/profiling_results
     Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
       dynamoNamespace: dynamo
       componentType: frontend
@@ -92,10 +91,10 @@ spec:
           image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           command:
-            - /bin/sh
-            - -c
-          args:
-            - "python3 -m dynamo.planner.prometheus"
+          - python3
+          - -m
+          - dynamo.planner.prometheus
+          args: []
     decode:
       dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
