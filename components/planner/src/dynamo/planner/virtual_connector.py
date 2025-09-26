@@ -32,7 +32,7 @@ class VirtualConnector(PlannerConnector):
     """
 
     def __init__(
-        self, runtime: DistributedRuntime, dynamo_namespace: str, backend: str
+        self, runtime: DistributedRuntime, dynamo_namespace: str, backend: Optional[str]
     ):
         self.connector = VirtualConnectorCoordinator(
             runtime,

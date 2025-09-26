@@ -68,22 +68,26 @@ class Planner:
         self.args = args
         self.dryrun = dryrun
 
+        # Rely on getting model name from connector
+        self.model_name: Optional[str] = None
+
         if not self.dryrun:
             self.runtime = runtime
             self.namespace = args.namespace
 
             if not args.no_operation:
                 if args.environment == "kubernetes":
-                    self.connector = KubernetesConnector(self.namespace)
+                    self.connector = KubernetesConnector(self.namespace, self.model_name)
                 elif args.environment == "virtual":
                     self.connector = VirtualConnector(
-                        runtime, self.namespace, args.backend
+                        runtime, self.namespace, args.model_name,
                     )
                 else:
                     raise ValueError(f"Invalid environment: {args.environment}")
 
             self.prometheus_api_client = PrometheusAPIClient(
-                SLAPlannerDefaults.prometheus_endpoint
+                SLAPlannerDefaults.prometheus_endpoint,
+                args.namespace,
             )
 
         self.num_req_predictor = LOAD_PREDICTORS[args.load_predictor](
@@ -242,27 +246,33 @@ class Planner:
             self.num_d_workers_gauge.set(len(self.d_endpoints))
 
         self.last_metrics.ttft = self.prometheus_api_client.get_avg_time_to_first_token(
-            f"{self.args.adjustment_interval}s"
+            f"{self.args.adjustment_interval}s", 
+            self.model_name,
         )
         self.last_metrics.itl = self.prometheus_api_client.get_avg_inter_token_latency(
-            f"{self.args.adjustment_interval}s"
+            f"{self.args.adjustment_interval}s",
+            self.model_name,
         )
         self.last_metrics.num_req = self.prometheus_api_client.get_avg_request_count(
-            f"{self.args.adjustment_interval}s"
+            f"{self.args.adjustment_interval}s",
+            self.model_name,
         )
         self.last_metrics.request_duration = (
             self.prometheus_api_client.get_avg_request_duration(
-                f"{self.args.adjustment_interval}s"
+                f"{self.args.adjustment_interval}s",
+                self.model_name,
             )
         )
         self.last_metrics.isl = (
             self.prometheus_api_client.get_avg_input_sequence_tokens(
-                f"{self.args.adjustment_interval}s"
+                f"{self.args.adjustment_interval}s",
+                self.model_name,
             )
         )
         self.last_metrics.osl = (
             self.prometheus_api_client.get_avg_output_sequence_tokens(
-                f"{self.args.adjustment_interval}s"
+                f"{self.args.adjustment_interval}s",
+                self.model_name,
             )
         )
 
@@ -459,18 +469,22 @@ class Planner:
         """Main loop for the planner"""
 
         if not self.args.no_operation:
-            # Fail fast if the deployment does not contain prefill and decode components
-            logger.info("Verifying prefill and decode components exist...")
+            # Fail fast if the deployment is not valid
+            logger.info("Validating deployment...")
 
             # TODO: still supporting framework component names for backwards compatibility
             # Should be deprecated in favor of service subComponentType
-            await self.connector.verify_prefill_and_decode_components_exist(
+            await self.connector.validate_deployment(
                 prefill_component_name=self.prefill_component_name,
                 decode_component_name=self.decode_component_name,
             )
-            logger.info("Successfully verified prefill and decode components exist")
+            logger.info("Successfully validated the deployment")
 
             await self.connector.wait_for_deployment_ready()
+
+            model_name = self.connector.get_model_name()
+            logger.info(f"Detected model name from deployment: {model_name}")
+            self.model_name = model_name.lower() # normalize model name to lowercase (MDC)
 
         self.last_adjustment_time = time.time()
 

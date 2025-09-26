@@ -16,6 +16,7 @@
 import logging
 import os
 from enum import Enum
+import shlex
 from typing import Optional
 
 from pydantic import BaseModel
@@ -23,11 +24,17 @@ from pydantic import BaseModel
 from dynamo.planner.kube import KubernetesAPI
 from dynamo.planner.planner_connector import PlannerConnector
 from dynamo.planner.utils.exceptions import (
+    BackendFrameworkInvalidError,
+    BackendFrameworkNotFoundError,
     ComponentError,
     DeploymentValidationError,
     DuplicateSubComponentError,
     EmptyTargetReplicasError,
+    DeploymentModelNameMismatchError,
+    ModelNameNotFoundError,
+    PlannerError,
     SubComponentNotFoundError,
+    UserProvidedModelNameMismatchError,
 )
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -46,6 +53,32 @@ class Service(BaseModel):
 
     def number_replicas(self) -> int:
         return self.service.get("replicas", 0)
+    
+    def get_model_name(self) -> Optional[str]:
+        args = self.service.get("extraPodSpec", {}).get("mainContainer", {}).get("args", [])
+
+        args = break_arguments(args)
+        if "--served-model-name" in args and len(args) > args.index("--served-model-name") + 1:
+            return args[args.index("--served-model-name") + 1]
+        if "--model" in args and len(args) > args.index("--model") + 1:
+            return args[args.index("--model") + 1]
+
+        return None
+        
+
+def break_arguments(args: list[str] | None) -> list[str]:
+    ans: list[str] = []
+    if args is None:
+        return ans
+    if isinstance(args, str):
+        # Use shlex.split to properly handle quoted arguments and JSON values
+        ans = shlex.split(args)
+    else:
+        for arg in args:
+            if arg is not None:
+                # Use shlex.split to properly handle quoted arguments
+                ans.extend(shlex.split(arg))
+    return ans
 
 
 class TargetReplica(BaseModel):
@@ -55,9 +88,13 @@ class TargetReplica(BaseModel):
 
 
 class KubernetesConnector(PlannerConnector):
-    def __init__(self, dynamo_namespace: str, k8s_namespace: Optional[str] = None):
+    def __init__(self, dynamo_namespace: str, model_name: Optional[str] = None, k8s_namespace: Optional[str] = None):
         self.kube_api = KubernetesAPI(k8s_namespace)
-        self.dynamo_namespace = dynamo_namespace
+
+        if model_name:
+            self.model_name = model_name.lower() # normalize model name to lowercase (MDC)
+        else:
+            self.model_name = None
 
         graph_deployment_name = os.getenv("DYN_PARENT_DGD_K8S_NAME")
         if not graph_deployment_name:
@@ -108,16 +145,17 @@ class KubernetesConnector(PlannerConnector):
                     self.graph_deployment_name,
                 )
 
-    async def verify_prefill_and_decode_components_exist(
+    async def validate_deployment(
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
     ):
         """
-        Verify that the deployment contains services with subComponentType prefill and decode.
+        Verify that the deployment contains services with subComponentType prefill and decode and the model name exists.
         Will fallback to worker service names for backwards compatibility. (TODO: deprecate)
 
         Raises:
+            DynamoGraphDeploymentNotFoundError: If the deployment is not found
             DeploymentValidationError: If the deployment does not contain services with subComponentType prefill and decode
         """
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
@@ -130,7 +168,7 @@ class KubernetesConnector(PlannerConnector):
                 SubComponentType.PREFILL,
                 component_name=prefill_component_name,
             )
-        except ComponentError as e:
+        except PlannerError as e:
             errors.append(str(e))
 
         try:
@@ -139,12 +177,63 @@ class KubernetesConnector(PlannerConnector):
                 SubComponentType.DECODE,
                 component_name=decode_component_name,
             )
-        except ComponentError as e:
+        except PlannerError as e:
+            errors.append(str(e))
+
+        try:
+            self.get_model_name(deployment)
+        except PlannerError as e:
             errors.append(str(e))
 
         # Raise combined error if any issues found
         if errors:
             raise DeploymentValidationError(errors)
+
+    def get_model_name(self, deployment: Optional[dict] = None) -> str:
+        """Get the model name from the deployment""" 
+        try:
+            if deployment is None:
+                deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+
+            # TODO: benchmarks/profiler/utils/config.py already contains DGD config parsing 
+            # and model name logic, should consolidate
+            prefill_service = self.get_service_from_sub_component_type_or_name(
+                deployment,
+                SubComponentType.PREFILL,
+            )
+            decode_service = self.get_service_from_sub_component_type_or_name(
+                deployment,
+                SubComponentType.DECODE,
+            )
+            prefill_model_name = prefill_service.get_model_name()
+            decode_model_name = decode_service.get_model_name()
+
+            if prefill_model_name is None and decode_model_name is None:
+                raise ModelNameNotFoundError()
+
+            # Check model name between prefill and decode
+            if prefill_model_name is None:
+                model_name = decode_model_name
+            elif decode_model_name is None:
+                model_name = prefill_model_name
+            elif prefill_model_name != decode_model_name:
+                raise DeploymentModelNameMismatchError(prefill_model_name, decode_model_name)
+            else:
+                model_name = prefill_model_name
+
+        except PlannerError as e:
+            if self.model_name:
+                logger.warning(f"Failed to get model name from deployment with error: {e}, using provided model name: {self.model_name}")
+                model_name = self.model_name
+            else:
+                raise e
+
+        # If user provided a model name and it doesn't match the model name from the deployment, raise an error
+        if self.model_name:
+            if model_name != self.model_name:
+                raise UserProvidedModelNameMismatchError(model_name, self.model_name)
+        
+        return model_name
 
     async def wait_for_deployment_ready(
         self,

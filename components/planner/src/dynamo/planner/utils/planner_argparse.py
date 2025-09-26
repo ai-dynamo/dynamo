@@ -118,4 +118,9 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         default=SLAPlannerDefaults.no_correction,
         help="Disable correction factor",
     )
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        help="Model name of deployment (only required for virtual environment)",
+    )
     return parser

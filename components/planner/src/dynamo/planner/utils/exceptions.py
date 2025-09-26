@@ -59,6 +59,59 @@ class ComponentError(PlannerError):
 
     pass
 
+class ModelNameNotFoundError(PlannerError):
+    """Raised when the model name is not found in the deployment"""
+
+    def __init__(self):
+        message = "Model name not found in DynamoGraphDeployment"
+        super().__init__(message)
+
+
+class DeploymentModelNameMismatchError(PlannerError):
+    """Raised when the model name is not the same in the deployment"""
+
+    def __init__(self, prefill_model_name: str, decode_model_name: str):
+        self.prefill_model_name = prefill_model_name
+        self.decode_model_name = decode_model_name
+
+        message = f"Model name mismatch in DynamoGraphDeployment: prefill model name {prefill_model_name} != decode model name {decode_model_name}"
+        self.message = message
+        super().__init__(self.message)
+
+class UserProvidedModelNameMismatchError(PlannerError):
+    """Raised when the model name is not the same as the user provided model name"""
+
+    def __init__(self, model_name: str, user_provided_model_name: str):
+        self.model_name = model_name
+        self.user_provided_model_name = user_provided_model_name
+
+        message = f"Model name {model_name} does not match expected model name {user_provided_model_name}"
+        self.message = message
+        super().__init__(self.message)
+
+
+class BackendFrameworkNotFoundError(PlannerError):
+    """Raised when the backend framework is not supported.
+    
+    This occurs when the DynamoGraphDeployment contains an unsupported backend framework.
+    """
+
+    def __init__(self):
+        message = "Backend framework not found on DynamoGraphDeployment"
+        super().__init__(message)
+
+class BackendFrameworkInvalidError(PlannerError):
+    """Raised when the backend framework does not exist.
+    
+    This occurs when the DynamoGraphDeployment contains an unsupported backend framework.
+    """
+
+    def __init__(self, backend_framework: str):
+        self.backend_framework = backend_framework
+
+        message = f"Backend framework {backend_framework} is invalid"
+        super().__init__(message)
+
 
 class SubComponentNotFoundError(ComponentError):
     """Raised when a required subComponentType is not found in the deployment.

@@ -28,6 +28,8 @@ from dynamo.planner.utils.exceptions import (
     DuplicateSubComponentError,
     DynamoGraphDeploymentNotFoundError,
     EmptyTargetReplicasError,
+    DeploymentModelNameMismatchError,
+    ModelNameNotFoundError,
     SubComponentNotFoundError,
 )
 
@@ -35,7 +37,7 @@ from dynamo.planner.utils.exceptions import (
 @pytest.fixture
 def mock_kube_api():
     mock_api = Mock()
-    mock_api.get_graph_deployment = AsyncMock()
+    mock_api.get_graph_deployment = Mock()
     mock_api.update_graph_replicas = AsyncMock()
     mock_api.wait_for_graph_deployment_ready = AsyncMock()
     mock_api.is_deployment_ready = Mock()
@@ -56,13 +58,13 @@ def kubernetes_connector(mock_kube_api_class, monkeypatch):
         "dynamo.planner.kubernetes_connector.KubernetesAPI", mock_kube_api_class
     )
     with patch.dict(os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}):
-        connector = KubernetesConnector("test-dynamo-namespace", "default")
+        connector = KubernetesConnector("test-dynamo-namespace")
         return connector
 
 
 def test_kubernetes_connector_no_env_var():
     with pytest.raises(DeploymentValidationError) as exc_info:
-        KubernetesConnector("test-dynamo-namespace", "default")
+        KubernetesConnector("test-dynamo-namespace")
 
     exception = exc_info.value
     assert set(exception.errors) == {
@@ -238,7 +240,7 @@ async def test_add_component_deployment_not_found(kubernetes_connector, mock_kub
     # Arrange
     component_name = "test-component"
     mock_kube_api.get_graph_deployment.side_effect = (
-        DynamoGraphDeploymentNotFoundError()
+        DynamoGraphDeploymentNotFoundError("test-graph", "default")
     )
 
     # Act & Assert
@@ -468,7 +470,7 @@ async def test_set_component_replicas_deployment_not_found(
         TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=3)
     ]
     mock_kube_api.get_graph_deployment.side_effect = (
-        DynamoGraphDeploymentNotFoundError()
+        DynamoGraphDeploymentNotFoundError("test-graph", "default")
     )
 
     # Act & Assert
@@ -518,7 +520,7 @@ async def test_set_component_replicas_deployment_not_ready(
 
 
 @pytest.mark.asyncio
-async def test_verify_prefill_and_decode_components_exist_true(
+async def test_validate_deployment_true(
     kubernetes_connector, mock_kube_api
 ):
     # Arrange
@@ -526,21 +528,21 @@ async def test_verify_prefill_and_decode_components_exist_true(
         "metadata": {"name": "test-graph"},
         "spec": {
             "services": {
-                "component1": {"replicas": 1, "subComponentType": "prefill"},
-                "component2": {"replicas": 2},
+                "component1": {"replicas": 1, "subComponentType": "prefill", "extraPodSpec": {"mainContainer": {"args": ["--served-model-name", "prefill-model"]}}},
+                "component2": {"replicas": 2, "subComponentType": "decode"},
             }
         },
     }
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
 
     # Act
-    await kubernetes_connector.verify_prefill_and_decode_components_exist(
+    await kubernetes_connector.validate_deployment(
         decode_component_name="component2"
     )
 
 
 @pytest.mark.asyncio
-async def test_verify_prefill_and_decode_components_fail(
+async def test_validate_deployment_fail(
     kubernetes_connector, mock_kube_api
 ):
     # Arrange
@@ -557,10 +559,86 @@ async def test_verify_prefill_and_decode_components_fail(
 
     # Act
     with pytest.raises(DeploymentValidationError) as exc_info:
-        await kubernetes_connector.verify_prefill_and_decode_components_exist()
+        await kubernetes_connector.validate_deployment()
 
     exception = exc_info.value
     assert set(exception.errors) == {
         str(DuplicateSubComponentError("prefill", ["component1", "component2"])),
         str(SubComponentNotFoundError("decode")),
     }
+
+
+def test_get_model_name_both_none_raises_error(kubernetes_connector, mock_kube_api):
+    # Arrange
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "component1": {"replicas": 1, "subComponentType": "prefill"},
+                "component2": {"replicas": 2, "subComponentType": "decode"},
+            }
+        },
+    }
+
+    with pytest.raises(ModelNameNotFoundError):
+        kubernetes_connector.get_model_name(mock_deployment)
+
+
+def test_get_model_name_prefill_none_decode_valid_returns_decode(kubernetes_connector):
+    # Arrange
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "component1": {"replicas": 1, "subComponentType": "prefill"},
+                "component2": {"replicas": 2, "subComponentType": "decode", "extraPodSpec": {"mainContainer": {"args": ["--served-model-name", "test-model"]}}},
+            }
+        },
+    }
+    # Act
+    result = kubernetes_connector.get_model_name(mock_deployment)
+    
+    # Assert
+    assert result == "test-model"
+
+
+def test_get_model_name_mismatch_raises_error(kubernetes_connector, mock_kube_api):
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "component1": {"replicas": 1, "subComponentType": "prefill", "extraPodSpec": {"mainContainer": {"args": ["--served-model-name", "prefill-model"]}}},
+                "component2": {"replicas": 2, "subComponentType": "decode", "extraPodSpec": {"mainContainer": {"args": ["--served-model-name", "decode-model"]}}},
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    
+        
+    # Act & Assert
+    with pytest.raises(DeploymentModelNameMismatchError) as exc_info:
+        kubernetes_connector.get_model_name(mock_deployment)
+    
+    exception = exc_info.value
+    assert exception.prefill_model_name == "prefill-model"
+    assert exception.decode_model_name == "decode-model"
+
+
+def test_get_model_name_agree_returns_model_name(kubernetes_connector, mock_kube_api):
+    # Arrange
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "component1": {"replicas": 1, "subComponentType": "prefill", "extraPodSpec": {"mainContainer": {"args": ["--served-model-name", "agreed-model"]}}},
+                "component2": {"replicas": 2, "subComponentType": "decode", "extraPodSpec": {"mainContainer": {"args": ["--served-model-name", "agreed-model"]}}},
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    
+    # Act
+    result = kubernetes_connector.get_model_name(mock_deployment)
+    
+    # Assert
+    assert result == "agreed-model"
