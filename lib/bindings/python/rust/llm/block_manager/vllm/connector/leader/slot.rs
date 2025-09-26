@@ -115,6 +115,7 @@ pub trait Slot: std::fmt::Debug {
         tokens: &[u32],
         block_ids: &[usize],
         computed_position: usize,
+        is_new_request: bool,
     ) -> Result<(), SlotError>;
 
     fn record_start_iteration(&mut self, iteration: u64) -> Result<(), SlotError>;
@@ -592,6 +593,7 @@ impl Slot for VllmConnectorSlot {
         tokens: &[u32],
         block_ids: &[usize],
         computed_position: usize,
+        is_new_request: bool,
     ) -> Result<(), SlotError> {
         // TRTLLM's KV Connector Manager will have (computed_position - external matches)
         // in onborading case
@@ -630,10 +632,17 @@ impl Slot for VllmConnectorSlot {
             self.device_blocks.extend(block_ids);
         }
 
-        let num_candidate_blocks =
-            ((computed_position + 1) / self.block_size) - self.evaluated_blocks;
+        let mut num_candidate_blocks = 0;
+        if is_new_request {
+            num_candidate_blocks = ((computed_position + 1) / self.block_size)
+                - block_ids.len()
+                - self.evaluated_blocks;
+        } else {
+            num_candidate_blocks =
+                ((computed_position + 1) / self.block_size) - self.evaluated_blocks;
+        }
 
-        if num_candidate_blocks != 0 {
+        if num_candidate_blocks > 0 {
             // do we have a mechanism for skipping gpu cache hit blocks?  not sure yet.
             // for now, offload all the blocks to the host
             let offload_block_ids: Vec<usize> = self
