@@ -739,7 +739,7 @@ mod tests {
         let disk_pool = if let Some(disk_blocks) = disk_blocks {
             config.num_blocks = disk_blocks;
             Some(build_layout(
-                config,
+                config.clone(),
                 layout_type,
                 agent,
                 &DiskAllocator,
