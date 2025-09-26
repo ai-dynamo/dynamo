@@ -30,10 +30,12 @@ import (
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -111,25 +113,41 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			message = Message(err.Error())
 			logger.Error(err, "Reconciliation failed")
 		}
-		dynamoDeployment.SetState(string(state))
 
-		readyStatus := metav1.ConditionFalse
-		if state == ReadyState {
-			readyStatus = metav1.ConditionTrue
-		}
+		retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latest := &nvidiacomv1alpha1.DynamoGraphDeployment{}
+			if getErr := r.Get(ctx, req.NamespacedName, latest); getErr != nil {
+				return getErr
+			}
 
-		// Update Ready condition
-		dynamoDeployment.AddStatusCondition(metav1.Condition{
-			Type:               "Ready",
-			Status:             readyStatus,
-			Reason:             string(reason),
-			Message:            string(message),
-			LastTransitionTime: metav1.Now(),
+			if latest.DeletionTimestamp != nil {
+				logger.Info("CR is being deleted during status update, skip")
+				return nil
+			}
+
+			latest.SetState(string(state))
+
+			readyStatus := metav1.ConditionFalse
+			if state == ReadyState {
+				readyStatus = metav1.ConditionTrue
+			}
+
+			latest.AddStatusCondition(metav1.Condition{
+				Type:               "Ready",
+				Status:             readyStatus,
+				Reason:             string(reason),
+				Message:            string(message),
+				LastTransitionTime: metav1.Now(),
+			})
+			return r.Status().Update(ctx, latest)
 		})
 
-		err = r.Status().Update(ctx, dynamoDeployment)
-		if err != nil {
-			logger.Error(err, "Unable to update the CRD status", "crd", req.NamespacedName)
+		if retryErr != nil {
+			if apierrors.IsNotFound(retryErr) {
+				logger.Info("DynamoGraphDeployment not found during status update, skipping")
+			} else {
+				logger.Error(retryErr, "Failed to update DynamoGraphDeployment status after retries")
+			}
 		}
 		logger.Info("Reconciliation done")
 	}()
