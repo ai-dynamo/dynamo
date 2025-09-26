@@ -52,6 +52,15 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
     http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());
 
+    // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
+    // Pass the custom backend metrics endpoint as-is (already in namespace.component.endpoint format)
+    http_service_builder = http_service_builder.with_custom_backend_config(
+        local_model
+            .custom_backend_metrics_endpoint()
+            .map(|s| s.to_string()),
+        local_model.custom_backend_metrics_polling_interval(),
+    );
+
     let http_service = match engine_config {
         EngineConfig::Dynamic(_) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
@@ -213,6 +222,41 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             .map(|rd| rd.to_string())
             .collect::<Vec<String>>()
     );
+
+    // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
+    // Start custom backend metrics polling if configured
+    if let (Some(namespace_component_endpoint), Some(polling_interval), Some(registry)) = (
+        http_service
+            .custom_backend_namespace_component_endpoint
+            .as_ref(),
+        http_service.custom_backend_metrics_polling_interval,
+        http_service.custom_backend_registry.as_ref(),
+    ) {
+        // Create DistributedRuntime for polling, matching the engine's mode
+        // Check if we have etcd_client to determine if we're in dynamic or static mode
+        let drt = if http_service.state().etcd_client().is_some() {
+            // Dynamic mode: use from_settings() which respects environment (includes etcd)
+            DistributedRuntime::from_settings(runtime.clone()).await?
+        } else {
+            // Static mode: no etcd
+            let dst_config = dynamo_runtime::distributed::DistributedConfig::from_settings(true);
+            DistributedRuntime::new(runtime.clone(), dst_config).await?
+        };
+
+        tracing::info!(
+            namespace_component_endpoint=%namespace_component_endpoint,
+            polling_interval_secs=polling_interval,
+            "Starting custom backend metrics polling task"
+        );
+        let _polling_task =
+            crate::http::service::custom_backend_metrics::spawn_custom_backend_polling_task(
+                drt,
+                namespace_component_endpoint.clone(),
+                polling_interval,
+                registry.clone(),
+            );
+    }
+
     http_service.run(runtime.primary_token()).await?;
     runtime.shutdown(); // Cancel primary token
     Ok(())
