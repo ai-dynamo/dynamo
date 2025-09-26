@@ -314,3 +314,30 @@ Remember that nats and etcd must be running (see earlier).
 Set the environment variable `DYN_LOG` to adjust the logging level; for example, `export DYN_LOG=debug`. It has the same syntax as `RUST_LOG`.
 
 If you use vscode or cursor, we have a .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions see the [ReadMe](.devcontainer/README.md) for more details.
+
+# Building from source
+
+For people who are willing to run `dynamo` on `aarch64` platforms (such as Nvidia GH200/GB200 or Ampere Altra), you need to build dynamo from source:
+
+```
+cd $PROJECT_ROOT
+# these packages are only required for the build process
+uv pip install hatchling maturin
+# build ai-dynamo
+uv pip wheel . --no-deps --no-build-isolation
+# build ai-dynamo-runtime
+uv pip wheel lib/bindings/python/ --no-deps --no-build-isolation
+```
+
+After the build completes, you will find two wheel files in the root folder. For example:
+
+```
+ai_dynamo-0.5.0-py3-none-any.whl
+ai_dynamo_runtime-0.5.0-cp312-cp312-linux_aarch64.whl
+```
+
+Install the wheels
+
+```
+uv pip install ai_dynamo-0.5.0-py3-none-any.whl ai_dynamo_runtime-0.5.0-cp312-cp312-linux_aarch64.whl
+```
