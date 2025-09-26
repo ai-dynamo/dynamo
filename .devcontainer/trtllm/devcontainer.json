@@ -1,13 +1,16 @@
 {
+// AUTO-GENERATED FILE - DO NOT EDIT DIRECTLY
+// This file was generated from devcontainer.json.j2
+// To make changes, edit the .j2 template and run gen_devcontainer_json.py
     "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
     "copyright": [
         "SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
         "SPDX-License-Identifier: Apache-2.0"
     ],
-    "name": "NVIDIA Dynamo Dev Container Development",
+    "name": "Dynamo TRTLLM Dev Container",
     "remoteUser": "ubuntu", // Matches our container user
     "updateRemoteUserUID": true, // Updates the UID of the remote user to match the host user, avoids permission errors
-    "image": "dynamo:latest-vllm-local-dev", // Use the latest VLLM dev image
+    "image": "dynamo:latest-trtllm-local-dev", // Use the latest TRTLLM dev image
     "runArgs": [
         "--gpus=all",
         "--network=host",
