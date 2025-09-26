@@ -28,6 +28,7 @@ impl CompletionSample {
             inner,
             common: Default::default(),
             nvext: None,
+            metadata: None,
         };
 
         Ok(Self {

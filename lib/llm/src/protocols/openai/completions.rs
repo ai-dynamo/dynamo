@@ -35,6 +35,10 @@ pub struct NvCreateCompletionRequest {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
+
+    // metadata - passthrough parameter without restrictions
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
@@ -442,6 +446,7 @@ impl ValidateRequest for NvCreateCompletionRequest {
         validate::validate_logit_bias(&self.inner.logit_bias)?;
         validate::validate_user(self.inner.user.as_deref())?;
         // none for seed
+        // none for metadata
 
         // Common Ext
         validate::validate_repetition_penalty(self.get_repetition_penalty())?;
