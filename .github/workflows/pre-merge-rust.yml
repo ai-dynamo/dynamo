@@ -32,6 +32,11 @@ on:
 env:
   APT_CACHE_DIR: ${HOME}/tmp/apt-cache
 
+# Cancel any previous check runs for the same pull request to avoid redundant workflows.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.event.pull_request.number) || format('{0}-{1}', github.workflow, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   pre-merge-rust:
     runs-on:
@@ -42,8 +47,6 @@ jobs:
       contents: read
     steps:
     - uses: actions/checkout@v4
-    - name: Prepare APT cache dir
-      run: mkdir -p ${{ env.APT_CACHE_DIR }}
     - name: Cache APT archives
       uses: actions/cache@v4
       with:
@@ -94,8 +97,6 @@ jobs:
       contents: read
     steps:
     - uses: actions/checkout@v4
-    - name: Prepare APT cache dir
-      run: mkdir -p ${{ env.APT_CACHE_DIR }}
     - name: Cache APT archives
       uses: actions/cache@v4
       with:
