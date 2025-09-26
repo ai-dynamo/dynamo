@@ -20,20 +20,17 @@ pub struct NvExt {
     pub ignore_eos: Option<bool>,
 
     #[builder(default, setter(strip_option))] // NIM LLM might default to -1
-    #[validate(custom(function = "validate_top_k"))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_k: Option<i32>,
 
     /// Relative probability floor
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
-    #[validate(range(min = 0.0, max = 1.0))]
     pub min_p: Option<f32>,
 
     /// How much to penalize tokens based on how frequently they occur in the text.
     /// A value of 1 means no penalty, while values larger than 1 discourage and values smaller encourage.
     #[builder(default, setter(strip_option))]
-    #[validate(range(exclusive_min = 0.0, max = 2.0))]
     pub repetition_penalty: Option<f32>,
 
     /// If true, sampling will be forced to be greedy.
@@ -95,6 +92,11 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     pub guided_decoding_backend: Option<String>,
 
+    /// If specified, the output will follow the whitespace pattern. Can be a string or null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub guided_whitespace_pattern: Option<String>,
+
     /// Maximum number of thinking tokens allowed
     /// NOTE: Currently passed through to backends as a no-op for future implementation
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,15 +120,6 @@ fn validate_nv_ext(_nv_ext: &NvExt) -> Result<(), ValidationError> {
     Ok(())
 }
 
-pub fn validate_top_k(top_k: i32) -> Result<(), ValidationError> {
-    if top_k == -1 || (top_k >= 1) {
-        return Ok(());
-    }
-    let mut error = ValidationError::new("top_k");
-    error.message = Some("top_k must be -1 or greater than or equal to 1".into());
-    Err(error)
-}
-
 impl NvExtBuilder {
     pub fn add_annotation(&mut self, annotation: impl Into<String>) -> &mut Self {
         self.annotations
@@ -140,7 +133,6 @@ impl NvExtBuilder {
 
 #[cfg(test)]
 mod tests {
-    use proptest::prelude::*;
     use validator::Validate;
 
     use super::*;
@@ -157,6 +149,7 @@ mod tests {
         assert_eq!(nv_ext.guided_regex, None);
         assert_eq!(nv_ext.guided_grammar, None);
         assert_eq!(nv_ext.guided_choice, None);
+        assert_eq!(nv_ext.guided_whitespace_pattern, None);
         assert_eq!(nv_ext.max_thinking_tokens, None);
     }
 
@@ -198,60 +191,5 @@ mod tests {
         assert_eq!(nv_ext.max_thinking_tokens, Some(1024));
         // Validate the built struct
         assert!(nv_ext.validate().is_ok());
-    }
-
-    // Test invalid `top_k` validation using proptest
-    proptest! {
-        #[test]
-        fn test_invalid_top_k_value(top_k in any::<i32>().prop_filter("Invalid top_k", |&k| k < -1 || (k > 0 && k < 1))) {
-            let nv_ext = NvExt::builder()
-                .top_k(top_k)
-                .build()
-                .unwrap();
-
-            let validation_result = nv_ext.validate();
-            assert!(validation_result.is_err(), "top_k should fail validation if less than -1 or in the invalid range 0 < top_k < 1");
-        }
-    }
-
-    // Test valid `top_k` values
-    #[test]
-    fn test_valid_top_k_values() {
-        let nv_ext = NvExt::builder().top_k(-1).build().unwrap();
-        assert!(nv_ext.validate().is_ok());
-
-        let nv_ext = NvExt::builder().top_k(1).build().unwrap();
-        assert!(nv_ext.validate().is_ok());
-
-        let nv_ext = NvExt::builder().top_k(10).build().unwrap();
-        assert!(nv_ext.validate().is_ok());
-    }
-
-    // Test valid repetition_penalty values
-    proptest! {
-        #[test]
-        fn test_valid_repetition_penalty_values(repetition_penalty in 0.01f32..=2.0f32) {
-            let nv_ext = NvExt::builder()
-                .repetition_penalty(repetition_penalty)
-                .build()
-                .unwrap();
-
-            let validation_result = nv_ext.validate();
-            assert!(validation_result.is_ok(), "repetition_penalty should be valid within the range (0, 2]");
-        }
-    }
-
-    // Test invalid repetition_penalty values
-    proptest! {
-        #[test]
-        fn test_invalid_repetition_penalty_values(repetition_penalty in -10.0f32..0.0f32) {
-            let nv_ext = NvExt::builder()
-                .repetition_penalty(repetition_penalty)
-                .build()
-                .unwrap();
-
-            let validation_result = nv_ext.validate();
-            assert!(validation_result.is_err(), "repetition_penalty should fail validation when outside the range (0, 2]");
-        }
     }
 }

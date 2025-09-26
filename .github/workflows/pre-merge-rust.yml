@@ -29,9 +29,15 @@ on:
     - 'Cargo.toml'
     - 'Cargo.lock'
 
+# Cancel any previous check runs for the same pull request to avoid redundant workflows.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.event.pull_request.number) || format('{0}-{1}', github.workflow, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   pre-merge-rust:
-    runs-on: ubuntu-latest
+    runs-on:
+      group: Fastchecker
     strategy:
       matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
     permissions:
@@ -42,17 +48,6 @@ jobs:
       run: |
         sudo apt-get update -y
         sudo apt-get install -y protobuf-compiler
-
-    - name: Free runner disk space
-      run: |
-        echo "Disk space before:"
-        df -h
-        sudo rm -rf \
-          /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-          /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup \
-          /usr/lib/jvm /opt/hostedtoolcache
-        echo "Disk space after:"
-        df -h
 
     # TODO: Caching target/ dir handles most of the build caching improvements
     #       currently, so sccache artifacts are mostly duplicates wasting disk space.

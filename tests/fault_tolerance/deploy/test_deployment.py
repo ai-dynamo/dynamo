@@ -147,7 +147,18 @@ async def test_fault_scenario(
         scenario.deployment.set_model(scenario.model)
         model = scenario.model
     else:
-        model = scenario.deployment["VllmDecodeWorker"].model
+        # Get model from the appropriate worker based on backend
+        try:
+            if scenario.backend == "vllm":
+                model = scenario.deployment["VllmDecodeWorker"].model
+            elif scenario.backend == "sglang":
+                model = scenario.deployment["decode"].model
+            else:
+                model = None
+        except (KeyError, AttributeError):
+            model = None
+    # Fallback to default if still None
+    model = model or "Qwen/Qwen3-0.6B"
 
     scenario.deployment.set_logging(True, "info")
 
