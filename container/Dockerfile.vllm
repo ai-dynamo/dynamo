@@ -21,7 +21,7 @@ ARG FLASHINF_REF="v0.3.0"
 ARG TORCH_BACKEND="cu128"
 
 # If left blank, then we will fallback to vLLM defaults
-ARG DEEPGEMM_REF=""
+ARG DEEPGEMM_REF="3f71de7aa93ff95c64249beb0dfa975b6aeac4e4"
 
 # sccache configuration - inherit from base build
 ARG USE_SCCACHE
