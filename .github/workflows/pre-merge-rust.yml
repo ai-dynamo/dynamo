@@ -30,7 +30,7 @@ on:
     - 'Cargo.lock'
 
 env:
-  APT_CACHE_DIR: ${HOME}/tmp/apt-cache
+  APT_CACHE_DIR: /tmp/apt-cache
 
 # Cancel any previous check runs for the same pull request to avoid redundant workflows.
 concurrency:
@@ -38,7 +38,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  pre-merge-rust:
+  tests:
     runs-on:
       group: Fastchecker
     strategy:
@@ -90,7 +90,7 @@ jobs:
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
 
-  clippy-checks:
+  clippy:
     runs-on:
       group: Fastchecker
     strategy:
