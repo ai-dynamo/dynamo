@@ -1421,7 +1421,11 @@ mod test_metricsregistry_nats {
                 1.0,
                 1.0,
             ), // Should be connected
-            (build_component_metric_name(nats_client::CURRENT_CONNECTIONS), 1.0, 1.0), // Should have 1 connection
+            (
+                build_component_metric_name(nats_client::CURRENT_CONNECTIONS),
+                1.0,
+                1.0,
+            ), // Should have 1 connection
             (
                 build_component_metric_name(nats_client::IN_TOTAL_BYTES),
                 800.0,
@@ -1550,7 +1554,11 @@ mod test_metricsregistry_nats {
                 1.0,
                 1.0,
             ), // Connected
-            (build_component_metric_name(nats_client::CURRENT_CONNECTIONS), 1.0, 1.0), // 1 connection
+            (
+                build_component_metric_name(nats_client::CURRENT_CONNECTIONS),
+                1.0,
+                1.0,
+            ), // 1 connection
             (
                 build_component_metric_name(nats_client::IN_TOTAL_BYTES),
                 20000.0,

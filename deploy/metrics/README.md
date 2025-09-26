@@ -95,7 +95,6 @@ These metrics come from the runtime configuration provided by worker backends du
 **MDC Metrics (from ModelDeploymentCard):**
 These metrics come from the Model Deployment Card information provided by worker backends during registration. Note that when multiple worker instances register with the same model name, only the first instance's configuration metrics (runtime config and MDC metrics) will be populated. Subsequent instances with duplicate model names will be skipped for configuration metric updates, though the worker count metric will reflect all instances.
 
-
 - `dynamo_frontend_model_context_length`: Maximum context length for a worker serving the model (gauge)
 - `dynamo_frontend_model_kv_cache_block_size`: KV cache block size for a worker serving the model (gauge)
 - `dynamo_frontend_model_migration_limit`: Request migration limit for a worker serving the model (gauge)

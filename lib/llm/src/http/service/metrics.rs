@@ -197,7 +197,7 @@ impl Metrics {
         .unwrap();
 
         let client_disconnect_gauge = prometheus::IntGauge::new(
-                frontend_metric_name(frontend_service::DISCONNECTED_CLIENTS),
+            frontend_metric_name(frontend_service::DISCONNECTED_CLIENTS),
             "Number of disconnected clients",
         )
         .unwrap();
