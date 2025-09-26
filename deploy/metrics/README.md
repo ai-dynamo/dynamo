@@ -70,14 +70,16 @@ Some components expose additional metrics specific to their functionality:
 
 When using Dynamo HTTP Frontend (`--framework VLLM` or `--framework TRTLLM`), these metrics are automatically exposed with the `dynamo_frontend_*` prefix and include `model` labels containing the model name:
 
-- `dynamo_frontend_inflight_requests_total`: Inflight requests (gauge)
-- `dynamo_frontend_queued_requests_total`: Number of requests in HTTP processing queue (gauge)
+- `dynamo_frontend_inflight_requests`: Inflight requests (gauge)
+- `dynamo_frontend_queued_requests`: Number of requests in HTTP processing queue (gauge)
 - `dynamo_frontend_input_sequence_tokens`: Input sequence length (histogram)
 - `dynamo_frontend_inter_token_latency_seconds`: Inter-token latency (histogram)
 - `dynamo_frontend_output_sequence_tokens`: Output sequence length (histogram)
 - `dynamo_frontend_request_duration_seconds`: LLM request duration (histogram)
 - `dynamo_frontend_requests_total`: Total LLM requests (counter)
 - `dynamo_frontend_time_to_first_token_seconds`: Time to first token (histogram)
+
+**Note**: The `dynamo_frontend_inflight_requests` metric tracks requests from HTTP handler start until the complete response is finished, while `dynamo_frontend_queued_requests` tracks requests from HTTP handler start until first token generation begins (including prefill time). HTTP queue time is a subset of inflight time.
 
 ##### Model Configuration Metrics
 
@@ -91,7 +93,7 @@ These metrics come from the runtime configuration provided by worker backends du
 - `dynamo_frontend_model_max_num_batched_tokens`: Maximum number of batched tokens for a worker serving the model (gauge)
 
 **MDC Metrics (from ModelDeploymentCard):**
-These metrics come from the Model Deployment Card information provided by worker backends during registration.
+These metrics come from the Model Deployment Card information provided by worker backends during registration. Note that when multiple worker instances register with the same model name, only the first instance's configuration metrics (runtime config and MDC metrics) will be populated. Subsequent instances with duplicate model names will be skipped for configuration metric updates, though the worker count metric will reflect all instances.
 
 - `dynamo_frontend_model_context_length`: Maximum context length for a worker serving the model (gauge)
 - `dynamo_frontend_model_kv_cache_block_size`: KV cache block size for a worker serving the model (gauge)
@@ -99,10 +101,6 @@ These metrics come from the Model Deployment Card information provided by worker
 
 **Worker Management Metrics:**
 - `dynamo_frontend_model_workers`: Number of worker instances currently serving the model (gauge)
-
-**Important Notes:**
-- The `dynamo_frontend_inflight_requests_total` metric tracks requests from HTTP handler start until the complete response is finished, while `dynamo_frontend_queued_requests_total` tracks requests from HTTP handler start until first token generation begins (including prefill time). HTTP queue time is a subset of inflight time.
-- **Model Name Deduplication**: When multiple worker instances register with the same model name, only the first instance's configuration metrics (runtime config and MDC metrics) will be populated. Subsequent instances with duplicate model names will be skipped for configuration metric updates, though the worker count metric will reflect all instances.
 
 #### Request Processing Flow
 
@@ -148,10 +146,10 @@ Try launching a frontend and a Mocker backend that allows 3 concurrent requests:
 $ python -m dynamo.frontend --http-port 8000
 $ python -m dynamo.mocker --model-path Qwen/Qwen3-0.6B --max-num-seqs 3
 # Launch your 10 concurrent clients here
-# Then check the queued_requests_total and inflight_requests_total metrics from the frontend:
+# Then check the queued_requests and inflight_requests metrics from the frontend:
 $ curl -s localhost:8000/metrics|grep -v '^#'|grep -E 'queue|inflight'
-dynamo_frontend_queued_requests_total{model="qwen/qwen3-0.6b"} 7
-dynamo_frontend_inflight_requests_total{model="qwen/qwen3-0.6b"} 10
+dynamo_frontend_queued_requests{model="qwen/qwen3-0.6b"} 7
+dynamo_frontend_inflight_requests{model="qwen/qwen3-0.6b"} 10
 ```
 
 **Real setup using vLLM (instead of Mocker):**
@@ -294,8 +292,8 @@ let component = namespace.component("my_component")?;
 let endpoint = component.endpoint("my_endpoint")?;
 
 // Create endpoint-level counters (this is a Prometheus Counter type)
-let total_requests = endpoint.create_counter(
-    "total_requests",
+let requests_total = endpoint.create_counter(
+    "requests_total",
     "Total requests across all namespaces",
     &[]
 )?;
@@ -472,8 +470,8 @@ let latency = endpoint.create_histogram(
 
 ```rust
 // Aggregate metrics across multiple endpoints
-let total_requests = namespace.create_counter(
-    "total_requests",
+let requests_total = namespace.create_counter(
+    "requests_total",
     "Total requests across all endpoints",
     &[]
 )?;

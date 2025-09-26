@@ -1176,8 +1176,8 @@ dynamo_component_nats_client_connection_state 1
 # TYPE dynamo_component_latency histogram
 dynamo_component_latency_bucket{le="0.1"} 10
 dynamo_component_latency_bucket{le="0.5"} 25
-dynamo_component_nats_service_total_requests 100
-dynamo_component_nats_service_total_errors 5"#;
+dynamo_component_nats_service_requests_total 100
+dynamo_component_nats_service_errors_total 5"#;
 
         // Test remove_nats_lines (excludes NATS lines but keeps help/type)
         let filtered_out = super::test_helpers::remove_nats_lines(test_input);
@@ -1421,7 +1421,11 @@ mod test_metricsregistry_nats {
                 1.0,
                 1.0,
             ), // Should be connected
-            (build_component_metric_name(nats_client::CONNECTS), 1.0, 1.0), // Should have 1 connection
+            (
+                build_component_metric_name(nats_client::CURRENT_CONNECTIONS),
+                1.0,
+                1.0,
+            ), // Should have 1 connection
             (
                 build_component_metric_name(nats_client::IN_TOTAL_BYTES),
                 800.0,
@@ -1444,22 +1448,22 @@ mod test_metricsregistry_nats {
             ), // Wide range around 2
             // Component NATS metrics (ordered to match COMPONENT_NATS_METRICS)
             (
-                build_component_metric_name(nats_service::AVG_PROCESSING_MS),
+                build_component_metric_name(nats_service::PROCESSING_MS_AVG),
                 0.0,
                 0.0,
             ), // No processing yet
             (
-                build_component_metric_name(nats_service::TOTAL_ERRORS),
+                build_component_metric_name(nats_service::ERRORS_TOTAL),
                 0.0,
                 0.0,
             ), // No errors yet
             (
-                build_component_metric_name(nats_service::TOTAL_REQUESTS),
+                build_component_metric_name(nats_service::REQUESTS_TOTAL),
                 0.0,
                 0.0,
             ), // No requests yet
             (
-                build_component_metric_name(nats_service::TOTAL_PROCESSING_MS),
+                build_component_metric_name(nats_service::PROCESSING_MS_TOTAL),
                 0.0,
                 0.0,
             ), // No processing yet
@@ -1550,7 +1554,11 @@ mod test_metricsregistry_nats {
                 1.0,
                 1.0,
             ), // Connected
-            (build_component_metric_name(nats_client::CONNECTS), 1.0, 1.0), // 1 connection
+            (
+                build_component_metric_name(nats_client::CURRENT_CONNECTIONS),
+                1.0,
+                1.0,
+            ), // 1 connection
             (
                 build_component_metric_name(nats_client::IN_TOTAL_BYTES),
                 20000.0,
@@ -1573,22 +1581,22 @@ mod test_metricsregistry_nats {
             ), // Wide range around 16
             // Component NATS metrics
             (
-                build_component_metric_name(nats_service::AVG_PROCESSING_MS),
+                build_component_metric_name(nats_service::PROCESSING_MS_AVG),
                 0.0,
                 1.0,
             ), // Low processing time
             (
-                build_component_metric_name(nats_service::TOTAL_ERRORS),
+                build_component_metric_name(nats_service::ERRORS_TOTAL),
                 0.0,
                 0.0,
             ), // No errors
             (
-                build_component_metric_name(nats_service::TOTAL_REQUESTS),
+                build_component_metric_name(nats_service::REQUESTS_TOTAL),
                 0.0,
                 0.0,
             ), // No work handler requests
             (
-                build_component_metric_name(nats_service::TOTAL_PROCESSING_MS),
+                build_component_metric_name(nats_service::PROCESSING_MS_TOTAL),
                 0.0,
                 5.0,
             ), // Low total processing time
