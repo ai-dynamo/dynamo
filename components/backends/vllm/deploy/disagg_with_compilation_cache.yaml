@@ -1,0 +1,84 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Example VLLM disaggregated deployment with compilation cache enabled
+# This configuration demonstrates how to use the compilation cache feature
+# to speed up container startup times by persisting PyTorch compilation artifacts
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg-with-compilation-cache
+  annotations:
+    nvidia.com/enable-grove: "false"
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: vllm-disagg-compilation-cache
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+    VllmDecodeWorker:
+      dynamoNamespace: vllm-disagg-compilation-cache
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 2
+      resources:
+        limits:
+          gpu: "1"
+      compilationCache:
+        create: true
+        name: vllm-compilation-cache
+        size: 30Gi
+        storageClass: csi-mounted-fs-path-sc
+        volumeAccessMode: ReadWriteMany
+        mountPoint: /root/.cache/vllm
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            failureThreshold: 60
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+          workingDir: /workspace/components/backends/vllm
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.vllm
+            - --model
+            - Qwen/Qwen3-0.6B
+    VllmPrefillWorker:
+      dynamoNamespace: vllm-disagg-compilation-cache
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      compilationCache:
+        create: false
+        name: vllm-compilation-cache
+        mountPoint: /root/.cache/vllm_compilation
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            failureThreshold: 60
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+          workingDir: /workspace/components/backends/vllm
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.vllm
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --is-prefill-worker

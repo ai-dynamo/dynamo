@@ -795,6 +795,20 @@ func GenerateBasePodSpec(
 			MountPath: *component.PVC.MountPoint,
 		})
 	}
+	if component.CompilationCache != nil {
+		volumes = append(volumes, corev1.Volume{
+			Name: *component.CompilationCache.Name,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: *component.CompilationCache.Name,
+				},
+			},
+		})
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+			Name:      *component.CompilationCache.Name,
+			MountPath: *component.CompilationCache.MountPoint,
+		})
+	}
 	if shmVol, shmMount := generateSharedMemoryVolumeAndMount(component.SharedMemory); shmVol != nil && shmMount != nil {
 		volumes = append(volumes, *shmVol)
 		container.VolumeMounts = append(container.VolumeMounts, *shmMount)
@@ -1154,8 +1168,8 @@ func ConvertDynamoComponentDeploymentToSpec(dynComponent *v1alpha1.DynamoCompone
 	}
 }
 
-// getBackendFrameworkFromDynamoComponent determines backend framework for a DynamoComponentDeployment
-func getBackendFrameworkFromDynamoComponent(dynComponent *v1alpha1.DynamoComponentDeployment) (BackendFramework, error) {
+// GetBackendFrameworkFromDynamoComponent determines backend framework for a DynamoComponentDeployment
+func GetBackendFrameworkFromDynamoComponent(dynComponent *v1alpha1.DynamoComponentDeployment) (BackendFramework, error) {
 	// Extract command/args from component
 	var command, args []string
 	if dynComponent.Spec.ExtraPodSpec != nil && dynComponent.Spec.ExtraPodSpec.MainContainer != nil {
@@ -1189,7 +1203,7 @@ func GenerateBasePodSpecForController(
 	numberOfNodes := componentSpec.GetNumberOfNodes()
 
 	// Determine backend framework using hybrid approach
-	backendFramework, err := getBackendFrameworkFromDynamoComponent(dynComponent)
+	backendFramework, err := GetBackendFrameworkFromDynamoComponent(dynComponent)
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine backend framework: %w", err)
 	}

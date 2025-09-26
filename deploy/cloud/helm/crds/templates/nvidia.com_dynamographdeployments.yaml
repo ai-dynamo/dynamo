@@ -781,6 +781,31 @@ spec:
                           minReplicas:
                             type: integer
                         type: object
+                      compilationCache:
+                        description: CompilationCache config for backend compilation artifacts (e.g., PyTorch, TensorRT).
+                        properties:
+                          create:
+                            description: Create indicates to create a new PVC
+                            type: boolean
+                          mountPoint:
+                            type: string
+                          name:
+                            description: Name is the name of the PVC
+                            type: string
+                          size:
+                            anyOf:
+                              - type: integer
+                              - type: string
+                            description: Size of the NIM cache in Gi, used during PVC creation
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          storageClass:
+                            description: StorageClass to be used for PVC creation. Leave it as empty if the PVC is already created.
+                            type: string
+                          volumeAccessMode:
+                            description: VolumeAccessMode is the volume access mode of the PVC
+                            type: string
+                        type: object
                       componentType:
                         description: ComponentType indicates the role of this component (for example, "main").
                         type: string

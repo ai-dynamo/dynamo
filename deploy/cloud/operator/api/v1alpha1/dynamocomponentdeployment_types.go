@@ -91,6 +91,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	EnvFromSecret *string `json:"envFromSecret,omitempty"`
 	// PVC config describing volumes to be mounted by the component.
 	PVC *PVC `json:"pvc,omitempty"`
+	// CompilationCache config for backend compilation artifacts (e.g., PyTorch, TensorRT).
+	CompilationCache *CompilationCachePVC `json:"compilationCache,omitempty"`
 
 	// Ingress config to expose the component outside the cluster (or through a service mesh).
 	Ingress *IngressSpec `json:"ingress,omitempty"`

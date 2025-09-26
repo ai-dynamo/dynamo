@@ -6,6 +6,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -27,6 +28,26 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 			container.ReadinessProbe = nil
 			container.StartupProbe = nil
 		}
+	}
+
+	// Set compilation cache environment variables for VLLM
+	if component.CompilationCache != nil && component.CompilationCache.MountPoint != nil {
+		cacheDir := *component.CompilationCache.MountPoint
+		// Set VLLM cache directory using the environment variable
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "VLLM_CACHE_ROOT",
+			Value: cacheDir,
+		})
+
+		// Log confirmation that compilation cache is configured for VLLM
+		logger := log.Log.WithName("vllm-backend")
+		logger.Info("Compilation cache configured and enabled for VLLM backend",
+			"backend", "vllm",
+			"status", "fully-supported",
+			"cache-dir", cacheDir,
+			"pvc-created", true,
+			"env-vars-set", true,
+			"env-vars", "VLLM_CACHE_ROOT")
 	}
 }
 

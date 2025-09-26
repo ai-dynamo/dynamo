@@ -11,6 +11,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type TRTLLMBackend struct {
@@ -18,6 +19,17 @@ type TRTLLMBackend struct {
 }
 
 func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+	// Log warning if compilation cache is configured
+	if component.CompilationCache != nil {
+		logger := log.Log.WithName("trtllm-backend")
+		logger.Info("Compilation cache configured for TensorRT-LLM but not yet fully supported",
+			"backend", "trtllm",
+			"status", "partial-support",
+			"pvc-created", true,
+			"env-vars-set", false,
+			"next-steps", "upstream TensorRT-LLM changes needed")
+	}
+
 	// For single node, nothing to do
 	if numberOfNodes <= 1 {
 		return

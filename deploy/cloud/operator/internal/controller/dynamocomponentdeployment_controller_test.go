@@ -1113,3 +1113,280 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 		})
 	}
 }
+
+func TestDynamoComponentDeploymentReconciler_reconcileCompilationCachePVC(t *testing.T) {
+	scheme := scheme.Scheme
+	err := v1alpha1.AddToScheme(scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name                   string
+		deployment             *v1alpha1.DynamoComponentDeployment
+		existingPVC            *corev1.PersistentVolumeClaim
+		wantPVC                *corev1.PersistentVolumeClaim
+		wantErr                bool
+		expectPVCCreation      bool
+		expectSkipCreation     bool
+		expectBackendFramework dynamo.BackendFramework
+	}{
+		{
+			name: "VLLM backend with compilation cache enabled - create new PVC",
+			deployment: &v1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vllm-deployment",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoComponentDeploymentSpec{
+					BackendFramework: "vllm",
+					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						CompilationCache: &v1alpha1.CompilationCachePVC{
+							PVC: v1alpha1.PVC{
+								Create:           ptr.To(true),
+								Name:             ptr.To("test-compilation-cache"),
+								StorageClass:     "fast-ssd",
+								Size:             resource.MustParse("30Gi"),
+								VolumeAccessMode: corev1.ReadWriteMany,
+								MountPoint:       ptr.To("/root/.cache/vllm"),
+							},
+						},
+					},
+				},
+			},
+			existingPVC:        nil,
+			expectPVCCreation:  true,
+			expectSkipCreation: false,
+			wantErr:            false,
+		},
+		{
+			name: "VLLM backend with compilation cache enabled - use existing PVC",
+			deployment: &v1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vllm-deployment",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoComponentDeploymentSpec{
+					BackendFramework: "vllm",
+					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						CompilationCache: &v1alpha1.CompilationCachePVC{
+							PVC: v1alpha1.PVC{
+								Create:     ptr.To(false),
+								Name:       ptr.To("existing-compilation-cache"),
+								MountPoint: ptr.To("/root/.cache/vllm"),
+							},
+						},
+					},
+				},
+			},
+			existingPVC: &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "existing-compilation-cache",
+					Namespace: "default",
+				},
+			},
+			expectPVCCreation:  false,
+			expectSkipCreation: false,
+			wantErr:            false,
+		},
+		{
+			name: "TRT-LLM backend with compilation cache - should skip creation",
+			deployment: &v1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-trtllm-deployment",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoComponentDeploymentSpec{
+					BackendFramework: "trtllm",
+					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						CompilationCache: &v1alpha1.CompilationCachePVC{
+							PVC: v1alpha1.PVC{
+								Create:     ptr.To(true),
+								Name:       ptr.To("trtllm-compilation-cache"),
+								MountPoint: ptr.To("/cache/trtllm"),
+							},
+						},
+					},
+				},
+			},
+			expectPVCCreation:  false,
+			expectSkipCreation: true,
+			wantErr:            false,
+		},
+		{
+			name: "SGLANG backend with compilation cache - should skip creation",
+			deployment: &v1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sglang-deployment",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoComponentDeploymentSpec{
+					BackendFramework: "sglang",
+					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						CompilationCache: &v1alpha1.CompilationCachePVC{
+							PVC: v1alpha1.PVC{
+								Create:     ptr.To(true),
+								Name:       ptr.To("sglang-compilation-cache"),
+								MountPoint: ptr.To("/cache/sglang"),
+							},
+						},
+					},
+				},
+			},
+			expectPVCCreation:  false,
+			expectSkipCreation: true,
+			wantErr:            false,
+		},
+		{
+			name: "No compilation cache specified",
+			deployment: &v1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deployment-no-cache",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoComponentDeploymentSpec{
+					BackendFramework: "vllm",
+					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						CompilationCache: nil,
+					},
+				},
+			},
+			expectPVCCreation:  false,
+			expectSkipCreation: true,
+			wantErr:            false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+
+			// Create fake client with existing resources
+			var objs []client.Object
+			if tt.existingPVC != nil {
+				objs = append(objs, tt.existingPVC)
+			}
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+
+			// Create reconciler
+			r := &DynamoComponentDeploymentReconciler{
+				Client:   fakeClient,
+				Recorder: record.NewFakeRecorder(100),
+			}
+
+			// Call reconcileCompilationCachePVC
+			ctx := context.Background()
+			pvc, err := r.reconcileCompilationCachePVC(ctx, tt.deployment)
+
+			// Check error expectation
+			if tt.wantErr {
+				g.Expect(err).To(gomega.HaveOccurred())
+				return
+			}
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+
+			if tt.expectSkipCreation {
+				// Should return nil when skipping creation
+				g.Expect(pvc).To(gomega.BeNil())
+			} else if tt.expectPVCCreation {
+				// Should have created a new PVC
+				g.Expect(pvc).ToNot(gomega.BeNil())
+				g.Expect(pvc.Name).To(gomega.Equal("test-compilation-cache"))
+				g.Expect(pvc.Namespace).To(gomega.Equal("default"))
+
+				// Verify PVC was actually created in the cluster
+				createdPVC := &corev1.PersistentVolumeClaim{}
+				err = fakeClient.Get(ctx, client.ObjectKey{Name: "test-compilation-cache", Namespace: "default"}, createdPVC)
+				g.Expect(err).ToNot(gomega.HaveOccurred())
+			} else {
+				// Should have returned existing PVC
+				g.Expect(pvc).ToNot(gomega.BeNil())
+				g.Expect(pvc.Name).To(gomega.Equal("existing-compilation-cache"))
+			}
+		})
+	}
+}
+
+func TestReconcileCompilationCachePVC_BackendFrameworkDetection(t *testing.T) {
+	tests := []struct {
+		name             string
+		backendFramework string
+		expectSupported  bool
+	}{
+		{
+			name:             "VLLM backend supports compilation cache",
+			backendFramework: "vllm",
+			expectSupported:  true,
+		},
+		{
+			name:             "TRT-LLM backend does not support compilation cache",
+			backendFramework: "trtllm",
+			expectSupported:  false,
+		},
+		{
+			name:             "SGLANG backend does not support compilation cache",
+			backendFramework: "sglang",
+			expectSupported:  false,
+		},
+	}
+
+	scheme := scheme.Scheme
+	err := v1alpha1.AddToScheme(scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+
+			deployment := &v1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deployment",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoComponentDeploymentSpec{
+					BackendFramework: tt.backendFramework,
+					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						CompilationCache: &v1alpha1.CompilationCachePVC{
+							PVC: v1alpha1.PVC{
+								Create:     ptr.To(true),
+								Name:       ptr.To("test-cache"),
+								MountPoint: ptr.To("/cache"),
+							},
+						},
+					},
+				},
+			}
+
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+			r := &DynamoComponentDeploymentReconciler{
+				Client:   fakeClient,
+				Recorder: record.NewFakeRecorder(100),
+			}
+
+			ctx := context.Background()
+			pvc, err := r.reconcileCompilationCachePVC(ctx, deployment)
+
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+
+			if tt.expectSupported {
+				// Should create PVC for supported backends
+				g.Expect(pvc).ToNot(gomega.BeNil())
+
+				// Verify PVC was created in cluster
+				createdPVC := &corev1.PersistentVolumeClaim{}
+				err = fakeClient.Get(ctx, client.ObjectKey{Name: "test-cache", Namespace: "default"}, createdPVC)
+				g.Expect(err).ToNot(gomega.HaveOccurred())
+			} else {
+				// Should skip creation for unsupported backends
+				g.Expect(pvc).To(gomega.BeNil())
+
+				// Verify no PVC was created
+				createdPVC := &corev1.PersistentVolumeClaim{}
+				err = fakeClient.Get(ctx, client.ObjectKey{Name: "test-cache", Namespace: "default"}, createdPVC)
+				g.Expect(err).To(gomega.HaveOccurred())
+			}
+		})
+	}
+}
