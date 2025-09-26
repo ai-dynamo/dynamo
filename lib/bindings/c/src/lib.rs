@@ -414,10 +414,7 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
     };
 
     let make_engine = || async {
-        let force_rr = std::env::var("DYNAMO_FORCE_RR").ok().as_deref() == Some("1");
-        let router_mode = if force_rr {
-            RouterMode::RoundRobin
-        } else if use_kv_routing {
+        let router_mode = if use_kv_routing {
             RouterMode::KV
         } else {
             RouterMode::RoundRobin

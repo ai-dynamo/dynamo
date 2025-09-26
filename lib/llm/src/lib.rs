@@ -10,6 +10,8 @@ use std::{fs::File, io::BufReader, path::Path};
 
 use anyhow::Context as _;
 
+pub use ::tokenizers::tokenizer::Tokenizer as HfTokenizer;
+
 pub mod backend;
 pub mod common;
 pub mod disagg_router;
