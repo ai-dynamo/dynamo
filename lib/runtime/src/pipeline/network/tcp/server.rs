@@ -151,16 +151,19 @@ impl TcpStreamServer {
                     )))?
                     .to_string()
             }
-            None => resolver.local_ip()
-                .or_else(|err| match err {
-                    Error::LocalIpAddressNotFound => {
-                        // Fall back to IPv6 if no IPv4 addresses are found
-                        resolver.local_ipv6()
-                    }
+            None => {
+                let resolved_ip = resolver.local_ip().or_else(|err| match err {
+                    Error::LocalIpAddressNotFound => resolver.local_ipv6(),
                     _ => Err(err),
-                })
-                .unwrap_or_else(|_| IpAddr::from([127, 0, 0, 1]))
-                .to_string(),
+                });
+
+                match resolved_ip {
+                    Ok(addr) => addr,
+                    Err(Error::LocalIpAddressNotFound) => IpAddr::from([127, 0, 0, 1]),
+                    Err(err) => return Err(err.into()),
+                }
+                .to_string()
+            }
         };
 
         let state = Arc::new(Mutex::new(State::default()));
