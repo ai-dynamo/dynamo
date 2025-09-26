@@ -47,7 +47,7 @@ jobs:
       contents: read
     steps:
     - uses: actions/checkout@v4
-    - name: Cache APT archives
+    - name: Cache APT
       uses: actions/cache@v4
       with:
         path: ${{ env.APT_CACHE_DIR }}
@@ -55,7 +55,7 @@ jobs:
     - name: Set up system dependencies
       run: |
         sudo apt-get update -y
-        sudo apt-get install -y -o Dir::Cache::archives=${{ env.APT_CACHE_DIR }} protobuf-compiler
+        sudo apt-get install -y -o Dir::Cache=${{ env.APT_CACHE_DIR }} protobuf-compiler
 
     - name: Cache cargo artifacts
       uses: actions/cache@v4
@@ -97,7 +97,7 @@ jobs:
       contents: read
     steps:
     - uses: actions/checkout@v4
-    - name: Cache APT archives
+    - name: Cache APT
       uses: actions/cache@v4
       with:
         path: ${{ env.APT_CACHE_DIR }}
@@ -105,7 +105,7 @@ jobs:
     - name: Set up system dependencies
       run: |
         sudo apt-get update -y
-        sudo apt-get install -y -o Dir::Cache::archives=${{ env.APT_CACHE_DIR }} protobuf-compiler
+        sudo apt-get install -y -o Dir::Cache=${{ env.APT_CACHE_DIR }} protobuf-compiler
 
     - name: Cache cargo artifacts
       uses: actions/cache@v4
