@@ -77,10 +77,14 @@ class Planner:
 
             if not args.no_operation:
                 if args.environment == "kubernetes":
-                    self.connector = KubernetesConnector(self.namespace, self.model_name)
+                    self.connector = KubernetesConnector(
+                        self.namespace, self.model_name
+                    )
                 elif args.environment == "virtual":
                     self.connector = VirtualConnector(
-                        runtime, self.namespace, args.model_name,
+                        runtime,
+                        self.namespace,
+                        args.model_name,
                     )
                 else:
                     raise ValueError(f"Invalid environment: {args.environment}")
@@ -246,7 +250,7 @@ class Planner:
             self.num_d_workers_gauge.set(len(self.d_endpoints))
 
         self.last_metrics.ttft = self.prometheus_api_client.get_avg_time_to_first_token(
-            f"{self.args.adjustment_interval}s", 
+            f"{self.args.adjustment_interval}s",
             self.model_name,
         )
         self.last_metrics.itl = self.prometheus_api_client.get_avg_inter_token_latency(
@@ -484,7 +488,9 @@ class Planner:
 
             model_name = self.connector.get_model_name()
             logger.info(f"Detected model name from deployment: {model_name}")
-            self.model_name = model_name.lower() # normalize model name to lowercase (MDC)
+            self.model_name = (
+                model_name.lower()
+            )  # normalize model name to lowercase (MDC)
 
         self.last_adjustment_time = time.time()
 

@@ -15,8 +15,8 @@
 
 import logging
 import os
-from enum import Enum
 import shlex
+from enum import Enum
 from typing import Optional
 
 from pydantic import BaseModel
@@ -24,13 +24,10 @@ from pydantic import BaseModel
 from dynamo.planner.kube import KubernetesAPI
 from dynamo.planner.planner_connector import PlannerConnector
 from dynamo.planner.utils.exceptions import (
-    BackendFrameworkInvalidError,
-    BackendFrameworkNotFoundError,
-    ComponentError,
+    DeploymentModelNameMismatchError,
     DeploymentValidationError,
     DuplicateSubComponentError,
     EmptyTargetReplicasError,
-    DeploymentModelNameMismatchError,
     ModelNameNotFoundError,
     PlannerError,
     SubComponentNotFoundError,
@@ -53,18 +50,25 @@ class Service(BaseModel):
 
     def number_replicas(self) -> int:
         return self.service.get("replicas", 0)
-    
+
     def get_model_name(self) -> Optional[str]:
-        args = self.service.get("extraPodSpec", {}).get("mainContainer", {}).get("args", [])
+        args = (
+            self.service.get("extraPodSpec", {})
+            .get("mainContainer", {})
+            .get("args", [])
+        )
 
         args = break_arguments(args)
-        if "--served-model-name" in args and len(args) > args.index("--served-model-name") + 1:
+        if (
+            "--served-model-name" in args
+            and len(args) > args.index("--served-model-name") + 1
+        ):
             return args[args.index("--served-model-name") + 1]
         if "--model" in args and len(args) > args.index("--model") + 1:
             return args[args.index("--model") + 1]
 
         return None
-        
+
 
 def break_arguments(args: list[str] | None) -> list[str]:
     ans: list[str] = []
@@ -88,11 +92,18 @@ class TargetReplica(BaseModel):
 
 
 class KubernetesConnector(PlannerConnector):
-    def __init__(self, dynamo_namespace: str, model_name: Optional[str] = None, k8s_namespace: Optional[str] = None):
+    def __init__(
+        self,
+        dynamo_namespace: str,
+        model_name: Optional[str] = None,
+        k8s_namespace: Optional[str] = None,
+    ):
         self.kube_api = KubernetesAPI(k8s_namespace)
 
         if model_name:
-            self.model_name = model_name.lower() # normalize model name to lowercase (MDC)
+            self.model_name = (
+                model_name.lower()
+            )  # normalize model name to lowercase (MDC)
         else:
             self.model_name = None
 
@@ -190,12 +201,14 @@ class KubernetesConnector(PlannerConnector):
             raise DeploymentValidationError(errors)
 
     def get_model_name(self, deployment: Optional[dict] = None) -> str:
-        """Get the model name from the deployment""" 
+        """Get the model name from the deployment"""
         try:
             if deployment is None:
-                deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+                deployment = self.kube_api.get_graph_deployment(
+                    self.graph_deployment_name
+                )
 
-            # TODO: benchmarks/profiler/utils/config.py already contains DGD config parsing 
+            # TODO: benchmarks/profiler/utils/config.py already contains DGD config parsing
             # and model name logic, should consolidate
             prefill_service = self.get_service_from_sub_component_type_or_name(
                 deployment,
@@ -217,13 +230,17 @@ class KubernetesConnector(PlannerConnector):
             elif decode_model_name is None:
                 model_name = prefill_model_name
             elif prefill_model_name != decode_model_name:
-                raise DeploymentModelNameMismatchError(prefill_model_name, decode_model_name)
+                raise DeploymentModelNameMismatchError(
+                    prefill_model_name, decode_model_name
+                )
             else:
                 model_name = prefill_model_name
 
         except PlannerError as e:
             if self.model_name:
-                logger.warning(f"Failed to get model name from deployment with error: {e}, using provided model name: {self.model_name}")
+                logger.warning(
+                    f"Failed to get model name from deployment with error: {e}, using provided model name: {self.model_name}"
+                )
                 model_name = self.model_name
             else:
                 raise e
@@ -232,19 +249,13 @@ class KubernetesConnector(PlannerConnector):
         if self.model_name:
             if model_name != self.model_name:
                 raise UserProvidedModelNameMismatchError(model_name, self.model_name)
-        
+
         return model_name
 
-    async def wait_for_deployment_ready(
-        self,
-        max_attempts: int = 180,  # default: 30 minutes total
-        delay_seconds: int = 10,  # default: check every 10 seconds
-    ):
+    async def wait_for_deployment_ready(self):
         """Wait for the deployment to be ready"""
         await self.kube_api.wait_for_graph_deployment_ready(
             self.graph_deployment_name,
-            max_attempts,
-            delay_seconds,
         )
 
     async def set_component_replicas(

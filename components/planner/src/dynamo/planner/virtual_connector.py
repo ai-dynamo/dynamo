@@ -6,7 +6,6 @@ import os
 from typing import Optional
 
 from dynamo._core import VirtualConnectorCoordinator
-from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 from dynamo.planner.planner_connector import PlannerConnector
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -32,7 +31,10 @@ class VirtualConnector(PlannerConnector):
     """
 
     def __init__(
-        self, runtime: DistributedRuntime, dynamo_namespace: str, backend: Optional[str]
+        self,
+        runtime: DistributedRuntime,
+        dynamo_namespace: str,
+        model_name: Optional[str] = None,
     ):
         self.connector = VirtualConnectorCoordinator(
             runtime,
@@ -42,8 +44,11 @@ class VirtualConnector(PlannerConnector):
             SCALING_MAX_RETRIES,
         )
 
-        self.backend = backend
-        self.worker_component_names = WORKER_COMPONENT_NAMES[backend]
+        if model_name is None:
+            raise ValueError("Model name is required for virtual connector")
+
+        self.model_name = model_name.lower()  # normalize model name to lowercase (MDC)
+
         self.dynamo_namespace = dynamo_namespace
 
     async def _async_init(self):
@@ -119,3 +124,19 @@ class VirtualConnector(PlannerConnector):
 
         if blocking:
             await self._wait_for_scaling_completion()
+
+    async def validate_deployment(
+        self,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ):
+        """Validate the deployment"""
+        pass
+
+    async def wait_for_deployment_ready(self):
+        """Wait for the deployment to be ready"""
+        await self._wait_for_scaling_completion()
+
+    async def get_model_name(self) -> str:
+        """Get the model name from the deployment"""
+        return self.model_name

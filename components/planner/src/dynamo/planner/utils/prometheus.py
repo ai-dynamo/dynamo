@@ -16,13 +16,14 @@
 import logging
 import typing
 
-from pydantic import BaseModel, ValidationError
 from prometheus_api_client import PrometheusConnect
+from pydantic import BaseModel, ValidationError
 
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
 
 class FrontendMetric(BaseModel):
     container: typing.Optional[str] = None
@@ -37,7 +38,7 @@ class FrontendMetric(BaseModel):
 
 class FrontendMetricContainer(BaseModel):
     metric: FrontendMetric
-    value: typing.Tuple[float, float] # [timestamp, value]
+    value: typing.Tuple[float, float]  # [timestamp, value]
 
 
 class PrometheusAPIClient:
@@ -46,11 +47,11 @@ class PrometheusAPIClient:
         self.dynamo_namespace = dynamo_namespace
 
     def _get_average_metric(
-        self, 
-        metric_name: str, 
+        self,
+        metric_name: str,
         interval: str,
-        operation_name: str, 
-        model_name: str, 
+        operation_name: str,
+        model_name: str,
     ) -> float:
         """
         Helper method to get average metrics using the pattern:
@@ -76,13 +77,16 @@ class PrometheusAPIClient:
 
             values = []
             for container in metrics_containers:
-                if container.metric.model == model_name and container.metric.dynamo_namespace == self.dynamo_namespace:
+                if (
+                    container.metric.model == model_name
+                    and container.metric.dynamo_namespace == self.dynamo_namespace
+                ):
                     values.append(container.value[1])
 
             if not values:
                 return 0
             return sum(values) / len(values)
-            
+
         except Exception as e:
             logger.error(f"Error getting {operation_name}: {e}")
             return 0
@@ -120,7 +124,10 @@ class PrometheusAPIClient:
             metrics_containers = parse_frontend_metric_containers(raw_res)
             total_count = 0.0
             for container in metrics_containers:
-                if container.metric.model == model_name and container.metric.dynamo_namespace == self.dynamo_namespace:
+                if (
+                    container.metric.model == model_name
+                    and container.metric.dynamo_namespace == self.dynamo_namespace
+                ):
                     total_count += container.value[1]
             return total_count
         except Exception as e:
@@ -143,7 +150,10 @@ class PrometheusAPIClient:
             model_name,
         )
 
-def parse_frontend_metric_containers(result: list[dict]) -> list[FrontendMetricContainer]:
+
+def parse_frontend_metric_containers(
+    result: list[dict],
+) -> list[FrontendMetricContainer]:
     metrics_containers: list[FrontendMetricContainer] = []
     for res in result:
         try:

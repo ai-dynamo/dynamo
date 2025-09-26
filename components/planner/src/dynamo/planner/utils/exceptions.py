@@ -59,6 +59,7 @@ class ComponentError(PlannerError):
 
     pass
 
+
 class ModelNameNotFoundError(PlannerError):
     """Raised when the model name is not found in the deployment"""
 
@@ -78,6 +79,7 @@ class DeploymentModelNameMismatchError(PlannerError):
         self.message = message
         super().__init__(self.message)
 
+
 class UserProvidedModelNameMismatchError(PlannerError):
     """Raised when the model name is not the same as the user provided model name"""
 
@@ -92,7 +94,7 @@ class UserProvidedModelNameMismatchError(PlannerError):
 
 class BackendFrameworkNotFoundError(PlannerError):
     """Raised when the backend framework is not supported.
-    
+
     This occurs when the DynamoGraphDeployment contains an unsupported backend framework.
     """
 
@@ -100,9 +102,10 @@ class BackendFrameworkNotFoundError(PlannerError):
         message = "Backend framework not found on DynamoGraphDeployment"
         super().__init__(message)
 
+
 class BackendFrameworkInvalidError(PlannerError):
     """Raised when the backend framework does not exist.
-    
+
     This occurs when the DynamoGraphDeployment contains an unsupported backend framework.
     """
 
