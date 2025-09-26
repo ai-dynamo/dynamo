@@ -117,7 +117,7 @@ maturin develop --uv
 cd $DYNAMO_HOME
 # installs sglang supported version along with dynamo
 # include the prerelease flag to install flashinfer rc versions
-uv pip install --prerelease==allow -e .[sglang]
+uv pip install --prerelease=allow -e .[sglang]
 ```
 
 </details>
