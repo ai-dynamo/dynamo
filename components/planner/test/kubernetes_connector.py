@@ -18,11 +18,11 @@ from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 
-from dynamo.planner.kubernetes_connector import (
-    KubernetesConnector,
+from dynamo.planner.defaults import (
     SubComponentType,
-    TargetReplica,
+    get_service_from_sub_component_type_or_name,
 )
+from dynamo.planner.kubernetes_connector import KubernetesConnector, TargetReplica
 from dynamo.planner.utils.exceptions import (
     DeploymentValidationError,
     DuplicateSubComponentError,
@@ -84,21 +84,21 @@ def test_get_service_name_from_sub_component_type(kubernetes_connector):
         },
     }
 
-    service = kubernetes_connector.get_service_from_sub_component_type_or_name(
+    service = get_service_from_sub_component_type_or_name(
         deployment, SubComponentType.PREFILL
     )
     assert service.name == "test-component-prefill"
     assert service.number_replicas() == 2
 
     # should still work if the component_name is provided
-    service = kubernetes_connector.get_service_from_sub_component_type_or_name(
+    service = get_service_from_sub_component_type_or_name(
         deployment, SubComponentType.PREFILL, "test-component-prefill"
     )
     assert service.name == "test-component-prefill"
     assert service.number_replicas() == 2
 
     # should respect subComponentType first
-    service = kubernetes_connector.get_service_from_sub_component_type_or_name(
+    service = get_service_from_sub_component_type_or_name(
         deployment, SubComponentType.DECODE, "test-component-prefill"
     )
     assert service.name == "test-component-decode"
@@ -115,12 +115,12 @@ def test_get_service_name_from_sub_component_type_not_found(kubernetes_connector
         },
     }
     with pytest.raises(SubComponentNotFoundError) as exc_info:
-        kubernetes_connector.get_service_from_sub_component_type_or_name(
+        get_service_from_sub_component_type_or_name(
             deployment, SubComponentType.PREFILL
         )
 
     with pytest.raises(SubComponentNotFoundError) as exc_info:
-        kubernetes_connector.get_service_from_sub_component_type_or_name(
+        get_service_from_sub_component_type_or_name(
             deployment, SubComponentType.PREFILL, "test-component-decode"
         )
 
@@ -147,7 +147,7 @@ def test_get_service_name_from_sub_component_type_duplicate(kubernetes_connector
 
     with pytest.raises(DuplicateSubComponentError) as exc_info:
         # even though "test-component-prefill" is provided, subComponentType duplicates should result in an error
-        kubernetes_connector.get_service_from_sub_component_type_or_name(
+        get_service_from_sub_component_type_or_name(
             deployment, SubComponentType.PREFILL, "test-component-prefill"
         )
 
@@ -170,7 +170,7 @@ def test_get_service_name_from_sub_component_type_or_name(kubernetes_connector):
         },
     }
 
-    service = kubernetes_connector.get_service_from_sub_component_type_or_name(
+    service = get_service_from_sub_component_type_or_name(
         deployment, SubComponentType.PREFILL, "test-component-prefill"
     )
     assert service.name == "test-component-prefill"

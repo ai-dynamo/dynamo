@@ -15,37 +15,25 @@
 
 import logging
 import os
-from enum import Enum
 from typing import Optional
 
 from pydantic import BaseModel
 
+from dynamo.planner.defaults import (
+    SubComponentType,
+    get_service_from_sub_component_type_or_name,
+)
 from dynamo.planner.kube import KubernetesAPI
 from dynamo.planner.planner_connector import PlannerConnector
 from dynamo.planner.utils.exceptions import (
     ComponentError,
     DeploymentValidationError,
-    DuplicateSubComponentError,
     EmptyTargetReplicasError,
-    SubComponentNotFoundError,
 )
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
-
-
-class SubComponentType(str, Enum):
-    PREFILL = "prefill"
-    DECODE = "decode"
-
-
-class Service(BaseModel):
-    name: str
-    service: dict
-
-    def number_replicas(self) -> int:
-        return self.service.get("replicas", 0)
 
 
 class TargetReplica(BaseModel):
@@ -74,7 +62,7 @@ class KubernetesConnector(PlannerConnector):
 
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
-        service = self.get_service_from_sub_component_type_or_name(
+        service = get_service_from_sub_component_type_or_name(
             deployment, sub_component_type
         )
         self.kube_api.update_graph_replicas(
@@ -94,7 +82,7 @@ class KubernetesConnector(PlannerConnector):
 
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
-        service = self.get_service_from_sub_component_type_or_name(
+        service = get_service_from_sub_component_type_or_name(
             deployment, sub_component_type
         )
         if service.number_replicas() > 0:
@@ -125,7 +113,7 @@ class KubernetesConnector(PlannerConnector):
         errors = []
 
         try:
-            self.get_service_from_sub_component_type_or_name(
+            get_service_from_sub_component_type_or_name(
                 deployment,
                 SubComponentType.PREFILL,
                 component_name=prefill_component_name,
@@ -134,7 +122,7 @@ class KubernetesConnector(PlannerConnector):
             errors.append(str(e))
 
         try:
-            self.get_service_from_sub_component_type_or_name(
+            get_service_from_sub_component_type_or_name(
                 deployment,
                 SubComponentType.DECODE,
                 component_name=decode_component_name,
@@ -174,7 +162,7 @@ class KubernetesConnector(PlannerConnector):
             return
 
         for target_replica in target_replicas:
-            service = self.get_service_from_sub_component_type_or_name(
+            service = get_service_from_sub_component_type_or_name(
                 deployment,
                 target_replica.sub_component_type,
                 component_name=target_replica.component_name,
@@ -198,57 +186,6 @@ class KubernetesConnector(PlannerConnector):
             await self.kube_api.wait_for_graph_deployment_ready(
                 self.graph_deployment_name,
             )
-
-    # TODO: still supporting framework component names for backwards compatibility
-    # Should be deprecated in favor of service subComponentType
-    def get_service_from_sub_component_type_or_name(
-        self,
-        deployment: dict,
-        sub_component_type: SubComponentType,
-        component_name: Optional[str] = None,
-    ) -> Service:
-        """
-        Get the current replicas for a component in a graph deployment
-
-        Returns: Service object
-
-        Raises:
-            SubComponentNotFoundError: If no service with the specified subComponentType is found
-            DuplicateSubComponentError: If multiple services with the same subComponentType are found
-        """
-        services = deployment.get("spec", {}).get("services", {})
-
-        # Collect all available subComponentTypes for better error messages
-        available_types = []
-        matching_services = []
-
-        for curr_name, curr_service in services.items():
-            service_sub_type = curr_service.get("subComponentType", "")
-            if service_sub_type:
-                available_types.append(service_sub_type)
-
-            if service_sub_type == sub_component_type.value:
-                matching_services.append((curr_name, curr_service))
-
-        # Check for duplicates
-        if len(matching_services) > 1:
-            service_names = [name for name, _ in matching_services]
-            raise DuplicateSubComponentError(sub_component_type.value, service_names)
-
-        # If no service found with subCompontType and fallback component_name is not provided or not found,
-        # or if the fallback component has a non-empty subComponentType, raise error
-        if not matching_services and (
-            not component_name
-            or component_name not in services
-            or services[component_name].get("subComponentType", "") != ""
-        ):
-            raise SubComponentNotFoundError(sub_component_type.value)
-        # If fallback component_name is provided and exists within services, add to matching_services
-        elif not matching_services and component_name in services:
-            matching_services.append((component_name, services[component_name]))
-
-        name, service = matching_services[0]
-        return Service(name=name, service=service)
 
 
 if __name__ == "__main__":

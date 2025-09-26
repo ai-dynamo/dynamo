@@ -7,7 +7,8 @@ import os
 import time
 from typing import Optional
 
-from dynamo.planner.kubernetes_connector import SubComponentType, TargetReplica
+from dynamo.planner.defaults import SubComponentType
+from dynamo.planner.kubernetes_connector import TargetReplica
 from dynamo.planner.planner_connector import PlannerConnector
 from dynamo.planner.utils.exceptions import (
     DeploymentValidationError,
