@@ -51,6 +51,12 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
     http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());
 
+    // Configure NIM metrics polling
+    let local_model = engine_config.local_model();
+    http_service_builder = http_service_builder
+        .nim_metrics_polling_interval_seconds(local_model.nim_metrics_polling_interval_seconds())
+        .nim_metrics_on_demand(local_model.nim_metrics_on_demand());
+
     let http_service = match engine_config {
         EngineConfig::Dynamic(_) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;

@@ -133,6 +133,8 @@ pub struct HttpService {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     route_docs: Vec<RouteDoc>,
+    nim_metrics_polling_interval_seconds: f64,
+    nim_metrics_on_demand: bool,
 }
 
 #[derive(Clone, Builder)]
@@ -172,6 +174,12 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "None")]
     etcd_client: Option<etcd::Client>,
+
+    #[builder(default = "0.0")]
+    nim_metrics_polling_interval_seconds: f64,
+
+    #[builder(default = "false")]
+    nim_metrics_on_demand: bool,
 }
 
 impl HttpService {
@@ -200,6 +208,16 @@ impl HttpService {
         let address = format!("{}:{}", self.host, self.port);
         let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
         tracing::info!(protocol, address, "Starting HTTP(S) service");
+
+        // Start NIM metrics polling task if enabled (interval > 0)
+        if self.nim_metrics_polling_interval_seconds > 0.0 {
+            let interval = self.nim_metrics_polling_interval_seconds;
+            let state = self.state.clone();
+            let polling_token = cancel_token.child_token();
+            tokio::spawn(async move {
+                Self::start_background_nim_metrics_polling(state, interval, polling_token).await;
+            });
+        }
 
         let router = self.router.clone();
         let observer = cancel_token.child_token();
@@ -270,6 +288,175 @@ impl HttpService {
             if enable { "enabled" } else { "disabled" }
         );
     }
+
+    pub fn nim_metrics_polling_interval_seconds(&self) -> f64 {
+        self.nim_metrics_polling_interval_seconds
+    }
+
+    pub fn nim_metrics_on_demand(&self) -> bool {
+        self.nim_metrics_on_demand
+    }
+
+    /// Background task to poll NIM backend metrics
+    async fn start_background_nim_metrics_polling(state: Arc<State>, interval_secs: f64, cancel_token: CancellationToken) {
+        let interval = Duration::from_secs_f64(interval_secs);
+        let mut ticker = tokio::time::interval(interval);
+
+        tracing::info!(
+            "Starting NIM metrics polling task with interval: {}s",
+            interval_secs
+        );
+
+        loop {
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                        tracing::info!("NIM metrics background polling task cancelled");
+                    break;
+                }
+                _ = ticker.tick() => {
+                    if let Err(e) = Self::get_nim_stats_for_models(&state).await {
+                        tracing::error!("Failed to poll NIM metrics: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get NIM stats for all discovered models via NATS
+    pub async fn get_nim_stats_for_models(state: &Arc<State>) -> Result<()> {
+        let model_entries = state.manager().get_model_entries();
+
+        if model_entries.is_empty() {
+            tracing::debug!("No model entries found, skipping NIM metrics polling");
+            return Ok(());
+        }
+
+        tracing::debug!("Polling NIM metrics from {} model entries", model_entries.len());
+
+        // Group model entries by namespace/component to avoid duplicate calls
+        let mut unique_components = std::collections::HashSet::new();
+
+        for entry in &model_entries {
+            let namespace = &entry.endpoint_id.namespace;
+            let component = &entry.endpoint_id.component;
+            let component_key = format!("{}/{}", namespace, component);
+
+            if !unique_components.insert(component_key) {
+                continue; // Skip if we've already processed this component
+            }
+
+            if let Err(e) = Self::get_nim_stats_from_endpoint(entry, namespace, component).await {
+                tracing::error!(
+                    namespace = %namespace,
+                    component = %component,
+                    error = %e,
+                    "Failed to poll NIM runtime_stats"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get NIM stats from a specific component using runtime_stats endpoint
+    async fn get_nim_stats_from_endpoint(
+        _entry: &crate::discovery::ModelEntry,
+        namespace: &str,
+        component: &str,
+    ) -> Result<()> {
+        use dynamo_runtime::{DistributedRuntime, pipeline::PushRouter};
+        use dynamo_runtime::protocols::annotated::Annotated;
+        use futures::StreamExt;
+        use std::time::Duration;
+
+        // Create a temporary DistributedRuntime to access the component
+        // TODO: This is not ideal - we should have access to the DRT from State
+        let runtime = dynamo_runtime::Runtime::from_settings()?;
+        let drt = DistributedRuntime::from_settings(runtime).await?;
+
+        let component_obj = drt
+            .namespace(namespace)?
+            .component(component)?;
+
+        // Try to get a client for the runtime_stats endpoint
+        let endpoint = component_obj.endpoint("runtime_stats");
+
+        let client = match endpoint.client().await {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::debug!(
+                    namespace = %namespace,
+                    component = %component,
+                    error = %e,
+                    "Failed to create runtime_stats client"
+                );
+                return Ok(()); // Don't fail the entire polling operation
+            }
+        };
+
+        // Wait briefly for instances to be available
+        if let Err(e) = tokio::time::timeout(
+            Duration::from_millis(100),
+            client.wait_for_instances()
+        ).await {
+            tracing::debug!(
+                namespace = %namespace,
+                component = %component,
+                "No runtime_stats instances available: {}",
+                e
+            );
+            return Ok(());
+        }
+
+        // Create a PushRouter to call the runtime_stats endpoint
+        let router = PushRouter::<String, Annotated<serde_json::Value>>::from_client(
+            client,
+            Default::default()
+        ).await?;
+
+        // Call the runtime_stats endpoint with empty request
+        let mut response_stream = match router.random(String::new().into()).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                tracing::debug!(
+                    namespace = %namespace,
+                    component = %component,
+                    error = %e,
+                    "Failed to call runtime_stats endpoint"
+                );
+                return Ok(()); // Don't fail the entire polling operation
+            }
+        };
+
+        // Collect the responses
+        let mut responses = Vec::new();
+        while let Some(response) = response_stream.next().await {
+            responses.push(response);
+        }
+
+        tracing::debug!(
+            namespace = %namespace,
+            component = %component,
+            response_count = responses.len(),
+            "Successfully polled NIM runtime_stats endpoint"
+        );
+
+        // TODO: Parse the responses and update Prometheus metrics
+        // The responses should contain NIM-specific runtime stats that can be
+        // converted to Prometheus format and stored in state.metrics
+        for response in &responses {
+            if let Some(data) = &response.data {
+                tracing::debug!(
+                    namespace = %namespace,
+                    component = %component,
+                    "Runtime stats data: {:?}",
+                    data
+                );
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Environment variable to set the metrics endpoint path (default: `/metrics`)
@@ -292,6 +479,11 @@ static HTTP_SVC_RESPONSES_PATH_ENV: &str = "DYN_HTTP_SVC_RESPONSES_PATH";
 impl HttpServiceConfigBuilder {
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
+
+        // Validate NIM metrics configuration
+        if config.nim_metrics_polling_interval_seconds > 0.0 && config.nim_metrics_on_demand {
+            anyhow::bail!("NIM metrics polling and sync pull cannot be enabled together");
+        }
 
         let model_manager = Arc::new(ModelManager::new());
         let etcd_client = config.etcd_client;
@@ -321,7 +513,12 @@ impl HttpServiceConfigBuilder {
         let mut all_docs = Vec::new();
 
         let mut routes = vec![
-            metrics::router(registry, var(HTTP_SVC_METRICS_PATH_ENV).ok()),
+            metrics::router(
+                registry,
+                var(HTTP_SVC_METRICS_PATH_ENV).ok(),
+                config.nim_metrics_on_demand,
+                if config.nim_metrics_on_demand { Some(state.clone()) } else { None }
+            ),
             super::openai::list_models_router(state.clone(), var(HTTP_SVC_MODELS_PATH_ENV).ok()),
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
@@ -347,6 +544,8 @@ impl HttpServiceConfigBuilder {
             tls_cert_path: config.tls_cert_path,
             tls_key_path: config.tls_key_path,
             route_docs: all_docs,
+            nim_metrics_polling_interval_seconds: config.nim_metrics_polling_interval_seconds,
+            nim_metrics_on_demand: config.nim_metrics_on_demand,
         })
     }
 

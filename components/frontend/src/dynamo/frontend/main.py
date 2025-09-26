@@ -44,6 +44,8 @@ from dynamo.runtime import DistributedRuntime
 from . import __version__
 
 DYNAMO_NAMESPACE_ENV_VAR = "DYN_NAMESPACE"
+NIM_METRICS_POLLING_INTERVAL_ENV_VAR = "NIM_METRICS_POLLING_INTERVAL_SECONDS"
+NIM_METRICS_ON_DEMAND_ENV_VAR = "NIM_METRICS_ON_DEMAND"
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +202,19 @@ def parse_args():
         default=False,
         help="Start KServe gRPC server.",
     )
+    parser.add_argument(
+        "--nim-metrics-polling-interval-seconds",
+        type=float,
+        default=float(os.environ.get(NIM_METRICS_POLLING_INTERVAL_ENV_VAR, "0")),
+        help=f"Interval in seconds for polling NIM backend metrics. Set to > 0 to enable polling (default: 0=disabled, suggested: 9.2s which is less than typical Prometheus scrape interval). Cannot be used with --nim-metrics-on-demand. Can be set via {NIM_METRICS_POLLING_INTERVAL_ENV_VAR} env var.",
+    )
+    parser.add_argument(
+        "--nim-metrics-on-demand",
+        action="store_true",
+        default=os.environ.get(NIM_METRICS_ON_DEMAND_ENV_VAR, "false").lower()
+        == "true",
+        help=f"Enable on-demand metrics pulling from NIM backend when /metrics endpoint is called. Cannot be used with --nim-metrics-polling-interval-seconds > 0. Can be set via {NIM_METRICS_ON_DEMAND_ENV_VAR} env var.",
+    )
 
     flags = parser.parse_args()
 
@@ -207,6 +222,12 @@ def parse_args():
         parser.error("--static-endpoint requires both --model-name and --model-path")
     if bool(flags.tls_cert_path) ^ bool(flags.tls_key_path):  # ^ is XOR
         parser.error("--tls-cert-path and --tls-key-path must be provided together")
+    if flags.nim_metrics_polling_interval_seconds < 0:
+        parser.error("--nim-metrics-polling-interval-seconds must be >= 0")
+    if flags.nim_metrics_polling_interval_seconds > 0 and flags.nim_metrics_on_demand:
+        parser.error(
+            "--nim-metrics-polling-interval-seconds > 0 and --nim-metrics-on-demand cannot be used together"
+        )
 
     return flags
 
@@ -262,6 +283,12 @@ async def async_main():
         kwargs["tls_key_path"] = flags.tls_key_path
     if flags.namespace:
         kwargs["namespace"] = flags.namespace
+
+    # NIM metrics configuration
+    kwargs[
+        "nim_metrics_polling_interval_seconds"
+    ] = flags.nim_metrics_polling_interval_seconds
+    kwargs["nim_metrics_on_demand"] = flags.nim_metrics_on_demand
 
     if is_static:
         # out=dyn://<static_endpoint>
