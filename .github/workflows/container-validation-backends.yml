@@ -60,6 +60,18 @@ jobs:
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
           pytest_marks: "e2e and vllm and gpu_1 and not slow"
+      - name: Docker Tag and Push
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build-image.outputs.image_tag }}
+          push_tag: ai-dynamo/dynamo:${{ github.sha }}-vllm-amd64
+          aws_push: 'true'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: us-west-2
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
   sglang:
     runs-on: gpu-l40-amd64
@@ -85,6 +97,18 @@ jobs:
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
           pytest_marks: "e2e and sglang and gpu_1"
+      - name: Docker Tag and Push
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build-image.outputs.image_tag }}
+          push_tag: ai-dynamo/dynamo:${{ github.sha }}-sglang-amd64
+          aws_push: 'true'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: us-west-2
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
   trtllm:
     runs-on: gpu-l40-amd64
@@ -110,3 +134,147 @@ jobs:
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
           pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow"
+      - name: Docker Tag and Push
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build-image.outputs.image_tag }}
+          push_tag: ai-dynamo/dynamo:${{ github.sha }}-trtllm-amd64
+          aws_push: 'true'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: us-west-2
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
+  e2e-tests:
+    runs-on: cpu-amd-m5-2xlarge
+    env:
+      NAMESPACE: gh-job-id-${{ github.run_id }}
+      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+    strategy:
+      matrix: { FRAMEWORK: ['vllm', 'trtllm', 'sglang'] }
+      fail-fast: false
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+    - name: Before Script
+      run: |
+        set -x
+        # Install dependencies
+        sudo apt-get update && sudo apt-get install -y curl bash openssl gettext git jq
+
+        # # TODO:
+        # set -x
+        # git clone -b $DYNAMO_REPO_BRANCH --depth=1 --single-branch https://dynamo-ai/dynamo dynamo
+        # # use nvidia internal bitnami charts to avoid rate limiting
+        # find dynamo -type f -exec sed -i 's|https://charts.bitnami.com/bitnami|oci://dockerhub.nvidia.com/bitnamicharts|g' {} +
+        # echo $DYNAMO_REPO_CI_COMMIT_SHA | tee -a build.env
+
+        # WE MOST LIKELY DON'T NEED uv
+        # curl -LsSf https://astral.sh/uv/install.sh | sh
+        # export PATH="/root/.local/bin:/opt/dynamo/venv/bin:$PATH"
+        # uv sync
+
+        # Install yq
+        echo "Installing yq..."
+        curl -L https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+        sudo chmod 755 yq
+        sudo mv yq /usr/local/bin/
+        # Install Helm
+        echo "Installing Helm..."
+        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        sudo chmod 700 get_helm.sh
+        sudo ./get_helm.sh
+        # Install kubectl
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        sudo chmod 755 +x kubectl
+        sudo mv kubectl /usr/local/bin/
+
+        # Make sure the right context is used
+        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+        chmod 600 .kubeconfig
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+
+        # Create a namespace for this job
+        echo "Creating an ephemeral namespace..."
+        kubectl delete namespace $NAMESPACE || true
+        kubectl create namespace $NAMESPACE || true
+        echo "Attaching the labels for secrets and cleanup"
+        kubectl label namespaces ${NAMESPACE} nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
+
+        # Set the namespace as default
+        kubectl config set-context --current --namespace=$NAMESPACE
+
+        # Get helm repo for platform helm chart
+        helm repo add --username gitlab-ci-token --password ${CI_JOB_TOKEN} ${CI_PROJECT_NAME} ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/helm/dev
+        helm repo update
+
+        # Check if Istio is installed
+        kubectl get pods -n istio-system
+        # Check if default storage class exists
+        kubectl get storageclass
+
+        # Install Helm chart
+        cat build.env
+        export IMAGE_TAG=$(cat build.env)
+        echo $IMAGE_TAG
+        export VIRTUAL_ENV=/opt/dynamo/venv
+        export KUBE_NS=$NAMESPACE
+        export ISTIO_ENABLED=true
+        export ISTIO_GATEWAY=istio-system/ingress-alb
+        export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
+        export DYNAMO_CLOUD=https://${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
+        # export DOCKER_SERVER=$CI_REGISTRY_IMAGE
+        # export DOCKER_USERNAME=gitlab-ci-token
+        # export DOCKER_PASSWORD=${CI_JOB_TOKEN}
+
+        # Install dynamo env secrets
+        kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=$HF_TOKEN -n $KUBE_NS || true
+        cd ${DYNAMO_REPO}
+    - name: Deploy Dynamo Operator
+      run: |
+        # Install CRDs
+        # helm upgrade --install dynamo-crds ./deploy/cloud/helm/crds/ --namespace default --wait --atomic
+        # Create docker pull secret for operator image
+        kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
+        # Install helm dependencies
+        helm repo add bitnami https://charts.bitnami.com/bitnami
+        cd deploy/cloud/helm/platform/
+        helm dep build .
+        # Install platform
+        helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} --set dynamo-operator.namespaceRestriction.enabled=true --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
+        # Wait for all deployments to be ready
+        timeout $OPERATOR_DEPLOY_TIMEOUT kubectl rollout status deployment -n $NAMESPACE --watch
+        cd -
+
+
+
+
+    - name: After Script
+      if: always()
+      timeout-minutes: 10
+      run: |
+        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+        chmod 600 .kubeconfig
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+
+        # For debugging purposes, list all the resources before we uninstall
+        kubectl get all
+
+        echo "Starting cleanup... after 300 seconds"
+        sleep 300
+
+        echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
+        kubectl delete dynamographdeployments --all -n $NAMESPACE || true
+
+        # Uninstall the helm chart
+        helm ls
+        helm uninstall dynamo-platform || true
+
+        echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
+        timeout 7200s kubectl delete namespace $NAMESPACE || true
+        echo "Namespace $NAMESPACE completed."
