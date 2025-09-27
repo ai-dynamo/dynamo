@@ -632,11 +632,16 @@ impl Slot for VllmConnectorSlot {
             self.device_blocks.extend(block_ids);
         }
 
-        if is_new_request && computed_position > 0 && self.evaluated_blocks == 0{
+        // This approach is fragile, but it’s the only way I can think of to skip evaluating
+        // the G1-matched blocks and to avoid offloading them again.
+        // TODO: Consider adding an indicator in the scheduler output to distinguish between
+        // matched and unmatched device blocks from the scheduler.
+        if is_new_request && computed_position > 0 && self.evaluated_blocks == 0 {
             self.evaluated_blocks += (computed_position + 1) / self.block_size;
         }
 
-        let num_candidate_blocks = ((computed_position + 1) / self.block_size).saturating_sub(self.evaluated_blocks);
+        let num_candidate_blocks =
+            ((computed_position + 1) / self.block_size).saturating_sub(self.evaluated_blocks);
 
         if num_candidate_blocks > 0 {
             // do we have a mechanism for skipping gpu cache hit blocks?  not sure yet.
