@@ -163,11 +163,3 @@ impl ConnectorMetadata {
         self.operations.extend(xfer_reqs);
     }
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectorOperation {
-    pub req_id: String,
-    pub iteration: u64,
-    pub uuid: uuid::Uuid,
-    pub xfer_req: BlockTransferRequest,
-}
