@@ -549,7 +549,7 @@ impl NatsQueue {
                             .await
                         {
                             Ok(purge_info) => {
-                                log::debug!(
+                                log::info!(
                                     "Successfully purged {} messages from NATS stream {}",
                                     purge_info.purged,
                                     self.stream_name
