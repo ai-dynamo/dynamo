@@ -173,6 +173,24 @@ def main():
         help="Maximum input sequence length to include in output (default: None, no filtering)",
     )
     parser.add_argument(
+        "--min-isl",
+        type=int,
+        default=None,
+        help="Minimum input sequence length to include in output (default: None, no filtering)",
+    )
+    parser.add_argument(
+        "--min-osl",
+        type=int,
+        default=None,
+        help="Minimum output sequence length - clips values below this threshold (default: None, no clipping)",
+    )
+    parser.add_argument(
+        "--max-osl",
+        type=int,
+        default=None,
+        help="Maximum output sequence length - clips values above this threshold (default: None, no clipping)",
+    )
+    parser.add_argument(
         "--block-size",
         type=int,
         default=512,
@@ -203,6 +221,9 @@ def main():
         or args.prefix_root_multiplier != 1
         or args.prompt_len_multiplier != 1.0
         or args.max_isl is not None
+        or args.min_isl is not None
+        or args.min_osl is not None
+        or args.max_osl is not None
     )
 
     if not needs_synthesis:
@@ -222,7 +243,18 @@ def main():
         logger.info(f"  Prefix len multiplier: {args.prefix_len_multiplier}")
         logger.info(f"  Prefix root multiplier: {args.prefix_root_multiplier}")
         logger.info(f"  Prompt len multiplier: {args.prompt_len_multiplier}")
-        logger.info(f"  Max ISL: {args.max_isl if args.max_isl else 'no limit'}")
+        logger.info(
+            f"  Max ISL: {args.max_isl if args.max_isl else 'no limit'} (filtering)"
+        )
+        logger.info(
+            f"  Min ISL: {args.min_isl if args.min_isl else 'no limit'} (filtering)"
+        )
+        logger.info(
+            f"  Min OSL: {args.min_osl if args.min_osl else 'no clipping'} (clipping)"
+        )
+        logger.info(
+            f"  Max OSL: {args.max_osl if args.max_osl else 'no clipping'} (clipping)"
+        )
         logger.info(f"  Random seed: {args.seed}")
 
         # Set random seed for reproducibility
@@ -248,7 +280,13 @@ def main():
             num_requests = args.num_requests
 
         # Generate synthetic requests
-        requests = synthesizer.synthesize_requests(num_requests, args.max_isl)
+        requests = synthesizer.synthesize_requests(
+            num_requests,
+            max_isl=args.max_isl,
+            min_isl=args.min_isl,
+            min_osl=args.min_osl,
+            max_osl=args.max_osl,
+        )
         logger.info(f"Generated {len(requests)} synthetic requests")
 
         # Save synthetic data to a permanent file in output directory
