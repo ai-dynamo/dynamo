@@ -269,7 +269,13 @@ get_options() {
 
     if [ -n "$HF_CACHE" ]; then
         mkdir -p "$HF_CACHE"
-        VOLUME_MOUNTS+=" -v $HF_CACHE:/root/.cache/huggingface"
+        # Use /home/ubuntu for local-dev target, /root for dev target.
+        if [ "$TARGET" = "local-dev" ] || [[ "$IMAGE" == *"local-dev"* ]]; then
+            HF_CACHE_TARGET="/home/ubuntu/.cache/huggingface"
+        else
+            HF_CACHE_TARGET="/root/.cache/huggingface"
+        fi
+        VOLUME_MOUNTS+=" -v $HF_CACHE:$HF_CACHE_TARGET"
     fi
 
     if [ -z "${PRIVILEGED}" ]; then
