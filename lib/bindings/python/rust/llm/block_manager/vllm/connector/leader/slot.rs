@@ -632,7 +632,7 @@ impl Slot for VllmConnectorSlot {
             self.device_blocks.extend(block_ids);
         }
 
-        if is_new_request && computed_position > 0 {
+        if is_new_request && computed_position > 0 && self.evaluated_blocks == 0{
             self.evaluated_blocks += (computed_position + 1) / self.block_size;
         }
 
