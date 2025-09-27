@@ -520,7 +520,7 @@ impl NatsQueue {
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(time::Duration::from_secs)
                 .unwrap_or_else(|| time::Duration::from_secs(60 * 60));
-            // Always try to create the stream (removes the race condition)
+
             let stream_config = jetstream::stream::Config {
                 name: self.stream_name.clone(),
                 subjects: vec![self.subject.clone()],
@@ -528,40 +528,26 @@ impl NatsQueue {
                 ..Default::default()
             };
 
-            match client.jetstream().create_stream(stream_config).await {
-                Ok(_) => {
-                    log::debug!("Successfully created NATS stream {}", self.stream_name);
-                }
-                Err(e) => {
-                    // Log warning but continue - stream likely already exists
-                    log::debug!(
-                        "Failed to create NATS stream '{}': {e}. Stream likely already exists, continuing...",
-                        self.stream_name
-                    );
+            // Get or create the stream
+            let stream = client
+                .jetstream()
+                .get_or_create_stream(stream_config)
+                .await?;
 
-                    // If reset_stream is true, purge all messages from the newly created stream
-                    if reset_stream {
-                        match client
-                            .jetstream()
-                            .get_stream(&self.stream_name)
-                            .await?
-                            .purge()
-                            .await
-                        {
-                            Ok(purge_info) => {
-                                log::debug!(
-                                    "Successfully purged {} messages from NATS stream {}",
-                                    purge_info.purged,
-                                    self.stream_name
-                                );
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "Failed to purge NATS stream '{}': {e}",
-                                    self.stream_name
-                                );
-                            }
-                        }
+            log::debug!("Stream {} is ready", self.stream_name);
+
+            // If reset_stream is true, purge all messages from the stream
+            if reset_stream {
+                match stream.purge().await {
+                    Ok(purge_info) => {
+                        log::info!(
+                            "Successfully purged {} messages from NATS stream {}",
+                            purge_info.purged,
+                            self.stream_name
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to purge NATS stream '{}': {e}", self.stream_name);
                     }
                 }
             }
@@ -574,7 +560,6 @@ impl NatsQueue {
                     ..Default::default()
                 };
 
-                let stream = client.jetstream().get_stream(&self.stream_name).await?;
                 let subscriber = stream.create_consumer(consumer_config).await?;
                 self.subscriber = Some(subscriber);
             }

@@ -157,8 +157,8 @@ def parse_args():
     parser.add_argument(
         "--router-snapshot-threshold",
         type=int,
-        default=10000,
-        help="KV Router: Number of messages in stream before triggering a snapshot. Defaults to 10000.",
+        default=1000000,
+        help="KV Router: Number of messages in stream before triggering a snapshot. Defaults to 1000000.",
     )
     parser.add_argument(
         "--router-reset-states",

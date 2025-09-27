@@ -119,7 +119,7 @@ impl Default for KvRouterConfig {
             use_kv_events: true,
             router_replica_sync: false,
             router_track_active_blocks: true,
-            router_snapshot_threshold: Some(10000),
+            router_snapshot_threshold: Some(1000000),
             router_reset_states: false,
         }
     }
