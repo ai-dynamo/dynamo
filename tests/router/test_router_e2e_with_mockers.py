@@ -277,7 +277,7 @@ async def send_inflight_requests(urls: list, payload: dict, num_requests: int):
     logger.info(f"All {num_requests} requests completed successfully")
 
 
-async def send_request_to_specified_mocker_instance(
+async def wait_for_mockers_ready(
     mockers: MockerProcess,
     token_ids: Optional[list] = None,
     stop_conditions: Optional[dict] = None,
@@ -671,11 +671,7 @@ def test_kv_push_router_bindings(request, runtime_services, predownload_tokenize
 
 
         # Wait for mockers to be ready
-        try:
-            asyncio.run(send_request_to_specified_mocker_instance(mockers))
-        except Exception as e:
-            print(f"Error while sending request to mockers: {e}")
-        raise
+        asyncio.run(wait_for_mockers_ready(mockers))
 
         # Run the async test
         async def test_kv_push_router():
