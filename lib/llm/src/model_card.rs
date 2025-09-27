@@ -13,6 +13,7 @@
 //! - Prompt formatter settings (PromptFormatterArtifact)
 //! - Various metadata like revision, publish time, etc.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -705,50 +706,58 @@ impl HFConfig {
         text_config.final_bos_token_id = final_bos_token_id;
 
         // TODO: refactor this when we switch to per-architecture tokenization
-        let final_eos_token_ids: Vec<TokenIdType> = config
-            .eos_token_id
-            .as_ref()
-            .or(text_config.eos_token_id.as_ref())
-            .and_then(|v| {
-                if v.is_number() {
-                    v.as_number()
-                        .and_then(|n| n.as_u64())
-                        .map(|n| vec![n as TokenIdType])
-                } else if v.is_array() {
-                    let arr = v.as_array().unwrap(); // Safety: We just checked
-                    Some(
-                        arr.iter()
-                            .filter_map(|inner_v| {
-                                inner_v
-                                    .as_number()
-                                    .and_then(|n| n.as_u64())
-                                    .map(|n| n as TokenIdType)
-                            })
-                            .collect(),
-                    )
-                } else {
-                    tracing::error!(
-                        ?v,
-                        path = %file_path.display(),
-                        "eos_token_id is not a number or an array, cannot use"
-                    );
-                    None
+        // eos_token_id can appear in multiple places; take the union from all sources.
+        // e.g., for gpt-oss, config.json only contains 200002, while generation_config.json
+        // has [200002, 199999, 200012]
+        let mut eos_token_id_set: HashSet<TokenIdType> = HashSet::new();
+
+        // Helper to merge either a single number or an array of numbers
+        let mut merge_eos = |v: &serde_json::Value| {
+            if let Some(n) = v.as_number().and_then(|n| n.as_u64()) {
+                eos_token_id_set.insert(n as TokenIdType);
+                return;
+            }
+            if let Some(arr) = v.as_array() {
+                for inner in arr {
+                    if let Some(n) = inner.as_number().and_then(|n| n.as_u64()) {
+                        eos_token_id_set.insert(n as TokenIdType);
+                    } else {
+                        tracing::error!(
+                            ?inner,
+                            path = %file_path.display(),
+                            "eos_token_id array contains non-numeric value; skipping"
+                        );
+                    }
                 }
-            })
-            .or_else(|| {
-                // Maybe it's in generation_config.json
-                crate::file_json_field(&gencfg_path, "eos_token_id")
-                .inspect_err(
-                    |err| tracing::warn!(%err, "Missing eos_token_id in generation_config.json"),
-                )
-                .ok()
-            })
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "missing eos_token_id in config.json and generation_config.json, cannot load"
-                )
-            })?;
-        text_config.final_eos_token_ids = final_eos_token_ids;
+                return;
+            }
+            tracing::error!(
+                ?v,
+                path = %file_path.display(),
+                "eos_token_id is not a number or an array; skipping"
+            );
+        };
+
+        if let Some(v) = config.eos_token_id.as_ref() {
+            merge_eos(v);
+        }
+        if let Some(v) = text_config.eos_token_id.as_ref() {
+            merge_eos(v);
+        }
+        // Read from generation_config.json if present
+        if let Ok(v) = crate::file_json_field::<serde_json::Value>(&gencfg_path, "eos_token_id")
+            .inspect_err(
+                |err| tracing::warn!(%err, "Missing eos_token_id in generation_config.json"),
+            )
+        {
+            merge_eos(&v);
+        }
+        if eos_token_id_set.is_empty() {
+            anyhow::bail!(
+                "missing eos_token_id in config.json and generation_config.json, cannot load"
+            );
+        }
+        text_config.final_eos_token_ids = eos_token_id_set.into_iter().collect();
 
         Ok(Arc::new(config))
     }
@@ -913,6 +922,7 @@ fn check_valid_local_repo_path(path: impl AsRef<Path>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::HFConfig;
+    use std::collections::HashSet;
     use std::path::Path;
 
     #[test]
@@ -921,6 +931,9 @@ mod tests {
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct/config.json");
         let config = HFConfig::from_json_file(&config_file)?;
         assert_eq!(config.bos_token_id(), 128000);
+        // eos_token_ids can be in any order as long as the set is correct
+        let eos_token_id_set: HashSet<_> = config.eos_token_ids().iter().cloned().collect();
+        assert_eq!(eos_token_id_set, vec![128001, 128009].into_iter().collect());
         Ok(())
     }
 

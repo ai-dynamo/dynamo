@@ -155,7 +155,9 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
   --max-batch-size 32 \
   --free-gpu-memory-fraction 0.9 \
   --tensor-parallel-size 4 \
-  --expert-parallel-size 4 &
+  --expert-parallel-size 4 \
+  --dyn-reasoning-parser gpt_oss \
+  --dyn-tool-call-parser harmony &
 ```
 
 3. **Launch decode worker**:
@@ -169,7 +171,9 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --max-num-tokens 16384 \
   --free-gpu-memory-fraction 0.9 \
   --tensor-parallel-size 4 \
-  --expert-parallel-size 4
+  --expert-parallel-size 4 \
+  --dyn-reasoning-parser gpt_oss \
+  --dyn-tool-call-parser harmony
 ```
 
 ### 6. Verify the Deployment is Ready
@@ -208,6 +212,13 @@ curl -X POST http://localhost:8000/v1/responses \
 ```
 
 The server exposes a standard OpenAI-compatible API endpoint that accepts JSON requests. You can adjust parameters like `max_tokens`, `temperature`, and others according to your needs.
+
+### 8. Reasoning and Tool Calling
+
+Dynamo has supported reasoning and tool calling in OpenAI Chat Completion endpoint.
+This support is backend agnostic and an example can be found in the [gpt-oss guide
+for vLLM](/components/backends/vllm/gpt-oss.md#4-reasoning-and-tool-calling).
+Please refer to the vLLM guide for detail.
 
 ## Benchmarking
 

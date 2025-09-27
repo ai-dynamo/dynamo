@@ -177,6 +177,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         for key, value in request["stop_conditions"].items():
             if value is not None and hasattr(sampling_params, key):
                 setattr(sampling_params, key, value)
+            if key == "stop_token_ids_hidden" and hasattr(
+                sampling_params, "stop_token_ids"
+            ):
+                if sampling_params.stop_token_ids is None:
+                    sampling_params.stop_token_ids = []
+                sampling_params.stop_token_ids = list(
+                    set(sampling_params.stop_token_ids) | set(value)
+                )
 
         # TODO: Change to prefill queue
         # TODO: (PeaBrane) eventually, do not use a router_client and a free_client directly.
