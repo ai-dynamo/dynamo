@@ -386,7 +386,7 @@ async def send_request_to_specified_mocker_instence(
                 sampling_options=test_sampling_options,
                 output_options=test_output_options,
                 router_config_override=test_router_config_override,
-                worker_id=worker_id,
+                worker_id=worker_id
             )
 
             # consume stream to verify
