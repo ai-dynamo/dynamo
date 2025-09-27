@@ -9,6 +9,7 @@ from tensorrt_llm.llmapi.llm_args import TorchLlmArgs
 from dynamo.llm.trtllm_integration.rust import (
     KvConnectorWorker as RustKvConnectorWorker,
 )
+from dynamo.llm.utils import find_and_set_available_port_from_env
 from dynamo.runtime import DistributedRuntime
 
 
@@ -16,6 +17,7 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
     def __init__(self, llm_args: TorchLlmArgs):
         super().__init__(llm_args)
 
+        find_and_set_available_port_from_env("DYN_SYSTEM_PORT")
         self.drt = DistributedRuntime.detached()
 
         mappings = self._llm_args.parallel_config.to_mapping()

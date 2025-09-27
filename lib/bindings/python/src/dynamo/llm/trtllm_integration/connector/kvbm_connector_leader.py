@@ -17,12 +17,17 @@ from dynamo.llm.trtllm_integration.rust import (
     KvConnectorLeader as RustKvConnectorLeader,
 )
 from dynamo.llm.trtllm_integration.rust import SchedulerOutput as RustSchedulerOutput
+from dynamo.llm.utils import find_and_set_available_port_from_env, maybe_sleep
 from dynamo.runtime import DistributedRuntime
 
 
 class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
     def __init__(self, llm_args: TorchLlmArgs):
         super().__init__(llm_args)
+        # NOTE: this is needed in TRTLLM to avoid metrics port conflict with KVBM worker,
+        # since there is no startup order in TRTLLM and race condition is possible.
+        maybe_sleep()
+        find_and_set_available_port_from_env("DYN_SYSTEM_PORT")
         self.drt = DistributedRuntime.detached()
 
         mappings = self._llm_args.parallel_config.to_mapping()
