@@ -277,6 +277,91 @@ async def send_inflight_requests(urls: list, payload: dict, num_requests: int):
     logger.info(f"All {num_requests} requests completed successfully")
 
 
+async def send_request_to_specified_mocker_instance(
+    mockers: MockerProcess,
+    token_ids: Optional[list] = None,
+    stop_conditions: Optional[dict] = None,
+    sampling_options: Optional[dict] = None,
+    output_options: Optional[dict] = None,
+    router_config_override: Optional[dict] = None,
+    worker_id: Optional[int] = None # If None, Router will select the best available worker
+):
+    """Send a request to the specified mocker instance.
+    Returns True if mockers respond, otherwise raises or returns False.
+    """
+    runtime = get_runtime()
+    namespace = runtime.namespace(mockers.namespace)
+    component = namespace.component("mocker")
+    endpoint = component.endpoint("generate")
+
+    kv_router_config = KvRouterConfig()
+    kv_push_router = KvPushRouter(
+        endpoint=endpoint,
+        block_size=BLOCK_SIZE,
+        kv_router_config=kv_router_config,
+    )
+
+    initial_wait = 1.0
+    max_retries = 8
+    wait_time = initial_wait
+
+    # Use provided token_ids or fallback to small dummy list
+    test_token_ids = token_ids if token_ids is not None else [1, 2, 3]
+    
+    # Use provided stop_conditions or fallback to generate only 1 token
+    test_stop_conditions = stop_conditions if stop_conditions is not None else {"max_tokens": 1}
+
+    # Use provided sampling_options or fallback to use temperature:0.7
+    test_sampling_options = sampling_options if sampling_options is not None else {"temperature": 0.7}
+
+    # Use provided output_options or fallback to exclude input tokens and full text
+    test_output_options = output_options if output_options is not None else {"include_input_tokens": False, "return_full_text": False}
+
+    # Use provided router_config_override or fallback to default overlap_score_weight
+    test_router_config_override = router_config_override if router_config_override is not None else {"overlap_score_weight": 1.0}
+
+    # Validate worker_id: accept only int or None
+    if worker_id is not None and not isinstance(worker_id, int):
+        raise ValueError(
+            f"backend_instance_id must be an int or None, got: {type(worker_id)}"
+        )
+
+    log_message = f"the mocker with worker_id={worker_id}" if worker_id is not None else "the best available mocker"
+
+    for attempt in range(max_retries + 1):
+        try:
+            logger.info(
+                f"Sending request to {log_message} (attempt {attempt + 1})"
+            )
+            
+            stream = await kv_push_router.generate(
+                token_ids=test_token_ids,
+                model=MODEL_NAME,
+                stop_conditions=test_stop_conditions,
+                sampling_options=test_sampling_options,
+                output_options=test_output_options,
+                router_config_override=test_router_config_override,
+                worker_id=worker_id
+            )
+
+            # consume stream to verify
+            async for response in stream:
+                pass
+
+            logger.info(f"Request succeeded on attempt {attempt + 1}")
+            return True
+
+        except Exception as e:
+            logger.warning(f"Attempt {attempt + 1} failed with error: {e}")
+            if attempt < max_retries:
+                await asyncio.sleep(wait_time)
+                wait_time *= 2
+            else:
+                raise RuntimeError(
+                    f"Failed to connect to mockers after {max_retries + 1} attempts: {e}"
+                )
+    return False
+
 @pytest.mark.pre_merge
 @pytest.mark.model(MODEL_NAME)
 def test_mocker_kv_router(request, runtime_services, predownload_tokenizers):
@@ -584,68 +669,9 @@ def test_kv_push_router_bindings(request, runtime_services, predownload_tokenize
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
-        # Wait for mockers to be ready by sending a dummy request with retry
-        async def wait_for_mockers_ready():
-            """Send a dummy request to ensure mockers are ready"""
-            runtime = get_runtime()
-            # Use the namespace from the mockers
-            namespace = runtime.namespace(mockers.namespace)
-            component = namespace.component("mocker")
-            endpoint = component.endpoint("generate")
-
-            kv_router_config = KvRouterConfig()
-            kv_push_router = KvPushRouter(
-                endpoint=endpoint,
-                block_size=BLOCK_SIZE,
-                kv_router_config=kv_router_config,
-            )
-
-            # Dummy request with minimal tokens
-            dummy_token_ids = [1, 2, 3]  # Just a few tokens for testing
-            max_retries = 8
-            wait_time = 1
-
-            for attempt in range(max_retries + 1):
-                try:
-                    logger.info(
-                        f"Sending dummy request to check mocker readiness (attempt {attempt + 1})"
-                    )
-                    stream = await kv_push_router.generate(
-                        token_ids=dummy_token_ids,
-                        model=MODEL_NAME,
-                        stop_conditions={"max_tokens": 1},  # Generate just 1 token
-                        sampling_options={"temperature": 0.7},
-                        output_options={
-                            "include_input_tokens": False,
-                            "return_full_text": False,
-                        },
-                    )
-
-                    # Consume the stream to verify it works
-                    token_count = 0
-                    async for response in stream:
-                        if isinstance(response, dict) and "token_ids" in response:
-                            token_count += len(response["token_ids"])
-
-                    logger.info(
-                        f"Mockers are ready! Dummy request succeeded on attempt {attempt + 1}"
-                    )
-                    return True
-
-                except Exception as e:
-                    logger.warning(f"Attempt {attempt + 1} failed with error: {e}")
-                    if attempt < max_retries:
-                        await asyncio.sleep(wait_time)
-                        wait_time *= 2  # Exponential backoff
-                    else:
-                        raise RuntimeError(
-                            f"Failed to connect to mockers after {max_retries + 1} attempts"
-                        )
-
-            return False
 
         # Wait for mockers to be ready
-        asyncio.run(wait_for_mockers_ready())
+        asyncio.run(send_request_to_specified_mocker_instance(mockers=mockers))
 
         # Run the async test
         async def test_kv_push_router():
