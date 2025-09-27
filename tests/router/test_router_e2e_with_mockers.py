@@ -671,7 +671,11 @@ def test_kv_push_router_bindings(request, runtime_services, predownload_tokenize
 
 
         # Wait for mockers to be ready
-        asyncio.run(send_request_to_specified_mocker_instance(mockers))
+        try:
+            asyncio.run(send_request_to_specified_mocker_instance(mockers))
+        except Exception as e:
+            print(f"Error while sending request to mockers: {e}")
+        raise
 
         # Run the async test
         async def test_kv_push_router():
