@@ -632,12 +632,11 @@ impl Slot for VllmConnectorSlot {
             self.device_blocks.extend(block_ids);
         }
 
-        let num_candidate_blocks = if is_new_request && computed_position > 0 {
-            ((computed_position + 1) / self.block_size)
-                .saturating_sub(block_ids.len() + self.evaluated_blocks)
-        } else {
-            ((computed_position + 1) / self.block_size).saturating_sub(self.evaluated_blocks)
-        };
+        if is_new_request && computed_position > 0 {
+            self.evaluated_blocks += (computed_position + 1) / self.block_size;
+        }
+
+        let num_candidate_blocks = ((computed_position + 1) / self.block_size).saturating_sub(self.evaluated_blocks);
 
         if num_candidate_blocks > 0 {
             // do we have a mechanism for skipping gpu cache hit blocks?  not sure yet.
