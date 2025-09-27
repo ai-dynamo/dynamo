@@ -48,6 +48,8 @@ def get_genai_perf_cmd_for_trace(
         url,
         "--input-file",
         f"payload:{input_dataset}",
+        "--fixed-schedule",
+        "True",
         "--random-seed",
         str(seed),
         "--artifact-dir",
