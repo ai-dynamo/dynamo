@@ -196,6 +196,13 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		return ctrl.Result{}, err
 	}
 
+	// Reconcile Compilation Cache PVC
+	_, err = r.reconcileCompilationCachePVC(ctx, dynamoComponentDeployment)
+	if err != nil {
+		logs.Error(err, "Unable to create compilation cache PVC", "crd", req.NamespacedName)
+		return ctrl.Result{}, err
+	}
+
 	// Create the appropriate workload resource based on deployment type
 	var leaderWorkerSets []*leaderworkersetv1.LeaderWorkerSet
 	var deployment *appsv1.Deployment
@@ -712,6 +719,58 @@ func (r *DynamoComponentDeploymentReconciler) reconcilePVC(ctx context.Context, 
 			return nil, err
 		}
 		logger.Info("PVC created", "pvc", pvcName)
+	}
+	return pvc, nil
+}
+
+func (r *DynamoComponentDeploymentReconciler) reconcileCompilationCachePVC(ctx context.Context, crd *v1alpha1.DynamoComponentDeployment) (*corev1.PersistentVolumeClaim, error) {
+	logger := log.FromContext(ctx)
+	if crd.Spec.CompilationCache == nil {
+		return nil, nil
+	}
+
+	// Determine backend framework to check if compilation cache is supported
+	backendFramework, err := dynamo.GetBackendFrameworkFromDynamoComponent(crd)
+	if err != nil {
+		logger.Error(err, "Failed to determine backend framework for compilation cache")
+		return nil, err
+	}
+
+	// Only create compilation cache PVC for VLLM backend
+	if backendFramework != dynamo.BackendFrameworkVLLM {
+		logger.Info("Compilation cache PVC creation skipped - only supported for VLLM backend",
+			"backend", string(backendFramework),
+			"component", crd.GetName(),
+			"supported-backend", "vllm")
+		return nil, nil
+	}
+
+	pvcConfig := crd.Spec.CompilationCache.PVC
+	pvc := &corev1.PersistentVolumeClaim{}
+	pvcName := types.NamespacedName{Name: getPvcName(crd, pvcConfig.Name), Namespace: crd.GetNamespace()}
+	err = r.Get(ctx, pvcName, pvc)
+	if err != nil && client.IgnoreNotFound(err) != nil {
+		logger.Error(err, "Unable to retrieve compilation cache PVC", "crd", crd.GetName())
+		return nil, err
+	}
+
+	// If PVC does not exist, create a new one
+	if err != nil {
+		if pvcConfig.Create == nil || !*pvcConfig.Create {
+			logger.Error(err, "Unknown compilation cache PVC", "pvc", pvc.Name)
+			return nil, err
+		}
+		pvc = constructPVC(crd, pvcConfig)
+		if err := controllerutil.SetControllerReference(crd, pvc, r.Client.Scheme()); err != nil {
+			logger.Error(err, "Failed to set controller reference for compilation cache PVC", "pvc", pvc.Name)
+			return nil, err
+		}
+		err = r.Create(ctx, pvc)
+		if err != nil {
+			logger.Error(err, "Failed to create compilation cache PVC", "pvc", pvc.Name)
+			return nil, err
+		}
+		logger.Info("Compilation cache PVC created for VLLM backend", "pvc", pvcName, "backend", "vllm")
 	}
 	return pvc, nil
 }

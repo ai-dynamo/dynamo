@@ -674,6 +674,31 @@ spec:
                     - vllm
                     - trtllm
                   type: string
+                compilationCache:
+                  description: CompilationCache config for backend compilation artifacts (e.g., PyTorch, TensorRT).
+                  properties:
+                    create:
+                      description: Create indicates to create a new PVC
+                      type: boolean
+                    mountPoint:
+                      type: string
+                    name:
+                      description: Name is the name of the PVC
+                      type: string
+                    size:
+                      anyOf:
+                        - type: integer
+                        - type: string
+                      description: Size of the NIM cache in Gi, used during PVC creation
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    storageClass:
+                      description: StorageClass to be used for PVC creation. Leave it as empty if the PVC is already created.
+                      type: string
+                    volumeAccessMode:
+                      description: VolumeAccessMode is the volume access mode of the PVC
+                      type: string
+                  type: object
                 componentType:
                   description: ComponentType indicates the role of this component (for example, "main").
                   type: string
@@ -683,7 +708,7 @@ spec:
                     Typically corresponds to a component defined in the packaged Dynamo artifacts.
                   type: string
                 dynamoNamespace:
-                  description: dynamo namespace of the service (allows to override the dynamo namespace of the service defined in annotations inside the dynamo archive)
+                  description: Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive)
                   type: string
                 dynamoTag:
                   description: 'contains the tag of the DynamoComponent: for example, "my_package:MyService"'
@@ -816,8 +841,9 @@ spec:
                   type: object
                 extraPodSpec:
                   description: |-
-                    ExtraPodSpec merges additional fields into the generated PodSpec for advanced
-                    customization (tolerations, node selectors, affinity, etc.).
+                    ExtraPodSpec allows to override the main pod spec configuration.
+                    It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field
+                    that allows overriding the main container configuration.
                   properties:
                     activeDeadlineSeconds:
                       description: |-
@@ -10239,7 +10265,7 @@ spec:
                       type: object
                   type: object
                 serviceName:
-                  description: contains the name of the component
+                  description: The name of the component
                   type: string
                 sharedMemory:
                   description: SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size).

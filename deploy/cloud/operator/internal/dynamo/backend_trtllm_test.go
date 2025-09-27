@@ -9,6 +9,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -143,10 +144,8 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 				StartupProbe:   &corev1.Probe{},
 			}
 
-			// Call UpdateContainer
 			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, tt.component, "test-service", tt.multinodeDeployer)
 
-			// Use helper functions to validate results
 			validateVolumeMounts(t, container, tt.expectedVolumeMounts)
 			validateCommand(t, container, tt.expectedCommand)
 			validateArgs(t, container, tt.expectedArgs)
@@ -813,6 +812,108 @@ func TestTRTLLMBackend_getGPUsPerNode(t *testing.T) {
 			if result != tt.expected {
 				t.Errorf("getGPUsPerNode() = %d, want %d", result, tt.expected)
 			}
+		})
+	}
+}
+
+func TestTRTLLMBackend_UpdateContainer_CompilationCache(t *testing.T) {
+	tests := []struct {
+		name                  string
+		component             *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		expectWarningLogged   bool
+		expectCacheEnvVar     bool
+		expectCacheEnvVarName string
+		expectCacheEnvVarVal  string
+	}{
+		{
+			name: "TRT-LLM with compilation cache enabled - logs warning",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					CompilationCache: &v1alpha1.CompilationCachePVC{
+						PVC: v1alpha1.PVC{
+							MountPoint: ptr.To("/root/.cache/trtllm"),
+						},
+					},
+				},
+			},
+			expectWarningLogged: true,
+			expectCacheEnvVar:   false,
+		},
+		{
+			name: "TRT-LLM with compilation cache at custom mount point - logs warning",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					CompilationCache: &v1alpha1.CompilationCachePVC{
+						PVC: v1alpha1.PVC{
+							MountPoint: ptr.To("/custom/cache/path"),
+						},
+					},
+				},
+			},
+			expectWarningLogged: true,
+			expectCacheEnvVar:   false,
+		},
+		{
+			name: "TRT-LLM without compilation cache",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					CompilationCache: nil,
+				},
+			},
+			expectWarningLogged: false,
+			expectCacheEnvVar:   false,
+		},
+		{
+			name: "TRT-LLM with compilation cache but no mount point - logs warning",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					CompilationCache: &v1alpha1.CompilationCachePVC{
+						PVC: v1alpha1.PVC{
+							MountPoint: nil,
+						},
+					},
+				},
+			},
+			expectWarningLogged: true,
+			expectCacheEnvVar:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := &TRTLLMBackend{
+				MpiRunSecretName: mpiRunSecretName,
+			}
+
+			container := &corev1.Container{
+				Args: []string{"python3", "--model", "test"},
+				Env:  []corev1.EnvVar{},
+			}
+
+			backend.UpdateContainer(container, 1, RoleMain, tt.component, "test-service", &GroveMultinodeDeployer{})
+
+			if tt.expectCacheEnvVar {
+				found := false
+				for _, env := range container.Env {
+					if env.Name == tt.expectCacheEnvVarName {
+						found = true
+						if env.Value != tt.expectCacheEnvVarVal {
+							t.Errorf("Expected environment variable %s = %s, got %s", tt.expectCacheEnvVarName, tt.expectCacheEnvVarVal, env.Value)
+						}
+						break
+					}
+				}
+				if !found {
+					t.Errorf("Expected environment variable %s not found in container", tt.expectCacheEnvVarName)
+				}
+			} else {
+				for _, env := range container.Env {
+					if env.Name == "TRTLLM_CACHE_ROOT" || env.Name == "TRTLLM_CACHE_DIR" || env.Name == "TRTLLM_COMPILATION_CACHE" {
+						t.Errorf("Unexpected compilation cache environment variable found: %s = %s", env.Name, env.Value)
+					}
+				}
+			}
+
 		})
 	}
 }

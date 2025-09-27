@@ -6,6 +6,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 )
 
 // Mock MultinodeDeployer for testing with no shell interpretation needed
@@ -301,7 +302,6 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 				t.Errorf("UpdateContainer() args = %v, want %v", container.Args, tt.expectedArgs)
 			}
 
-			// Verify command is still sh -c for shell commands
 			expectedCommand := tt.initialCommand
 			if !reflect.DeepEqual(container.Command, expectedCommand) {
 				t.Errorf("UpdateContainer() should preserve shell command, got: %v, want: %v", container.Command, expectedCommand)
@@ -438,7 +438,6 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create initial probes
 			livenessProbe := &corev1.Probe{InitialDelaySeconds: 30}
 			readinessProbe := &corev1.Probe{InitialDelaySeconds: 10}
 			startupProbe := &corev1.Probe{InitialDelaySeconds: 5}
@@ -471,6 +470,104 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 				}
 				if container.StartupProbe == nil {
 					t.Errorf("Expected StartupProbe to be preserved, but it was removed")
+				}
+			}
+		})
+	}
+}
+
+func TestSGLangBackend_UpdateContainer_CompilationCache(t *testing.T) {
+	backend := &SGLangBackend{}
+
+	tests := []struct {
+		name                  string
+		component             *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		expectWarningLogged   bool
+		expectCacheEnvVar     bool
+		expectCacheEnvVarName string
+		expectCacheEnvVarVal  string
+	}{
+		{
+			name: "SGLANG with compilation cache enabled - logs warning",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					CompilationCache: &v1alpha1.CompilationCachePVC{
+						PVC: v1alpha1.PVC{
+							MountPoint: ptr.To("/root/.cache/sglang"),
+						},
+					},
+				},
+			},
+			expectWarningLogged: true,
+			expectCacheEnvVar:   false,
+		},
+		{
+			name: "SGLANG with compilation cache at custom mount point - logs warning",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					CompilationCache: &v1alpha1.CompilationCachePVC{
+						PVC: v1alpha1.PVC{
+							MountPoint: ptr.To("/custom/cache/path"),
+						},
+					},
+				},
+			},
+			expectWarningLogged: true,
+			expectCacheEnvVar:   false,
+		},
+		{
+			name: "SGLANG without compilation cache",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					CompilationCache: nil,
+				},
+			},
+			expectWarningLogged: false,
+			expectCacheEnvVar:   false,
+		},
+		{
+			name: "SGLANG with compilation cache but no mount point - logs warning",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					CompilationCache: &v1alpha1.CompilationCachePVC{
+						PVC: v1alpha1.PVC{
+							MountPoint: nil,
+						},
+					},
+				},
+			},
+			expectWarningLogged: true,
+			expectCacheEnvVar:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			container := &corev1.Container{
+				Env: []corev1.EnvVar{},
+			}
+
+			backend.UpdateContainer(container, 1, RoleMain, tt.component, "test-service", &GroveMultinodeDeployer{})
+
+			if tt.expectCacheEnvVar {
+				found := false
+				for _, env := range container.Env {
+					if env.Name == tt.expectCacheEnvVarName {
+						found = true
+						if env.Value != tt.expectCacheEnvVarVal {
+							t.Errorf("Expected environment variable %s = %s, got %s", tt.expectCacheEnvVarName, tt.expectCacheEnvVarVal, env.Value)
+						}
+						break
+					}
+				}
+				if !found {
+					t.Errorf("Expected environment variable %s not found in container", tt.expectCacheEnvVarName)
+				}
+			} else {
+				for _, env := range container.Env {
+					if env.Name == "SGLANG_CACHE_ROOT" || env.Name == "SGLANG_CACHE_DIR" {
+						t.Errorf("Unexpected cache environment variable found: %s = %s", env.Name, env.Value)
+					}
 				}
 			}
 		})
