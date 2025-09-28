@@ -10,7 +10,6 @@ from typing import (
     List,
     Optional,
     Tuple,
-    Union,
 )
 
 def log_message(level: str, message: str, module: str, file: str, line: int) -> None:
@@ -41,140 +40,16 @@ class DistributedRuntime:
         """
         ...
 
-    def etcd_client(self) -> Optional[EtcdClient]:
+    def allocate_port_block(self, namespace, port_min, port_max, block_size, context=None) -> List[int]:
         """
-        Get the `EtcdClient` object. Not available for static workers.
+        Allocate a contiguous block of ports from the specified range and atomically reserve them.
+        Returns a list of all allocated ports in order.
         """
         ...
 
     def shutdown(self) -> None:
         """
         Shutdown the runtime by triggering the cancellation token
-        """
-        ...
-class EtcdClient:
-    """
-    Etcd is used for discovery in the DistributedRuntime
-    """
-
-    def primary_lease_id(self) -> int:
-        """
-        return the primary lease id.
-        """
-        ...
-
-    async def kv_create(
-        self, key: str, value: bytes, lease_id: Optional[int] = None
-    ) -> None:
-        """
-        Atomically create a key in etcd, fail if the key already exists.
-        """
-        ...
-
-    async def kv_create_or_validate(
-        self, key: str, value: bytes, lease_id: Optional[int] = None
-    ) -> None:
-        """
-        Atomically create a key if it does not exist, or validate the values are identical if the key exists.
-        """
-        ...
-
-    async def kv_put(
-        self, key: str, value: bytes, lease_id: Optional[int] = None
-    ) -> None:
-        """
-        Put a key-value pair into etcd
-        """
-        ...
-
-    async def kv_get_prefix(self, prefix: str) -> List[Dict[str, JsonLike]]:
-        """
-        Get all keys with a given prefix
-        """
-        ...
-
-    async def revoke_lease(self, lease_id: int) -> None:
-        """
-        Revoke a lease
-        """
-        ...
-
-class EtcdKvCache:
-    """
-    A cache for key-value pairs stored in etcd.
-    """
-
-    @staticmethod
-    async def new(
-        etcd_client: EtcdClient,
-        prefix: str,
-        initial_values: Dict[str, Union[str, bytes]]
-    ) -> "EtcdKvCache":
-        """
-        Create a new EtcdKvCache instance.
-
-        Args:
-            etcd_client: The etcd client to use for operations
-            prefix: The prefix to use for all keys in this cache.
-                EtcdKvCache will continuously watch the changes of the keys under this prefix.
-            initial_values: Initial key-value pairs to populate the cache with
-                NOTE: if the key already exists, it won't be updated
-
-        Returns:
-            A new EtcdKvCache instance
-        """
-        ...
-
-    async def get(self, key: str) -> Optional[bytes]:
-        """
-        Get a value from the cache.
-
-        Args:
-            key: The key to retrieve
-
-        Returns:
-            The value as bytes if found, None otherwise
-
-        NOTE: this get is cheap because internally there is a cache that holds the latest kv pairs.
-        To prevent race condition, there is a lock when reading/writing the internal cache.
-        """
-        ...
-
-    async def get_all(self) -> Dict[str, bytes]:
-        """
-        Get all key-value pairs from the cache.
-
-        Returns:
-            A dictionary of all key-value pairs, with keys stripped of the prefix
-            (i.e., in the same format as in `initial_values`.keys())
-        """
-        ...
-
-    async def put(
-        self,
-        key: str,
-        value: bytes,
-        lease_id: Optional[int] = None
-    ) -> None:
-        """
-        Put a key-value pair into the cache and etcd.
-
-        Args:
-            key: The key to store
-            value: The value to store
-            lease_id: Optional lease ID to associate with this key-value pair
-        """
-        ...
-
-    async def delete(self, key: str) -> None:
-        """
-        Delete a key-value pair from the cache and etcd.
-        """
-        ...
-
-    async def clear_all(self) -> None:
-        """
-        Delete all key-value pairs from the cache and etcd.
         """
         ...
 
@@ -846,11 +721,11 @@ class HttpAsyncEngine:
     ...
 
 class ModelInput:
-    """What type of request this model needs: Text or Tokens"""
+    """What type of request this model needs: Text, Tokens or Tensor"""
     ...
 
 class ModelType:
-    """What type of request this model needs: Chat, Completions or Embedding"""
+    """What type of request this model needs: Chat, Completions, Embedding or Tensor"""
     ...
 
 class RouterMode:
@@ -1151,6 +1026,103 @@ class ZmqKvEventListener:
         """
         ...
 
+class KvRouter:
+    """
+    A KV Router that decides which worker to use based on KV cache overlap.
+    This router tracks request states and manages KV cache distribution across workers.
+    """
+
+    def __init__(
+        self,
+        endpoint: Endpoint,
+        block_size: int,
+        kv_router_config: Optional[KvRouterConfig] = None,
+        consumer_uuid: Optional[str] = None,
+    ) -> None:
+        """
+        Create a new KvRouter instance.
+
+        Args:
+            endpoint: The endpoint to associate with this router
+            block_size: The KV cache block size
+            kv_router_config: Optional configuration for the KV router
+            consumer_uuid: Optional unique identifier for this router instance.
+                          If not provided, a UUID will be generated.
+        """
+        ...
+
+    async def find_best_match(
+        self,
+        request_id: str,
+        tokens: List[int],
+        *,
+        update_states: bool = False,
+        router_config_override: Optional[JsonLike] = None,
+    ) -> Tuple[int, int]:
+        """
+        Find the best matching worker for the given tokens.
+
+        Args:
+            request_id: Unique identifier for the request used for tracking
+            tokens: List of token IDs to find matches for
+            update_states: Whether to update router states for this request (default: False)
+            router_config_override: Optional router configuration override with fields:
+                - overlap_score_weight: Optional weight for overlap score
+                - router_temperature: Optional temperature for worker selection
+
+        Returns:
+            A tuple of (worker_id, overlap_blocks) where:
+                - worker_id: The ID of the best matching worker
+                - overlap_blocks: The number of overlapping blocks found
+        """
+        ...
+
+    async def add_request(
+        self,
+        request_id: str,
+        tokens: List[int],
+        overlap_blocks: int,
+        worker_id: int,
+    ) -> None:
+        """
+        Add a request to the router's tracking system.
+
+        Args:
+            request_id: Unique identifier for the request
+            tokens: List of token IDs for the request
+            overlap_blocks: Number of overlapping blocks found
+            worker_id: ID of the worker handling this request
+        """
+        ...
+
+    async def mark_prefill_completed(self, request_id: str) -> None:
+        """
+        Mark that prefill has been completed for a request.
+
+        Args:
+            request_id: The request ID to mark as prefill completed
+        """
+        ...
+
+    async def free(self, request_id: str) -> None:
+        """
+        Free resources associated with a request.
+
+        Args:
+            request_id: The request ID to free
+        """
+        ...
+
+    @property
+    def block_size(self) -> int:
+        """
+        Get the KV cache block size.
+
+        Returns:
+            The block size in tokens
+        """
+        ...
+
 class KvPushRouter:
     """
     A KV-aware push router that performs intelligent routing based on KV cache overlap.
@@ -1208,7 +1180,6 @@ class KvPushRouter:
 
     async def best_worker_id(
         self,
-        context_id: str,
         token_ids: List[int],
         router_config_override: Optional[JsonLike] = None,
     ) -> Tuple[int, int]:
@@ -1216,7 +1187,6 @@ class KvPushRouter:
         Find the best matching worker for the given tokens without updating states.
 
         Args:
-            context_id: String identifier for the request
             token_ids: List of token IDs to find matches for
             router_config_override: Optional router configuration override
 
@@ -1261,3 +1231,48 @@ class EntrypointArgs:
     """
 
     ...
+
+class PlannerDecision:
+    """A request from planner to client to perform a scaling action.
+    Fields: num_prefill_workers, num_decode_workers, decision_id.
+            -1 in any of those fields mean not set, usually because planner hasn't decided anything yet.
+    Call VirtualConnectorClient.complete(event) when action is completed.
+    """
+    ...
+
+class VirtualConnectorCoordinator:
+    """Internal planner virtual connector component"""
+
+    def __init__(self, runtime: DistributedRuntime, dynamo_namespace: str, check_interval_secs: int, max_wait_time_secs: int, max_retries: int) -> None:
+        ...
+
+    async def async_init(self) -> None:
+        """Call this before using the object"""
+        ...
+
+    def read_state(self) -> PlannerDecision:
+        """Get the current values. Most for test / debug."""
+        ...
+
+    async def update_scaling_decision(self, num_prefill: Optional[int] = None, num_decode: Optional[int] = None) -> None:
+        ...
+
+    async def wait_for_scaling_completion(self) -> None:
+        ...
+
+class VirtualConnectorClient:
+    """How a client discovers planner requests and marks them complete"""
+
+    def __init__(self, runtime: DistributedRuntime, dynamo_namespace: str) -> None:
+        ...
+
+    async def get(self) -> PlannerDecision:
+        ...
+
+    async def complete(self, decision: PlannerDecision) -> None:
+        ...
+
+    async def wait(self) -> None:
+        """Blocks until there is a new decision to fetch using 'get'"""
+        ...
+

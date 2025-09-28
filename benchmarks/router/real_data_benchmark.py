@@ -118,7 +118,7 @@ def main():
     parser.add_argument(
         "--url",
         type=str,
-        default="http://localhost:8080",
+        default="http://localhost:8000",
         help="Server URL",
     )
     parser.add_argument(

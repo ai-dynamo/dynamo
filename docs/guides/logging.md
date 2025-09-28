@@ -146,4 +146,4 @@ curl -d '{"model": "Qwen/Qwen3-0.6B", "max_completion_tokens": 2049, "messages":
 - [Distributed Runtime Architecture](../architecture/distributed_runtime.md)
 - [Dynamo Architecture Overview](../architecture/architecture.md)
 - [Backend Guide](backend.md)
-- [Log Aggregation in Kubernetes](dynamo_deploy/logging.md)
+- [Log Aggregation in Kubernetes](../kubernetes/logging.md)

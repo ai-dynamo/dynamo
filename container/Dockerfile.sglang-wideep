@@ -11,14 +11,14 @@ ARG ARCH_ALT="x86_64"
 ARG NIXL_UCX_REF="v1.19.0"
 ARG NIXL_TAG="0.5.0"
 ARG CMAKE_VERSION="3.31.8"
-ARG RUST_VERSION="1.89.0"
+ARG RUST_VERSION="1.90.0"
 ARG CARGO_BUILD_JOBS="16"
 
 RUN apt-get update -y && \
     apt-get install -y \
       cmake meson ninja-build pybind11-dev patchelf net-tools \
       build-essential protobuf-compiler libssl-dev pkg-config \
-      clang libclang-dev git rapidjson-dev zlib1g-dev && \
+      clang libclang-dev git rapidjson-dev zlib1g-dev jq && \
     pip install --break-system-packages meson-python wheel build
 
 # Build UCX + NIXL for x86/hopper until its fully tested on GB200
@@ -58,7 +58,7 @@ ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
 
 # Dynamo
 WORKDIR /sgl-workspace
-RUN git clone https://github.com/ai-dynamo/dynamo.git
+COPY . /sgl-workspace/dynamo
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
@@ -86,6 +86,10 @@ RUN cd dynamo/lib/bindings/python && \
     pip install --break-system-packages .
 
 RUN pip install --break-system-packages sglang-router==0.1.9
+
+# Install dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    pip install --break-system-packages --requirement /tmp/requirements.txt
 
 RUN wget --tries=3 --waitretry=5 \
       https://github.com/nats-io/nats-server/releases/download/v2.10.28/\

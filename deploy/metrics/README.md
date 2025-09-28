@@ -79,7 +79,30 @@ When using Dynamo HTTP Frontend (`--framework VLLM` or `--framework TRTLLM`), th
 - `dynamo_frontend_requests_total`: Total LLM requests (counter)
 - `dynamo_frontend_time_to_first_token_seconds`: Time to first token (histogram)
 
-**Note**: The `dynamo_frontend_inflight_requests_total` metric tracks requests from HTTP handler start until the complete response is finished, while `dynamo_frontend_queued_requests_total` tracks requests from HTTP handler start until first token generation begins (including prefill time). HTTP queue time is a subset of inflight time.
+##### Model Configuration Metrics
+
+The frontend also exposes model configuration metrics with the `dynamo_frontend_model_*` prefix. These metrics are populated from the worker backend registration service when workers register with the system:
+
+**Runtime Config Metrics (from ModelRuntimeConfig):**
+These metrics come from the runtime configuration provided by worker backends during registration.
+
+- `dynamo_frontend_model_total_kv_blocks`: Total KV blocks available for a worker serving the model (gauge)
+- `dynamo_frontend_model_max_num_seqs`: Maximum number of sequences for a worker serving the model (gauge)
+- `dynamo_frontend_model_max_num_batched_tokens`: Maximum number of batched tokens for a worker serving the model (gauge)
+
+**MDC Metrics (from ModelDeploymentCard):**
+These metrics come from the Model Deployment Card information provided by worker backends during registration.
+
+- `dynamo_frontend_model_context_length`: Maximum context length for a worker serving the model (gauge)
+- `dynamo_frontend_model_kv_cache_block_size`: KV cache block size for a worker serving the model (gauge)
+- `dynamo_frontend_model_migration_limit`: Request migration limit for a worker serving the model (gauge)
+
+**Worker Management Metrics:**
+- `dynamo_frontend_model_workers`: Number of worker instances currently serving the model (gauge)
+
+**Important Notes:**
+- The `dynamo_frontend_inflight_requests_total` metric tracks requests from HTTP handler start until the complete response is finished, while `dynamo_frontend_queued_requests_total` tracks requests from HTTP handler start until first token generation begins (including prefill time). HTTP queue time is a subset of inflight time.
+- **Model Name Deduplication**: When multiple worker instances register with the same model name, only the first instance's configuration metrics (runtime config and MDC metrics) will be populated. Subsequent instances with duplicate model names will be skipped for configuration metric updates, though the worker count metric will reflect all instances.
 
 #### Request Processing Flow
 

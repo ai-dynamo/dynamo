@@ -41,3 +41,31 @@ pub fn detect_tool_call_start_json(chunk: &str, config: &JsonParserConfig) -> bo
         JsonParserType::DeepseekV31 => detect_tool_call_start_deepseek_v3_1(chunk, config),
     }
 }
+
+pub fn find_tool_call_end_position_json(
+    chunk: &str,
+    parser: &str,
+    config: &JsonParserConfig,
+) -> usize {
+    match parser {
+        "hermes" | "nemotron_deci" => {
+            if let Some(end_token) = config.tool_call_end_tokens.first() {
+                if let Some(pos) = chunk.find(end_token) {
+                    pos + end_token.len()
+                } else {
+                    chunk.len()
+                }
+            } else {
+                chunk.len()
+            }
+        }
+        "mistral" | "phi4" => {
+            if let Some(pos) = chunk.rfind(']') {
+                pos + 1
+            } else {
+                chunk.len()
+            }
+        }
+        _ => chunk.len(),
+    }
+}

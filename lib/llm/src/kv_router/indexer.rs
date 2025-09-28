@@ -277,10 +277,16 @@ impl RadixTree {
         let mut scores = OverlapScores::new();
         let mut current = self.root.clone();
         let now = Instant::now();
-        for block_hash in sequence {
+
+        tracing::trace!(
+            "RadixTree::find_matches: looking for sequence={:?}",
+            sequence.iter().map(|h| h.0).collect::<Vec<_>>()
+        );
+
+        for (idx, block_hash) in sequence.iter().enumerate() {
             let next_block = {
                 let current_borrow = current.borrow();
-                current_borrow.children.get(&block_hash).cloned()
+                current_borrow.children.get(block_hash).cloned()
             };
             if let Some(block) = next_block {
                 scores.update_scores(&block.borrow().workers);
@@ -305,9 +311,16 @@ impl RadixTree {
 
                 current = block;
             } else {
+                tracing::trace!(
+                    "RadixTree::find_matches: block not found at index {} for hash {}",
+                    idx,
+                    block_hash.0
+                );
                 break;
             }
         }
+
+        tracing::trace!("RadixTree::find_matches: final scores={:?}", scores.scores);
 
         scores
     }
@@ -320,7 +333,7 @@ impl RadixTree {
     pub fn apply_event(&mut self, event: RouterEvent) -> Result<(), KvCacheEventError> {
         let (worker_id, event) = (event.worker_id, event.event);
         let (id, op) = (event.event_id, event.data);
-        tracing::trace!(id, "Store operation: {:?}", op);
+        tracing::trace!(id, "RadixTree::apply_event: Store operation: {:?}", op);
 
         let worker_lookup = self.lookup.entry(worker_id).or_default();
 
@@ -873,6 +886,15 @@ impl KvIndexer {
     /// A `mpsc::Sender` for `DumpRequest`s.
     pub fn snapshot_event_sender(&self) -> mpsc::Sender<DumpRequest> {
         self.dump_tx.clone()
+    }
+
+    /// Get a sender for worker removal requests.
+    ///
+    /// ### Returns
+    ///
+    /// A `mpsc::Sender` for `WorkerId`s.
+    pub fn remove_worker_sender(&self) -> mpsc::Sender<WorkerId> {
+        self.remove_worker_tx.clone()
     }
 }
 
