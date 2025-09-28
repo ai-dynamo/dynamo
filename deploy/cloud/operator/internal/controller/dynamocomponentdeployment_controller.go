@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"maps"
 	"os"
-	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -32,7 +31,6 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"emperror.dev/errors"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/schemas"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
@@ -47,6 +45,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -717,26 +716,21 @@ func (r *DynamoComponentDeploymentReconciler) reconcilePVC(ctx context.Context, 
 }
 
 func (r *DynamoComponentDeploymentReconciler) setStatusConditions(ctx context.Context, req ctrl.Request, conditions ...metav1.Condition) (dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, err error) {
-	dynamoComponentDeployment = &v1alpha1.DynamoComponentDeployment{}
-	maxRetries := 3
-	for range maxRetries - 1 {
-		if err = r.Get(ctx, req.NamespacedName, dynamoComponentDeployment); err != nil {
-			err = errors.Wrap(err, "Failed to re-fetch DynamoComponentDeployment")
-			return
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &v1alpha1.DynamoComponentDeployment{}
+		if err := r.Get(ctx, req.NamespacedName, current); err != nil {
+			return errors.Wrap(err, "failed to get DynamoComponentDeployment")
 		}
 		for _, condition := range conditions {
-			meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, condition)
+			meta.SetStatusCondition(&current.Status.Conditions, condition)
 		}
-		if err = r.Status().Update(ctx, dynamoComponentDeployment); err != nil {
-			if k8serrors.IsConflict(err) {
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
-			break
-		} else {
-			break
+
+		if err := r.Status().Update(ctx, current); err != nil {
+			return err
 		}
-	}
+		dynamoComponentDeployment = current
+		return nil
+	})
 	if err != nil {
 		err = errors.Wrap(err, "Failed to update DynamoComponentDeployment status")
 		return
