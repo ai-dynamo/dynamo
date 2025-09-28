@@ -99,20 +99,6 @@ RUN apt-get update && \
         jq && \
     rm -rf /var/lib/apt/lists/*
 
-# Install prometheus
-ARG PROM_VERSION=3.4.1
-RUN ARCH=$(dpkg --print-architecture) && \
-    case "$ARCH" in \
-        amd64) PLATFORM=linux-amd64 ;; \
-        arm64) PLATFORM=linux-arm64 ;; \
-        *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
-    esac && \
-    curl -fsSL --retry 5 --retry-delay 5 "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PLATFORM}.tar.gz" \
-    | tar -xz -C /tmp && \
-    mv "/tmp/prometheus-${PROM_VERSION}.${PLATFORM}/prometheus" /usr/local/bin/ && \
-    chmod +x /usr/local/bin/prometheus && \
-    rm -rf "/tmp/prometheus-${PROM_VERSION}.${PLATFORM}"
-
 # Copy CUDA development tools (nvcc, headers, dependencies, etc.) from framework devel image
 COPY --from=framework /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
 COPY --from=framework /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++

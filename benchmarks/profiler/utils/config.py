@@ -58,6 +58,7 @@ class Service(BaseModel):
     replicas: Optional[int] = None
     resources: Optional[ServiceResources] = None
     extraPodSpec: Optional[PodSpec] = None
+    subComponentType: Optional[str] = None
     model_config = {"extra": "allow"}
 
 
