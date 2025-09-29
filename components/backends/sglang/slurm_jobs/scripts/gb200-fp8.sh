@@ -32,8 +32,8 @@ echo "Mode: $mode"
 echo "Command: dynamo"
 
 # Check if required environment variables are set
-if [ -z "$HOST_IP" ]; then
-    echo "Error: HOST_IP environment variable is not set"
+if [ -z "$HOST_IP_MACHINE" ]; then
+    echo "Error: HOST_IP_MACHINE environment variable is not set"
     exit 1
 fi
 
@@ -71,6 +71,8 @@ if [ "$mode" = "prefill" ]; then
     if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix="--init-expert-location /configs/prefill_dsr1-0528_in1000out1000_num40000.json"; fi
 
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
+    export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800 \
+    export SGL_DG_CACHE_DIR="/configs/dgcache/3p1dcache" \
     MC_TE_METRIC=true \
     SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \
     SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=100000 \
@@ -88,7 +90,7 @@ if [ "$mode" = "prefill" ]; then
         --skip-tokenizer-init \
         --trust-remote-code \
         --disaggregation-mode prefill \
-        --dist-init-addr "$HOST_IP:$PORT" \
+        --dist-init-addr "$HOST_IP_MACHINE:$PORT" \
         --disaggregation-bootstrap-port 30001 \
         --nnodes "$TOTAL_NODES" \
         --node-rank "$RANK" \
@@ -100,7 +102,8 @@ if [ "$mode" = "prefill" ]; then
         --max-running-requests 12288 \
         --context-length 9600 \
         --disable-radix-cache \
-        --enable-deepep-moe \
+        --moe-a2a-backend deepep \
+        --load-balance-method round_robin \
         --deepep-mode normal \
         --ep-dispatch-algorithm dynamic \
         --moe-dense-tp-size 1 \
@@ -124,6 +127,8 @@ elif [ "$mode" = "decode" ]; then
 
     # GB200 dynamo decode command
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
+    export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800 \
+    export SGL_DG_CACHE_DIR="/configs/dgcache/3p1dcache" \
     SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=512 \
     MC_TE_METRIC=true \
     SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \
@@ -143,7 +148,7 @@ elif [ "$mode" = "decode" ]; then
         --skip-tokenizer-init \
         --trust-remote-code \
         --disaggregation-mode decode \
-        --dist-init-addr "$HOST_IP:$PORT" \
+        --dist-init-addr "$HOST_IP_MACHINE:$PORT" \
         --disaggregation-bootstrap-port 30001 \
         --nnodes "$TOTAL_NODES" \
         --node-rank "$RANK" \
@@ -155,7 +160,8 @@ elif [ "$mode" = "decode" ]; then
         --max-running-requests 36864 \
         --context-length 9600 \
         --disable-radix-cache \
-        --enable-deepep-moe \
+        --moe-a2a-backend deepep \
+        --prefill-round-robin-balance \
         --deepep-mode low_latency \
         --moe-dense-tp-size 1 \
         --enable-dp-lm-head \
