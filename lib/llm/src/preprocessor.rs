@@ -675,29 +675,29 @@ impl OpenAIPreprocessor {
     pub fn parse_reasoning_content_from_stream<S>(
         stream: S,
         runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
-        context: Arc<dyn AsyncEngineContext>,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
         use dynamo_parsers::{ReasoningParser, ReasoningParserType};
-        
+
         struct ReasoningState {
-            stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
+            stream:
+                Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
             reasoning_parser: Option<Box<dyn ReasoningParser>>,
-            context: Arc<dyn AsyncEngineContext>,
         }
 
         // Initialize reasoning parser if configured
         let reasoning_parser = runtime_config.reasoning_parser.as_ref().map(|parser_name| {
             tracing::debug!("Initializing reasoning parser: {}", parser_name);
-            Box::new(ReasoningParserType::get_reasoning_parser_from_name(parser_name)) as Box<dyn ReasoningParser>
+            Box::new(ReasoningParserType::get_reasoning_parser_from_name(
+                parser_name,
+            )) as Box<dyn ReasoningParser>
         });
 
         let state = ReasoningState {
             stream: Box::pin(stream),
             reasoning_parser,
-            context,
         };
 
         stream::unfold(state, |mut state| async move {
@@ -706,7 +706,8 @@ impl OpenAIPreprocessor {
                 let processed_response = if let Some(ref mut parser) = state.reasoning_parser {
                     response.map_data(|mut data| {
                         // Extract text content from the response for parsing
-                        let (text_content, token_ids) = if let Some(ref choices) = data.choices.get(0) {
+                        let (text_content, token_ids) = if let Some(choices) = data.choices.first()
+                        {
                             let text = choices.delta.content.clone();
                             // For now, we don't have access to token_ids in the stream response
                             // This is a limitation we'll need to address in a future iteration
@@ -716,8 +717,9 @@ impl OpenAIPreprocessor {
                         };
 
                         if let Some(text) = text_content.as_ref() {
-                            let parser_result = parser.parse_reasoning_streaming_incremental(text, &token_ids);
-                            
+                            let parser_result =
+                                parser.parse_reasoning_streaming_incremental(text, &token_ids);
+
                             // Update the response with parsed content
                             if let Some(choice) = data.choices.get_mut(0) {
                                 choice.delta.content = parser_result.get_some_normal_text();
@@ -812,11 +814,7 @@ impl
         );
 
         // Apply reasoning content parsing as a separate transformation step
-        let stream = Self::parse_reasoning_content_from_stream(
-            stream,
-            self.runtime_config.clone(),
-            context.clone(),
-        );
+        let stream = Self::parse_reasoning_content_from_stream(stream, self.runtime_config.clone());
 
         // Check if tools are present and if we should apply jail
         let has_tools =

@@ -65,7 +65,6 @@ pub struct DeltaGenerator {
     msg_counter: u64,
     /// Configuration options for response generation.
     options: DeltaGeneratorOptions,
-
 }
 
 impl DeltaGenerator {
@@ -96,7 +95,6 @@ impl DeltaGenerator {
             completion_tokens_details: None,
         };
 
-
         let chatcmpl_id = format!("chatcmpl-{request_id}");
 
         Self {
@@ -111,7 +109,6 @@ impl DeltaGenerator {
             options,
         }
     }
-
 
     /// Updates the prompt token usage count.
     ///
@@ -185,7 +182,6 @@ impl DeltaGenerator {
             refusal: None,
         })
     }
-
 
     /// Creates a choice within a chat completion response.
     ///
@@ -329,12 +325,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         // Create the streaming response.
         let index = 0;
-        let stream_response = self.create_choice(
-            index,
-            delta.text,
-            finish_reason,
-            logprobs,
-        );
+        let stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
 
         Ok(stream_response)
     }
