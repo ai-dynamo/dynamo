@@ -99,20 +99,6 @@ RUN apt-get update && \
         jq && \
     rm -rf /var/lib/apt/lists/*
 
-# Install prometheus
-ARG PROM_VERSION=3.4.1
-RUN ARCH=$(dpkg --print-architecture) && \
-    case "$ARCH" in \
-        amd64) PLATFORM=linux-amd64 ;; \
-        arm64) PLATFORM=linux-arm64 ;; \
-        *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
-    esac && \
-    curl -fsSL --retry 5 --retry-delay 5 "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PLATFORM}.tar.gz" \
-    | tar -xz -C /tmp && \
-    mv "/tmp/prometheus-${PROM_VERSION}.${PLATFORM}/prometheus" /usr/local/bin/ && \
-    chmod +x /usr/local/bin/prometheus && \
-    rm -rf "/tmp/prometheus-${PROM_VERSION}.${PLATFORM}"
-
 # Copy CUDA development tools (nvcc, headers, dependencies, etc.) from framework devel image
 COPY --from=framework /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
 COPY --from=framework /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
@@ -195,6 +181,8 @@ ARG HAS_TRTLLM_CONTEXT
 ARG TENSORRTLLM_PIP_WHEEL
 ARG TENSORRTLLM_INDEX_URL
 
+# Copy only wheel files from trtllm_wheel stage from build_context
+COPY --from=trtllm_wheel /*.whl /trtllm_wheel/
 # Note: TensorRT needs to be uninstalled before installing the TRTLLM wheel
 # because there might be mismatched versions of TensorRT between the NGC PyTorch
 # and the TRTLLM wheel.
