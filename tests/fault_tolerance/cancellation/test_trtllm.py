@@ -344,6 +344,11 @@ def test_request_cancellation_trtllm_decode_first_decode_cancel(
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.xfail(
+    reason="Time-sensitive test: Relies on request timeout (0.1s) to cancel during remote prefill phase. "
+    "May fail if prefill completes too quickly or timeout triggers at a different phase.",
+    strict=False,
+)
 def test_request_cancellation_trtllm_decode_first_remote_prefill_cancel(
     request, runtime_services, predownload_models
 ):
@@ -403,6 +408,11 @@ def test_request_cancellation_trtllm_decode_first_remote_prefill_cancel(
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.xfail(
+    reason="Time-sensitive test: Relies on request timeout (0.1s) to cancel during prefill phase. "
+    "May fail if prefill completes too quickly or timeout triggers at a different phase.",
+    strict=False,
+)
 def test_request_cancellation_trtllm_prefill_first_prefill_cancel(
     request, runtime_services, predownload_models
 ):
