@@ -16,18 +16,8 @@
 from dataclasses import dataclass
 from typing import Optional
 
+from tests.fault_tolerance.deploy.worker_config import WORKER_MAP
 from tests.utils.managed_deployment import DeploymentSpec
-
-WORKER_MAP = {
-    "vllm": {
-        "decode": "VllmDecodeWorker",
-        "prefill": "VllmPrefillWorker",
-    },
-    "sglang": {
-        "decode": "decode",
-        "prefill": "prefill",
-    },
-}
 
 
 @dataclass
