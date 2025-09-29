@@ -9,9 +9,11 @@ Quick deployment guide for the disaggregated planner with automatic scaling.
 
 **Components:**
 - **Frontend**: Serves requests and exposes `/metrics`
-- **Prometheus**: Scrapes frontend metrics every 5 seconds
-- **Planner**: Queries Prometheus and adjusts worker scaling every 60 seconds
+- **Prometheus**: Scrapes frontend metrics every adjustment interval
+- **Planner**: Queries Prometheus and adjusts worker scaling every adjustment interval
 - **Workers**: prefill and backend workers handle inference
+
+The adjustment interval can be defined in the planner manifest as an argument. The default interval value can be found in this [file](/components/planner/src/dynamo/planner/defaults.py).
 
 ```mermaid
 flowchart LR
@@ -25,6 +27,7 @@ flowchart LR
 - Kubernetes cluster with GPU nodes
 - [Pre-Deployment Profiling](/docs/benchmarks/pre_deployment_profiling.md) completed and its results saved to `dynamo-pvc` PVC.
 - Prefill and decode worker uses the best parallelization mapping suggested by the pre-deployment profiling script.
+- [kube-prometheus-stack](/docs/kubernetes/metrics.md) installed and running.
 
 > [!NOTE]
 > **Important**: The profiling that occurs before Planner deployment requires additional Kubernetes manifests (ServiceAccount, Role, RoleBinding, PVC) that are not included in standard Dynamo deployments. Apply these manifests in the same namespace as `$NAMESPACE`. For a complete setup, start with the [Quick Start guide](/deploy/utils/README.md#quick-start), which provides a fully encapsulated deployment including all required manifests.
@@ -50,7 +53,6 @@ Expected pods (all should be `1/1 Running`):
 ```
 # For vLLM:
 vllm-disagg-planner-frontend-*            1/1 Running
-vllm-disagg-planner-prometheus-*          1/1 Running
 vllm-disagg-planner-planner-*             1/1 Running
 vllm-disagg-planner-backend-*             1/1 Running
 vllm-disagg-planner-prefill-*             1/1 Running
@@ -103,8 +105,8 @@ kubectl logs -n $NAMESPACE deployment/vllm-disagg-planner-planner --tail=10
 
 **Connection Issues:**
 ```bash
-# Verify Prometheus is accessible (runs on port 8000)
-kubectl port-forward -n $NAMESPACE deployment/vllm-disagg-planner-prometheus 9090:8000
+# Verify Prometheus is accessible
+kubectl port-forward svc/prometheus-kube-prometheus-prometheus -n monitoring 9090:9090
 curl "http://localhost:9090/api/v1/query?query=up"
 ```
 
@@ -119,3 +121,11 @@ curl http://localhost:8000/metrics | grep nv_llm_http_service
 - Large models can take 10+ minutes to initialize
 - Check worker logs: `kubectl logs -n $NAMESPACE deployment/vllm-disagg-planner-backend`
 - Ensure GPU resources are available for workers
+
+**Unknown Field subComponentType:**
+
+If you encounter the following error when attempting to apply the deployment:
+```bash
+Error from server (BadRequest): error when creating "components/backends/vllm/deploy/disagg.yaml": DynamoGraphDeployment in version "v1alpha1" cannot be handled as a DynamoGraphDeployment: strict decoding error: unknown field "spec.services.DecodeWorker.subComponentType", unknown field "spec.services.PrefillWorker.subComponentType"
+```
+This is because the `subComponentType` field has only been added in newer versions of the DynamoGraphDeployment CRD (> 0.5.0). You can upgrade the CRD version by following the instructions [here](/docs/kubernetes/installation_guide.md).

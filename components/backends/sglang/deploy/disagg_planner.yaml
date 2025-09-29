@@ -7,8 +7,6 @@ metadata:
   name: sglang-disagg-planner
 spec:
   envs:
-    - name: DYNAMO_SERVICE_CONFIG
-      value: '{"Prometheus":{"global":{"scrape_interval":"5s"},"scrape_configs":[{"job_name":"prometheus","static_configs":[{"targets":["localhost:9090"]}]},{"job_name":"frontend","static_configs":[{"targets":["sglang-disagg-planner-frontend:8000"]}]}]}}'
     - name: DYNAMO_NAMESPACE
       value: "dynamo"
   services:
@@ -61,6 +59,7 @@ spec:
               --backend=sglang
               --adjustment-interval=60
               --profile-results-dir=/data/profiling_results
+<<<<<<< HEAD
     Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
       dynamoNamespace: dynamo
       componentType: frontend
@@ -96,10 +95,13 @@ spec:
             - -c
           args:
             - "python3 -m dynamo.planner.prometheus"
+=======
+>>>>>>> origin/main
     decode:
       dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
       componentType: worker
+      subComponentType: decode
       replicas: 2
       resources:
         limits:
@@ -131,6 +133,7 @@ spec:
       dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
       componentType: worker
+      subComponentType: prefill
       replicas: 2
       resources:
         limits:

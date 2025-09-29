@@ -216,20 +216,6 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 # Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
 ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 
-# Install prometheus
-ARG PROM_VERSION=3.4.1
-RUN ARCH=$(dpkg --print-architecture) && \
-    case "$ARCH" in \
-        amd64) PLATFORM=linux-amd64 ;; \
-        arm64) PLATFORM=linux-arm64 ;; \
-        *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
-    esac && \
-    curl -fsSL --retry 5 --retry-delay 5 "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PLATFORM}.tar.gz" \
-    | tar -xz -C /tmp && \
-    mv "/tmp/prometheus-${PROM_VERSION}.${PLATFORM}/prometheus" /usr/local/bin/ && \
-    chmod +x /usr/local/bin/prometheus && \
-    rm -rf "/tmp/prometheus-${PROM_VERSION}.${PLATFORM}"
-
 # Copy UCX from dev image as plugin for NIXL
 # Copy NIXL source from devr image
 # Copy dynamo wheels for gitlab artifacts
