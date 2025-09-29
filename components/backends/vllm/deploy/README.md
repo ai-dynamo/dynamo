@@ -188,7 +188,6 @@ vLLM workers are configured through command-line arguments. Key parameters inclu
 
 - `--model`: Model to serve (e.g., `Qwen/Qwen3-0.6B`)
 - `--is-prefill-worker`: Enable prefill-only mode for disaggregated serving
-- `--metrics-endpoint-port`: Port for publishing KV metrics to Dynamo
 
 See the [vLLM CLI documentation](https://docs.vllm.ai/en/v0.9.2/configuration/serve_args.html?h=serve+arg) for the full list of configuration options.
 
