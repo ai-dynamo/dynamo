@@ -23,16 +23,18 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
+// +kubebuilder:validation:XValidation:rule="!has(self.create) || self.create == false || (has(self.size) && has(self.storageClass) && has(self.volumeAccessMode))",message="When create is true, size, storageClass, and volumeAccessMode are required"
 type PVC struct {
 	// Create indicates to create a new PVC
 	Create *bool `json:"create,omitempty"`
 	// Name is the name of the PVC
+	// +kubebuilder:validation:Required
 	Name *string `json:"name,omitempty"`
-	// StorageClass to be used for PVC creation. Leave it as empty if the PVC is already created.
+	// StorageClass to be used for PVC creation. Required when create is true.
 	StorageClass string `json:"storageClass,omitempty"`
-	// Size of the volume in Gi, used during PVC creation
+	// Size of the volume in Gi, used during PVC creation. Required when create is true.
 	Size resource.Quantity `json:"size,omitempty"`
-	// VolumeAccessMode is the volume access mode of the PVC
+	// VolumeAccessMode is the volume access mode of the PVC. Required when create is true.
 	VolumeAccessMode corev1.PersistentVolumeAccessMode `json:"volumeAccessMode,omitempty"`
 }
 

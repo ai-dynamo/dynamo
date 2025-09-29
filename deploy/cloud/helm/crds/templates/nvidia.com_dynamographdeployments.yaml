@@ -196,16 +196,21 @@ spec:
                         anyOf:
                           - type: integer
                           - type: string
-                        description: Size of the volume in Gi, used during PVC creation
+                        description: Size of the volume in Gi, used during PVC creation. Required when create is true.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                       storageClass:
-                        description: StorageClass to be used for PVC creation. Leave it as empty if the PVC is already created.
+                        description: StorageClass to be used for PVC creation. Required when create is true.
                         type: string
                       volumeAccessMode:
-                        description: VolumeAccessMode is the volume access mode of the PVC
+                        description: VolumeAccessMode is the volume access mode of the PVC. Required when create is true.
                         type: string
+                    required:
+                      - name
                     type: object
+                    x-kubernetes-validations:
+                      - message: When create is true, size, storageClass, and volumeAccessMode are required
+                        rule: '!has(self.create) || self.create == false || (has(self.size) && has(self.storageClass) && has(self.volumeAccessMode))'
                   type: array
                 services:
                   additionalProperties:
