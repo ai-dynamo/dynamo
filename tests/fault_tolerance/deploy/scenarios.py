@@ -27,6 +27,10 @@ WORKER_MAP = {
         "decode": "decode",
         "prefill": "prefill",
     },
+    "trtllm": {
+        "decode": "TrtllmDecodeWorker",
+        "prefill": "TrtllmPrefillWorker",
+    },
 }
 
 
@@ -154,6 +158,7 @@ def _create_deployments_for_backend(backend):
 deployment_specs = {}
 deployment_specs.update(_create_deployments_for_backend("vllm"))
 deployment_specs.update(_create_deployments_for_backend("sglang"))
+deployment_specs.update(_create_deployments_for_backend("trtllm"))
 
 
 # Each failure scenaro contains a list of failure injections
@@ -203,6 +208,13 @@ def _create_backend_failures(backend):
         failures["sglang_prefill_detokenizer"] = [
             Failure(30, prefill_worker, "sglang::detokenizer", "SIGKILL")
         ]
+    elif backend == "trtllm":
+        failures["trtllm_decode_engine_core"] = [
+            Failure(30, decode_worker, "TRTLLM::EngineCore", "SIGKILL")
+        ]
+        failures["trtllm_prefill_engine_core"] = [
+            Failure(30, prefill_worker, "TRTLLM::EngineCore", "SIGKILL")
+        ]
 
     return failures
 
@@ -221,6 +233,7 @@ scenarios = {}
 backend_failure_map = {
     "vllm": _create_backend_failures("vllm"),
     "sglang": _create_backend_failures("sglang"),
+    "trtllm": _create_backend_failures("trtllm"),
 }
 
 for deployment_name, deployment_info in deployment_specs.items():

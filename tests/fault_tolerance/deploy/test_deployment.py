@@ -153,6 +153,8 @@ async def test_fault_scenario(
                 model = scenario.deployment["VllmDecodeWorker"].model
             elif scenario.backend == "sglang":
                 model = scenario.deployment["decode"].model
+            elif scenario.backend == "trtllm":
+                model = scenario.deployment["TrtllmDecodeWorker"].model
             else:
                 model = None
         except (KeyError, AttributeError):
