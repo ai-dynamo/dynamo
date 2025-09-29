@@ -643,7 +643,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "TODO(elyas): temporarily disabled; parser/content segmentation mismatch after parser changes"]
     async fn test_jailed_stream_mistral_parser_with_tool_calls_marker() {
         // Tests Mistral format tool call parsing with explicit [TOOL_CALLS] marker
         // Input: "Let me check that for you. " + "[TOOL_CALLS][{\"name\": \"get_time\", \"arguments\": {\"timezone\": \"UTC\"}}]" + " Here's the time."
@@ -2441,7 +2440,6 @@ mod parallel_jail_tests {
     // =============================================================================
 
     #[tokio::test]
-    #[ignore = "TODO(elyas): temporarily disabled; partial malformed call handling needs revisit"]
     async fn test_parallel_partial_malformed_calls() {
         let jail = JailedStream::builder()
             .tool_call_parser("nemotron_deci")

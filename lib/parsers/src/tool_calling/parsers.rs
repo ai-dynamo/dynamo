@@ -659,7 +659,6 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     }
 
     #[tokio::test]
-    #[ignore = "TODO(elyas): temporarily disabled; failing after test move"]
     async fn test_mistralai_mistral_7b_instruct_v03_single_with_start_token() {
         let input = r#"[TOOL_CALLS] [{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]"#;
         let config = ToolCallConfig::mistral();
@@ -674,7 +673,6 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     }
 
     #[tokio::test]
-    #[ignore = "TODO(elyas): temporarily disabled; failing after test move"]
     async fn test_mistralai_mistral_7b_instruct_v03_single_with_start_token_with_normal_text() {
         let input = r#"Hey How are you? [TOOL_CALLS] [{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]"#;
         let config = ToolCallConfig::mistral();
@@ -689,7 +687,6 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     }
 
     #[tokio::test]
-    #[ignore = "TODO(elyas): temporarily disabled; failing after test move"]
     async fn test_mistralai_mistral_7b_instruct_v03_single_with_start_tokenwith_new_lines() {
         let input = r#"
         [TOOL_CALLS]
@@ -710,7 +707,6 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     }
 
     #[tokio::test]
-    #[ignore = "TODO(elyas): temporarily disabled; failing after test move"]
     async fn test_mistralai_mistral_7b_instruct_v03_single_with_start_token_multiple() {
         let input = r#"[TOOL_CALLS] [{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}, {"name": "get_weather", "arguments": {"location": "New York, NY", "unit": "fahrenheit"}}]"#;
         let config = ToolCallConfig::mistral();
@@ -729,7 +725,6 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     }
 
     #[tokio::test]
-    #[ignore = "TODO(elyas): temporarily disabled; failing after test move"]
     async fn test_mistralai_mistral_7b_instruct_v03_single_with_start_token_multiple_with_normal_text()
      {
         let input = r#"Hey How are you? [TOOL_CALLS] [{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}, {"name": "get_weather", "arguments": {"location": "New York, NY", "unit": "fahrenheit"}}]"#;
@@ -749,7 +744,6 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     }
 
     #[tokio::test]
-    #[ignore = "TODO(elyas): temporarily disabled; failing after test move"]
     async fn test_mistralai_mistral_7b_instruct_v03_single_with_start_token_multiple_with_new_lines()
      {
         let input = r#"
@@ -1612,7 +1606,6 @@ mod parallel_tool_calling_tests {
     // =============================================================================
 
     #[tokio::test]
-    #[ignore = "TODO(elyas): temporarily disabled; failing after test move"]
     async fn test_parallel_jamba_format_two_cities() {
         let input = r#" <tool_calls>[
     {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}},
@@ -1773,7 +1766,6 @@ fahrenheit
     // =============================================================================
 
     #[tokio::test]
-    #[ignore = "TODO(elyas): temporarily disabled; failing after test move"]
     async fn test_parallel_harmony_format_multiple_tools() {
         // Test with harmony parser for multiple tool calls
         let input = r#"<|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"city": "Dallas", "state": "TX", "unit": "fahrenheit"}<|call|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"city": "Orlando", "state": "FL", "unit": "fahrenheit"}<|call|>"#;
@@ -2140,7 +2132,6 @@ fahrenheit
     }
 
     #[tokio::test]
-    #[ignore = "TODO(elyas): temporarily disabled; failing after test move"]
     async fn test_parallel_json_escaping_and_quotes() {
         let input = r#"<TOOLCALL>[
     {"name": "process_json", "arguments": {"json_string": "{\"key\": \"value with \\\"quotes\\\"\"}", "format": "strict"}},
@@ -2330,7 +2321,6 @@ fahrenheit
     }
 
     #[tokio::test]
-    #[ignore = "TODO(elyas): temporarily disabled; failing after test move"]
     async fn test_parallel_malformed_recovery() {
         // Test parser's ability to recover from malformed entries
         let input = r#"<TOOLCALL>[
