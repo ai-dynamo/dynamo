@@ -668,6 +668,76 @@ impl OpenAIPreprocessor {
             .build();
         jail.apply(stream)
     }
+
+    /// Parse reasoning content from the stream as a separate transformation step
+    /// This method extracts reasoning parsing logic from choice_from_postprocessor
+    /// to allow for better separation of concerns and more flexible processing
+    pub fn parse_reasoning_content_from_stream<S>(
+        stream: S,
+        runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
+        context: Arc<dyn AsyncEngineContext>,
+    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        use dynamo_parsers::{ReasoningParser, ReasoningParserType};
+        
+        struct ReasoningState {
+            stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
+            reasoning_parser: Option<Box<dyn ReasoningParser>>,
+            context: Arc<dyn AsyncEngineContext>,
+        }
+
+        // Initialize reasoning parser if configured
+        let reasoning_parser = runtime_config.reasoning_parser.as_ref().map(|parser_name| {
+            tracing::debug!("Initializing reasoning parser: {}", parser_name);
+            Box::new(ReasoningParserType::get_reasoning_parser_from_name(parser_name)) as Box<dyn ReasoningParser>
+        });
+
+        let state = ReasoningState {
+            stream: Box::pin(stream),
+            reasoning_parser,
+            context,
+        };
+
+        stream::unfold(state, |mut state| async move {
+            if let Some(response) = state.stream.next().await {
+                // Process the response through reasoning parser if available
+                let processed_response = if let Some(ref mut parser) = state.reasoning_parser {
+                    response.map_data(|mut data| {
+                        // Extract text content from the response for parsing
+                        let (text_content, token_ids) = if let Some(ref choices) = data.choices.get(0) {
+                            let text = choices.delta.content.clone();
+                            // For now, we don't have access to token_ids in the stream response
+                            // This is a limitation we'll need to address in a future iteration
+                            (text, vec![])
+                        } else {
+                            (None, vec![])
+                        };
+
+                        if let Some(text) = text_content.as_ref() {
+                            let parser_result = parser.parse_reasoning_streaming_incremental(text, &token_ids);
+                            
+                            // Update the response with parsed content
+                            if let Some(choice) = data.choices.get_mut(0) {
+                                choice.delta.content = parser_result.get_some_normal_text();
+                                choice.delta.reasoning_content = parser_result.get_some_reasoning();
+                            }
+                        }
+
+                        Ok(data)
+                    })
+                } else {
+                    // No reasoning parser configured, pass through unchanged
+                    response
+                };
+
+                Some((processed_response, state))
+            } else {
+                None
+            }
+        })
+    }
 }
 
 // for pals, we do not want to add the generation prompt to the formatted prompt
@@ -702,9 +772,6 @@ impl
 
         let mut response_generator = Box::new(response_generator);
 
-        // set the runtime configuration
-        response_generator.set_reasoning_parser(self.runtime_config.clone());
-
         // update isl
         response_generator.update_isl(common_request.token_ids.len() as u32);
 
@@ -728,6 +795,13 @@ impl
         let stream = Self::transform_postprocessor_stream(
             response_stream,
             response_generator,
+            context.clone(),
+        );
+
+        // Apply reasoning content parsing as a separate transformation step
+        let stream = Self::parse_reasoning_content_from_stream(
+            stream,
+            self.runtime_config.clone(),
             context.clone(),
         );
 
