@@ -68,8 +68,8 @@ async fn health_handler(
         .iter()
         .map(|instance| instance.endpoint_id().as_url())
         .collect();
-    endpoints.dedup();
     endpoints.sort();
+    endpoints.dedup();
     (
         StatusCode::OK,
         Json(json!({

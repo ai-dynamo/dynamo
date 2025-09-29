@@ -471,7 +471,7 @@ impl Metrics {
 
     /// Update metrics from a ModelDeploymentCard
     /// This updates both runtime config metrics and MDC-specific metrics
-    pub async fn update_metrics_from_mdc(&self, card: &ModelDeploymentCard) -> anyhow::Result<()> {
+    pub fn update_metrics_from_mdc(&self, card: &ModelDeploymentCard) -> anyhow::Result<()> {
         self.update_runtime_config_metrics(&card.display_name, &card.runtime_config);
 
         self.model_context_length

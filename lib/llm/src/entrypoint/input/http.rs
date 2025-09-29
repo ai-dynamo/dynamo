@@ -243,7 +243,7 @@ async fn run_watcher(
             update_http_endpoints(http_service.clone(), model_update.clone());
 
             // Update metrics (only for added models)
-            update_model_metrics(model_update, metrics.clone()).await;
+            update_model_metrics(model_update, metrics.clone());
         }
     });
 
@@ -278,14 +278,14 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
 }
 
 /// Updates metrics for model type changes
-async fn update_model_metrics(
+fn update_model_metrics(
     model_type: ModelUpdate,
     metrics: Arc<crate::http::service::metrics::Metrics>,
 ) {
     match model_type {
         ModelUpdate::Added(card) => {
             tracing::debug!("Updating metrics for added model: {}", card.display_name);
-            if let Err(err) = metrics.update_metrics_from_mdc(&card).await {
+            if let Err(err) = metrics.update_metrics_from_mdc(&card) {
                 tracing::warn!(%err, model_name=card.display_name, "update_metrics_from_mdc failed");
             }
         }
