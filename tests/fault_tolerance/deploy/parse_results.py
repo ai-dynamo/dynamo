@@ -54,19 +54,22 @@ def parse_test_log(
 
     with open(file_path, "r") as f:
         for line in f:
+            # Extract timestamp using regex to handle different log formats
+            timestamp_match = re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", line)
+
             # Look for multiprocess creation
-            if "Creating ManagedDeployment" in line:
-                timestamp = line[26:45]  # Extract timestamp
+            if "Creating ManagedDeployment" in line and timestamp_match:
+                timestamp = timestamp_match.group(1)
                 start_time = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S")
 
             # Look for "All workers are ready"
-            if "All workers are ready" in line:
-                timestamp = line[26:45]
+            if "All workers are ready" in line and timestamp_match:
+                timestamp = timestamp_match.group(1)
                 ready_time = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S")
 
             # Look for fault injection
-            if "Injecting failure for:" in line:
-                timestamp = line[26:45]
+            if "Injecting failure for:" in line and timestamp_match:
+                timestamp = timestamp_match.group(1)
                 fault_time = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S")
 
                 # Extract failure details

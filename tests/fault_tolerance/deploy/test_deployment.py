@@ -31,7 +31,6 @@ def _clients(
     input_token_length,
     output_token_length,
     max_retries,
-    max_request_rate,
 ):
     procs = []
     ctx = multiprocessing.get_context("spawn")
@@ -49,7 +48,6 @@ def _clients(
                     input_token_length,
                     output_token_length,
                     max_retries,
-                    max_request_rate,
                 ),
             )
         )
@@ -178,6 +176,5 @@ async def test_fault_scenario(
             scenario.load.input_token_length,
             scenario.load.output_token_length,
             scenario.load.max_retries,
-            scenario.load.max_request_rate,
         ):
             _inject_failures(scenario.failures, logger, deployment)

@@ -88,9 +88,9 @@ def get_frontend_port(
 
     # Setup or reuse port forward
     if pod_name not in pod_ports:
-        port_forward = managed_deployment.port_forward(
-            selected_pod, deployment_spec.port
-        )
+        # Get port from deployment_spec (default: 8000)
+        port_value = getattr(deployment_spec, "_port", 8000)
+        port_forward = managed_deployment.port_forward(selected_pod, port_value)
         if port_forward:
             pod_ports[pod_name] = port_forward
             port = port_forward.local_port
@@ -114,7 +114,6 @@ def run_aiperf(
     requests_per_client: int,
     input_token_length: int,
     output_token_length: int,
-    max_request_rate: float,
     output_dir: Path,
     logger: logging.Logger,
 ) -> bool:
@@ -130,13 +129,19 @@ def run_aiperf(
         requests_per_client: Number of requests to send
         input_token_length: Input token count
         output_token_length: Output token count
-        max_request_rate: Maximum request rate (0 for unlimited)
         output_dir: Directory for AI-Perf artifacts
         logger: Logger instance
 
     Returns:
         True if successful, False otherwise
     """
+    # Validate required parameters
+    if not model or not url or not endpoint:
+        logger.error(
+            f"Missing required parameter: model={model!r}, url={url!r}, endpoint={endpoint!r}"
+        )
+        return False
+
     # Build AI-Perf command
     cmd = [
         "genai-perf",
@@ -144,20 +149,18 @@ def run_aiperf(
         # Model configuration (required)
         "--model",
         model,
-        "--tokenizer",
-        model,
         # Endpoint configuration
         "--url",
         url,
         "--endpoint",
-        f"/{endpoint}",  # Optional: defaults to /v1/chat/completions
+        endpoint if endpoint.startswith("/") else f"/{endpoint}",
         "--endpoint-type",
         "chat",  # Required: tells AI-Perf the API type
         # Request parameters
         "--request-count",
         str(requests_per_client),  # Required: how many requests
         "--concurrency",
-        "1",  # Optional: we set to 1 for sequential (legacy behavior)
+        "1",  # Optional: we set to 1 for sequential
         # Token configuration
         "--synthetic-input-tokens-mean",
         str(input_token_length),
@@ -167,38 +170,14 @@ def run_aiperf(
         str(output_token_length),
         "--output-tokens-stddev",
         "0",  # Set to 0 for consistent token counts
-        # Enforce exact output length (for test consistency)
-        "--extra-inputs",
-        f"max_tokens:{output_token_length}",
-        "--extra-inputs",
-        f"min_tokens:{output_token_length}",
-        "--extra-inputs",
-        "ignore_eos:true",  # Force exact length
-        "--extra-inputs",
-        '{"nvext":{"ignore_eos":true}}',
-        # Rate limiting
-        "--request-rate",
-        str(max_request_rate) if max_request_rate > 0 else "inf",
         # Warmup
         "--warmup-request-count",
         "3",
         # Output configuration
         "--artifact-dir",
         str(output_dir),
-        # Fixed parameters
-        "--streaming",
-        "false",  # Non-streaming mode
         "--random-seed",
         "100",  # For reproducible results
-        # Additional parameters for reliability
-        "--",
-        "-v",
-        "--max-threads",
-        str(max(int(requests_per_client * 0.1), 10)),
-        "-H",
-        "Authorization: Bearer NOT USED",
-        "-H",
-        "Accept: text/event-stream",
     ]
 
     # Calculate timeout (same as legacy would for all requests)
@@ -299,7 +278,6 @@ def client(
     input_token_length: int,
     output_token_length: int,
     max_retries: int,
-    max_request_rate: float,
     retry_delay: float = 1,
 ):
     """
@@ -319,7 +297,6 @@ def client(
         input_token_length: Number of input tokens per request
         output_token_length: Number of output tokens per request
         max_retries: Maximum retry attempts (AI-Perf handles retries internally)
-        max_request_rate: Maximum requests per second (0 for unlimited)
         retry_delay: Delay between retries (AI-Perf handles retries internally)
     """
     logger = logging.getLogger(f"CLIENT: {index}")
@@ -348,16 +325,18 @@ def client(
 
         url = f"http://localhost:{port}"
 
+        # Get endpoint from deployment_spec (default: /v1/chat/completions)
+        endpoint = getattr(deployment_spec, "_endpoint", "/v1/chat/completions")
+
         success = run_aiperf(
             url=url,
-            endpoint=deployment_spec.endpoint,
+            endpoint=endpoint,
             model=model,
             pod_name=pod_name,
             port=port,
             requests_per_client=requests_per_client,
             input_token_length=input_token_length,
             output_token_length=output_token_length,
-            max_request_rate=max_request_rate,
             output_dir=client_output_dir,
             logger=logger,
         )

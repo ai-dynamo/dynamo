@@ -79,7 +79,6 @@ class Load:
     input_token_length: int = 100
     output_token_length: int = 100
     max_retries: int = 1
-    max_request_rate: float = 1
     sla: Optional[float] = None
 
 
