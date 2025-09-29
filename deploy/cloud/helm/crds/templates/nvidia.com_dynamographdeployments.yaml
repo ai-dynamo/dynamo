@@ -182,8 +182,8 @@ spec:
                   type: array
                 pvcs:
                   description: |-
-                    PVCs defines persistent volume claims that can be referenced by components.
-                    The key is the PVC name that can be referenced in component specifications.
+                    PVCs defines a list of persistent volume claims that can be referenced by components.
+                    Each PVC must have a unique name that can be referenced in component specifications.
                   items:
                     properties:
                       create:

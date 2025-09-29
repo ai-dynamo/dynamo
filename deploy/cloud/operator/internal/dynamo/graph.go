@@ -818,7 +818,7 @@ func GenerateBasePodSpec(
 		} else {
 			defaultMountPoint := getDefaultCompilationCacheMountPoint(backendFramework)
 			if defaultMountPoint == "" {
-				return nil, fmt.Errorf("compilation cache is not supported for backend framework %s, please use volumeMounts to specify an explicit mountPoint if you want to mount a volume for other purposes", backendFramework)
+				return nil, fmt.Errorf("compilationCacheRef.mountPoint is required for backend framework %s (no default mount point available)", backendFramework)
 			}
 			mountPoint = defaultMountPoint
 		}

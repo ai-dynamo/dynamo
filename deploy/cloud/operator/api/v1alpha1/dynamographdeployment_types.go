@@ -32,8 +32,8 @@ type DynamoGraphDeploymentSpec struct {
 	// DynamoGraph selects the graph (workflow/topology) to deploy. This must match
 	// a graph name packaged with the Dynamo archive.
 	DynamoGraph string `json:"dynamoGraph,omitempty"`
-	// PVCs defines persistent volume claims that can be referenced by components.
-	// The key is the PVC name that can be referenced in component specifications.
+	// PVCs defines a list of persistent volume claims that can be referenced by components.
+	// Each PVC must have a unique name that can be referenced in component specifications.
 	// +kubebuilder:validation:Optional
 	PVCs []PVC `json:"pvcs,omitempty"`
 	// Services allows per-service overrides of the component deployment settings.

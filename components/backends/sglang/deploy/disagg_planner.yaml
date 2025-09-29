@@ -9,7 +9,7 @@ spec:
   envs:
     - name: DYNAMO_NAMESPACE
       value: "dynamo"
-  PVCs:
+  pvcs:
     - name: dynamo-pvc
       create: false # Must be pre-created before deployment and SLA profiler must have been run
   services:
