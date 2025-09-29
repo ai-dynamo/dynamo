@@ -52,6 +52,7 @@ async def runtime():
     yield runtime
     runtime.shutdown()
 
+
 @pytest.fixture(scope="module")
 async def distributed_runtime():
     loop = asyncio.get_running_loop()
