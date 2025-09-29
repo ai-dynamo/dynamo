@@ -11,7 +11,6 @@
 //! - Model information (ModelInfoType)
 //! - Tokenizer configuration (TokenizerKind)
 //! - Prompt formatter settings (PromptFormatterArtifact)
-//! - Various metadata like revision, publish time, etc.
 
 use std::fmt;
 use std::fs::File;
@@ -121,10 +120,6 @@ pub struct ModelDeploymentCard {
 
     /// When this card was last advertised by a worker. None if not yet published.
     pub last_published: Option<chrono::DateTime<chrono::Utc>>,
-
-    /// Incrementing count of how many times we published this card
-    #[serde(default, skip_serializing)]
-    pub revision: u64,
 
     /// Max context (in number of tokens) this model can handle
     pub context_length: u32,
@@ -496,7 +491,6 @@ impl ModelDeploymentCard {
             prompt_formatter: Some(PromptFormatterArtifact::GGUF(gguf_file.to_path_buf())),
             chat_template_file: None,
             prompt_context: None, // TODO - auto-detect prompt context
-            revision: 0,
             last_published: None,
             context_length,
             kv_cache_block_size: 0,
@@ -560,7 +554,6 @@ impl ModelDeploymentCard {
             prompt_formatter: PromptFormatterArtifact::from_repo(repo_id)?,
             chat_template_file,
             prompt_context: None, // TODO - auto-detect prompt context
-            revision: 0,
             last_published: None,
             context_length,
             kv_cache_block_size: 0, // set later
@@ -572,14 +565,14 @@ impl ModelDeploymentCard {
     }
 }
 
+/// A ModelDeploymentCard is published a single time per instance and never updated.
 impl Versioned for ModelDeploymentCard {
     fn revision(&self) -> u64 {
-        self.revision
+        0
     }
 
-    fn set_revision(&mut self, revision: u64) {
+    fn set_revision(&mut self, _revision: u64) {
         self.last_published = Some(chrono::Utc::now());
-        self.revision = revision;
     }
 }
 
