@@ -410,6 +410,8 @@ impl LocalModel {
         let Some(etcd_client) = endpoint.drt().etcd_client() else {
             anyhow::bail!("Cannot attach to static endpoint");
         };
+        self.card.model_type = model_type;
+        self.card.model_input = model_input;
 
         // Store model config files in NATS object store
         let nats_client = endpoint.drt().nats_client();
@@ -431,9 +433,7 @@ impl LocalModel {
         let model_registration = ModelEntry {
             name: self.display_name().to_string(),
             endpoint_id: endpoint.id(),
-            model_type,
             runtime_config: Some(self.runtime_config.clone()),
-            model_input,
         };
         etcd_client
             .kv_create(
