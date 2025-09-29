@@ -62,9 +62,10 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 						Services: map[string]*v1alpha1.DynamoComponentDeploymentOverridesSpec{
 							"service1": {
 								DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-									DynamoNamespace: &[]string{"default"}[0],
-									ComponentType:   "frontend",
-									Replicas:        &[]int32{3}[0],
+									DynamoNamespace:  &[]string{"default"}[0],
+									ComponentType:    "frontend",
+									SubComponentType: "test-sub-component",
+									Replicas:         &[]int32{3}[0],
 									Resources: &common.Resources{
 										Requests: &common.ResourceItem{
 											CPU:    "1",
@@ -106,10 +107,11 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-							ServiceName:     "service1",
-							DynamoNamespace: &[]string{"default"}[0],
-							ComponentType:   "frontend",
-							Replicas:        &[]int32{3}[0],
+							ServiceName:      "service1",
+							DynamoNamespace:  &[]string{"default"}[0],
+							ComponentType:    "frontend",
+							SubComponentType: "test-sub-component",
+							Replicas:         &[]int32{3}[0],
 							Resources: &common.Resources{
 								Requests: &common.ResourceItem{
 									CPU:    "1",
@@ -1088,7 +1090,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 						Services: map[string]*v1alpha1.DynamoComponentDeploymentOverridesSpec{
 							"Frontend": {
 								DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-									ComponentType: "frontend", // Frontend component
+									ComponentType:    "frontend", // Frontend component
+									SubComponentType: "test-sub-component",
 									ExtraPodMetadata: &common.ExtraPodMetadata{
 										Annotations: map[string]string{
 											"nvidia.com/annotation1": "annotation1",
@@ -1240,6 +1243,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-frontend",
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeFrontend,
+									commonconsts.KubeLabelDynamoSubComponentType:    "test-sub-component",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 									"nvidia.com/label1":                             "label1",
 									"nvidia.com/label2":                             "label2",
@@ -1642,8 +1646,9 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 											"nvidia.com/label2": "label2",
 										},
 									},
-									Replicas:      &[]int32{5}[0],
-									ComponentType: commonconsts.ComponentTypeWorker,
+									Replicas:         &[]int32{5}[0],
+									ComponentType:    commonconsts.ComponentTypeWorker,
+									SubComponentType: "test-sub-component",
 									ExtraPodSpec: &common.ExtraPodSpec{
 										MainContainer: &corev1.Container{
 											Image: "worker-image",
@@ -1767,6 +1772,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 								Name: "worker-ldr",
 								Labels: map[string]string{
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+									commonconsts.KubeLabelDynamoSubComponentType:    "test-sub-component",
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker-ldr",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
@@ -1917,6 +1923,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 								Name: "worker-wkr",
 								Labels: map[string]string{
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+									commonconsts.KubeLabelDynamoSubComponentType:    "test-sub-component",
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker-wkr",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
