@@ -2018,9 +2018,7 @@ class DynamoFrameworkInfo(NodeInfo):
                 item_path = os.path.join(components_path, item)
                 if os.path.isdir(item_path):
                     # Check for dynamo module in src
-                    module_path = os.path.join(
-                        item_path, "__init__.py"
-                    )
+                    module_path = os.path.join(item_path, "__init__.py")
                     if os.path.exists(module_path):
                         components.append(f"dynamo.{item}")
 
