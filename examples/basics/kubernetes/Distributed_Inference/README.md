@@ -21,7 +21,7 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 3. Model hosting with vLLM backend
 This `agg_router.yaml` is adpated from vLLM deployment [example](https://github.com/ai-dynamo/dynamo/blob/main/components/backends/vllm/deploy/agg_router.yaml). It has following customizations
 - Deployed `Qwen/Qwen2.5-1.5B-Instruct` model
-- Use KV cache based routing in frontend deployment `--router-mode kv`
+- Use KV cache based routing in frontend deployment via the `DYN_ROUTER_MODEL=kv` environment variable
 - Mounted a local cache folder `/YOUR/LOCAL/CACHE/FOLDER` for model artifacts reuse
 - Created 4 replicas for this model deployment by setting `replicas: 4`
 - Added `debug` flag environment variable for observability
@@ -69,7 +69,7 @@ aiconfigurator cli --model LLAMA3.1_70B --total_gpus 16 --system h200_sxm
 ```
 and from the output, you can see the Pareto curve with suggest P/D settings
 ![text](images/pareto.png)
-3. Start the serving with 1 prefill workers with tensor parallem 4 and 1 decoding worker with tensor parallem 8 as AI Configurator suggested
+3. Start the serving with 1 prefill worker with tensor parallelism 4 and 1 decoding worker with tensor parallelism 8 as AI Configurator suggested
 ![text](images/settings.png)
 ```sh
 kubectl apply -f disagg_router.yaml --namespace ${NAMESPACE}
