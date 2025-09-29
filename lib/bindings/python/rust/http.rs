@@ -152,21 +152,17 @@ where
 
                         // check: Py03 exceptions cannot be cross-compiled, so we duck-type by name
                         // and fields.
-                        if let Ok(type_name) = bound_err.get_type().name() {
-                            if type_name.to_string().contains("HttpError") {
-                                if let (Ok(code), Ok(message)) =
+                        if let Ok(type_name) = bound_err.get_type().name()
+                            && type_name.to_string().contains("HttpError")
+                                && let (Ok(code), Ok(message)) =
                                     (bound_err.getattr("code"), bound_err.getattr("message"))
-                                {
-                                    if let (Ok(code), Ok(message)) =
+                                    && let (Ok(code), Ok(message)) =
                                         (code.extract::<u16>(), message.extract::<String>())
                                     {
                                         // SSE panics if there are carriage returns or newlines
                                         let message = message.replace(['\r', '\n'], "");
                                         return Err(http_error::HttpError { code, message })?;
                                     }
-                                }
-                            }
-                        }
                         Err(error!("Python Error: {}", py_err.to_string()))
                     })
                 } else {

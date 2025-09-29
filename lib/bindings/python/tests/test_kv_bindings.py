@@ -34,7 +34,7 @@ from dynamo.runtime import Component
 
 pytestmark = pytest.mark.pre_merge
 
-
+@pytest.mark.forked
 async def test_radix_tree_binding(runtime):
     """Test RadixTree binding directly with store event and find matches"""
     import json
@@ -92,6 +92,7 @@ async def test_radix_tree_binding(runtime):
 # The test works individually if I run it with 32, then 11, then 64.
 # @pytest.mark.parametrize("kv_block_size", [11, 32, 64])
 @pytest.mark.skip(reason="Flakey in CI. Likely race condition going on.")
+@pytest.mark.forked
 async def test_event_handler(runtime):
     kv_block_size = 32
     namespace = "kv_test"
@@ -146,7 +147,7 @@ async def test_event_handler(runtime):
                 not scores.scores
             ), f"Scores still present after {(retry+1)*0.5}s: {scores.scores}"
 
-
+@pytest.mark.forked
 async def test_approx_kv_indexer(runtime):
     kv_block_size = 32
     namespace = "kv_test"
@@ -203,7 +204,7 @@ class EventPublisher:
         )
         self.event_id_counter += 1
 
-
+@pytest.mark.forked
 async def test_metrics_aggregator(runtime):
     namespace = "kv_test"
     component = "metrics"
