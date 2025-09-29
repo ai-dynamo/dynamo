@@ -4,6 +4,7 @@
 import copy
 import logging
 
+from dynamo._core import Context
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.encode_helper import EncodeHelper
 from dynamo.trtllm.request_handlers.handler_base import (
@@ -66,9 +67,10 @@ class AggregatedHandler(HandlerBase):
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
 
-    async def generate(self, request: dict):
+    async def generate(self, request: dict, context: Context):
+        logging.debug(f"New Request ID: {context.id()}")
         # Implement all steps locally.
-        async for res in self.generate_locally(request):
+        async for res in self.generate_locally(request, context):
             yield res
 
 
@@ -80,7 +82,8 @@ class EncodeHandler(HandlerBase):
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
 
-    async def generate(self, request: dict):
+    async def generate(self, request: dict, context: Context):
+        logging.debug(f"New Request ID: {context.id()}")
         if self.connector:
             # Use helper method to process embedding request
             async for response in EncodeHelper.process_embedding_request(
@@ -122,11 +125,12 @@ class PrefillHandler(HandlerBase):
             encode_response, self.connector
         )
 
-    async def remote_decode(self, request: dict):
-        async for res in await self.next_client.round_robin(request):
+    async def remote_decode(self, request: dict, context: Context):
+        async for res in await self.next_client.round_robin(request, context=context):
             yield res.data()
 
-    async def generate(self, request: dict):
+    async def generate(self, request: dict, context: Context):
+        logging.debug(f"New Request ID: {context.id()}")
         logging.debug(f"PrefillHandler.generate received request: {request}")
         embeddings_tensor = None
 
@@ -145,11 +149,17 @@ class PrefillHandler(HandlerBase):
         prefill_request = copy.deepcopy(request)
         prefill_response = None
         response_count = 0
-        async for res in self.generate_locally(prefill_request, embeddings_tensor):
+        async for res in self.generate_locally(
+            prefill_request, context, embeddings_tensor
+        ):
             prefill_response = res
             response_count += 1
             if response_count > 1:
                 raise ValueError("Prefill response should be generated only once.")
+
+        if context.is_stopped() or context.is_killed():
+            # Local generate abort monitor will print debug log, so only returning here.
+            return
 
         if (
             self.disaggregation_strategy == DisaggregationStrategy.PREFILL_FIRST
@@ -161,8 +171,12 @@ class PrefillHandler(HandlerBase):
                 request["disaggregated_params"] = prefill_response[
                     "disaggregated_params"
                 ]
-            async for res in self.remote_decode(request):
+            async for res in self.remote_decode(request, context):
                 yield res
+
+            if context.is_stopped() or context.is_killed():
+                logging.debug(f"Aborted Remote Request ID: {context.id()}")
+                return
         else:
             # Return response to the decode handler.
             yield prefill_response
@@ -176,11 +190,12 @@ class DecodeHandler(HandlerBase):
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
 
-    async def remote_prefill(self, request: dict):
-        async for res in await self.next_client.round_robin(request):
+    async def remote_prefill(self, request: dict, context: Context):
+        async for res in await self.next_client.round_robin(request, context=context):
             yield res
 
-    async def generate(self, request: dict):
+    async def generate(self, request: dict, context: Context):
+        logging.debug(f"New Request ID: {context.id()}")
         if self.disaggregation_strategy == DisaggregationStrategy.DECODE_FIRST:
             prefill_response = None
             # If operating under decode_first strategy, the decode handler needs to trigger
@@ -188,11 +203,15 @@ class DecodeHandler(HandlerBase):
             response_count = 0
             # Do not yield the prefill response directly.
             # Instead, capture it and extract the state.
-            async for res in self.remote_prefill(request):
+            async for res in self.remote_prefill(request, context):
                 prefill_response = res
                 response_count += 1
                 if response_count > 1:
                     raise ValueError("Prefill response should be generated only once.")
+
+            if context.is_stopped() or context.is_killed():
+                logging.debug(f"Aborted Remote Request ID: {context.id()}")
+                return
 
             response_data = (
                 prefill_response.data() if prefill_response is not None else None
@@ -204,5 +223,5 @@ class DecodeHandler(HandlerBase):
             if prefill_response is not None and response_data is not None:
                 request["disaggregated_params"] = response_data["disaggregated_params"]
 
-        async for res in self.generate_locally(request):
+        async for res in self.generate_locally(request, context):
             yield res

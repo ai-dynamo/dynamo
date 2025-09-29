@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::context::{Context, callable_accepts_kwarg};
+use dynamo_runtime::logging::get_distributed_tracing_context;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3::{PyAny, PyErr};
@@ -155,6 +156,9 @@ where
         let id = context.id().to_string();
         tracing::trace!("processing request: {}", id);
 
+        // Capture current trace context
+        let current_trace_context = get_distributed_tracing_context();
+
         // Clone the PyObject to move into the thread
 
         // Create a channel to communicate between the Python thread and the Rust async context
@@ -178,7 +182,9 @@ where
         let stream = tokio::task::spawn_blocking(move || {
             Python::with_gil(|py| {
                 let py_request = pythonize(py, &request)?;
-                let py_ctx = Py::new(py, Context::new(ctx_python.clone()))?;
+
+                // Create context with trace information
+                let py_ctx = Py::new(py, Context::new(ctx_python.clone(), current_trace_context))?;
 
                 let gen_result = if has_context {
                     // Pass context as a kwarg

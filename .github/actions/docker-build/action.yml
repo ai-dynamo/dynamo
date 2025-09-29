@@ -1,0 +1,77 @@
+name: 'Docker Build'
+description: 'Build Dynamo container images'
+inputs:
+  framework:
+    description: 'Framework to build'
+    required: true
+    default: 'vllm'
+  target:
+    description: 'Target to build'
+    required: false
+    default: 'runtime'
+  image_tag:
+    description: 'Custom image tag (optional, defaults to framework:latest)'
+    required: false
+  ngc_ci_access_token:
+    description: 'NGC CI Access Token'
+    required: false
+  ci_token:
+    description: 'CI Token'
+    required: false
+  aws_default_region:
+    description: 'AWS Default Region'
+    required: false
+  sccache_s3_bucket:
+    description: 'SCCache S3 Bucket'
+    required: false
+  aws_access_key_id:
+    description: 'AWS Access Key ID'
+    required: false
+  aws_secret_access_key:
+    description: 'AWS Secret Access Key'
+    required: false
+
+outputs:
+  image_tag:
+    description: 'Image Tag'
+    value: ${{ steps.build.outputs.image_tag }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    - name: Login to NGC
+      if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
+      shell: bash
+      run: |
+        echo "${{ inputs.ngc_ci_access_token }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+    - name: Cleanup
+      if: always()
+      shell: bash
+      run: |
+        docker system prune -af
+    - name: Build image
+      id: build
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.ci_token }}
+        AWS_DEFAULT_REGION: ${{ inputs.aws_default_region }}
+        SCCACHE_S3_BUCKET:  ${{ inputs.sccache_s3_bucket }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
+      run: |
+        # Determine image tag
+        if [ -n "${{ inputs.image_tag }}" ]; then
+          IMAGE_TAG="${{ inputs.image_tag }}"
+        else
+          IMAGE_TAG="${{ inputs.framework }}:latest"
+        fi
+        echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+        ./container/build.sh --tag "$IMAGE_TAG" \
+          --target ${{ inputs.target }} \
+          --framework ${{ inputs.framework }} \
+          --use-sccache \
+          --sccache-bucket "$SCCACHE_S3_BUCKET" \
+          --sccache-region "$AWS_DEFAULT_REGION"
