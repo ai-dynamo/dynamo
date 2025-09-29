@@ -16,7 +16,9 @@
 2. Input the cluster name as `dynamo-fargate`
 3. Choose **AWS Fargate (serverless)** as the infrastructure
 4. For networking, use the same VPC and subnets as the EC2 cluster to ensure connectivity between services
-5. Click on **Create** to deploy the Fargate cluster
+5. For the security group, use the same security group as the EC2 cluster. This automatically allows communication between all services.
+6. Ensure outbound rules allow all traffic (default setting) so the Fargate tasks can download container images and communicate externally
+7. Click on **Create** to deploy the Fargate cluster
 
 ## 3. ETCD/NATS Task Definitions Setup
 Add a task for ETCD and NATS services to run on Fargate. A sample task definition JSON is attached.
@@ -77,6 +79,9 @@ You can create a service or directly run the task from the task definition
 1. ETCD/NATS Task
 - Choose the Fargate cluster (`dynamo-fargate`) for **Existing cluster** created in step 2.
 - Select **Launch type** as `FARGATE`
+- In the **Networking** section, select the same VPC and subnets used for the EC2 cluster
+- For **Security group**, select the same security group used by the EC2 cluster
+- Verify that outbound rules allow all traffic for downloading images and external communication
 - Wait for this deployment to finish, and get the **Private IP** of this task.
 2. Dynamo Frontend Task
 - Choose the EC2 cluster (`dynamo-GPU`) for **Existing cluster** created in step 1.
