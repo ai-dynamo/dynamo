@@ -167,7 +167,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		}
 		// merge the envs from the parent deployment with the envs from the service
 		if len(parentDynamoGraphDeployment.Spec.Envs) > 0 {
-			deployment.Spec.Envs = MergeEnvs(deployment.Spec.Envs, parentDynamoGraphDeployment.Spec.Envs)
+			deployment.Spec.Envs = MergeEnvs(parentDynamoGraphDeployment.Spec.Envs, deployment.Spec.Envs)
 		}
 		err := updateDynDeploymentConfig(deployment, commonconsts.DynamoServicePort)
 		if err != nil {
