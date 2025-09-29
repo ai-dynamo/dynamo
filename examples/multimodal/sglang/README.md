@@ -26,16 +26,16 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 - workers: For aggregated serving, we have two workers, [SglangEncodeWorker](components/encode_worker.py) for encoding and [SglangPDWorkerHandler](components/worker.py) for prefilling and decoding.
 - processor: Tokenizes the prompt and passes it to the SglangEncodeWorker.
 
-### Graph
+### Workflow
 
-In this graph, we have two workers, [SglangEncodeWorker](components/encode_worker.py) and [SglangPDWorkerHandler](components/worker.py).
+In this workflow, we have two workers, [SglangEncodeWorker](components/encode_worker.py) and [SglangPDWorkerHandler](components/worker.py).
 The SglangEncodeWorker is responsible for encoding the image and passing the embeddings to the SglangPDWorkerHandler via a combination of NATS and RDMA.
 The work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface.
 Its SglangPDWorkerHandler then prefills and decodes the prompt, just like the [LLM aggregated serving](../../../components/backends/sglang/README.md) example.
 By separating the encode from the prefill and decode stages, we can have a more flexible deployment and scale the
 SglangEncodeWorker independently from the prefill and decode workers if needed.
 
-This figure shows the flow of the graph:
+This figure illustrates the workflow:
 ```mermaid
 flowchart LR
   HTTP --> processor
@@ -113,14 +113,14 @@ You should see a response similar to this:
 - workers: For disaggregated serving, we have three workers, [SglangEncodeWorker](components/encode_worker.py) for encoding, [SglangPDWorkerHandler](components/worker.py) for decoding, and [SglangPrefillWorkerHandler](components/worker.py) for prefilling.
 - processor: Tokenizes the prompt and passes it to the SglangEncodeWorker.
 
-### Graph
+### Workflow
 
-In this graph, we have three workers, [SglangEncodeWorker](components/encode_worker.py), [SglangPDWorkerHandler](components/worker.py), and [SglangPrefillWorkerHandler](components/worker.py).
+In this workflow, we have three workers, [SglangEncodeWorker](components/encode_worker.py), [SglangPDWorkerHandler](components/worker.py), and [SglangPrefillWorkerHandler](components/worker.py).
 For the Qwen2.5-VL model, embeddings are only required during the prefill stage. As such, the image embeddings are transferred using a NIXL descriptor from the encode worker to the SglangPDWorkerHandler and then passed to the SglangPrefillWorkerHandler for processing.
 The SglangPrefillWorkerHandler performs the prefilling step and forwards the KV cache to the SglangPDWorkerHandler for decoding.
 For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](../../../components/backends/sglang/README.md) example.
 
-This figure shows the flow of the graph:
+This figure illustrates the workflow:
 ```mermaid
 flowchart LR
   HTTP --> processor
