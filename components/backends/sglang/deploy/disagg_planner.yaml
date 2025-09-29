@@ -45,7 +45,7 @@ spec:
         timeoutSeconds: 30
         failureThreshold: 10
       volumeMounts:
-        - name: dynamo-pvc 
+        - name: dynamo-pvc
           mountPoint: /data
       extraPodSpec:
         mainContainer:
