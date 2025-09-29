@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-
-use super::nvext::validate_top_k;
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
@@ -25,20 +23,17 @@ pub struct CommonExt {
     /// Integer that controls the number of top tokens to consider. Set to -1 to consider all tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
-    #[validate(custom(function = "validate_top_k"))]
     pub top_k: Option<i32>,
 
     /// Relative probability floor
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
-    #[validate(range(min = 0.0, max = 1.0))]
     pub min_p: Option<f32>,
 
     /// How much to penalize tokens based on how frequently they occur in the text.
     /// A value of 1 means no penalty, while values larger than 1 discourage and values smaller encourage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
-    #[validate(range(exclusive_min = 0.0, max = 2.0))]
     pub repetition_penalty: Option<f32>,
 
     /// include_stop_str_in_output
@@ -71,6 +66,12 @@ pub struct CommonExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub guided_decoding_backend: Option<String>,
+
+    /// If specified, the output will follow the whitespace pattern. Can be a string or null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    #[allow(unused)] // Not used
+    pub guided_whitespace_pattern: Option<String>,
 }
 
 impl CommonExt {
@@ -90,6 +91,8 @@ pub trait CommonExtProvider {
     fn get_guided_grammar(&self) -> Option<String>;
     fn get_guided_choice(&self) -> Option<Vec<String>>;
     fn get_guided_decoding_backend(&self) -> Option<String>;
+    #[allow(unused)] // Not used
+    fn get_guided_whitespace_pattern(&self) -> Option<String>;
 
     /// Other sampling Options
     fn get_top_k(&self) -> Option<i32>;
@@ -215,6 +218,7 @@ mod tests {
             guided_grammar: None,
             guided_choice: None,
             guided_decoding_backend: None,
+            guided_whitespace_pattern: None,
         };
         assert!(common_ext.validate().is_ok());
     }
