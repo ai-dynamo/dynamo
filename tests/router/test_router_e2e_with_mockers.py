@@ -760,9 +760,7 @@ def test_kv_push_router_bindings(request, runtime_services, predownload_tokenize
 
         # Test with partial override (only temperature)
         partial_override = {"router_temperature": 0.1}
-        logger.info(
-            f"Testing with partial router config overrides: {partial_override}"
-        )
+        logger.info(f"Testing with partial router config overrides: {partial_override}")
         asyncio.run(
             send_request_via_python_kv_router(
                 kv_python_router=kv_push_router,
