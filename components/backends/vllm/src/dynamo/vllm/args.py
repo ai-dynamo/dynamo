@@ -156,7 +156,7 @@ def parse_args() -> Config:
     config.tool_call_parser = args.dyn_tool_call_parser
     config.reasoning_parser = args.dyn_reasoning_parser
     config.custom_jinja_template = args.custom_jinja_template
-    
+
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:
         # Expand environment variables and user home (~) before validation
@@ -169,6 +169,7 @@ def parse_args() -> Config:
                 f"Custom Jinja template file not found: {expanded_template_path}. "
                 f"Please ensure the file exists and the path is correct."
             )
+
     # Check for conflicting flags
     has_kv_transfer_config = (
         hasattr(engine_args, "kv_transfer_config")
