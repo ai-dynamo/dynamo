@@ -696,7 +696,6 @@ impl
 
         // Preserve original inbound streaming flag before any internal overrides
         let request_id = context.id().to_string();
-        let _requested_streaming = request.inner.stream.unwrap_or(false);
 
         // Build audit handle (None if DYN_AUDIT_ENABLED=0)
         let mut audit_handle = crate::audit::handle::create_handle(&request, &request_id);
