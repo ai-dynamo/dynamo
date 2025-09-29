@@ -159,9 +159,14 @@ def parse_args() -> Config:
     
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:
-        if not os.path.isfile(config.custom_jinja_template):
+        # Expand environment variables and user home (~) before validation
+        expanded_template_path = os.path.expanduser(
+            os.path.expandvars(config.custom_jinja_template)
+        )
+        config.custom_jinja_template = expanded_template_path
+        if not os.path.isfile(expanded_template_path):
             raise FileNotFoundError(
-                f"Custom Jinja template file not found: {config.custom_jinja_template}. "
+                f"Custom Jinja template file not found: {expanded_template_path}. "
                 f"Please ensure the file exists and the path is correct."
             )
     # Check for conflicting flags
