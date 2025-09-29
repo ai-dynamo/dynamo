@@ -2011,28 +2011,15 @@ class DynamoFrameworkInfo(NodeInfo):
         if not workspace_dir:
             return components
 
-        # Scan components directory (frontend, planner, etc.)
-        components_path = os.path.join(workspace_dir, "components")
+        # Scan components python src directory (frontend, planner, etc.)
+        components_path = os.path.join(workspace_dir, "components", "src", "dynamo")
         if os.path.exists(components_path):
             for item in os.listdir(components_path):
                 item_path = os.path.join(components_path, item)
                 if os.path.isdir(item_path):
                     # Check for dynamo module in src
                     module_path = os.path.join(
-                        item_path, "src", "dynamo", item, "__init__.py"
-                    )
-                    if os.path.exists(module_path):
-                        components.append(f"dynamo.{item}")
-
-        # Scan backends directory (vllm, sglang, trtllm, etc.)
-        backends_path = os.path.join(workspace_dir, "components", "backends")
-        if os.path.exists(backends_path):
-            for item in os.listdir(backends_path):
-                item_path = os.path.join(backends_path, item)
-                if os.path.isdir(item_path):
-                    # Check for dynamo module in src
-                    module_path = os.path.join(
-                        item_path, "src", "dynamo", item, "__init__.py"
+                        item_path, "__init__.py"
                     )
                     if os.path.exists(module_path):
                         components.append(f"dynamo.{item}")
