@@ -59,6 +59,7 @@ spec:
               --backend=sglang
               --adjustment-interval=60
               --profile-results-dir=/data/profiling_results
+<<<<<<< HEAD
     Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
       dynamoNamespace: dynamo
       componentType: frontend
@@ -94,6 +95,8 @@ spec:
             - -c
           args:
             - "python3 -m dynamo.planner.prometheus"
+=======
+>>>>>>> origin/main
     decode:
       dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
