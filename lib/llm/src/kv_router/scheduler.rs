@@ -56,6 +56,7 @@ pub struct SchedulingResponse {
 }
 
 pub struct SchedulingRequest {
+    pub maybe_request_id: Option<String>,
     pub token_seq: Option<Vec<SequenceHash>>,
     pub isl_tokens: usize,
     pub overlaps: OverlapScores,
@@ -246,6 +247,13 @@ impl KvScheduler {
                         if !request.update_states {
                             continue;
                         }
+
+                        let Some(request_id) = request.maybe_request_id else {
+                            tracing::error!(
+                                "No request_id provided to add_request to the slot tracker"
+                            );
+                            continue;
+                        };
 
                         if let Err(e) = slots_clone
                             .add_request(

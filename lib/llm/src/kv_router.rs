@@ -308,7 +308,7 @@ impl KvRouter {
             scheduler,
             block_size,
             kv_router_config,
-            cancellation_token
+            cancellation_token,
         })
     }
 

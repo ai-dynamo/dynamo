@@ -143,6 +143,18 @@ for i in $(seq 1 $NUM_WORKERS); do
                 --endpoint dyn://test.mocker.generate \
                 "${EXTRA_ARGS[@]}"
         else
+            echo "[${WORKER_TYPE^} Worker-$i] Using GPUs: $GPU_DEVICES"
+            # Run vLLM engine with PYTHONHASHSEED=0 for deterministic event IDs in KV-aware routing
+            VLLM_ARGS=()
+            VLLM_ARGS+=("--model" "$MODEL_PATH")
+            VLLM_ARGS+=("--tensor-parallel-size" "$TENSOR_PARALLEL_SIZE")
+            if [ "$USE_PREFILLS" = true ]; then
+                VLLM_ARGS+=("--is-prefill-worker")
+            fi
+            VLLM_ARGS+=("${EXTRA_ARGS[@]}")
+
+            exec env PYTHONHASHSEED=0 CUDA_VISIBLE_DEVICES=$GPU_DEVICES python -m dynamo.vllm \
+                "${VLLM_ARGS[@]}"
         fi
     } &
     PIDS+=($!)
