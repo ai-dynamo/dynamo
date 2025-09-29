@@ -711,70 +711,75 @@ pub async fn extract_worker_selection_from_stream(
 ) -> anyhow::Result<(i64, Vec<u32>)> {
     use futures::StreamExt;
 
-    let mut worker_id = 0i64;
-    let mut tokens = Vec::<u32>::new();
+    let mut worker_id: i64 = 0;
+    let mut tokens: Vec<u32> = Vec::new();
+
     while let Some(response) = stream.next().await {
-        if let Some(event) = &response.event {
-            match event.as_str() {
-                "worker_instance_id" => {
-                    tracing::debug!(
-                        "extract_worker_selection_from_stream: Found worker_instance_id event"
-                    );
-                    if let Some(first_comment) = response.comment.as_ref().and_then(|v| v.first()) {
-                        // Try JSON string first (e.g., "1732646935200805498")
-                        if let Ok(id_string) = serde_json::from_str::<String>(first_comment) {
-                            if let Ok(parsed_id) = id_string.parse::<i64>() {
-                                worker_id = parsed_id;
-                                tracing::debug!("parsed worker_id from JSON string: {}", worker_id);
-                            } else {
-                                tracing::error!(
-                                    "failed to parse number from JSON string: '{}'",
-                                    id_string
-                                );
-                            }
-                        } else if let Ok(parsed_id) = first_comment.parse::<i64>() {
-                            // Fallback: unquoted number
+        let Some(event) = &response.event else {
+            tracing::error!("Response has no event field");
+            continue;
+        };
+
+        match event.as_str() {
+            "worker_instance_id" => {
+                tracing::debug!("Found worker_instance_id event");
+
+                let Some(first_comment) = response.comment.as_ref().and_then(|v| v.first()) else {
+                    tracing::debug!("worker_instance_id event without comments");
+                    continue;
+                };
+
+                // Try JSON string first (e.g. `"1732646935200805498"`), then plain integer.
+                if let Ok(id_string) = serde_json::from_str::<String>(first_comment) {
+                    match id_string.parse::<i64>() {
+                        Ok(parsed_id) => {
                             worker_id = parsed_id;
-                            tracing::debug!("parsed worker_id directly: {}", worker_id);
-                        } else {
-                            tracing::error!("failed to parse worker_id from: '{}'", first_comment);
+                            tracing::debug!("parsed worker_id from JSON string: {}", worker_id);
+                        }
+                        Err(_) => {
+                            tracing::error!(
+                                "failed to parse number from JSON string: '{}'",
+                                id_string
+                            );
                         }
                     }
+                    continue;
                 }
-                "token_data" => {
-                    tracing::debug!("extract_worker_selection_from_stream: Found token_data event");
-                    if let Some(first_comment) = response.comment.as_ref().and_then(|v| v.first()) {
-                        tracing::debug!(
-                            "extract_worker_selection_from_stream: Token comment: '{}'",
-                            first_comment
-                        );
-                        match serde_json::from_str::<Vec<u32>>(first_comment) {
-                            Ok(parsed_tokens) => {
-                                tokens = parsed_tokens;
-                                tracing::debug!(
-                                    "extract_worker_selection_from_stream: Successfully parsed {} tokens",
-                                    tokens.len()
-                                );
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    "extract_worker_selection_from_stream: Failed to parse tokens from '{}': {}",
-                                    first_comment,
-                                    e
-                                );
-                            }
-                        }
+
+                match first_comment.parse::<i64>() {
+                    Ok(parsed_id) => {
+                        worker_id = parsed_id;
+                        tracing::debug!("parsed worker_id directly: {}", worker_id);
                     }
-                }
-                _ => {
-                    tracing::debug!(
-                        "extract_worker_selection_from_stream: Unknown event type: '{}'",
-                        event
-                    );
+                    Err(_) => {
+                        tracing::error!("failed to parse worker_id from: '{}'", first_comment);
+                    }
                 }
             }
-        } else {
-            tracing::error!("extract_worker_selection_from_stream: Response has no event field");
+
+            "token_data" => {
+                tracing::debug!("Found token_data event");
+
+                let Some(first_comment) = response.comment.as_ref().and_then(|v| v.first()) else {
+                    tracing::debug!("token_data event without comments");
+                    continue;
+                };
+
+                tracing::debug!("Token comment: '{}'", first_comment);
+                match serde_json::from_str::<Vec<u32>>(first_comment) {
+                    Ok(parsed_tokens) => {
+                        tokens = parsed_tokens;
+                        tracing::debug!("Successfully parsed {} tokens", tokens.len());
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to parse tokens from '{}': {}", first_comment, e);
+                    }
+                }
+            }
+
+            other => {
+                tracing::debug!("Unknown event type: '{}'", other);
+            }
         }
     }
 
@@ -800,35 +805,7 @@ pub async fn extract_worker_selection_from_stream(
 pub fn add_query_instance_id(
     request: &mut NvCreateChatCompletionRequest,
 ) -> &mut NvCreateChatCompletionRequest {
-    // Create or modify the nvext field to include the query_instance_id annotation
-    match request.nvext.as_mut() {
-        Some(nvext) => {
-            // NvExt already exists, add annotation to it
-            match nvext.annotations.as_mut() {
-                Some(annotations) => {
-                    // Annotations vector exists, add if not already present
-                    if !annotations.contains(&"query_instance_id".to_string()) {
-                        annotations.push("query_instance_id".to_string());
-                    }
-                }
-                None => {
-                    // No annotations vector, create one with our annotation
-                    nvext.annotations = Some(vec!["query_instance_id".to_string()]);
-                }
-            }
-        }
-        None => {
-            // No nvext field, create one with our annotation
-            request.nvext = Some(
-                NvExt::builder()
-                    .add_annotation("query_instance_id")
-                    .build()
-                    .expect("NvExt builder should not fail"),
-            );
-        }
-    }
-
-    request
+    add_annotation_unique(request, "query_instance_id")
 }
 
 /// Utility function to add worker_instance_id annotation to an OpenAI request
@@ -836,32 +813,7 @@ pub fn add_worker_instance_id_annotation(
     request: &mut NvCreateChatCompletionRequest,
     worker_id: i64,
 ) -> &mut NvCreateChatCompletionRequest {
-    let worker_id_str = worker_id.to_string();
-
-    match request.nvext.as_mut() {
-        Some(nvext) => {
-            match nvext.annotations.as_mut() {
-                Some(annotations) => {
-                    // Remove existing worker_instance_id if present
-                    annotations.retain(|ann| !ann.starts_with("worker_instance_id:"));
-                    annotations.push(format!("worker_instance_id:{}", worker_id_str));
-                }
-                None => {
-                    nvext.annotations = Some(vec![format!("worker_instance_id:{}", worker_id_str)]);
-                }
-            }
-        }
-        None => {
-            request.nvext = Some(
-                NvExt::builder()
-                    .add_annotation(format!("worker_instance_id:{}", worker_id_str))
-                    .build()
-                    .expect("NvExt builder should not fail"),
-            );
-        }
-    }
-
-    request
+    set_kv_annotation(request, "worker_instance_id", worker_id.to_string())
 }
 
 /// Utility function to add token_data annotation to an OpenAI request
@@ -870,30 +822,42 @@ pub fn add_token_data_annotation<'a>(
     tokens: &[u32],
 ) -> &'a mut NvCreateChatCompletionRequest {
     let tokens_json = serde_json::to_string(tokens).unwrap_or_default();
+    set_kv_annotation(request, "token_data", tokens_json)
+}
 
-    match request.nvext.as_mut() {
-        Some(nvext) => {
-            match nvext.annotations.as_mut() {
-                Some(annotations) => {
-                    // Remove existing token_data if present
-                    annotations.retain(|ann| !ann.starts_with("token_data:"));
-                    annotations.push(format!("token_data:{}", tokens_json));
-                }
-                None => {
-                    nvext.annotations = Some(vec![format!("token_data:{}", tokens_json)]);
-                }
-            }
-        }
-        None => {
-            request.nvext = Some(
-                NvExt::builder()
-                    .add_annotation(format!("token_data:{}", tokens_json))
-                    .build()
-                    .expect("NvExt builder should not fail"),
-            );
-        }
+/// Ensure `nvext` exists and return a mutable slice of annotations.
+fn ensure_annotations<'a>(request: &'a mut NvCreateChatCompletionRequest) -> &'a mut Vec<String> {
+    let nvext = request.nvext.get_or_insert_with(|| {
+        NvExt::builder()
+            .build()
+            .expect("NvExt builder should not fail")
+    });
+    nvext.annotations.get_or_insert_with(Vec::new)
+}
+
+/// Add a plain annotation once.
+fn add_annotation_unique(
+    request: &mut NvCreateChatCompletionRequest,
+    annotation: impl Into<String>,
+) -> &mut NvCreateChatCompletionRequest {
+    let ann = annotation.into();
+    let annotations = ensure_annotations(request);
+    if !annotations.iter().any(|a| a == &ann) {
+        annotations.push(ann);
     }
+    request
+}
 
+/// Set a `key:value` annotation.
+fn set_kv_annotation<'a>(
+    request: &'a mut NvCreateChatCompletionRequest,
+    key: &str,
+    value: impl Into<String>,
+) -> &'a mut NvCreateChatCompletionRequest {
+    let kv = format!("{}:{}", key, value.into());
+    let annotations = ensure_annotations(request);
+    annotations.retain(|a| !a.starts_with(&format!("{}:", key)));
+    annotations.push(kv);
     request
 }
 
@@ -997,10 +961,10 @@ pub async fn create_worker_selection_pipeline_chat(
     let drt_owned = DistributedRuntime::new(runtime, dst_config).await?;
     let distributed_runtime: &'static DistributedRuntime = Box::leak(Box::new(drt_owned));
 
-    let ns = distributed_runtime.namespace(namespace)?;
-    let component = ns.component(component_name)?;
-    let endpoint = component.endpoint(GENERATE_ENDPOINT);
-    let client = endpoint.client().await?;
+    let component = distributed_runtime
+        .namespace(namespace)?
+        .component(component_name)?;
+    let client = component.endpoint(GENERATE_ENDPOINT).client().await?;
 
     let model_slug = Slug::from_string(model_name);
     let card = match ModelDeploymentCard::load_from_store(&model_slug, component.drt()).await {
