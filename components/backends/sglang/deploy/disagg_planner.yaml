@@ -50,15 +50,14 @@ spec:
           image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/planner/src/dynamo/planner
           command:
-            - /bin/sh
-            - -c
+          - python3
+          - -m
+          - planner_sla
           args:
-            - >-
-              python3 -m planner_sla
-              --environment=kubernetes
-              --backend=sglang
-              --adjustment-interval=60
-              --profile-results-dir=/data/profiling_results
+            - --environment=kubernetes
+            - --backend=sglang
+            - --adjustment-interval=60
+            - --profile-results-dir=/data/profiling_results
     decode:
       dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
