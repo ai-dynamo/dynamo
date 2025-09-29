@@ -60,6 +60,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/etcd"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secret"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secrets"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
 	//+kubebuilder:scaffold:imports
@@ -123,6 +124,7 @@ func main() {
 	var enableHTTP2 bool
 	var restrictedNamespace string
 	var leaderElectionID string
+	var leaderElectionNamespace string
 	var natsAddr string
 	var etcdAddr string
 	var istioVirtualServiceGateway string
@@ -133,6 +135,8 @@ func main() {
 	var groveTerminationDelay time.Duration
 	var modelExpressURL string
 	var prometheusEndpoint string
+	var mpiRunSecretName string
+	var mpiRunSecretNamespace string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -146,6 +150,9 @@ func main() {
 		"Enable resources filtering, only the resources belonging to the given namespace will be handled.")
 	flag.StringVar(&leaderElectionID, "leader-election-id", "", "Leader election id"+
 		"Id to use for the leader election.")
+	flag.StringVar(&leaderElectionNamespace,
+		"leader-election-namespace", "",
+		"Namespace where the leader election resource will be created (default: same as operator namespace)")
 	flag.StringVar(&natsAddr, "natsAddr", "", "address of the NATS server")
 	flag.StringVar(&etcdAddr, "etcdAddr", "", "address of the etcd server")
 	flag.StringVar(&istioVirtualServiceGateway, "istio-virtual-service-gateway", "",
@@ -159,11 +166,15 @@ func main() {
 	flag.StringVar(&ingressHostSuffix, "ingress-host-suffix", "",
 		"The suffix to use for the ingress host")
 	flag.DurationVar(&groveTerminationDelay, "grove-termination-delay", consts.DefaultGroveTerminationDelay,
-		"The termination delay for Grove PodGangSets")
+		"The termination delay for Grove PodCliqueSets")
 	flag.StringVar(&modelExpressURL, "model-express-url", "",
 		"URL of the Model Express server to inject into all pods")
 	flag.StringVar(&prometheusEndpoint, "prometheus-endpoint", "",
 		"URL of the Prometheus endpoint to use for metrics")
+	flag.StringVar(&mpiRunSecretName, "mpi-run-ssh-secret-name", "",
+		"Name of the secret containing the SSH key for MPI Run (required)")
+	flag.StringVar(&mpiRunSecretNamespace, "mpi-run-ssh-secret-namespace", "",
+		"Namespace where the MPI SSH secret is located (required)")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -177,6 +188,16 @@ func main() {
 			os.Exit(1)
 		}
 		setupLog.Info("Model Express URL configured", "url", modelExpressURL)
+	}
+
+	if mpiRunSecretName == "" {
+		setupLog.Error(nil, "mpi-run-ssh-secret-name is required")
+		os.Exit(1)
+	}
+
+	if mpiRunSecretNamespace == "" {
+		setupLog.Error(nil, "mpi-run-ssh-secret-namespace is required")
+		os.Exit(1)
 	}
 
 	ctrlConfig := commonController.Config{
@@ -201,6 +222,9 @@ func main() {
 		},
 		ModelExpressURL:    modelExpressURL,
 		PrometheusEndpoint: prometheusEndpoint,
+		MpiRun: commonController.MpiRunConfig{
+			SecretName: mpiRunSecretName,
+		},
 	}
 
 	mainCtx := ctrl.SetupSignalHandler()
@@ -233,10 +257,11 @@ func main() {
 			SecureServing: secureMetrics,
 			TLSOpts:       tlsOpts,
 		},
-		WebhookServer:          webhookServer,
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       leaderElectionID,
+		WebhookServer:           webhookServer,
+		HealthProbeBindAddress:  probeAddr,
+		LeaderElection:          enableLeaderElection,
+		LeaderElectionID:        leaderElectionID,
+		LeaderElectionNamespace: leaderElectionNamespace,
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -371,6 +396,14 @@ func main() {
 			}
 		}
 	}()
+
+	// Create MPI SSH SecretReplicator for cross-namespace secret replication
+	mpiSecretReplicator := secret.NewSecretReplicator(
+		mgr.GetClient(),
+		mpiRunSecretNamespace,
+		mpiRunSecretName,
+	)
+
 	if err = (&controller.DynamoComponentDeploymentReconciler{
 		Client:                mgr.GetClient(),
 		Recorder:              mgr.GetEventRecorderFor("dynamocomponentdeployment"),
@@ -394,6 +427,7 @@ func main() {
 		Config:                ctrlConfig,
 		DockerSecretRetriever: dockerSecretRetriever,
 		ScaleClient:           scaleClient,
+		MPISecretReplicator:   mpiSecretReplicator,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeployment")
 		os.Exit(1)

@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 mod local;
 mod logical;
@@ -23,7 +11,7 @@ use crate::block_manager::offload::request::BlockResult;
 
 use super::*;
 
-// use super::offload::OffloadManager;
+// use super::offload::{OffloadManager, OffloadManagerConfig};
 use super::{
     block::{
         Block, GlobalRegistry, ImmutableBlock, factory::LocalBlockDataFactory,
@@ -32,7 +20,7 @@ use super::{
     config::NixlOptions,
     events::{EventManager, NullEventManager},
     metrics::BlockManagerMetrics,
-    offload::OffloadManager,
+    offload::{OffloadManager, OffloadManagerConfig},
 };
 use derive_getters::Dissolve;
 use std::sync::Arc;
@@ -115,6 +103,7 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
     KvBlockManagerState<locality::Logical<R>, Metadata>
 {
     pub async fn new(config: KvBlockManagerConfig, logical_resources: R) -> Result<Arc<Self>> {
+        let model_config = config.model.clone();
         let mut resources = Resources::new(config)?;
         let block_data_factories =
             logical::LogicalBlockFactories::new(&mut resources, logical_resources)?;
@@ -157,14 +146,19 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
             }
         };
 
+        let offload_config = OffloadManagerConfig {
+            nixl_agent: resources.nixl_agent.clone(),
+            async_rt_handle: resources.async_rt_handle.clone(),
+            metrics: resources.metrics.clone(),
+            cancellation_token: resources.cancellation_token.clone(),
+            model_config,
+        };
+
         let offload_manager = OffloadManager::new(
             disk_pool.clone(),
             host_pool.clone(),
             device_pool.clone(),
-            resources.nixl_agent.clone(),
-            resources.async_rt_handle.clone(),
-            resources.metrics.clone(),
-            resources.cancellation_token.clone(),
+            offload_config,
         )?;
 
         let resources = Arc::new(resources);
@@ -218,6 +212,7 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
 // - this will allow us to use the locality abstraction to build our factories and block pools
 impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
     pub async fn new(config: KvBlockManagerConfig) -> Result<Arc<Self>> {
+        let model_config = config.model.clone();
         let mut resources = Resources::new(config)?;
         let block_data_factories = local::LocalBlockDataFactories::new(&mut resources)?;
 
@@ -266,14 +261,19 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
             local_block_set.set_nixl_metadata(nixl_agent.get_local_md()?);
         }
 
+        let offload_config = OffloadManagerConfig {
+            nixl_agent: resources.nixl_agent.clone(),
+            async_rt_handle: resources.async_rt_handle.clone(),
+            metrics: resources.metrics.clone(),
+            cancellation_token: resources.cancellation_token.clone(),
+            model_config,
+        };
+
         let offload_manager = OffloadManager::new(
             disk_pool.clone(),
             host_pool.clone(),
             device_pool.clone(),
-            resources.nixl_agent.clone(),
-            resources.async_rt_handle.clone(),
-            resources.metrics.clone(),
-            resources.cancellation_token.clone(),
+            offload_config,
         )?;
 
         let resources = Arc::new(resources);

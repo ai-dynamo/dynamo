@@ -3,3 +3,4 @@
 
 pub mod kserve;
 pub mod openai;
+pub mod tensor;

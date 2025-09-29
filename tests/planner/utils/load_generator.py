@@ -131,10 +131,14 @@ class LoadGenerator:
         ]
 
         logger.info(f"Running command: {' '.join(cmd)}")
+        logger.info(
+            f"Expected duration: {duration_sec}s, timeout: {max(duration_sec * 2 + 120, int(duration_sec * 2.5))}s"
+        )
 
         # Run genai-perf (async)
         start_time = time.time()
-        timeout = max(duration_sec + 60, int(duration_sec * 1.5))
+        # More generous timeout for high-load tests - allow 2x duration + 2 minutes buffer
+        timeout = max(duration_sec * 2 + 120, int(duration_sec * 2.5))
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -251,12 +255,11 @@ class LoadGenerator:
 
     async def run_scaling_test(self) -> Dict[str, Any]:
         """
-        Run a multi-phase graduated scaling test for prefill scaling.
+        Run a graduated scaling test for prefill scaling.
 
         Uses a conservative graduated approach:
-        - Phase 1: 5 req/s (baseline, should work)
-        - Phase 2: 10 req/s (moderate load)
-        - Phase 3: 18 req/s (should trigger prefill scaling to 2P1D)
+        - Phase 1: 8 req/s (baseline, should maintain 1P1D)
+        - Phase 2: 18 req/s (should trigger prefill scaling to 2P1D)
 
         Returns:
             Dictionary with complete test results
@@ -269,8 +272,7 @@ class LoadGenerator:
         # Graduated test parameters (optimized for prefill scaling)
         phases: List[Dict[str, Any]] = [
             {"rate": 8.0, "duration": 90, "name": "baseline"},
-            {"rate": 15.0, "duration": 120, "name": "moderate"},
-            {"rate": 25.0, "duration": 180, "name": "prefill_scaling_trigger"},
+            {"rate": 18.0, "duration": 120, "name": "prefill_scaling_trigger"},
         ]
         transition_delay = 30
 

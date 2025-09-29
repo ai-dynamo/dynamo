@@ -13,15 +13,17 @@ use super::*;
 use crate::llm::block_manager::distributed::get_barrier_id_prefix;
 use crate::llm::block_manager::vllm::connector::worker::event_sync_blocking;
 use crate::{
-    llm::block_manager::distributed::VllmTensor, to_pyerr,
-    DistributedRuntime as PyDistributedRuntime,
+    DistributedRuntime as PyDistributedRuntime, llm::block_manager::distributed::VllmTensor,
+    to_pyerr,
 };
 
 use anyhow;
 use dynamo_llm::block_manager::distributed::{KvbmWorker, KvbmWorkerConfig};
+use dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics;
 use dynamo_llm::block_manager::storage::torch::TorchTensor;
-use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::metrics::prometheus_names::kvbm_connector;
+use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
 pub trait Worker: Send + Sync {
     fn register_kv_caches(
@@ -68,6 +70,8 @@ pub struct KvConnectorWorker {
 
     /// cuda events created by the python side
     layer_events: Vec<u64>,
+
+    kvbm_metrics: KvbmMetrics,
 }
 
 impl KvConnectorWorker {
@@ -93,6 +97,11 @@ impl KvConnectorWorker {
             trtllm_rank
         );
 
+        let kvbm_metrics = KvbmMetrics::new(
+            &drt.namespace(kvbm_connector::KVBM_CONNECTOR_WORKER)
+                .unwrap(),
+        );
+
         Ok(Self {
             drt,
             kvbm_worker: OnceLock::new(),
@@ -106,6 +115,7 @@ impl KvConnectorWorker {
             iteration: 0,
             layers_complete: 0,
             layer_events: Vec::new(),
+            kvbm_metrics,
         })
     }
 }
@@ -223,6 +233,7 @@ impl Worker for KvConnectorWorker {
                 self.connector.enqueue_request(operation);
             }
         }
+        self.kvbm_metrics.save_kv_layer_requests.inc();
         Ok(())
     }
 
@@ -274,7 +285,10 @@ impl Worker for KvConnectorWorker {
                 .maybe_finished_offloading
                 .contains(&request_id.to_string())
             {
-                tracing::warn!(request_id, "possibly got a duplicate finished request; request_id already in the maybe_finished_offloading set");
+                tracing::warn!(
+                    request_id,
+                    "possibly got a duplicate finished request; request_id already in the maybe_finished_offloading set"
+                );
             } else {
                 tracing::debug!(
                     request_id,
@@ -300,7 +314,10 @@ impl Worker for KvConnectorWorker {
                 .maybe_finished_onboarding
                 .contains(&request_id.to_string())
             {
-                tracing::warn!(request_id, "possibly got a duplicate finished request; request_id already in the maybe_finished_onboarding set");
+                tracing::warn!(
+                    request_id,
+                    "possibly got a duplicate finished request; request_id already in the maybe_finished_onboarding set"
+                );
             }
         }
 
@@ -316,7 +333,9 @@ impl Worker for KvConnectorWorker {
             } else {
                 // made this condition more strict slot existence checks were added as a prerequesite
                 // to be added to the maybe_finished_offloading set.
-                panic!("request slot missing for {request_id}; however, it was present when added to the maybe finished offloading set");
+                panic!(
+                    "request slot missing for {request_id}; however, it was present when added to the maybe finished offloading set"
+                );
             }
         }
 
@@ -329,7 +348,10 @@ impl Worker for KvConnectorWorker {
             if self.connector.has_slot(request_id) {
                 self.connector.remove_slot(request_id);
             } else {
-                tracing::debug!(request_id, "is_finished_offloading: request slot is not found - likely aborted, removing from is finished offloading set");
+                tracing::debug!(
+                    request_id,
+                    "is_finished_offloading: request slot is not found - likely aborted, removing from is finished offloading set"
+                );
             }
         }
 
@@ -343,7 +365,9 @@ impl Worker for KvConnectorWorker {
                     tracing::debug!(request_id, "request slot is not finished onboarding");
                 }
             } else {
-                panic!("request slot missing for {request_id}; however, it was present when added to the maybe finished onboarding set");
+                panic!(
+                    "request slot missing for {request_id}; however, it was present when added to the maybe finished onboarding set"
+                );
             }
         }
 

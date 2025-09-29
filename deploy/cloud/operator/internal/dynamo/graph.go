@@ -317,16 +317,16 @@ type SecretsRetriever interface {
 	GetSecrets(namespace, registry string) ([]string, error)
 }
 
-// applyCliqueStartupDependencies configures StartsAfter dependencies for cliques in a PodGangSet
+// applyCliqueStartupDependencies configures StartsAfter dependencies for cliques in a PodCliqueSet
 // based on the backend framework and multinode deployment patterns.
 //
 // Rules:
 // - For VLLM and SGLang: worker cliques start after leader clique
 // - For TRTLLM: leader clique starts after worker cliques
 // - Only applies to multinode deployments (numberOfNodes > 1)
-// - Sets the PodGangSet StartupType to Explicit if any dependencies are configured
+// - Sets the PodCliqueSet StartupType to Explicit if any dependencies are configured
 func applyCliqueStartupDependencies(
-	gangSet *grovev1alpha1.PodGangSet,
+	gangSet *grovev1alpha1.PodCliqueSet,
 	roles []ServiceRole,
 	backendFramework BackendFramework,
 	numberOfNodes int32,
@@ -553,14 +553,6 @@ func GenerateDefaultIngressSpec(dynamoDeployment *v1alpha1.DynamoGraphDeployment
 	return res
 }
 
-// Helper: mergeContainerCommand returns userCmd if specified, else defaultCmd
-func mergeContainerCommand(defaultCmd, userCmd []string) []string {
-	if len(userCmd) > 0 {
-		return userCmd
-	}
-	return defaultCmd
-}
-
 // Define Role enum for leader/worker/main
 // Use this type everywhere instead of string for role
 
@@ -623,18 +615,20 @@ func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 type MultinodeDeployer interface {
 	GetLeaderHostname(serviceName string) string
 	GetHostNames(serviceName string, numberOfNodes int32) []string
-	GetNodeRank() string
+	GetNodeRank() (string, bool) // returns (rank, needsShellInterpretation)
 }
 
 // BackendFactory creates backend instances based on the framework type
-func BackendFactory(backendFramework BackendFramework) Backend {
+func BackendFactory(backendFramework BackendFramework, controllerConfig controller_common.Config) Backend {
 	switch backendFramework {
 	case BackendFrameworkSGLang:
 		return &SGLangBackend{}
 	case BackendFrameworkVLLM:
 		return &VLLMBackend{}
 	case BackendFrameworkTRTLLM:
-		return &TRTLLMBackend{}
+		return &TRTLLMBackend{
+			MpiRunSecretName: controllerConfig.MpiRun.SecretName,
+		}
 	case BackendFrameworkNoop:
 		return &NoopBackend{}
 	default:
@@ -765,8 +759,10 @@ func GenerateBasePodSpec(
 		maps.Copy(container.Resources.Limits, overrideResources.Limits)
 	}
 
+	shouldDisableImagePullSecret := component.Annotations[commonconsts.KubeAnnotationDisableImagePullSecretDiscovery] == commonconsts.KubeLabelValueTrue
+
 	imagePullSecrets := []corev1.LocalObjectReference{}
-	if secretsRetriever != nil && component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil && component.ExtraPodSpec.MainContainer.Image != "" {
+	if !shouldDisableImagePullSecret && secretsRetriever != nil && component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil && component.ExtraPodSpec.MainContainer.Image != "" {
 		secretsName, err := secretsRetriever.GetSecrets(namespace, component.ExtraPodSpec.MainContainer.Image)
 		if err == nil {
 			for _, secretName := range secretsName {
@@ -809,7 +805,7 @@ func GenerateBasePodSpec(
 	if multinodeDeployer == nil {
 		return nil, fmt.Errorf("unsupported multinode deployment type: %s", multinodeDeploymentType)
 	}
-	backend := BackendFactory(backendFramework)
+	backend := BackendFactory(backendFramework, controllerConfig)
 	if backend == nil {
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
@@ -880,14 +876,14 @@ func GeneratePodSpecForComponent(
 	return podSpec, nil
 }
 
-// GenerateGrovePodGangSet generates a Grove PodGangSet for the given deployment, supporting both single-node and multinode cases.
-func GenerateGrovePodGangSet(
+// GenerateGrovePodCliqueSet generates a Grove PodCliqueSet for the given deployment, supporting both single-node and multinode cases.
+func GenerateGrovePodCliqueSet(
 	ctx context.Context,
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
 	controllerConfig controller_common.Config,
 	secretsRetriever SecretsRetriever,
-) (*grovev1alpha1.PodGangSet, error) {
-	gangSet := &grovev1alpha1.PodGangSet{}
+) (*grovev1alpha1.PodCliqueSet, error) {
+	gangSet := &grovev1alpha1.PodCliqueSet{}
 	gangSet.Name = dynamoDeployment.Name
 	gangSet.Namespace = dynamoDeployment.Namespace
 	gangSet.Spec.Replicas = 1
@@ -986,7 +982,7 @@ func GenerateGrovePodGangSet(
 		gangSet.Spec.Template.PodCliqueScalingGroupConfigs = scalingGroups
 	}
 
-	return controller_common.CanonicalizePodGangSet(gangSet), nil
+	return controller_common.CanonicalizePodCliqueSet(gangSet), nil
 }
 
 func generateLabels(component *v1alpha1.DynamoComponentDeploymentOverridesSpec, dynamoDeployment *v1alpha1.DynamoGraphDeployment, componentName string) (map[string]string, error) {
@@ -995,6 +991,9 @@ func generateLabels(component *v1alpha1.DynamoComponentDeploymentOverridesSpec, 
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
 	if component.ComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoComponentType] = component.ComponentType
+	}
+	if component.SubComponentType != "" {
+		labels[commonconsts.KubeLabelDynamoSubComponentType] = component.SubComponentType
 	}
 	setMetricsLabels(labels, dynamoDeployment)
 	if component.Labels != nil {
