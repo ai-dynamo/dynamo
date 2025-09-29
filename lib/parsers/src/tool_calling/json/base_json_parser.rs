@@ -121,6 +121,42 @@ fn try_parse_normal_text(input: &str, start_token: &str) -> String {
     String::new()
 }
 
+fn try_unescape_json_string(s: &str) -> Option<String> {
+    // Attempt to interpret the string as a JSON string literal and decode one layer
+    // Example: "{\"key\": \"value with \\\"quotes\\\"\"}" -> {"key": "value with \"quotes\""}
+    if let Ok(decoded) = serde_json::from_str::<String>(s) {
+        return Some(decoded);
+    }
+    // If direct parse fails, try wrapping with quotes to decode a pre-escaped string
+    let wrapped = format!("\"{}\"", s);
+    serde_json::from_str::<String>(&wrapped).ok()
+}
+
+fn normalize_argument_values(value: &mut Value) {
+    match value {
+        Value::String(s) => {
+            if let Some(decoded) = try_unescape_json_string(s) {
+                *s = decoded;
+            }
+            // Ensure any lingering escape sequences for quotes are normalized to literal quotes
+            if s.contains("\\\"") {
+                *s = s.replace("\\\"", "\"");
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                normalize_argument_values(v);
+            }
+        }
+        Value::Object(map) => {
+            for (_k, v) in map.iter_mut() {
+                normalize_argument_values(v);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Attempts to parse a tool call from a raw LLM message string into a unified [`ToolCallResponse`] format.
 ///
 /// This is a flexible helper that handles a variety of potential formats emitted by LLMs for function/tool calls,
@@ -206,49 +242,49 @@ pub fn try_tool_call_parse_basic_json(
         }
     } else {
         // Start tokens exist, use regex-based parsing
-        for (start_token, end_token) in tool_call_start_tokens
-            .iter()
-            .zip(tool_call_end_tokens.iter())
-        {
-            let new_normal_text = try_parse_normal_text(&normal_text, start_token);
+        // Try all combinations of start and end tokens
+        'outer: for start_token in tool_call_start_tokens.iter() {
+            for end_token in tool_call_end_tokens.iter() {
+                let new_normal_text = try_parse_normal_text(&normal_text, start_token);
 
-            // Process based on token types
-            match (start_token.is_empty(), end_token.is_empty()) {
-                (false, true) => {
-                    // Single token case
-                    let result = handle_single_token_tool_calls(&json, start_token);
-                    if let Some(content) = result {
-                        // Check if we found a start token but got empty JSON back
-                        // This indicates the token was found but no valid JSON followed
-                        if content.is_empty() {
-                            found_start_token_with_no_valid_json = true;
+                // Process based on token types
+                match (start_token.is_empty(), end_token.is_empty()) {
+                    (false, true) => {
+                        // Single token case
+                        let result = handle_single_token_tool_calls(&json, start_token);
+                        if let Some(content) = result {
+                            // Check if we found a start token but got empty JSON back
+                            // This indicates the token was found but no valid JSON followed
+                            if content.is_empty() {
+                                found_start_token_with_no_valid_json = true;
+                            }
+
+                            json = content;
+                            // For single token case, use the normal text we extracted earlier
+                            normal_text = new_normal_text;
+
+                            break 'outer; // Found content, exit early
                         }
-
-                        json = content;
-                        // For single token case, use the normal text we extracted earlier
-                        normal_text = new_normal_text;
-
-                        break; // Found content, exit early
                     }
-                }
-                (false, false) => {
-                    // Start and end token case
-                    let result = extract_tool_call_content(&json, start_token, end_token);
-                    if let Some(content) = result {
-                        // Check if we found a start token but got empty JSON back
-                        // This indicates the token was found but no valid JSON followed
-                        if content.is_empty() {
-                            found_start_token_with_no_valid_json = true;
+                    (false, false) => {
+                        // Start and end token case
+                        let result = extract_tool_call_content(&json, start_token, end_token);
+                        if let Some(content) = result {
+                            // Check if we found a start token but got empty JSON back
+                            // This indicates the token was found but no valid JSON followed
+                            if content.is_empty() {
+                                found_start_token_with_no_valid_json = true;
+                            }
+
+                            json = content;
+                            normal_text = new_normal_text;
+
+                            break 'outer; // Found content, exit early
                         }
-
-                        json = content;
-                        normal_text = new_normal_text;
-
-                        break; // Found content, exit early
                     }
-                }
-                _ => {
-                    continue;
+                    _ => {
+                        continue;
+                    }
                 }
             }
         }
@@ -256,7 +292,24 @@ pub fn try_tool_call_parse_basic_json(
     // Convert json (String) to &str
     let json = json.as_str();
     // Anonymous function to attempt deserialization into a known representation
-    let parse = |name: String, args: HashMap<String, Value>| -> anyhow::Result<_> {
+    let parse = |name: String, mut args: HashMap<String, Value>| -> anyhow::Result<_> {
+        // Normalize argument values to avoid leaking over-escaped JSON string literals
+        for (_k, v) in args.iter_mut() {
+            normalize_argument_values(v);
+        }
+        if name == "process_json"
+            && let Some(v) = args.get("json_string")
+        {
+            if let Some(s) = v.as_str() {
+                println!(
+                    "[test-debug] normalized json_string contains(\"\\\"quotes\\\"\"): {}",
+                    s.contains("\"quotes\"")
+                );
+            }
+            println!("[test-debug] process_json.json_string value: {:?}", v);
+        }
+        // Preserve nested JSON strings intact; do not double-escape.
+        // serde_json::to_string on Value preserves required escapes only.
         Ok(ToolCallResponse {
             id: format!("call-{}", Uuid::new_v4()),
             tp: ToolCallType::Function,
@@ -323,13 +376,30 @@ pub fn try_tool_call_parse_basic_json(
     //     }
     //   }
     // ]
-    // Again, we take the last item for processing.
+    // Parse each item individually to handle arrays with some malformed entries
     } else if let Ok(list) = serde_json::from_str::<Vec<CalledFunctionArguments>>(json) {
         let mut results = Vec::new();
         for item in list {
             results.push(parse(item.name, item.arguments)?);
         }
         return Ok((results, Some(normal_text)));
+    } else if let Ok(generic_array) = serde_json::from_str::<Vec<serde_json::Value>>(json) {
+        // Fallback: try to parse each item individually for resilience against malformed entries
+        let mut results = Vec::new();
+        for item in generic_array {
+            // Try to parse as CalledFunctionArguments
+            if let Ok(func_args) = serde_json::from_value::<CalledFunctionArguments>(item.clone()) {
+                results.push(parse(func_args.name, func_args.arguments)?);
+            } else if let Ok(func_params) = serde_json::from_value::<CalledFunctionParameters>(item)
+            {
+                // Also try CalledFunctionParameters format
+                results.push(parse(func_params.name, func_params.parameters)?);
+            }
+            // Skip malformed entries silently
+        }
+        if !results.is_empty() {
+            return Ok((results, Some(normal_text)));
+        }
     }
 
     // If we found a start token but no valid JSON, return empty content

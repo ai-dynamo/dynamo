@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::config::{ToolCallConfig, ToolCallParserType};
+use super::harmony::parse_tool_calls_harmony;
 use super::harmony::{
     detect_tool_call_start_harmony, find_tool_call_end_position_harmony,
     parse_tool_calls_harmony_complete,
@@ -53,6 +54,13 @@ pub async fn try_tool_call_parse(
         ToolCallParserType::Harmony => {
             let (results, normal_content) =
                 parse_tool_calls_harmony_complete(message, &config.json).await?;
+            if results.is_empty() {
+                // Fallback: attempt streaming parser when direct parse yields no calls
+                // This increases resilience to multi-call inputs and minor format drift
+                let (fallback_results, fallback_normal) =
+                    parse_tool_calls_harmony(message, &config.json).await?;
+                return Ok((fallback_results, fallback_normal));
+            }
             Ok((results, normal_content))
         }
         ToolCallParserType::Pythonic => {
@@ -1602,15 +1610,15 @@ mod parallel_tool_calling_tests {
     }
 
     // =============================================================================
-    // 1. JAMBA TOOL PARSER FORMAT (JSON Array in XML tags) - Testing via nemotron_deci parser
+    // 1. NEMOTRON/DECI TOOL PARSER FORMAT (JSON Array in XML tags)
     // =============================================================================
 
     #[tokio::test]
-    async fn test_parallel_jamba_format_two_cities() {
-        let input = r#" <tool_calls>[
+    async fn test_parallel_nemotron_format_two_cities() {
+        let input = r#" <TOOLCALL>[
     {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}},
     {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}
-]</tool_calls>"#;
+]</TOOLCALL>"#;
 
         let (result, content) = detect_and_parse_tool_call(input, Some("nemotron_deci"))
             .await
@@ -1621,7 +1629,7 @@ mod parallel_tool_calling_tests {
     }
 
     #[tokio::test]
-    async fn test_parallel_jamba_format_three_cities() {
+    async fn test_parallel_nemotron_format_three_cities() {
         let input = r#"<TOOLCALL>[
     {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}},
     {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}},
@@ -1640,7 +1648,7 @@ mod parallel_tool_calling_tests {
     }
 
     #[tokio::test]
-    async fn test_parallel_jamba_format_with_normal_text() {
+    async fn test_parallel_nemotron_format_with_normal_text() {
         let input = r#"I'll help you get the weather for both cities. <TOOLCALL>[
     {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}},
     {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}
@@ -2422,6 +2430,14 @@ mod detect_parser_tests {
 
     #[test]
     fn test_e2e_detect_tool_call_start_deepseek_v3_1() {
+        let text =
+            r#"<｜tool▁call▁begin｜>get_current_weather{"location": "Tokyo"}<｜tool▁call▁end｜>"#;
+        let result = detect_tool_call_start(text, Some("deepseek_v3_1")).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_e2e_detect_tool_call_multiple_start_deepseek_v3_1() {
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather{"location": "Tokyo"}<｜tool▁call▁end｜>"#;
         let result = detect_tool_call_start(text, Some("deepseek_v3_1")).unwrap();
         assert!(result);

@@ -663,6 +663,20 @@ mod tests {
         let jailed_stream = jail.apply(input_stream);
         let results: Vec<_> = jailed_stream.collect().await;
 
+        // Debug: Print what we got
+        tracing::debug!("Got {} results", results.len());
+        for (i, result) in results.iter().enumerate() {
+            if let Some(data) = result.data.as_ref() {
+                for (j, choice) in data.choices.iter().enumerate() {
+                    tracing::trace!(
+                        "Result {i} Choice {j}: content={:?}, tool_calls_count={:?}",
+                        choice.delta.content,
+                        choice.delta.tool_calls.as_ref().map(|tc| tc.len())
+                    );
+                }
+            }
+        }
+
         // Debug: Test mistral parser directly
         use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate;
         let test_content =
@@ -780,7 +794,7 @@ mod tests {
 
         let jailed_stream = jail.apply(input_stream);
         let results: Vec<_> = jailed_stream.collect().await;
-        println!("results: {:?}", results);
+        tracing::debug!("results: {:?}", results);
 
         // Should have exactly 3 chunks: content + tool call + content
         assert_eq!(
@@ -822,7 +836,7 @@ mod tests {
 
         let jailed_stream = jail.apply(input_stream);
         let results: Vec<_> = jailed_stream.collect().await;
-        println!("results: {:?}", results);
+        tracing::debug!("results: {:?}", results);
 
         // The "{" pattern triggers jailing, so some chunks get combined
         assert_eq!(results.len(), 2);
@@ -1792,7 +1806,7 @@ mod tests {
 
         // Should have at least one output containing both analysis text and parsed tool call
         assert!(!results.is_empty());
-        println!("results: {:?}", results);
+        tracing::debug!("results: {:?}", results);
 
         // Verify the analysis text appears as content in one of the outputs
         let has_analysis_text = results.iter().any(|r| {
@@ -1830,7 +1844,7 @@ mod tests {
         let jail = JailedStream::builder().tool_call_parser("mistral").build();
         let jailed_stream = jail.apply(input_stream);
         let results: Vec<_> = jailed_stream.collect().await;
-        println!("results: {:?}", results);
+        tracing::debug!("results: {:?}", results);
 
         assert!(results.len() >= 2);
         assert_content(&results[0], "Hey How");
