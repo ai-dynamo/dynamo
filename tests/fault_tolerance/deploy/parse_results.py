@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from tabulate import tabulate
 
-from tests.fault_tolerance.deploy.worker_config import (
+from tests.fault_tolerance.deploy.scenarios import (
     WORKER_READY_PATTERNS,
     get_all_worker_types,
 )
