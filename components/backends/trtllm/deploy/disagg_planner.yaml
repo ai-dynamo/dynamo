@@ -6,6 +6,9 @@ kind: DynamoGraphDeployment
 metadata:
   name: trtllm-disagg-planner
 spec:
+  pvcs:
+    - name: dynamo-pvc
+      create: false
   envs:
     - name: DYNAMO_NAMESPACE
       value: "trtllm-disagg-planner"
@@ -58,10 +61,9 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      pvc:
-        create: false
-        name: dynamo-pvc # Must be pre-created before deployment and SLA profiler must have been run
-        mountPoint: /data
+      volumeMounts:
+        - name: dynamo-pvc # Must be pre-created before deployment and SLA profiler must have been run
+          mountPoint: /data
       extraPodSpec:
         mainContainer:
           image: my-registry/trtllm-runtime:my-tag

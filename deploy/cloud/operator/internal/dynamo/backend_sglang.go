@@ -27,13 +27,24 @@ func isPythonCommand(cmd string) bool {
 }
 
 func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	// Log warning if compilation cache is configured
-	if component.CompilationCache != nil {
+	// Check if compilationCacheRef is set and find its mount point
+	cacheDir := ""
+	if component.CompilationCacheRef != nil && component.CompilationCacheRef.Name != "" {
+		for _, mount := range container.VolumeMounts {
+			if mount.Name == component.CompilationCacheRef.Name {
+				cacheDir = mount.MountPath
+				break
+			}
+		}
+	}
+
+	if cacheDir != "" {
 		logger := log.Log.WithName("sglang-backend")
 		logger.Info("Compilation cache configured for SGLang but not yet fully supported",
 			"backend", "sglang",
 			"status", "partial-support",
-			"pvc-created", true,
+			"cache-dir", cacheDir,
+			"compilation-cache-ref", component.CompilationCacheRef != nil,
 			"env-vars-set", false,
 			"next-steps", "upstream SGLang changes needed")
 	}

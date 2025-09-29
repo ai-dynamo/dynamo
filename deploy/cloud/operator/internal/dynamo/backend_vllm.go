@@ -31,8 +31,19 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 	}
 
 	// Set compilation cache environment variables for VLLM
-	if component.CompilationCache != nil && component.CompilationCache.MountPoint != nil {
-		cacheDir := *component.CompilationCache.MountPoint
+	cacheDir := ""
+
+	// Check if compilationCacheRef is set and find its mount point
+	if component.CompilationCacheRef != nil && component.CompilationCacheRef.Name != "" {
+		for _, mount := range container.VolumeMounts {
+			if mount.Name == component.CompilationCacheRef.Name {
+				cacheDir = mount.MountPath
+				break
+			}
+		}
+	}
+
+	if cacheDir != "" {
 		// Set VLLM cache directory using the environment variable
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  "VLLM_CACHE_ROOT",
@@ -45,7 +56,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 			"backend", "vllm",
 			"status", "fully-supported",
 			"cache-dir", cacheDir,
-			"pvc-created", true,
+			"compilation-cache-ref", component.CompilationCacheRef != nil,
 			"env-vars-set", true,
 			"env-vars", "VLLM_CACHE_ROOT")
 	}

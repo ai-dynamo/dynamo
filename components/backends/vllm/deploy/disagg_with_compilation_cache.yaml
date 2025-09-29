@@ -12,6 +12,12 @@ metadata:
   annotations:
     nvidia.com/enable-grove: "false"
 spec:
+  pvcs:
+    - name: vllm-compilation-cache
+      create: true
+      size: 30Gi
+      storageClass: csi-mounted-fs-path-sc
+      volumeAccessMode: ReadWriteMany
   services:
     Frontend:
       dynamoNamespace: vllm-disagg-compilation-cache
@@ -28,12 +34,8 @@ spec:
       resources:
         limits:
           gpu: "1"
-      compilationCache:
-        create: true
+      compilationCacheRef:
         name: vllm-compilation-cache
-        size: 30Gi
-        storageClass: csi-mounted-fs-path-sc
-        volumeAccessMode: ReadWriteMany
         mountPoint: /root/.cache/vllm
       extraPodSpec:
         mainContainer:
@@ -60,8 +62,7 @@ spec:
       resources:
         limits:
           gpu: "1"
-      compilationCache:
-        create: false
+      compilationCacheRef:
         name: vllm-compilation-cache
         mountPoint: /root/.cache/vllm_compilation
       extraPodSpec:

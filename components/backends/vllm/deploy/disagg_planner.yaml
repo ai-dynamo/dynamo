@@ -6,6 +6,9 @@ kind: DynamoGraphDeployment
 metadata:
   name: vllm-disagg-planner
 spec:
+  pvcs:
+    - name: dynamo-pvc
+      create: false
   envs:
     - name: DYNAMO_NAMESPACE
       value: "vllm-disagg-planner"

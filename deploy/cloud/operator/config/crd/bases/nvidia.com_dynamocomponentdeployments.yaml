@@ -674,30 +674,19 @@ spec:
                     - vllm
                     - trtllm
                   type: string
-                compilationCache:
-                  description: CompilationCache config for backend compilation artifacts (e.g., PyTorch, TensorRT).
+                compilationCacheRef:
+                  description: CompilationCacheRef references a PVC defined at the top level for compilation cache.
                   properties:
-                    create:
-                      description: Create indicates to create a new PVC
-                      type: boolean
                     mountPoint:
+                      description: |-
+                        MountPoint specifies where to mount the compilation cache volume
+                        If not specified, uses backend-specific default
                       type: string
                     name:
-                      description: Name is the name of the PVC
+                      description: Name references a PVC name defined in the top-level PVCs map
                       type: string
-                    size:
-                      anyOf:
-                        - type: integer
-                        - type: string
-                      description: Size of the NIM cache in Gi, used during PVC creation
-                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                      x-kubernetes-int-or-string: true
-                    storageClass:
-                      description: StorageClass to be used for PVC creation. Leave it as empty if the PVC is already created.
-                      type: string
-                    volumeAccessMode:
-                      description: VolumeAccessMode is the volume access mode of the PVC
-                      type: string
+                  required:
+                    - name
                   type: object
                 componentType:
                   description: ComponentType indicates the role of this component (for example, "main").
@@ -10049,31 +10038,6 @@ spec:
                       type: integer
                   required:
                     - nodeCount
-                  type: object
-                pvc:
-                  description: PVC config describing volumes to be mounted by the component.
-                  properties:
-                    create:
-                      description: Create indicates to create a new PVC
-                      type: boolean
-                    mountPoint:
-                      type: string
-                    name:
-                      description: Name is the name of the PVC
-                      type: string
-                    size:
-                      anyOf:
-                        - type: integer
-                        - type: string
-                      description: Size of the NIM cache in Gi, used during PVC creation
-                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                      x-kubernetes-int-or-string: true
-                    storageClass:
-                      description: StorageClass to be used for PVC creation. Leave it as empty if the PVC is already created.
-                      type: string
-                    volumeAccessMode:
-                      description: VolumeAccessMode is the volume access mode of the PVC
-                      type: string
                   type: object
                 readinessProbe:
                   description: ReadinessProbe to signal when the container is ready to receive traffic.

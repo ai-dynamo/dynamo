@@ -781,32 +781,51 @@ func GenerateBasePodSpec(
 	addStandardEnvVars(&container, controllerConfig)
 
 	var volumes []corev1.Volume
-	if component.PVC != nil {
+
+	for _, volumeMount := range component.VolumeMounts {
+		if volumeMount.Name == "" || volumeMount.MountPoint == "" {
+			return nil, fmt.Errorf("volumeMount.name and volumeMount.mountPoint are required when volumeMounts is set")
+		}
+
 		volumes = append(volumes, corev1.Volume{
-			Name: *component.PVC.Name,
+			Name: volumeMount.Name,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: *component.PVC.Name,
+					ClaimName: volumeMount.Name,
 				},
 			},
 		})
+
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-			Name:      *component.PVC.Name,
-			MountPath: *component.PVC.MountPoint,
+			Name:      volumeMount.Name,
+			MountPath: volumeMount.MountPoint,
 		})
 	}
-	if component.CompilationCache != nil {
+
+	if component.CompilationCacheRef != nil && component.CompilationCacheRef.Name != "" {
 		volumes = append(volumes, corev1.Volume{
-			Name: *component.CompilationCache.Name,
+			Name: component.CompilationCacheRef.Name,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: *component.CompilationCache.Name,
+					ClaimName: component.CompilationCacheRef.Name,
 				},
 			},
 		})
+
+		mountPoint := ""
+		if component.CompilationCacheRef.MountPoint != nil {
+			mountPoint = *component.CompilationCacheRef.MountPoint
+		} else {
+			defaultMountPoint := getDefaultCompilationCacheMountPoint(backendFramework)
+			if defaultMountPoint == "" {
+				return nil, fmt.Errorf("compilation cache is not supported for backend framework %s, please use volumeMounts to specify an explicit mountPoint if you want to mount a volume for other purposes", backendFramework)
+			}
+			mountPoint = defaultMountPoint
+		}
+
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-			Name:      *component.CompilationCache.Name,
-			MountPath: *component.CompilationCache.MountPoint,
+			Name:      component.CompilationCacheRef.Name,
+			MountPath: mountPoint,
 		})
 	}
 	if shmVol, shmMount := generateSharedMemoryVolumeAndMount(component.SharedMemory); shmVol != nil && shmMount != nil {
@@ -1228,6 +1247,21 @@ func GenerateBasePodSpecForController(
 	}
 
 	return podSpec, nil
+}
+
+// getDefaultCompilationCacheMountPoint returns the default mount point for compilation cache based on backend framework
+func getDefaultCompilationCacheMountPoint(backendFramework BackendFramework) string {
+	switch backendFramework {
+	case BackendFrameworkVLLM:
+		return commonconsts.DefaultVLLMCacheMountPoint
+	case BackendFrameworkSGLang, BackendFrameworkTRTLLM:
+		// SGLang and TensorRT-LLM don't currently support compilation caches
+		// Return empty string as these should not be used
+		return ""
+	default:
+		// For unknown backends, don't assume compilation cache support
+		return ""
+	}
 }
 
 func generateSharedMemoryVolumeAndMount(spec *v1alpha1.SharedMemorySpec) (*corev1.Volume, *corev1.VolumeMount) {

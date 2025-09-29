@@ -30,16 +30,30 @@ type PVC struct {
 	Name *string `json:"name,omitempty"`
 	// StorageClass to be used for PVC creation. Leave it as empty if the PVC is already created.
 	StorageClass string `json:"storageClass,omitempty"`
-	// Size of the NIM cache in Gi, used during PVC creation
+	// Size of the volume in Gi, used during PVC creation
 	Size resource.Quantity `json:"size,omitempty"`
 	// VolumeAccessMode is the volume access mode of the PVC
 	VolumeAccessMode corev1.PersistentVolumeAccessMode `json:"volumeAccessMode,omitempty"`
-	MountPoint       *string                           `json:"mountPoint,omitempty"`
 }
 
-// CompilationCachePVC defines a dedicated PVC for backend compilation caches
-type CompilationCachePVC struct {
-	PVC `json:",inline"`
+// VolumeMount references a PVC defined at the top level for volumes to be mounted by the component
+type VolumeMount struct {
+	// Name references a PVC name defined in the top-level PVCs map
+	// +kubebuilder:validation:Required
+	Name string `json:"name,omitempty"`
+	// +kubebuilder:validation:Required
+	// MountPoint specifies where to mount the volume
+	MountPoint string `json:"mountPoint,omitempty"`
+}
+
+// CompilationCacheRef references a PVC defined at the top level for compilation cache
+type CompilationCacheRef struct {
+	// Name references a PVC name defined in the top-level PVCs map
+	// +kubebuilder:validation:Required
+	Name string `json:"name,omitempty"`
+	// MountPoint specifies where to mount the compilation cache volume
+	// If not specified, uses backend-specific default
+	MountPoint *string `json:"mountPoint,omitempty"`
 }
 
 type Autoscaling struct {

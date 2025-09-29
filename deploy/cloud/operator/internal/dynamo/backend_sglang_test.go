@@ -2,6 +2,7 @@ package dynamo
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
@@ -476,98 +477,83 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 	}
 }
 
-func TestSGLangBackend_UpdateContainer_CompilationCache(t *testing.T) {
+func TestSGLangBackend_UpdateContainer_CompilationCacheRef(t *testing.T) {
 	backend := &SGLangBackend{}
 
 	tests := []struct {
-		name                  string
-		component             *v1alpha1.DynamoComponentDeploymentOverridesSpec
-		expectWarningLogged   bool
-		expectCacheEnvVar     bool
-		expectCacheEnvVarName string
-		expectCacheEnvVarVal  string
+		name                string
+		component           *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		volumeMounts        []corev1.VolumeMount
+		expectWarningLogged bool
 	}{
 		{
-			name: "SGLANG with compilation cache enabled - logs warning",
+			name: "SGLang with compilation cache ref and volume mount - logs warning",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					CompilationCache: &v1alpha1.CompilationCachePVC{
-						PVC: v1alpha1.PVC{
-							MountPoint: ptr.To("/root/.cache/sglang"),
-						},
+					CompilationCacheRef: &v1alpha1.CompilationCacheRef{
+						Name:       "sglang-cache",
+						MountPoint: ptr.To("/root/.cache/sglang"),
 					},
 				},
 			},
+			volumeMounts: []corev1.VolumeMount{
+				{Name: "sglang-cache", MountPath: "/root/.cache/sglang"},
+			},
 			expectWarningLogged: true,
-			expectCacheEnvVar:   false,
 		},
 		{
-			name: "SGLANG with compilation cache at custom mount point - logs warning",
+			name: "SGLang with compilation cache ref at custom mount point - logs warning",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					CompilationCache: &v1alpha1.CompilationCachePVC{
-						PVC: v1alpha1.PVC{
-							MountPoint: ptr.To("/custom/cache/path"),
-						},
+					CompilationCacheRef: &v1alpha1.CompilationCacheRef{
+						Name:       "custom-cache",
+						MountPoint: ptr.To("/custom/cache/path"),
 					},
 				},
 			},
+			volumeMounts: []corev1.VolumeMount{
+				{Name: "custom-cache", MountPath: "/custom/cache/path"},
+			},
 			expectWarningLogged: true,
-			expectCacheEnvVar:   false,
 		},
 		{
-			name: "SGLANG without compilation cache",
+			name: "SGLang without compilation cache ref",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					CompilationCache: nil,
+					CompilationCacheRef: nil,
 				},
 			},
+			volumeMounts:        []corev1.VolumeMount{},
 			expectWarningLogged: false,
-			expectCacheEnvVar:   false,
 		},
 		{
-			name: "SGLANG with compilation cache but no mount point - logs warning",
+			name: "SGLang with compilation cache ref but no volume mount",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					CompilationCache: &v1alpha1.CompilationCachePVC{
-						PVC: v1alpha1.PVC{
-							MountPoint: nil,
-						},
+					CompilationCacheRef: &v1alpha1.CompilationCacheRef{
+						Name: "missing-cache",
 					},
 				},
 			},
-			expectWarningLogged: true,
-			expectCacheEnvVar:   false,
+			volumeMounts:        []corev1.VolumeMount{}, // No matching volume mount
+			expectWarningLogged: false,                  // Should not log warning if no mount found
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Create a container with initial state including volume mounts
 			container := &corev1.Container{
-				Env: []corev1.EnvVar{},
+				Env:          []corev1.EnvVar{},
+				VolumeMounts: tt.volumeMounts,
 			}
 
 			backend.UpdateContainer(container, 1, RoleMain, tt.component, "test-service", &GroveMultinodeDeployer{})
 
-			if tt.expectCacheEnvVar {
-				found := false
-				for _, env := range container.Env {
-					if env.Name == tt.expectCacheEnvVarName {
-						found = true
-						if env.Value != tt.expectCacheEnvVarVal {
-							t.Errorf("Expected environment variable %s = %s, got %s", tt.expectCacheEnvVarName, tt.expectCacheEnvVarVal, env.Value)
-						}
-						break
-					}
-				}
-				if !found {
-					t.Errorf("Expected environment variable %s not found in container", tt.expectCacheEnvVarName)
-				}
-			} else {
-				for _, env := range container.Env {
-					if env.Name == "SGLANG_CACHE_ROOT" || env.Name == "SGLANG_CACHE_DIR" {
-						t.Errorf("Unexpected cache environment variable found: %s = %s", env.Name, env.Value)
-					}
+			// Verify no unexpected cache-related environment variables are set
+			for _, env := range container.Env {
+				if strings.Contains(env.Name, "CACHE") && strings.Contains(env.Name, "SGLANG") {
+					t.Errorf("Unexpected SGLang cache environment variable found: %s = %s", env.Name, env.Value)
 				}
 			}
 		})
