@@ -337,7 +337,8 @@ COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
 # Much better than chown -R $USERNAME:$USERNAME /opt/dynamo/venv (~10min on my cpu)
 COPY --from=runtime ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
-# so we can use maturin develop
+# Install maturin, for maturin develop
+# Editable install of dynamo
 RUN uv pip install maturin[patchelf] && \
     uv pip install --no-deps -e .
 
