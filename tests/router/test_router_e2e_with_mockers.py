@@ -356,7 +356,7 @@ async def send_request_via_python_kv_router(
         )
 
         logger.info(
-            f"Successfully verified {stop_conditions["max_tokens"]} tokens generated via KvPushRouter"
+            f"Successfully verified {max_tokens} tokens generated via KvPushRouter"
         )
         return True
 
