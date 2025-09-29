@@ -225,6 +225,13 @@ python real_data_benchmark.py --input-dataset trace.jsonl --prefix-len-multiplie
 python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multiplier 3
 ```
 
+> [!Note]
+> At the time of writing this documentation, you may need to install the latest genai-perf from the main source branch to loadgen on the trace files:
+> ```bash
+> pip install git+https://github.com/triton-inference-server/perf_analyzer.git#subdirectory=genai-perf
+> ```
+> However, by the time of release, the genai-perf version included in the vLLM runtime container should be up to date enough to use as-is.
+
 ## Troubleshooting
 
 1. **Workers fail to start**: Check CUDA_VISIBLE_DEVICES and GPU availability
