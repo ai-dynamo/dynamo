@@ -701,10 +701,7 @@ impl
         // Build audit handle (None if DYN_AUDIT_ENABLED=0)
         let mut audit_handle = crate::audit::handle::create_handle(&request, &request_id);
 
-        // If Full mode, stash the full inbound request now (no-op in UsageOnly)
-        if let Some(ref mut h) = audit_handle
-            && h.mode() == crate::audit::handle::AuditMode::Full
-        {
+        if let Some(ref mut h) = audit_handle {
             h.set_request(std::sync::Arc::new(request.clone()));
         }
 
@@ -783,12 +780,7 @@ impl
             // Spawn audit task
             tokio::spawn(async move {
                 let final_resp = agg_fut.await;
-                if let Some(usage) = final_resp.usage.clone() {
-                    audit.add_usage(usage);
-                }
-                if audit.mode() == crate::audit::handle::AuditMode::Full {
-                    audit.set_response(Arc::new(final_resp));
-                }
+                audit.set_response(Arc::new(final_resp));
                 audit.emit();
             });
 
