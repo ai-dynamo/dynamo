@@ -10246,6 +10246,22 @@ spec:
                 subComponentType:
                   description: SubComponentType indicates the sub-role of this component (for example, "prefill").
                   type: string
+                volumeMounts:
+                  description: VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component.
+                  items:
+                    description: VolumeMount references a PVC defined at the top level for volumes to be mounted by the component
+                    properties:
+                      mountPoint:
+                        description: MountPoint specifies where to mount the volume
+                        type: string
+                      name:
+                        description: Name references a PVC name defined in the top-level PVCs map
+                        type: string
+                    required:
+                      - mountPoint
+                      - name
+                    type: object
+                  type: array
               type: object
             status:
               description: Status reflects the current observed state of the component deployment.
