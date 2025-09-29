@@ -67,12 +67,13 @@ if [ "$mode" = "prefill" ]; then
     # GB200 dynamo prefill command
     set -x
     # SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=2048 \
+    # timeouts and kernel cache
+    export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
+    export SGL_DG_CACHE_DIR="/configs/dgcache/3p1dcache"
 
     if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix="--init-expert-location /configs/prefill_dsr1-0528_in1000out1000_num40000.json"; fi
 
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
-    export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800 \
-    export SGL_DG_CACHE_DIR="/configs/dgcache/3p1dcache" \
     MC_TE_METRIC=true \
     SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \
     SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=100000 \
@@ -125,10 +126,12 @@ elif [ "$mode" = "decode" ]; then
     command_suffix=""
     if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix="--init-expert-location /configs/decode_dsr1-0528_loadgen_in1024out1024_num2000_2p12d.json"; fi
 
+    # timeouts and kernel cache
+    export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
+    export SGL_DG_CACHE_DIR="/configs/dgcache/3p1dcache"
+
     # GB200 dynamo decode command
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
-    export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800 \
-    export SGL_DG_CACHE_DIR="/configs/dgcache/3p1dcache" \
     SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=512 \
     MC_TE_METRIC=true \
     SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \
