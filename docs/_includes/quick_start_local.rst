@@ -19,7 +19,7 @@ Get started with Dynamo locally in just a few commands:
 
    # Fetch and start etcd and NATS using Docker Compose
    VERSION=$(uv pip show ai-dynamo | grep Version | cut -d' ' -f2)
-   curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/ai-dynamo/dynamo/release/${VERSION}/deploy/docker-compose.yml
+   curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/ai-dynamo/dynamo/refs/tags/v${VERSION}/deploy/docker-compose.yml
    docker compose -f docker-compose.yml up -d
 
 **3. Run Dynamo**
