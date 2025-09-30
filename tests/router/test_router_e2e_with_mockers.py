@@ -314,7 +314,7 @@ async def send_request_via_python_kv_router(
                 sampling_options=sampling_options,
                 output_options=output_options,
                 router_config_override=router_config_override,
-                # worker_id=worker_id
+                #worker_id=worker_id,
             )
 
             if stream is not None:
@@ -346,9 +346,9 @@ async def send_request_via_python_kv_router(
             if "finish_reason" in response:
                 logger.info(f"Stream finished with reason: {response['finish_reason']}")
 
-    # Verify if expected number of tokens are generated
+    # Verify if expected number of tokens are generated if max_tokens specified and ignore_eos is True
     logger.info(f"Total generated tokens: {len(generated_tokens)}")
-    if stop_conditions and "max_tokens" in stop_conditions:
+    if stop_conditions and "max_tokens" in stop_conditions and "ignore_eos" in stop_conditions and stop_conditions["ignore_eos"]:
         max_tokens = int(stop_conditions["max_tokens"])
         assert len(generated_tokens) == max_tokens, (
             f"Expected exactly {max_tokens} tokens but got {len(generated_tokens)}. "
@@ -356,7 +356,7 @@ async def send_request_via_python_kv_router(
         )
 
         logger.info(
-            f"Successfully verified {max_tokens} tokens generated via KvPushRouter"
+            f"Successfully verified {max_tokens} tokens generated as expected via KvPushRouter with ignore_eos=True"
         )
         return True
 
@@ -374,7 +374,7 @@ def test_mocker_kv_router(request, runtime_services, predownload_tokenizers):
     # runtime_services starts etcd and nats
     logger.info("Starting mocker KV router test")
 
-    # Create mocker args dictionary
+    # Create mocker args dictiona: FixtureRequestry: tuple[NatsServer, EtcdServer]: NoneType
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
 
     try:
@@ -426,7 +426,7 @@ def test_mocker_two_kv_router(request, runtime_services, predownload_tokenizers)
     # runtime_services starts etcd and nats
     logger.info("Starting mocker two KV router test")
 
-    # Create mocker args dictionary
+    # Create mocker args dictionary: FixtureRequest: tuple[NatsServer, EtcdServer]: NoneType
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
 
     kv_routers = []
@@ -490,7 +490,6 @@ def test_mocker_kv_router_overload_503(
 
     # runtime_services starts etcd and nats
     logger.info("Starting mocker KV router overload test for 503 status")
-
     # Create mocker args dictionary with limited resources
     mocker_args = {
         "speedup_ratio": 10,
@@ -739,7 +738,7 @@ def test_kv_push_router_bindings(request, runtime_services, predownload_tokenize
                 router_config_override=router_config_override,
             )
         )
-
+        
         # Test without overrides
         logger.info("Testing without router config overrides")
         asyncio.run(
@@ -748,7 +747,10 @@ def test_kv_push_router_bindings(request, runtime_services, predownload_tokenize
                 token_ids=token_ids[:50],  # Use fewer tokens for second test,
                 initial_wait=1.0,
                 max_retries=8,
-                stop_conditions={"max_tokens": 10},
+                stop_conditions={
+                    "ignore_eos": True,  # Don't stop on EOS token
+                    "max_tokens": 10,  # Generate exactly 10 tokens for the second test
+                },
                 sampling_options={"temperature": 0.7, "top_p": 0.9},
                 output_options={
                     "include_input_tokens": False,
@@ -767,7 +769,10 @@ def test_kv_push_router_bindings(request, runtime_services, predownload_tokenize
                 token_ids=token_ids[:30],  # Use fewer tokens for third test,
                 initial_wait=1.0,
                 max_retries=8,
-                stop_conditions={"max_tokens": 5},
+                stop_conditions={
+                    "ignore_eos": True,  # Don't stop on EOS token
+                    "max_tokens": 5,  # Generate exactly 5 tokens for the third test
+                },
                 sampling_options={"temperature": 0.7, "top_p": 0.9},
                 output_options={
                     "include_input_tokens": False,
@@ -796,7 +801,7 @@ def test_indexers_sync(request, runtime_services, predownload_tokenizers):
     # runtime_services starts etcd and nats
     logger.info("Starting indexers sync test")
 
-    # Create mocker args dictionary
+    # Create mocker args dicti: FixtureRequestonary: tuple[NatsServer, EtcdServer]: NoneType
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
 
     try:
@@ -1025,7 +1030,7 @@ def test_query_instance_id_returns_worker_and_tokens(
     1. NOT route the request to a worker immediately
     2. Return worker_instance_id as an SSE event
     3. Return token_data as an SSE event containing the request tokens
-    4. Terminate the stream with [DONE]
+    4. Term: FixtureRequestinate the stream w: tuple[NatsServer, EtcdServer]ith [DONE]: NoneType
 
     This tests the specific code block:
         if query_instance_id {
