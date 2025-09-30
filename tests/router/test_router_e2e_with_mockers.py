@@ -314,7 +314,7 @@ async def send_request_via_python_kv_router(
                 sampling_options=sampling_options,
                 output_options=output_options,
                 router_config_override=router_config_override,
-                #worker_id=worker_id,
+                # worker_id will be added by next PR
             )
 
             if stream is not None:
@@ -348,7 +348,12 @@ async def send_request_via_python_kv_router(
 
     # Verify if expected number of tokens are generated if max_tokens specified and ignore_eos is True
     logger.info(f"Total generated tokens: {len(generated_tokens)}")
-    if stop_conditions and "max_tokens" in stop_conditions and "ignore_eos" in stop_conditions and stop_conditions["ignore_eos"]:
+    if (
+        stop_conditions 
+        and "max_tokens" in stop_conditions 
+        and "ignore_eos" in stop_conditions 
+        and stop_conditions["ignore_eos"]
+    ):
         max_tokens = int(stop_conditions["max_tokens"])
         assert len(generated_tokens) == max_tokens, (
             f"Expected exactly {max_tokens} tokens but got {len(generated_tokens)}. "
