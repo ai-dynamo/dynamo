@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
-import requests
 
 from tests.serve.common import (
     SERVE_TEST_DIR,
@@ -43,16 +42,6 @@ sglang_configs = {
         models_port=8000,
         request_payloads=[chat_payload_default(), completion_payload_default()],
     ),
-    "custom_chat_template": SGLangConfig(
-        name="custom_chat_template",
-        directory=SERVE_TEST_DIR,
-        script_name="sglang_custom_template.sh",
-        marks=[pytest.mark.gpu_1],
-        model="Qwen/Qwen3-0.6B",
-        env={},
-        models_port=8000,
-        request_payloads=[chat_payload_default()],
-    ),
     "disaggregated": SGLangConfig(
         name="disaggregated",
         directory=sglang_dir,
@@ -83,6 +72,16 @@ sglang_configs = {
             )
         ],
     ),
+    "custom_chat_template": SGLangConfig(
+        name="custom_chat_template",
+        directory=SERVE_TEST_DIR,
+        script_name="sglang_custom_template.sh",
+        marks=[pytest.mark.gpu_1],
+        model="Qwen/Qwen3-0.6B",
+        env={},
+        models_port=8000,
+        request_payloads=[chat_payload_default()],
+    ),
     "template_verification": SGLangConfig(
         name="template_verification",
         directory=SERVE_TEST_DIR,
@@ -91,7 +90,11 @@ sglang_configs = {
         model="Qwen/Qwen3-0.6B",
         env={},
         models_port=8000,
-        request_payloads=[],
+        request_payloads=[
+            chat_payload_default(
+                expected_response=["Successfully Applied Chat Template"]
+            )
+        ],
     ),
 }
 
@@ -185,39 +188,5 @@ def test_custom_template_verification(request, runtime_services, predownload_mod
     applied to the input prompt by looking for the 'CUSTOM_TEMPLATE_ACTIVE|' prefix and
     return "Successfully Applied Chat Template" if found, or a failure message otherwise.
     """
-
     config = sglang_configs["template_verification"]
-
-    with EngineProcess.from_script(config, request) as _:
-        payload = {
-            "model": config.model,
-            "messages": [{"role": "user", "content": "test message"}],
-            "stream": False,
-        }
-
-        response = requests.post(
-            f"http://localhost:{config.models_port}/v1/chat/completions",
-            json=payload,
-            timeout=10,
-        )
-
-        # Verify response
-        assert (
-            response.status_code == 200
-        ), f"Request failed with status {response.status_code}"
-        result = response.json()
-
-        # Check that we got the success message
-        assert "choices" in result, "Response missing 'choices' field"
-        assert len(result["choices"]) > 0, "No choices in response"
-
-        message_content = ""
-        if "message" in result["choices"][0]:
-            message_content = result["choices"][0]["message"].get("content", "")
-        elif "text" in result["choices"][0]:
-            message_content = result["choices"][0].get("text", "")
-
-        # Success/Failure Messages are hardcoded in launch/template_verifier.py
-        assert (
-            "Successfully Applied Chat Template" in message_content
-        ), f"Template verification failed. Response: {message_content}"
+    run_serve_deployment(config, request)

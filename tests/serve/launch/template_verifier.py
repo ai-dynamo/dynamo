@@ -10,6 +10,8 @@ from transformers import AutoTokenizer
 from dynamo.llm import ModelInput, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
+SERVE_TEST_DIR = "/workspace/tests/serve"
+
 
 class TemplateVerificationHandler:
     """Handler to verify custom template application during preprocessing."""
@@ -38,16 +40,13 @@ class TemplateVerificationHandler:
 async def main(runtime: DistributedRuntime):
     """Main worker function for template verification."""
 
-    # Get test directory path
-    test_dir = Path(__file__).parent.parent
-
     # Create service
     component = runtime.namespace("test").component("backend")
     await component.create_service()
     endpoint = component.endpoint("generate")
 
     # Use the existing custom template from fixtures
-    template_path = test_dir / "fixtures" / "custom_template.jinja"
+    template_path = Path(SERVE_TEST_DIR) / "fixtures" / "custom_template.jinja"
     if not template_path.exists():
         print(f"Error: Template not found at {template_path}")
         sys.exit(1)

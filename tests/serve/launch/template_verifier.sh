@@ -16,18 +16,10 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "Starting template verification stack..."
-echo "Using model: Qwen/Qwen3-0.6B"
-echo "Location of Custom Chat Template: $TEST_DIR/fixtures/custom_template.jinja"
-
-# Start the HTTP frontend
-echo "Starting HTTP frontend on port 8000..."
+# run ingress
 python3 -m dynamo.frontend --http-port=8000 &
 FRONTEND_PID=$!
 
-# Give frontend a moment to start
-sleep 1
-
-# Run the verification backend
+# run the mock worker + template validation generate()
 cd "$SCRIPT_DIR"
 exec python template_verifier.py
