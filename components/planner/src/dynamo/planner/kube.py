@@ -14,11 +14,17 @@
 # limitations under the License.
 
 import asyncio
-import os
+import logging
 from typing import Optional
 
 from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
+
+from dynamo.planner.utils.exceptions import DynamoGraphDeploymentNotFoundError
+from dynamo.runtime.logging import configure_dynamo_logging
+
+configure_dynamo_logging()
+logger = logging.getLogger(__name__)
 
 
 def get_current_k8s_namespace() -> str:
@@ -42,9 +48,7 @@ class KubernetesAPI:
         self.custom_api = client.CustomObjectsApi()
         self.current_namespace = k8s_namespace or get_current_k8s_namespace()
 
-    def _get_graph_deployment_from_name(
-        self, graph_deployment_name: str
-    ) -> Optional[dict]:
+    def _get_graph_deployment_from_name(self, graph_deployment_name: str) -> dict:
         """Get the graph deployment from the dynamo graph deployment name"""
         return self.custom_api.get_namespaced_custom_object(
             group="nvidia.com",
@@ -54,38 +58,27 @@ class KubernetesAPI:
             name=graph_deployment_name,
         )
 
-    async def get_parent_graph_deployment(self) -> Optional[dict]:
+    def get_graph_deployment(self, graph_deployment_name: str) -> dict:
         """
-        Get the parent DynamoGraphDeployment using environment variable.
-
-        Uses DYN_PARENT_DGD_K8S_NAME environment variable and assumes the DGD
-        is in the same namespace as this component (self.current_namespace).
+        Get the parent DynamoGraphDeployment
 
         Returns:
-            The DynamoGraphDeployment object or None if env var is not set
+            The DynamoGraphDeployment object
+
+        Raises:
+            DynamoGraphDeploymentNotFoundError: If the parent graph deployment is not found
         """
-        dgd_name = os.getenv("DYN_PARENT_DGD_K8S_NAME")
-
-        if not dgd_name:
-            return None
-
         try:
-            return self._get_graph_deployment_from_name(dgd_name)
+            return self._get_graph_deployment_from_name(graph_deployment_name)
         except client.ApiException as e:
             if e.status == 404:
-                return None
+                raise DynamoGraphDeploymentNotFoundError(
+                    deployment_name=graph_deployment_name,
+                    namespace=self.current_namespace,
+                )
             raise
 
-    async def get_graph_deployment(self) -> Optional[dict]:
-        """
-        Get the parent DynamoGraphDeployment using environment variable.
-
-        Returns:
-            The DynamoGraphDeployment object or None if env var is not set
-        """
-        return await self.get_parent_graph_deployment()
-
-    async def update_graph_replicas(
+    def update_graph_replicas(
         self, graph_deployment_name: str, component_name: str, replicas: int
     ) -> None:
         """Update the replicas count for a component in a DynamoGraphDeployment"""
@@ -99,15 +92,10 @@ class KubernetesAPI:
             body=patch,
         )
 
-    async def is_deployment_ready(self, graph_deployment_name: str) -> bool:
+    def is_deployment_ready(self, deployment: dict) -> bool:
         """Check if a graph deployment is ready"""
 
-        graph_deployment = self._get_graph_deployment_from_name(graph_deployment_name)
-
-        if not graph_deployment:
-            raise ValueError(f"Graph deployment {graph_deployment_name} not found")
-
-        conditions = graph_deployment.get("status", {}).get("conditions", [])
+        conditions = deployment.get("status", {}).get("conditions", [])
         ready_condition = next(
             (c for c in conditions if c.get("type") == "Ready"), None
         )
@@ -125,12 +113,7 @@ class KubernetesAPI:
         for attempt in range(max_attempts):
             await asyncio.sleep(delay_seconds)
 
-            graph_deployment = self._get_graph_deployment_from_name(
-                graph_deployment_name
-            )
-
-            if not graph_deployment:
-                raise ValueError(f"Graph deployment {graph_deployment_name} not found")
+            graph_deployment = self.get_graph_deployment(graph_deployment_name)
 
             conditions = graph_deployment.get("status", {}).get("conditions", [])
             ready_condition = next(
@@ -140,7 +123,7 @@ class KubernetesAPI:
             if ready_condition and ready_condition.get("status") == "True":
                 return  # Deployment is ready
 
-            print(
+            logger.info(
                 f"[Attempt {attempt + 1}/{max_attempts}] "
                 f"(status: {ready_condition.get('status') if ready_condition else 'N/A'}, "
                 f"message: {ready_condition.get('message') if ready_condition else 'no condition found'})"

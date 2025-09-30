@@ -196,10 +196,10 @@ python prefix_ratio_benchmark.py --output-dir results/experiment1
 Instead of synthetic benchmarks with controlled prefix ratios, you can benchmark using real trace data in [mooncake-style format](https://github.com/kvcache-ai/Mooncake/blob/d21da178bae8db9651cf18a76824c084145fc725/mooncake_trace.jsonl). This approach uses actual request patterns from production traces, potentially modified with synthesis parameters.
 
 ```bash
-python real_data_benchmark.py --input-file mooncake_trace.jsonl
+python real_data_benchmark.py --input-dataset mooncake_trace.jsonl
 ```
 
-The script can apply various modifications on top of the original trace file to simulate different scenarios and workload conditions. This script accepts the same synthesis parameters as the [prefix data generator](../prefix_data_generator/README.md):
+The script can apply various modifications on top of the original trace dataset to simulate different scenarios and workload conditions. This script accepts the same synthesis parameters as the [prefix data generator](../prefix_data_generator/README.md):
 
 **Key parameters:**
 - `--num-requests`: Number of requests to synthesize from the trace (default: use all)
@@ -212,18 +212,25 @@ The script can apply various modifications on top of the original trace file to 
 Examples:
 
 ```bash
-# Use original trace file as-is (no synthesis parameters specified)
-python real_data_benchmark.py --input-file trace.jsonl
+# Use original trace dataset as-is (no synthesis parameters specified)
+python real_data_benchmark.py --input-dataset trace.jsonl
 
 # Speed up request rate by 2x and use only first 1000 requests
-python real_data_benchmark.py --input-file trace.jsonl --num-requests 1000 --speedup-ratio 2.0
+python real_data_benchmark.py --input-dataset trace.jsonl --num-requests 1000 --speedup-ratio 2.0
 
 # Double prefix lengths to test cache efficiency with longer shared contexts
-python real_data_benchmark.py --input-file trace.jsonl --prefix-len-multiplier 2.0
+python real_data_benchmark.py --input-dataset trace.jsonl --prefix-len-multiplier 2.0
 
 # Create more diverse workload by replicating prefix tree 3 times
-python real_data_benchmark.py --input-file trace.jsonl --prefix-root-multiplier 3
+python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multiplier 3
 ```
+
+> [!Note]
+> At the time of writing this documentation, you may need to install the latest genai-perf from the main source branch to loadgen on the trace files:
+> ```bash
+> pip install git+https://github.com/triton-inference-server/perf_analyzer.git#subdirectory=genai-perf
+> ```
+> However, by the time of release, the genai-perf version included in the vLLM runtime container should be up to date enough to use as-is.
 
 ## Troubleshooting
 
