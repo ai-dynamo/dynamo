@@ -124,7 +124,7 @@ async def http_server(runtime: DistributedRuntime):
             await asyncio.wait_for(server_task, timeout=10.0)
         except asyncio.CancelledError:
             print("Server task cancelled during teardown.")
-            breakpoint()
+            pass
 
 
 @pytest.mark.asyncio
