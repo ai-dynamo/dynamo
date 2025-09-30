@@ -83,7 +83,7 @@ if [ "$mode" = "prefill" ]; then
     NCCL_MNNVL_ENABLE=1 \
     NCCL_CUMEM_ENABLE=1 \
     SGLANG_USE_MESSAGE_QUEUE_BROADCASTER=0 \
-    SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
+    SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
     PYTHONUNBUFFERED=1 \
     python3 -m dynamo.sglang \
         --served-model-name deepseek-ai/DeepSeek-R1 \
@@ -143,7 +143,7 @@ elif [ "$mode" = "decode" ]; then
     MC_FORCE_MNNVL=1 \
     NCCL_CUMEM_ENABLE=1 \
     SGLANG_USE_MESSAGE_QUEUE_BROADCASTER=0 \
-    SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
+    SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
     PYTHONUNBUFFERED=1 \
     python3 -m dynamo.sglang \
         --served-model-name deepseek-ai/DeepSeek-R1 \
