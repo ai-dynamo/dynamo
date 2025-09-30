@@ -813,7 +813,11 @@ pub fn add_worker_instance_id_annotation(
     request: &mut NvCreateChatCompletionRequest,
     worker_id: i64,
 ) -> &mut NvCreateChatCompletionRequest {
-    set_kv_annotation(request, "worker_instance_id", worker_id.to_string())
+    set_kv_annotation(
+        request,
+        "worker_instance_id".to_string(),
+        worker_id.to_string(),
+    )
 }
 
 /// Utility function to add token_data annotation to an OpenAI request
@@ -822,11 +826,11 @@ pub fn add_token_data_annotation<'a>(
     tokens: &[u32],
 ) -> &'a mut NvCreateChatCompletionRequest {
     let tokens_json = serde_json::to_string(tokens).unwrap_or_default();
-    set_kv_annotation(request, "token_data", tokens_json)
+    set_kv_annotation(request, "token_data".to_string(), tokens_json)
 }
 
 /// Ensure `nvext` exists and return a mutable slice of annotations.
-fn ensure_annotations<'a>(request: &'a mut NvCreateChatCompletionRequest) -> &'a mut Vec<String> {
+fn ensure_annotations(request: &mut NvCreateChatCompletionRequest) -> &mut Vec<String> {
     let nvext = request.nvext.get_or_insert_with(|| {
         NvExt::builder()
             .build()
@@ -849,14 +853,15 @@ fn add_annotation_unique(
 }
 
 /// Set a `key:value` annotation.
-fn set_kv_annotation<'a>(
-    request: &'a mut NvCreateChatCompletionRequest,
-    key: &str,
+fn set_kv_annotation(
+    request: &mut NvCreateChatCompletionRequest,
+    key: String, // <- owned, only one borrowed param remains
     value: impl Into<String>,
-) -> &'a mut NvCreateChatCompletionRequest {
-    let kv = format!("{}:{}", key, value.into());
+) -> &mut NvCreateChatCompletionRequest {
+    let prefix = format!("{}:", key);
+    let kv = format!("{}{}", prefix, value.into());
     let annotations = ensure_annotations(request);
-    annotations.retain(|a| !a.starts_with(&format!("{}:", key)));
+    annotations.retain(|a| !a.starts_with(&prefix));
     annotations.push(kv);
     request
 }
