@@ -3,15 +3,11 @@
 
 """Common base classes and utilities for engine tests (vLLM, TRT-LLM, etc.)"""
 
-import asyncio
-import json
 import logging
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
-import etcd3
 import pytest
-from nats.aio.client import Client as NATS
 
 from tests.utils.client import send_request
 from tests.utils.engine_process import EngineConfig, EngineProcess
@@ -79,32 +75,3 @@ def params_with_model_mark(configs: Mapping[str, EngineConfig]):
         marks.append(pytest.mark.model(cfg.model))
         params.append(pytest.param(config_name, marks=marks))
     return params
-
-
-def get_mdc_from_etcd(mdc_key: str) -> Dict[str, Any]:
-    """Pull (Model Deployment Card) MDC from etcd for the given key."""
-    client = etcd3.Client()
-    result = client.range(mdc_key)
-    if result.kvs:
-        return json.loads(result.kvs[0].value)
-    else:
-        raise RuntimeError(f"Could not retrieve MDC from etcd for key: {mdc_key}")
-
-
-def download_from_nats(nats_url: str) -> str:
-    """Download object from NATS object store."""
-    # Parse the NATS URL to extract bucket and object names
-    bucket_name, object_name = nats_url.replace("nats://0.0.0.0:4222/", "").split(
-        "/", 1
-    )
-
-    async def fetch():
-        nc = NATS()
-        await nc.connect("nats://localhost:4222")
-        js = nc.jetstream()
-        store = await js.object_store(bucket_name)
-        obj = await store.get(object_name)
-        await nc.close()
-        return obj.data.decode("utf-8") if isinstance(obj.data, bytes) else obj.data
-
-    return asyncio.run(fetch())
