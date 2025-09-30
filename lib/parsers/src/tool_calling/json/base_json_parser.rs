@@ -132,7 +132,7 @@ fn try_unescape_json_string(s: &str) -> Option<String> {
     serde_json::from_str::<String>(&wrapped).ok()
 }
 
-fn normalize_argument_values(value: &mut Value) {
+fn unescape_argument_values(value: &mut Value) {
     match value {
         Value::String(s) => {
             if let Some(decoded) = try_unescape_json_string(s) {
@@ -145,12 +145,12 @@ fn normalize_argument_values(value: &mut Value) {
         }
         Value::Array(arr) => {
             for v in arr.iter_mut() {
-                normalize_argument_values(v);
+                unescape_argument_values(v);
             }
         }
         Value::Object(map) => {
             for (_k, v) in map.iter_mut() {
-                normalize_argument_values(v);
+                unescape_argument_values(v);
             }
         }
         _ => {}
@@ -292,21 +292,10 @@ pub fn try_tool_call_parse_basic_json(
     // Convert json (String) to &str
     let json = json.as_str();
     // Anonymous function to attempt deserialization into a known representation
-    let parse = |name: String, mut args: HashMap<String, Value>| -> anyhow::Result<_> {
-        // Normalize argument values to avoid leaking over-escaped JSON string literals
+    let parse = |name: String, mut args: HashMap<String, Value>| -> anyhow::Result<ToolCallResponse> {
+        // Unescape argument values to avoid leaking over-escaped JSON string literals
         for (_k, v) in args.iter_mut() {
-            normalize_argument_values(v);
-        }
-        if name == "process_json"
-            && let Some(v) = args.get("json_string")
-        {
-            if let Some(s) = v.as_str() {
-                println!(
-                    "[test-debug] normalized json_string contains(\"\\\"quotes\\\"\"): {}",
-                    s.contains("\"quotes\"")
-                );
-            }
-            println!("[test-debug] process_json.json_string value: {:?}", v);
+            unescape_argument_values(v);
         }
         // Preserve nested JSON strings intact; do not double-escape.
         // serde_json::to_string on Value preserves required escapes only.
@@ -385,6 +374,7 @@ pub fn try_tool_call_parse_basic_json(
         return Ok((results, Some(normal_text)));
     } else if let Ok(generic_array) = serde_json::from_str::<Vec<serde_json::Value>>(json) {
         // Fallback: try to parse each item individually for resilience against malformed entries
+        // See test test_parallel_malformed_second_call
         let mut results = Vec::new();
         for item in generic_array {
             // Try to parse as CalledFunctionArguments
