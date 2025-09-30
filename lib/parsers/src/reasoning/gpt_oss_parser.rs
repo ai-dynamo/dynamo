@@ -279,7 +279,6 @@ impl ReasoningParser for GptOssReasoningParser {
                 tracing::warn!("Shouldn't be delta content after in channel: {}", channel);
             }
         }
-                          
         tracing::debug!("No deltas to return, returning empty result");
         ParserResult::default()
     }
@@ -357,6 +356,100 @@ mod tests {
 
 #[test]
 fn test_gpt_oss_reasoning_parser_streaming_in_question() {
+    let text = "<|channel|>analysis<|message|>User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>{}";
+    let enc = get_harmony_encoding()
+        .as_ref()
+        .expect("Failed to get encoding");
+    let token_ids = enc.tokenizer().encode_with_special_tokens(text); // Example token IDs
+    // Send token one by one
+    {
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let mut reasoning_text_incr = String::new();
+        let mut normal_text_incr = String::new();
+        for token in token_ids.iter() {
+            let result = parser.parse_reasoning_streaming_incremental("", &[(*token)]);
+            normal_text_incr.push_str(&result.normal_text);
+            reasoning_text_incr.push_str(&result.reasoning_text);
+        }
+        assert_eq!(
+            reasoning_text_incr,
+            "User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function."
+        );
+        // [gluo TODO] missing "<|start|>assistant" and "{}" from original message
+        assert_eq!(
+            normal_text_incr,
+            "<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>"
+        );
+    }
+    // Send token in chunks (chunking obtained from actual model output)
+    {
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let mut reasoning_text_incr = String::new();
+        let mut normal_text_incr = String::new();
+        let chunk_tokens = [
+            vec![200005],
+            vec![35644, 200008, 1844, 31064, 25, 392, 25216, 11, 4853],
+            vec![2371, 25, 382, 5519, 869, 326, 6788, 16842, 1416, 1757],
+            vec![2371, 2420, 3230, 2360, 290, 5181, 1114, 717, 39303, 126214],
+            vec![
+                13, 7649, 1114, 13, 200007, 200006, 173781, 200005, 12606, 815,
+            ],
+            vec![
+                316, 28, 44580, 775, 39303, 126214, 220, 200003, 4108, 200008,
+            ],
+            vec![12083],
+        ];
+        // concatenate chunk tokens and verify they match original token_ids
+        let concatenated: Vec<u32> = chunk_tokens.iter().flatten().copied().collect();
+        assert_eq!(concatenated, token_ids);
+
+        for token in chunk_tokens.iter() {
+            let result = parser.parse_reasoning_streaming_incremental("", token);
+            normal_text_incr.push_str(&result.normal_text);
+            reasoning_text_incr.push_str(&result.reasoning_text);
+        }
+        assert_eq!(
+            reasoning_text_incr,
+            "User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function."
+        );
+        assert_eq!(
+            normal_text_incr,
+            "<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>"
+        );
+    }
+
+    #[test]
+    fn test_gpt_oss_reasoning_parser_streaming_chunked() {
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let enc = get_harmony_encoding()
+            .as_ref()
+            .expect("Failed to get encoding");
+        let text = "<|channel|>analysis<|message|>The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed.<|end|><|start|>assistant<|channel|>final<|message|>The capital of Brazil is Brasília.";
+        let token_ids = enc.tokenizer().encode_with_special_tokens(text);
+        let mut reasoning_text_incr = String::new();
+        let mut normal_text_incr = String::new();
+
+        let mut idx = 0;
+        let chunk_size = 4;
+        while idx < token_ids.len() {
+            let end = (idx + chunk_size).min(token_ids.len());
+            let result =
+                parser.parse_reasoning_streaming_incremental("Test text", &token_ids[idx..end]);
+            normal_text_incr.push_str(&result.normal_text);
+            reasoning_text_incr.push_str(&result.reasoning_text);
+            idx = end;
+        }
+
+        assert_eq!(normal_text_incr, "The capital of Brazil is Brasília.");
+        assert_eq!(
+            reasoning_text_incr,
+            "The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed."
+        );
+    }
+}
+
+#[test]
+fn test_gpt_oss_reasoning_parser_streaming_variable_length_chunks() {
     let text = "<|channel|>analysis<|message|>User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>{}";
     let enc = get_harmony_encoding()
         .as_ref()
