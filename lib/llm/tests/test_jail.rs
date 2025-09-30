@@ -643,7 +643,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "TODO(elyas): temporarily disabled; parser/content segmentation mismatch after parser changes"]
     async fn test_jailed_stream_mistral_parser_with_tool_calls_marker() {
         // Tests Mistral format tool call parsing with explicit [TOOL_CALLS] marker
         // Input: "Let me check that for you. " + "[TOOL_CALLS][{\"name\": \"get_time\", \"arguments\": {\"timezone\": \"UTC\"}}]" + " Here's the time."
@@ -663,28 +662,6 @@ mod tests {
 
         let jailed_stream = jail.apply(input_stream);
         let results: Vec<_> = jailed_stream.collect().await;
-
-        // Debug: Test mistral parser directly
-        use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate;
-        let test_content =
-            "[TOOL_CALLS][{\"name\": \"get_time\", \"arguments\": {\"timezone\": \"UTC\"}}]";
-        match try_tool_call_parse_aggregate(test_content, Some("mistral")).await {
-            Ok((tool_calls, normal_text)) => {
-                tracing::debug!(
-                    "Direct mistral parse test: content={:?}, tool_calls_count={}, normal_text={:?}",
-                    test_content,
-                    tool_calls.len(),
-                    normal_text
-                );
-            }
-            Err(e) => {
-                tracing::debug!(
-                    "Direct mistral parse test failed: content={:?}, error={:?}",
-                    test_content,
-                    e
-                );
-            }
-        }
 
         // Should have exactly 3 chunks: content + tool call + content
         assert_eq!(
@@ -781,7 +758,6 @@ mod tests {
 
         let jailed_stream = jail.apply(input_stream);
         let results: Vec<_> = jailed_stream.collect().await;
-        println!("results: {:?}", results);
 
         // Should have exactly 3 chunks: content + tool call + content
         assert_eq!(
@@ -823,7 +799,6 @@ mod tests {
 
         let jailed_stream = jail.apply(input_stream);
         let results: Vec<_> = jailed_stream.collect().await;
-        println!("results: {:?}", results);
 
         // The "{" pattern triggers jailing, so some chunks get combined
         assert_eq!(results.len(), 2);
@@ -1793,7 +1768,6 @@ mod tests {
 
         // Should have at least one output containing both analysis text and parsed tool call
         assert!(!results.is_empty());
-        println!("results: {:?}", results);
 
         // Verify the analysis text appears as content in one of the outputs
         let has_analysis_text = results.iter().any(|r| {
@@ -1831,7 +1805,6 @@ mod tests {
         let jail = JailedStream::builder().tool_call_parser("mistral").build();
         let jailed_stream = jail.apply(input_stream);
         let results: Vec<_> = jailed_stream.collect().await;
-        println!("results: {:?}", results);
 
         assert!(results.len() >= 2);
         assert_content(&results[0], "Hey How");
@@ -2441,7 +2414,6 @@ mod parallel_jail_tests {
     // =============================================================================
 
     #[tokio::test]
-    #[ignore = "TODO(elyas): temporarily disabled; partial malformed call handling needs revisit"]
     async fn test_parallel_partial_malformed_calls() {
         let jail = JailedStream::builder()
             .tool_call_parser("nemotron_deci")
