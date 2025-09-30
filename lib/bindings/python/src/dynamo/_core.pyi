@@ -10,7 +10,6 @@ from typing import (
     List,
     Optional,
     Tuple,
-    Union,
 )
 
 def log_message(level: str, message: str, module: str, file: str, line: int) -> None:
@@ -41,13 +40,6 @@ class DistributedRuntime:
         """
         ...
 
-    def do_not_use_etcd_client(self) -> Optional[EtcdClient]:
-        """
-        Get the `EtcdClient` object. Not available for static workers.
-        This will be removed soon, do not use it.
-        """
-        ...
-
     def allocate_port_block(self, namespace, port_min, port_max, block_size, context=None) -> List[int]:
         """
         Allocate a contiguous block of ports from the specified range and atomically reserve them.
@@ -58,126 +50,6 @@ class DistributedRuntime:
     def shutdown(self) -> None:
         """
         Shutdown the runtime by triggering the cancellation token
-        """
-        ...
-
-class EtcdClient:
-    """
-    Etcd is used for discovery in the DistributedRuntime
-    """
-
-    def primary_lease_id(self) -> int:
-        """
-        return the primary lease id.
-        """
-        ...
-
-    async def kv_create(
-        self, key: str, value: bytes, lease_id: Optional[int] = None
-    ) -> None:
-        """
-        Atomically create a key in etcd, fail if the key already exists.
-        """
-        ...
-
-    async def kv_create_or_validate(
-        self, key: str, value: bytes, lease_id: Optional[int] = None
-    ) -> None:
-        """
-        Atomically create a key if it does not exist, or validate the values are identical if the key exists.
-        """
-        ...
-
-    async def kv_put(
-        self, key: str, value: bytes, lease_id: Optional[int] = None
-    ) -> None:
-        """
-        Put a key-value pair into etcd
-        """
-        ...
-
-    async def kv_get_prefix(self, prefix: str) -> List[Dict[str, JsonLike]]:
-        """
-        Get all keys with a given prefix
-        """
-        ...
-
-    async def revoke_lease(self, lease_id: int) -> None:
-        """
-        Revoke a lease
-        """
-        ...
-
-class EtcdKvCache:
-    """
-    A cache for key-value pairs stored in etcd.
-    """
-
-    @staticmethod
-    async def new(
-        etcd_client: EtcdClient,
-        prefix: str,
-        initial_values: Dict[str, Union[str, bytes]]
-    ) -> "EtcdKvCache":
-        """
-        Create a new EtcdKvCache instance.
-
-        Args:
-            etcd_client: The etcd client to use for operations
-            prefix: The prefix to use for all keys in this cache.
-                EtcdKvCache will continuously watch the changes of the keys under this prefix.
-            initial_values: Initial key-value pairs to populate the cache with
-                NOTE: if the key already exists, it won't be updated
-
-        Returns:
-            A new EtcdKvCache instance
-        """
-        ...
-
-    async def get(self, key: str) -> Optional[bytes]:
-        """
-        Get a value from the cache.
-
-        Args:
-            key: The key to retrieve
-
-        Returns:
-            The value as bytes if found, None otherwise
-
-        NOTE: this get is cheap because internally there is a cache that holds the latest kv pairs.
-        To prevent race condition, there is a lock when reading/writing the internal cache.
-        """
-        ...
-
-    async def get_all(self) -> Dict[str, bytes]:
-        """
-        Get all key-value pairs from the cache.
-
-        Returns:
-            A dictionary of all key-value pairs, with keys stripped of the prefix
-            (i.e., in the same format as in `initial_values`.keys())
-        """
-        ...
-
-    async def put(
-        self,
-        key: str,
-        value: bytes,
-        lease_id: Optional[int] = None
-    ) -> None:
-        """
-        Put a key-value pair into the cache and etcd.
-
-        Args:
-            key: The key to store
-            value: The value to store
-            lease_id: Optional lease ID to associate with this key-value pair
-        """
-        ...
-
-    async def delete(self, key: str) -> None:
-        """
-        Delete a key-value pair from the cache and etcd.
         """
         ...
 
@@ -1404,3 +1276,134 @@ class VirtualConnectorClient:
         """Blocks until there is a new decision to fetch using 'get'"""
         ...
 
+class PrometheusNames:
+    """
+    Main container for all Prometheus metric name constants
+    """
+
+    @property
+    def frontend(self) -> FrontendService:
+        """
+        Frontend service metrics
+        """
+        ...
+
+    @property
+    def work_handler(self) -> WorkHandler:
+        """
+        Work handler metrics
+        """
+        ...
+
+class FrontendService:
+    """
+    Frontend service metrics (LLM HTTP service)
+    These methods return the full metric names with the "dynamo_frontend_" prefix
+    """
+
+    @property
+    def requests_total(self) -> str:
+        """
+        Total number of LLM requests processed
+        """
+        ...
+
+    @property
+    def queued_requests_total(self) -> str:
+        """
+        Number of requests waiting in HTTP queue before receiving the first response
+        """
+        ...
+
+    @property
+    def inflight_requests_total(self) -> str:
+        """
+        Number of inflight requests going to the engine (vLLM, SGLang, ...)
+        """
+        ...
+
+    @property
+    def request_duration_seconds(self) -> str:
+        """
+        Duration of LLM requests
+        """
+        ...
+
+    @property
+    def input_sequence_tokens(self) -> str:
+        """
+        Input sequence length in tokens
+        """
+        ...
+
+    @property
+    def output_sequence_tokens(self) -> str:
+        """
+        Output sequence length in tokens
+        """
+        ...
+
+    @property
+    def time_to_first_token_seconds(self) -> str:
+        """
+        Time to first token in seconds
+        """
+        ...
+
+    @property
+    def inter_token_latency_seconds(self) -> str:
+        """
+        Inter-token latency in seconds
+        """
+        ...
+
+class WorkHandler:
+    """
+    Work handler metrics (component request processing)
+    These methods return the full metric names with the "dynamo_component_" prefix
+    """
+
+    @property
+    def requests_total(self) -> str:
+        """
+        Total number of requests processed by work handler
+        """
+        ...
+
+    @property
+    def request_bytes_total(self) -> str:
+        """
+        Total number of bytes received in requests by work handler
+        """
+        ...
+
+    @property
+    def response_bytes_total(self) -> str:
+        """
+        Total number of bytes sent in responses by work handler
+        """
+        ...
+
+    @property
+    def inflight_requests(self) -> str:
+        """
+        Number of requests currently being processed by work handler
+        """
+        ...
+
+    @property
+    def request_duration_seconds(self) -> str:
+        """
+        Time spent processing requests by work handler (histogram)
+        """
+        ...
+
+    @property
+    def errors_total(self) -> str:
+        """
+        Total number of errors in work handler processing
+        """
+        ...
+
+# Module-level singleton instance for convenient access
+prometheus_names: PrometheusNames

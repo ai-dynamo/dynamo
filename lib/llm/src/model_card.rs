@@ -11,16 +11,15 @@
 //! - Model information (ModelInfoType)
 //! - Tokenizer configuration (TokenizerKind)
 //! - Prompt formatter settings (PromptFormatterArtifact)
-//! - Various metadata like revision, publish time, etc.
 
 use std::fmt;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::common::checked_file::CheckedFile;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
+use crate::model_type::{ModelInput, ModelType};
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_runtime::DistributedRuntime;
@@ -34,9 +33,6 @@ use crate::protocols::TokenIdType;
 
 /// Identify model deployment cards in the key-value store
 pub const ROOT_PATH: &str = "mdc";
-
-/// If a model deployment card hasn't been refreshed in this much time the worker is likely gone
-const CARD_MAX_AGE: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
@@ -119,13 +115,6 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_context: Option<Vec<PromptContextMixin>>,
 
-    /// When this card was last advertised by a worker. None if not yet published.
-    pub last_published: Option<chrono::DateTime<chrono::Utc>>,
-
-    /// Incrementing count of how many times we published this card
-    #[serde(default, skip_serializing)]
-    pub revision: u64,
-
     /// Max context (in number of tokens) this model can handle
     pub context_length: u32,
 
@@ -136,6 +125,14 @@ pub struct ModelDeploymentCard {
     /// How many times a request can be migrated to another worker if the HTTP server lost
     /// connection to the current worker.
     pub migration_limit: u32,
+
+    /// Specifies whether the model is a chat, completions, etc model.
+    pub model_type: ModelType,
+
+    /// Specifies the model input type.
+    /// `Tokens` for engines that expect pre-processed input.
+    /// `Text` for engines that take care of pre-processing themselves.
+    pub model_input: ModelInput,
 
     /// User-defined metadata for custom worker behavior
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -163,17 +160,6 @@ impl ModelDeploymentCard {
             display_name: name.to_string(),
             slug: Slug::from_string(name),
             ..Default::default()
-        }
-    }
-
-    /// How often we should check if a model deployment card expired because it's workers are gone
-    pub fn expiry_check_period() -> Duration {
-        match CARD_MAX_AGE.to_std() {
-            Ok(duration) => duration / 3,
-            Err(_) => {
-                // Only happens if CARD_MAX_AGE is negative, which it isn't
-                unreachable!("Cannot run card expiry watcher, invalid CARD_MAX_AGE");
-            }
         }
     }
 
@@ -213,15 +199,6 @@ impl ModelDeploymentCard {
     pub fn mdcsum(&self) -> String {
         let json = self.to_json().unwrap();
         format!("{}", blake3::hash(json.as_bytes()))
-    }
-
-    /// Was this card last published a long time ago, suggesting the worker is gone?
-    pub fn is_expired(&self) -> bool {
-        if let Some(last_published) = self.last_published.as_ref() {
-            chrono::Utc::now() - last_published > CARD_MAX_AGE
-        } else {
-            false
-        }
     }
 
     /// Is this a full model card with tokenizer?
@@ -410,6 +387,10 @@ impl ModelDeploymentCard {
         }
     }
 
+    pub fn requires_preprocessing(&self) -> bool {
+        matches!(self.model_input, ModelInput::Tokens)
+    }
+
     /// Load a ModelDeploymentCard from storage the DistributedRuntime is configured to use.
     /// Card should be fully local and ready to use when the call returns.
     pub async fn load_from_store(
@@ -496,11 +477,11 @@ impl ModelDeploymentCard {
             prompt_formatter: Some(PromptFormatterArtifact::GGUF(gguf_file.to_path_buf())),
             chat_template_file: None,
             prompt_context: None, // TODO - auto-detect prompt context
-            revision: 0,
-            last_published: None,
             context_length,
             kv_cache_block_size: 0,
             migration_limit: 0,
+            model_type: Default::default(),  // set later
+            model_input: Default::default(), // set later
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
             cache_dir: None,
@@ -560,11 +541,11 @@ impl ModelDeploymentCard {
             prompt_formatter: PromptFormatterArtifact::from_repo(repo_id)?,
             chat_template_file,
             prompt_context: None, // TODO - auto-detect prompt context
-            revision: 0,
-            last_published: None,
             context_length,
             kv_cache_block_size: 0, // set later
             migration_limit: 0,
+            model_type: Default::default(),  // set later
+            model_input: Default::default(), // set later
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
             cache_dir: None,
@@ -572,15 +553,19 @@ impl ModelDeploymentCard {
     }
 }
 
+impl PartialEq for ModelDeploymentCard {
+    fn eq(&self, other: &ModelDeploymentCard) -> bool {
+        self.mdcsum() == other.mdcsum()
+    }
+}
+
+/// A ModelDeploymentCard is published a single time per instance and never updated.
 impl Versioned for ModelDeploymentCard {
     fn revision(&self) -> u64 {
-        self.revision
+        0
     }
 
-    fn set_revision(&mut self, revision: u64) {
-        self.last_published = Some(chrono::Utc::now());
-        self.revision = revision;
-    }
+    fn set_revision(&mut self, _revision: u64) {}
 }
 
 impl fmt::Display for ModelDeploymentCard {

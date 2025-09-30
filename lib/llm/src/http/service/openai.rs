@@ -711,12 +711,6 @@ pub fn validate_chat_completion_unsupported_fields(
 ) -> Result<(), ErrorResponse> {
     let inner = &request.inner;
 
-    if inner.parallel_tool_calls == Some(true) {
-        return Err(ErrorMessage::not_implemented_error(
-            "`parallel_tool_calls: true` is not supported.",
-        ));
-    }
-
     if inner.function_call.is_some() {
         return Err(ErrorMessage::not_implemented_error(
             "`function_call` is deprecated. Please migrate to use `tool_choice` instead.",
@@ -982,16 +976,6 @@ pub fn validate_response_unsupported_fields(
             "`max_tool_calls` is not supported.",
         ));
     }
-    if inner.metadata.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            "`metadata` is not supported.",
-        ));
-    }
-    if inner.parallel_tool_calls == Some(true) {
-        return Some(ErrorMessage::not_implemented_error(
-            "`parallel_tool_calls: true` is not supported.",
-        ));
-    }
     if inner.previous_response_id.is_some() {
         return Some(ErrorMessage::not_implemented_error(
             "`previous_response_id` is not supported.",
@@ -1198,7 +1182,6 @@ pub fn responses_router(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
 
     use super::*;
     use crate::discovery::ModelManagerError;
@@ -1345,6 +1328,14 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_unsupported_fields_accepts_parallel_tool_calls() {
+        let mut request = make_base_request();
+        request.inner.parallel_tool_calls = Some(true);
+        let result = validate_response_unsupported_fields(&request);
+        assert!(result.is_none(), "parallel_tool_calls should be supported");
+    }
+
+    #[test]
     fn test_validate_unsupported_fields_detects_flags() {
         #[allow(clippy::type_complexity)]
         let unsupported_cases: Vec<(&str, Box<dyn FnOnce(&mut CreateResponse)>)> = vec![
@@ -1358,11 +1349,6 @@ mod tests {
                 Box::new(|r| r.instructions = Some("System prompt".into())),
             ),
             ("max_tool_calls", Box::new(|r| r.max_tool_calls = Some(3))),
-            ("metadata", Box::new(|r| r.metadata = Some(HashMap::new()))),
-            (
-                "parallel_tool_calls",
-                Box::new(|r| r.parallel_tool_calls = Some(true)),
-            ),
             (
                 "previous_response_id",
                 Box::new(|r| r.previous_response_id = Some("prev-id".into())),
@@ -1489,6 +1475,7 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            metadata: None,
         };
 
         let result = validate_completion_fields_generic(&request);
@@ -1511,6 +1498,7 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            metadata: None,
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1532,6 +1520,7 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            metadata: None,
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1553,6 +1542,7 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            metadata: None,
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1576,6 +1566,7 @@ mod tests {
                 .build()
                 .unwrap(),
             nvext: None,
+            metadata: None,
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1597,6 +1588,7 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            metadata: None,
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1607,6 +1599,34 @@ mod tests {
                 "Logprobs must be between 0 and 5, got 6"
             );
         }
+    }
+
+    #[test]
+    fn test_metadata_field_nested() {
+        use serde_json::json;
+
+        // Test metadata field with nested object
+        let request = NvCreateCompletionRequest {
+            inner: CreateCompletionRequest {
+                model: "test-model".to_string(),
+                prompt: "Hello".into(),
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+            metadata: json!({
+                "user": {"id": 1, "name": "user-1"},
+                "session": {"id": "session-1", "timestamp": 1640995200}
+            })
+            .into(),
+        };
+
+        let result = validate_completion_fields_generic(&request);
+        assert!(result.is_ok());
+
+        // Verify metadata is accessible
+        assert!(request.metadata.is_some());
+        assert_eq!(request.metadata.as_ref().unwrap()["user"]["id"], 1);
     }
 
     #[test]

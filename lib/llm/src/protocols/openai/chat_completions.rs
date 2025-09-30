@@ -206,6 +206,16 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
         )
     }
 
+    fn get_guided_whitespace_pattern(&self) -> Option<String> {
+        choose_with_deprecation(
+            "guided_whitespace_pattern",
+            self.common.guided_whitespace_pattern.as_ref(),
+            self.nvext
+                .as_ref()
+                .and_then(|nv| nv.guided_whitespace_pattern.as_ref()),
+        )
+    }
+
     fn get_top_k(&self) -> Option<i32> {
         choose_with_deprecation(
             "top_k",
@@ -321,7 +331,7 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_model(&self.inner.model)?;
         // none for store
         validate::validate_reasoning_effort(&self.inner.reasoning_effort)?;
-        validate::validate_metadata(&self.inner.metadata)?;
+        // none for metadata
         validate::validate_frequency_penalty(self.inner.frequency_penalty)?;
         validate::validate_logit_bias(&self.inner.logit_bias)?;
         // none for logprobs
@@ -349,6 +359,8 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // none for functions
         // Common Ext
         validate::validate_repetition_penalty(self.get_repetition_penalty())?;
+        validate::validate_min_p(self.get_min_p())?;
+        validate::validate_top_k(self.get_top_k())?;
 
         Ok(())
     }

@@ -7,6 +7,8 @@ pub mod json;
 pub mod parsers;
 pub mod pythonic;
 pub mod response;
+#[cfg(test)]
+pub mod tests;
 pub mod tools;
 
 // Re-export main types and functions for convenience

@@ -40,10 +40,10 @@ use crate::{
 use super::{MODEL_ROOT_PATH, ModelEntry, ModelManager};
 use crate::namespace::is_global_namespace;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum ModelUpdate {
-    Added(ModelType),
-    Removed(ModelType),
+    Added(ModelDeploymentCard),
+    Removed(ModelDeploymentCard),
 }
 
 pub struct ModelWatcher {
@@ -140,25 +140,8 @@ impl ModelWatcher {
                             continue;
                         }
                     };
-                    self.manager.save_model_entry(key, model_entry.clone());
 
-                    if let Some(tx) = &self.model_update_tx {
-                        tx.send(ModelUpdate::Added(model_entry.model_type))
-                            .await
-                            .ok();
-                    }
-
-                    if self.manager.has_model_any(&model_entry.name) {
-                        tracing::trace!(
-                            name = model_entry.name,
-                            namespace = model_entry.endpoint_id.namespace,
-                            "New endpoint for existing model"
-                        );
-                        self.notify_on_model.notify_waiters();
-                        continue;
-                    }
-
-                    match self.handle_put(&model_entry).await {
+                    match self.handle_put(key, &model_entry).await {
                         Ok(()) => {
                             tracing::info!(
                                 model_name = model_entry.name,
@@ -196,13 +179,13 @@ impl ModelWatcher {
     /// Returns the name of the model we just deleted, if any.
     async fn handle_delete(&self, kv: &KeyValue) -> anyhow::Result<Option<String>> {
         let key = kv.key_str()?;
-        let model_entry = match self.manager.remove_model_entry(key) {
-            Some(entry) => entry,
+        let card = match self.manager.remove_model_card(key) {
+            Some(card) => card,
             None => {
-                anyhow::bail!("Missing ModelEntry for {key}");
+                anyhow::bail!("Missing ModelDeploymentCard for {key}");
             }
         };
-        let model_name = model_entry.name;
+        let model_name = card.display_name.clone();
         let active_instances = self
             .entries_for_model(&model_name)
             .await
@@ -257,7 +240,7 @@ impl ModelWatcher {
                     || (tensor_model_removed && *model_type == ModelType::TensorBased))
                     && let Some(tx) = &self.model_update_tx
                 {
-                    tx.send(ModelUpdate::Removed(*model_type)).await.ok();
+                    tx.send(ModelUpdate::Removed(card.clone())).await.ok();
                 }
             }
         }
@@ -267,7 +250,7 @@ impl ModelWatcher {
 
     // Handles a PUT event from etcd, this usually means adding a new model to the list of served
     // models.
-    async fn handle_put(&self, model_entry: &ModelEntry) -> anyhow::Result<()> {
+    async fn handle_put(&self, key: &str, model_entry: &ModelEntry) -> anyhow::Result<()> {
         let endpoint_id = &model_entry.endpoint_id;
         let component = self
             .drt
@@ -294,9 +277,24 @@ impl ModelWatcher {
             }
         };
 
-        if model_entry.model_input == ModelInput::Tokens
-            && (model_entry.model_type.supports_chat()
-                || model_entry.model_type.supports_completions())
+        self.manager.save_model_card(key, card.clone());
+
+        if self.manager.has_model_any(&model_entry.name) {
+            tracing::trace!(
+                name = model_entry.name,
+                namespace = model_entry.endpoint_id.namespace,
+                "New endpoint for existing model"
+            );
+            self.notify_on_model.notify_waiters();
+            return Ok(());
+        }
+
+        if let Some(tx) = &self.model_update_tx {
+            tx.send(ModelUpdate::Added(card.clone())).await.ok();
+        }
+
+        if card.model_input == ModelInput::Tokens
+            && (card.model_type.supports_chat() || card.model_type.supports_completions())
         {
             // Case 1: Tokens + (Chat OR Completions OR Both)
             // A model that expects pre-processed requests meaning it's up to us whether we
@@ -321,7 +319,7 @@ impl ModelWatcher {
             let tokenizer_hf = card.tokenizer_hf().context("tokenizer_hf")?;
 
             // Add chat engine only if the model supports chat
-            if model_entry.model_type.supports_chat() {
+            if card.model_type.supports_chat() {
                 let chat_engine = entrypoint::build_routed_pipeline::<
                     NvCreateChatCompletionRequest,
                     NvCreateChatCompletionStreamResponse,
@@ -342,7 +340,7 @@ impl ModelWatcher {
             }
 
             // Add completions engine only if the model supports completions
-            if model_entry.model_type.supports_completions() {
+            if card.model_type.supports_completions() {
                 let formatter = PromptFormatter::no_op();
                 let PromptFormatter::OAI(formatter) = formatter;
                 let preprocessor = OpenAIPreprocessor::new_with_parts(
@@ -370,9 +368,7 @@ impl ModelWatcher {
                     .context("add_completions_model")?;
                 tracing::info!("Completions is ready");
             }
-        } else if model_entry.model_input == ModelInput::Text
-            && model_entry.model_type.supports_chat()
-        {
+        } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
             // Case 3: Text + Chat
             let push_router = PushRouter::<
                 NvCreateChatCompletionRequest,
@@ -384,9 +380,7 @@ impl ModelWatcher {
             let engine = Arc::new(push_router);
             self.manager
                 .add_chat_completions_model(&model_entry.name, engine)?;
-        } else if model_entry.model_input == ModelInput::Text
-            && model_entry.model_type.supports_completions()
-        {
+        } else if card.model_input == ModelInput::Text && card.model_type.supports_completions() {
             // Case 2: Text + Completions
             let push_router = PushRouter::<
                 NvCreateCompletionRequest,
@@ -398,9 +392,7 @@ impl ModelWatcher {
             let engine = Arc::new(push_router);
             self.manager
                 .add_completions_model(&model_entry.name, engine)?;
-        } else if model_entry.model_input == ModelInput::Tokens
-            && model_entry.model_type.supports_embedding()
-        {
+        } else if card.model_input == ModelInput::Tokens && card.model_type.supports_embedding() {
             // Case 4: Tokens + Embeddings
 
             // Create preprocessing pipeline similar to Backend
@@ -434,9 +426,7 @@ impl ModelWatcher {
 
             self.manager
                 .add_embeddings_model(&model_entry.name, embedding_engine)?;
-        } else if model_entry.model_input == ModelInput::Tensor
-            && model_entry.model_type.supports_tensor()
-        {
+        } else if card.model_input == ModelInput::Tensor && card.model_type.supports_tensor() {
             // Case 5: Tensor + Tensor (non-LLM)
             let push_router = PushRouter::<
                 NvCreateTensorRequest,
@@ -452,8 +442,8 @@ impl ModelWatcher {
             anyhow::bail!(
                 "Unsupported model configuration: {} with {} input. Supported combinations: \
                 Tokens+(Chat|Completions), Text+Chat, Text+Completions, Tokens+Embeddings, Tensor+TensorBased",
-                model_entry.model_type,
-                model_entry.model_input.as_str()
+                card.model_type,
+                card.model_input.as_str()
             );
         }
 

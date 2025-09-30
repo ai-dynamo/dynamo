@@ -18,12 +18,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::discovery::ModelEntry;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
-use crate::model_card::{ModelDeploymentCard, ROOT_PATH as MDC_ROOT_PATH};
+use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
-use dynamo_runtime::slug::Slug;
-use dynamo_runtime::storage::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager};
 
 pub use prometheus::Registry;
 
@@ -472,190 +469,29 @@ impl Metrics {
         }
     }
 
-    /// Update model deployment card metrics for a model
-    /// This should be called when model deployment card information is available
-    pub fn update_mdc_metrics(
-        &self,
-        model_name: &str,
-        context_length: u32,
-        kv_cache_block_size: u32,
-        migration_limit: u32,
-    ) {
+    /// Update metrics from a ModelDeploymentCard
+    /// This updates both runtime config metrics and MDC-specific metrics
+    pub fn update_metrics_from_mdc(&self, card: &ModelDeploymentCard) -> anyhow::Result<()> {
+        self.update_runtime_config_metrics(&card.display_name, &card.runtime_config);
+
         self.model_context_length
-            .with_label_values(&[model_name])
-            .set(context_length as i64);
+            .with_label_values(&[&card.display_name])
+            .set(card.context_length as i64);
 
         self.model_kv_cache_block_size
-            .with_label_values(&[model_name])
-            .set(kv_cache_block_size as i64);
+            .with_label_values(&[&card.display_name])
+            .set(card.kv_cache_block_size as i64);
 
         self.model_migration_limit
-            .with_label_values(&[model_name])
-            .set(migration_limit as i64);
-    }
+            .with_label_values(&[&card.display_name])
+            .set(card.migration_limit as i64);
 
-    /// Update metrics from a ModelEntry
-    /// This is a convenience method that extracts runtime config from a ModelEntry
-    /// and updates the appropriate metrics
-    pub fn update_metrics_from_model_entry(&self, model_entry: &ModelEntry) {
-        if let Some(runtime_config) = &model_entry.runtime_config {
-            self.update_runtime_config_metrics(&model_entry.name, runtime_config);
-        }
-    }
-
-    /// Update metrics from a ModelEntry and its ModelDeploymentCard
-    /// This updates both runtime config metrics and MDC-specific metrics
-    pub async fn update_metrics_from_model_entry_with_mdc(
-        &self,
-        model_entry: &ModelEntry,
-        etcd_client: &dynamo_runtime::transports::etcd::Client,
-    ) -> anyhow::Result<()> {
-        // Update runtime config metrics
-        if let Some(runtime_config) = &model_entry.runtime_config {
-            self.update_runtime_config_metrics(&model_entry.name, runtime_config);
-        }
-
-        // Load and update MDC metrics
-        let model_slug = Slug::from_string(&model_entry.name);
-        let store: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
-        let card_store = Arc::new(KeyValueStoreManager::new(store));
-
-        match card_store
-            .load::<ModelDeploymentCard>(MDC_ROOT_PATH, &model_slug)
-            .await
-        {
-            Ok(Some(mdc)) => {
-                self.update_mdc_metrics(
-                    &model_entry.name,
-                    mdc.context_length,
-                    mdc.kv_cache_block_size,
-                    mdc.migration_limit,
-                );
-                tracing::debug!(
-                    model = %model_entry.name,
-                    "Successfully updated MDC metrics"
-                );
-            }
-            Ok(None) => {
-                tracing::debug!(
-                    model = %model_entry.name,
-                    "No MDC found in storage, skipping MDC metrics"
-                );
-            }
-            Err(e) => {
-                tracing::debug!(
-                    model = %model_entry.name,
-                    error = %e,
-                    "Failed to load MDC for metrics update"
-                );
-            }
-        }
+        tracing::debug!(
+            model = %card.display_name,
+            "Successfully updated MDC metrics"
+        );
 
         Ok(())
-    }
-
-    /// Start a background task that periodically updates runtime config metrics
-    ///
-    /// ## Why Polling is Required
-    ///
-    /// Polling is necessary because new models may come online at any time through the distributed
-    /// discovery system. The ModelManager is continuously updated as workers register/deregister
-    /// with etcd, and we need to periodically check for these changes to expose their metrics.
-    ///
-    /// ## Behavior
-    ///
-    /// - Polls the ModelManager for current models and updates metrics accordingly
-    /// - Models are never removed from metrics to preserve historical data
-    /// - If multiple model instances have the same name, only the first instance's metrics are used
-    /// - Subsequent instances with duplicate names will be skipped
-    ///
-    /// ## MDC (Model Deployment Card) Behavior
-    ///
-    /// Currently, we don't overwrite an MDC. The first worker to start wins, and we assume
-    /// that all other workers claiming to serve that model really are using the same configuration.
-    /// Later, every worker will have its own MDC, and the frontend will validate that they
-    /// checksum the same. For right now, you can assume they have the same MDC, because
-    /// they aren't allowed to change it.
-    ///
-    /// The task will run until the provided cancellation token is cancelled.
-    pub fn start_runtime_config_polling_task(
-        metrics: Arc<Self>,
-        manager: Arc<crate::discovery::ModelManager>,
-        etcd_client: Option<dynamo_runtime::transports::etcd::Client>,
-        poll_interval: Duration,
-        cancel_token: tokio_util::sync::CancellationToken,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(poll_interval);
-            let mut known_models = std::collections::HashSet::new();
-
-            tracing::info!(
-                interval_secs = poll_interval.as_secs(),
-                "Starting runtime config metrics polling task (metrics never removed)"
-            );
-
-            loop {
-                tokio::select! {
-                    _ = cancel_token.cancelled() => {
-                        tracing::info!("Runtime config metrics polling task cancelled");
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        // Continue with polling logic
-                    }
-                }
-
-                // Get current model entries from the manager
-                let current_entries = manager.get_model_entries();
-                let mut current_models = std::collections::HashSet::new();
-
-                // Note: If multiple model instances have the same name, only the first instance's config metrics are recorded.
-                // Subsequent instances with duplicate names will be skipped for config updates.
-                // This is based on the assumption that all workers serving the same model have identical
-                // configuration values (MDC content, runtime config, etc.). This assumption holds because
-                // workers are not allowed to change their configuration after registration.
-
-                // Update configuration metrics for current models
-                for entry in current_entries {
-                    // Skip config processing if we've already seen this model name
-                    if !current_models.insert(entry.name.clone()) {
-                        tracing::debug!(
-                            model_name = %entry.name,
-                            endpoint = ?entry.endpoint_id,
-                            "Skipping duplicate model instance - only first instance config metrics are recorded"
-                        );
-                        continue;
-                    }
-
-                    // Update runtime config metrics if available
-                    if let Some(runtime_config) = &entry.runtime_config {
-                        metrics.update_runtime_config_metrics(&entry.name, runtime_config);
-                    }
-
-                    // Optionally load MDC for additional metrics if etcd is available
-                    if let Some(ref etcd) = etcd_client
-                        && let Err(e) = metrics
-                            .update_metrics_from_model_entry_with_mdc(&entry, etcd)
-                            .await
-                    {
-                        tracing::debug!(
-                            model = %entry.name,
-                            error = %e,
-                            "Failed to update MDC metrics (this is normal if MDC is not available)"
-                        );
-                    }
-                }
-
-                // Update our known models set
-                known_models.extend(current_models.iter().cloned());
-
-                tracing::trace!(
-                    active_models = current_models.len(),
-                    total_known_models = known_models.len(),
-                    "Updated runtime config metrics for active models"
-                );
-            }
-        })
     }
 
     /// Create a new [`InflightGuard`] for the given model and annotate if its a streaming request,

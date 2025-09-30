@@ -687,12 +687,14 @@ dependencies = [
  "once_cell",
  "prometheus",
  "rand 0.9.1",
+ "rayon",
  "regex",
  "serde",
  "serde_json",
  "socket2",
  "thiserror 2.0.12",
  "tokio",
+ "tokio-rayon",
  "tokio-stream",
  "tokio-util",
  "tower-http",
@@ -2846,6 +2848,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.100",
+]
+
+[[package]]
+name = "tokio-rayon"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cf33a76e0b1dd03b778f83244137bd59887abf25c0e87bc3e7071105f457693"
+dependencies = [
+ "rayon",
+ "tokio",
 ]
 
 [[package]]

@@ -107,6 +107,13 @@ impl Instance {
     pub fn id(&self) -> i64 {
         self.instance_id
     }
+    pub fn endpoint_id(&self) -> EndpointId {
+        EndpointId {
+            namespace: self.namespace.clone(),
+            component: self.component.clone(),
+            name: self.endpoint.clone(),
+        }
+    }
 }
 
 /// A [Component] a discoverable entity in the distributed runtime.
