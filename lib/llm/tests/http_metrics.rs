@@ -386,26 +386,21 @@ mod integration_tests {
             .await
             .unwrap();
 
-        // Manually update metrics for the registered model
-        // This simulates what the ModelWatcher would do in production
-        if let Some(etcd_client) = distributed_runtime.etcd_client() {
-            let model_entries = service.model_manager().get_model_entries();
-            for entry in model_entries {
-                if entry.name == local_model.service_name() {
-                    if let Err(e) = service
-                        .state()
-                        .metrics_clone()
-                        .update_metrics_from_model_entry_with_mdc(&entry, &etcd_client)
-                        .await
-                    {
-                        tracing::debug!(
-                            model = %entry.name,
-                            error = %e,
-                            "Failed to update MDC metrics in test"
-                        );
-                    }
-                }
-            }
+        // Manually save the model card and update metrics
+        // This simulates what the ModelWatcher polling task would do in production
+        let card = local_model.card().clone();
+        manager.save_model_card("test-mdc-key", card.clone());
+
+        if let Err(e) = service
+            .state()
+            .metrics_clone()
+            .update_metrics_from_mdc(&card)
+        {
+            tracing::debug!(
+                model = %card.display_name,
+                error = %e,
+                "Failed to update MDC metrics in test"
+            );
         }
 
         // Start the HTTP service
