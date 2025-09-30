@@ -24,12 +24,13 @@ import torch
 import uvloop
 from sglang.srt.conversation import chat_templates
 from transformers import AutoImageProcessor, AutoModel, AutoTokenizer
-from utils.args import Config, parse_args, parse_endpoint
 
 import dynamo.nixl_connect as connect
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.sglang.args import MultimodalConfig, parse_args_multimodal, parse_endpoint
 
+# TODO: Clean up for both vllm and sglang examples and move to common utils and remove sys.path.append
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from utils.encode_utils import encode_image_embeddings
 from utils.image_loader import ImageLoader
@@ -57,7 +58,7 @@ CACHE_SIZE_MAXIMUM = 8
 class SglangEncodeWorker:
     def __init__(
         self,
-        config: Config,
+        config: MultimodalConfig,
         pd_worker_client: Client,
     ) -> None:
         self.pd_worker_client = pd_worker_client
@@ -192,9 +193,9 @@ class SglangEncodeWorker:
         logger.info("Startup completed.")
 
     @classmethod
-    def parse_args(cls) -> Config:
+    def parse_args(cls) -> MultimodalConfig:
         # Use our unified parser following SGLang backend pattern
-        return parse_args(component="encoder")
+        return parse_args_multimodal(component="encoder")
 
 
 async def graceful_shutdown(runtime):
@@ -228,7 +229,7 @@ async def worker(runtime: DistributedRuntime):
     await init(runtime, config)
 
 
-async def init(runtime: DistributedRuntime, config: Config):
+async def init(runtime: DistributedRuntime, config: MultimodalConfig):
     """
     Instantiate and serve
     """

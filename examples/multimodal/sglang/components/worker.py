@@ -26,13 +26,15 @@ import sglang as sgl
 import torch
 import uvloop
 from sglang.srt.utils import get_ip
-from utils.args import Config, DisaggregationMode, parse_args, parse_endpoint
 from utils.protocol import DisaggSglangMultimodalRequest, SglangMultimodalRequest
 
 import dynamo.nixl_connect as connect
 from dynamo._core import Client
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.sglang.args import DisaggregationMode
+from dynamo.sglang.args import MultimodalConfig as Config
+from dynamo.sglang.args import parse_args_multimodal, parse_endpoint
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -566,7 +568,7 @@ class SglangPrefillWorkerHandler(BaseSglangWorkerHandler):
 
 def parse_worker_args() -> Config:
     """Parse command line arguments for worker"""
-    return parse_args(component="worker")
+    return parse_args_multimodal(component="worker")
 
 
 async def graceful_shutdown(runtime):

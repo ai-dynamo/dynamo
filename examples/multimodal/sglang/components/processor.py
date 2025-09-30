@@ -24,19 +24,16 @@ from typing import Any, Dict
 
 import uvloop
 from transformers import AutoTokenizer
-from utils.args import Config, parse_args, parse_endpoint
 from utils.chat_processor import (
     multimodal_request_to_sglang,
     process_sglang_stream_response,
 )
-
-# To import example local module
-# sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from utils.protocol import MultiModalInput, MultiModalRequest, SglangMultimodalRequest
 
 from dynamo.llm import ModelInput, ModelType, register_llm
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.sglang.args import MultimodalConfig, parse_args_multimodal, parse_endpoint
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -53,13 +50,12 @@ class SglangProcessor:
     """
 
     @classmethod
-    def parse_args(cls) -> Config:
-        # Use our unified parser following SGLang backend pattern
-        return parse_args(component="processor")
+    def parse_args(cls) -> MultimodalConfig:
+        return parse_args_multimodal(component="processor")
 
     def __init__(
         self,
-        config: Config,
+        config: MultimodalConfig,
         encode_worker_client: Client,
     ):
         self.encode_worker_client = encode_worker_client
@@ -273,7 +269,7 @@ async def worker(runtime: DistributedRuntime):
     await init(runtime, config)
 
 
-async def init(runtime: DistributedRuntime, config: Config):
+async def init(runtime: DistributedRuntime, config: MultimodalConfig):
     """
     Instantiate and serve
     """
