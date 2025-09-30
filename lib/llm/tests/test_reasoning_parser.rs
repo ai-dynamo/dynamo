@@ -116,7 +116,7 @@ mod tests {
         // Apply the reasoning parser transformation
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
-            runtime_config.reasoning_parser,
+            runtime_config.reasoning_parser.unwrap(),
         );
 
         // Pin the stream and collect all output chunks
@@ -161,7 +161,7 @@ mod tests {
         // Apply the reasoning parser transformation
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
-            runtime_config.reasoning_parser,
+            runtime_config.reasoning_parser.unwrap(),
         );
 
         // Pin the stream and collect all output chunks
@@ -205,7 +205,7 @@ mod tests {
         // Apply the reasoning parser transformation
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
-            runtime_config.reasoning_parser,
+            runtime_config.reasoning_parser.unwrap(),
         );
 
         // Pin the stream and collect all output chunks
@@ -240,7 +240,7 @@ mod tests {
         // Apply the reasoning parser transformation
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
-            runtime_config.reasoning_parser,
+            runtime_config.reasoning_parser.unwrap(),
         );
 
         // Pin the stream and collect all output chunks
@@ -282,7 +282,7 @@ mod tests {
         // Apply the reasoning parser transformation
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
-            runtime_config.reasoning_parser,
+            runtime_config.reasoning_parser.unwrap(),
         );
 
         // Pin the stream and collect all output chunks
@@ -338,7 +338,7 @@ mod tests {
         // Apply the reasoning parser transformation
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
-            runtime_config.reasoning_parser,
+            runtime_config.reasoning_parser.unwrap(),
         );
 
         // Pin the stream and collect all output chunks
@@ -397,7 +397,7 @@ mod tests {
         // Apply the reasoning parser transformation
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
-            runtime_config.reasoning_parser,
+            runtime_config.reasoning_parser.unwrap(),
         );
 
         // Pin the stream and collect all output chunks
