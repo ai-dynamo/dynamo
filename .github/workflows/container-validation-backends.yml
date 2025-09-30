@@ -3,10 +3,6 @@
 
 name: Docker Build and Test
 
-concurrency:
-  group: ${{ github.workflow }}-build-test-frameworks-${{ github.ref_name || github.run_id }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-
 on:
   push:
     branches:
