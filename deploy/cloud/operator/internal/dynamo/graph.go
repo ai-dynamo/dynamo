@@ -729,7 +729,7 @@ func GenerateBasePodSpec(
 			}
 		}
 	}
-	container.Env = MergeEnvs(component.Envs, container.Env)
+	container.Env = MergeEnvs(container.Env, component.Envs)
 
 	// Merge probes entirely if they are passed (no partial merge)
 	if component.LivenessProbe != nil {

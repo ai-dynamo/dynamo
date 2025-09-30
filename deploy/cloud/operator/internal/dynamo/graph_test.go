@@ -625,6 +625,12 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								},
 							},
 						},
+						Envs: []corev1.EnvVar{
+							{
+								Name:  "TEST_ENV",
+								Value: "test-value",
+							},
+						},
 					},
 				},
 			},
@@ -666,6 +672,12 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									Args:    []string{"echo hello world", "sleep 99999"},
 								},
 							},
+							Envs: []corev1.EnvVar{
+								{
+									Name:  "TEST_ENV",
+									Value: "test-value",
+								},
+							},
 						},
 					},
 				},
@@ -699,6 +711,12 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								},
 							},
 							Autoscaling: nil,
+							Envs: []corev1.EnvVar{
+								{
+									Name:  "TEST_ENV",
+									Value: "test-value",
+								},
+							},
 						},
 					},
 				},
@@ -1501,7 +1519,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "http://localhost:9090",
 													},
 													{
-														Name:  "PROMETHEUS_PORT",
+														Name:  "PLANNER_PROMETHEUS_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort),
 													},
 												},
@@ -2276,7 +2294,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "test-namespace",
 													},
 													{
-														Name:  "PROMETHEUS_PORT",
+														Name:  "PLANNER_PROMETHEUS_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort),
 													},
 												},
@@ -3067,7 +3085,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "test-namespace",
 													},
 													{
-														Name:  "PROMETHEUS_PORT",
+														Name:  "PLANNER_PROMETHEUS_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort),
 													},
 												},
@@ -4345,6 +4363,24 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 			backendFramework: BackendFrameworkVLLM,
 			wantEnvVars: map[string]string{
 				"DYN_HTTP_PORT": fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+			},
+		},
+		{
+			name: "frontend with overriding env var",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Envs: []corev1.EnvVar{
+						{
+							Name:  "DYN_HTTP_PORT",
+							Value: "3000",
+						},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			wantEnvVars: map[string]string{
+				"DYN_HTTP_PORT": "3000",
 			},
 		},
 	}
