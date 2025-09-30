@@ -30,6 +30,18 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: {{ include "dynamo-operator.fullname" . }}-ssh-keygen
+      {{- $sshKeygen := .Values.dynamo.mpiRun.sshKeygen | default dict -}}
+      {{- $controller := .Values.controllerManager | default dict -}}
+      {{- $tolerations := ternary $sshKeygen.tolerations $controller.tolerations (hasKey $sshKeygen "tolerations") -}}
+      {{- if $tolerations }}
+      tolerations:
+        {{- toYaml $tolerations | nindent 8 }}
+      {{- end }}
+      {{- $affinity := ternary $sshKeygen.affinity $controller.affinity (hasKey $sshKeygen "affinity") -}}
+      {{- if $affinity }}
+      affinity:
+        {{- toYaml $affinity | nindent 8 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
