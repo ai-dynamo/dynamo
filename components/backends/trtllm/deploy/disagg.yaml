@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
+          image: my-registry/trtllm-runtime:my-tag
     TRTLLMPrefillWorker:
       dynamoNamespace: trtllm-disagg
       envFromSecret: hf-token-secret
@@ -24,13 +24,23 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
+          image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/components/backends/trtllm
           command:
-            - /bin/sh
-            - -c
+          - python3
+          - -m
+          - dynamo.trtllm
           args:
-            - "python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B --extra-engine-args engine_configs/prefill.yaml --disaggregation-mode prefill --disaggregation-strategy decode_first"
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --extra-engine-args
+            - engine_configs/prefill.yaml
+            - --disaggregation-mode
+            - prefill
+            - --disaggregation-strategy
+            - decode_first
     TRTLLMDecodeWorker:
       dynamoNamespace: trtllm-disagg
       envFromSecret: hf-token-secret
@@ -41,10 +51,20 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
+          image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/components/backends/trtllm
           command:
-            - /bin/sh
-            - -c
+          - python3
+          - -m
+          - dynamo.trtllm
           args:
-            - "python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B --extra-engine-args engine_configs/decode.yaml --disaggregation-mode decode --disaggregation-strategy decode_first"
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --extra-engine-args
+            - engine_configs/decode.yaml
+            - --disaggregation-mode
+            - decode
+            - --disaggregation-strategy
+            - decode_first

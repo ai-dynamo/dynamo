@@ -84,13 +84,7 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--profile-results-dir",
         default=SLAPlannerDefaults.profile_results_dir,
-        help="Profile results directory",
-    )
-    parser.add_argument(
-        "--isl", type=int, default=SLAPlannerDefaults.isl, help="Input sequence length"
-    )
-    parser.add_argument(
-        "--osl", type=int, default=SLAPlannerDefaults.osl, help="Output sequence length"
+        help="Profile results directory or 'use-pre-swept-results:<gpu_type>:<framework>:<model>:<tp>:<dp>:<pp>:<block_size>:<max_batch_size>:<gpu_count>' to use pre-swept results from pre_swept_results directory",
     )
     parser.add_argument(
         "--ttft",
@@ -123,5 +117,10 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=SLAPlannerDefaults.no_correction,
         help="Disable correction factor",
+    )
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        help="Model name of deployment (only required for virtual environment)",
     )
     return parser

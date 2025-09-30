@@ -5,16 +5,12 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-disagg-planner
-  annotations:
-    nvidia.com/enable-grove: "false" # temporarily disable grove because current k8s connector does not work with grove
 spec:
   envs:
     - name: DYNAMO_SERVICE_CONFIG
       value: '{"Prometheus":{"global":{"scrape_interval":"5s"},"scrape_configs":[{"job_name":"prometheus","static_configs":[{"targets":["localhost:9090"]}]},{"job_name":"frontend","static_configs":[{"targets":["vllm-disagg-planner-frontend:8000"]}]}]}}'
     - name: DYNAMO_NAMESPACE
       value: "vllm-disagg-planner"
-    - name: PROMETHEUS_PORT
-      value: "8000"
   services:
     Frontend:
       dynamoNamespace: vllm-disagg-planner
@@ -22,7 +18,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-301.6
+          image: my-registry/vllm-runtime:my-tag
     Planner:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
@@ -45,7 +41,7 @@ spec:
         failureThreshold: 10
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-301.6
+          image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/planner/src/dynamo/planner
           ports:
             - name: metrics
@@ -65,45 +61,11 @@ spec:
               --itl=0.01
               --load-predictor=constant
               --no-correction
-    Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
-      dynamoNamespace: vllm-disagg-planner
-      componentType: frontend
-      replicas: 1
-      envs:
-        - name: PYTHONPATH
-          value: "/workspace/components/planner/src"
-      livenessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        initialDelaySeconds: 30
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-301.6
-          workingDir: /workspace/components/backends/vllm
-          command:
-            - /bin/sh
-            - -c
-          args:
-            - "python3 -m dynamo.planner.prometheus"
     VllmDecodeWorker:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
+      subComponentType: decode
       replicas: 1
       resources:
         limits:
@@ -116,7 +78,7 @@ spec:
               port: 9090
             periodSeconds: 30
             failureThreshold: 60
-          image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-301.6
+          image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -127,6 +89,7 @@ spec:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
+      subComponentType: prefill
       replicas: 1
       resources:
         limits:
@@ -139,7 +102,7 @@ spec:
               port: 9090
             periodSeconds: 30
             failureThreshold: 60
-          image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-301.6
+          image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh

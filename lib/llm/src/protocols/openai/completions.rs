@@ -35,6 +35,10 @@ pub struct NvCreateCompletionRequest {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
+
+    // metadata - passthrough parameter without restrictions
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
@@ -190,6 +194,16 @@ impl CommonExtProvider for NvCreateCompletionRequest {
             self.nvext
                 .as_ref()
                 .and_then(|nv| nv.guided_decoding_backend.as_ref()),
+        )
+    }
+
+    fn get_guided_whitespace_pattern(&self) -> Option<String> {
+        choose_with_deprecation(
+            "guided_whitespace_pattern",
+            self.common.guided_whitespace_pattern.as_ref(),
+            self.nvext
+                .as_ref()
+                .and_then(|nv| nv.guided_whitespace_pattern.as_ref()),
         )
     }
 
@@ -432,9 +446,12 @@ impl ValidateRequest for NvCreateCompletionRequest {
         validate::validate_logit_bias(&self.inner.logit_bias)?;
         validate::validate_user(self.inner.user.as_deref())?;
         // none for seed
+        // none for metadata
 
         // Common Ext
         validate::validate_repetition_penalty(self.get_repetition_penalty())?;
+        validate::validate_min_p(self.get_min_p())?;
+        validate::validate_top_k(self.get_top_k())?;
 
         Ok(())
     }

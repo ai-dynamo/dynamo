@@ -34,51 +34,7 @@ docker compose -f deploy/docker-compose.yml up
 
 ## Instructions
 
-### 1. Pull the Container
-
-```bash
-export DYNAMO_CONTAINER_IMAGE="nvcr.io/nvidia/ai-dynamo/tensorrtllm-gpt-oss:latest"
-
-docker pull $DYNAMO_CONTAINER_IMAGE
-```
-
-<details>
-<summary> Building your own container </summary>
-
-If you'd like to build your own Dynamo container, use the following instructions
-
-**For ARM64 (GB200):**
-```bash
-# Navigate to the Dynamo repository root
-cd $DYNAMO_ROOT
-
-export DYNAMO_CONTAINER_IMAGE=dynamo-gpt-oss-arm64
-
-# Build the container with a specific TensorRT-LLM commit
-docker build --platform linux/arm64 -f container/Dockerfile.trtllm_prebuilt . \
-  --build-arg BASE_IMAGE=nvcr.io/nvidia/tensorrt-llm/release \
-  --build-arg BASE_IMAGE_TAG=gpt-oss-dev \
-  --build-arg ARCH=arm64 \
-  --build-arg ARCH_ALT=aarch64 \
-  -t $DYNAMO_CONTAINER_IMAGE
-```
-
-**For x86_64:**
-```bash
-# Navigate to the Dynamo repository root
-cd $DYNAMO_ROOT
-
-export DYNAMO_CONTAINER_IMAGE=dynamo-gpt-oss-amd64
-
-docker build -f container/Dockerfile.trtllm_prebuilt . \
-  --build-arg BASE_IMAGE=nvcr.io/nvidia/tensorrt-llm/release \
-  --build-arg BASE_IMAGE_TAG=gpt-oss-dev \
-  -t $DYNAMO_CONTAINER_IMAGE
-```
-
-</details>
-
-### 2. Download the Model
+### 1. Download the Model
 
 ```bash
 export MODEL_PATH=<LOCAL_MODEL_DIRECTORY>
@@ -89,7 +45,12 @@ pip install -U "huggingface_hub[cli]"
 huggingface-cli download openai/gpt-oss-120b --exclude "original/*" --exclude "metal/*" --local-dir $MODEL_PATH
 ```
 
-### 3. Run the Container
+### 2. Run the Container
+
+Set the container image:
+```bash
+export DYNAMO_CONTAINER_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+```
 
 Launch the Dynamo TensorRT-LLM container with the necessary configurations:
 
@@ -123,7 +84,7 @@ This command:
 - Enables [PDL](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#programmatic-dependent-launch-and-synchronization) and disables parallel weight loading
 - Sets HuggingFace token as environment variable in the container
 
-### 4. Understanding the Configuration
+### 3. Understanding the Configuration
 
 The deployment uses configuration files and command-line arguments to control behavior:
 
@@ -158,7 +119,7 @@ Decode-specific arguments:
 - `--max-num-tokens 16384` - Maximum tokens for decode processing
 - `--max-batch-size 128` - Maximum batch size for decode
 
-### 5. Launch the Deployment
+### 4. Launch the Deployment
 
 You can use the provided launch script or run the components manually:
 

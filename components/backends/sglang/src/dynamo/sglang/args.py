@@ -55,6 +55,12 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": None,
         "help": "Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
     },
+    "use-sglang-tokenizer": {
+        "flags": ["--use-sglang-tokenizer"],
+        "action": "store_true",
+        "default": False,
+        "help": "Use SGLang's tokenizer. This will skip tokenization of the input and output and only v1/chat/completions will be available when using the dynamo frontend",
+    },
 }
 
 
@@ -69,6 +75,9 @@ class DynamoArgs:
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
     custom_jinja_template: Optional[str] = None
+
+    # preprocessing options
+    use_sglang_tokenizer: bool = False
 
 
 class DisaggregationMode(Enum):
@@ -134,13 +143,18 @@ def parse_args(args: list[str]) -> Config:
 
     # Dynamo args
     for info in DYNAMO_ARGS.values():
-        parser.add_argument(
-            *info["flags"],
-            type=info["type"],
-            default=info["default"] if "default" in info else None,
-            help=info["help"],
-            choices=info.get("choices", None),
-        )
+        kwargs = {
+            "default": info["default"] if "default" in info else None,
+            "help": info["help"],
+        }
+        if "type" in info:
+            kwargs["type"] = info["type"]
+        if "choices" in info:
+            kwargs["choices"] = info["choices"]
+        if "action" in info:
+            kwargs["action"] = info["action"]
+
+        parser.add_argument(*info["flags"], **kwargs)
 
     # SGLang args
     bootstrap_port = _reserve_disaggregation_bootstrap_port()
@@ -206,15 +220,20 @@ def parse_args(args: list[str]) -> Config:
         tool_call_parser=tool_call_parser,
         reasoning_parser=reasoning_parser,
         custom_jinja_template=expanded_template_path,
+        use_sglang_tokenizer=parsed_args.use_sglang_tokenizer
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
 
     server_args = ServerArgs.from_cli_args(parsed_args)
 
-    if not server_args.skip_tokenizer_init:
-        logging.warning(
-            "When using the dynamo frontend (python3 -m dynamo.frontend), we perform tokenization and detokenization "
-            "in the frontend. Automatically setting --skip-tokenizer-init to True."
+    if parsed_args.use_sglang_tokenizer:
+        logging.info(
+            "Using SGLang's built in tokenizer. Setting skip_tokenizer_init to False"
+        )
+        server_args.skip_tokenizer_init = False
+    else:
+        logging.info(
+            "Using dynamo's built in tokenizer. Setting skip_tokenizer_init to True"
         )
         server_args.skip_tokenizer_init = True
 

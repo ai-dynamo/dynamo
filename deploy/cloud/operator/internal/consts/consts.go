@@ -37,6 +37,7 @@ const (
 	KubeLabelDynamoNamespace            = "nvidia.com/dynamo-namespace"
 	KubeLabelDynamoDeploymentTargetType = "nvidia.com/dynamo-deployment-target-type"
 	KubeLabelDynamoComponentType        = "nvidia.com/dynamo-component-type"
+	KubeLabelDynamoSubComponentType     = "nvidia.com/dynamo-sub-component-type"
 
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
@@ -73,8 +74,6 @@ const (
 	// Grove multinode role suffixes
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
-
-	MpiRunSshSecretName = "mpi-run-ssh-secret"
 )
 
 type MultinodeDeploymentType string

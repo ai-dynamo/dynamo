@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-chosen_isl=$3
-chosen_osl=$4
+n_prefill=$1
+n_decode=$2
+total_gpus=$3
 
-concurrency_list=$5
+chosen_isl=$4
+chosen_osl=$5
+concurrency_list=$6
+
 IFS='x' read -r -a chosen_concurrencies <<< "$concurrency_list"
-chosen_req_rate=$6
+chosen_req_rate=$7
 
 echo "Config ${chosen_isl}; ${chosen_osl}; ${chosen_concurrencies[@]}; ${chosen_req_rate}"
 
@@ -19,12 +23,12 @@ MODEL_PATH=/model/
 
 source /scripts/benchmark_utils.sh
 
-wait_for_model $head_node $head_port 5 2400 60
+wait_for_model $head_node $head_port $n_prefill $n_decode 5 900 60
 
 sleep 300
 
 set -e
-warmup_model $head_node $head_port $SERVED_MODEL_NAME $MODEL_PATH "${chosen_isl}x${chosen_osl}x10000x10000x${chosen_req_rate}"
+warmup_model $head_node $head_port $SERVED_MODEL_NAME $MODEL_PATH "${chosen_isl}x${chosen_osl}x10000x10000x250"
 set +e
 
 profile_folder="/logs/sglang_isl_${chosen_isl}_osl_${chosen_osl}"

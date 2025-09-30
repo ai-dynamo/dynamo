@@ -47,6 +47,11 @@ type KaiSchedulerConfig struct {
 	Enabled bool
 }
 
+type MpiRunConfig struct {
+	// SecretName is the name of the secret containing the SSH key for MPI Run
+	SecretName string
+}
+
 type Config struct {
 	// Enable resources filtering, only the resources belonging to the given namespace will be handled.
 	RestrictedNamespace string
@@ -60,6 +65,7 @@ type Config struct {
 	ModelExpressURL string
 	// PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics
 	PrometheusEndpoint string
+	MpiRun             MpiRunConfig
 }
 
 type IngressConfig struct {
