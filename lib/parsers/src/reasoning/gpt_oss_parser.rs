@@ -58,7 +58,7 @@ impl GptOssReasoningParser {
 
 impl ReasoningParser for GptOssReasoningParser {
     fn detect_and_parse_reasoning(&mut self, _text: &str, token_ids: &[u32]) -> ParserResult {
-        tracing::debug!(
+        eprintln!(
             "detect_and_parse_reasoning called with {} token_ids",
             token_ids.len()
         );
@@ -66,7 +66,7 @@ impl ReasoningParser for GptOssReasoningParser {
         let parser = &mut self.parser;
 
         for (i, token_id) in token_ids.iter().enumerate() {
-            tracing::debug!(
+            eprintln!(
                 "Processing token {} of {}: {}",
                 i + 1,
                 token_ids.len(),
@@ -79,62 +79,62 @@ impl ReasoningParser for GptOssReasoningParser {
         }
 
         let output_msgs = parser.messages();
-        tracing::debug!("Parser has {} output messages", output_msgs.len());
+        eprintln!("Parser has {} output messages", output_msgs.len());
 
         match output_msgs.len() {
             0 => {
-                tracing::debug!("No output messages, using current content");
+                eprintln!("No output messages, using current content");
                 let current = parser.current_content().unwrap_or_default();
-                tracing::debug!("Current content length: {}", current.len());
+                eprintln!("Current content length: {}", current.len());
                 ParserResult {
                     normal_text: String::new(),
                     reasoning_text: current,
                 }
             }
             1 => {
-                tracing::debug!("Single output message detected");
+                eprintln!("Single output message detected");
                 let mut reasoning_text = String::new();
                 if let Some(openai_harmony::chat::Content::Text(TextContent { text })) =
                     output_msgs[0].content.first()
                 {
                     reasoning_text.push_str(text);
-                    tracing::debug!("Extracted reasoning text length: {}", reasoning_text.len());
+                    eprintln!("Extracted reasoning text length: {}", reasoning_text.len());
                 }
                 let current = parser.current_content().unwrap_or_default();
-                tracing::debug!("Current content length: {}", current.len());
+                eprintln!("Current content length: {}", current.len());
                 ParserResult {
                     normal_text: current,
                     reasoning_text,
                 }
             }
             _ => {
-                tracing::debug!("Multiple output messages detected: {}", output_msgs.len());
+                eprintln!("Multiple output messages detected: {}", output_msgs.len());
                 let mut reasoning_text = String::new();
                 let mut normal_text = String::new();
 
                 // Loop until second last message
                 for (i, parse_msg) in output_msgs.iter().take(output_msgs.len() - 1).enumerate() {
-                    tracing::debug!("Processing reasoning message {}", i + 1);
+                    eprintln!("Processing reasoning message {}", i + 1);
                     if let Some(openai_harmony::chat::Content::Text(TextContent { text })) =
                         parse_msg.content.first()
                     {
                         reasoning_text.push_str(text);
-                        tracing::debug!("Added {} chars to reasoning text", text.len());
+                        eprintln!("Added {} chars to reasoning text", text.len());
                     }
                 }
 
                 let last_msg = &output_msgs[output_msgs.len() - 1];
-                tracing::debug!("Processing final message");
+                eprintln!("Processing final message");
 
                 // Handle the last message
                 if let Some(openai_harmony::chat::Content::Text(TextContent { text })) =
                     last_msg.content.first()
                 {
                     normal_text.push_str(text);
-                    tracing::debug!("Added {} chars to normal text", text.len());
+                    eprintln!("Added {} chars to normal text", text.len());
                 }
 
-                tracing::debug!(
+                eprintln!(
                     "Final result - normal_text: {} chars, reasoning_text: {} chars",
                     normal_text.len(),
                     reasoning_text.len()
@@ -153,12 +153,15 @@ impl ReasoningParser for GptOssReasoningParser {
         text: &str,
         token_ids: &[u32],
     ) -> ParserResult {
-        tracing::debug!(
+        eprintln!(
             "parse_reasoning_streaming_incremental called with {} token_ids",
             token_ids.len()
         );
 
         let parser: &mut StreamableParser = &mut self.parser;
+        let mut normal_delta = String::new();
+        let mut reasoning_delta = String::new();
+
         for (i, token_id) in token_ids.iter().enumerate() {
             tracing::debug!(
                 "Processing streaming token {} of {}: {}",
@@ -170,13 +173,38 @@ impl ReasoningParser for GptOssReasoningParser {
                 tracing::warn!("Harmony parse error for token_id {token_id}: {e}");
                 return ParserResult::default();
             }
+
+            if let Some(delta) = parser.last_content_delta().unwrap_or_default() {
+                if let Some(channel) = parser.current_channel() {
+                    match channel.as_str() {
+                        "final" => normal_delta.push_str(&delta),
+                        "analysis" => reasoning_delta.push_str(&delta),
+                        "commentary" => {}
+                        _ => {}
+
+                    }
+                }
+            }
         }
 
-        if let Some(channel) = self.parser.current_channel() {
+        if !normal_delta.is_empty() || !reasoning_delta.is_empty() {
+            tracing::debug!(
+                "Returning aggregated deltas: normal: {} chars, reasoning: {} chars",
+                normal_delta.len(),
+                reasoning_delta.len()
+            );
+            return ParserResult {
+                normal_text: normal_delta,
+                reasoning_text: reasoning_delta,
+            };
+        }       
+
+
+        if let Some(channel) = parser.current_channel() {
             tracing::debug!("Current channel {}", channel);
             if channel == "final" {
                 // If we're in the final channel, we should not parse reasoning
-                if let Some(current) = self.parser.last_content_delta().unwrap_or_default() {
+                if let Some(current) = parser.last_content_delta().unwrap_or_default() {
                     tracing::debug!("Got normal text delta of {} chars", current.len());
                     return ParserResult {
                         normal_text: current,
@@ -189,7 +217,7 @@ impl ReasoningParser for GptOssReasoningParser {
                 // If we're in the commentary channel, we should return raw token content and recover content that has been consumed by the parser
                 // so that the tool parser can process it properly
                 if let Ok(enc) = get_harmony_encoding() {
-                    let current_content = self.parser.current_content().unwrap_or_default();
+                    let current_content = parser.current_content().unwrap_or_default();
                     let mut final_text = text.to_string();
 
                     // Restore commentary metadata consumed by the parser so the tool-call parser can
@@ -206,7 +234,7 @@ impl ReasoningParser for GptOssReasoningParser {
 
                     // Recovery should only happen once, and only when `current_content` is empty.
                     if current_content.is_empty() {
-                        let tokens = self.parser.tokens();
+                        let tokens = parser.tokens();
 
                         // Get the token id for " <|channel|>"
                         let channel_token_id = enc
@@ -222,14 +250,12 @@ impl ReasoningParser for GptOssReasoningParser {
                             })
                             .unwrap_or(0);
 
-                        // Then get the generated text from the last <|channel|> to the end of self.parser.tokens()
-                        let end_token_idx = self.parser.tokens().len();
+                        // Then get the generated text from the last <|channel|> to the end of parser.tokens()
+                        let end_token_idx = parser.tokens().len();
                         // Use Harmony's decode_utf8 to decode tokens into text
                         let generated_text = enc
                             .tokenizer()
-                            .decode_utf8(
-                                &self.parser.tokens()[last_channel_token_idx..end_token_idx],
-                            )
+                            .decode_utf8(&parser.tokens()[last_channel_token_idx..end_token_idx])
                             .unwrap_or_default();
 
                         final_text = generated_text;
@@ -245,7 +271,7 @@ impl ReasoningParser for GptOssReasoningParser {
                 }
             } else {
                 tracing::debug!("In reasoning channel: {}", channel);
-                if let Some(current) = self.parser.last_content_delta().unwrap_or_default() {
+                    if let Some(current) = parser.last_content_delta().unwrap_or_default() {
                     tracing::debug!("Got reasoning text delta of {} chars", current.len());
                     return ParserResult {
                         normal_text: String::new(),
@@ -303,4 +329,86 @@ mod tests {
                 == "The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed."
         );
     }
+
+    #[test]
+    fn test_gpt_oss_reasoning_parser_streaming_chunked() {
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let enc = get_harmony_encoding()
+            .as_ref()
+            .expect("Failed to get encoding");
+        let text = "<|channel|>analysis<|message|>The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed.<|end|><|start|>assistant<|channel|>final<|message|>The capital of Brazil is Brasília.";
+        let token_ids = enc.tokenizer().encode_with_special_tokens(text);
+        let mut reasoning_text_incr = String::new();
+        let mut normal_text_incr = String::new();
+
+        let mut idx = 0;
+        let chunk_size = 4;
+        while idx < token_ids.len() {
+            let end = (idx + chunk_size).min(token_ids.len());
+            let result =
+                parser.parse_reasoning_streaming_incremental("Test text", &token_ids[idx..end]);
+            normal_text_incr.push_str(&result.normal_text);
+            reasoning_text_incr.push_str(&result.reasoning_text);
+            idx = end;
+        }
+
+        assert_eq!(normal_text_incr, "The capital of Brazil is Brasília.");
+        assert_eq!(
+            reasoning_text_incr,
+            "The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed."
+        );
+    }
 }
+
+    #[test]
+    fn test_gpt_oss_reasoning_parser_streaming_in_question() {
+        let text = "<|channel|>analysis<|message|>User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>{}";
+        let enc = get_harmony_encoding()
+            .as_ref()
+            .expect("Failed to get encoding");
+        let token_ids = enc.tokenizer().encode_with_special_tokens(text); // Example token IDs
+        // Send token one by one
+        {
+            let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+            let mut reasoning_text_incr = String::new();
+            let mut normal_text_incr = String::new();
+            for token in token_ids.iter() {
+                let result = parser.parse_reasoning_streaming_incremental("", &[(*token)]);
+                normal_text_incr.push_str(&result.normal_text);
+                reasoning_text_incr.push_str(&result.reasoning_text);
+            }
+            assert_eq!(
+                reasoning_text_incr,
+                "User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function."
+            );
+            // [gluo TODO] missing "<|start|>assistant" and "{}" from original message
+            assert_eq!(normal_text_incr, "<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>");
+        }
+        // Send token in chunks (chunking obtained from actual model output)
+        {
+            let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+            let mut reasoning_text_incr = String::new();
+            let mut normal_text_incr = String::new();
+            let chunk_tokens = vec![vec![200005],
+            vec![35644, 200008, 1844, 31064, 25, 392, 25216, 11, 4853],
+            vec![2371, 25, 382, 5519, 869, 326, 6788, 16842, 1416, 1757],
+            vec![2371, 2420, 3230, 2360, 290, 5181, 1114, 717, 39303, 126214],
+            vec![13, 7649, 1114, 13, 200007, 200006, 173781, 200005, 12606, 815],
+            vec![316, 28, 44580, 775, 39303, 126214, 220, 200003, 4108, 200008],
+            vec![12083]];
+            // concatenate chunk tokens and verify they match original token_ids
+            let concatenated: Vec<u32> = chunk_tokens.iter().flatten().copied().collect();
+            assert_eq!(concatenated, token_ids);
+
+            for token in chunk_tokens.iter() {
+                let result = parser.parse_reasoning_streaming_incremental("", &token);
+                normal_text_incr.push_str(&result.normal_text);
+                reasoning_text_incr.push_str(&result.reasoning_text);
+            }
+            assert_eq!(
+                reasoning_text_incr,
+                "User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function."
+            );
+            assert_eq!(normal_text_incr, "<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>");
+        }
+    }
