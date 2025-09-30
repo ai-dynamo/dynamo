@@ -126,7 +126,9 @@ def test_sglang_disagg_dp_attention(request, runtime_services, predownload_model
 @pytest.mark.gpu_1
 def test_custom_jinja_template_mdc(request, runtime_services, predownload_models):
     """Test that custom jinja template is correctly stored in MDC (etcd/NATS).
-    This test
+
+    This test loads a model (Qwen/Qwen3-0.6B) with a custom chat template (look at launch/sglang_custom_template.sh).
+    Once the frontend + backend worker are setup, this test will pull the MDC from etcd and the jinja template from NATS.
     """
 
     config = sglang_configs["custom_chat_template"]
@@ -159,18 +161,14 @@ def test_custom_jinja_template_mdc(request, runtime_services, predownload_models
         ), f"Template info missing 'path' field. Template info: {template_info}"
 
         nats_url = template_info["path"]
-
-        # Download template from NATS
         downloaded_template = download_from_nats(nats_url)
-        print(downloaded_template)
-        # Compare templates
+
         if expected_template != downloaded_template:
-            # Print both templates for inspection
-            print("\n=== EXPECTED TEMPLATE ===")
-            print(expected_template)
-            print("\n=== DOWNLOADED TEMPLATE ===")
-            print(downloaded_template)
-            print("\n")
+            logger.info("\n=== EXPECTED TEMPLATE ===")
+            logger.info(expected_template)
+            logger.info("\n=== DOWNLOADED TEMPLATE ===")
+            logger.info(downloaded_template)
+            logger.info("\n")
 
             assert False, "Expected and Downloaded Template do not match"
 
@@ -181,16 +179,16 @@ def test_custom_jinja_template_mdc(request, runtime_services, predownload_models
 def test_custom_template_verification(request, runtime_services, predownload_models):
     """Test that custom jinja template is applied during preprocessing.
 
-    This test verifies that:
-    1. The custom template is applied by the frontend
-    2. The template marker appears in the tokenized input
-    3. The backend correctly identifies the marker
+    This test will load a mock model + custom jinja template directly using register_llm().
+    The mock model has a custom generate() function (see launch/template_verifier.*).
+    The generate() function will validate that the jinja template has been successfully
+    applied to the input prompt by looking for the 'CUSTOM_TEMPLATE_ACTIVE|' prefix and
+    return "Successfully Applied Chat Template" if found, or a failure message otherwise.
     """
 
     config = sglang_configs["template_verification"]
 
     with EngineProcess.from_script(config, request) as _:
-        # Send test request
         payload = {
             "model": config.model,
             "messages": [{"role": "user", "content": "test message"}],
@@ -219,6 +217,7 @@ def test_custom_template_verification(request, runtime_services, predownload_mod
         elif "text" in result["choices"][0]:
             message_content = result["choices"][0].get("text", "")
 
+        # Success/Failure Messages are hardcoded in launch/template_verifier.py
         assert (
             "Successfully Applied Chat Template" in message_content
         ), f"Template verification failed. Response: {message_content}"
