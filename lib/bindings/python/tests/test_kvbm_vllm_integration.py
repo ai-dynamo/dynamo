@@ -5,7 +5,11 @@ from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
-import torch
+
+try:
+    import torch
+except ImportError:
+    pass
 
 try:
     from vllm.multimodal.inputs import MultiModalKwargs

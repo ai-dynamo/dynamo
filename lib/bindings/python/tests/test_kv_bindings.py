@@ -43,6 +43,7 @@ async def distributed_runtime():
     loop = asyncio.get_running_loop()
     return DistributedRuntime(loop, False)
 
+
 # TODO: enable pytest.mark.forked + scope='function' runtime.
 async def test_radix_tree_binding(distributed_runtime):
     """Test RadixTree binding directly with store event and find matches"""
@@ -155,6 +156,7 @@ async def test_event_handler(distributed_runtime):
                 not scores.scores
             ), f"Scores still present after {(retry+1)*0.5}s: {scores.scores}"
 
+
 # TODO: enable pytest.mark.forked + scope='function' runtime.
 async def test_approx_kv_indexer(distributed_runtime):
     kv_block_size = 32
@@ -211,6 +213,7 @@ class EventPublisher:
             ],  # block_hashes
         )
         self.event_id_counter += 1
+
 
 # TODO: enable pytest.mark.forked + scope='function' runtime.
 async def test_metrics_aggregator(distributed_runtime):

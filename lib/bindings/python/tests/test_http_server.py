@@ -77,6 +77,7 @@ class MockHttpEngine:
             }
             await asyncio.sleep(0.01)
 
+
 @pytest.fixture(scope="function", autouse=False)
 async def http_server(runtime: DistributedRuntime):
     """Fixture to start a mock HTTP server using HttpService, contributed by Baseten."""
