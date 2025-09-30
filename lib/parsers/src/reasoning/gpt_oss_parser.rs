@@ -58,7 +58,7 @@ impl GptOssReasoningParser {
 
 impl ReasoningParser for GptOssReasoningParser {
     fn detect_and_parse_reasoning(&mut self, _text: &str, token_ids: &[u32]) -> ParserResult {
-        eprintln!(
+        tracing::debug!(
             "detect_and_parse_reasoning called with {} token_ids",
             token_ids.len()
         );
@@ -66,7 +66,7 @@ impl ReasoningParser for GptOssReasoningParser {
         let parser = &mut self.parser;
 
         for (i, token_id) in token_ids.iter().enumerate() {
-            eprintln!(
+            tracing::debug!(
                 "Processing token {} of {}: {}",
                 i + 1,
                 token_ids.len(),
@@ -79,62 +79,62 @@ impl ReasoningParser for GptOssReasoningParser {
         }
 
         let output_msgs = parser.messages();
-        eprintln!("Parser has {} output messages", output_msgs.len());
+        tracing::debug!("Parser has {} output messages", output_msgs.len());
 
         match output_msgs.len() {
             0 => {
-                eprintln!("No output messages, using current content");
+                tracing::debug!("No output messages, using current content");
                 let current = parser.current_content().unwrap_or_default();
-                eprintln!("Current content length: {}", current.len());
+                tracing::debug!("Current content length: {}", current.len());
                 ParserResult {
                     normal_text: String::new(),
                     reasoning_text: current,
                 }
             }
             1 => {
-                eprintln!("Single output message detected");
+                tracing::debug!("Single output message detected");
                 let mut reasoning_text = String::new();
                 if let Some(openai_harmony::chat::Content::Text(TextContent { text })) =
                     output_msgs[0].content.first()
                 {
                     reasoning_text.push_str(text);
-                    eprintln!("Extracted reasoning text length: {}", reasoning_text.len());
+                    tracing::debug!("Extracted reasoning text length: {}", reasoning_text.len());
                 }
                 let current = parser.current_content().unwrap_or_default();
-                eprintln!("Current content length: {}", current.len());
+                tracing::debug!("Current content length: {}", current.len());
                 ParserResult {
                     normal_text: current,
                     reasoning_text,
                 }
             }
             _ => {
-                eprintln!("Multiple output messages detected: {}", output_msgs.len());
+                tracing::debug!("Multiple output messages detected: {}", output_msgs.len());
                 let mut reasoning_text = String::new();
                 let mut normal_text = String::new();
 
                 // Loop until second last message
                 for (i, parse_msg) in output_msgs.iter().take(output_msgs.len() - 1).enumerate() {
-                    eprintln!("Processing reasoning message {}", i + 1);
+                    tracing::debug!("Processing reasoning message {}", i + 1);
                     if let Some(openai_harmony::chat::Content::Text(TextContent { text })) =
                         parse_msg.content.first()
                     {
                         reasoning_text.push_str(text);
-                        eprintln!("Added {} chars to reasoning text", text.len());
+                        tracing::debug!("Added {} chars to reasoning text", text.len());
                     }
                 }
 
                 let last_msg = &output_msgs[output_msgs.len() - 1];
-                eprintln!("Processing final message");
+                tracing::debug!("Processing final message");
 
                 // Handle the last message
                 if let Some(openai_harmony::chat::Content::Text(TextContent { text })) =
                     last_msg.content.first()
                 {
                     normal_text.push_str(text);
-                    eprintln!("Added {} chars to normal text", text.len());
+                    tracing::debug!("Added {} chars to normal text", text.len());
                 }
 
-                eprintln!(
+                tracing::debug!(
                     "Final result - normal_text: {} chars, reasoning_text: {} chars",
                     normal_text.len(),
                     reasoning_text.len()
@@ -153,7 +153,7 @@ impl ReasoningParser for GptOssReasoningParser {
         text: &str,
         token_ids: &[u32],
     ) -> ParserResult {
-        eprintln!(
+        tracing::debug!(
             "parse_reasoning_streaming_incremental called with {} token_ids",
             token_ids.len()
         );
