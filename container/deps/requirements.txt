@@ -30,6 +30,7 @@ protobuf==5.29.5
 pydantic==2.10.6
 pyright
 PyYAML
+ray[default]==2.49.1
 scikit-learn
 scipy<1.14.0  # Pin scipy version for pmdarima compatibility
 sentencepiece
