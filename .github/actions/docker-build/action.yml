@@ -9,6 +9,10 @@ inputs:
     description: 'Target to build'
     required: false
     default: 'runtime'
+  platform:
+    description: 'Docker platform to build on, ie. linux/amd64'
+    required: false
+    default: 'linux/amd64'
   image_tag:
     description: 'Custom image tag (optional, defaults to framework:latest)'
     required: false
@@ -75,6 +79,7 @@ runs:
         ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \
           --framework ${{ inputs.framework }} \
+          --platform ${{ inputs.platform }} \
           --use-sccache \
           --sccache-bucket "$SCCACHE_S3_BUCKET" \
           --sccache-region "$AWS_DEFAULT_REGION"

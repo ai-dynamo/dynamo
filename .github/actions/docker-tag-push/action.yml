@@ -1,3 +1,5 @@
+description: 'Tag and Push Docker Images'
+
 inputs:
   local_image:
     description: 'Local Image Name:Tag'
