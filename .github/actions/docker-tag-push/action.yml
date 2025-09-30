@@ -5,7 +5,7 @@ inputs:
     description: 'Local Image Name:Tag'
     required: true
   push_tag:
-    description: 'Target tag'
+    description: 'Target Name:Tag'
     required: true
   aws_push:
     description: 'Push to AWS Boolean'
@@ -50,7 +50,7 @@ runs:
     - name: Install awscli
       shell: bash
       run: |
-        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "awscliv2.zip"
         unzip awscliv2.zip
         sudo ./aws/install
     - name: ECR Login
