@@ -1,5 +1,6 @@
 #!/bin/bash
-# Launch script for template verification backend
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 set -e
 
