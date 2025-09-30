@@ -15,9 +15,8 @@
 
 # For IFEval dataset loading in kvbm tests
 datasets
-# For pulling chat template from MDC
-etcd3-py
-nats-py
+etcd3-py # For pulling MDC from etcd in tests/serve/test_<backend>.py
+nats-py  # For pulling uploaded chat template from NATS in tests/serve/test_<backend>.py
 psutil>=5.0.0
 pyright
 pytest
