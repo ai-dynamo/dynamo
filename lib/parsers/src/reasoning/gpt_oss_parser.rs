@@ -340,7 +340,7 @@ mod tests {
 }
 
 #[test]
-fn test_gpt_oss_reasoning_parser_streaming_in_question() {
+fn test_gpt_oss_reasoning_parser_streaming_variable_length_chunks() {
     let text = "<|channel|>analysis<|message|>User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>{}";
     let enc = get_harmony_encoding()
         .as_ref()
