@@ -292,22 +292,23 @@ pub fn try_tool_call_parse_basic_json(
     // Convert json (String) to &str
     let json = json.as_str();
     // Anonymous function to attempt deserialization into a known representation
-    let parse = |name: String, mut args: HashMap<String, Value>| -> anyhow::Result<ToolCallResponse> {
-        // Unescape argument values to avoid leaking over-escaped JSON string literals
-        for (_k, v) in args.iter_mut() {
-            unescape_argument_values(v);
-        }
-        // Preserve nested JSON strings intact; do not double-escape.
-        // serde_json::to_string on Value preserves required escapes only.
-        Ok(ToolCallResponse {
-            id: format!("call-{}", Uuid::new_v4()),
-            tp: ToolCallType::Function,
-            function: CalledFunction {
-                name,
-                arguments: serde_json::to_string(&args)?,
-            },
-        })
-    };
+    let parse =
+        |name: String, mut args: HashMap<String, Value>| -> anyhow::Result<ToolCallResponse> {
+            // Unescape argument values to avoid leaking over-escaped JSON string literals
+            for (_k, v) in args.iter_mut() {
+                unescape_argument_values(v);
+            }
+            // Preserve nested JSON strings intact; do not double-escape.
+            // serde_json::to_string on Value preserves required escapes only.
+            Ok(ToolCallResponse {
+                id: format!("call-{}", Uuid::new_v4()),
+                tp: ToolCallType::Function,
+                function: CalledFunction {
+                    name,
+                    arguments: serde_json::to_string(&args)?,
+                },
+            })
+        };
 
     // CalledFunctionParameters: Single { name, parameters }
     // Example:
