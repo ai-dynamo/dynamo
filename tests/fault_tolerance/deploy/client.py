@@ -23,6 +23,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import requests
+
 from tests.utils.managed_deployment import ManagedDeployment
 
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -131,10 +133,6 @@ def wait_for_model_availability(
     if attempt_timeouts is None:
         # Default: Start with 60s timeout, then gradually decrease
         attempt_timeouts = [60, 60, 45, 30, 30, 20, 20, 15, 15, 15, 10, 10, 10, 10, 10]
-
-    import time
-
-    import requests
 
     test_url = f"{url}{endpoint}"
 
@@ -475,8 +473,6 @@ def client(
 
         # Add a startup delay for early clients to give model time to load
         if index < 5:
-            import time
-
             wait_time = 30 - (index * 5)  # 30, 25, 20, 15, 10 seconds
             logger.info(
                 f"Client {index} waiting {wait_time}s for model registration..."
