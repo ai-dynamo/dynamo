@@ -30,23 +30,22 @@ from tabulate import tabulate
 
 def parse_test_log(
     file_path: str,
-) -> Tuple[Optional[float], Optional[datetime], Optional[List[str]]]:
+) -> Tuple[Optional[float], Optional[List[str]]]:
     """
-    Parse test log for startup time and fault injection time.
+    Parse test log for startup time and failure info.
 
     Args:
         file_path: Path to test.log.txt
 
     Returns:
-        Tuple of (startup_time_seconds, fault_time, start_cmd)
+        Tuple of (startup_time_seconds, failure_info)
     """
     start_time = None
     ready_time = None
-    fault_time = None
-    start_cmd: Optional[List[str]] = None
+    failure_info: Optional[List[str]] = None
 
     if not os.path.isfile(file_path):
-        return None, None, None
+        return None, None
 
     with open(file_path, "r") as f:
         for line in f:
@@ -64,26 +63,23 @@ def parse_test_log(
                 ready_time = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S")
 
             # Look for fault injection
-            if "Injecting failure for:" in line and timestamp_match:
-                timestamp = timestamp_match.group(1)
-                fault_time = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S")
-
+            if "Injecting failure for:" in line:
                 # Extract failure details
                 match = re.search(r"Failure\((.*?)\)", line)
                 if match:
                     failure_str = match.group(1)
                     parts = failure_str.split(", ")
-                    failure_info = {}
+                    failure_dict = {}
                     for part in parts:
                         key_val = part.split("=")
                         if len(key_val) == 2:
-                            failure_info[key_val[0]] = key_val[1]
+                            failure_dict[key_val[0]] = key_val[1]
 
                     # Build command list from failure info
-                    if failure_info:
-                        start_cmd = [
-                            failure_info.get("pod_name", "unknown"),
-                            failure_info.get("command", "unknown"),
+                    if failure_dict:
+                        failure_info = [
+                            failure_dict.get("pod_name", "unknown").strip("'\""),
+                            failure_dict.get("command", "unknown").strip("'\""),
                         ]
 
     # Calculate startup time in seconds
@@ -91,85 +87,99 @@ def parse_test_log(
     if start_time and ready_time:
         startup_time = (ready_time - start_time).total_seconds()
 
-    return startup_time, fault_time, start_cmd
+    return startup_time, failure_info
 
 
 def calculate_recovery_time(
-    fault_time: Optional[datetime],
     failure_info: Optional[List[str]],
     process_logs_dir: str,
 ) -> Optional[float]:
     """
-    Calculate recovery time after fault injection by finding when the container restarted.
+    Calculate recovery time by comparing last timestamp in .previous.log with first in current log.
+    This avoids timezone issues between test.log.txt and container logs.
 
     Args:
-        fault_time: Time when fault was injected
         failure_info: List with [pod_name, command] from fault injection
         process_logs_dir: Directory containing process log files
 
     Returns:
         Recovery time in seconds or None if not found
     """
-    if not fault_time or not failure_info:
+    if not failure_info:
         return None
 
-    # Determine component type from failure info
-    component_type = failure_info[0]  # e.g., "Frontend" or "decode"
+    # Determine component type from failure info (strip any quotes)
+    component_type = failure_info[0].strip("'\"")  # e.g., "Frontend" or "decode"
     component_dir = os.path.join(process_logs_dir, component_type)
 
     if not os.path.exists(component_dir):
         return None
 
-    # Find the earliest timestamp from current container logs (not .previous.log or .metrics.log)
-    earliest_recovery = None
+    last_timestamp_before = None
+    first_timestamp_after = None
 
+    # Find the last timestamp from .previous.log (container before restart)
     for log_file in os.listdir(component_dir):
-        # Skip non-current logs
-        if not log_file.endswith(".log") or log_file.endswith(
+        if log_file.endswith(".previous.log"):
+            log_path = os.path.join(component_dir, log_file)
+            try:
+                with open(log_path, "r") as f:
+                    # Read last few lines to find last valid timestamp
+                    lines = f.readlines()
+                    for line in reversed(lines[-10:]):  # Check last 10 lines
+                        if '"time":"' in line:
+                            try:
+                                log_entry = json.loads(line)
+                                timestamp_str = log_entry.get("time", "")[:19]
+                                last_timestamp_before = datetime.strptime(
+                                    timestamp_str, "%Y-%m-%dT%H:%M:%S"
+                                )
+                                break
+                            except (json.JSONDecodeError, ValueError):
+                                continue
+            except IOError as e:
+                logging.debug(f"Could not read {log_file}: {e}")
+
+    # Find the first timestamp from current container log
+    for log_file in os.listdir(component_dir):
+        if log_file.endswith(".log") and not log_file.endswith(
             (".previous.log", ".metrics.log")
         ):
-            continue
+            log_path = os.path.join(component_dir, log_file)
+            try:
+                with open(log_path, "r") as f:
+                    first_line = f.readline()
+                    if first_line and '"time":"' in first_line:
+                        log_entry = json.loads(first_line)
+                        timestamp_str = log_entry.get("time", "")[:19]
+                        first_timestamp_after = datetime.strptime(
+                            timestamp_str, "%Y-%m-%dT%H:%M:%S"
+                        )
+            except (json.JSONDecodeError, ValueError, IOError) as e:
+                logging.debug(f"Could not parse timestamp from {log_file}: {e}")
 
-        log_path = os.path.join(component_dir, log_file)
-
-        # Get first timestamp from this log file
-        try:
-            with open(log_path, "r") as f:
-                first_line = f.readline()
-                if not first_line:
-                    continue
-
-                # Try to extract timestamp from JSON log
-                if '"time":"' in first_line:
-                    log_entry = json.loads(first_line)
-                    timestamp_str = log_entry.get("time", "")[:19]
-                    timestamp = datetime.strptime(timestamp_str, "%Y-%m-%dT%H:%M:%S")
-
-                    # Only consider timestamps after the fault
-                    if timestamp > fault_time:
-                        if not earliest_recovery or timestamp < earliest_recovery:
-                            earliest_recovery = timestamp
-
-        except (json.JSONDecodeError, ValueError, IOError) as e:
-            logging.debug(f"Could not parse timestamp from {log_file}: {e}")
-            continue
-
-    if earliest_recovery:
-        return (earliest_recovery - fault_time).total_seconds()
+    # Calculate recovery time from container timestamps (both in UTC)
+    if last_timestamp_before and first_timestamp_after:
+        recovery_time = (first_timestamp_after - last_timestamp_before).total_seconds()
+        # Sanity check - recovery should be seconds/minutes, not hours
+        if recovery_time > 3600:  # More than 1 hour is likely wrong
+            logging.warning(
+                f"Recovery time {recovery_time}s seems too large, possible timezone issue"
+            )
+        return recovery_time
 
     return None
 
 
-def parse_aiperf_client_results(log_dir: str, num_clients: int) -> Dict[str, Any]:
+def parse_aiperf_client_results(log_dir: str) -> Dict[str, Any]:
     """
-    Parse AI-Perf results from multiple clients.
+    Parse AI-Perf results from all client directories.
 
     Args:
         log_dir: Directory containing client result directories
-        num_clients: Number of client processes
 
     Returns:
-        Dictionary with aggregated metrics
+        Dictionary with aggregated metrics and client count
     """
     all_metrics = {
         "total_requests": 0,
@@ -182,10 +192,18 @@ def parse_aiperf_client_results(log_dir: str, num_clients: int) -> Dict[str, Any
         "p50_latencies": [],
         "p90_latencies": [],
         "p99_latencies": [],
+        "num_clients": 0,
     }
 
-    for i in range(num_clients):
-        client_dir = Path(log_dir) / f"client_{i}"
+    # Iterate over actual client directories
+    for item in sorted(os.listdir(log_dir)):
+        if not item.startswith("client_") or not os.path.isdir(
+            os.path.join(log_dir, item)
+        ):
+            continue
+
+        client_dir = Path(log_dir) / item
+        all_metrics["num_clients"] += 1
 
         # Look for AI-Perf results in attempt directories
         profile_json = None
@@ -198,7 +216,7 @@ def parse_aiperf_client_results(log_dir: str, num_clients: int) -> Dict[str, Any
                 break  # Use the first successful attempt
 
         if not profile_json:
-            logging.warning(f"No AI-Perf results found for client_{i} in {client_dir}")
+            logging.warning(f"No AI-Perf results found for {item} in {client_dir}")
         else:
             try:
                 with open(profile_json) as f:
@@ -265,7 +283,7 @@ def parse_aiperf_client_results(log_dir: str, num_clients: int) -> Dict[str, Any
                     all_metrics["throughputs"].append(req_throughput)
 
             except Exception as e:
-                logging.error(f"Error parsing client_{i} results: {e}")
+                logging.error(f"Error parsing {item} results: {e}")
 
     return all_metrics
 
@@ -395,25 +413,18 @@ def process_single_test(
     """
     # Parse test configuration
     test_log = os.path.join(log_dir, "test.log.txt")
-    startup_time, fault_time, failure_info = parse_test_log(test_log)
+    startup_time, failure_info = parse_test_log(test_log)
 
     # Calculate recovery time only if fault was injected
     recovery_time = None
-    if fault_time and failure_info:
-        recovery_time = calculate_recovery_time(fault_time, failure_info, log_dir)
+    if failure_info:
+        recovery_time = calculate_recovery_time(failure_info, log_dir)
 
-    # Clear startup_time if no fault injection (it's not relevant for "none" scenarios)
-    if not fault_time:
-        startup_time = None
+    # Parse AI-Perf results (also counts clients)
+    metrics = parse_aiperf_client_results(log_dir)
 
-    # Count number of clients (client_X directories)
-    num_clients = 0
-    for item in os.listdir(log_dir):
-        if item.startswith("client_") and os.path.isdir(os.path.join(log_dir, item)):
-            num_clients += 1
-
-    # Parse AI-Perf results
-    metrics = parse_aiperf_client_results(log_dir, num_clients)
+    # Extract client count from metrics
+    num_clients = metrics.get("num_clients", 0)
 
     # Print summary
     print_summary_table(
