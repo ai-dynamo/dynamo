@@ -681,14 +681,14 @@ impl OpenAIPreprocessor {
     // Since we have tool calling parsing as separate step, it makes sense to have reasoning parser as separate step as well
     pub fn parse_reasoning_content_from_stream<S>(
         stream: S,
-        parser_name: Option<String>,
+        parser_name: String,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
         // Initialize reasoning parser from parser_name
         let reasoning_parser = Box::new(ReasoningParserType::get_reasoning_parser_from_name(
-            parser_name.as_ref().unwrap(),
+            parser_name.as_ref(),
         )) as Box<dyn ReasoningParser>;
 
         let state = ReasoningState {
@@ -798,7 +798,7 @@ impl
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
             Box::pin(Self::parse_reasoning_content_from_stream(
                 stream,
-                self.runtime_config.reasoning_parser.clone(),
+                self.runtime_config.reasoning_parser.clone().unwrap(), // Safety: We already checked that parser is some, so gtg
             ))
         } else {
             Box::pin(stream)
