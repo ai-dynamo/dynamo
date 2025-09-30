@@ -34,6 +34,10 @@ from dynamo.runtime import Component
 
 pytestmark = pytest.mark.pre_merge
 
+@pytest.fixture(scope="module", autouse=False)
+async def distributed_runtime():
+    loop = asyncio.get_running_loop()
+    return DistributedRuntime(loop, False)
 
 async def test_radix_tree_binding(distributed_runtime):
     """Test RadixTree binding directly with store event and find matches"""

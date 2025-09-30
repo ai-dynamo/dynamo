@@ -52,8 +52,3 @@ async def runtime():
     yield runtime
     runtime.shutdown()
 
-
-@pytest.fixture(scope="function", autouse=False)
-async def distributed_runtime():
-    loop = asyncio.get_running_loop()
-    return DistributedRuntime(loop, False)
