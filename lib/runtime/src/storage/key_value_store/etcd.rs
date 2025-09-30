@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::time::Duration;
 
-use crate::{slug::Slug, transports::etcd::Client};
+use crate::{slug::Slug, storage::key_value_store::Key, transports::etcd::Client};
 use async_stream::stream;
 use async_trait::async_trait;
 use etcd_client::{Compare, CompareOp, EventType, PutOptions, Txn, TxnOp, WatchOptions};
@@ -56,21 +56,21 @@ pub struct EtcdBucket {
 impl KeyValueBucket for EtcdBucket {
     async fn insert(
         &self,
-        key: String,
-        value: String,
+        key: &Key,
+        value: &str,
         // "version" in etcd speak. revision is a global cluster-wide value
         revision: u64,
     ) -> Result<StorageOutcome, StorageError> {
         let version = revision;
         if version == 0 {
-            self.create(&key, &value).await
+            self.create(key, value).await
         } else {
-            self.update(&key, &value, version).await
+            self.update(key, value, version).await
         }
     }
 
-    async fn get(&self, key: &str) -> Result<Option<bytes::Bytes>, StorageError> {
-        let k = make_key(&self.bucket_name, key);
+    async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StorageError> {
+        let k = format!("{}/{key}", self.bucket_name);
         tracing::trace!("etcd get: {k}");
 
         let mut kvs = self
@@ -85,10 +85,10 @@ impl KeyValueBucket for EtcdBucket {
         Ok(Some(val.into()))
     }
 
-    async fn delete(&self, key: &str) -> Result<(), StorageError> {
+    async fn delete(&self, key: &Key) -> Result<(), StorageError> {
         let _ = self
             .client
-            .kv_delete(key, None)
+            .kv_delete(key.0.clone(), None)
             .await
             .map_err(|e| StorageError::EtcdError(e.to_string()))?;
         Ok(())
@@ -98,7 +98,7 @@ impl KeyValueBucket for EtcdBucket {
         &self,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = bytes::Bytes> + Send + 'life0>>, StorageError>
     {
-        let k = make_key(&self.bucket_name, "");
+        let k = make_key(&self.bucket_name, &"".into());
         tracing::trace!("etcd watch: {k}");
         let (_watcher, mut watch_stream) = self
             .client
@@ -121,7 +121,7 @@ impl KeyValueBucket for EtcdBucket {
     }
 
     async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StorageError> {
-        let k = make_key(&self.bucket_name, "");
+        let k = make_key(&self.bucket_name, &"".into());
         tracing::trace!("etcd entries: {k}");
 
         let resp = self
@@ -142,7 +142,7 @@ impl KeyValueBucket for EtcdBucket {
 }
 
 impl EtcdBucket {
-    async fn create(&self, key: &str, value: &str) -> Result<StorageOutcome, StorageError> {
+    async fn create(&self, key: &Key, value: &str) -> Result<StorageOutcome, StorageError> {
         let k = make_key(&self.bucket_name, key);
         tracing::trace!("etcd create: {k}");
 
@@ -187,7 +187,7 @@ impl EtcdBucket {
 
     async fn update(
         &self,
-        key: &str,
+        key: &Key,
         value: &str,
         revision: u64,
     ) -> Result<StorageOutcome, StorageError> {
@@ -208,7 +208,7 @@ impl EtcdBucket {
             tracing::warn!(
                 current_version,
                 attempted_next_version = version,
-                key,
+                %key,
                 "update: Wrong revision"
             );
             // NATS does a resync_update, overwriting the key anyway and getting the new revision.
@@ -234,12 +234,8 @@ impl EtcdBucket {
     }
 }
 
-fn make_key(bucket_name: &str, key: &str) -> String {
-    [
-        Slug::slugify(bucket_name).to_string(),
-        Slug::slugify(key).to_string(),
-    ]
-    .join("/")
+fn make_key(bucket_name: &str, key: &Key) -> String {
+    [Slug::slugify(bucket_name).to_string(), key.to_string()].join("/")
 }
 
 #[cfg(feature = "integration")]
@@ -278,7 +274,7 @@ mod concurrent_create_tests {
         let barrier = Arc::new(Barrier::new(num_workers));
 
         // Shared test data
-        let test_key = format!("concurrent_test_key_{}", uuid::Uuid::new_v4());
+        let test_key: Key = Key::new(&format!("concurrent_test_key_{}", uuid::Uuid::new_v4()));
         let test_value = "test_value";
 
         // Spawn multiple tasks that will all try to create the same key simultaneously
@@ -302,7 +298,7 @@ mod concurrent_create_tests {
                 let result = bucket_clone
                     .lock()
                     .await
-                    .insert(key_clone, value_clone, 0)
+                    .insert(&key_clone, &value_clone, 0)
                     .await;
 
                 match result {

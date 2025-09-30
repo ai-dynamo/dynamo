@@ -11,6 +11,8 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+use crate::storage::key_value_store::Key;
+
 use super::{KeyValueBucket, KeyValueStore, StorageError, StorageOutcome};
 
 #[derive(Clone)]
@@ -100,8 +102,8 @@ impl KeyValueStore for MemoryStorage {
 impl KeyValueBucket for MemoryBucketRef {
     async fn insert(
         &self,
-        key: String,
-        value: String,
+        key: &Key,
+        value: &str,
         revision: u64,
     ) -> Result<StorageOutcome, StorageError> {
         let mut locked_data = self.inner.data.lock().await;
@@ -111,8 +113,11 @@ impl KeyValueBucket for MemoryBucketRef {
         };
         let outcome = match bucket.data.entry(key.to_string()) {
             Entry::Vacant(e) => {
-                e.insert((revision, value.clone()));
-                let _ = self.inner.change_sender.send((key, value));
+                e.insert((revision, value.to_string()));
+                let _ = self
+                    .inner
+                    .change_sender
+                    .send((key.to_string(), value.to_string()));
                 StorageOutcome::Created(revision)
             }
             Entry::Occupied(mut entry) => {
@@ -120,7 +125,7 @@ impl KeyValueBucket for MemoryBucketRef {
                 if *rev == revision {
                     StorageOutcome::Exists(revision)
                 } else {
-                    entry.insert((revision, value));
+                    entry.insert((revision, value.to_string()));
                     StorageOutcome::Created(revision)
                 }
             }
@@ -128,23 +133,23 @@ impl KeyValueBucket for MemoryBucketRef {
         Ok(outcome)
     }
 
-    async fn get(&self, key: &str) -> Result<Option<bytes::Bytes>, StorageError> {
+    async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StorageError> {
         let locked_data = self.inner.data.lock().await;
         let Some(bucket) = locked_data.get(&self.name) else {
             return Ok(None);
         };
         Ok(bucket
             .data
-            .get(key)
+            .get(&key.0)
             .map(|(_, v)| bytes::Bytes::from(v.clone())))
     }
 
-    async fn delete(&self, key: &str) -> Result<(), StorageError> {
+    async fn delete(&self, key: &Key) -> Result<(), StorageError> {
         let mut locked_data = self.inner.data.lock().await;
         let Some(bucket) = locked_data.get_mut(&self.name) else {
             return Err(StorageError::MissingBucket(self.name.to_string()));
         };
-        bucket.data.remove(key);
+        bucket.data.remove(&key.0);
         Ok(())
     }
 
