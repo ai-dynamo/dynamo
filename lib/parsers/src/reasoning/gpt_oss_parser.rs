@@ -56,12 +56,27 @@ impl GptOssReasoningParser {
     }
 }
 
+
+fn encode_text_to_tokens(text: &str) -> anyhow::Result<Vec<u32>> {
+    println!("Encoding text: {}", text);
+    let enc = get_harmony_encoding()
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("Failed to get harmony encoding: {e}"))?;
+    println!("Encoding text: {}", text);
+    println!("Encoded tokens: {:?}", enc.tokenizer().encode_with_special_tokens(text));
+    Ok(enc.tokenizer().encode_with_special_tokens(text))
+}
+
 impl ReasoningParser for GptOssReasoningParser {
-    fn detect_and_parse_reasoning(&mut self, _text: &str, token_ids: &[u32]) -> ParserResult {
-        tracing::debug!(
-            "detect_and_parse_reasoning called with {} token_ids",
-            token_ids.len()
-        );
+    fn detect_and_parse_reasoning(&mut self, text: &str, token_ids: &[u32]) -> ParserResult {
+        let encoded_tokens;
+        let token_ids = if token_ids.is_empty() {
+            // WAR: Since we are moving to just text based reasoning parsing, converting to token_ids now using harmony encoding
+            encoded_tokens = encode_text_to_tokens(text).unwrap();
+            &encoded_tokens
+        } else {
+            token_ids
+        };
 
         let parser = &mut self.parser;
 
@@ -153,11 +168,14 @@ impl ReasoningParser for GptOssReasoningParser {
         text: &str,
         token_ids: &[u32],
     ) -> ParserResult {
-        tracing::debug!(
-            "parse_reasoning_streaming_incremental called with {} token_ids",
-            token_ids.len()
-        );
-
+        let encoded_tokens;
+        let token_ids = if token_ids.is_empty() {
+            // WAR: Since we are moving to just text based reasoning parsing, converting to token_ids now using harmony encoding
+            encoded_tokens = encode_text_to_tokens(text).unwrap();
+            &encoded_tokens
+        } else {
+            token_ids
+        };
         let parser: &mut StreamableParser = &mut self.parser;
         let mut normal_delta = String::new();
         let mut reasoning_delta = String::new();
@@ -261,7 +279,7 @@ impl ReasoningParser for GptOssReasoningParser {
                 tracing::warn!("Shouldn't be delta content after in channel: {}", channel);
             }
         }
-
+                          
         tracing::debug!("No deltas to return, returning empty result");
         ParserResult::default()
     }
@@ -274,12 +292,8 @@ mod tests {
     #[test]
     fn test_gpt_oss_reasoning_parser() {
         let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
-        let enc = get_harmony_encoding()
-            .as_ref()
-            .expect("Failed to get encoding");
         let text = "<|channel|>analysis<|message|>The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed.<|end|><|start|>assistant<|channel|>final<|message|>The capital of Brazil is Brasília.";
-        let token_ids = enc.tokenizer().encode_with_special_tokens(text); // Example token IDs
-        let result = parser.detect_and_parse_reasoning("Test text", &token_ids);
+        let result = parser.detect_and_parse_reasoning(text, &[]);
         assert!(result.normal_text == "The capital of Brazil is Brasília.");
         assert!(
             result.reasoning_text
@@ -290,15 +304,17 @@ mod tests {
     #[test]
     fn test_gpt_oss_reasoning_parser_streaming() {
         let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
-        let enc = get_harmony_encoding()
-            .as_ref()
-            .expect("Failed to get encoding");
-        let text = "<|channel|>analysis<|message|>The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed.<|end|><|start|>assistant<|channel|>final<|message|>The capital of Brazil is Brasília.";
-        let token_ids = enc.tokenizer().encode_with_special_tokens(text); // Example token IDs
+        let chunks = vec![
+            "<|channel|>",
+            "analysis<|message|>The user asks a simple factual question: capital of Brazil.",
+            " The answer is Brasília. No additional explanation needed.",
+            "<|end|><|start|>assistant<|channel|>final<|message|>",
+            "The capital of Brazil is Brasília.",
+        ];
         let mut reasoning_text_incr = String::new();
         let mut normal_text_incr = String::new();
-        for token in token_ids.iter() {
-            let result = parser.parse_reasoning_streaming_incremental("Test text", &[(*token)]);
+        for chunk in chunks {   
+            let result = parser.parse_reasoning_streaming_incremental(chunk, &[]);
             normal_text_incr.push_str(&result.normal_text);
             reasoning_text_incr.push_str(&result.reasoning_text);
         }
