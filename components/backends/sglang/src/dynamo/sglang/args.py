@@ -191,6 +191,13 @@ def parse_args(args: list[str]) -> Config:
         "reasoning-parser",
     )
 
+    # Replaces any environment variables or home dir (~) to get absolute path
+    expanded_template_path = None
+    if parsed_args.custom_jinja_template:
+        expanded_template_path = os.path.expandvars(
+            os.path.expanduser(parsed_args.custom_jinja_template)
+        )
+
     dynamo_args = DynamoArgs(
         namespace=parsed_namespace,
         component=parsed_component_name,
@@ -198,7 +205,7 @@ def parse_args(args: list[str]) -> Config:
         migration_limit=parsed_args.migration_limit,
         tool_call_parser=tool_call_parser,
         reasoning_parser=reasoning_parser,
-        custom_jinja_template=parsed_args.custom_jinja_template,
+        custom_jinja_template=expanded_template_path,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
 

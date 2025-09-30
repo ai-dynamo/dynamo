@@ -15,6 +15,9 @@
 
 # For IFEval dataset loading in kvbm tests
 datasets
+etcd3-py
+# For pulling chat template from MDC
+nats-py
 psutil>=5.0.0
 pyright
 pytest
