@@ -245,6 +245,7 @@ impl LocalModelBuilder {
         let relative_path = model_path.trim_start_matches(HF_SCHEME);
         let full_path = if is_hf_repo {
             // HF download if necessary
+            eprintln!("is_mocker[++++++++++++]: {}", self.is_mocker);
             super::hub::from_hf(relative_path, self.is_mocker).await?
         } else {
             fs::canonicalize(relative_path)?
