@@ -19,7 +19,7 @@ python -m dynamo.frontend \
     --router-reset-states &
 
 # run prefill router service
-python -m dynamo.vllm_prefill_router \
+python -m dynamo.prefill_router \
     --namespace dynamo \
     --block-size $BLOCK_SIZE &
 

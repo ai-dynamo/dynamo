@@ -4,10 +4,10 @@
 """
 Centralized Prefill Router Service
 
-Usage: python -m dynamo.vllm_prefill_router [args]
+Usage: python -m dynamo.prefill_router [args]
 
 This service provides a single KV-aware router for all prefill workers in a
-disaggregated vLLM deployment. Instead of each decode worker maintaining its own
+disaggregated deployment. Instead of each decode worker maintaining its own
 round-robin client to prefill workers, this service uses KvRouter to make
 intelligent routing decisions based on KV cache state.
 """

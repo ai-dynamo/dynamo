@@ -127,8 +127,8 @@ python -m dynamo.frontend \
     --http-port 8000 \
     --kv-overlap-score-weight 0
 
-# In another terminal, start the prefill router (currently only supports vLLM)
-python -m dynamo.vllm_prefill_router \
+# In another terminal, start the prefill router
+python -m dynamo.prefill_router \
     --namespace dynamo \
     --block-size 64
 ```
