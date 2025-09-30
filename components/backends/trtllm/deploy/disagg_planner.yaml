@@ -11,6 +11,8 @@ spec:
       value: '{"Prometheus":{"global":{"scrape_interval":"5s"},"scrape_configs":[{"job_name":"prometheus","static_configs":[{"targets":["localhost:8000"]}]},{"job_name":"frontend","static_configs":[{"targets":["trtllm-disagg-planner-frontend:8000"]}]}]}}'
     - name: DYNAMO_NAMESPACE
       value: "trtllm-disagg-planner"
+    - name: PROMETHEUS_PORT
+      value: "8000"
   services:
     Frontend:
       dynamoNamespace: trtllm-disagg-planner

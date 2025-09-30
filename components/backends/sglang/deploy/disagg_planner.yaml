@@ -10,17 +10,19 @@ spec:
     - name: DYNAMO_SERVICE_CONFIG
       value: '{"Prometheus":{"global":{"scrape_interval":"5s"},"scrape_configs":[{"job_name":"prometheus","static_configs":[{"targets":["localhost:9090"]}]},{"job_name":"frontend","static_configs":[{"targets":["sglang-disagg-planner-frontend:8000"]}]}]}}'
     - name: DYNAMO_NAMESPACE
-      value: "dynamo"
+      value: "sglang-disagg-planner"
+    - name: PROMETHEUS_PORT
+      value: "8000"
   services:
     Frontend:
-      dynamoNamespace: dynamo
+      dynamoNamespace: sglang-disagg-planner
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.5.1
     Planner:
-      dynamoNamespace: dynamo
+      dynamoNamespace: sglang-disagg-planner
       envFromSecret: hf-token-secret
       componentType: planner
       replicas: 1
@@ -62,7 +64,7 @@ spec:
               --adjustment-interval=60
               --profile-results-dir=/data/profiling_results
     Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
-      dynamoNamespace: dynamo
+      dynamoNamespace: sglang-disagg-planner
       componentType: frontend
       replicas: 1
       envs:
@@ -97,7 +99,7 @@ spec:
           args:
             - "python3 -m dynamo.planner.prometheus"
     decode:
-      dynamoNamespace: dynamo
+      dynamoNamespace: sglang-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 2
@@ -128,7 +130,7 @@ spec:
             - --disaggregation-transfer-backend
             - nixl
     prefill:
-      dynamoNamespace: dynamo
+      dynamoNamespace: sglang-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 2
