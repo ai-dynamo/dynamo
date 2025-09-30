@@ -51,4 +51,3 @@ async def runtime():
     runtime = DistributedRuntime(loop, True)
     yield runtime
     runtime.shutdown()
-
