@@ -28,6 +28,7 @@ use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::PreprocessedRequestBuilder;
 use crate::tokenizers::Encoding;
 
+use dynamo_parsers::{ReasoningParser, ReasoningParserType};
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, Error, ManyOut, Operator, SingleIn, async_trait,
@@ -91,6 +92,12 @@ impl LLMMetricAnnotation {
         let metrics: LLMMetricAnnotation = serde_json::from_str(&comments[0])?;
         Ok(Some(metrics))
     }
+}
+
+// Reasoning State for reasoning parsing transformation step
+struct ReasoningState {
+    stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
+    reasoning_parser: Option<Box<dyn ReasoningParser>>,
 }
 
 pub struct OpenAIPreprocessor {
@@ -669,35 +676,24 @@ impl OpenAIPreprocessor {
         jail.apply(stream)
     }
 
-    /// Parse reasoning content from the stream as a separate transformation step
-    /// This method extracts reasoning parsing logic from choice_from_postprocessor
-    /// to allow for better separation of concerns and more flexible processing
+    // Motivation: Each transformation on the stream should be a separate step to allow for more flexibility
+    // Earlier reasoning parser logic was nested under delta generation logic in choice_from_postprocessor
+    // Since we have tool calling parsing as separate step, it makes sense to have reasoning parser as separate step as well
     pub fn parse_reasoning_content_from_stream<S>(
         stream: S,
-        runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
+        parser_name: Option<String>,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        use dynamo_parsers::{ReasoningParser, ReasoningParserType};
-
-        struct ReasoningState {
-            stream:
-                Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
-            reasoning_parser: Option<Box<dyn ReasoningParser>>,
-        }
-
-        // Initialize reasoning parser if configured
-        let reasoning_parser = runtime_config.reasoning_parser.as_ref().map(|parser_name| {
-            tracing::debug!("Initializing reasoning parser: {}", parser_name);
-            Box::new(ReasoningParserType::get_reasoning_parser_from_name(
-                parser_name,
-            )) as Box<dyn ReasoningParser>
-        });
+        // Initialize reasoning parser from parser_name
+        let reasoning_parser = Box::new(ReasoningParserType::get_reasoning_parser_from_name(
+            parser_name.as_ref().unwrap(),
+        )) as Box<dyn ReasoningParser>;
 
         let state = ReasoningState {
             stream: Box::pin(stream),
-            reasoning_parser,
+            reasoning_parser: Some(reasoning_parser),
         };
 
         stream::unfold(state, |mut state| async move {
@@ -705,28 +701,17 @@ impl OpenAIPreprocessor {
                 // Process the response through reasoning parser if available
                 let processed_response = if let Some(ref mut parser) = state.reasoning_parser {
                     response.map_data(|mut data| {
-                        // Extract text content from the response for parsing
-                        let (text_content, token_ids) = if let Some(choices) = data.choices.first()
-                        {
-                            let text = choices.delta.content.clone();
-                            // For now, we don't have access to token_ids in the stream response
-                            // This is a limitation we'll need to address in a future iteration
-                            (text, vec![])
-                        } else {
-                            (None, vec![])
-                        };
+                        // Process all choices, not just the first one
+                        for choice in data.choices.iter_mut() {
+                            if let Some(text) = choice.delta.content.as_ref() {
+                                let parser_result =
+                                    parser.parse_reasoning_streaming_incremental(text, &[]);
 
-                        if let Some(text) = text_content.as_ref() {
-                            let parser_result =
-                                parser.parse_reasoning_streaming_incremental(text, &token_ids);
-
-                            // Update the response with parsed content
-                            if let Some(choice) = data.choices.get_mut(0) {
+                                // Update this specific choice with parsed content
                                 choice.delta.content = parser_result.get_some_normal_text();
                                 choice.delta.reasoning_content = parser_result.get_some_reasoning();
                             }
                         }
-
                         Ok(data)
                     })
                 } else {
@@ -813,8 +798,24 @@ impl
             context.clone(),
         );
 
-        // Apply reasoning content parsing as a separate transformation step
-        let stream = Self::parse_reasoning_content_from_stream(stream, self.runtime_config.clone());
+        // Try to parse reasoning content only if parser is configured
+        let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some();
+
+        // Reasoning Content Parsing Transformation Step
+        // Current Solution:
+        // This step operates on Deltas created by the transform_postprocessor_stream function
+        // Only access to text and not token_ids - so can not support parsing based on token_ids for now
+        // Future Solution:
+        // To address the limitation if needed in future: move this step before transform_postprocessor_stream and add new field of reasoning_content to the backend output
+        // Use backend_output.reasoning_content field to fill out the deltas.
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
+            Box::pin(Self::parse_reasoning_content_from_stream(
+                stream,
+                self.runtime_config.reasoning_parser.clone(),
+            ))
+        } else {
+            Box::pin(stream)
+        };
 
         // Check if tools are present and if we should apply jail
         let has_tools =
