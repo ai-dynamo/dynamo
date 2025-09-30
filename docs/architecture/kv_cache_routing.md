@@ -330,8 +330,8 @@ from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
 async def main():
     # Get runtime and create endpoint
     runtime = DistributedRuntime.detached()
-    namespace = runtime.namespace("inference")
-    component = namespace.component("vllm")
+    namespace = runtime.namespace("dynamo")
+    component = namespace.component("backend")
     endpoint = component.endpoint("generate")
 
     # Create KV router
@@ -396,8 +396,8 @@ from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
 async def minimize_ttft_routing():
     # Setup router
     runtime = DistributedRuntime.detached()
-    namespace = runtime.namespace("inference")
-    component = namespace.component("vllm")
+    namespace = runtime.namespace("dynamo")
+    component = namespace.component("backend")
     endpoint = component.endpoint("generate")
 
     router = KvPushRouter(
