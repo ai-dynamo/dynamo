@@ -16,12 +16,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Export environment variables
-export DYN_LOG="${DYN_LOG:-info}"
-export DYN_NAMESPACE="test"
-export DYN_COMPONENT="backend"
-export DYN_ENDPOINT="generate"
-
 echo "Starting template verification stack..."
 echo "Using model: Qwen/Qwen3-0.6B"
 echo "Location of Custom Chat Template: $TEST_DIR/fixtures/custom_template.jinja"
