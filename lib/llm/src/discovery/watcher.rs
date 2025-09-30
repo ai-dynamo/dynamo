@@ -14,6 +14,7 @@ use dynamo_runtime::{
         network::egress::push_router::PushRouter,
     },
     protocols::annotated::Annotated,
+    storage::key_value_store::Key,
     transports::etcd::{KeyValue, WatchEvent},
 };
 
@@ -258,7 +259,12 @@ impl ModelWatcher {
             .component(&endpoint_id.component)?;
         let client = component.endpoint(&endpoint_id.name).client().await?;
         let model_slug = model_entry.slug();
-        let card = match ModelDeploymentCard::load_from_store(&model_slug, &self.drt).await {
+        let card = match ModelDeploymentCard::load_from_store(
+            &Key::from_raw(model_slug.to_string()),
+            &self.drt,
+        )
+        .await
+        {
             Ok(Some(mut card)) => {
                 tracing::debug!(card.display_name, "adding model");
                 // Ensure runtime_config is populated

@@ -53,6 +53,26 @@ class DistributedRuntime:
         """
         ...
 
+    def child_token(self) -> CancellationToken:
+        """
+        Get a child cancellation token that can be passed to async tasks
+        """
+        ...
+
+class CancellationToken:
+    def cancel(self) -> None:
+        """
+        Cancel the token and all its children
+        """
+        ...
+
+    async def cancelled(self) -> None:
+        """
+        Await until the token is cancelled
+        """
+        ...
+
+
 class Namespace:
     """
     A namespace is a collection of components
@@ -700,13 +720,6 @@ class HttpService:
     """
     A HTTP service for dynamo applications.
     It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
-    """
-
-    ...
-
-class HttpError:
-    """
-    An error that occurred in the HTTP service
     """
 
     ...

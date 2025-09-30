@@ -23,7 +23,9 @@ use crate::model_type::{ModelInput, ModelType};
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_runtime::DistributedRuntime;
-use dynamo_runtime::storage::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager};
+use dynamo_runtime::storage::key_value_store::{
+    EtcdStorage, Key, KeyValueStore, KeyValueStoreManager,
+};
 use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned, transports::nats};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
@@ -394,7 +396,7 @@ impl ModelDeploymentCard {
     /// Load a ModelDeploymentCard from storage the DistributedRuntime is configured to use.
     /// Card should be fully local and ready to use when the call returns.
     pub async fn load_from_store(
-        model_slug: &Slug,
+        mdc_key: &Key,
         drt: &DistributedRuntime,
     ) -> anyhow::Result<Option<Self>> {
         let Some(etcd_client) = drt.etcd_client() else {
@@ -404,7 +406,7 @@ impl ModelDeploymentCard {
         let store: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client));
         let card_store = Arc::new(KeyValueStoreManager::new(store));
         let Some(mut card) = card_store
-            .load::<ModelDeploymentCard>(ROOT_PATH, model_slug)
+            .load::<ModelDeploymentCard>(ROOT_PATH, mdc_key)
             .await?
         else {
             return Ok(None);
