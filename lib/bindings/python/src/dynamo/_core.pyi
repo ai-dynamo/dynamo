@@ -267,12 +267,12 @@ class Context:
         """
         ...
 
-    def id(self) -> str:
+    def id(self) -> Optional[str]:
         """
         Get the context ID.
 
         Returns:
-            The context identifier string.
+            The context identifier string, or None if not set.
         """
         ...
 
