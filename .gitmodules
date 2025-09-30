@@ -1,0 +1,3 @@
+[submodule "components/backends/trtllm/performance_sweeps/scripts/bench"]
+	path = components/backends/trtllm/performance_sweeps/scripts/bench
+	url = https://github.com/kedarpotdar-nv/bench_serving.git

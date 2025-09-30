@@ -8,6 +8,8 @@ ctx_gpus=$3
 model_name=$4
 model_path=$5
 disaggregation_mode=$6
+instance_id=$7
+work_dir=$8
 unset UCX_TLS
 echo "config_file: ${config_file}, enable_pdl: ${enable_pdl}, ctx_gpus: ${ctx_gpus}, disaggregation_mode: ${disaggregation_mode}"
 
@@ -40,7 +42,6 @@ echo "  max_batch_size: ${max_batch_size}"
 echo "  max_seq_len: ${max_seq_len}"
 
 export TLLM_LOG_LEVEL=INFO
-export TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER=1
 
 if [ "${enable_pdl}" = "true" ]; then
     export TRTLLM_ENABLE_PDL=1
@@ -49,11 +50,19 @@ fi
 export TRTLLM_UCX_INTERFACE=enP6p9s0np0
 export UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,mlx5_3:1,mlx5_4:1,enP6p9s0np0
 
-trtllm-llmapi-launch python3 -m dynamo.trtllm \
-    --model-path ${model_path} \
-    --served-model-name ${model_name} \
+# save the hostname to a file
+
+# if SLURM_NODEID is 0
+if [ "${SLURM_NODEID}" = "0" ]; then
+    mkdir -p ${work_dir}/hostnames/
+    echo $(hostname) > ${work_dir}/hostnames/${disaggregation_mode}_${instance_id}.txt
+    echo "hostname saved to ${work_dir}/hostnames/${disaggregation_mode}_${instance_id}.txt"
+fi
+
+trtllm-llmapi-launch trtllm-serve ${model_path} \
     --max-num-tokens ${max_num_tokens} \
     --max-batch-size ${max_batch_size} \
     --max-seq-len ${max_seq_len} \
-    --disaggregation-mode ${disaggregation_mode} \
-    --extra-engine-args ${config_file}
+    --host 0.0.0.0 \
+    --port 8336 \
+    --extra_llm_api_options ${config_file}

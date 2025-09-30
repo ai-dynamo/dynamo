@@ -115,6 +115,18 @@ export SERVED_MODEL_NAME="nvidia/DeepSeek-R1-FP4"
 ./submit.sh mtp=on all
 ```
 
+> [!NOTE]
+> By default, the scripts above run benchmarks with ISL (Input Sequence Length) set to 8k and OSL (Output Sequence Length) set to 1k.
+> To benchmark with 1k/1k sequence lengths, set the `ISL` and `OSL` environment variables to `1024` before running the scripts.
+> The scripts will automatically use optimized configurations for the 1k/1k case when these variables are set.
+
+To run the aggregated benchmarking sweep with both input and output sequence lengths set to 1024 (1k/1k), set the `ISL` and `OSL` environment variables as shown below:
+
+```bash
+# Runs the benchmark on 1k/1k configs.
+ISL=1024 OSL=1024 ./submit_agg.sh
+```
+
 ## Post-Processing Results
 
 The above jobs use genAI-perf tool to benchmark each configuration point across different concurrency values. These get stored in `dynamo_disagg-bm-8150-1024/<config-setup>/genai_perf_artifacts` and `dynamo_agg-bm-8150-1024/<config-setup>/genai_perf_artifacts` for disaggregated and aggregated respectively.
