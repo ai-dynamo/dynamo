@@ -214,7 +214,7 @@ impl ModelManager {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
     ) -> anyhow::Result<Arc<KvRouter>> {
-        if let Some(kv_chooser) = self.kv_choosers.lock().get(model_name).cloned() {
+        if let Some(kv_chooser) = self.get_kv_chooser(model_name) {
             // Check if the existing router has a different block size
             if kv_chooser.block_size() != kv_cache_block_size {
                 tracing::warn!(
@@ -262,6 +262,10 @@ impl ModelManager {
             .lock()
             .insert(model_name.to_string(), new_kv_chooser.clone());
         Ok(new_kv_chooser)
+    }
+
+    fn get_kv_chooser(&self, model_name: &str) -> Option<Arc<KvRouter>> {
+        self.kv_choosers.lock().get(model_name).cloned()
     }
 
     pub fn get_model_tool_call_parser(&self, model: &str) -> Option<String> {
