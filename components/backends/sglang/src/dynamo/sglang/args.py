@@ -220,7 +220,7 @@ def parse_args(args: list[str]) -> Config:
         tool_call_parser=tool_call_parser,
         reasoning_parser=reasoning_parser,
         custom_jinja_template=expanded_template_path,
-        use_sglang_tokenizer=parsed_args.use_sglang_tokenizer
+        use_sglang_tokenizer=parsed_args.use_sglang_tokenizer,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
 
