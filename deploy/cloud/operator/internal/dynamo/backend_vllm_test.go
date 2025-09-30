@@ -7,7 +7,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 )
 
 func TestVLLMBackend_UpdateContainer(t *testing.T) {
@@ -127,7 +126,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 	}
 }
 
-func TestVLLMBackend_UpdateContainer_CompilationCacheRef(t *testing.T) {
+func TestVLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 	backend := &VLLMBackend{}
 
 	tests := []struct {
@@ -139,59 +138,64 @@ func TestVLLMBackend_UpdateContainer_CompilationCacheRef(t *testing.T) {
 		expectCacheEnvVarVal  string
 	}{
 		{
-			name: "VLLM with compilation cache ref and volume mount",
+			name: "VLLM backend with useAsCompilationCache volume mount",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					CompilationCacheRef: &v1alpha1.CompilationCacheRef{
-						Name:       "vllm-cache",
-						MountPoint: ptr.To("/root/.cache/vllm"),
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "vllm-cache",
+							MountPoint:            "/root/.cache/vllm",
+							UseAsCompilationCache: true,
+						},
 					},
 				},
 			},
-			volumeMounts: []corev1.VolumeMount{
-				{Name: "vllm-cache", MountPath: "/root/.cache/vllm"},
-			},
+			volumeMounts:          []corev1.VolumeMount{},
 			expectCacheEnvVar:     true,
 			expectCacheEnvVarName: "VLLM_CACHE_ROOT",
 			expectCacheEnvVarVal:  "/root/.cache/vllm",
 		},
 		{
-			name: "VLLM with compilation cache ref at custom mount point",
+			name: "VLLM backend with useAsCompilationCache at custom mount point",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					CompilationCacheRef: &v1alpha1.CompilationCacheRef{
-						Name:       "custom-cache",
-						MountPoint: ptr.To("/custom/cache/path"),
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "custom-cache",
+							MountPoint:            "/custom/cache/path",
+							UseAsCompilationCache: true,
+						},
 					},
 				},
 			},
-			volumeMounts: []corev1.VolumeMount{
-				{Name: "custom-cache", MountPath: "/custom/cache/path"},
-			},
+			volumeMounts:          []corev1.VolumeMount{},
 			expectCacheEnvVar:     true,
 			expectCacheEnvVarName: "VLLM_CACHE_ROOT",
 			expectCacheEnvVarVal:  "/custom/cache/path",
 		},
 		{
-			name: "VLLM without compilation cache ref",
+			name: "VLLM backend without useAsCompilationCache",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					CompilationCacheRef: nil,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:       "regular-volume",
+							MountPoint: "/data",
+						},
+					},
 				},
 			},
 			volumeMounts:      []corev1.VolumeMount{},
 			expectCacheEnvVar: false,
 		},
 		{
-			name: "VLLM with compilation cache ref but no volume mount",
+			name: "VLLM backend with no volume mounts",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					CompilationCacheRef: &v1alpha1.CompilationCacheRef{
-						Name: "missing-cache",
-					},
+					VolumeMounts: nil,
 				},
 			},
-			volumeMounts:      []corev1.VolumeMount{}, // No matching volume mount
+			volumeMounts:      []corev1.VolumeMount{},
 			expectCacheEnvVar: false,
 		},
 	}

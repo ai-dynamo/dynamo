@@ -4909,7 +4909,7 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 	}
 }
 
-func TestGenerateBasePodSpec_CompilationCacheRef(t *testing.T) {
+func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
 	controllerConfig := controller_common.Config{}
 
@@ -4921,13 +4921,16 @@ func TestGenerateBasePodSpec_CompilationCacheRef(t *testing.T) {
 		expectedMount    *corev1.VolumeMount
 	}{
 		{
-			name: "compilationCacheRef with custom mount point",
+			name: "useAsCompilationCache with custom mount point",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 					ComponentType: commonconsts.ComponentTypeFrontend,
-					CompilationCacheRef: &v1alpha1.CompilationCacheRef{
-						Name:       "cache-pvc",
-						MountPoint: ptr.To("/custom/cache"),
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "cache-pvc",
+							MountPoint:            "/custom/cache",
+							UseAsCompilationCache: true,
+						},
 					},
 				},
 			},
@@ -4936,12 +4939,15 @@ func TestGenerateBasePodSpec_CompilationCacheRef(t *testing.T) {
 			expectedMount:    &corev1.VolumeMount{Name: "cache-pvc", MountPath: "/custom/cache"},
 		},
 		{
-			name: "compilationCacheRef with default mount point for VLLM",
+			name: "useAsCompilationCache with default mount point for VLLM",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 					ComponentType: commonconsts.ComponentTypeFrontend,
-					CompilationCacheRef: &v1alpha1.CompilationCacheRef{
-						Name: "cache-pvc",
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "cache-pvc",
+							UseAsCompilationCache: true,
+						},
 					},
 				},
 			},
@@ -4950,12 +4956,15 @@ func TestGenerateBasePodSpec_CompilationCacheRef(t *testing.T) {
 			expectedMount:    &corev1.VolumeMount{Name: "cache-pvc", MountPath: commonconsts.DefaultVLLMCacheMountPoint},
 		},
 		{
-			name: "compilationCacheRef without mount point for SGLang - should error",
+			name: "useAsCompilationCache without mount point for SGLang - should error",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 					ComponentType: commonconsts.ComponentTypeFrontend,
-					CompilationCacheRef: &v1alpha1.CompilationCacheRef{
-						Name: "cache-pvc",
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "cache-pvc",
+							UseAsCompilationCache: true,
+						},
 					},
 				},
 			},
@@ -4964,13 +4973,16 @@ func TestGenerateBasePodSpec_CompilationCacheRef(t *testing.T) {
 			expectedMount:    nil,
 		},
 		{
-			name: "compilationCacheRef with explicit mount point for SGLang - should work",
+			name: "useAsCompilationCache with explicit mount point for SGLang - should work",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 					ComponentType: commonconsts.ComponentTypeFrontend,
-					CompilationCacheRef: &v1alpha1.CompilationCacheRef{
-						Name:       "cache-pvc",
-						MountPoint: ptr.To("/custom/sglang/cache"),
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "cache-pvc",
+							MountPoint:            "/custom/sglang/cache",
+							UseAsCompilationCache: true,
+						},
 					},
 				},
 			},
@@ -4979,12 +4991,15 @@ func TestGenerateBasePodSpec_CompilationCacheRef(t *testing.T) {
 			expectedMount:    &corev1.VolumeMount{Name: "cache-pvc", MountPath: "/custom/sglang/cache"},
 		},
 		{
-			name: "compilationCacheRef without mount point for TensorRT-LLM - should error",
+			name: "useAsCompilationCache without mount point for TensorRT-LLM - should error",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 					ComponentType: commonconsts.ComponentTypeFrontend,
-					CompilationCacheRef: &v1alpha1.CompilationCacheRef{
-						Name: "cache-pvc",
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "cache-pvc",
+							UseAsCompilationCache: true,
+						},
 					},
 				},
 			},
@@ -4993,13 +5008,16 @@ func TestGenerateBasePodSpec_CompilationCacheRef(t *testing.T) {
 			expectedMount:    nil,
 		},
 		{
-			name: "compilationCacheRef with explicit mount point for TensorRT-LLM - should work",
+			name: "useAsCompilationCache with explicit mount point for TensorRT-LLM - should work",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 					ComponentType: commonconsts.ComponentTypeFrontend,
-					CompilationCacheRef: &v1alpha1.CompilationCacheRef{
-						Name:       "cache-pvc",
-						MountPoint: ptr.To("/custom/trtllm/cache"),
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "cache-pvc",
+							MountPoint:            "/custom/trtllm/cache",
+							UseAsCompilationCache: true,
+						},
 					},
 				},
 			},
@@ -5008,12 +5026,15 @@ func TestGenerateBasePodSpec_CompilationCacheRef(t *testing.T) {
 			expectedMount:    &corev1.VolumeMount{Name: "cache-pvc", MountPath: "/custom/trtllm/cache"},
 		},
 		{
-			name: "empty compilationCacheRef name - should be ignored",
+			name: "no useAsCompilationCache volumes - should be ignored",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 					ComponentType: commonconsts.ComponentTypeFrontend,
-					CompilationCacheRef: &v1alpha1.CompilationCacheRef{
-						Name: "",
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:       "regular-pvc",
+							MountPoint: "/data",
+						},
 					},
 				},
 			},

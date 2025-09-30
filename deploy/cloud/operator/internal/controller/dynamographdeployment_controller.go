@@ -437,7 +437,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcilePVC(ctx context.Context, dyna
 			return nil, err
 		}
 
-		pvc = r.constructPVCFromConfig(dynamoDeployment, pvcName, pvcConfig)
+		pvc = constructPVC(dynamoDeployment, pvcConfig)
 		if err := controllerutil.SetControllerReference(dynamoDeployment, pvc, r.Client.Scheme()); err != nil {
 			logger.Error(err, "Failed to set controller reference for top-level PVC", "pvcName", pvcName)
 			return nil, err
@@ -464,6 +464,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcilePVCs(ctx context.Context, dyn
 
 	for _, pvcConfig := range dynamoDeployment.Spec.PVCs {
 		if pvcConfig.Name == nil || *pvcConfig.Name == "" {
+			logger.Error(nil, "PVC not reconcilable: name is required", "pvcConfig", pvcConfig)
 			continue
 		}
 
@@ -477,26 +478,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcilePVCs(ctx context.Context, dyn
 	}
 
 	return nil
-}
-
-// constructPVCFromConfig creates a PVC from the DynamoGraphDeployment PVC config
-func (r *DynamoGraphDeploymentReconciler) constructPVCFromConfig(dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, pvcName string, pvcConfig nvidiacomv1alpha1.PVC) *corev1.PersistentVolumeClaim {
-	storageClassName := pvcConfig.StorageClass
-	return &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      pvcName,
-			Namespace: dynamoDeployment.Namespace,
-		},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{pvcConfig.VolumeAccessMode},
-			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceStorage: pvcConfig.Size,
-				},
-			},
-			StorageClassName: &storageClassName,
-		},
-	}
 }
 
 func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {

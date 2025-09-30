@@ -43,19 +43,14 @@ type VolumeMount struct {
 	// Name references a PVC name defined in the top-level PVCs map
 	// +kubebuilder:validation:Required
 	Name string `json:"name,omitempty"`
-	// +kubebuilder:validation:Required
-	// MountPoint specifies where to mount the volume
+	// MountPoint specifies where to mount the volume.
+	// If useAsCompilationCache is true and mountPoint is not specified,
+	// a backend-specific default will be used.
 	MountPoint string `json:"mountPoint,omitempty"`
-}
-
-// CompilationCacheRef references a PVC defined at the top level for compilation cache
-type CompilationCacheRef struct {
-	// Name references a PVC name defined in the top-level PVCs map
-	// +kubebuilder:validation:Required
-	Name string `json:"name,omitempty"`
-	// MountPoint specifies where to mount the compilation cache volume
-	// If not specified, uses backend-specific default
-	MountPoint *string `json:"mountPoint,omitempty"`
+	// UseAsCompilationCache indicates this volume should be used as a compilation cache.
+	// When true, backend-specific environment variables will be set and default mount points may be used.
+	// +kubebuilder:default=false
+	UseAsCompilationCache bool `json:"useAsCompilationCache,omitempty"`
 }
 
 type Autoscaling struct {

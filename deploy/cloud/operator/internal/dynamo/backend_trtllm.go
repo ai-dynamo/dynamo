@@ -19,26 +19,17 @@ type TRTLLMBackend struct {
 }
 
 func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	// Check if compilationCacheRef is set and find its mount point
-	cacheDir := ""
-	if component.CompilationCacheRef != nil && component.CompilationCacheRef.Name != "" {
-		for _, mount := range container.VolumeMounts {
-			if mount.Name == component.CompilationCacheRef.Name {
-				cacheDir = mount.MountPath
-				break
-			}
+	// Check for volumeMounts with useAsCompilationCache=true
+	for _, volumeMount := range component.VolumeMounts {
+		if volumeMount.UseAsCompilationCache {
+			logger := log.Log.WithName("trtllm-backend")
+			logger.Info("Compilation cache configured for TensorRT-LLM but not yet fully supported",
+				"backend", "trtllm",
+				"status", "partial-support",
+				"use-as-compilation-cache", true,
+				"env-vars-set", false,
+				"next-steps", "upstream TensorRT-LLM changes needed")
 		}
-	}
-
-	if cacheDir != "" {
-		logger := log.Log.WithName("trtllm-backend")
-		logger.Info("Compilation cache configured for TensorRT-LLM but not yet fully supported",
-			"backend", "trtllm",
-			"status", "partial-support",
-			"cache-dir", cacheDir,
-			"compilation-cache-ref", component.CompilationCacheRef != nil,
-			"env-vars-set", false,
-			"next-steps", "upstream TensorRT-LLM changes needed")
 	}
 
 	// For single node, nothing to do

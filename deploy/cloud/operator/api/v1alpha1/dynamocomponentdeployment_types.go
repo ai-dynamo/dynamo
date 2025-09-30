@@ -91,8 +91,6 @@ type DynamoComponentDeploymentSharedSpec struct {
 	EnvFromSecret *string `json:"envFromSecret,omitempty"`
 	// VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component.
 	VolumeMounts []VolumeMount `json:"volumeMounts,omitempty"`
-	// CompilationCacheRef references a PVC defined at the top level for compilation cache.
-	CompilationCacheRef *CompilationCacheRef `json:"compilationCacheRef,omitempty"`
 
 	// Ingress config to expose the component outside the cluster (or through a service mesh).
 	Ingress *IngressSpec `json:"ingress,omitempty"`

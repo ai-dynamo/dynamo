@@ -2,12 +2,10 @@ package dynamo
 
 import (
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 )
 
 // Mock MultinodeDeployer for testing with no shell interpretation needed
@@ -477,66 +475,76 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 	}
 }
 
-func TestSGLangBackend_UpdateContainer_CompilationCacheRef(t *testing.T) {
+func TestSGLangBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 	backend := &SGLangBackend{}
 
 	tests := []struct {
-		name                string
-		component           *v1alpha1.DynamoComponentDeploymentOverridesSpec
-		volumeMounts        []corev1.VolumeMount
-		expectWarningLogged bool
+		name                       string
+		component                  *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		volumeMounts               []corev1.VolumeMount
+		expectNoEnvVarChanges      bool
+		expectLoggedPartialSupport bool
 	}{
 		{
-			name: "SGLang with compilation cache ref and volume mount - logs warning",
+			name: "SGLang backend with useAsCompilationCache volume mount",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					CompilationCacheRef: &v1alpha1.CompilationCacheRef{
-						Name:       "sglang-cache",
-						MountPoint: ptr.To("/root/.cache/sglang"),
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "sglang-cache",
+							MountPoint:            "/cache/sglang",
+							UseAsCompilationCache: true,
+						},
 					},
 				},
 			},
-			volumeMounts: []corev1.VolumeMount{
-				{Name: "sglang-cache", MountPath: "/root/.cache/sglang"},
-			},
-			expectWarningLogged: true,
+			volumeMounts:               []corev1.VolumeMount{},
+			expectNoEnvVarChanges:      true, // SGLang doesn't set env vars yet
+			expectLoggedPartialSupport: true,
 		},
 		{
-			name: "SGLang with compilation cache ref at custom mount point - logs warning",
+			name: "SGLang backend with useAsCompilationCache at custom volume mount",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					CompilationCacheRef: &v1alpha1.CompilationCacheRef{
-						Name:       "custom-cache",
-						MountPoint: ptr.To("/custom/cache/path"),
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "custom-cache",
+							MountPoint:            "/custom/cache/path",
+							UseAsCompilationCache: true,
+						},
 					},
 				},
 			},
-			volumeMounts: []corev1.VolumeMount{
-				{Name: "custom-cache", MountPath: "/custom/cache/path"},
-			},
-			expectWarningLogged: true,
+			volumeMounts:               []corev1.VolumeMount{},
+			expectNoEnvVarChanges:      true, // SGLang doesn't set env vars yet
+			expectLoggedPartialSupport: true,
 		},
 		{
-			name: "SGLang without compilation cache ref",
+			name: "SGLang backend without useAsCompilationCache volume mount",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					CompilationCacheRef: nil,
-				},
-			},
-			volumeMounts:        []corev1.VolumeMount{},
-			expectWarningLogged: false,
-		},
-		{
-			name: "SGLang with compilation cache ref but no volume mount",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
-				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					CompilationCacheRef: &v1alpha1.CompilationCacheRef{
-						Name: "missing-cache",
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:       "regular-volume",
+							MountPoint: "/data",
+						},
 					},
 				},
 			},
-			volumeMounts:        []corev1.VolumeMount{}, // No matching volume mount
-			expectWarningLogged: false,                  // Should not log warning if no mount found
+			volumeMounts:               []corev1.VolumeMount{},
+			expectNoEnvVarChanges:      true,
+			expectLoggedPartialSupport: false,
+		},
+		{
+			name: "SGLang backend with no volume mounts",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					VolumeMounts: nil,
+				},
+			},
+			volumeMounts:               []corev1.VolumeMount{},
+			expectNoEnvVarChanges:      true,
+			expectLoggedPartialSupport: false,
 		},
 	}
 
@@ -548,14 +556,19 @@ func TestSGLangBackend_UpdateContainer_CompilationCacheRef(t *testing.T) {
 				VolumeMounts: tt.volumeMounts,
 			}
 
+			// Store original env vars for comparison
+			originalEnvCount := len(container.Env)
+
+			// Call UpdateContainer (single node to avoid multinode logic)
 			backend.UpdateContainer(container, 1, RoleMain, tt.component, "test-service", &GroveMultinodeDeployer{})
 
-			// Verify no unexpected cache-related environment variables are set
-			for _, env := range container.Env {
-				if strings.Contains(env.Name, "CACHE") && strings.Contains(env.Name, "SGLANG") {
-					t.Errorf("Unexpected SGLang cache environment variable found: %s = %s", env.Name, env.Value)
+			if tt.expectNoEnvVarChanges {
+				// Check that no new environment variables were added
+				if len(container.Env) != originalEnvCount {
+					t.Errorf("Expected no environment variable changes, but env count changed from %d to %d", originalEnvCount, len(container.Env))
 				}
 			}
+
 		})
 	}
 }

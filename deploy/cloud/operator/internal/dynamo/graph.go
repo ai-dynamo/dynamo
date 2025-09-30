@@ -783,8 +783,21 @@ func GenerateBasePodSpec(
 	var volumes []corev1.Volume
 
 	for _, volumeMount := range component.VolumeMounts {
-		if volumeMount.Name == "" || volumeMount.MountPoint == "" {
-			return nil, fmt.Errorf("volumeMount.name and volumeMount.mountPoint are required when volumeMounts is set")
+		if volumeMount.Name == "" {
+			return nil, fmt.Errorf("volumeMount.name is required when volumeMounts is set")
+		}
+
+		// Determine mount point
+		mountPoint := volumeMount.MountPoint
+		if volumeMount.UseAsCompilationCache && mountPoint == "" {
+			// Use backend-specific default for compilation cache
+			defaultMountPoint := getDefaultCompilationCacheMountPoint(backendFramework)
+			if defaultMountPoint == "" {
+				return nil, fmt.Errorf("volumeMount with useAsCompilationCache=true requires an explicit mountPoint for backend framework %s (no default available)", backendFramework)
+			}
+			mountPoint = defaultMountPoint
+		} else if !volumeMount.UseAsCompilationCache && mountPoint == "" {
+			return nil, fmt.Errorf("volumeMount.mountPoint is required when useAsCompilationCache is false")
 		}
 
 		volumes = append(volumes, corev1.Volume{
@@ -798,33 +811,6 @@ func GenerateBasePodSpec(
 
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 			Name:      volumeMount.Name,
-			MountPath: volumeMount.MountPoint,
-		})
-	}
-
-	if component.CompilationCacheRef != nil && component.CompilationCacheRef.Name != "" {
-		volumes = append(volumes, corev1.Volume{
-			Name: component.CompilationCacheRef.Name,
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: component.CompilationCacheRef.Name,
-				},
-			},
-		})
-
-		mountPoint := ""
-		if component.CompilationCacheRef.MountPoint != nil {
-			mountPoint = *component.CompilationCacheRef.MountPoint
-		} else {
-			defaultMountPoint := getDefaultCompilationCacheMountPoint(backendFramework)
-			if defaultMountPoint == "" {
-				return nil, fmt.Errorf("compilationCacheRef.mountPoint is required for backend framework %s (no default mount point available)", backendFramework)
-			}
-			mountPoint = defaultMountPoint
-		}
-
-		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-			Name:      component.CompilationCacheRef.Name,
 			MountPath: mountPoint,
 		})
 	}

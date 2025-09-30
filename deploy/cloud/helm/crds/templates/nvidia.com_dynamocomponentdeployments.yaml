@@ -674,20 +674,6 @@ spec:
                     - vllm
                     - trtllm
                   type: string
-                compilationCacheRef:
-                  description: CompilationCacheRef references a PVC defined at the top level for compilation cache.
-                  properties:
-                    mountPoint:
-                      description: |-
-                        MountPoint specifies where to mount the compilation cache volume
-                        If not specified, uses backend-specific default
-                      type: string
-                    name:
-                      description: Name references a PVC name defined in the top-level PVCs map
-                      type: string
-                  required:
-                    - name
-                  type: object
                 componentType:
                   description: ComponentType indicates the role of this component (for example, "main").
                   type: string
@@ -10252,13 +10238,21 @@ spec:
                     description: VolumeMount references a PVC defined at the top level for volumes to be mounted by the component
                     properties:
                       mountPoint:
-                        description: MountPoint specifies where to mount the volume
+                        description: |-
+                          MountPoint specifies where to mount the volume.
+                          If useAsCompilationCache is true and mountPoint is not specified,
+                          a backend-specific default will be used.
                         type: string
                       name:
                         description: Name references a PVC name defined in the top-level PVCs map
                         type: string
+                      useAsCompilationCache:
+                        default: false
+                        description: |-
+                          UseAsCompilationCache indicates this volume should be used as a compilation cache.
+                          When true, backend-specific environment variables will be set and default mount points may be used.
+                        type: boolean
                     required:
-                      - mountPoint
                       - name
                     type: object
                   type: array
