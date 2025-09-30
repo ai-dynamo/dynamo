@@ -745,8 +745,140 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         echo "======================================"
         BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
         $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        
+        # Extract sccache metrics from the built image if sccache was enabled
+        if [ "$USE_SCCACHE" = true ] && [ -z "$RUN_PREFIX" ]; then
+            echo ""
+            echo "🔍 === EXTRACTING SCCACHE METRICS FROM CONTAINER ==="
+            echo "=================================================="
+            
+            # Create temporary directory for metrics
+            METRICS_DIR="build-metrics"
+            mkdir -p "$METRICS_DIR"
+            
+            # Get the image name from the TAG
+            IMAGE_NAME=$(echo "$TAG" | sed 's/--tag //')
+            
+            # Run a temporary container to extract sccache metrics
+            echo "📊 Extracting sccache metrics from image: $IMAGE_NAME"
+            
+            # Export metrics to files that can be read by the host
+            docker run --rm \
+                -e SCCACHE_ENV_FILE=/tmp/sccache.env \
+                -e SCCACHE_METRICS_FILE=/tmp/sccache.txt \
+                -v "$(pwd)/$METRICS_DIR:/host-metrics" \
+                "$IMAGE_NAME" \
+                bash -c "
+                    # Run the metrics export
+                    /tmp/use-sccache.sh export-final-metrics
+                    
+                    # Copy metrics files to host-accessible location
+                    if [ -f /tmp/sccache.env ]; then
+                        cp /tmp/sccache.env /host-metrics/sccache.env
+                        echo '✅ Exported structured sccache metrics to build-metrics/sccache.env'
+                    fi
+                    
+                    if [ -f /tmp/sccache.txt ]; then
+                        cp /tmp/sccache.txt /host-metrics/sccache.txt
+                        echo '✅ Exported raw sccache output to build-metrics/sccache.txt'
+                    fi
+                " || echo "⚠️  Failed to extract sccache metrics from container"
+            
+            # If metrics were extracted, show them
+            if [ -f "$METRICS_DIR/sccache.env" ]; then
+                echo ""
+                echo "🎯 === EXTRACTED SCCACHE METRICS ==="
+                echo "=================================="
+                cat "$METRICS_DIR/sccache.env"
+                echo "=================================="
+                echo ""
+                
+                # Source the metrics to make them available as environment variables
+                set -a  # Export all variables
+                source "$METRICS_DIR/sccache.env"
+                set +a  # Stop exporting
+                
+                echo "✅ sccache metrics are now available as environment variables"
+                echo "   SCCACHE_HIT_RATE=${SCCACHE_HIT_RATE:-0}"
+                echo "   SCCACHE_CACHE_HITS=${SCCACHE_CACHE_HITS:-0}"
+                echo "   SCCACHE_CACHE_MISSES=${SCCACHE_CACHE_MISSES:-0}"
+            else
+                echo "⚠️  No sccache metrics file found - using default values"
+                export SCCACHE_HIT_RATE=0
+                export SCCACHE_CACHE_HITS=0
+                export SCCACHE_CACHE_MISSES=0
+                export SCCACHE_S3_READS=0
+                export SCCACHE_S3_WRITES=0
+            fi
+        fi
     else
         $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        
+        # Extract sccache metrics from the built image if sccache was enabled
+        if [ "$USE_SCCACHE" = true ] && [ -z "$RUN_PREFIX" ]; then
+            echo ""
+            echo "🔍 === EXTRACTING SCCACHE METRICS FROM CONTAINER ==="
+            echo "=================================================="
+            
+            # Create temporary directory for metrics
+            METRICS_DIR="build-metrics"
+            mkdir -p "$METRICS_DIR"
+            
+            # Get the image name from the TAG
+            IMAGE_NAME=$(echo "$TAG" | sed 's/--tag //')
+            
+            # Run a temporary container to extract sccache metrics
+            echo "📊 Extracting sccache metrics from image: $IMAGE_NAME"
+            
+            # Export metrics to files that can be read by the host
+            docker run --rm \
+                -e SCCACHE_ENV_FILE=/tmp/sccache.env \
+                -e SCCACHE_METRICS_FILE=/tmp/sccache.txt \
+                -v "$(pwd)/$METRICS_DIR:/host-metrics" \
+                "$IMAGE_NAME" \
+                bash -c "
+                    # Run the metrics export
+                    /tmp/use-sccache.sh export-final-metrics
+                    
+                    # Copy metrics files to host-accessible location
+                    if [ -f /tmp/sccache.env ]; then
+                        cp /tmp/sccache.env /host-metrics/sccache.env
+                        echo '✅ Exported structured sccache metrics to build-metrics/sccache.env'
+                    fi
+                    
+                    if [ -f /tmp/sccache.txt ]; then
+                        cp /tmp/sccache.txt /host-metrics/sccache.txt
+                        echo '✅ Exported raw sccache output to build-metrics/sccache.txt'
+                    fi
+                " || echo "⚠️  Failed to extract sccache metrics from container"
+            
+            # If metrics were extracted, show them
+            if [ -f "$METRICS_DIR/sccache.env" ]; then
+                echo ""
+                echo "🎯 === EXTRACTED SCCACHE METRICS ==="
+                echo "=================================="
+                cat "$METRICS_DIR/sccache.env"
+                echo "=================================="
+                echo ""
+                
+                # Source the metrics to make them available as environment variables
+                set -a  # Export all variables
+                source "$METRICS_DIR/sccache.env"
+                set +a  # Stop exporting
+                
+                echo "✅ sccache metrics are now available as environment variables"
+                echo "   SCCACHE_HIT_RATE=${SCCACHE_HIT_RATE:-0}"
+                echo "   SCCACHE_CACHE_HITS=${SCCACHE_CACHE_HITS:-0}"
+                echo "   SCCACHE_CACHE_MISSES=${SCCACHE_CACHE_MISSES:-0}"
+            else
+                echo "⚠️  No sccache metrics file found - using default values"
+                export SCCACHE_HIT_RATE=0
+                export SCCACHE_CACHE_HITS=0
+                export SCCACHE_CACHE_MISSES=0
+                export SCCACHE_S3_READS=0
+                export SCCACHE_S3_WRITES=0
+            fi
+        fi
     fi
 fi
 
