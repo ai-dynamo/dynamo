@@ -121,42 +121,6 @@ fn try_parse_normal_text(input: &str, start_token: &str) -> String {
     String::new()
 }
 
-fn try_unescape_json_string(s: &str) -> Option<String> {
-    // Attempt to interpret the string as a JSON string literal and decode one layer
-    // Example: "{\"key\": \"value with \\\"quotes\\\"\"}" -> {"key": "value with \"quotes\""}
-    if let Ok(decoded) = serde_json::from_str::<String>(s) {
-        return Some(decoded);
-    }
-    // If direct parse fails, try wrapping with quotes to decode a pre-escaped string
-    let wrapped = format!("\"{}\"", s);
-    serde_json::from_str::<String>(&wrapped).ok()
-}
-
-fn unescape_argument_values(value: &mut Value) {
-    match value {
-        Value::String(s) => {
-            if let Some(decoded) = try_unescape_json_string(s) {
-                *s = decoded;
-            }
-            // Ensure any lingering escape sequences for quotes are normalized to literal quotes
-            if s.contains("\\\"") {
-                *s = s.replace("\\\"", "\"");
-            }
-        }
-        Value::Array(arr) => {
-            for v in arr.iter_mut() {
-                unescape_argument_values(v);
-            }
-        }
-        Value::Object(map) => {
-            for (_k, v) in map.iter_mut() {
-                unescape_argument_values(v);
-            }
-        }
-        _ => {}
-    }
-}
-
 /// Attempts to parse a tool call from a raw LLM message string into a unified [`ToolCallResponse`] format.
 ///
 /// This is a flexible helper that handles a variety of potential formats emitted by LLMs for function/tool calls,
@@ -293,11 +257,7 @@ pub fn try_tool_call_parse_basic_json(
     let json = json.as_str();
     // Anonymous function to attempt deserialization into a known representation
     let parse =
-        |name: String, mut args: HashMap<String, Value>| -> anyhow::Result<ToolCallResponse> {
-            // Unescape argument values to avoid leaking over-escaped JSON string literals
-            for (_k, v) in args.iter_mut() {
-                unescape_argument_values(v);
-            }
+        |name: String, args: HashMap<String, Value>| -> anyhow::Result<ToolCallResponse> {
             // Preserve nested JSON strings intact; do not double-escape.
             // serde_json::to_string on Value preserves required escapes only.
             Ok(ToolCallResponse {
@@ -341,56 +301,27 @@ pub fn try_tool_call_parse_basic_json(
             Some(normal_text),
         ));
 
-    // Vec<CalledFunctionParameters>: List of { name, parameters }
+    // Vec<CalledFunctionParameters> or Vec<CalledFunctionArguments>: Array of tool calls
     // Example:
     // [
     //   { "name": "lookup_user", "parameters": { "user_id": "123" } },
-    //   { "name": "send_email", "parameters": { "to": "user@example.com", "subject": "Welcome!" } }
+    //   { "name": "get_weather", "arguments": { "location": "SF", "units": "celsius" } }
     // ]
-    // We pop the last item in the list to use.
-    } else if let Ok(list) = serde_json::from_str::<Vec<CalledFunctionParameters>>(json) {
+    // Parse as generic array to handle both formats and malformed entries gracefully
+    // Note: Always return once we parse a valid array, even if empty or with malformed entries
+    } else if let Ok(array) = serde_json::from_str::<Vec<serde_json::Value>>(json) {
         let mut results = Vec::new();
-        for item in list {
-            results.push(parse(item.name, item.parameters)?);
-        }
-        return Ok((results, Some(normal_text)));
-
-    // Vec<CalledFunctionArguments>: List of { name, arguments }
-    // Example:
-    // [
-    //   {
-    //     "name": "get_weather",
-    //     "arguments": {
-    //       "location": "San Francisco",
-    //       "units": "celsius"
-    //     }
-    //   }
-    // ]
-    // Parse each item individually to handle arrays with some malformed entries
-    } else if let Ok(list) = serde_json::from_str::<Vec<CalledFunctionArguments>>(json) {
-        let mut results = Vec::new();
-        for item in list {
-            results.push(parse(item.name, item.arguments)?);
-        }
-        return Ok((results, Some(normal_text)));
-    } else if let Ok(generic_array) = serde_json::from_str::<Vec<serde_json::Value>>(json) {
-        // Fallback: try to parse each item individually for resilience against malformed entries
-        // See test test_parallel_malformed_second_call
-        let mut results = Vec::new();
-        for item in generic_array {
-            // Try to parse as CalledFunctionArguments
+        for item in array {
+            // Try both CalledFunctionArguments and CalledFunctionParameters formats
             if let Ok(func_args) = serde_json::from_value::<CalledFunctionArguments>(item.clone()) {
                 results.push(parse(func_args.name, func_args.arguments)?);
-            } else if let Ok(func_params) = serde_json::from_value::<CalledFunctionParameters>(item)
-            {
-                // Also try CalledFunctionParameters format
+            } else if let Ok(func_params) = serde_json::from_value::<CalledFunctionParameters>(item) {
                 results.push(parse(func_params.name, func_params.parameters)?);
             }
             // Skip malformed entries silently
         }
-        if !results.is_empty() {
-            return Ok((results, Some(normal_text)));
-        }
+        // Return with whatever results we have, even if empty (e.g., [] is a valid empty array)
+        return Ok((results, Some(normal_text)));
     }
 
     // If we found a start token but no valid JSON, return empty content
