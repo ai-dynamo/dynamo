@@ -77,8 +77,7 @@ class MockHttpEngine:
             }
             await asyncio.sleep(0.01)
 
-
-@pytest.fixture
+# non fixture
 async def http_server(runtime: DistributedRuntime):
     """Fixture to start a mock HTTP server using HttpService, contributed by Baseten."""
     port = 8008
@@ -129,9 +128,9 @@ async def http_server(runtime: DistributedRuntime):
 
 @pytest.mark.asyncio
 @pytest.mark.forked
-async def test_chat_completion_success(http_server):
+async def test_chat_completion_success(runtime):
     """Tests a successful chat completion request."""
-    base_url, model_name = http_server
+    base_url, model_name = await http_server(runtime)
     url = f"{base_url}/v1/chat/completions"
     data = {
         "model": model_name,
@@ -171,9 +170,9 @@ async def test_chat_completion_success(http_server):
     ],
 )
 @pytest.mark.forked
-async def test_chat_completion_http_error(http_server, msg_to_code: tuple[str, int]):
+async def test_chat_completion_http_error(runtime, msg_to_code: tuple[str, int]):
     """Tests that an HttpError is raised when the message contains 'error'."""
-    base_url, model_name = http_server
+    base_url, model_name = await http_server(runtime)
     url = f"{base_url}/v1/chat/completions"
     data = {
         "model": model_name,
