@@ -64,7 +64,6 @@ async def main(runtime: DistributedRuntime):
 
     # Create handler and serve
     handler = TemplateVerificationHandler(model_name)
-    print("Template verification backend ready", flush=True)
     await endpoint.serve_endpoint(handler.generate)
 
 
