@@ -83,6 +83,8 @@ impl DistributedRuntime {
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
+            local_engines: Arc::new(Mutex::new(HashMap::new())),
+            background_endpoints: Arc::new(Mutex::new(HashMap::new())),
             hierarchy_to_metricsregistry: Arc::new(std::sync::RwLock::new(HashMap::<
                 String,
                 crate::MetricsRegistryEntry,
@@ -344,6 +346,69 @@ impl DistributedRuntime {
     fn get_registered_hierarchies(&self) -> Vec<String> {
         let registries = self.hierarchy_to_metricsregistry.read().unwrap();
         registries.keys().cloned().collect()
+    }
+
+    /// Register a local engine for direct access without network overhead
+    pub(crate) async fn register_local_engine(
+        &self,
+        key: String,
+        engine: Arc<dyn crate::engine::AnyAsyncEngine>,
+    ) -> Result<()> {
+        let mut engines = self.local_engines.lock().await;
+        engines.insert(key, engine);
+        Ok(())
+    }
+
+    /// Retrieve a local engine by key
+    pub(crate) async fn get_local_engine(
+        &self,
+        key: &str,
+    ) -> Option<Arc<dyn crate::engine::AnyAsyncEngine>> {
+        let engines = self.local_engines.lock().await;
+        engines.get(key).cloned()
+    }
+
+    /// Unregister a local engine
+    pub(crate) async fn unregister_local_engine(
+        &self,
+        key: &str,
+    ) -> Option<Arc<dyn crate::engine::AnyAsyncEngine>> {
+        let mut engines = self.local_engines.lock().await;
+        engines.remove(key)
+    }
+
+    /// Register a background endpoint handle
+    pub(crate) async fn register_background_endpoint(
+        &self,
+        key: String,
+        handle: crate::utils::tasks::critical::CriticalTaskExecutionHandle,
+    ) {
+        let mut endpoints = self.background_endpoints.lock().await;
+
+        // Store the handle without detaching so we can cancel it later
+        endpoints.insert(key, handle);
+    }
+
+    /// Cancel a specific background endpoint gracefully
+    pub async fn cancel_endpoint(&self, key: &str) -> bool {
+        let mut endpoints = self.background_endpoints.lock().await;
+        if let Some(handle) = endpoints.remove(key) {
+            handle.cancel();
+            handle.detach(); // Detach after cancelling so it can be dropped
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Cancel all background endpoints (for shutdown)
+    pub async fn cancel_all_endpoints(&self) {
+        let mut endpoints = self.background_endpoints.lock().await;
+        for (key, handle) in endpoints.drain() {
+            tracing::debug!("Cancelling background endpoint: {}", key);
+            handle.cancel();
+            handle.detach(); // Detach after cancelling so it can be dropped
+        }
     }
 }
 

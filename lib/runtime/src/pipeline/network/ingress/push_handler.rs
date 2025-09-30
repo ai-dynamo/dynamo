@@ -126,14 +126,32 @@ where
         Ingress::add_metrics(self, endpoint, metrics_labels)
     }
 
-    fn set_endpoint_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
+    fn as_any_engine(&self) -> Option<Arc<dyn crate::engine::AnyAsyncEngine>> {
+        use crate::engine::AsStreamAnyAsyncEngine;
         use crate::pipeline::network::Ingress;
+
+        // First try to get the pre-stored type-erased engine
+        if let Some(engine) = Ingress::any_engine(self) {
+            return Some(engine);
+        }
+
+        // If no pre-stored engine, try to create one from the underlying engine
+        if let Some(service_engine) = Ingress::engine(self) {
+            // Try to convert using StreamData-compatible wrapper
+            if let Some(stream_engine) = service_engine.as_stream_any() {
+                return Some(stream_engine);
+            }
+        }
+
+        None
+    }
+
+    fn set_endpoint_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
         self.endpoint_health_check_notifier
             .set(notifier)
             .map_err(|_| anyhow::anyhow!("Endpoint health check notifier already set"))?;
         Ok(())
     }
-
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError> {
         let start_time = std::time::Instant::now();
 

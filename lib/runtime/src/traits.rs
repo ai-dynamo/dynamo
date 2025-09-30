@@ -4,6 +4,9 @@
 pub mod events;
 
 use super::{DistributedRuntime, Runtime};
+use crate::engine::AnyAsyncEngine;
+use std::sync::Arc;
+
 /// A trait for objects that proivde access to the [Runtime]
 pub trait RuntimeProvider {
     fn rt(&self) -> &Runtime;

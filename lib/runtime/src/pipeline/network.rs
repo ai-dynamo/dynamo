@@ -276,6 +276,10 @@ struct RequestControlMessage {
 pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {
     segment: OnceLock<Arc<SegmentSource<Req, Resp>>>,
     metrics: OnceLock<Arc<WorkHandlerMetrics>>,
+    // Store the original engine for local registry
+    engine: OnceLock<ServiceEngine<Req, Resp>>,
+    // Store type-erased engine for local registry
+    any_engine: OnceLock<Arc<dyn crate::engine::AnyAsyncEngine>>,
     /// Endpoint-specific notifier for health check timer resets
     endpoint_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
 }
@@ -285,6 +289,8 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
         Arc::new(Self {
             segment: OnceLock::new(),
             metrics: OnceLock::new(),
+            engine: OnceLock::new(),
+            any_engine: OnceLock::new(),
             endpoint_health_check_notifier: OnceLock::new(),
         })
     }
@@ -322,13 +328,15 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
 
     pub fn for_engine(engine: ServiceEngine<Req, Resp>) -> Result<Arc<Self>> {
         let frontend = SegmentSource::<Req, Resp>::new();
-        let backend = ServiceBackend::from_engine(engine);
+        let backend = ServiceBackend::from_engine(engine.clone());
 
         // create the pipeline
         let pipeline = frontend.link(backend)?.link(frontend)?;
 
         let ingress = Ingress::new();
         ingress.attach(pipeline)?;
+        // Store the engine for local registry access
+        let _ = ingress.engine.set(engine);
 
         Ok(ingress)
     }
@@ -336,6 +344,21 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
     /// Helper method to access metrics if available
     fn metrics(&self) -> Option<&Arc<WorkHandlerMetrics>> {
         self.metrics.get()
+    }
+
+    /// Get the underlying engine if available (for local registry)
+    pub fn engine(&self) -> Option<&ServiceEngine<Req, Resp>> {
+        self.engine.get()
+    }
+
+    /// Get the type-erased engine if available (for local registry)
+    pub fn any_engine(&self) -> Option<Arc<dyn crate::engine::AnyAsyncEngine>> {
+        self.any_engine.get().cloned()
+    }
+
+    /// Set the type-erased engine (called when we have proper trait bounds)
+    pub fn set_any_engine(&self, any_engine: Arc<dyn crate::engine::AnyAsyncEngine>) {
+        let _ = self.any_engine.set(any_engine);
     }
 }
 
@@ -349,6 +372,11 @@ pub trait PushWorkHandler: Send + Sync {
         endpoint: &crate::component::Endpoint,
         metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<()>;
+
+    /// Get the underlying engine as AnyAsyncEngine for local registry (optional)
+    fn as_any_engine(&self) -> Option<Arc<dyn crate::engine::AnyAsyncEngine>> {
+        None
+    }
 
     /// Set the endpoint-specific notifier for health check timer resets
     fn set_endpoint_health_check_notifier(
