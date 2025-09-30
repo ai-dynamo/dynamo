@@ -66,14 +66,13 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 | **Build Dependency** | **Version**                                                                      |
 | :------------------- | :------------------------------------------------------------------------------- |
-| **Base Container**   | [25.03](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/cuda-dl-base/tags) |
 | **TensorRT-LLM**     | 1.1.0rc5                                                                         |
 | **NIXL**             | 0.4.1                                                                            |
 | **vLLM**             | 0.10.1.1                                                                         |
 | **SGLang**           | 0.5.0rc2                                                                         |
 
 > [!Important]
-> Specific versions of TensorRT-LLM supported by Dynamo are subject to change.
+> Specific versions of TensorRT-LLM supported by Dynamo are subject to change. Currently TensorRT-LLM does not support Python 3.11 so installation of the ai-dynamo[trtllm] will fail.
 
 ## Cloud Service Provider Compatibility
 
