@@ -174,14 +174,15 @@ impl ReasoningParser for GptOssReasoningParser {
                 return ParserResult::default();
             }
 
-            if let Some(delta) = parser.last_content_delta().unwrap_or_default() {
-                if let Some(channel) = parser.current_channel() {
-                    match channel.as_str() {
-                        "final" => normal_delta.push_str(&delta),
-                        "analysis" => reasoning_delta.push_str(&delta),
-                        "commentary" => {}
-                        _ => {}
-                    }
+            if let (Some(delta), Some(channel)) = (
+                parser.last_content_delta().unwrap_or_default(),
+                parser.current_channel(),
+            ) {
+                match channel.as_str() {
+                    "final" => normal_delta.push_str(&delta),
+                    "analysis" => reasoning_delta.push_str(&delta),
+                    "commentary" => {}
+                    _ => {}
                 }
             }
         }
@@ -390,7 +391,7 @@ fn test_gpt_oss_reasoning_parser_streaming_in_question() {
         let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
         let mut reasoning_text_incr = String::new();
         let mut normal_text_incr = String::new();
-        let chunk_tokens = vec![
+        let chunk_tokens = [
             vec![200005],
             vec![35644, 200008, 1844, 31064, 25, 392, 25216, 11, 4853],
             vec![2371, 25, 382, 5519, 869, 326, 6788, 16842, 1416, 1757],
@@ -408,7 +409,7 @@ fn test_gpt_oss_reasoning_parser_streaming_in_question() {
         assert_eq!(concatenated, token_ids);
 
         for token in chunk_tokens.iter() {
-            let result = parser.parse_reasoning_streaming_incremental("", &token);
+            let result = parser.parse_reasoning_streaming_incremental("", token);
             normal_text_incr.push_str(&result.normal_text);
             reasoning_text_incr.push_str(&result.reasoning_text);
         }
