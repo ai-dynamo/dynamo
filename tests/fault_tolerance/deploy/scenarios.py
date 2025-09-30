@@ -59,10 +59,15 @@ def get_all_worker_types() -> list[str]:
         worker_types.extend(backend.values())
     # Remove duplicates while preserving order
     seen = set()
-    return [x for x in worker_types if not (x in seen or seen.add(x))]
+    result = []
+    for x in worker_types:
+        if x not in seen:
+            seen.add(x)
+            result.append(x)
+    return result
 
 
-def get_worker_ready_pattern(worker_name: str) -> Pattern:
+def get_worker_ready_pattern(worker_name: str) -> Optional[Pattern]:
     """Get the ready pattern for a specific worker type."""
     return WORKER_READY_PATTERNS.get(worker_name)
 

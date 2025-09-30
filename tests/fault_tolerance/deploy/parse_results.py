@@ -181,7 +181,7 @@ def parse_aiperf_client_results(log_dir: str) -> Dict[str, Any]:
     Returns:
         Dictionary with aggregated metrics and client count
     """
-    all_metrics = {
+    all_metrics: Dict[str, Any] = {
         "total_requests": 0,
         "successful_requests": 0,
         "failed_requests": 0,
@@ -314,7 +314,7 @@ def print_summary_table(
 
     # Test info
     rows.append(["Test Directory", log_dir])
-    rows.append(["Number of Clients", num_clients])
+    rows.append(["Number of Clients", str(num_clients)])
     rows.append(["", ""])
 
     # Deployment metrics

@@ -21,7 +21,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from tests.utils.managed_deployment import ManagedDeployment
 
@@ -112,7 +112,7 @@ def wait_for_model_availability(
     model: str,
     logger: logging.Logger,
     max_attempts: int = 15,
-    attempt_timeouts: list = None,
+    attempt_timeouts: Optional[List[float]] = None,
 ) -> bool:
     """
     Wait for model to be available before running AI-Perf.
