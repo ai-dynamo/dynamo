@@ -20,9 +20,10 @@ import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from enum import Enum
-from typing import Any, AsyncGenerator, Optional, Union
+from typing import AsyncGenerator, Optional, Union
 
 import torch
+from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
 
@@ -103,34 +104,23 @@ class HandlerBase:
                 result["finish_reason"] == "stop" or result["finish_reason"] == "error"
             )
 
-    async def _handle_cancellation(self, generation_result: Any, context: Context):
+    async def _handle_cancellation(
+        self, generation_result: GenerationResult, context: Context
+    ):
         """Background task to handle cancellation by monitoring context state."""
         try:
             # Wait asynchronously for cancellation signal instead of polling
             await context.async_killed_or_stopped()
-            # Call abort_request on the executor through the LLM instance
-            if hasattr(self.engine.llm, "_executor") and self.engine.llm._executor:
-                # Get the internal request ID from the generation result
-                internal_request_id = getattr(generation_result, "request_id", None)
-                if internal_request_id is not None:
-                    # TODO: Can this be an official abort method in TRT-LLM?
-                    self.engine.llm._executor.abort_request(internal_request_id)
-                    logging.debug(f"Aborted Request ID: {context.id()}")
-                else:
-                    logging.error(
-                        f"Could not retrieve internal request ID for abort: {context.id()}"
-                    )
-            else:
-                logging.error(
-                    f"TensorRT-LLM executor not found for abort request: {context.id()}"
-                )
+            # Abort the generation
+            generation_result.abort()
+            logging.debug(f"Aborted Request ID: {context.id()}")
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes
             pass
 
     @asynccontextmanager
     async def _cancellation_monitor(
-        self, generation_result: Any, context: Context
+        self, generation_result: GenerationResult, context: Context
     ) -> AsyncGenerator[asyncio.Task, None]:
         """
         Context manager for monitoring request cancellation.
@@ -280,7 +270,8 @@ class HandlerBase:
                         )
                         yield final_out
 
-                if not res.outputs:
+                # If we are not done generating, but there are no outputs, return an error
+                if not res.outputs and not res.finished:
                     yield {"finish_reason": "error", "token_ids": []}
                     break
 
@@ -303,6 +294,13 @@ class HandlerBase:
                     out["disaggregated_params"] = asdict(
                         DisaggregatedParamsCodec.encode(output.disaggregated_params)
                     )
+
+                if res.finished and not out.get("finish_reason"):
+                    out["finish_reason"] = "unknown"
+                    logging.warning(
+                        "Request finished with no finish reason set - this indicates a possible bug"
+                    )
+
                 # Yield the chunk to the client and update the token count for the next iteration.
                 yield out
                 num_output_tokens_so_far = next_total_toks

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-ARG SGLANG_IMAGE_TAG="v0.5.0rc2-cu126"
+ARG SGLANG_IMAGE_TAG="v0.5.3rc0-cu126"
 
 FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG}
 

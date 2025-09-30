@@ -293,12 +293,13 @@ async fn test_metrics_with_mock_model() {
 mod integration_tests {
     use super::*;
     use dynamo_llm::{
-        discovery::{ModelEntry, ModelWatcher},
+        discovery::{MODEL_ROOT_PATH, ModelEntry, ModelWatcher},
         engines::make_echo_engine,
         entrypoint::EngineConfig,
         local_model::LocalModelBuilder,
     };
     use dynamo_runtime::DistributedRuntime;
+    use dynamo_runtime::pipeline::RouterMode;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -335,8 +336,6 @@ mod integration_tests {
 
         // Set up model watcher to discover models from etcd (like production)
         // This is crucial for the polling task to find model entries
-        use dynamo_llm::discovery::{MODEL_ROOT_PATH, ModelWatcher};
-        use dynamo_runtime::pipeline::RouterMode;
 
         let model_watcher = ModelWatcher::new(
             distributed_runtime.clone(),
@@ -531,7 +530,7 @@ mod integration_tests {
 
                     if let Some(key) = key {
                         // Remove from ModelManager first (this returns the ModelEntry)
-                        if let Some(_removed_entry) = manager.remove_model_entry(&key) {
+                        if let Some(_removed_card) = manager.remove_model_card(&key) {
                             // Remove engines (following ModelWatcher::handle_delete pattern)
                             manager
                                 .remove_chat_completions_model(&model_entry.name)

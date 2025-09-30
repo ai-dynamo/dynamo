@@ -18,12 +18,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::discovery::ModelEntry;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
-use crate::model_card::{ModelDeploymentCard, ROOT_PATH as MDC_ROOT_PATH};
+use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
-use dynamo_runtime::slug::Slug;
-use dynamo_runtime::storage::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager};
 
 pub use prometheus::Registry;
 
@@ -472,60 +469,27 @@ impl Metrics {
         }
     }
 
-    /// Update metrics from a ModelEntry and its ModelDeploymentCard
+    /// Update metrics from a ModelDeploymentCard
     /// This updates both runtime config metrics and MDC-specific metrics
-    pub async fn update_metrics_from_model_entry_with_mdc(
-        &self,
-        model_entry: &ModelEntry,
-        etcd_client: &dynamo_runtime::transports::etcd::Client,
-    ) -> anyhow::Result<()> {
-        // Update runtime config metrics
-        if let Some(runtime_config) = &model_entry.runtime_config {
-            self.update_runtime_config_metrics(&model_entry.name, runtime_config);
-        }
+    pub fn update_metrics_from_mdc(&self, card: &ModelDeploymentCard) -> anyhow::Result<()> {
+        self.update_runtime_config_metrics(&card.display_name, &card.runtime_config);
 
-        // Load and update MDC metrics
-        let model_slug = Slug::from_string(&model_entry.name);
-        let store: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
-        let card_store = Arc::new(KeyValueStoreManager::new(store));
+        self.model_context_length
+            .with_label_values(&[&card.display_name])
+            .set(card.context_length as i64);
 
-        match card_store
-            .load::<ModelDeploymentCard>(MDC_ROOT_PATH, &model_slug)
-            .await
-        {
-            Ok(Some(mdc)) => {
-                // Inline MDC metrics update
-                self.model_context_length
-                    .with_label_values(&[&model_entry.name])
-                    .set(mdc.context_length as i64);
+        self.model_kv_cache_block_size
+            .with_label_values(&[&card.display_name])
+            .set(card.kv_cache_block_size as i64);
 
-                self.model_kv_cache_block_size
-                    .with_label_values(&[&model_entry.name])
-                    .set(mdc.kv_cache_block_size as i64);
+        self.model_migration_limit
+            .with_label_values(&[&card.display_name])
+            .set(card.migration_limit as i64);
 
-                self.model_migration_limit
-                    .with_label_values(&[&model_entry.name])
-                    .set(mdc.migration_limit as i64);
-
-                tracing::debug!(
-                    model = %model_entry.name,
-                    "Successfully updated MDC metrics"
-                );
-            }
-            Ok(None) => {
-                tracing::debug!(
-                    model = %model_entry.name,
-                    "No MDC found in storage, skipping MDC metrics"
-                );
-            }
-            Err(e) => {
-                tracing::debug!(
-                    model = %model_entry.name,
-                    error = %e,
-                    "Failed to load MDC for metrics update"
-                );
-            }
-        }
+        tracing::debug!(
+            model = %card.display_name,
+            "Successfully updated MDC metrics"
+        );
 
         Ok(())
     }
