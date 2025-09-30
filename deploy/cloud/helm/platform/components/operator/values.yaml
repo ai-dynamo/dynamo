@@ -116,8 +116,6 @@ dynamo:
     secretName: "mpi-run-ssh-secret"
     sshKeygen:
       enabled: true
-      tolerations: []
-      affinity: []
 
 
 #imagePullSecrets: []
