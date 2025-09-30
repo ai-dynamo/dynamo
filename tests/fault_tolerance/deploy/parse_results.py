@@ -267,12 +267,12 @@ def parse_aiperf_client_results(log_dir: str) -> Dict[str, Any]:
                         )
 
                 # Time to first token (if available in records)
-                ttft = records.get("time_to_first_token", {})
+                ttft = records.get("time_to_first_token", {}) or records.get("ttft", {})
                 if ttft and "avg" in ttft:
                     all_metrics["ttft"].append(ttft["avg"] / 1000.0)  # Convert ms to s
 
                 # Inter-token latency (if available in records)
-                itl = records.get("inter_token_latency", {})
+                itl = records.get("inter_token_latency", {}) or records.get("itl", {})
                 if itl and "avg" in itl:
                     all_metrics["itl"].append(itl["avg"] / 1000.0)  # Convert ms to s
 

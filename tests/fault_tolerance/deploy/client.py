@@ -243,6 +243,8 @@ def run_aiperf(
         endpoint if endpoint.startswith("/") else f"/{endpoint}",
         "--endpoint-type",
         "chat",  # Required: tells AI-Perf the API type
+        # Enable streaming for TTFT and ITL metrics
+        "--streaming",
         # Request parameters
         "--request-count",
         str(requests_per_client),  # Required: how many requests
