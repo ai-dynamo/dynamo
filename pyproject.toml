@@ -60,7 +60,7 @@ vllm = [
 sglang = [
     "uvloop",
     "nixl<=0.4.1",
-    "sglang[all]==0.5.0rc2",
+    "sglang[all]==0.5.3rc0",
 ]
 
 llama_cpp = [
