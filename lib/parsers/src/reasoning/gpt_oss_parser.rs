@@ -56,24 +56,25 @@ impl GptOssReasoningParser {
     }
 }
 
-
 fn encode_text_to_tokens(text: &str) -> anyhow::Result<Vec<u32>> {
-    println!("Encoding text: {}", text);
     let enc = get_harmony_encoding()
         .as_ref()
         .map_err(|e| anyhow::anyhow!("Failed to get harmony encoding: {e}"))?;
-    println!("Encoding text: {}", text);
-    println!("Encoded tokens: {:?}", enc.tokenizer().encode_with_special_tokens(text));
     Ok(enc.tokenizer().encode_with_special_tokens(text))
 }
 
 impl ReasoningParser for GptOssReasoningParser {
     fn detect_and_parse_reasoning(&mut self, text: &str, token_ids: &[u32]) -> ParserResult {
-        let encoded_tokens;
         let token_ids = if token_ids.is_empty() {
             // WAR: Since we are moving to just text based reasoning parsing, converting to token_ids now using harmony encoding
-            encoded_tokens = encode_text_to_tokens(text).unwrap();
-            &encoded_tokens
+            let encoded_tokens = match encode_text_to_tokens(text) {
+                Ok(tokens) => tokens,
+                Err(err) => {
+                    tracing::warn!("Failed to encode Harmony tokens: {err}");
+                    return ParserResult::default();
+                }
+            };
+            &encoded_tokens.to_vec()
         } else {
             token_ids
         };
@@ -168,14 +169,20 @@ impl ReasoningParser for GptOssReasoningParser {
         text: &str,
         token_ids: &[u32],
     ) -> ParserResult {
-        let encoded_tokens;
         let token_ids = if token_ids.is_empty() {
             // WAR: Since we are moving to just text based reasoning parsing, converting to token_ids now using harmony encoding
-            encoded_tokens = encode_text_to_tokens(text).unwrap();
-            &encoded_tokens
+            let encoded_tokens = match encode_text_to_tokens(text) {
+                Ok(tokens) => tokens,
+                Err(err) => {
+                    tracing::warn!("Failed to encode Harmony tokens: {err}");
+                    return ParserResult::default();
+                }
+            };
+            &encoded_tokens.to_vec()
         } else {
             token_ids
         };
+
         let parser: &mut StreamableParser = &mut self.parser;
         let mut normal_delta = String::new();
         let mut reasoning_delta = String::new();
@@ -312,7 +319,7 @@ mod tests {
         ];
         let mut reasoning_text_incr = String::new();
         let mut normal_text_incr = String::new();
-        for chunk in chunks {   
+        for chunk in chunks {
             let result = parser.parse_reasoning_streaming_incremental(chunk, &[]);
             normal_text_incr.push_str(&result.normal_text);
             reasoning_text_incr.push_str(&result.reasoning_text);
@@ -352,74 +359,76 @@ mod tests {
             "The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed."
         );
     }
-}
 
-#[test]
-fn test_gpt_oss_reasoning_parser_streaming_in_question() {
-    let text = "<|channel|>analysis<|message|>User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>{}";
-    let enc = get_harmony_encoding()
-        .as_ref()
-        .expect("Failed to get encoding");
-    let token_ids = enc.tokenizer().encode_with_special_tokens(text); // Example token IDs
-    // Send token one by one
-    {
-        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
-        let mut reasoning_text_incr = String::new();
-        let mut normal_text_incr = String::new();
-        for token in token_ids.iter() {
-            let result = parser.parse_reasoning_streaming_incremental("", &[(*token)]);
-            normal_text_incr.push_str(&result.normal_text);
-            reasoning_text_incr.push_str(&result.reasoning_text);
-        }
-        assert_eq!(
-            reasoning_text_incr,
-            "User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function."
-        );
-        // [gluo TODO] missing "<|start|>assistant" and "{}" from original message
-        assert_eq!(
-            normal_text_incr,
-            "<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>"
-        );
-    }
-    // Send token in chunks (chunking obtained from actual model output)
-    {
-        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
-        let mut reasoning_text_incr = String::new();
-        let mut normal_text_incr = String::new();
-        let chunk_tokens = [
-            vec![200005],
-            vec![35644, 200008, 1844, 31064, 25, 392, 25216, 11, 4853],
-            vec![2371, 25, 382, 5519, 869, 326, 6788, 16842, 1416, 1757],
-            vec![2371, 2420, 3230, 2360, 290, 5181, 1114, 717, 39303, 126214],
-            vec![
-                13, 7649, 1114, 13, 200007, 200006, 173781, 200005, 12606, 815,
-            ],
-            vec![
-                316, 28, 44580, 775, 39303, 126214, 220, 200003, 4108, 200008,
-            ],
-            vec![12083],
-        ];
-        // concatenate chunk tokens and verify they match original token_ids
-        let concatenated: Vec<u32> = chunk_tokens.iter().flatten().copied().collect();
-        assert_eq!(concatenated, token_ids);
+    #[test]
+    fn test_gpt_oss_reasoning_parser_streaming_in_question() {
+        let text = "<|channel|>analysis<|message|>User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>{}";
+        let enc = get_harmony_encoding()
+            .as_ref()
+            .expect("Failed to get encoding");
+        let token_ids = enc.tokenizer().encode_with_special_tokens(text);
 
-        for token in chunk_tokens.iter() {
-            let result = parser.parse_reasoning_streaming_incremental("", token);
-            normal_text_incr.push_str(&result.normal_text);
-            reasoning_text_incr.push_str(&result.reasoning_text);
+        // Send token one by one
+        {
+            let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+            let mut reasoning_text_incr = String::new();
+            let mut normal_text_incr = String::new();
+            for token in token_ids.iter() {
+                let result = parser.parse_reasoning_streaming_incremental("", &[(*token)]);
+                normal_text_incr.push_str(&result.normal_text);
+                reasoning_text_incr.push_str(&result.reasoning_text);
+            }
+            assert_eq!(
+                reasoning_text_incr,
+                "User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function."
+            );
+            // [gluo TODO] missing "<|start|>assistant" and "{}" from original message
+            assert_eq!(
+                normal_text_incr,
+                "<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>"
+            );
         }
-        assert_eq!(
-            reasoning_text_incr,
-            "User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function."
-        );
-        assert_eq!(
-            normal_text_incr,
-            "<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>"
-        );
+
+        // Send token in chunks (chunking obtained from actual model output)
+        {
+            let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+            let mut reasoning_text_incr = String::new();
+            let mut normal_text_incr = String::new();
+            let chunk_tokens = [
+                vec![200005],
+                vec![35644, 200008, 1844, 31064, 25, 392, 25216, 11, 4853],
+                vec![2371, 25, 382, 5519, 869, 326, 6788, 16842, 1416, 1757],
+                vec![2371, 2420, 3230, 2360, 290, 5181, 1114, 717, 39303, 126214],
+                vec![
+                    13, 7649, 1114, 13, 200007, 200006, 173781, 200005, 12606, 815,
+                ],
+                vec![
+                    316, 28, 44580, 775, 39303, 126214, 220, 200003, 4108, 200008,
+                ],
+                vec![12083],
+            ];
+            // Concatenate chunk tokens and verify they match original token_ids
+            let concatenated: Vec<u32> = chunk_tokens.iter().flatten().copied().collect();
+            assert_eq!(concatenated, token_ids);
+
+            for token in chunk_tokens.iter() {
+                let result = parser.parse_reasoning_streaming_incremental("", token);
+                normal_text_incr.push_str(&result.normal_text);
+                reasoning_text_incr.push_str(&result.reasoning_text);
+            }
+            assert_eq!(
+                reasoning_text_incr,
+                "User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function."
+            );
+            assert_eq!(
+                normal_text_incr,
+                "<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>"
+            );
+        }
     }
 
     #[test]
-    fn test_gpt_oss_reasoning_parser_streaming_chunked() {
+    fn test_gpt_oss_reasoning_parser_streaming_chunked_duplicate() {
         let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
         let enc = get_harmony_encoding()
             .as_ref()
@@ -446,69 +455,71 @@ fn test_gpt_oss_reasoning_parser_streaming_in_question() {
             "The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed."
         );
     }
-}
 
-#[test]
-fn test_gpt_oss_reasoning_parser_streaming_variable_length_chunks() {
-    let text = "<|channel|>analysis<|message|>User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>{}";
-    let enc = get_harmony_encoding()
-        .as_ref()
-        .expect("Failed to get encoding");
-    let token_ids = enc.tokenizer().encode_with_special_tokens(text); // Example token IDs
-    // Send token one by one
-    {
-        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
-        let mut reasoning_text_incr = String::new();
-        let mut normal_text_incr = String::new();
-        for token in token_ids.iter() {
-            let result = parser.parse_reasoning_streaming_incremental("", &[(*token)]);
-            normal_text_incr.push_str(&result.normal_text);
-            reasoning_text_incr.push_str(&result.reasoning_text);
-        }
-        assert_eq!(
-            reasoning_text_incr,
-            "User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function."
-        );
-        // [gluo TODO] missing "<|start|>assistant" and "{}" from original message
-        assert_eq!(
-            normal_text_incr,
-            "<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>"
-        );
-    }
-    // Send token in chunks (chunking obtained from actual model output)
-    {
-        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
-        let mut reasoning_text_incr = String::new();
-        let mut normal_text_incr = String::new();
-        let chunk_tokens = [
-            vec![200005],
-            vec![35644, 200008, 1844, 31064, 25, 392, 25216, 11, 4853],
-            vec![2371, 25, 382, 5519, 869, 326, 6788, 16842, 1416, 1757],
-            vec![2371, 2420, 3230, 2360, 290, 5181, 1114, 717, 39303, 126214],
-            vec![
-                13, 7649, 1114, 13, 200007, 200006, 173781, 200005, 12606, 815,
-            ],
-            vec![
-                316, 28, 44580, 775, 39303, 126214, 220, 200003, 4108, 200008,
-            ],
-            vec![12083],
-        ];
-        // concatenate chunk tokens and verify they match original token_ids
-        let concatenated: Vec<u32> = chunk_tokens.iter().flatten().copied().collect();
-        assert_eq!(concatenated, token_ids);
+    #[test]
+    fn test_gpt_oss_reasoning_parser_streaming_variable_length_chunks() {
+        let text = "<|channel|>analysis<|message|>User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>{}";
+        let enc = get_harmony_encoding()
+            .as_ref()
+            .expect("Failed to get encoding");
+        let token_ids = enc.tokenizer().encode_with_special_tokens(text);
 
-        for token in chunk_tokens.iter() {
-            let result = parser.parse_reasoning_streaming_incremental("", token);
-            normal_text_incr.push_str(&result.normal_text);
-            reasoning_text_incr.push_str(&result.reasoning_text);
+        // Send token one by one
+        {
+            let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+            let mut reasoning_text_incr = String::new();
+            let mut normal_text_incr = String::new();
+            for token in token_ids.iter() {
+                let result = parser.parse_reasoning_streaming_incremental("", &[(*token)]);
+                normal_text_incr.push_str(&result.normal_text);
+                reasoning_text_incr.push_str(&result.reasoning_text);
+            }
+            assert_eq!(
+                reasoning_text_incr,
+                "User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function."
+            );
+            // [gluo TODO] missing "<|start|>assistant" and "{}" from original message
+            assert_eq!(
+                normal_text_incr,
+                "<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>"
+            );
         }
-        assert_eq!(
-            reasoning_text_incr,
-            "User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function."
-        );
-        assert_eq!(
-            normal_text_incr,
-            "<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>"
-        );
+
+        // Send token in chunks (chunking obtained from actual model output)
+        {
+            let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+            let mut reasoning_text_incr = String::new();
+            let mut normal_text_incr = String::new();
+            let chunk_tokens = [
+                vec![200005],
+                vec![35644, 200008, 1844, 31064, 25, 392, 25216, 11, 4853],
+                vec![2371, 25, 382, 5519, 869, 326, 6788, 16842, 1416, 1757],
+                vec![2371, 2420, 3230, 2360, 290, 5181, 1114, 717, 39303, 126214],
+                vec![
+                    13, 7649, 1114, 13, 200007, 200006, 173781, 200005, 12606, 815,
+                ],
+                vec![
+                    316, 28, 44580, 775, 39303, 126214, 220, 200003, 4108, 200008,
+                ],
+                vec![12083],
+            ];
+            // Concatenate chunk tokens and verify they match original token_ids
+            let concatenated: Vec<u32> = chunk_tokens.iter().flatten().copied().collect();
+            assert_eq!(concatenated, token_ids);
+
+            for token in chunk_tokens.iter() {
+                let result = parser.parse_reasoning_streaming_incremental("", token);
+                normal_text_incr.push_str(&result.normal_text);
+                reasoning_text_incr.push_str(&result.reasoning_text);
+            }
+            assert_eq!(
+                reasoning_text_incr,
+                "User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function."
+            );
+            assert_eq!(
+                normal_text_incr,
+                "<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>"
+            );
+        }
     }
 }
