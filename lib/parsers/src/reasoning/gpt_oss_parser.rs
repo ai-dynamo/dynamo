@@ -178,6 +178,9 @@ impl ReasoningParser for GptOssReasoningParser {
                 parser.last_content_delta().unwrap_or_default(),
                 parser.current_channel(),
             ) {
+                // `last_content_delta` only exposes the newest token slice, so we forward
+                // `final`/`analysis` chunks immediately; commentary is reconstructed in the
+                // fallback path below because it needs the stripped metadata.
                 match channel.as_str() {
                     "final" => normal_delta.push_str(&delta),
                     "analysis" => reasoning_delta.push_str(&delta),
@@ -200,19 +203,8 @@ impl ReasoningParser for GptOssReasoningParser {
         }
 
         if let Some(channel) = parser.current_channel() {
-            tracing::debug!("Current channel {}", channel);
-            if channel == "final" {
-                // If we're in the final channel, we should not parse reasoning
-                if let Some(current) = parser.last_content_delta().unwrap_or_default() {
-                    tracing::debug!("Got normal text delta of {} chars", current.len());
-                    return ParserResult {
-                        normal_text: current,
-                        reasoning_text: String::new(),
-                    };
-                }
-                tracing::debug!("No content delta in final channel");
-                ParserResult::default()
-            } else if channel == "commentary" {
+            if channel == "commentary" {
+                tracing::debug!("In commentary channel, recovering full content");
                 // If we're in the commentary channel, we should return raw token content and recover content that has been consumed by the parser
                 // so that the tool parser can process it properly
                 if let Ok(enc) = get_harmony_encoding() {
@@ -260,30 +252,18 @@ impl ReasoningParser for GptOssReasoningParser {
                         final_text = generated_text;
                     }
 
-                    ParserResult {
+                    return ParserResult {
                         normal_text: final_text,
                         reasoning_text: String::new(),
-                    }
-                } else {
-                    tracing::warn!("Failed to get harmony encoding for raw token decoding");
-                    ParserResult::default()
-                }
-            } else {
-                tracing::debug!("In reasoning channel: {}", channel);
-                if let Some(current) = parser.last_content_delta().unwrap_or_default() {
-                    tracing::debug!("Got reasoning text delta of {} chars", current.len());
-                    return ParserResult {
-                        normal_text: String::new(),
-                        reasoning_text: current,
                     };
                 }
-                tracing::debug!("No content delta in reasoning channel");
-                ParserResult::default()
+            } else {
+                tracing::warn!("Shouldn't be delta content after in channel: {}", channel);
             }
-        } else {
-            tracing::debug!("No current channel detected");
-            ParserResult::default()
         }
+
+        tracing::debug!("No deltas to return, returning empty result");
+        ParserResult::default()
     }
 }
 
