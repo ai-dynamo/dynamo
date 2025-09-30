@@ -210,6 +210,8 @@ def parse_args(args: list[str]) -> Config:
             "Cannot use --custom-jinja-template and --use-sglang-tokenizer together. "
             "--custom-jinja-template requires Dynamo's preprocessor to apply the template, "
             "while --use-sglang-tokenizer bypasses Dynamo's preprocessor entirely."
+            "If you want to use the SGLang tokenizer with a custom chat template, "
+            "please use the --chat-template argument from SGLang."
         )
         sys.exit(1)
 
