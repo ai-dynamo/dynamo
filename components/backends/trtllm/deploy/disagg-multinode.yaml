@@ -32,7 +32,7 @@ data:
     kv_cache_config:
       free_gpu_memory_fraction: 0.80
     cache_transceiver_config:
-      backend: default
+      backend: DEFAULT
 
   decode.yaml: |
     # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
@@ -60,7 +60,7 @@ data:
     kv_cache_config:
       free_gpu_memory_fraction: 0.80
     cache_transceiver_config:
-      backend: default
+      backend: DEFAULT
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
