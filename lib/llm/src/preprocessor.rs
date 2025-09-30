@@ -692,7 +692,20 @@ impl
         >,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         // unpack the request
-        let (request, context) = request.into_parts();
+        let (mut request, context) = request.into_parts();
+
+        // Preserve original inbound streaming flag before any internal overrides
+        let request_id = context.id().to_string();
+
+        // Build audit handle (None if DYN_AUDIT_ENABLED=0)
+        let mut audit_handle = crate::audit::handle::create_handle(&request, &request_id);
+
+        if let Some(ref mut h) = audit_handle {
+            h.set_request(std::sync::Arc::new(request.clone()));
+        }
+
+        // Set stream=true for internal processing (after audit capture)
+        request.inner.stream = Some(true);
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
@@ -735,8 +748,6 @@ impl
         let has_tools =
             request.inner.tools.is_some() && !request.inner.tools.as_ref().unwrap().is_empty();
 
-        // Context was already extracted above from response_stream
-
         // Determine if we should apply jail (do this before moving request)
         let should_jail = Self::should_apply_tool_jail(
             self.tool_call_parser.as_ref(),
@@ -745,7 +756,7 @@ impl
         )?;
 
         // Apply jail conditionally
-        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
+        let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
             if let Some(parser) = self.tool_call_parser.clone() {
                 Box::pin(Self::apply_tool_calling_jail(parser, stream))
             } else {
@@ -754,8 +765,31 @@ impl
         } else {
             Box::pin(stream)
         };
+
+        // Step 4: Apply audit aggregation strategy
+        let final_stream = if let Some(mut audit) = audit_handle {
+            let (stream, agg_fut) = if audit.streaming() {
+                // Streaming: apply scan (pass-through + parallel aggregation)
+                crate::audit::stream::scan_aggregate_with_future(transformed_stream)
+            } else {
+                // Non-streaming: apply fold (collect all, then emit single chunk)
+                crate::audit::stream::fold_aggregate_with_future(transformed_stream)
+            };
+
+            // Spawn audit task
+            tokio::spawn(async move {
+                let final_resp = agg_fut.await;
+                audit.set_response(Arc::new(final_resp));
+                audit.emit();
+            });
+
+            Box::pin(stream)
+        } else {
+            transformed_stream
+        };
+
         // prepend the annotations to the response stream
-        let stream = annotations_stream.chain(stream);
+        let stream = annotations_stream.chain(final_stream);
 
         // return the response stream - single boxing at the end
         Ok(ResponseStream::new(Box::pin(stream), context))
@@ -779,7 +813,9 @@ impl
         >,
     ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         // unpack the request
-        let (request, context) = request.into_parts();
+        let (mut request, context) = request.into_parts();
+
+        request.inner.stream = Some(true);
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
