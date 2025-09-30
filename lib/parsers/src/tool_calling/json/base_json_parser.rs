@@ -256,19 +256,18 @@ pub fn try_tool_call_parse_basic_json(
     // Convert json (String) to &str
     let json = json.as_str();
     // Anonymous function to attempt deserialization into a known representation
-    let parse =
-        |name: String, args: HashMap<String, Value>| -> anyhow::Result<ToolCallResponse> {
-            // Preserve nested JSON strings intact; do not double-escape.
-            // serde_json::to_string on Value preserves required escapes only.
-            Ok(ToolCallResponse {
-                id: format!("call-{}", Uuid::new_v4()),
-                tp: ToolCallType::Function,
-                function: CalledFunction {
-                    name,
-                    arguments: serde_json::to_string(&args)?,
-                },
-            })
-        };
+    let parse = |name: String, args: HashMap<String, Value>| -> anyhow::Result<ToolCallResponse> {
+        // Preserve nested JSON strings intact; do not double-escape.
+        // serde_json::to_string on Value preserves required escapes only.
+        Ok(ToolCallResponse {
+            id: format!("call-{}", Uuid::new_v4()),
+            tp: ToolCallType::Function,
+            function: CalledFunction {
+                name,
+                arguments: serde_json::to_string(&args)?,
+            },
+        })
+    };
 
     // CalledFunctionParameters: Single { name, parameters }
     // Example:
@@ -315,7 +314,8 @@ pub fn try_tool_call_parse_basic_json(
             // Try both CalledFunctionArguments and CalledFunctionParameters formats
             if let Ok(func_args) = serde_json::from_value::<CalledFunctionArguments>(item.clone()) {
                 results.push(parse(func_args.name, func_args.arguments)?);
-            } else if let Ok(func_params) = serde_json::from_value::<CalledFunctionParameters>(item) {
+            } else if let Ok(func_params) = serde_json::from_value::<CalledFunctionParameters>(item)
+            {
                 results.push(parse(func_params.name, func_params.parameters)?);
             }
             // Skip malformed entries silently
