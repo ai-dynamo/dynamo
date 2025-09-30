@@ -1050,21 +1050,20 @@ impl KvPushRouter {
                 ));
             }
 
-            // Create KvRouter with a unique consumer UUID
-            let consumer_uuid = uuid::Uuid::new_v4().to_string();
-            let kv_router = llm_rs::kv_router::KvRouter::new(
-                component.clone(),
-                block_size as u32,
-                None, // default selector
-                Some(kv_router_config.inner()),
-                consumer_uuid,
-            )
-            .await
-            .map_err(to_pyerr)?;
+            // Create ModelManager and use it to create KvRouter (ensures etcd registration)
+            let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
+            let kv_router = model_manager
+                .kv_chooser_for(
+                    "dummy_name", // does not matter, never cached
+                    component,
+                    block_size as u32,
+                    Some(kv_router_config.inner()),
+                )
+                .await
+                .map_err(to_pyerr)?;
 
-            // Create KvPushRouter
-            let kv_push_router =
-                llm_rs::kv_router::KvPushRouter::new(push_router, Arc::new(kv_router));
+            // Create KvPushRouter (kv_router is already Arc<KvRouter>)
+            let kv_push_router = llm_rs::kv_router::KvPushRouter::new(push_router, kv_router);
 
             Ok(Self {
                 inner: Arc::new(kv_push_router),

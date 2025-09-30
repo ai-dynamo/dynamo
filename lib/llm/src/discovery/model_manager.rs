@@ -214,7 +214,7 @@ impl ModelManager {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
     ) -> anyhow::Result<Arc<KvRouter>> {
-        if let Some(kv_chooser) = self.get_kv_chooser(model_name) {
+        if let Some(kv_chooser) = self.kv_choosers.lock().get(model_name).cloned() {
             // Check if the existing router has a different block size
             if kv_chooser.block_size() != kv_cache_block_size {
                 tracing::warn!(
@@ -227,22 +227,8 @@ impl ModelManager {
             }
             return Ok(kv_chooser);
         }
-        self.create_kv_chooser(model_name, component, kv_cache_block_size, kv_router_config)
-            .await
-    }
 
-    fn get_kv_chooser(&self, model_name: &str) -> Option<Arc<KvRouter>> {
-        self.kv_choosers.lock().get(model_name).cloned()
-    }
-
-    /// Create and return a KV chooser for this component and model
-    async fn create_kv_chooser(
-        &self,
-        model_name: &str,
-        component: &Component,
-        kv_cache_block_size: u32,
-        kv_router_config: Option<KvRouterConfig>,
-    ) -> anyhow::Result<Arc<KvRouter>> {
+        // Create new KV router with etcd registration
         let etcd_client = component
             .drt()
             .etcd_client()
