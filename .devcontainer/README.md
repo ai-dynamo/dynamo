@@ -125,15 +125,23 @@ When opening the devcontainer in VS Code/Cursor, navigate to the specific framew
 Build the appropriate framework image (e.g., `dynamo:latest-vllm-local-dev`) from scratch from the source:
 
 ```bash
-# Single command approach (recommended) - replace FRAMEWORK with VLLM/SGLANG/TRTLLM
-./container/build.sh --framework FRAMEWORK --target local-dev
-# Creates both dynamo:latest-framework and dynamo:latest-framework-local-dev
+# Single command approach (recommended)
+export FRAMEWORK=VLLM         # Note: any of VLLM, SGLANG, TRTLLM can be used
+./container/build.sh --framework $FRAMEWORK --target local-dev
 
-# Alternatively, you can build a development container, then build local-dev
-./container/build.sh --framework FRAMEWORK
-# Now you have a development image dynamo:latest-framework
-./container/build.sh --dev-image dynamo:latest-FRAMEWORK
-# Now you have a local-dev image dynamo:latest-FRAMEWORK-local-dev
+# Now you've created both dynamo:latest-vllm and dynamo:latest-vllm-local-dev
+```
+
+Alternatively, you can build a development container, then build local-dev:
+
+```bash
+export FRAMEWORK=VLLM
+
+./container/build.sh --framework $FRAMEWORK
+# Now you have a development image dynamo:latest-vllm
+
+./container/build.sh --dev-image dynamo:latest-${FRAMEWORK,,}
+# Now you have a local-dev image dynamo:latest-vllm-local-dev
 ```
 
 The local-dev image will give you local user permissions matching your host user and includes extra developer utilities (debugging tools, text editors, system monitors, etc.).
@@ -393,9 +401,10 @@ If you see errors like "container is not running" or "An error occurred setting 
    docker images | grep dynamo
 
    # If missing, build the dev image first, then build local-dev
-   ./container/build.sh --framework FRAMEWORK  # Replace with vllm/sglang/trtllm
-   ./container/build.sh --dev-image dynamo:latest-FRAMEWORK --framework FRAMEWORK
-   # Output: dynamo:latest-FRAMEWORK-local-dev
+   export FRAMEWORK=VLLM  # Replace with VLLM, SGLANG, or TRTLLM
+   ./container/build.sh --framework $FRAMEWORK
+   ./container/build.sh --dev-image dynamo:latest-${FRAMEWORK,,} --framework $FRAMEWORK
+   # Now you have dynamo:latest-vllm-local-dev
    ```
 
 2. **Container startup failure:**
