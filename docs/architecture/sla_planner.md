@@ -123,26 +123,14 @@ kubectl apply -f disagg_planner.yaml -n {$NAMESPACE}
 
 ### Virtual Deployment
 
-The SLA planner supports virtual deployment mode for customized environments (e.g., customized cluster) through the `VirtualConnector`. This connector enables the planner to communicate scaling decisions via ETCD without directly managing the deployment infrastructure.
+The SLA planner supports virtual deployment mode for customized environments (e.g., customized cluster) through the `VirtualConnector`. This connector enables the planner to communicate scaling decisions without directly managing the deployment infrastructure.
 
-The `VirtualConnector` acts as a bridge between the SLA planner and external deployment environments. Instead of directly scaling Kubernetes resources, it writes scaling decisions to ETCD and waits for the deployment environment to acknowledge completion.
-
-#### ETCD Communication Protocol
-
-The VirtualConnector uses the following ETCD key structure under `/{dynamo_namespace}/planner/`:
-
-**Planner Output Keys** (written by the planner):
-- `num_prefill_workers`: Integer (stored as string) specifying the target number of prefill workers
-- `num_decode_workers`: Integer (stored as string) specifying the target number of decode workers
-- `decision_id`: Integer (stored as string) with incremental ID for each scaling decision (-1 if no decisions made)
-
-**Deployment Environment Input Key** (written by the deployment environment):
-- `scaled_decision_id`: Integer (stored as string) specifying the newest decision_id that has been successfully scaled
+The `VirtualConnector` acts as a bridge between the SLA planner and external deployment environments. Instead of directly scaling Kubernetes resources, it writes scaling decisions and waits for the deployment environment to acknowledge completion.
 
 #### Scaling Decision Flow
 
-1. **Decision Generation**: The planner calculates optimal worker counts and writes them to ETCD with an incremented `decision_id`
-2. **Change Detection**: The planner skips scaling if the target counts match current counts, logging: `"No scaling needed (prefill=X, decode=Y), skipping ETCD update"`
+1. **Decision Generation**: The planner calculates optimal worker counts
+2. **Change Detection**: The planner skips scaling if the target counts match current counts, logging: `"No scaling needed (prefill=X, decode=Y)"`
 3. **Readiness Check**: Before making new decisions, the planner verifies that previous scaling operations have completed by checking if `scaled_decision_id >= decision_id`
 4. **Timeout Handling**: If a scaling decision isn't acknowledged within 30 minutes (1800 seconds), the planner proceeds with new decisions anyway
 5. **Completion Tracking**: The planner can optionally wait for scaling completion confirmation (blocking mode)
@@ -158,31 +146,23 @@ backend: "vllm"  # or "sglang"
 
 #### Deployment Environment Requirements
 
-The external deployment environment must:
+The external deployment environment must use `VirtualConnectorClient`:
 
-1. **Monitor ETCD**: Continuously watch the `/{dynamo_namespace}/planner/` prefix for scaling decisions
-2. **Parse Decisions**: Read `num_prefill_workers`, `num_decode_workers`, and `decision_id` values
-3. **Execute Scaling**: Apply the scaling decisions to the actual deployment infrastructure
-4. **Acknowledge Completion**: Write the completed `decision_id` to `scaled_decision_id` when scaling is finished
-
-#### Example Integration
-
-```python
-# Deployment environment pseudo-code
-async def monitor_scaling_decisions():
-    while True:
-        # Watch for changes in planner decisions
-        decision_id = await etcd.get("/my-namespace/planner/decision_id")
-        num_prefill = await etcd.get("/my-namespace/planner/num_prefill_workers")
-        num_decode = await etcd.get("/my-namespace/planner/num_decode_workers")
-
-        # Apply scaling to your infrastructure
-        await scale_prefill_workers(int(num_prefill))
-        await scale_decode_workers(int(num_decode))
-
-        # Acknowledge completion
-        await etcd.put("/my-namespace/planner/scaled_decision_id", decision_id)
-
-        await asyncio.sleep(10)
 ```
+from dynamo._core import DistributedRuntime, VirtualConnectorClient
+
+client = VirtualConnectorClient(distributed_runtime, namespace)
+```
+
+1. **Monitor Planner**: Continuously watch for scaling decisions: `await client.wait()`. This blocks until there is a change.
+2. **Parse Decisions**: Read `num_prefill_workers` and `num_decode_workers` values: `decision = await client.get()`
+3. **Execute Scaling**: Apply the scaling decisions to the actual deployment infrastructure
+4. **Acknowledge Completion**: Mark the decision completed when scaling is finished: `await client.complete(decision)`
+
+A scaling decision (returned by `client.get()`) contains the following fields, which are -1 if not set yet:
+- `num_prefill_workers`: Integer specifying the target number of prefill workers
+- `num_decode_workers`: Integer specifying the target number of decode workers
+- `decision_id`: Integer with incremental ID for each scaling decision
+
+See `components/planner/test/test_virtual_connector.py` for a full example.
 

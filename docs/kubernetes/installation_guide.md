@@ -69,7 +69,7 @@ Install from [NGC published artifacts](https://catalog.ngc.nvidia.com/orgs/nvidi
 
 ```bash
 # 1. Set environment
-export NAMESPACE=dynamo-kubernetes
+export NAMESPACE=dynamo-system
 export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
 
 # 2. Install CRDs
@@ -99,6 +99,15 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 --set "dynamo-operator.modelExpressURL=http://model-express-server.model-express.svc.cluster.local:8080"
 ```
 
+> [!TIP]
+> By default, Dynamo Operator is installed cluster-wide and will monitor all namespaces.
+> If you wish to restrict the operator to monitor only a specific namespace (the helm release namespace by default), you can set the namespaceRestriction.enabled to true.
+> You can also change the restricted namespace by setting the targetNamespace property.
+
+```bash
+--set "dynamo-operator.namespaceRestriction.enabled=true"
+--set "dynamo-operator.namespaceRestriction.targetNamespace=dynamo-namespace" # optional
+```
 
 → [Verify Installation](#verify-installation)
 
@@ -108,7 +117,7 @@ Build and deploy from source for customization.
 
 ```bash
 # 1. Set environment
-export NAMESPACE=dynamo-cloud
+export NAMESPACE=dynamo-system
 export DOCKER_SERVER=nvcr.io/nvidia/ai-dynamo/  # or your registry
 export DOCKER_USERNAME='$oauthtoken'
 export DOCKER_PASSWORD=<YOUR_NGC_CLI_API_KEY>

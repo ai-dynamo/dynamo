@@ -11,8 +11,8 @@ use parking_lot::{Mutex, RwLock};
 use dynamo_runtime::component::Component;
 use dynamo_runtime::prelude::DistributedRuntimeProvider;
 
-use crate::discovery::{KV_ROUTERS_ROOT_PATH, ModelEntry};
 use crate::kv_router::{KvRouterConfig, scheduler::DefaultWorkerSelector};
+use crate::{discovery::KV_ROUTERS_ROOT_PATH, model_card::ModelDeploymentCard};
 use crate::{
     kv_router::KvRouter,
     types::generic::tensor::TensorStreamingEngine,
@@ -40,7 +40,7 @@ pub struct ModelManager {
     tensor_engines: RwLock<ModelEngines<TensorStreamingEngine>>,
 
     // These two are Mutex because we read and write rarely and equally
-    entries: Mutex<HashMap<String, ModelEntry>>,
+    cards: Mutex<HashMap<String, ModelDeploymentCard>>,
     kv_choosers: Mutex<HashMap<String, Arc<KvRouter>>>,
 }
 
@@ -57,13 +57,13 @@ impl ModelManager {
             chat_completion_engines: RwLock::new(ModelEngines::default()),
             embeddings_engines: RwLock::new(ModelEngines::default()),
             tensor_engines: RwLock::new(ModelEngines::default()),
-            entries: Mutex::new(HashMap::new()),
+            cards: Mutex::new(HashMap::new()),
             kv_choosers: Mutex::new(HashMap::new()),
         }
     }
 
-    pub fn get_model_entries(&self) -> Vec<ModelEntry> {
-        self.entries.lock().values().cloned().collect()
+    pub fn get_model_cards(&self) -> Vec<ModelDeploymentCard> {
+        self.cards.lock().values().cloned().collect()
     }
 
     pub fn has_model_any(&self, model: &str) -> bool {
@@ -196,15 +196,15 @@ impl ModelManager {
             .ok_or(ModelManagerError::ModelNotFound(model.to_string()))
     }
 
-    /// Save a ModelEntry under an instance's etcd `models/` key so we can fetch it later when the key is
+    /// Save a ModelDeploymentCard from an instance's etcd `models/` key so we can fetch it later when the key is
     /// deleted from etcd.
-    pub fn save_model_entry(&self, key: &str, entry: ModelEntry) {
-        self.entries.lock().insert(key.to_string(), entry);
+    pub fn save_model_card(&self, key: &str, entry: ModelDeploymentCard) {
+        self.cards.lock().insert(key.to_string(), entry);
     }
 
-    /// Remove and return model entry for this instance's etcd key. We do this when the instance stops.
-    pub fn remove_model_entry(&self, key: &str) -> Option<ModelEntry> {
-        self.entries.lock().remove(key)
+    /// Remove and return model card for this instance's etcd key. We do this when the instance stops.
+    pub fn remove_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
+        self.cards.lock().remove(key)
     }
 
     pub async fn kv_chooser_for(
@@ -279,12 +279,11 @@ impl ModelManager {
     }
 
     pub fn get_model_tool_call_parser(&self, model: &str) -> Option<String> {
-        self.entries
+        self.cards
             .lock()
             .values()
-            .find(|entry| entry.name == model)
-            .and_then(|entry| entry.runtime_config.as_ref())
-            .and_then(|config| config.tool_call_parser.clone())
+            .find(|c| c.display_name == model)
+            .and_then(|c| c.runtime_config.tool_call_parser.as_ref())
             .map(|parser| parser.to_string())
     }
 

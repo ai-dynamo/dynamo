@@ -31,11 +31,12 @@ DEFAULT_FRAMEWORK=VLLM
 SOURCE_DIR=$(dirname "$(readlink -f "$0")")
 
 IMAGE=
-HF_CACHE=
-DEFAULT_HF_CACHE=${SOURCE_DIR}/.cache/huggingface
+HF_HOME=${HF_HOME:-}
+DEFAULT_HF_HOME=${SOURCE_DIR}/.cache/huggingface
 GPUS="all"
 PRIVILEGED=
 VOLUME_MOUNTS=
+PORT_MAPPINGS=
 MOUNT_WORKSPACE=
 ENVIRONMENT_VARIABLES=
 REMAINING_ARGS=
@@ -43,6 +44,7 @@ INTERACTIVE=
 USE_NIXL_GDS=
 RUNTIME=nvidia
 WORKDIR=/workspace
+NETWORK=host
 
 get_options() {
     while :; do
@@ -83,9 +85,9 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
-        --hf-cache)
+        --hf-cache|--hf-home)
             if [ "$2" ]; then
-                HF_CACHE=$2
+                HF_HOME=$2
                 shift
             else
                 missing_requirement "$1"
@@ -148,6 +150,14 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
+        -p|--port)
+            if [ "$2" ]; then
+                PORT_MAPPINGS+=" -p $2 "
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
         -e)
             if [ "$2" ]; then
                 ENVIRONMENT_VARIABLES+=" -e $2 "
@@ -164,6 +174,14 @@ get_options() {
             ;;
         --use-nixl-gds)
             USE_NIXL_GDS=TRUE
+            ;;
+        --network)
+            if [ "$2" ]; then
+                NETWORK=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
             ;;
         --dry-run)
             RUN_PREFIX="echo"
@@ -232,8 +250,8 @@ get_options() {
         VOLUME_MOUNTS+=" -v /tmp:/tmp "
         VOLUME_MOUNTS+=" -v /mnt/:/mnt "
 
-        if [ -z "$HF_CACHE" ]; then
-            HF_CACHE=$DEFAULT_HF_CACHE
+        if [ -z "$HF_HOME" ]; then
+            HF_HOME=$DEFAULT_HF_HOME
         fi
 
         if [ -z "${PRIVILEGED}" ]; then
@@ -245,13 +263,19 @@ get_options() {
         INTERACTIVE=" -it "
     fi
 
-    if [[ ${HF_CACHE^^} == "NONE" ]]; then
-        HF_CACHE=
+    if [[ ${HF_HOME^^} == "NONE" ]]; then
+        HF_HOME=
     fi
 
-    if [ -n "$HF_CACHE" ]; then
-        mkdir -p "$HF_CACHE"
-        VOLUME_MOUNTS+=" -v $HF_CACHE:/root/.cache/huggingface"
+    if [ -n "$HF_HOME" ]; then
+        mkdir -p "$HF_HOME"
+        # Use /home/ubuntu for local-dev target, /root for dev target.
+        if [ "$TARGET" = "local-dev" ] || [[ "$IMAGE" == *"local-dev"* ]]; then
+            HF_HOME_TARGET="/home/ubuntu/.cache/huggingface"
+        else
+            HF_HOME_TARGET="/root/.cache/huggingface"
+        fi
+        VOLUME_MOUNTS+=" -v $HF_HOME:$HF_HOME_TARGET"
     fi
 
     if [ -z "${PRIVILEGED}" ]; then
@@ -301,10 +325,15 @@ show_help() {
     echo "  [--name name for launched container, default NONE]"
     echo "  [--privileged whether to launch in privileged mode, default FALSE unless mounting workspace]"
     echo "  [--dry-run print docker commands without running]"
-    echo "  [--hf-cache directory to volume mount as the hf cache, default is NONE unless mounting workspace]"
+    echo "  [--hf-home|--hf-cache directory to volume mount as the hf home, default is NONE unless mounting workspace]"
     echo "  [--gpus gpus to enable, default is 'all', 'none' disables gpu support]"
     echo "  [--use-nixl-gds add volume mounts and capabilities needed for NVIDIA GPUDirect Storage]"
+    echo "  [--network network mode for container, default is 'host']"
+    echo "           Options: 'host' (default), 'bridge', 'none', 'container:name'"
+    echo "           Examples: --network bridge (isolated), --network none (no network - WARNING: breaks most functionality)"
+    echo "                    --network container:redis (share network with 'redis' container)"
     echo "  [-v add volume mount]"
+    echo "  [-p|--port add port mapping (host_port:container_port)]"
     echo "  [-e add environment variable]"
     echo "  [--mount-workspace set up for local development]"
     echo "  [-- stop processing and pass remaining args as command to docker run]"
@@ -335,7 +364,7 @@ ${RUN_PREFIX} docker run \
     ${GPU_STRING} \
     ${INTERACTIVE} \
     ${RM_STRING} \
-    --network host \
+    --network "$NETWORK" \
     ${RUNTIME:+--runtime "$RUNTIME"} \
     --shm-size=10G \
     --ulimit memlock=-1 \
@@ -343,6 +372,7 @@ ${RUN_PREFIX} docker run \
     --ulimit nofile=65536:65536 \
     ${ENVIRONMENT_VARIABLES} \
     ${VOLUME_MOUNTS} \
+    ${PORT_MAPPINGS} \
     -w "$WORKDIR" \
     --cap-add CAP_SYS_PTRACE \
     ${NIXL_GDS_CAPS} \
