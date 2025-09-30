@@ -78,7 +78,7 @@ class Load:
     requests_per_client: int = 150
     input_token_length: int = 100
     output_token_length: int = 100
-    max_retries: int = 1
+    max_retries: int = 3  # Increased for fault tolerance
     sla: Optional[float] = None
 
 

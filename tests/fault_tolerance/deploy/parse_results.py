@@ -17,6 +17,7 @@
 
 import argparse
 import json
+import logging
 import os
 import re
 from datetime import datetime
@@ -25,11 +26,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from tabulate import tabulate
-
-from tests.fault_tolerance.deploy.scenarios import (
-    WORKER_READY_PATTERNS,
-    get_all_worker_types,
-)
 
 
 def parse_test_log(
@@ -57,13 +53,13 @@ def parse_test_log(
             # Extract timestamp using regex to handle different log formats
             timestamp_match = re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", line)
 
-            # Look for multiprocess creation
-            if "Creating ManagedDeployment" in line and timestamp_match:
+            # Look for deployment start
+            if "Starting Deployment" in line and timestamp_match:
                 timestamp = timestamp_match.group(1)
                 start_time = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S")
 
-            # Look for "All workers are ready"
-            if "All workers are ready" in line and timestamp_match:
+            # Look for deployment ready
+            if "Deployment fault-tolerance-test is ready" in line and timestamp_match:
                 timestamp = timestamp_match.group(1)
                 ready_time = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S")
 
@@ -98,59 +94,13 @@ def parse_test_log(
     return startup_time, fault_time, start_cmd
 
 
-def parse_process_log(file_path: str) -> List[Tuple[datetime, str, str]]:
-    """
-    Parse process logs for worker events.
-
-    Args:
-        file_path: Path to process log file
-
-    Returns:
-        List of (timestamp, worker_type, worker_name) tuples
-    """
-    events = []
-
-    if not os.path.isfile(file_path):
-        return events
-
-    with open(file_path, "r") as f:
-        for line in f:
-            # Check each worker ready pattern
-            for worker_type, pattern in WORKER_READY_PATTERNS.items():
-                match = pattern.search(line)
-                if match:
-                    # Extract timestamp
-                    timestamp_match = re.search(
-                        r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", line
-                    )
-                    if timestamp_match:
-                        timestamp = datetime.strptime(
-                            timestamp_match.group(1), "%Y-%m-%d %H:%M:%S"
-                        )
-
-                        # Extract model name if available
-                        worker_name = worker_type
-                        if (
-                            hasattr(match, "groupdict")
-                            and "model_name" in match.groupdict()
-                        ):
-                            model_name = match.group("model_name")
-                            if model_name:
-                                worker_name = f"{worker_type}[{model_name}]"
-
-                        events.append((timestamp, worker_type, worker_name))
-                        break
-
-    return events
-
-
 def calculate_recovery_time(
     fault_time: Optional[datetime],
     failure_info: Optional[List[str]],
     process_logs_dir: str,
 ) -> Optional[float]:
     """
-    Calculate recovery time after fault injection.
+    Calculate recovery time after fault injection by finding when the container restarted.
 
     Args:
         fault_time: Time when fault was injected
@@ -163,45 +113,51 @@ def calculate_recovery_time(
     if not fault_time or not failure_info:
         return None
 
-    failed_component = failure_info[0]
+    # Determine component type from failure info
+    component_type = failure_info[0]  # e.g., "Frontend" or "decode"
+    component_dir = os.path.join(process_logs_dir, component_type)
 
-    # Get all worker types from config
-    all_worker_types = get_all_worker_types()
-
-    # Determine what component type failed
-    component_type = None
-    if "frontend" in failed_component.lower():
-        component_type = "Frontend"
-    else:
-        # Check if it's one of the known worker types
-        for worker_type in all_worker_types:
-            if worker_type.lower() in failed_component.lower():
-                component_type = worker_type
-                break
-
-    if not component_type:
+    if not os.path.exists(component_dir):
         return None
 
-    # Find recovery event
-    recovery_time = None
+    # Find the earliest timestamp from current container logs (not .previous.log or .metrics.log)
     earliest_recovery = None
 
-    for log_file in os.listdir(process_logs_dir):
-        if log_file.endswith(".log.txt"):
-            events = parse_process_log(os.path.join(process_logs_dir, log_file))
+    for log_file in os.listdir(component_dir):
+        # Skip non-current logs
+        if not log_file.endswith(".log") or log_file.endswith(
+            (".previous.log", ".metrics.log")
+        ):
+            continue
 
-            for timestamp, worker_type, worker_name in events:
-                # Check if this event is after fault injection
-                if timestamp > fault_time:
-                    # Check if this is the recovery of the failed component
-                    if worker_type == component_type:
+        log_path = os.path.join(component_dir, log_file)
+
+        # Get first timestamp from this log file
+        try:
+            with open(log_path, "r") as f:
+                first_line = f.readline()
+                if not first_line:
+                    continue
+
+                # Try to extract timestamp from JSON log
+                if '"time":"' in first_line:
+                    log_entry = json.loads(first_line)
+                    timestamp_str = log_entry.get("time", "")[:19]
+                    timestamp = datetime.strptime(timestamp_str, "%Y-%m-%dT%H:%M:%S")
+
+                    # Only consider timestamps after the fault
+                    if timestamp > fault_time:
                         if not earliest_recovery or timestamp < earliest_recovery:
                             earliest_recovery = timestamp
 
-    if earliest_recovery:
-        recovery_time = (earliest_recovery - fault_time).total_seconds()
+        except (json.JSONDecodeError, ValueError, IOError) as e:
+            logging.debug(f"Could not parse timestamp from {log_file}: {e}")
+            continue
 
-    return recovery_time
+    if earliest_recovery:
+        return (earliest_recovery - fault_time).total_seconds()
+
+    return None
 
 
 def parse_aiperf_client_results(log_dir: str, num_clients: int) -> Dict[str, Any]:
@@ -230,53 +186,86 @@ def parse_aiperf_client_results(log_dir: str, num_clients: int) -> Dict[str, Any
 
     for i in range(num_clients):
         client_dir = Path(log_dir) / f"client_{i}"
-        profile_json = client_dir / "profile_export.json"
 
-        # Try alternative names
-        if not profile_json.exists():
-            profile_json = client_dir / "profile_results.json"
+        # Look for AI-Perf results in attempt directories
+        profile_json = None
 
-        if profile_json.exists():
+        # Check for attempt directories (attempt_0, attempt_1, etc.)
+        for attempt_dir in sorted(client_dir.glob("attempt_*")):
+            json_path = attempt_dir / "profile_export_aiperf.json"
+            if json_path.exists():
+                profile_json = json_path
+                break  # Use the first successful attempt
+
+        if not profile_json:
+            logging.warning(f"No AI-Perf results found for client_{i} in {client_dir}")
+        else:
             try:
                 with open(profile_json) as f:
                     client_metrics = json.load(f)
 
-                # Extract metrics
-                request_count = client_metrics.get("request_count", 0)
-                error_count = client_metrics.get("error_count", 0)
+                # AI-Perf format has "records" dictionary at the top level
+                records = client_metrics.get("records", {})
+
+                # Extract request count (this is the total requests made)
+                request_count_record = records.get("request_count", {})
+                request_count = (
+                    int(request_count_record.get("avg", 0))
+                    if request_count_record
+                    else 0
+                )
+
+                # Check for errors in error_summary
+                error_summary = client_metrics.get("error_summary", [])
+                error_count = len(error_summary)
+
+                # Check if test was cancelled
+                was_cancelled = client_metrics.get("was_cancelled", False)
+                if was_cancelled:
+                    error_count = request_count  # Mark all as failed if cancelled
 
                 all_metrics["total_requests"] += request_count
                 all_metrics["successful_requests"] += request_count - error_count
                 all_metrics["failed_requests"] += error_count
 
-                # Latency metrics
-                latencies = client_metrics.get("request_latencies", {})
-                if latencies:
-                    if "mean" in latencies:
-                        all_metrics["latencies"].append(latencies["mean"])
-                    if "p50" in latencies:
-                        all_metrics["p50_latencies"].append(latencies["p50"])
-                    if "p90" in latencies:
-                        all_metrics["p90_latencies"].append(latencies["p90"])
-                    if "p99" in latencies:
-                        all_metrics["p99_latencies"].append(latencies["p99"])
+                # Extract latency from request_latency record
+                request_latency = records.get("request_latency", {})
 
-                # Token generation metrics
-                ttft_metrics = client_metrics.get("time_to_first_token", {})
-                if ttft_metrics and "mean" in ttft_metrics:
-                    all_metrics["ttft"].append(ttft_metrics["mean"])
+                if request_latency:
+                    # Convert milliseconds to seconds for consistency
+                    if "avg" in request_latency:
+                        all_metrics["latencies"].append(request_latency["avg"] / 1000.0)
+                    if "p50" in request_latency:
+                        all_metrics["p50_latencies"].append(
+                            request_latency["p50"] / 1000.0
+                        )
+                    if "p90" in request_latency:
+                        all_metrics["p90_latencies"].append(
+                            request_latency["p90"] / 1000.0
+                        )
+                    if "p99" in request_latency:
+                        all_metrics["p99_latencies"].append(
+                            request_latency["p99"] / 1000.0
+                        )
 
-                itl_metrics = client_metrics.get("inter_token_latency", {})
-                if itl_metrics and "mean" in itl_metrics:
-                    all_metrics["itl"].append(itl_metrics["mean"])
+                # Time to first token (if available in records)
+                ttft = records.get("time_to_first_token", {})
+                if ttft and "avg" in ttft:
+                    all_metrics["ttft"].append(ttft["avg"] / 1000.0)  # Convert ms to s
 
-                # Throughput
-                throughput_metrics = client_metrics.get("request_throughput", {})
-                if throughput_metrics and "value" in throughput_metrics:
-                    all_metrics["throughputs"].append(throughput_metrics["value"])
+                # Inter-token latency (if available in records)
+                itl = records.get("inter_token_latency", {})
+                if itl and "avg" in itl:
+                    all_metrics["itl"].append(itl["avg"] / 1000.0)  # Convert ms to s
+
+                # Throughput from request_throughput record
+                request_throughput = records.get("request_throughput", {})
+                req_throughput = request_throughput.get("avg", 0)
+                if req_throughput:
+                    all_metrics["throughputs"].append(req_throughput)
 
             except Exception as e:
-                print(f"Error parsing client_{i} results: {e}")
+                logging.error(f"Error parsing client_{i} results: {e}")
 
     return all_metrics
 
@@ -408,10 +397,14 @@ def process_single_test(
     test_log = os.path.join(log_dir, "test.log.txt")
     startup_time, fault_time, failure_info = parse_test_log(test_log)
 
-    # Calculate recovery time if fault was injected
+    # Calculate recovery time only if fault was injected
     recovery_time = None
     if fault_time and failure_info:
         recovery_time = calculate_recovery_time(fault_time, failure_info, log_dir)
+
+    # Clear startup_time if no fault injection (it's not relevant for "none" scenarios)
+    if not fault_time:
+        startup_time = None
 
     # Count number of clients (client_X directories)
     num_clients = 0
@@ -506,6 +499,9 @@ def main(
 
 
 if __name__ == "__main__":
+    # Configure logging
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
     parser = argparse.ArgumentParser(description="Parse fault tolerance test results")
     parser.add_argument(
         "log_dir", type=str, help="Directory containing test logs and results"
@@ -514,7 +510,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if not os.path.isdir(args.log_dir):
-        print(f"Error: {args.log_dir} is not a valid directory")
+        logging.error(f"{args.log_dir} is not a valid directory")
         exit(1)
 
     main(args.log_dir)

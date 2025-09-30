@@ -31,6 +31,7 @@ def _clients(
     input_token_length,
     output_token_length,
     max_retries,
+    retry_delay=5,  # Default 5 seconds between retries
 ):
     procs = []
     ctx = multiprocessing.get_context("spawn")
@@ -48,6 +49,7 @@ def _clients(
                     input_token_length,
                     output_token_length,
                     max_retries,
+                    retry_delay,
                 ),
             )
         )
