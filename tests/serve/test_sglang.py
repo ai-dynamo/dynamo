@@ -68,6 +68,24 @@ sglang_configs = {
             )
         ],
     ),
+    "template_verification": SGLangConfig(
+        # Tests custom jinja template preprocessing by verifying the template
+        # marker 'CUSTOM_TEMPLATE_ACTIVE|' is applied to user messages.
+        # The backend (launch/template_verifier.*) checks for this marker
+        # and returns "Successfully Applied Chat Template" if found.
+        name="template_verification",
+        directory=SERVE_TEST_DIR,
+        script_name="template_verifier.sh",
+        marks=[pytest.mark.gpu_1],
+        model="Qwen/Qwen3-0.6B",
+        env={},
+        models_port=8000,
+        request_payloads=[
+            chat_payload_default(
+                expected_response=["Successfully Applied Chat Template"]
+            )
+        ],
+    ),
 }
 
 

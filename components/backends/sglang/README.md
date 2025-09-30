@@ -68,6 +68,7 @@ Dynamo SGLang uses SGLang's native argument parser, so **most SGLang engine argu
 | `--dyn-tool-call-parser` | Tool call parser for structured outputs (takes precedence over `--tool-call-parser`) | `None` | `--tool-call-parser` |
 | `--dyn-reasoning-parser` | Reasoning parser for CoT models (takes precedence over `--reasoning-parser`) | `None` | `--reasoning-parser` |
 | `--use-sglang-tokenizer` | Use SGLang's tokenizer instead of Dynamo's | `False` | N/A |
+| `--custom-jinja-template` | Use custom chat template for that model (takes precedence over default chat template in model repo) | `None` | `--chat-template` |
 
 #### Tokenizer Behavior
 
