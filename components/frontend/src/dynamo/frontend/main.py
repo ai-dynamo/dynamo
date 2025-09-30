@@ -200,6 +200,12 @@ def parse_args():
         default=False,
         help="Start KServe gRPC server.",
     )
+    parser.add_argument(
+        "--request-template",
+        type=pathlib.Path,
+        default=None,
+        help="Path to JSON file containing default request parameters (model, temperature, max_completion_tokens).",
+    )
 
     flags = parser.parse_args()
 
@@ -262,6 +268,8 @@ async def async_main():
         kwargs["tls_key_path"] = flags.tls_key_path
     if flags.namespace:
         kwargs["namespace"] = flags.namespace
+    if flags.request_template:
+        kwargs["template_file"] = flags.request_template
 
     if is_static:
         # out=dyn://<static_endpoint>
