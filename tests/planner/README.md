@@ -150,11 +150,11 @@ Test the replica calculation logic without requiring Kubernetes:
 
 ```bash
 # Set PYTHONPATH to include planner components
-PYTHONPATH=components/planner/src python -m pytest tests/planner/test_replica_calculation.py -v
+PYTHONPATH=components/src python -m pytest tests/planner/test_replica_calculation.py -v
 
 # Or from the tests/planner directory:
 cd tests/planner
-PYTHONPATH=../../components/planner/src python -m pytest test_replica_calculation.py -v
+PYTHONPATH=../../components/src python -m pytest test_replica_calculation.py -v
 ```
 
 **Note**: The unit tests automatically mock external dependencies (prometheus_client, runtime modules) to ensure they can run in isolation without requiring the full Dynamo environment.

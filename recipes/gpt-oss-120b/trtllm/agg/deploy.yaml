@@ -6,15 +6,17 @@ metadata:
   name: gpt-oss-agg-shm
 spec:
   backendFramework: trtllm
+  pvcs:
+    - name: model-cache-oss-gpt120b
+      create: false
   services:
     TrtllmWorker:
       componentType: main
       dynamoNamespace: gpt-oss-agg-shm
       envFromSecret: hf-token-secret
-      pvc:
-        create: false
-        name: model-cache-oss-gpt120b
-        mountPoint: /root/.cache/huggingface
+      volumeMounts:
+        - name: model-cache-oss-gpt120b
+          mountPoint: /root/.cache/huggingface
       sharedMemory:
         size: 80Gi
       extraPodSpec:

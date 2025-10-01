@@ -698,9 +698,10 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Value: "test_value_from_dynamo_component_deployment_spec",
 									},
 								},
-								ComponentType:   string(commonconsts.ComponentTypeWorker),
-								ServiceName:     "test-lws-deploy-service",
-								DynamoNamespace: &[]string{"default"}[0],
+								ComponentType:    string(commonconsts.ComponentTypeWorker),
+								SubComponentType: "test-sub-component",
+								ServiceName:      "test-lws-deploy-service",
+								DynamoNamespace:  &[]string{"default"}[0],
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
 								},
@@ -783,6 +784,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									"role":                               "leader",
 									"nvidia.com/label1":                  "label1",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+									commonconsts.KubeLabelDynamoSubComponentType:    "test-sub-component",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "",
 								},
 								Annotations: map[string]string{
@@ -893,6 +895,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									"role":                               "worker",
 									"nvidia.com/label1":                  "label1",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+									commonconsts.KubeLabelDynamoSubComponentType:    "test-sub-component",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "",
 								},
 								Annotations: map[string]string{

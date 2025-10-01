@@ -23,6 +23,45 @@ pub use nats::NATSStorage;
 mod etcd;
 pub use etcd::EtcdStorage;
 
+/// A key that is safe to use directly in the KV store.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Key(String);
+
+impl Key {
+    pub fn new(s: &str) -> Key {
+        Key(Slug::slugify(s).to_string())
+    }
+
+    /// Create a Key without changing the string, it is assumed already KV store safe.
+    pub fn from_raw(s: String) -> Key {
+        Key(s)
+    }
+}
+
+impl From<&str> for Key {
+    fn from(s: &str) -> Key {
+        Key::new(s)
+    }
+}
+
+impl fmt::Display for Key {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl AsRef<str> for Key {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&Key> for String {
+    fn from(k: &Key) -> String {
+        k.0.clone()
+    }
+}
+
 #[async_trait]
 pub trait KeyValueStore: Send + Sync {
     async fn get_or_create_bucket(
@@ -48,13 +87,13 @@ impl KeyValueStoreManager {
     pub async fn load<T: for<'a> Deserialize<'a>>(
         &self,
         bucket: &str,
-        key: &Slug,
+        key: &Key,
     ) -> Result<Option<T>, StorageError> {
         let Some(bucket) = self.0.get_bucket(bucket).await? else {
             // No bucket means no cards
             return Ok(None);
         };
-        match bucket.get(key.as_ref()).await {
+        match bucket.get(key).await {
             Ok(Some(card_bytes)) => {
                 let card: T = serde_json::from_slice(card_bytes.as_ref())?;
                 Ok(Some(card))
@@ -109,15 +148,13 @@ impl KeyValueStoreManager {
         &self,
         bucket_name: &str,
         bucket_ttl: Option<Duration>,
-        key: &str,
+        key: &Key,
         obj: &mut T,
     ) -> anyhow::Result<StorageOutcome> {
         let obj_json = serde_json::to_string(obj)?;
         let bucket = self.0.get_or_create_bucket(bucket_name, bucket_ttl).await?;
 
-        let outcome = bucket
-            .insert(key.to_string(), obj_json, obj.revision())
-            .await?;
+        let outcome = bucket.insert(key, &obj_json, obj.revision()).await?;
 
         match outcome {
             StorageOutcome::Created(revision) | StorageOutcome::Exists(revision) => {
@@ -125,59 +162,6 @@ impl KeyValueStoreManager {
             }
         }
         Ok(outcome)
-    }
-
-    /// Re-publish the model card to the store regularly. Spawns a task and returns.
-    /// Takes most arguments by value because it will hold on to them in the publish task.
-    /// Deletes the card on cancellation.
-    pub fn publish_until_cancelled<T: Serialize + Versioned + Send + Sync + 'static>(
-        self: Arc<Self>,
-        cancel_token: CancellationToken,
-        bucket_name: String,
-        bucket_ttl: Option<Duration>,
-        publish_interval: Duration,
-        key: String,
-        mut obj: T,
-    ) {
-        tokio::spawn(async move {
-            loop {
-                let publish_result = self
-                    .clone()
-                    .publish(&bucket_name, bucket_ttl, &key, &mut obj)
-                    .await;
-                if let Err(err) = publish_result {
-                    tracing::error!(
-                        model = key,
-                        error = %err,
-                        "Failed publishing to KV storage. Ending publish task.",
-                    );
-                }
-                tokio::select! {
-                    _ = tokio::time::sleep(publish_interval) => {},
-                    _ = cancel_token.cancelled() => {
-                        tracing::trace!(model_service_name = key, "Publish loop cancelled");
-                        match self.0.get_bucket(&bucket_name).await {
-                            Ok(Some(bucket)) => {
-                                if let Err(err) = bucket.delete(&key).await {
-                                    // This is usually expected, our NATS connection is closed
-                                    tracing::trace!(bucket_name, key, %err, "Error delete published card from NATS on publish stop");
-                                }
-
-                                tracing::trace!(bucket_name, key, "Deleted Model Deployment Card from NATS");
-                            }
-                            Ok(None) => {
-                                tracing::trace!(bucket_name, key, "Bucket does not exist");
-                            }
-                            Err(err) => {
-                                tracing::trace!(bucket_name, %err, "publish_until_cancelled shutdown error");
-                            }
-                        }
-                        // Stop publishing
-                        break;
-                    }
-                }
-            }
-        });
     }
 }
 
@@ -189,16 +173,16 @@ pub trait KeyValueBucket: Send {
     /// Insert a value into a bucket, if it doesn't exist already
     async fn insert(
         &self,
-        key: String,
-        value: String,
+        key: &Key,
+        value: &str,
         revision: u64,
     ) -> Result<StorageOutcome, StorageError>;
 
     /// Fetch an item from the key-value storage
-    async fn get(&self, key: &str) -> Result<Option<bytes::Bytes>, StorageError>;
+    async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StorageError>;
 
     /// Delete an item from the bucket
-    async fn delete(&self, key: &str) -> Result<(), StorageError>;
+    async fn delete(&self, key: &Key) -> Result<(), StorageError>;
 
     /// A stream of items inserted into the bucket.
     /// Every time the stream is polled it will either return a newly created entry, or block until
@@ -311,9 +295,7 @@ mod tests {
         let s2 = Arc::clone(&s);
 
         let bucket = s.get_or_create_bucket(BUCKET_NAME, None).await?;
-        let res = bucket
-            .insert("test1".to_string(), "value1".to_string(), 0)
-            .await?;
+        let res = bucket.insert(&"test1".into(), "value1", 0).await?;
         assert_eq!(res, StorageOutcome::Created(0));
 
         let (got_first_tx, got_first_rx) = tokio::sync::oneshot::channel();
@@ -341,26 +323,18 @@ mod tests {
         // wouldn't be testing the watch behavior.
         got_first_rx.await?;
 
-        let res = bucket
-            .insert("test2".to_string(), "value2".to_string(), 0)
-            .await?;
+        let res = bucket.insert(&"test2".into(), "value2", 0).await?;
         assert_eq!(res, StorageOutcome::Created(0));
 
         // Repeat a key and revision. Ignored.
-        let res = bucket
-            .insert("test2".to_string(), "value2".to_string(), 0)
-            .await?;
+        let res = bucket.insert(&"test2".into(), "value2", 0).await?;
         assert_eq!(res, StorageOutcome::Exists(0));
 
         // Increment revision
-        let res = bucket
-            .insert("test2".to_string(), "value2".to_string(), 1)
-            .await?;
+        let res = bucket.insert(&"test2".into(), "value2", 1).await?;
         assert_eq!(res, StorageOutcome::Created(1));
 
-        let res = bucket
-            .insert("test3".to_string(), "value3".to_string(), 0)
-            .await?;
+        let res = bucket.insert(&"test3".into(), "value3", 0).await?;
         assert_eq!(res, StorageOutcome::Created(0));
 
         // ingress exits once it has received all values
@@ -377,9 +351,7 @@ mod tests {
         let bucket: &'static _ =
             Box::leak(Box::new(s.get_or_create_bucket(BUCKET_NAME, None).await?));
 
-        let res = bucket
-            .insert("test1".to_string(), "value1".to_string(), 0)
-            .await?;
+        let res = bucket.insert(&"test1".into(), "value1", 0).await?;
         assert_eq!(res, StorageOutcome::Created(0));
 
         let stream = bucket.watch().await?;
@@ -397,9 +369,7 @@ mod tests {
             assert_eq!(b, bytes::Bytes::from(vec![b'G', b'K']));
         });
 
-        bucket
-            .insert("test1".to_string(), "GK".to_string(), 1)
-            .await?;
+        bucket.insert(&"test1".into(), "GK", 1).await?;
 
         let _ = futures::join!(handle1, handle2);
         Ok(())

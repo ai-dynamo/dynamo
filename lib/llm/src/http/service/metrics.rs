@@ -18,12 +18,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::discovery::ModelEntry;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
-use crate::model_card::{ModelDeploymentCard, ROOT_PATH as MDC_ROOT_PATH};
+use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
-use dynamo_runtime::slug::Slug;
-use dynamo_runtime::storage::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager};
 
 pub use prometheus::Registry;
 
@@ -137,7 +134,8 @@ impl Metrics {
     ///
     /// The following metrics will be created with the configured prefix:
     /// - `{prefix}_requests_total` - IntCounterVec for the total number of requests processed
-    /// - `{prefix}_inflight_requests` - IntGaugeVec for the number of inflight requests
+    /// - `{prefix}_inflight_requests` - IntGaugeVec for the number of inflight/concurrent requests
+    /// - `{prefix}_disconnected_clients` - IntGauge for the number of disconnected clients
     /// - `{prefix}_request_duration_seconds` - HistogramVec for the duration of requests
     /// - `{prefix}_input_sequence_tokens` - HistogramVec for input sequence length in tokens
     /// - `{prefix}_output_sequence_tokens` - HistogramVec for output sequence length in tokens
@@ -188,7 +186,7 @@ impl Metrics {
 
         let inflight_gauge = IntGaugeVec::new(
             Opts::new(
-                frontend_metric_name(frontend_service::INFLIGHT_REQUESTS_TOTAL),
+                frontend_metric_name(frontend_service::INFLIGHT_REQUESTS),
                 "Number of inflight requests",
             ),
             &["model"],
@@ -196,14 +194,14 @@ impl Metrics {
         .unwrap();
 
         let client_disconnect_gauge = prometheus::IntGauge::new(
-            frontend_metric_name("client_disconnects"),
-            "Number of connections dropped by clients",
+            frontend_metric_name(frontend_service::DISCONNECTED_CLIENTS),
+            "Number of disconnected clients",
         )
         .unwrap();
 
         let http_queue_gauge = IntGaugeVec::new(
             Opts::new(
-                frontend_metric_name(frontend_service::QUEUED_REQUESTS_TOTAL),
+                frontend_metric_name(frontend_service::QUEUED_REQUESTS),
                 "Number of requests in HTTP processing queue",
             ),
             &["model"],
@@ -472,60 +470,27 @@ impl Metrics {
         }
     }
 
-    /// Update metrics from a ModelEntry and its ModelDeploymentCard
+    /// Update metrics from a ModelDeploymentCard
     /// This updates both runtime config metrics and MDC-specific metrics
-    pub async fn update_metrics_from_model_entry_with_mdc(
-        &self,
-        model_entry: &ModelEntry,
-        etcd_client: &dynamo_runtime::transports::etcd::Client,
-    ) -> anyhow::Result<()> {
-        // Update runtime config metrics
-        if let Some(runtime_config) = &model_entry.runtime_config {
-            self.update_runtime_config_metrics(&model_entry.name, runtime_config);
-        }
+    pub fn update_metrics_from_mdc(&self, card: &ModelDeploymentCard) -> anyhow::Result<()> {
+        self.update_runtime_config_metrics(&card.display_name, &card.runtime_config);
 
-        // Load and update MDC metrics
-        let model_slug = Slug::from_string(&model_entry.name);
-        let store: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
-        let card_store = Arc::new(KeyValueStoreManager::new(store));
+        self.model_context_length
+            .with_label_values(&[&card.display_name])
+            .set(card.context_length as i64);
 
-        match card_store
-            .load::<ModelDeploymentCard>(MDC_ROOT_PATH, &model_slug)
-            .await
-        {
-            Ok(Some(mdc)) => {
-                // Inline MDC metrics update
-                self.model_context_length
-                    .with_label_values(&[&model_entry.name])
-                    .set(mdc.context_length as i64);
+        self.model_kv_cache_block_size
+            .with_label_values(&[&card.display_name])
+            .set(card.kv_cache_block_size as i64);
 
-                self.model_kv_cache_block_size
-                    .with_label_values(&[&model_entry.name])
-                    .set(mdc.kv_cache_block_size as i64);
+        self.model_migration_limit
+            .with_label_values(&[&card.display_name])
+            .set(card.migration_limit as i64);
 
-                self.model_migration_limit
-                    .with_label_values(&[&model_entry.name])
-                    .set(mdc.migration_limit as i64);
-
-                tracing::debug!(
-                    model = %model_entry.name,
-                    "Successfully updated MDC metrics"
-                );
-            }
-            Ok(None) => {
-                tracing::debug!(
-                    model = %model_entry.name,
-                    "No MDC found in storage, skipping MDC metrics"
-                );
-            }
-            Err(e) => {
-                tracing::debug!(
-                    model = %model_entry.name,
-                    error = %e,
-                    "Failed to load MDC for metrics update"
-                );
-            }
-        }
+        tracing::debug!(
+            model = %card.display_name,
+            "Successfully updated MDC metrics"
+        );
 
         Ok(())
     }

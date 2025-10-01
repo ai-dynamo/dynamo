@@ -133,10 +133,11 @@ impl ChoiceJailState {
 
         if !self.is_jailed {
             // Use the marker matcher to detect complete/partial markers
-            match jail_stream
+            let match_result = jail_stream
                 .marker_matcher
-                .process_chunk(content, &self.partial_match_buffer)
-            {
+                .process_chunk(content, &self.partial_match_buffer);
+
+            match match_result {
                 MatchResult::Complete {
                     prefix,
                     marker,
@@ -632,6 +633,14 @@ impl JailedStream {
         let tool_call_match = self.tool_call_parser.is_some()
             && detect_tool_call_start(content, self.tool_call_parser.as_deref()).unwrap_or(false);
 
+        tracing::debug!(
+            "should_start_jail: content={:?}, sequence_match={}, tool_call_match={}, sequences={:?}",
+            content,
+            sequence_match,
+            tool_call_match,
+            self.jail_start_sequences
+        );
+
         sequence_match || tool_call_match
     }
 
@@ -726,10 +735,12 @@ impl JailedStream {
     async fn should_exit_jail_early(&self, accumulated: &str) -> bool {
         if let Some(ref parser) = self.tool_call_parser {
             // Try to parse - if successful and we have complete tool calls, exit early
-            if let Ok((tool_calls, _)) =
-                try_tool_call_parse_aggregate(accumulated, Some(parser)).await
-            {
-                return !tool_calls.is_empty();
+            match try_tool_call_parse_aggregate(accumulated, Some(parser)).await {
+                Ok((tool_calls, _normal_text)) => {
+                    let result = !tool_calls.is_empty();
+                    return result;
+                }
+                Err(_e) => {}
             }
         }
         false
@@ -878,6 +889,7 @@ impl JailedStreamBuilder {
             MarkerMatcher::new(vec!["__NEVER_MATCH__".to_string()])
                 .expect("Failed to create dummy MarkerMatcher")
         } else {
+            tracing::debug!("Creating MarkerMatcher with patterns: {:?}", all_patterns);
             MarkerMatcher::new(all_patterns)
                 .expect("Failed to create MarkerMatcher with configured patterns")
         };
