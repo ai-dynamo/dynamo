@@ -10,11 +10,9 @@ ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 ARG RELEASE_BUILD
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
-ARG CUDA_INDEX="128"
 
 # Make sure to update the dependency version in pyproject.toml when updating this
 ARG SGLANG_VERSION="0.5.0rc2"
-ARG SGL_KERNEL_VERSION="0.3.12"
 
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
@@ -95,17 +93,12 @@ ARG ARCH_ALT
 
 WORKDIR /workspace
 # Install SGLang and related dependencies
-ARG SGLANG_VERSION
-ARG SGL_KERNEL_VERSION
 ARG CUDA_INDEX
 RUN --mount=type=cache,target=/root/.cache/uv \
     cd /opt && \
     git clone https://github.com/sgl-project/sglang.git && \
     cd sglang && \
     git checkout v${SGLANG_VERSION} && \
-    uv pip install --no-cache-dir \
-        https://github.com/sgl-project/whl/releases/download/v${SGL_KERNEL_VERSION}/sgl_kernel-${SGL_KERNEL_VERSION}+cu${CUDA_INDEX}-cp310-abi3-manylinux2014_$(uname -m).whl \
-        --force-reinstall --no-deps && \
     # Install in editable mode for development
     uv pip install -e "python[all]"
 
