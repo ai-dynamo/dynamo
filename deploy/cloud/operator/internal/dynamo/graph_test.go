@@ -62,9 +62,10 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 						Services: map[string]*v1alpha1.DynamoComponentDeploymentOverridesSpec{
 							"service1": {
 								DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-									DynamoNamespace: &[]string{"default"}[0],
-									ComponentType:   "frontend",
-									Replicas:        &[]int32{3}[0],
+									DynamoNamespace:  &[]string{"default"}[0],
+									ComponentType:    "frontend",
+									SubComponentType: "test-sub-component",
+									Replicas:         &[]int32{3}[0],
 									Resources: &common.Resources{
 										Requests: &common.ResourceItem{
 											CPU:    "1",
@@ -106,10 +107,11 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-							ServiceName:     "service1",
-							DynamoNamespace: &[]string{"default"}[0],
-							ComponentType:   "frontend",
-							Replicas:        &[]int32{3}[0],
+							ServiceName:      "service1",
+							DynamoNamespace:  &[]string{"default"}[0],
+							ComponentType:    "frontend",
+							SubComponentType: "test-sub-component",
+							Replicas:         &[]int32{3}[0],
 							Resources: &common.Resources{
 								Requests: &common.ResourceItem{
 									CPU:    "1",
@@ -623,6 +625,12 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								},
 							},
 						},
+						Envs: []corev1.EnvVar{
+							{
+								Name:  "TEST_ENV",
+								Value: "test-value",
+							},
+						},
 					},
 				},
 			},
@@ -664,6 +672,12 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									Args:    []string{"echo hello world", "sleep 99999"},
 								},
 							},
+							Envs: []corev1.EnvVar{
+								{
+									Name:  "TEST_ENV",
+									Value: "test-value",
+								},
+							},
 						},
 					},
 				},
@@ -697,6 +711,12 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								},
 							},
 							Autoscaling: nil,
+							Envs: []corev1.EnvVar{
+								{
+									Name:  "TEST_ENV",
+									Value: "test-value",
+								},
+							},
 						},
 					},
 				},
@@ -1088,7 +1108,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 						Services: map[string]*v1alpha1.DynamoComponentDeploymentOverridesSpec{
 							"Frontend": {
 								DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-									ComponentType: "frontend", // Frontend component
+									ComponentType:    "frontend", // Frontend component
+									SubComponentType: "test-sub-component",
 									ExtraPodMetadata: &common.ExtraPodMetadata{
 										Annotations: map[string]string{
 											"nvidia.com/annotation1": "annotation1",
@@ -1179,9 +1200,11 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 											Value: "2",
 										},
 									},
-									PVC: &v1alpha1.PVC{
-										Name:       &[]string{"planner-pvc"}[0],
-										MountPoint: &[]string{"/planner"}[0],
+									VolumeMounts: []v1alpha1.VolumeMount{
+										{
+											Name:       "planner-pvc",
+											MountPoint: "/planner",
+										},
 									},
 									EnvFromSecret: &[]string{"planner-secret"}[0],
 									LivenessProbe: &corev1.Probe{
@@ -1240,6 +1263,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-frontend",
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeFrontend,
+									commonconsts.KubeLabelDynamoSubComponentType:    "test-sub-component",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 									"nvidia.com/label1":                             "label1",
 									"nvidia.com/label2":                             "label2",
@@ -1497,7 +1521,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "http://localhost:9090",
 													},
 													{
-														Name:  "PROMETHEUS_PORT",
+														Name:  "PLANNER_PROMETHEUS_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort),
 													},
 												},
@@ -1642,8 +1666,9 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 											"nvidia.com/label2": "label2",
 										},
 									},
-									Replicas:      &[]int32{5}[0],
-									ComponentType: commonconsts.ComponentTypeWorker,
+									Replicas:         &[]int32{5}[0],
+									ComponentType:    commonconsts.ComponentTypeWorker,
+									SubComponentType: "test-sub-component",
 									ExtraPodSpec: &common.ExtraPodSpec{
 										MainContainer: &corev1.Container{
 											Image: "worker-image",
@@ -1652,7 +1677,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												"-c",
 											},
 											Args: []string{
-												"python3 -m dynamo.sglang.worker --custom-flag custom-value",
+												"python3 -m dynamo.sglang --custom-flag custom-value",
 											},
 										},
 									},
@@ -1696,9 +1721,11 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 											Value: "2",
 										},
 									},
-									PVC: &v1alpha1.PVC{
-										Name:       &[]string{"planner-pvc"}[0],
-										MountPoint: &[]string{"/planner"}[0],
+									VolumeMounts: []v1alpha1.VolumeMount{
+										{
+											Name:       "planner-pvc",
+											MountPoint: "/planner",
+										},
 									},
 									EnvFromSecret: &[]string{"planner-secret"}[0],
 									LivenessProbe: &corev1.Probe{
@@ -1767,6 +1794,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 								Name: "worker-ldr",
 								Labels: map[string]string{
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+									commonconsts.KubeLabelDynamoSubComponentType:    "test-sub-component",
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker-ldr",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
@@ -1804,7 +1832,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													"-c",
 												},
 												Args: []string{
-													"python3 -m dynamo.sglang.worker --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 3 --node-rank 0 --custom-flag custom-value",
+													"python3 -m dynamo.sglang --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 3 --node-rank 0 --custom-flag custom-value",
 												},
 												Ports: []corev1.ContainerPort{
 													{
@@ -1917,6 +1945,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 								Name: "worker-wkr",
 								Labels: map[string]string{
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+									commonconsts.KubeLabelDynamoSubComponentType:    "test-sub-component",
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker-wkr",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
@@ -1955,7 +1984,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													"-c",
 												},
 												Args: []string{
-													"python3 -m dynamo.sglang.worker --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 3 --node-rank $((GROVE_PCLQ_POD_INDEX + 1)) --custom-flag custom-value",
+													"python3 -m dynamo.sglang --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 3 --node-rank $((GROVE_PCLQ_POD_INDEX + 1)) --custom-flag custom-value",
 												},
 												Ports: []corev1.ContainerPort{
 													{
@@ -2269,7 +2298,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "test-namespace",
 													},
 													{
-														Name:  "PROMETHEUS_PORT",
+														Name:  "PLANNER_PROMETHEUS_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort),
 													},
 												},
@@ -2492,9 +2521,11 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 											Value: "2",
 										},
 									},
-									PVC: &v1alpha1.PVC{
-										Name:       &[]string{"planner-pvc"}[0],
-										MountPoint: &[]string{"/planner"}[0],
+									VolumeMounts: []v1alpha1.VolumeMount{
+										{
+											Name:       "planner-pvc",
+											MountPoint: "/planner",
+										},
 									},
 									EnvFromSecret: &[]string{"planner-secret"}[0],
 									LivenessProbe: &corev1.Probe{
@@ -3060,7 +3091,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "test-namespace",
 													},
 													{
-														Name:  "PROMETHEUS_PORT",
+														Name:  "PLANNER_PROMETHEUS_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort),
 													},
 												},
@@ -3182,7 +3213,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 					ComponentType: commonconsts.ComponentTypeWorker,
 					ExtraPodSpec: &common.ExtraPodSpec{
 						MainContainer: &corev1.Container{
-							Args: []string{"python3 -m dynamo.sglang.worker"},
+							Args: []string{"python3 -m dynamo.sglang"},
 						},
 					},
 				},
@@ -3191,7 +3222,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 			role:              RoleMain,
 			numberOfNodes:     1,
 			expectError:       false,
-			expectContains:    []string{"python3", "-m", "dynamo.sglang.worker"},
+			expectContains:    []string{"python3", "-m", "dynamo.sglang"},
 			expectNotContains: []string{"dist-init-addr", "nnodes", "tp-size"},
 		},
 		{
@@ -3201,7 +3232,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 					ComponentType: commonconsts.ComponentTypeWorker,
 					ExtraPodSpec: &common.ExtraPodSpec{
 						MainContainer: &corev1.Container{
-							Args: []string{"python3 -m dynamo.sglang.worker"},
+							Args: []string{"python3 -m dynamo.sglang"},
 						},
 					},
 				},
@@ -3210,7 +3241,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 			role:             RoleLeader,
 			numberOfNodes:    3,
 			expectError:      false,
-			expectContains:   []string{"python3", "-m", "dynamo.sglang.worker", "dist-init-addr", "nnodes", "node-rank"},
+			expectContains:   []string{"python3", "-m", "dynamo.sglang", "dist-init-addr", "nnodes", "node-rank"},
 		},
 		{
 			name: "SGLang multinode worker",
@@ -3219,7 +3250,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 					ComponentType: commonconsts.ComponentTypeWorker,
 					ExtraPodSpec: &common.ExtraPodSpec{
 						MainContainer: &corev1.Container{
-							Args: []string{"python3 -m dynamo.sglang.worker"},
+							Args: []string{"python3 -m dynamo.sglang"},
 						},
 					},
 				},
@@ -3228,7 +3259,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 			role:             RoleWorker,
 			numberOfNodes:    3,
 			expectError:      false,
-			expectContains:   []string{"python3", "-m", "dynamo.sglang.worker", "dist-init-addr", "nnodes", "node-rank"},
+			expectContains:   []string{"python3", "-m", "dynamo.sglang", "dist-init-addr", "nnodes", "node-rank"},
 		},
 		{
 			name: "SGLang with user command override",
@@ -3660,7 +3691,7 @@ func TestDetectBackendFrameworkFromArgs(t *testing.T) {
 		{
 			name:     "detect SGLang from args",
 			command:  []string{"/bin/sh", "-c"},
-			args:     []string{"python -m dynamo.sglang.worker --model test"},
+			args:     []string{"python -m dynamo.sglang --model test"},
 			expected: BackendFrameworkSGLang,
 		},
 		{
@@ -3678,7 +3709,7 @@ func TestDetectBackendFrameworkFromArgs(t *testing.T) {
 		{
 			name:     "detect from python3.11",
 			command:  []string{},
-			args:     []string{"python3.11 -m dynamo.sglang.decode_worker"},
+			args:     []string{"python3.11 -m dynamo.sglang"},
 			expected: BackendFrameworkSGLang,
 		},
 		{
@@ -3690,7 +3721,7 @@ func TestDetectBackendFrameworkFromArgs(t *testing.T) {
 		{
 			name:        "multiple backends detected",
 			command:     []string{},
-			args:        []string{"python -m dynamo.vllm.worker && python -m dynamo.sglang.worker"},
+			args:        []string{"python -m dynamo.vllm.worker && python -m dynamo.sglang"},
 			expectError: true,
 		},
 	}
@@ -3752,7 +3783,7 @@ func TestDetermineBackendFramework(t *testing.T) {
 		{
 			name:                     "worker with detected matching explicit",
 			componentType:            "worker",
-			args:                     []string{"python -m dynamo.sglang.worker"},
+			args:                     []string{"python -m dynamo.sglang"},
 			explicitBackendFramework: "sglang",
 			expected:                 BackendFrameworkSGLang,
 		},
@@ -3856,7 +3887,7 @@ func TestGetBackendFrameworkFromComponent(t *testing.T) {
 					ComponentType: "worker", // Worker component
 					ExtraPodSpec: &common.ExtraPodSpec{
 						MainContainer: &corev1.Container{
-							Args: []string{"python -m dynamo.sglang.worker"},
+							Args: []string{"python -m dynamo.sglang"},
 						},
 					},
 				},
@@ -4340,6 +4371,24 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 				"DYN_HTTP_PORT": fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 			},
 		},
+		{
+			name: "frontend with overriding env var",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Envs: []corev1.EnvVar{
+						{
+							Name:  "DYN_HTTP_PORT",
+							Value: "3000",
+						},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			wantEnvVars: map[string]string{
+				"DYN_HTTP_PORT": "3000",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -4713,6 +4762,347 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 			diff := cmp.Diff(tt.expectedPodSpec, podSpec)
 			if diff != "" {
 				t.Errorf("GenerateBasePodSpec() podSpec = %v, want %v, diff = %v", podSpec, tt.expectedPodSpec, diff)
+			}
+		})
+	}
+}
+
+func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
+	secretsRetriever := &mockSecretsRetriever{}
+	controllerConfig := controller_common.Config{}
+
+	tests := []struct {
+		name           string
+		component      *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		expectError    bool
+		expectedPVCs   []string
+		expectedMounts []corev1.VolumeMount
+	}{
+		{
+			name: "valid volumeMounts",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:       "test-pvc",
+							MountPoint: "/data",
+						},
+					},
+				},
+			},
+			expectError:  false,
+			expectedPVCs: []string{"test-pvc"},
+			expectedMounts: []corev1.VolumeMount{
+				{Name: "test-pvc", MountPath: "/data"},
+				{Name: "shared-memory", MountPath: "/dev/shm"},
+			},
+		},
+		{
+			name: "multiple volumeMounts",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{Name: "pvc1", MountPoint: "/data1"},
+						{Name: "pvc2", MountPoint: "/data2"},
+					},
+				},
+			},
+			expectError:  false,
+			expectedPVCs: []string{"pvc1", "pvc2"},
+			expectedMounts: []corev1.VolumeMount{
+				{Name: "pvc1", MountPath: "/data1"},
+				{Name: "pvc2", MountPath: "/data2"},
+				{Name: "shared-memory", MountPath: "/dev/shm"},
+			},
+		},
+		{
+			name: "empty volumeMount name",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{Name: "", MountPoint: "/data"},
+					},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "empty volumeMount mountPoint",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{Name: "test-pvc", MountPoint: ""},
+					},
+				},
+			},
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			podSpec, err := GenerateBasePodSpec(
+				tt.component,
+				BackendFrameworkVLLM,
+				secretsRetriever,
+				"test-deployment",
+				"default",
+				RoleMain,
+				1,
+				controllerConfig,
+				commonconsts.MultinodeDeploymentTypeGrove,
+				"test-service",
+			)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("GenerateBasePodSpec() expected error, got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("GenerateBasePodSpec() unexpected error: %v", err)
+				return
+			}
+
+			// Check expected PVCs are present in volumes
+			for _, expectedPVC := range tt.expectedPVCs {
+				found := false
+				for _, volume := range podSpec.Volumes {
+					if volume.Name == expectedPVC && volume.PersistentVolumeClaim != nil {
+						if volume.PersistentVolumeClaim.ClaimName == expectedPVC {
+							found = true
+							break
+						}
+					}
+				}
+				if !found {
+					t.Errorf("GenerateBasePodSpec() expected PVC volume %s not found", expectedPVC)
+				}
+			}
+
+			// Check expected mounts are present
+			if len(podSpec.Containers) == 0 {
+				t.Errorf("GenerateBasePodSpec() no containers found")
+				return
+			}
+
+			container := podSpec.Containers[0]
+			for _, expectedMount := range tt.expectedMounts {
+				found := false
+				for _, mount := range container.VolumeMounts {
+					if mount.Name == expectedMount.Name && mount.MountPath == expectedMount.MountPath {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("GenerateBasePodSpec() expected volume mount %+v not found", expectedMount)
+				}
+			}
+		})
+	}
+}
+
+func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) {
+	secretsRetriever := &mockSecretsRetriever{}
+	controllerConfig := controller_common.Config{}
+
+	tests := []struct {
+		name             string
+		component        *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		backendFramework BackendFramework
+		expectError      bool
+		expectedMount    *corev1.VolumeMount
+	}{
+		{
+			name: "useAsCompilationCache with custom mount point",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "cache-pvc",
+							MountPoint:            "/custom/cache",
+							UseAsCompilationCache: true,
+						},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			expectError:      false,
+			expectedMount:    &corev1.VolumeMount{Name: "cache-pvc", MountPath: "/custom/cache"},
+		},
+		{
+			name: "useAsCompilationCache with default mount point for VLLM",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "cache-pvc",
+							UseAsCompilationCache: true,
+						},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			expectError:      false,
+			expectedMount:    &corev1.VolumeMount{Name: "cache-pvc", MountPath: commonconsts.DefaultVLLMCacheMountPoint},
+		},
+		{
+			name: "useAsCompilationCache without mount point for SGLang - should error",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "cache-pvc",
+							UseAsCompilationCache: true,
+						},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkSGLang,
+			expectError:      true, // SGLang doesn't support compilation cache, requires explicit mount point
+			expectedMount:    nil,
+		},
+		{
+			name: "useAsCompilationCache with explicit mount point for SGLang - should work",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "cache-pvc",
+							MountPoint:            "/custom/sglang/cache",
+							UseAsCompilationCache: true,
+						},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkSGLang,
+			expectError:      false,
+			expectedMount:    &corev1.VolumeMount{Name: "cache-pvc", MountPath: "/custom/sglang/cache"},
+		},
+		{
+			name: "useAsCompilationCache without mount point for TensorRT-LLM - should error",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "cache-pvc",
+							UseAsCompilationCache: true,
+						},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkTRTLLM,
+			expectError:      true, // TensorRT-LLM doesn't support compilation cache, requires explicit mount point
+			expectedMount:    nil,
+		},
+		{
+			name: "useAsCompilationCache with explicit mount point for TensorRT-LLM - should work",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "cache-pvc",
+							MountPoint:            "/custom/trtllm/cache",
+							UseAsCompilationCache: true,
+						},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkTRTLLM,
+			expectError:      false,
+			expectedMount:    &corev1.VolumeMount{Name: "cache-pvc", MountPath: "/custom/trtllm/cache"},
+		},
+		{
+			name: "no useAsCompilationCache volumes - should be ignored",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:       "regular-pvc",
+							MountPoint: "/data",
+						},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			expectError:      false,
+			expectedMount:    nil, // Should be ignored, not error
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			podSpec, err := GenerateBasePodSpec(
+				tt.component,
+				tt.backendFramework,
+				secretsRetriever,
+				"test-deployment",
+				"default",
+				RoleMain,
+				1,
+				controllerConfig,
+				commonconsts.MultinodeDeploymentTypeGrove,
+				"test-service",
+			)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("GenerateBasePodSpec() expected error, got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("GenerateBasePodSpec() unexpected error: %v", err)
+				return
+			}
+
+			if tt.expectedMount != nil {
+				// Check PVC volume exists
+				found := false
+				for _, volume := range podSpec.Volumes {
+					if volume.Name == tt.expectedMount.Name && volume.PersistentVolumeClaim != nil {
+						if volume.PersistentVolumeClaim.ClaimName == tt.expectedMount.Name {
+							found = true
+							break
+						}
+					}
+				}
+				if !found {
+					t.Errorf("GenerateBasePodSpec() expected PVC volume %s not found", tt.expectedMount.Name)
+				}
+
+				// Check volume mount exists
+				if len(podSpec.Containers) == 0 {
+					t.Errorf("GenerateBasePodSpec() no containers found")
+					return
+				}
+
+				container := podSpec.Containers[0]
+				found = false
+				for _, mount := range container.VolumeMounts {
+					if mount.Name == tt.expectedMount.Name && mount.MountPath == tt.expectedMount.MountPath {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("GenerateBasePodSpec() expected volume mount %+v not found", tt.expectedMount)
+				}
 			}
 		})
 	}

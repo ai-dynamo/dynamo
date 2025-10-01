@@ -37,6 +37,7 @@ const (
 	KubeLabelDynamoNamespace            = "nvidia.com/dynamo-namespace"
 	KubeLabelDynamoDeploymentTargetType = "nvidia.com/dynamo-deployment-target-type"
 	KubeLabelDynamoComponentType        = "nvidia.com/dynamo-component-type"
+	KubeLabelDynamoSubComponentType     = "nvidia.com/dynamo-sub-component-type"
 
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
@@ -63,6 +64,9 @@ const (
 	KubeValueNameSharedMemory    = "shared-memory"
 	DefaultSharedMemoryMountPath = "/dev/shm"
 	DefaultSharedMemorySize      = "8Gi"
+
+	// Compilation cache default mount points
+	DefaultVLLMCacheMountPoint = "/root/.cache/vllm"
 
 	// Kai-scheduler related constants
 	KubeAnnotationKaiSchedulerQueue = "nvidia.com/kai-scheduler-queue" // User-provided annotation to specify queue name

@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use pyo3::{exceptions::PyException, prelude::*};
+use pyo3::prelude::*;
 
 use crate::{CancellationToken, engine::*, to_pyerr};
 
@@ -102,31 +102,6 @@ impl HttpService {
     }
 }
 
-/// Python Exception for HTTP errors
-#[pyclass(extends=PyException)]
-pub struct HttpError {
-    code: u16,
-    message: String,
-}
-
-#[pymethods]
-impl HttpError {
-    #[new]
-    pub fn new(code: u16, message: String) -> Self {
-        HttpError { code, message }
-    }
-
-    #[getter]
-    fn code(&self) -> u16 {
-        self.code
-    }
-
-    #[getter]
-    fn message(&self) -> &str {
-        &self.message
-    }
-}
-
 #[pyclass]
 #[derive(Clone)]
 pub struct HttpAsyncEngine(pub PythonAsyncEngine);
@@ -172,18 +147,23 @@ where
             Err(e) => {
                 if let Some(py_err) = e.downcast_ref::<PyErr>() {
                     Python::with_gil(|py| {
-                        if let Ok(http_error_instance) = py_err
-                            .clone_ref(py)
-                            .into_value(py)
-                            .extract::<PyRef<HttpError>>(py)
+                        let err_val = py_err.clone_ref(py).into_value(py);
+                        let bound_err = err_val.bind(py);
+
+                        // check: Py03 exceptions cannot be cross-compiled, so we duck-type by name
+                        // and fields.
+                        if let Ok(type_name) = bound_err.get_type().name()
+                            && type_name.to_string().contains("HttpError")
+                            && let (Ok(code), Ok(message)) =
+                                (bound_err.getattr("code"), bound_err.getattr("message"))
+                            && let (Ok(code), Ok(message)) =
+                                (code.extract::<u16>(), message.extract::<String>())
                         {
-                            Err(http_error::HttpError {
-                                code: http_error_instance.code,
-                                message: http_error_instance.message.clone(),
-                            })?
-                        } else {
-                            Err(error!("Python Error: {}", py_err.to_string()))
+                            // SSE panics if there are carriage returns or newlines
+                            let message = message.replace(['\r', '\n'], "");
+                            return Err(http_error::HttpError { code, message })?;
                         }
+                        Err(error!("Python Error: {}", py_err.to_string()))
                     })
                 } else {
                     Err(e)

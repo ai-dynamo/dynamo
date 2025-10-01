@@ -6,14 +6,16 @@ metadata:
   name: llama3-70b-agg
 spec:
   backendFramework: vllm
+  pvcs:
+    - name: model-cache
+      create: false
   services:
     Frontend:
       componentType: frontend
       dynamoNamespace: llama3-70b-agg
-      pvc:
-        create: false
-        name: model-cache
-        mountPoint: /root/.cache/huggingface
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /root/.cache/huggingface
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
@@ -23,10 +25,9 @@ spec:
       componentType: worker
       dynamoNamespace: llama3-70b-agg
       envFromSecret: hf-token-secret
-      pvc:
-        create: false
-        name: model-cache
-        mountPoint: /root/.cache/huggingface
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /root/.cache/huggingface
       sharedMemory:
         size: 20Gi
       extraPodSpec:
