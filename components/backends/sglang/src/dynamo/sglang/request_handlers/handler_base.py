@@ -27,12 +27,7 @@ class BaseWorkerHandler(ABC):
         self.kv_publisher = kv_publisher
         self.prefill_client = prefill_client
         self.serving_mode = config.serving_mode
-        # Only access skip_tokenizer_init if engine is available
-        self.skip_tokenizer_init = (
-            getattr(config.server_args, "skip_tokenizer_init", False)
-            if engine
-            else False
-        )
+        self.skip_tokenizer_init = config.server_args.skip_tokenizer_init
 
     @abstractmethod
     async def generate(self, request: str):
@@ -43,9 +38,6 @@ class BaseWorkerHandler(ABC):
 
     def _get_input_param(self, request: dict) -> dict:
         """Get the appropriate input parameter for SGLang"""
-        if not self.engine:
-            raise RuntimeError("SGLang engine is required for _get_input_param")
-
         if self.skip_tokenizer_init:
             return {"input_ids": request["token_ids"]}
         else:
