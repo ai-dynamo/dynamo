@@ -314,7 +314,7 @@ async def send_request_via_python_kv_router(
                 sampling_options=sampling_options,
                 output_options=output_options,
                 router_config_override=router_config_override,
-                # worker_id=worker_id,
+                worker_id=worker_id,
             )
 
             if stream is not None:
@@ -828,68 +828,47 @@ def test_indexers_sync(request, runtime_services, predownload_tokenizers):
             endpoint = component.endpoint("generate")
 
             # Create first KV router
-            from dynamo._core import KvPushRouter, KvRouterConfig
+            # from dynamo._core import KvPushRouter, KvRouterConfig
 
             kv_router_config = KvRouterConfig(router_snapshot_threshold=20)
 
             async def send_requests_to_router(router, num_requests, router_name):
-                # First, send a test request with retry to ensure router is ready
-                max_retries = 8
-                wait_time = 1
-
-                for attempt in range(max_retries + 1):
-                    try:
-                        logger.info(
-                            f"Testing {router_name} readiness (attempt {attempt + 1})"
-                        )
-                        # Generate small test token IDs
-                        test_token_ids = [random.randint(1, 10000) for _ in range(10)]
-                        stream = await router.generate(
-                            token_ids=test_token_ids,  # Small test
-                            model=MODEL_NAME,
-                            stop_conditions={"max_tokens": 1},
-                        )
-                        # Just consume the stream to verify it works
-                        async for _ in stream:
-                            pass
-                        logger.info(f"{router_name} is ready!")
-                        break
-                    except Exception as e:
-                        logger.warning(
-                            f"{router_name} attempt {attempt + 1} failed: {e}"
-                        )
-                        if attempt < max_retries:
-                            await asyncio.sleep(wait_time)
-                            wait_time *= 2
-                        else:
-                            raise RuntimeError(
-                                f"Failed to connect to {router_name} after retries"
-                            )
+                # Initialize and check the readiness of the mockers by sending dummy request
+                # Generate small test token IDs
+                test_token_ids = [random.randint(1, 10000) for _ in range(10)]
+                logger.info(f"Initializing {router_name} and mocker instances")
+                await send_request_via_python_kv_router(
+                    kv_python_router=router,
+                    token_ids=test_token_ids,
+                    initial_wait=1.0,
+                    max_retries=8,
+                    stop_conditions={"max_tokens": 1},  # Generate just 1 token
+                )
 
                 # Now send the actual requests
                 tasks = []
                 for i in range(num_requests):
                     # Generate random token IDs for each request
+                    logger.info(
+                        f"Sending request {i + 1}/{num_requests} to {router_name}"
+                    )
+
                     request_tokens = [random.randint(1, 10000) for _ in range(30)]
 
-                    async def single_request(req_id, tokens):
-                        try:
-                            stream = await router.generate(
-                                token_ids=tokens,
-                                model=MODEL_NAME,
-                                stop_conditions={"max_tokens": 10},
+                    tasks.append(
+                        asyncio.create_task(
+                            send_request_via_python_kv_router(
+                                kv_python_router=router,
+                                token_ids=request_tokens,
+                                initial_wait=1.0,
+                                max_retries=8,
+                                stop_conditions={
+                                    "ignore_eos": True,  # Don't stop on EOS token
+                                    "max_tokens": 10,  # Generate exactly 10 tokens
+                                },
                             )
-                            # Consume the stream
-                            async for _ in stream:
-                                pass
-                            return True
-                        except Exception as e:
-                            logger.error(
-                                f"Request {req_id} to {router_name} failed: {e}"
-                            )
-                            return False
-
-                    tasks.append(asyncio.create_task(single_request(i, request_tokens)))
+                        )
+                    )
 
                 results = await asyncio.gather(*tasks)
                 successful = sum(1 for r in results if r)
@@ -920,11 +899,10 @@ def test_indexers_sync(request, runtime_services, predownload_tokenizers):
 
             # Launch second router - will automatically sync with the first router's state
             logger.info("Creating second KV router")
-            kv_router_config2 = KvRouterConfig(router_snapshot_threshold=20)
             kv_push_router2 = KvPushRouter(
                 endpoint=endpoint,
                 block_size=BLOCK_SIZE,
-                kv_router_config=kv_router_config2,
+                kv_router_config=kv_router_config,
             )
 
             # Send 25 requests to second router with initial retry loop
