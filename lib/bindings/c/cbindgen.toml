@@ -25,7 +25,20 @@ enum_class = false
 
 
 [export]
-include = ["DynamoLlmResult", "dynamo_llm_init", "dynamo_llm_shutdown"]
+include = [
+    "DynamoLlmResult",
+    "dynamo_llm_init",
+    "dynamo_llm_shutdown",
+    "dynamo_llm_load_publisher_create",
+    "dynamo_kv_event_publish_stored",
+    "dynamo_kv_event_publish_removed",
+    "WorkerSelectionPipeline",
+    "dynamo_create_worker_selection_pipeline",
+    "dynamo_destroy_worker_selection_pipeline",
+    "dynamo_query_worker_selection_and_annotate",
+    "dynamo_free_worker_selection_result",
+]
+
 
 [export.rename]
 "DynamoLlmResult" = "dynamo_llm_result_t"
