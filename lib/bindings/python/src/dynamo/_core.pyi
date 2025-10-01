@@ -248,6 +248,93 @@ def compute_block_hash_for_seq_py(tokens: List[int], kv_block_size: int) -> List
 
     ...
 
+class Context:
+    """
+    Context wrapper around AsyncEngineContext for Python bindings.
+    Provides tracing and cancellation capabilities for request handling.
+    """
+
+    def __init__(self, id: Optional[str] = None) -> None:
+        """
+        Create a new Context instance.
+
+        Args:
+            id: Optional request ID. If None, a default ID will be generated.
+        """
+        ...
+
+    def is_stopped(self) -> bool:
+        """
+        Check if the context has been stopped (synchronous).
+
+        Returns:
+            True if the context is stopped, False otherwise.
+        """
+        ...
+
+    def is_killed(self) -> bool:
+        """
+        Check if the context has been killed (synchronous).
+
+        Returns:
+            True if the context is killed, False otherwise.
+        """
+        ...
+
+    def stop_generating(self) -> None:
+        """
+        Issue a stop generating signal to the context.
+        """
+        ...
+
+    def id(self) -> Optional[str]:
+        """
+        Get the context ID.
+
+        Returns:
+            The context identifier string, or None if not set.
+        """
+        ...
+
+    async def async_killed_or_stopped(self) -> bool:
+        """
+        Asynchronously wait until the context is killed or stopped.
+
+        Returns:
+            True when the context is killed or stopped.
+        """
+        ...
+
+    @property
+    def trace_id(self) -> Optional[str]:
+        """
+        Get the distributed trace ID if available.
+
+        Returns:
+            The trace ID string, or None if no trace context.
+        """
+        ...
+
+    @property
+    def span_id(self) -> Optional[str]:
+        """
+        Get the distributed span ID if available.
+
+        Returns:
+            The span ID string, or None if no trace context.
+        """
+        ...
+
+    @property
+    def parent_span_id(self) -> Optional[str]:
+        """
+        Get the parent span ID if available.
+
+        Returns:
+            The parent span ID string, or None if no trace context.
+        """
+        ...
+
 class WorkerStats:
     """
     Worker stats.
