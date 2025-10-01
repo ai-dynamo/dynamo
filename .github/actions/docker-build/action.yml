@@ -25,6 +25,9 @@ inputs:
   aws_default_region:
     description: 'AWS Default Region'
     required: false
+  aws_account_id:
+    description: 'AWS Account ID'
+    required: false
   sccache_s3_bucket:
     description: 'SCCache S3 Bucket'
     required: false
@@ -58,6 +61,18 @@ runs:
       shell: bash
       run: |
         docker system prune -af
+    - name: Install awscli
+      shell: bash
+      run: |
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "awscliv2.zip"
+        unzip awscliv2.zip
+        sudo ./aws/install
+    - name: ECR Login
+      shell: bash
+      env:
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+      run: |
+        aws ecr get-login-password --region ${{ inputs.aws_default_region }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
     - name: Build image
       id: build
       shell: bash
@@ -67,6 +82,7 @@ runs:
         SCCACHE_S3_BUCKET:  ${{ inputs.sccache_s3_bucket }}
         AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
         # Determine image tag
         if [ -n "${{ inputs.image_tag }}" ]; then
@@ -75,7 +91,7 @@ runs:
           IMAGE_TAG="${{ inputs.framework }}:latest"
         fi
         echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
-
+        docker pull ${ECR_HOSTNAME}/ai-dynamo/dynamo:35776f3c8bae3da632f89e812059fa6946b21cd6-${{ inputs.framework }}-${{ inputs.platform }}
         ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \
           --framework ${{ inputs.framework }} \
