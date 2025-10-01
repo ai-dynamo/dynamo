@@ -4,7 +4,7 @@
 """
 Standalone KV Router Service
 
-Usage: python -m dynamo.router_standalone --endpoint <namespace.component.endpoint> [args]
+Usage: python -m dynamo.router --endpoint <namespace.component.endpoint> [args]
 
 This service provides a standalone KV-aware router for any set of workers
 in a Dynamo deployment. It can be used for disaggregated serving (e.g., routing
@@ -257,14 +257,6 @@ def parse_args():
         help="KV Router: Disable tracking of active blocks (blocks being used for ongoing generation). By default, active blocks are tracked for load balancing (default: True)",
     )
 
-    parser.add_argument(
-        "--log-level",
-        type=str,
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Logging level (default: INFO)",
-    )
-
     return parser.parse_args()
 
 
@@ -273,9 +265,6 @@ async def worker(runtime: DistributedRuntime):
     """Main worker function for the standalone router service."""
 
     args = parse_args()
-
-    # Set logging level
-    logging.getLogger().setLevel(getattr(logging, args.log_level))
 
     # Parse endpoint path to get namespace for service registration
     endpoint_parts = args.endpoint.split(".")
@@ -308,8 +297,8 @@ async def worker(runtime: DistributedRuntime):
         router_track_active_blocks=args.router_track_active_blocks,
     )
 
-    # Create service component - use "router_standalone" as component name
-    component = runtime.namespace(namespace).component("router_standalone")
+    # Create service component - use "router" as component name
+    component = runtime.namespace(namespace).component("router")
     await component.create_service()
 
     # Create handler
@@ -329,12 +318,12 @@ async def worker(runtime: DistributedRuntime):
             find_best_worker_endpoint.serve_endpoint(
                 handler.find_best_worker,
                 graceful_shutdown=True,
-                metrics_labels=[("service", "router_standalone")],
+                metrics_labels=[("service", "router")],
             ),
             free_endpoint.serve_endpoint(
                 handler.free,
                 graceful_shutdown=True,
-                metrics_labels=[("service", "router_standalone")],
+                metrics_labels=[("service", "router")],
             ),
         )
     except Exception as e:

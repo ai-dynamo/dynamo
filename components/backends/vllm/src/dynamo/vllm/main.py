@@ -219,14 +219,14 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     prefill_router_client = (
         await runtime.namespace(config.namespace)
-        .component("router_standalone")  # Standalone router for prefill workers
+        .component("router")  # Standalone router for prefill workers
         .endpoint("find_best_worker")
         .client()
     )
 
     prefill_router_free_client = (
         await runtime.namespace(config.namespace)
-        .component("router_standalone")  # Standalone router for prefill workers
+        .component("router")  # Standalone router for prefill workers
         .endpoint("free")
         .client()
     )

@@ -128,14 +128,14 @@ python -m dynamo.frontend \
     --kv-overlap-score-weight 0
 
 # In another terminal, start the standalone router for prefill workers
-python -m dynamo.router_standalone \
+python -m dynamo.router \
     --endpoint dynamo.prefill.generate \
     --block-size 64 \
     --router-reset-states \
     --no-track-active-blocks
 ```
 
-The standalone router will automatically coordinate with the decode router to handle request routing between prefill and decode workers. The `--router-reset-states` flag clears any previous state, and `--no-track-active-blocks` disables active block tracking (suitable for prefill-only routing where decode load is not relevant).
+The `--router-reset-states` flag clears any previous state, and `--no-track-active-blocks` disables active block tracking (suitable for prefill-only routing where decode load is not relevant).
 
 **Note**: If you're unsure whether your backend engines correctly emit KV events for certain models (e.g., hybrid models like gpt-oss or nemotron nano 2), use the `--no-kv-events` flag to disable KV event tracking and use approximate KV indexing instead:
 

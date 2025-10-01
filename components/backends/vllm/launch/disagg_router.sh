@@ -15,11 +15,12 @@ BLOCK_SIZE=64
 python -m dynamo.frontend \
     --router-mode kv \
     --http-port 8000 \
+    --kv-cache-block-size $BLOCK_SIZE \
     --kv-overlap-score-weight 0 \
     --router-reset-states &
 
 # run standalone router service for prefill workers
-python -m dynamo.router_standalone \
+python -m dynamo.router \
     --endpoint dynamo.prefill.generate \
     --block-size $BLOCK_SIZE \
     --router-reset-states \
