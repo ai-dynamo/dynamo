@@ -119,13 +119,15 @@ pub(crate) struct EntrypointArgs {
     tls_key_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
     namespace: Option<String>,
+    nim_metrics_polling_interval_seconds: f64,
+    nim_metrics_on_demand: bool,
 }
 
 #[pymethods]
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, model_config=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, model_config=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, nim_metrics_polling_interval_seconds=0.0, nim_metrics_on_demand=false))]
     pub fn new(
         engine_type: EngineType,
         model_path: Option<PathBuf>,
@@ -142,6 +144,8 @@ impl EntrypointArgs {
         tls_key_path: Option<PathBuf>,
         extra_engine_args: Option<PathBuf>,
         namespace: Option<String>,
+        nim_metrics_polling_interval_seconds: f64,
+        nim_metrics_on_demand: bool,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -149,6 +153,11 @@ impl EntrypointArgs {
         {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "tls_cert_path and tls_key_path must be provided together",
+            ));
+        }
+        if nim_metrics_polling_interval_seconds > 0.0 && nim_metrics_on_demand {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "nim_metrics_polling_interval_seconds > 0 and nim_metrics_on_demand cannot be used together",
             ));
         }
         Ok(EntrypointArgs {
@@ -167,6 +176,8 @@ impl EntrypointArgs {
             tls_key_path,
             extra_engine_args,
             namespace,
+            nim_metrics_polling_interval_seconds,
+            nim_metrics_on_demand,
         })
     }
 }
@@ -200,7 +211,9 @@ pub fn make_engine<'p>(
         .tls_key_path(args.tls_key_path.clone())
         .is_mocker(matches!(args.engine_type, EngineType::Mocker))
         .extra_engine_args(args.extra_engine_args.clone())
-        .namespace(args.namespace.clone());
+        .namespace(args.namespace.clone())
+        .nim_metrics_polling_interval_seconds(args.nim_metrics_polling_interval_seconds)
+        .nim_metrics_on_demand(args.nim_metrics_on_demand);
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let local_model = builder.build().await.map_err(to_pyerr)?;
         let inner = select_engine(distributed_runtime, args, local_model)
