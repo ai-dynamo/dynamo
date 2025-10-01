@@ -28,12 +28,31 @@
 //! # Access metrics directly (no constructor call needed!)
 //! frontend = prometheus_names.frontend
 //! print(frontend.requests_total)           # "dynamo_frontend_requests_total"
+//! print(frontend.queued_requests)          # "dynamo_frontend_queued_requests"
+//! print(frontend.inflight_requests)        # "dynamo_frontend_inflight_requests"
+//! print(frontend.disconnected_clients)     # "dynamo_frontend_disconnected_clients"
 //! print(frontend.request_duration_seconds) # "dynamo_frontend_request_duration_seconds"
+//! print(frontend.input_sequence_tokens)    # "dynamo_frontend_input_sequence_tokens"
+//! print(frontend.output_sequence_tokens)   # "dynamo_frontend_output_sequence_tokens"
+//! print(frontend.time_to_first_token_seconds) # "dynamo_frontend_time_to_first_token_seconds"
 //! print(frontend.inter_token_latency_seconds) # "dynamo_frontend_inter_token_latency_seconds"
+//! print(frontend.model_context_length)     # "dynamo_frontend_model_context_length"
+//! print(frontend.model_kv_cache_block_size) # "dynamo_frontend_model_kv_cache_block_size"
+//! print(frontend.model_migration_limit)    # "dynamo_frontend_model_migration_limit"
 //!
 //! work_handler = prometheus_names.work_handler
 //! print(work_handler.requests_total)       # "dynamo_component_requests_total"
+//! print(work_handler.request_bytes_total)  # "dynamo_component_request_bytes_total"
+//! print(work_handler.response_bytes_total) # "dynamo_component_response_bytes_total"
+//! print(work_handler.inflight_requests)    # "dynamo_component_inflight_requests"
+//! print(work_handler.request_duration_seconds) # "dynamo_component_request_duration_seconds"
 //! print(work_handler.errors_total)         # "dynamo_component_errors_total"
+//!
+//! kvstats = prometheus_names.kvstats
+//! print(kvstats.active_blocks)             # "kvstats_active_blocks"
+//! print(kvstats.total_blocks)              # "kvstats_total_blocks"
+//! print(kvstats.gpu_cache_usage_percent)   # "kvstats_gpu_cache_usage_percent"
+//! print(kvstats.gpu_prefix_cache_hit_rate) # "kvstats_gpu_prefix_cache_hit_rate"
 //!
 //! # Use in Prometheus queries
 //! query = f"rate({frontend.requests_total}[5m])"
@@ -59,6 +78,12 @@ impl PrometheusNames {
     #[getter]
     fn work_handler(&self) -> WorkHandler {
         WorkHandler
+    }
+
+    /// KV stats metrics
+    #[getter]
+    fn kvstats(&self) -> KvStatsMetrics {
+        KvStatsMetrics
     }
 }
 
@@ -86,21 +111,21 @@ impl FrontendService {
 
     /// Number of requests waiting in HTTP queue before receiving the first response
     #[getter]
-    fn queued_requests_total(&self) -> String {
+    fn queued_requests(&self) -> String {
         format!(
             "{}_{}",
             name_prefix::FRONTEND,
-            frontend_service::QUEUED_REQUESTS_TOTAL
+            frontend_service::QUEUED_REQUESTS
         )
     }
 
     /// Number of inflight requests going to the engine (vLLM, SGLang, ...)
     #[getter]
-    fn inflight_requests_total(&self) -> String {
+    fn inflight_requests(&self) -> String {
         format!(
             "{}_{}",
             name_prefix::FRONTEND,
-            frontend_service::INFLIGHT_REQUESTS_TOTAL
+            frontend_service::INFLIGHT_REQUESTS
         )
     }
 
@@ -151,6 +176,76 @@ impl FrontendService {
             "{}_{}",
             name_prefix::FRONTEND,
             frontend_service::INTER_TOKEN_LATENCY_SECONDS
+        )
+    }
+
+    /// Number of disconnected clients
+    #[getter]
+    fn disconnected_clients(&self) -> String {
+        format!(
+            "{}_{}",
+            name_prefix::FRONTEND,
+            frontend_service::DISCONNECTED_CLIENTS
+        )
+    }
+
+    /// Model total KV blocks
+    #[getter]
+    fn model_total_kv_blocks(&self) -> String {
+        format!(
+            "{}_{}",
+            name_prefix::FRONTEND,
+            frontend_service::MODEL_TOTAL_KV_BLOCKS
+        )
+    }
+
+    /// Model max number of sequences
+    #[getter]
+    fn model_max_num_seqs(&self) -> String {
+        format!(
+            "{}_{}",
+            name_prefix::FRONTEND,
+            frontend_service::MODEL_MAX_NUM_SEQS
+        )
+    }
+
+    /// Model max number of batched tokens
+    #[getter]
+    fn model_max_num_batched_tokens(&self) -> String {
+        format!(
+            "{}_{}",
+            name_prefix::FRONTEND,
+            frontend_service::MODEL_MAX_NUM_BATCHED_TOKENS
+        )
+    }
+
+    /// Model context length
+    #[getter]
+    fn model_context_length(&self) -> String {
+        format!(
+            "{}_{}",
+            name_prefix::FRONTEND,
+            frontend_service::MODEL_CONTEXT_LENGTH
+        )
+    }
+
+    /// Model KV cache block size
+    #[getter]
+    fn model_kv_cache_block_size(&self) -> String {
+        format!(
+            "{}_{}",
+            name_prefix::FRONTEND,
+            frontend_service::MODEL_KV_CACHE_BLOCK_SIZE
+        )
+    }
+
+    /// Model migration limit
+    #[getter]
+    fn model_migration_limit(&self) -> String {
+        format!(
+            "{}_{}",
+            name_prefix::FRONTEND,
+            frontend_service::MODEL_MIGRATION_LIMIT
         )
     }
 }
@@ -219,11 +314,44 @@ impl WorkHandler {
     }
 }
 
+/// KV stats metrics (KV cache statistics)
+/// These methods return the metric names with the "kvstats_" prefix
+#[pyclass]
+pub struct KvStatsMetrics;
+
+#[pymethods]
+impl KvStatsMetrics {
+    /// Number of active KV cache blocks currently in use
+    #[getter]
+    fn active_blocks(&self) -> String {
+        kvstats::ACTIVE_BLOCKS.to_string()
+    }
+
+    /// Total number of KV cache blocks available
+    #[getter]
+    fn total_blocks(&self) -> String {
+        kvstats::TOTAL_BLOCKS.to_string()
+    }
+
+    /// GPU cache usage as a percentage (0.0-1.0)
+    #[getter]
+    fn gpu_cache_usage_percent(&self) -> String {
+        kvstats::GPU_CACHE_USAGE_PERCENT.to_string()
+    }
+
+    /// GPU prefix cache hit rate as a percentage (0.0-1.0)
+    #[getter]
+    fn gpu_prefix_cache_hit_rate(&self) -> String {
+        kvstats::GPU_PREFIX_CACHE_HIT_RATE.to_string()
+    }
+}
+
 /// Add prometheus_names module to the Python bindings
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PrometheusNames>()?;
     m.add_class::<FrontendService>()?;
     m.add_class::<WorkHandler>()?;
+    m.add_class::<KvStatsMetrics>()?;
 
     // Add a module-level singleton instance for convenience
     let prometheus_names_instance = PrometheusNames;

@@ -12,6 +12,9 @@ from typing import (
     Tuple,
 )
 
+# Prometheus metric names are defined in a separate module
+from ._prometheus_names import prometheus_names
+
 def log_message(level: str, message: str, module: str, file: str, line: int) -> None:
     """
     Log a message from Python with file and line info
@@ -1376,134 +1379,7 @@ class VirtualConnectorClient:
         """Blocks until there is a new decision to fetch using 'get'"""
         ...
 
-class PrometheusNames:
-    """
-    Main container for all Prometheus metric name constants
-    """
-
-    @property
-    def frontend(self) -> FrontendService:
-        """
-        Frontend service metrics
-        """
-        ...
-
-    @property
-    def work_handler(self) -> WorkHandler:
-        """
-        Work handler metrics
-        """
-        ...
-
-class FrontendService:
-    """
-    Frontend service metrics (LLM HTTP service)
-    These methods return the full metric names with the "dynamo_frontend_" prefix
-    """
-
-    @property
-    def requests_total(self) -> str:
-        """
-        Total number of LLM requests processed
-        """
-        ...
-
-    @property
-    def queued_requests_total(self) -> str:
-        """
-        Number of requests waiting in HTTP queue before receiving the first response
-        """
-        ...
-
-    @property
-    def inflight_requests_total(self) -> str:
-        """
-        Number of inflight requests going to the engine (vLLM, SGLang, ...)
-        """
-        ...
-
-    @property
-    def request_duration_seconds(self) -> str:
-        """
-        Duration of LLM requests
-        """
-        ...
-
-    @property
-    def input_sequence_tokens(self) -> str:
-        """
-        Input sequence length in tokens
-        """
-        ...
-
-    @property
-    def output_sequence_tokens(self) -> str:
-        """
-        Output sequence length in tokens
-        """
-        ...
-
-    @property
-    def time_to_first_token_seconds(self) -> str:
-        """
-        Time to first token in seconds
-        """
-        ...
-
-    @property
-    def inter_token_latency_seconds(self) -> str:
-        """
-        Inter-token latency in seconds
-        """
-        ...
-
-class WorkHandler:
-    """
-    Work handler metrics (component request processing)
-    These methods return the full metric names with the "dynamo_component_" prefix
-    """
-
-    @property
-    def requests_total(self) -> str:
-        """
-        Total number of requests processed by work handler
-        """
-        ...
-
-    @property
-    def request_bytes_total(self) -> str:
-        """
-        Total number of bytes received in requests by work handler
-        """
-        ...
-
-    @property
-    def response_bytes_total(self) -> str:
-        """
-        Total number of bytes sent in responses by work handler
-        """
-        ...
-
-    @property
-    def inflight_requests(self) -> str:
-        """
-        Number of requests currently being processed by work handler
-        """
-        ...
-
-    @property
-    def request_duration_seconds(self) -> str:
-        """
-        Time spent processing requests by work handler (histogram)
-        """
-        ...
-
-    @property
-    def errors_total(self) -> str:
-        """
-        Total number of errors in work handler processing
-        """
-        ...
-
-# Module-level singleton instance for convenient access
-prometheus_names: PrometheusNames
+__all__ = [
+    # ... existing exports ...
+    "prometheus_names"
+]

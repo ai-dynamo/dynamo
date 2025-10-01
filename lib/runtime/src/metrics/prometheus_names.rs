@@ -20,26 +20,38 @@
 //! **Prefix**: Component identifier (`dynamo_component_`, `dynamo_frontend_`, etc.)
 //! **Name**: Descriptive snake_case name indicating what is measured
 //! **Suffix**:
-//!   - Units: `_seconds`, `_bytes`, `_ms`, `_percent`
-//!   - Counters: `_total` (not `total_` prefix)
+//!   - Units: `_seconds`, `_bytes`, `_ms`, `_percent`, `_messages`, `_connections`
+//!   - Counters: `_total` (not `total_` prefix) - for cumulative metrics that only increase
+//!   - Gauges: No `_total` suffix - for current state metrics that can go up and down
 //!   - Note: Do not use `_counter`, `_gauge`, `_time`, or `_size` in Prometheus names (too vague)
 //!
 //! **Common Transformations**:
 //! - ❌ `_counter` → ✅ `_total`
-//! - ❌ `_time` → ✅ `_seconds`, `_ms`, `_hours`, `_duration_seconds`
-//! - ❌ `_size` → ✅ `_bytes`, `_total`, `_length`
+//! - ❌ `_sum` → ✅ `_total`
 //! - ❌ `_gauge` → ✅ (no suffix needed for current values)
+//! - ❌ `_time` → ✅ `_seconds`, `_ms`, `_hours`, `_duration_seconds`
+//! - ❌ `_time_total` → ✅ `_seconds_total`, `_ms_total`, `_hours_total`
+//! - ❌ `_total_time` → ✅ `_seconds_total`, `_ms_total`, `_hours_total`
+//! - ❌ `_total_time_seconds` → ✅ `_seconds_total`
+//! - ❌ `_average_time` → ✅ `_seconds_avg`, `_ms_avg`
+//! - ❌ `_size` → ✅ `_bytes`, `_total`, `_length`
+//! - ❌ `_some_request_size` → ✅ `_some_request_bytes_avg`
 //! - ❌ `_rate` → ✅ `_per_second`, `_per_minute`
+//! - ❌ `disconnected_clients_total` → ✅ `disconnected_clients` (gauge, not counter)
+//! - ❌ `inflight_requests_total` → ✅ `inflight_requests` (gauge, not counter)
+//! - ❌ `connections_total` → ✅ `current_connections` (gauge, not counter)
 //!
 //! **Examples**:
 //! - ✅ `dynamo_frontend_requests_total` - Total request counter (not `incoming_requests`)
 //! - ✅ `dynamo_frontend_request_duration_seconds` - Request duration histogram (not `response_time`)
 //! - ✅ `dynamo_component_errors_total` - Total error counter (not `total_errors`)
 //! - ✅ `dynamo_component_memory_usage_bytes` - Memory usage gauge
-//! - ✅ `dynamo_frontend_inflight_requests_total` - Current inflight requests gauge
+//! - ✅ `dynamo_frontend_inflight_requests` - Current inflight requests gauge
 //! - ✅ `nats_client_connection_duration_ms` - Connection time in milliseconds
 //! - ✅ `dynamo_component_cpu_usage_percent` - CPU usage percentage
 //! - ✅ `dynamo_frontend_tokens_per_second` - Token generation rate
+//! - ✅ `nats_client_current_connections` - Current active connections gauge
+//! - ✅ `nats_client_in_messages` - Total messages received counter
 //!
 //! ## Key Differences: Prometheus Metric Names vs Prometheus Label Names
 //!
@@ -83,11 +95,15 @@ pub mod frontend_service {
     /// Total number of LLM requests processed
     pub const REQUESTS_TOTAL: &str = "requests_total";
 
-    /// Number of requests waiting in HTTP queue before receiving the first response.
-    pub const QUEUED_REQUESTS_TOTAL: &str = "queued_requests_total";
+    /// Number of requests waiting in HTTP queue before receiving the first response (gauge)
+    pub const QUEUED_REQUESTS: &str = "queued_requests";
 
-    /// Number of inflight requests going to the engine (vLLM, SGLang, ...)
-    pub const INFLIGHT_REQUESTS_TOTAL: &str = "inflight_requests_total";
+    /// Number of inflight/concurrent requests going to the engine (vLLM, SGLang, ...)
+    /// Note: This is a gauge metric (current state) that can go up and down, so no _total suffix
+    pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
+
+    /// Number of disconnected clients (gauge that can go up and down)
+    pub const DISCONNECTED_CLIENTS: &str = "disconnected_clients";
 
     /// Duration of LLM requests
     pub const REQUEST_DURATION_SECONDS: &str = "request_duration_seconds";
@@ -157,6 +173,7 @@ pub mod work_handler {
     pub const RESPONSE_BYTES_TOTAL: &str = "response_bytes_total";
 
     /// Number of requests currently being processed by work handler
+    /// Note: This is a gauge metric (current state) that can go up and down, so no _total suffix
     pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
 
     /// Time spent processing requests by work handler (histogram)
@@ -214,8 +231,9 @@ pub mod nats_client {
     /// Total number of messages sent by NATS client
     pub const OUT_MESSAGES: &str = nats_client_name!("out_messages");
 
-    /// Total number of connections established by NATS client
-    pub const CONNECTS: &str = nats_client_name!("connects");
+    /// Current number of active connections for NATS client
+    /// Note: Gauge metric measuring current connections, not cumulative total
+    pub const CURRENT_CONNECTIONS: &str = nats_client_name!("current_connections");
 
     /// Current connection state of NATS client (0=disconnected, 1=connected, 2=reconnecting)
     pub const CONNECTION_STATE: &str = nats_client_name!("connection_state");
@@ -234,16 +252,16 @@ pub mod nats_service {
     pub const PREFIX: &str = nats_service_name!("");
 
     /// Average processing time in milliseconds (maps to: average_processing_time in ms)
-    pub const AVG_PROCESSING_MS: &str = nats_service_name!("avg_processing_time_ms");
+    pub const PROCESSING_MS_AVG: &str = nats_service_name!("processing_ms_avg");
 
     /// Total errors across all endpoints (maps to: num_errors)
-    pub const TOTAL_ERRORS: &str = nats_service_name!("total_errors");
+    pub const ERRORS_TOTAL: &str = nats_service_name!("errors_total");
 
     /// Total requests across all endpoints (maps to: num_requests)
-    pub const TOTAL_REQUESTS: &str = nats_service_name!("total_requests");
+    pub const REQUESTS_TOTAL: &str = nats_service_name!("requests_total");
 
     /// Total processing time in milliseconds (maps to: processing_time in ms)
-    pub const TOTAL_PROCESSING_MS: &str = nats_service_name!("total_processing_time_ms");
+    pub const PROCESSING_MS_TOTAL: &str = nats_service_name!("processing_ms_total");
 
     /// Number of active services (derived from ServiceSet.services)
     pub const ACTIVE_SERVICES: &str = nats_service_name!("active_services");
@@ -255,7 +273,7 @@ pub mod nats_service {
 /// All NATS client Prometheus metric names as an array for iteration/validation
 pub const DRT_NATS_METRICS: &[&str] = &[
     nats_client::CONNECTION_STATE,
-    nats_client::CONNECTS,
+    nats_client::CURRENT_CONNECTIONS,
     nats_client::IN_TOTAL_BYTES,
     nats_client::IN_MESSAGES,
     nats_client::OUT_OVERHEAD_BYTES,
@@ -265,10 +283,10 @@ pub const DRT_NATS_METRICS: &[&str] = &[
 /// All component service Prometheus metric names as an array for iteration/validation
 /// (ordered to match NatsStatsMetrics fields)
 pub const COMPONENT_NATS_METRICS: &[&str] = &[
-    nats_service::AVG_PROCESSING_MS, // maps to: average_processing_time (nanoseconds)
-    nats_service::TOTAL_ERRORS,      // maps to: num_errors
-    nats_service::TOTAL_REQUESTS,    // maps to: num_requests
-    nats_service::TOTAL_PROCESSING_MS, // maps to: processing_time (nanoseconds)
+    nats_service::PROCESSING_MS_AVG, // maps to: average_processing_time (nanoseconds)
+    nats_service::ERRORS_TOTAL,      // maps to: num_errors
+    nats_service::REQUESTS_TOTAL,    // maps to: num_requests
+    nats_service::PROCESSING_MS_TOTAL, // maps to: processing_time (nanoseconds)
     nats_service::ACTIVE_SERVICES,   // derived from ServiceSet.services
     nats_service::ACTIVE_ENDPOINTS,  // derived from ServiceInfo.endpoints
 ];
