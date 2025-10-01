@@ -37,5 +37,5 @@ spec:
   volumes:
   - name: profiling-storage
     persistentVolumeClaim:
-      claimName: dynamo-pvc
+      claimName: planner-pvc
   restartPolicy: Never

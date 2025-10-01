@@ -167,6 +167,9 @@ envsubst < benchmarks/profiler/deploy/profile_sla_job.yaml | kubectl apply -f -
 
 # for MoE models
 envsubst < benchmarks/profiler/deploy/profile_sla_moe_job.yaml | kubectl apply -f -
+
+# using aiconfigurator instead of real sweeping (see below for more details)
+envsubst < benchmarks/profiler/deploy/profile_sla_aic_job.yaml | kubectl apply -f -
 ```
 
 **Step 5: Wait for profiling to complete**

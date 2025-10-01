@@ -72,6 +72,7 @@ class PrometheusAPIClient:
             result = self.prom.custom_query(query=query)
             if not result:
                 # No data available yet (no requests made) - return 0 silently
+                logger.warning(f"No prometheus metric data available for {metric_name}, use 0 instead")
                 return 0
             metrics_containers = parse_frontend_metric_containers(result)
 
@@ -84,6 +85,7 @@ class PrometheusAPIClient:
                     values.append(container.value[1])
 
             if not values:
+                logger.warning(f"No prometheus metric data available for {metric_name} with model {model_name} and dynamo namespace {self.dynamo_namespace}, use 0 instead")
                 return 0
             return sum(values) / len(values)
 

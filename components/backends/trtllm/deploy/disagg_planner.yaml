@@ -39,28 +39,9 @@ spec:
       envFromSecret: hf-token-secret
       componentType: planner
       replicas: 1
-      livenessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
       pvc:
         create: false
-        name: dynamo-pvc # Must be pre-created before deployment and SLA profiler must have been run
+        name: planner-pvc # Must be pre-created before deployment and SLA profiler must have been run
         mountPoint: /data
       extraPodSpec:
         mainContainer:
@@ -105,12 +86,6 @@ spec:
       extraPodSpec:
         terminationGracePeriodSeconds: 600
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 9090
-            periodSeconds: 10
-            failureThreshold: 60
           image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/components/backends/trtllm
           command:
@@ -140,12 +115,6 @@ spec:
       extraPodSpec:
         terminationGracePeriodSeconds: 600
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 9090
-            periodSeconds: 10
-            failureThreshold: 60
           image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/components/backends/trtllm
           command:

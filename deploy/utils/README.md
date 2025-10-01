@@ -20,7 +20,7 @@ This includes:
   - `serviceaccount.yaml` — ServiceAccount `dynamo-sa` for benchmarking and profiling jobs
   - `role.yaml` — Role `dynamo-role` with necessary permissions
   - `rolebinding.yaml` — RoleBinding `dynamo-binding`
-  - `pvc.yaml` — PVC `dynamo-pvc` for storing profiler results and configurations
+  - `pvc.yaml` — PVC `planner-pvc` for storing profiler results and configurations
   - `pvc-access-pod.yaml` — short‑lived pod for copying profiler results from the PVC
 - `kubernetes.py` — helper used by tooling to apply/read resources (e.g., access pod for PVC downloads)
 - `inject_manifest.py` — utility for injecting deployment configurations into the PVC for profiling
@@ -46,7 +46,7 @@ This script applies the following manifests to your existing Dynamo namespace:
 - `deploy/utils/manifests/serviceaccount.yaml` - ServiceAccount `dynamo-sa`
 - `deploy/utils/manifests/role.yaml` - Role `dynamo-role`
 - `deploy/utils/manifests/rolebinding.yaml` - RoleBinding `dynamo-binding`
-- `deploy/utils/manifests/pvc.yaml` - PVC `dynamo-pvc`
+- `deploy/utils/manifests/pvc.yaml` - PVC `planner-pvc`
 
 If `HF_TOKEN` is provided, it also creates a secret for HuggingFace model access.
 
@@ -54,7 +54,7 @@ After running the setup script, verify the resources by checking:
 
 ```bash
 kubectl get serviceaccount dynamo-sa -n $NAMESPACE
-kubectl get pvc dynamo-pvc -n $NAMESPACE
+kubectl get pvc planner-pvc -n $NAMESPACE
 ```
 
 ### PVC Manipulation Scripts

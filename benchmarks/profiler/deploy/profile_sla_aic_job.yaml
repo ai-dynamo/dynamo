@@ -45,9 +45,16 @@ spec:
           - --osl
           - "150"
           - --ttft
-          - "200"
+          - "500"
           - --itl
-          - "20"
+          - "30"
+          - --use-ai-configurator
+          - --aic-system
+          - h200_sxm
+          - --aic-model-name
+          - QWEN3_32B
+          - --backend-version
+          - 0.20.0
         volumeMounts:
           - name: output-volume
             mountPath: /data

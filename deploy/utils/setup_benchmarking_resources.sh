@@ -101,7 +101,7 @@ ok "Benchmarking resource setup complete"
 # Verify installation
 log "Verifying installation..."
 kubectl get serviceaccount dynamo-sa -n "$NAMESPACE" >/dev/null && ok "ServiceAccount dynamo-sa exists" || err "ServiceAccount dynamo-sa not found"
-kubectl get pvc dynamo-pvc -n "$NAMESPACE" >/dev/null && ok "PVC dynamo-pvc exists" || err "PVC dynamo-pvc not found"
+kubectl get pvc planner-pvc -n "$NAMESPACE" >/dev/null && ok "PVC planner-pvc exists" || err "PVC planner-pvc not found"
 
 if [[ -n "$HF_TOKEN" ]]; then
   kubectl get secret hf-token-secret -n "$NAMESPACE" >/dev/null && ok "Secret hf-token-secret exists" || err "Secret hf-token-secret not found"
