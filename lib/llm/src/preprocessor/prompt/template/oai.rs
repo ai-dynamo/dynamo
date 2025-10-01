@@ -145,7 +145,11 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
 
     fn tools(&self) -> Option<Value> {
         if self.inner.tools.is_none() {
-            None
+            // ISSUE: {%- if tools is iterable and tools | length > 0 %}
+            // For cases like above, minijinja will not error out in calculating the length of tools
+            // as it evaluates both the sides an don't do short circuiting.
+            // Safe to return an empty array here. This will work even if tools are not present as length = 0
+            Some(Value::from_serialize(Vec::<serde_json::Value>::new()))
         } else {
             // Try to fix the tool schema if it is missing type and properties
             Some(may_be_fix_tool_schema(
@@ -254,7 +258,8 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         let mixins = Value::from_dyn_object(self.mixins.clone());
 
         let tools = req.tools();
-        let has_tools = tools.is_some();
+        // has_tools should be true if tools is a non-empty array
+        let has_tools = tools.as_ref().and_then(|v| v.len()).is_some_and(|l| l > 0);
         let add_generation_prompt = req.should_add_generation_prompt();
 
         tracing::trace!(
