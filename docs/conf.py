@@ -76,6 +76,9 @@ suppress_warnings = [
     "myst.xref_missing",  # Missing cross-references of relative links outside docs folder
 ]
 
+# Make Sphinx treat warnings as errors
+nitpicky = True
+
 # Additional MyST configuration
 myst_heading_anchors = 7  # Generate anchors for headers
 myst_substitutions = {}  # Custom substitutions
