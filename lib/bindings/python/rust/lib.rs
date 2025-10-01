@@ -428,6 +428,15 @@ impl DistributedRuntime {
         })
     }
 
+    /// Set the health status for an endpoint
+    fn set_endpoint_health_status(&self, endpoint: String, status: String) -> PyResult<()> {
+        self.inner
+            .set_endpoint_health_status_str(&endpoint, &status)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+        Ok(())
+    }
+
     fn namespace(&self, name: String) -> PyResult<Namespace> {
         Ok(Namespace {
             inner: self.inner.namespace(name).map_err(to_pyerr)?,

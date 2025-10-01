@@ -95,6 +95,22 @@ impl SystemHealth {
         endpoint_health.insert(endpoint.to_string(), status);
     }
 
+    /// Set the health status for an endpoint using a string representation
+    pub fn set_endpoint_health_status_str(&self, endpoint: &str, status: &str) -> anyhow::Result<()> {
+        let health_status = match status.to_lowercase().as_str() {
+            "ready" => HealthStatus::Ready,
+            "notready" | "not_ready" => HealthStatus::NotReady,
+            _ => {
+                anyhow::bail!(
+                    "Invalid health status: {}. Must be one of: ready, notready",
+                    status
+                )
+            }
+        };
+        self.set_endpoint_health_status(endpoint, health_status);
+        Ok(())
+    }
+
     /// Returns the overall health status and endpoint health statuses
     /// System health is determined by ALL endpoints that have registered health checks
     pub fn get_health_status(&self) -> (bool, HashMap<String, String>) {

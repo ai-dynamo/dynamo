@@ -212,6 +212,14 @@ impl DistributedRuntime {
         self.runtime.shutdown();
     }
 
+    /// Set the health status for an endpoint using a string representation
+    pub fn set_endpoint_health_status_str(&self, endpoint: &str, status: &str) -> Result<()> {
+        self.system_health
+            .lock()
+            .unwrap()
+            .set_endpoint_health_status_str(endpoint, status)
+    }
+
     /// Create a [`Namespace`]
     pub fn namespace(&self, name: impl Into<String>) -> Result<Namespace> {
         Namespace::new(self.clone(), name.into(), self.is_static)

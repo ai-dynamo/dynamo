@@ -95,7 +95,8 @@ async def init(runtime: DistributedRuntime, config: Config):
             yield response
 
     handler = DecodeWorkerHandler(
-        component, engine, config, publisher, kv_publisher, prefill_client
+        component, engine, config, publisher, kv_publisher, prefill_client,
+        runtime=runtime, endpoint_name=dynamo_args.endpoint
     )
 
     async def register_model():
@@ -140,7 +141,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         except asyncio.CancelledError:
             logging.info("Metrics task succesfully cancelled")
             pass
-        handler.cleanup()
+        await handler.cleanup()
 
 
 async def init_prefill(runtime: DistributedRuntime, config: Config):
@@ -155,7 +156,10 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
-    handler = PrefillWorkerHandler(component, engine, config)
+    handler = PrefillWorkerHandler(
+        component, engine, config,
+        runtime=runtime, endpoint_name=dynamo_args.endpoint
+    )
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 
@@ -174,7 +178,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         logging.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
-        handler.cleanup()
+        await handler.cleanup()
 
 
 async def graceful_shutdown(runtime):
