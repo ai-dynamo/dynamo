@@ -4,8 +4,8 @@
 use anyhow::Error;
 use async_stream::stream;
 use dynamo_llm::{
-    http::service::metrics::Endpoint,
-    http::service::service_v2::HttpService,
+    http::service::{metrics::Endpoint, service_v2::HttpService},
+    model_card::ModelDeploymentCard,
     protocols::{
         Annotated,
         openai::chat_completions::{
@@ -206,9 +206,10 @@ async fn test_metrics_with_mock_model() {
         let task = tokio::spawn(async move { service.run(token.clone()).await });
 
         // Add mock model engine
+        let card = ModelDeploymentCard::with_name_only("mockmodel");
         let mock_engine = Arc::new(MockModelEngine {});
         manager
-            .add_chat_completions_model("mockmodel", mock_engine)
+            .add_chat_completions_model("mockmodel", card.mdcsum(), mock_engine)
             .unwrap();
 
         // Wait for service to be ready
@@ -362,10 +363,11 @@ mod integration_tests {
             panic!("Expected StaticFull config");
         };
 
+        let card = local_model.card().clone();
         let engine = Arc::new(dynamo_llm::engines::StreamingEngineAdapter::new(engine));
         let manager = service.model_manager();
         manager
-            .add_chat_completions_model(model.service_name(), engine.clone())
+            .add_chat_completions_model(model.service_name(), card.mdcsum(), engine.clone())
             .unwrap();
 
         // Now do the proper MDC registration via LocalModel::attach()
@@ -386,8 +388,7 @@ mod integration_tests {
 
         // Manually save the model card and update metrics
         // This simulates what the ModelWatcher polling task would do in production
-        let card = local_model.card().clone();
-        manager.save_model_card("test-mdc-key", card.clone());
+        let _ = manager.save_model_card("test-mdc-key", card.clone());
 
         if let Err(e) = service
             .state()

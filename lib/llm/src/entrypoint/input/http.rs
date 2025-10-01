@@ -93,6 +93,8 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
         }
         EngineConfig::StaticRemote(local_model) => {
             let card = local_model.card();
+            let checksum = card.mdcsum();
+
             let router_mode = local_model.router_config().router_mode;
 
             let dst_config = DistributedConfig::from_settings(true); // true means static
@@ -134,7 +136,11 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 tokenizer_hf.clone(),
             )
             .await?;
-            manager.add_chat_completions_model(local_model.display_name(), chat_engine)?;
+            manager.add_chat_completions_model(
+                local_model.display_name(),
+                checksum,
+                chat_engine,
+            )?;
 
             let completions_engine =
                 entrypoint::build_routed_pipeline::<
@@ -142,7 +148,11 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                     NvCreateCompletionResponse,
                 >(card, &client, router_mode, None, kv_chooser, tokenizer_hf)
                 .await?;
-            manager.add_completions_model(local_model.display_name(), completions_engine)?;
+            manager.add_completions_model(
+                local_model.display_name(),
+                checksum,
+                completions_engine,
+            )?;
 
             for endpoint_type in EndpointType::all() {
                 http_service.enable_model_endpoint(endpoint_type, true);
@@ -154,8 +164,9 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             let http_service = http_service_builder.build()?;
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let manager = http_service.model_manager();
-            manager.add_completions_model(model.service_name(), engine.clone())?;
-            manager.add_chat_completions_model(model.service_name(), engine)?;
+            let checksum = model.card().mdcsum();
+            manager.add_completions_model(model.service_name(), checksum, engine.clone())?;
+            manager.add_chat_completions_model(model.service_name(), checksum, engine)?;
 
             // Enable all endpoints
             for endpoint_type in EndpointType::all() {
@@ -170,6 +181,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
         } => {
             let http_service = http_service_builder.build()?;
             let manager = http_service.model_manager();
+            let checksum = model.card().mdcsum();
 
             let tokenizer_hf = model.card().tokenizer_hf()?;
             let chat_pipeline =
@@ -178,14 +190,14 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                     NvCreateChatCompletionStreamResponse,
                 >(model.card(), inner_engine.clone(), tokenizer_hf.clone())
                 .await?;
-            manager.add_chat_completions_model(model.service_name(), chat_pipeline)?;
+            manager.add_chat_completions_model(model.service_name(), checksum, chat_pipeline)?;
 
             let cmpl_pipeline = common::build_pipeline::<
                 NvCreateCompletionRequest,
                 NvCreateCompletionResponse,
             >(model.card(), inner_engine, tokenizer_hf)
             .await?;
-            manager.add_completions_model(model.service_name(), cmpl_pipeline)?;
+            manager.add_completions_model(model.service_name(), checksum, cmpl_pipeline)?;
             // Enable all endpoints
             for endpoint_type in EndpointType::all() {
                 http_service.enable_model_endpoint(endpoint_type, true);

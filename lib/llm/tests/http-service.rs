@@ -4,17 +4,6 @@
 use anyhow::Error;
 use async_stream::stream;
 use dynamo_async_openai::config::OpenAIConfig;
-use dynamo_llm::http::{
-    client::{
-        GenericBYOTClient, HttpClientConfig, HttpRequestContext, NvCustomClient, PureOpenAIClient,
-    },
-    service::{
-        Metrics,
-        error::HttpError,
-        metrics::{Endpoint, RequestType, Status},
-        service_v2::HttpService,
-    },
-};
 use dynamo_llm::protocols::{
     Annotated,
     codec::SseLineCodec,
@@ -23,6 +12,21 @@ use dynamo_llm::protocols::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
+};
+use dynamo_llm::{
+    http::{
+        client::{
+            GenericBYOTClient, HttpClientConfig, HttpRequestContext, NvCustomClient,
+            PureOpenAIClient,
+        },
+        service::{
+            Metrics,
+            error::HttpError,
+            metrics::{Endpoint, RequestType, Status},
+            service_v2::HttpService,
+        },
+    },
+    model_card::ModelDeploymentCard,
 };
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
@@ -275,15 +279,18 @@ async fn test_http_service() {
 
     let registry = Registry::new();
 
+    // TODO: Shouldn't this test know the card before it registers a model?
+    let card = ModelDeploymentCard::with_name_only("foo");
     let counter = Arc::new(CounterEngine {});
-    let result = manager.add_chat_completions_model("foo", counter);
+    let result = manager.add_chat_completions_model("foo", card.mdcsum(), counter);
     assert!(result.is_ok());
 
     let failure = Arc::new(AlwaysFailEngine {});
-    let result = manager.add_chat_completions_model("bar", failure.clone());
+    let card = ModelDeploymentCard::with_name_only("bar");
+    let result = manager.add_chat_completions_model("bar", card.mdcsum(), failure.clone());
     assert!(result.is_ok());
 
-    let result = manager.add_completions_model("bar", failure);
+    let result = manager.add_completions_model("bar", card.mdcsum(), failure);
     assert!(result.is_ok());
 
     let metrics = state.metrics_clone();
@@ -578,14 +585,16 @@ async fn service_with_engines() -> (HttpService, Arc<CounterEngine>, Arc<AlwaysF
     let counter = Arc::new(CounterEngine {});
     let failure = Arc::new(AlwaysFailEngine {});
 
+    let card = ModelDeploymentCard::with_name_only("foo");
     manager
-        .add_chat_completions_model("foo", counter.clone())
+        .add_chat_completions_model("foo", card.mdcsum(), counter.clone())
+        .unwrap();
+    let card = ModelDeploymentCard::with_name_only("bar");
+    manager
+        .add_chat_completions_model("bar", card.mdcsum(), failure.clone())
         .unwrap();
     manager
-        .add_chat_completions_model("bar", failure.clone())
-        .unwrap();
-    manager
-        .add_completions_model("bar", failure.clone())
+        .add_completions_model("bar", card.mdcsum(), failure.clone())
         .unwrap();
 
     (service, counter, failure, port)
@@ -977,9 +986,10 @@ async fn test_client_disconnect_cancellation_unary() {
     wait_for_service_ready(port).await;
 
     // Create a long-running engine (10 seconds)
+    let card = ModelDeploymentCard::with_name_only("slow-model");
     let long_running_engine = Arc::new(LongRunningEngine::new(10_000));
     manager
-        .add_chat_completions_model("slow-model", long_running_engine.clone())
+        .add_chat_completions_model("slow-model", card.mdcsum(), long_running_engine.clone())
         .unwrap();
 
     let client = reqwest::Client::new();
@@ -1068,9 +1078,14 @@ async fn test_client_disconnect_cancellation_streaming() {
     wait_for_service_ready(port).await;
 
     // Create a long-running engine (10 seconds)
+    let card = ModelDeploymentCard::with_name_only("slow-stream-model");
     let long_running_engine = Arc::new(LongRunningEngine::new(10_000));
     manager
-        .add_chat_completions_model("slow-stream-model", long_running_engine.clone())
+        .add_chat_completions_model(
+            "slow-stream-model",
+            card.mdcsum(),
+            long_running_engine.clone(),
+        )
         .unwrap();
 
     let client = reqwest::Client::new();
@@ -1166,9 +1181,10 @@ async fn test_request_id_annotation() {
     wait_for_service_ready(port).await;
 
     // Add a counter engine for this test
+    let card = ModelDeploymentCard::with_name_only("test-model");
     let counter_engine = Arc::new(CounterEngine {});
     manager
-        .add_chat_completions_model("test-model", counter_engine)
+        .add_chat_completions_model("test-model", card.mdcsum(), counter_engine)
         .unwrap();
 
     // Create reqwest client directly
