@@ -11,13 +11,7 @@ import sglang as sgl
 import uvloop
 from sglang.srt.utils import get_ip
 
-from dynamo.llm import (
-    ModelInput,
-    ModelType,
-    ZmqKvEventPublisher,
-    ZmqKvEventPublisherConfig,
-    register_llm,
-)
+from dynamo.llm import ModelInput, ZmqKvEventPublisher, ZmqKvEventPublisherConfig
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, DisaggregationMode, parse_args, parse_endpoint
@@ -110,11 +104,11 @@ async def init(runtime: DistributedRuntime, config: Config):
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
-    async def gated_generate(request):
-        """Queue requests until model registration completes"""
-        await ready_event.wait()  # Block until model is ready
-        async for response in handler.generate(request):
-            yield response
+    # async def gated_generate(request):
+    #     """Queue requests until model registration completes"""
+    #     await ready_event.wait()  # Block until model is ready
+    #     async for response in handler.generate(request):
+    #         yield response
 
     handler = DecodeWorkerHandler(
         component, engine, config, publisher, kv_publisher, prefill_client
@@ -228,21 +222,33 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
     logging.info("Waiting for Encoder Worker Instances ...")
     await encode_worker_client.wait_for_instances()
 
-    # Register the endpoint as entrypoint to a model
-    await register_llm(
-        ModelInput.Text,  # Custom processor is used and this type bypasses SDK processor
-        ModelType.Chat,
-        generate_endpoint,
-        server_args.model_path,
-        server_args.served_model_name,
-    )
+    async def register_model():
+        """Register the model and signal readiness"""
+        registration_success = await register_llm_with_runtime_config(
+            None,  # engine,
+            generate_endpoint,
+            server_args,
+            dynamo_args,
+            input_type=ModelInput.Text,
+        )
+
+        if not registration_success:
+            logging.error("Model registration failed; shutting down")
+            runtime.shutdown()
+            raise RuntimeError("Model registration failed")
+
+        logging.info("Model registration succeeded; processing queued requests")
 
     try:
+        # Start endpoint immediately and register model concurrently
+        # Requests queue until ready_event is set
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
+                graceful_shutdown=True,
                 metrics_labels=[("model", server_args.served_model_name)],
             ),
+            register_model(),
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")

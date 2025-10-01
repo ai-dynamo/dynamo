@@ -10,7 +10,7 @@ import sys
 from argparse import Namespace
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from sglang.srt.server_args import ServerArgs
 
@@ -299,6 +299,21 @@ def reserve_free_port(host: str = "localhost"):
         yield port
     finally:
         sock.close()
+
+
+def parse_endpoint(endpoint: str) -> List[str]:
+    """Parse endpoint string into namespace, component, and endpoint parts."""
+    endpoint_str = endpoint.replace("dyn://", "", 1)
+    endpoint_parts = endpoint_str.split(".")
+    if len(endpoint_parts) != 3:
+        error_msg = (
+            f"Invalid endpoint format: '{endpoint}'. "
+            f"Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
+        )
+        logging.error(error_msg)
+        raise ValueError(error_msg)
+
+    return endpoint_parts
 
 
 def _reserve_disaggregation_bootstrap_port():
