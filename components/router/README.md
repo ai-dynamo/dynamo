@@ -78,8 +78,7 @@ python -m dynamo.vllm --model MODEL_NAME --block-size 64 --is-prefill-worker &
 > - Standalone router (`--block-size`)
 > - Frontend router (`--kv-cache-block-size`)
 > - All worker instances (`--block-size`)
-
->[!Note]
+>
 > **Endpoint Matching:**
 > The `--endpoint` argument must match where your target workers register. For example:
 > - vLLM prefill workers: `dynamo.prefill.generate`
