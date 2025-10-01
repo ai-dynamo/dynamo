@@ -325,13 +325,25 @@ mod tests {
             // Chunk 1: Start of analysis channel
             create_mock_response_chunk("<|channel|>".to_string(), None),
             // Chunk 2: Analysis channel with reasoning content
-            create_mock_response_chunk("analysis<|message|>Let me analyze this question carefully.".to_string(), None),
+            create_mock_response_chunk(
+                "analysis<|message|>Let me analyze this question carefully.".to_string(),
+                None,
+            ),
             // Chunk 3: Continue reasoning content
-            create_mock_response_chunk(" The user is asking about weather in San Francisco.".to_string(), None),
+            create_mock_response_chunk(
+                " The user is asking about weather in San Francisco.".to_string(),
+                None,
+            ),
             // Chunk 4: End analysis and start assistant final channel
-            create_mock_response_chunk("<|end|><|start|>assistant<|channel|>final<|message|>".to_string(), None),
+            create_mock_response_chunk(
+                "<|end|><|start|>assistant<|channel|>final<|message|>".to_string(),
+                None,
+            ),
             // Chunk 5: Normal content (final response)
-            create_mock_response_chunk("I can help you with the weather in San Francisco.".to_string(), None),
+            create_mock_response_chunk(
+                "I can help you with the weather in San Francisco.".to_string(),
+                None,
+            ),
         ];
         let input_stream = stream::iter(input_chunks);
 
@@ -381,8 +393,7 @@ mod tests {
 
         // Assert normal content was parsed correctly
         assert_eq!(
-            all_normal_content,
-            "I can help you with the weather in San Francisco.",
+            all_normal_content, "I can help you with the weather in San Francisco.",
             "Normal content should exactly match expected text. Got: {}",
             all_normal_content
         );
@@ -455,7 +466,10 @@ mod tests {
             // Chunk 4: Tool call start
             create_mock_response_chunk("<TOOLCALL>[{\"name\": \"get_weather\",".to_string(), None),
             // Chunk 5: Tool call arguments
-            create_mock_response_chunk(" \"arguments\": {\"location\": \"San Francisco\"}}]".to_string(), None),
+            create_mock_response_chunk(
+                " \"arguments\": {\"location\": \"San Francisco\"}}]".to_string(),
+                None,
+            ),
             // Chunk 6: Tool call end
             create_mock_response_chunk("</TOOLCALL>".to_string(), None),
         ];
@@ -504,19 +518,19 @@ mod tests {
                     }
 
                     // Check for tool calls
-                    if let Some(ref tool_calls) = choice.delta.tool_calls {
-                        if !tool_calls.is_empty() {
-                            found_tool_calls = true;
-                            
-                            // Extract tool call details
-                            for tool_call in tool_calls {
-                                if let Some(ref function) = tool_call.function {
-                                    if let Some(ref name) = function.name {
-                                        tool_call_function_name = Some(name.clone());
-                                    }
-                                    if let Some(ref args) = function.arguments {
-                                        tool_call_arguments = Some(serde_json::from_str(args).unwrap());
-                                    }
+                    if let Some(ref tool_calls) = choice.delta.tool_calls
+                        && !tool_calls.is_empty()
+                    {
+                        found_tool_calls = true;
+
+                        // Extract tool call details
+                        for tool_call in tool_calls {
+                            if let Some(ref function) = tool_call.function {
+                                if let Some(ref name) = function.name {
+                                    tool_call_function_name = Some(name.clone());
+                                }
+                                if let Some(ref args) = function.arguments {
+                                    tool_call_arguments = Some(serde_json::from_str(args).unwrap());
                                 }
                             }
                         }
@@ -527,16 +541,14 @@ mod tests {
 
         // Assert reasoning content was parsed correctly
         assert_eq!(
-            all_reasoning,
-            "I need to check the weather first",
+            all_reasoning, "I need to check the weather first",
             "Reasoning content should exactly match expected text. Got: {}",
             all_reasoning
         );
 
         // Assert normal content was parsed correctly
         assert_eq!(
-            all_normal_content,
-            "Let me help you with that. ",
+            all_normal_content, "Let me help you with that. ",
             "Normal content should exactly match expected text. Got: {}",
             all_normal_content
         );
@@ -559,8 +571,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]  // TODO: Harmony tool calling in streaming mode with reasoning parser has integration issues
-    async fn test_gpt_oss_with_reasoning_and_tool_calls_full() {        
+    #[ignore]
+    // (TODO: Ayush) Fix this test
+    async fn test_gpt_oss_with_reasoning_and_tool_calls_full() {
         let input_chunks = vec![
             create_mock_response_chunk("<|channel|>analysis<|message|>Let me help you with that. I need to check the weather first.<|end|>".to_string(), None),
             create_mock_response_chunk("<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"location\":\"San Francisco\"}".to_string(), None),
@@ -573,12 +586,9 @@ mod tests {
             "gpt_oss".to_string(),
         );
 
-        // Add debug statements to inspect the chunks after reasoning parsing
         let mut debug_stream = std::pin::pin!(reasoning_parsed_stream);
         let mut debug_chunks = Vec::new();
         while let Some(chunk) = debug_stream.next().await {
-            // Print the chunk for debugging
-            println!("DEBUG: Reasoning parsed chunk: {:#?}", chunk);
             debug_chunks.push(chunk);
         }
         // Re-create a stream from the debug_chunks for further processing
@@ -589,11 +599,9 @@ mod tests {
             reasoning_parsed_stream,
         );
 
-
         let mut tool_parsed_stream = std::pin::pin!(tool_parsed_stream);
         let mut output_chunks = Vec::new();
         while let Some(chunk) = tool_parsed_stream.next().await {
-            println!("DEBUG: Tool parsed chunk: {:#?}", chunk);
             output_chunks.push(chunk);
         }
 
@@ -612,10 +620,10 @@ mod tests {
                     if let Some(ref content) = choice.delta.content {
                         all_normal_content.push_str(content);
                     }
-                    if let Some(ref tool_calls) = choice.delta.tool_calls {
-                        if !tool_calls.is_empty() {
-                            found_tool_calls = true;
-                        }
+                    if let Some(ref tool_calls) = choice.delta.tool_calls
+                        && !tool_calls.is_empty()
+                    {
+                        found_tool_calls = true;
                     }
                 }
             }
@@ -628,5 +636,4 @@ mod tests {
         assert!(all_normal_content.contains("I'll check the weather for you"));
         assert!(found_tool_calls, "Should have found tool calls");
     }
-    
 }
