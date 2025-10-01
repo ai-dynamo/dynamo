@@ -89,7 +89,7 @@ impl
         let stream = stream! {
             tokio::time::sleep(std::time::Duration::from_millis(max_tokens)).await;
             for i in 0..10 {
-                let output = generator.create_choice(i,Some(format!("choice {i}")), None, None, None);
+                let output = generator.create_choice(i,Some(format!("choice {i}")), None, None);
 
                 yield Annotated::from_data(output);
             }

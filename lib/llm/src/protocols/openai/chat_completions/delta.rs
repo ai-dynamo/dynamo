@@ -7,7 +7,6 @@ use crate::{
     protocols::common::{self},
     types::TokenIdType,
 };
-use dynamo_parsers::{ParserResult, ReasoningParser, ReasoningParserType, ReasoningParserWrapper};
 
 /// Provides a method for generating a [`DeltaGenerator`] from a chat completion request.
 impl NvCreateChatCompletionRequest {
@@ -66,11 +65,6 @@ pub struct DeltaGenerator {
     msg_counter: u64,
     /// Configuration options for response generation.
     options: DeltaGeneratorOptions,
-
-    /// Reasoning Parser object
-    /// This is used to parse reasoning content in the response.
-    /// None means no reasoning parsing will be performed.
-    reasoning_parser: Option<ReasoningParserWrapper>,
 }
 
 impl DeltaGenerator {
@@ -101,14 +95,6 @@ impl DeltaGenerator {
             completion_tokens_details: None,
         };
 
-        // Reasoning parser type
-        // If no parser is specified (None), no reasoning parsing will be performed
-        let reasoning_parser = options
-            .runtime_config
-            .reasoning_parser
-            .as_deref()
-            .map(ReasoningParserType::get_reasoning_parser_from_name);
-
         let chatcmpl_id = format!("chatcmpl-{request_id}");
 
         Self {
@@ -121,21 +107,6 @@ impl DeltaGenerator {
             usage,
             msg_counter: 0,
             options,
-            reasoning_parser,
-        }
-    }
-
-    /// Update runtime configuration and reconfigure the reasoning parser accordingly.
-    pub fn set_reasoning_parser(&mut self, runtime_config: ModelRuntimeConfig) {
-        self.options.runtime_config = runtime_config.clone();
-        match self.options.runtime_config.reasoning_parser.as_deref() {
-            Some(name) => {
-                self.reasoning_parser =
-                    Some(ReasoningParserType::get_reasoning_parser_from_name(name));
-            }
-            None => {
-                self.reasoning_parser = None;
-            }
         }
     }
 
@@ -212,24 +183,6 @@ impl DeltaGenerator {
         })
     }
 
-    fn create_reasoning_content(
-        &mut self,
-        text: &Option<String>,
-        token_ids: &[u32],
-    ) -> Option<ParserResult> {
-        // If no reasoning parser is configured, return None
-        let reasoning_parser = self.reasoning_parser.as_mut()?;
-
-        let text_ref = text.as_deref().unwrap_or("");
-        if text_ref.is_empty() && token_ids.is_empty() {
-            return None;
-        }
-        let parser_result =
-            reasoning_parser.parse_reasoning_streaming_incremental(text_ref, token_ids);
-
-        Some(parser_result)
-    }
-
     /// Creates a choice within a chat completion response.
     ///
     /// # Arguments
@@ -245,7 +198,6 @@ impl DeltaGenerator {
         &mut self,
         index: u32,
         text: Option<String>,
-        reasoning_content: Option<String>,
         finish_reason: Option<dynamo_async_openai::types::FinishReason>,
         logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
     ) -> NvCreateChatCompletionStreamResponse {
@@ -259,7 +211,7 @@ impl DeltaGenerator {
                 None
             },
             refusal: None,
-            reasoning_content,
+            reasoning_content: None,
         };
 
         let choice = dynamo_async_openai::types::ChatChoiceStream {
@@ -371,25 +323,9 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             None => None,
         };
 
-        // Handle reasoning parsing if enabled, otherwise treat all text as normal
-        let (normal_text, reasoning_content) =
-            match self.create_reasoning_content(&delta.text, &delta.token_ids) {
-                Some(reasoning_parser_result) => (
-                    reasoning_parser_result.get_some_normal_text(),
-                    reasoning_parser_result.get_some_reasoning(),
-                ),
-                None => (delta.text, None),
-            };
-
         // Create the streaming response.
         let index = 0;
-        let stream_response = self.create_choice(
-            index,
-            normal_text,
-            reasoning_content,
-            finish_reason,
-            logprobs,
-        );
+        let stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
 
         Ok(stream_response)
     }
