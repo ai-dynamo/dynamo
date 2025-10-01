@@ -10,7 +10,7 @@ import sys
 from argparse import Namespace
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from sglang.srt.server_args import ServerArgs
 
@@ -218,9 +218,15 @@ def parse_args(args: list[str]) -> Config:
             endpoint = f"dyn://{namespace}.backend.generate"
 
     # Always parse the endpoint (whether auto-generated or user-provided)
-    parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
-        endpoint
-    )
+    endpoint_str = endpoint.replace("dyn://", "", 1)
+    endpoint_parts = endpoint_str.split(".")
+    if len(endpoint_parts) != 3:
+        logging.error(
+            f"Invalid endpoint format: '{endpoint}'. Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
+        )
+        sys.exit(1)
+
+    parsed_namespace, parsed_component_name, parsed_endpoint_name = endpoint_parts
 
     tool_call_parser = _set_parser(
         parsed_args.tool_call_parser,
@@ -303,18 +309,3 @@ def _reserve_disaggregation_bootstrap_port():
     """
     with reserve_free_port() as port:
         return port
-
-
-def parse_endpoint(endpoint: str) -> List[str]:
-    """Parse endpoint string into namespace, component, and endpoint parts."""
-    endpoint_str = endpoint.replace("dyn://", "", 1)
-    endpoint_parts = endpoint_str.split(".")
-    if len(endpoint_parts) != 3:
-        error_msg = (
-            f"Invalid endpoint format: '{endpoint}'. "
-            f"Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
-        )
-        logging.error(error_msg)
-        raise ValueError(error_msg)
-
-    return endpoint_parts
