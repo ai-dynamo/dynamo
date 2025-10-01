@@ -816,7 +816,6 @@ def test_indexers_sync(request, runtime_services, predownload_tokenizers):
             request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
         )
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
-        
         # Initialize mockers
         mockers.__enter__()
 
