@@ -235,6 +235,10 @@ pub struct RadixTree {
     /// as the entire prefix would need to be sent. Alternatively, we could use block_depth
     /// integers to indicate how many blocks to skip and use a radix/prefix tree at each level.
     lookup: HashMap<WorkerId, HashMap<ExternalSequenceBlockHash, SharedRadixBlock>>,
+    /// Reverse lookup for O(1) external hash retrieval during snapshotting.
+    /// Keyed on the block's pointer (since these are allocated inside a RefCell this should be stable).
+    reverse_block_hash_lookup:
+        HashMap<WorkerId, HashMap<*const RadixBlock, ExternalSequenceBlockHash>>,
     /// The time buffer the radix tree should check when considering frequence of block accesses
     expiration_duration: Option<Duration>,
 }
@@ -255,6 +259,7 @@ impl RadixTree {
         Self {
             root: Rc::new(RefCell::new(RadixBlock::new())),
             lookup: HashMap::new(),
+            reverse_block_hash_lookup: HashMap::new(),
             expiration_duration,
         }
     }
@@ -386,6 +391,11 @@ impl RadixTree {
                     // add the block to the worker_id lookup table
                     worker_lookup.insert(block_id.block_hash, block.clone());
 
+                    // add to reverse lookup for O(1) snapshotting
+                    let reverse_block_hash_lookup =
+                        self.reverse_block_hash_lookup.entry(worker_id).or_default();
+                    reverse_block_hash_lookup.insert(block.as_ptr(), block_id.block_hash);
+
                     // drop inner so we can shift current to this block
                     drop(inner);
 
@@ -438,6 +448,8 @@ impl RadixTree {
                 block.borrow_mut().workers.remove(&worker);
             });
         }
+        // Clean up reverse lookup
+        self.reverse_block_hash_lookup.remove(&worker);
     }
 
     pub fn clear_all_blocks(&mut self, worker: WorkerId) {
@@ -450,9 +462,13 @@ impl RadixTree {
                 block.borrow_mut().workers.remove(&worker);
             });
 
-            // Clear the worker's blocks
-            if let Some(worker_blocks) = self.lookup.get_mut(&worker) {
-                worker_blocks.clear();
+            // Clear the worker's blocks and the reverse lookup for this worker.
+            if let Some(worker_lookup) = self.lookup.get_mut(&worker) {
+                worker_lookup.clear();
+            }
+            if let Some(reverse_block_hash_lookup) = self.reverse_block_hash_lookup.get_mut(&worker)
+            {
+                reverse_block_hash_lookup.clear();
             }
         }
     }
@@ -461,6 +477,12 @@ impl RadixTree {
     /// Uses BFS traversal to ensure that the tree reconstruction is unique,
     /// though the exact event ordering will be lost.
     pub fn dump_tree_as_events(&self) -> Vec<RouterEvent> {
+        tracing::info!("Dumping radix tree as events...");
+        tracing::info!(
+            "Radix tree contains information about {:?} workers",
+            self.lookup.len()
+        );
+
         let mut events = Vec::new();
         let mut event_id = 0u64;
 
@@ -479,12 +501,11 @@ impl RadixTree {
 
             // Closure to find external hash for a block in a worker's lookup
             let find_external_hash = |worker_id: &WorkerId| {
-                self.lookup.get(worker_id).and_then(|worker_blocks| {
-                    worker_blocks
-                        .iter()
-                        .find(|(_, block)| Rc::ptr_eq(block, &current_block))
-                        .map(|(hash, _)| *hash)
-                })
+                let block_ptr = current_block.as_ptr() as *const RadixBlock;
+                self.reverse_block_hash_lookup
+                    .get(worker_id)
+                    .and_then(|reverse_map| reverse_map.get(&block_ptr))
+                    .copied()
             };
 
             // For each worker that has this block
@@ -529,6 +550,7 @@ impl RadixTree {
             }
         }
 
+        tracing::info!("Finished dumping radix tree as events");
         events
     }
 }
@@ -2170,5 +2192,141 @@ mod tests {
                 .get(),
             1
         );
+    }
+
+    #[test]
+    fn test_reverse_lookup_consistency_during_snapshotting() {
+        setup();
+        let mut trie = RadixTree::new();
+
+        let worker_1 = 1;
+        let worker_2 = 2;
+        let worker_3 = 3;
+
+        // Create a complex tree with shared blocks
+        // Worker 1: [1, 2, 3] -> [4, 5] -> [6]
+        trie.apply_event(create_store_event(worker_1, 1, vec![1, 2, 3], None))
+            .unwrap();
+        trie.apply_event(create_store_event(
+            worker_1,
+            2,
+            vec![4, 5],
+            Some(ExternalSequenceBlockHash(300)), // parent of [4, 5]
+        ))
+        .unwrap();
+        trie.apply_event(create_store_event(
+            worker_1,
+            3,
+            vec![6],
+            Some(ExternalSequenceBlockHash(500)), // parent of [6]
+        ))
+        .unwrap();
+
+        // Worker 2: [1, 2, 3] -> [7, 8] (shares [1, 2, 3] with worker_1)
+        trie.apply_event(create_store_event(worker_2, 4, vec![1, 2, 3], None))
+            .unwrap();
+        trie.apply_event(create_store_event(
+            worker_2,
+            5,
+            vec![7, 8],
+            Some(ExternalSequenceBlockHash(300)), // same parent as worker_1's [4, 5]
+        ))
+        .unwrap();
+
+        // Worker 3: [9, 10] (completely separate branch)
+        trie.apply_event(create_store_event(worker_3, 6, vec![9, 10], None))
+            .unwrap();
+
+        // Verify reverse lookup is populated correctly
+        assert_eq!(trie.reverse_block_hash_lookup.len(), 3);
+
+        // Get the actual block pointers and their expected external hashes
+        let worker_1_blocks = trie.lookup.get(&worker_1).unwrap();
+        let worker_2_blocks = trie.lookup.get(&worker_2).unwrap();
+        let worker_3_blocks = trie.lookup.get(&worker_3).unwrap();
+
+        // Verify reverse lookup consistency for worker_1
+        let worker_1_reverse = trie.reverse_block_hash_lookup.get(&worker_1).unwrap();
+        for (expected_hash, block) in worker_1_blocks {
+            let block_ptr = block.as_ptr() as *const RadixBlock;
+            let actual_hash = worker_1_reverse.get(&block_ptr).unwrap();
+            assert_eq!(actual_hash, expected_hash,);
+        }
+
+        // Verify reverse lookup consistency for worker_2
+        let worker_2_reverse = trie.reverse_block_hash_lookup.get(&worker_2).unwrap();
+        for (expected_hash, block) in worker_2_blocks {
+            let block_ptr = block.as_ptr() as *const RadixBlock;
+            let actual_hash = worker_2_reverse.get(&block_ptr).unwrap();
+            assert_eq!(actual_hash, expected_hash,);
+        }
+
+        // Verify reverse lookup consistency for worker_3
+        let worker_3_reverse = trie.reverse_block_hash_lookup.get(&worker_3).unwrap();
+        for (expected_hash, block) in worker_3_blocks {
+            let block_ptr = block.as_ptr() as *const RadixBlock;
+            let actual_hash = worker_3_reverse.get(&block_ptr).unwrap();
+            assert_eq!(actual_hash, expected_hash,);
+        }
+
+        // Now test snapshotting - dump the tree and verify external hashes are correct.
+        let events = trie.dump_tree_as_events();
+        let mut events_by_worker: HashMap<WorkerId, Vec<&RouterEvent>> = HashMap::new();
+        for event in &events {
+            events_by_worker
+                .entry(event.worker_id)
+                .or_default()
+                .push(event);
+        }
+
+        // Verify each worker's events have correct external hashes
+        for (worker_id, worker_events) in events_by_worker {
+            let worker_blocks = trie.lookup.get(&worker_id).unwrap();
+            let worker_reverse = trie.reverse_block_hash_lookup.get(&worker_id).unwrap();
+
+            for event in worker_events {
+                if let KvCacheEventData::Stored(ref store_data) = event.event.data {
+                    for block_data in &store_data.blocks {
+                        // Find the corresponding block in the tree
+                        let block = worker_blocks.get(&block_data.block_hash).unwrap();
+                        let block_ptr = block.as_ptr() as *const RadixBlock;
+
+                        // Verify the reverse lookup returns the correct external hash
+                        let reverse_hash = worker_reverse.get(&block_ptr).unwrap();
+                        assert_eq!(
+                            reverse_hash, &block_data.block_hash,
+                            "Worker {} reverse lookup returned wrong hash for block pointer {:?}",
+                            worker_id, block_ptr
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_reverse_lookup_cleanup_and_remove() {
+        setup();
+        let mut trie = RadixTree::new();
+        let worker_1 = 1;
+
+        // Create blocks for multiple workers
+        trie.apply_event(create_store_event(worker_1, 1, vec![1, 2, 3], None))
+            .unwrap();
+        assert!(trie.reverse_block_hash_lookup.contains_key(&worker_1));
+
+        // Test clear_all_blocks cleanup
+        trie.clear_all_blocks(worker_1);
+        assert!(trie.reverse_block_hash_lookup.contains_key(&worker_1));
+        assert!(
+            trie.reverse_block_hash_lookup
+                .get(&worker_1)
+                .unwrap()
+                .is_empty()
+        );
+
+        // Test remove_worker cleanup
+        trie.remove_worker(worker_1);
+        assert!(!trie.reverse_block_hash_lookup.contains_key(&worker_1));
     }
 }
