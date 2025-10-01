@@ -816,9 +816,11 @@ def test_indexers_sync(request, runtime_services, predownload_tokenizers):
             request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
         )
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
+        
+        # Initialize mockers
         mockers.__enter__()
 
-        # Run the async test
+        # Use async to manage the test flow
         async def test_sync():
             # Get runtime and create endpoint
             runtime = get_runtime()
@@ -831,9 +833,10 @@ def test_indexers_sync(request, runtime_services, predownload_tokenizers):
             kv_router_config = KvRouterConfig(router_snapshot_threshold=20)
 
             async def send_requests_to_router(router, num_requests, router_name):
-                # Initialize and check the readiness of the mockers by sending dummy request
                 # Generate small test token IDs
                 test_token_ids = [random.randint(1, 10000) for _ in range(10)]
+
+                # Initialize and check the readiness of the mockers by sending dummy request
                 logger.info(f"Initializing {router_name} and mocker instances")
                 await send_request_via_python_kv_router(
                     kv_python_router=router,
@@ -851,8 +854,10 @@ def test_indexers_sync(request, runtime_services, predownload_tokenizers):
                         f"Sending request {i + 1}/{num_requests} to {router_name}"
                     )
 
+                    # Generate 30 random tokens
                     request_tokens = [random.randint(1, 10000) for _ in range(30)]
 
+                    # Send request to mocker via the router
                     tasks.append(
                         asyncio.create_task(
                             send_request_via_python_kv_router(
@@ -868,6 +873,7 @@ def test_indexers_sync(request, runtime_services, predownload_tokenizers):
                         )
                     )
 
+                # Wait for all requests to complete
                 results = await asyncio.gather(*tasks)
                 successful = sum(1 for r in results if r)
                 logger.info(
@@ -972,7 +978,7 @@ def test_indexers_sync(request, runtime_services, predownload_tokenizers):
                             "router2_state": state2_item,
                         }
                     )
-
+            # If there are differences, format them for easier debugging
             if differences:
                 error_msg = f"Router states are not equal. Found {len(differences)} differences:\n"
                 for diff in differences:
