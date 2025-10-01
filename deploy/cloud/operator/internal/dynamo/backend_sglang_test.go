@@ -301,7 +301,6 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 				t.Errorf("UpdateContainer() args = %v, want %v", container.Args, tt.expectedArgs)
 			}
 
-			// Verify command is still sh -c for shell commands
 			expectedCommand := tt.initialCommand
 			if !reflect.DeepEqual(container.Command, expectedCommand) {
 				t.Errorf("UpdateContainer() should preserve shell command, got: %v, want: %v", container.Command, expectedCommand)
@@ -438,7 +437,6 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create initial probes
 			livenessProbe := &corev1.Probe{InitialDelaySeconds: 30}
 			readinessProbe := &corev1.Probe{InitialDelaySeconds: 10}
 			startupProbe := &corev1.Probe{InitialDelaySeconds: 5}
@@ -473,6 +471,104 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 					t.Errorf("Expected StartupProbe to be preserved, but it was removed")
 				}
 			}
+		})
+	}
+}
+
+func TestSGLangBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
+	backend := &SGLangBackend{}
+
+	tests := []struct {
+		name                       string
+		component                  *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		volumeMounts               []corev1.VolumeMount
+		expectNoEnvVarChanges      bool
+		expectLoggedPartialSupport bool
+	}{
+		{
+			name: "SGLang backend with useAsCompilationCache volume mount",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "sglang-cache",
+							MountPoint:            "/cache/sglang",
+							UseAsCompilationCache: true,
+						},
+					},
+				},
+			},
+			volumeMounts:               []corev1.VolumeMount{},
+			expectNoEnvVarChanges:      true, // SGLang doesn't set env vars yet
+			expectLoggedPartialSupport: true,
+		},
+		{
+			name: "SGLang backend with useAsCompilationCache at custom volume mount",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "custom-cache",
+							MountPoint:            "/custom/cache/path",
+							UseAsCompilationCache: true,
+						},
+					},
+				},
+			},
+			volumeMounts:               []corev1.VolumeMount{},
+			expectNoEnvVarChanges:      true, // SGLang doesn't set env vars yet
+			expectLoggedPartialSupport: true,
+		},
+		{
+			name: "SGLang backend without useAsCompilationCache volume mount",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:       "regular-volume",
+							MountPoint: "/data",
+						},
+					},
+				},
+			},
+			volumeMounts:               []corev1.VolumeMount{},
+			expectNoEnvVarChanges:      true,
+			expectLoggedPartialSupport: false,
+		},
+		{
+			name: "SGLang backend with no volume mounts",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					VolumeMounts: nil,
+				},
+			},
+			volumeMounts:               []corev1.VolumeMount{},
+			expectNoEnvVarChanges:      true,
+			expectLoggedPartialSupport: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a container with initial state including volume mounts
+			container := &corev1.Container{
+				Env:          []corev1.EnvVar{},
+				VolumeMounts: tt.volumeMounts,
+			}
+
+			// Store original env vars for comparison
+			originalEnvCount := len(container.Env)
+
+			// Call UpdateContainer (single node to avoid multinode logic)
+			backend.UpdateContainer(container, 1, RoleMain, tt.component, "test-service", &GroveMultinodeDeployer{})
+
+			if tt.expectNoEnvVarChanges {
+				// Check that no new environment variables were added
+				if len(container.Env) != originalEnvCount {
+					t.Errorf("Expected no environment variable changes, but env count changed from %d to %d", originalEnvCount, len(container.Env))
+				}
+			}
+
 		})
 	}
 }

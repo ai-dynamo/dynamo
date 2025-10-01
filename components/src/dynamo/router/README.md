@@ -3,7 +3,7 @@
 
 # Standalone Router
 
-A backend-agnostic standalone KV-aware router service for Dynamo deployments. For details on how KV-aware routing works, see the [KV Cache Routing documentation](../../docs/architecture/kv_cache_routing.md).
+A backend-agnostic standalone KV-aware router service for Dynamo deployments. For details on how KV-aware routing works, see the [KV Cache Routing documentation](/docs/architecture/kv_cache_routing.md).
 
 ## Overview
 
@@ -29,7 +29,7 @@ python -m dynamo.router \
 - `--endpoint`: Full endpoint path for workers in the format `namespace.component.endpoint` (e.g., `dynamo.prefill.generate`)
 
 **Router Configuration:**
-For detailed descriptions of all KV router configuration options including `--block-size`, `--kv-overlap-score-weight`, `--router-temperature`, `--no-kv-events`, `--router-replica-sync`, `--router-snapshot-threshold`, `--router-reset-states`, and `--no-track-active-blocks`, see the [KV Cache Routing documentation](../../docs/architecture/kv_cache_routing.md).
+For detailed descriptions of all KV router configuration options including `--block-size`, `--kv-overlap-score-weight`, `--router-temperature`, `--no-kv-events`, `--router-replica-sync`, `--router-snapshot-threshold`, `--router-reset-states`, and `--no-track-active-blocks`, see the [KV Cache Routing documentation](/docs/architecture/kv_cache_routing.md).
 
 ## Architecture
 
@@ -42,7 +42,7 @@ Clients query the `find_best_worker` endpoint to determine which worker should p
 
 ## Example: Disaggregated Serving with Prefill Workers
 
-See [`components/backends/vllm/launch/disagg_router.sh`](../backends/vllm/launch/disagg_router.sh) for a complete example.
+See [`components/backends/vllm/launch/disagg_router.sh`](/components/backends/vllm/launch/disagg_router.sh) for a complete example.
 
 ```bash
 # Start frontend router for decode workers
@@ -94,10 +94,10 @@ To integrate the standalone router with a backend:
 2. Workers should register at the endpoint specified by the `--endpoint` argument
 3. Clients should call the `router.free` endpoint when requests complete
 
-See [`components/backends/vllm/src/dynamo/vllm/handlers.py`](../backends/vllm/src/dynamo/vllm/handlers.py) for a reference implementation (search for `prefill_router_client`).
+See [`components/src/dynamo/vllm/handlers.py`](../vllm/handlers.py) for a reference implementation (search for `prefill_router_client`).
 
 ## See Also
 
-- [KV Cache Routing Architecture](../../docs/architecture/kv_cache_routing.md) - Detailed explanation of KV-aware routing
+- [KV Cache Routing Architecture](/docs/architecture/kv_cache_routing.md) - Detailed explanation of KV-aware routing
 - [Frontend Router](../frontend/README.md) - Main HTTP frontend with integrated routing
-- [Router Benchmarking](../../benchmarks/router/README.md) - Performance testing and tuning
+- [Router Benchmarking](/benchmarks/router/README.md) - Performance testing and tuning

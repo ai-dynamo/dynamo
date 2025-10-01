@@ -50,7 +50,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -188,13 +187,6 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	}()
 
 	modified := false
-
-	// Reconcile PVC
-	_, err = r.reconcilePVC(ctx, dynamoComponentDeployment)
-	if err != nil {
-		logs.Error(err, "Unable to create PVC", "crd", req.NamespacedName)
-		return ctrl.Result{}, err
-	}
 
 	// Create the appropriate workload resource based on deployment type
 	var leaderWorkerSets []*leaderworkersetv1.LeaderWorkerSet
@@ -679,41 +671,6 @@ func IsDeploymentReady(deployment *appsv1.Deployment) bool {
 	}
 	// If we get here, the basic checks passed but the Available condition wasn't found
 	return false
-}
-
-func (r *DynamoComponentDeploymentReconciler) reconcilePVC(ctx context.Context, crd *v1alpha1.DynamoComponentDeployment) (*corev1.PersistentVolumeClaim, error) {
-	logger := log.FromContext(ctx)
-	if crd.Spec.PVC == nil {
-		return nil, nil
-	}
-	pvcConfig := *crd.Spec.PVC
-	pvc := &corev1.PersistentVolumeClaim{}
-	pvcName := types.NamespacedName{Name: getPvcName(crd, pvcConfig.Name), Namespace: crd.GetNamespace()}
-	err := r.Get(ctx, pvcName, pvc)
-	if err != nil && client.IgnoreNotFound(err) != nil {
-		logger.Error(err, "Unable to retrieve PVC", "crd", crd.GetName())
-		return nil, err
-	}
-
-	// If PVC does not exist, create a new one
-	if err != nil {
-		if pvcConfig.Create == nil || !*pvcConfig.Create {
-			logger.Error(err, "Unknown PVC", "pvc", pvc.Name)
-			return nil, err
-		}
-		pvc = constructPVC(crd, pvcConfig)
-		if err := controllerutil.SetControllerReference(crd, pvc, r.Client.Scheme()); err != nil {
-			logger.Error(err, "Failed to set controller reference", "pvc", pvc.Name)
-			return nil, err
-		}
-		err = r.Create(ctx, pvc)
-		if err != nil {
-			logger.Error(err, "Failed to create pvc", "pvc", pvc.Name)
-			return nil, err
-		}
-		logger.Info("PVC created", "pvc", pvcName)
-	}
-	return pvc, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) setStatusConditions(ctx context.Context, req ctrl.Request, conditions ...metav1.Condition) (dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, err error) {

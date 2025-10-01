@@ -77,9 +77,10 @@ cargo build --locked --profile dev --features dynamo-llm/block-manager
 #     echo "maturin is already installed"
 # fi
 
+# install ai-dynamo-runtime
 (cd $DYNAMO_HOME/lib/bindings/python && retry maturin develop)
 
-# installs overall python packages, grabs binaries from .build/target/debug
+# install ai-dynamo
 cd $DYNAMO_HOME && retry env DYNAMO_BIN_PATH=$CARGO_TARGET_DIR/debug uv pip install -e .
 
 { set +x; } 2>/dev/null
@@ -95,23 +96,6 @@ if [ -n "${PYTHONPATH:-}" ]; then
     if ! grep -q "export PYTHONPATH=" ~/.bashrc; then
         echo "# PYTHONPATH modified from /workspace to use DYNAMO_HOME" >> ~/.bashrc
         show_and_run echo "export PYTHONPATH=\"$PYTHONPATH\"" >> ~/.bashrc
-    fi
-else
-    # PYTHONPATH not set, extract from README.md or use backup
-    PYTHONPATH_LINE=$(grep "^export PYTHONPATH=" $DYNAMO_HOME/README.md | head -n1)
-    if [ -n "$PYTHONPATH_LINE" ]; then
-        # Remove the ${PYTHONPATH}: prefix if it exists, then replace $(pwd) with the actual path
-        MODIFIED_LINE=$(echo "$PYTHONPATH_LINE" | sed 's/\${PYTHONPATH}://g' | sed "s|\$(pwd)|$DYNAMO_HOME|g")
-        eval "$MODIFIED_LINE"
-        # Also add to .bashrc for persistence (with expanded path)
-        if ! grep -q "export PYTHONPATH=" ~/.bashrc; then
-            # MODIFIED_LINE already has $DYNAMO_HOME expanded to /home/ubuntu/dynamo
-            echo "# PYTHONPATH is derived from the README.md" >> ~/.bashrc
-            show_and_run echo "$MODIFIED_LINE" >> ~/.bashrc
-        fi
-    else
-        # Back-up version. Make sure to sync this with the README.md's PYTHONPATH. This is the version from 2025-08-19
-        show_and_run export PYTHONPATH=$DYNAMO_HOME/components/frontend/src:$DYNAMO_HOME/components/planner/src:$DYNAMO_HOME/components/backends/vllm/src:$DYNAMO_HOME/components/backends/sglang/src:$DYNAMO_HOME/components/backends/trtllm/src:$DYNAMO_HOME/components/backends/llama_cpp/src:$DYNAMO_HOME/components/backends/mocker/src
     fi
 fi
 
