@@ -3,7 +3,7 @@
 
 # Standalone Router
 
-A backend-agnostic standalone KV-aware router service for Dynamo deployments. For details on how KV-aware routing works, see the [KV Cache Routing documentation](docs/architecture/kv_cache_routing.md).
+A backend-agnostic standalone KV-aware router service for Dynamo deployments. For details on how KV-aware routing works, see the [KV Cache Routing documentation](/docs/architecture/kv_cache_routing.md).
 
 ## Overview
 
@@ -29,7 +29,7 @@ python -m dynamo.router \
 - `--endpoint`: Full endpoint path for workers in the format `namespace.component.endpoint` (e.g., `dynamo.prefill.generate`)
 
 **Router Configuration:**
-For detailed descriptions of all KV router configuration options including `--block-size`, `--kv-overlap-score-weight`, `--router-temperature`, `--no-kv-events`, `--router-replica-sync`, `--router-snapshot-threshold`, `--router-reset-states`, and `--no-track-active-blocks`, see the [KV Cache Routing documentation](docs/architecture/kv_cache_routing.md).
+For detailed descriptions of all KV router configuration options including `--block-size`, `--kv-overlap-score-weight`, `--router-temperature`, `--no-kv-events`, `--router-replica-sync`, `--router-snapshot-threshold`, `--router-reset-states`, and `--no-track-active-blocks`, see the [KV Cache Routing documentation](/docs/architecture/kv_cache_routing.md).
 
 ## Architecture
 
