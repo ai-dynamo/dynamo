@@ -5,8 +5,8 @@ The examples below assume you build the latest image yourself from source. If us
     :margin: 0
     :padding: 3 4 0 0
 
-    .. grid-item-card:: :doc:`Hello World <../examples/custom_backend/hello_world/README>`
-        :link: ../examples/custom_backend/hello_world/README
+    .. grid-item-card:: :doc:`Hello World <../examples/runtime/hello_world/README>`
+        :link: ../examples/runtime/hello_world/README
         :link-type: doc
 
         Demonstrates the basic concepts of Dynamo by creating a simple GPU-unaware graph
