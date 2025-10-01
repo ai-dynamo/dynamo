@@ -1,5 +1,8 @@
 # SLA Planner Deployment Guide
 
+> [!TIP]
+> **New to SLA Planner?** For a complete workflow including profiling and deployment, see the [SLA Planner Quick Start Guide](sla_planner_quickstart.md).
+
 Quick deployment guide for the disaggregated planner with automatic scaling.
 
 > [!NOTE]
