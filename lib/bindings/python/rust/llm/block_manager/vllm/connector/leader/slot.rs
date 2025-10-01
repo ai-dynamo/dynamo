@@ -115,6 +115,7 @@ pub trait Slot: std::fmt::Debug {
         tokens: &[u32],
         block_ids: &[usize],
         computed_position: usize,
+        is_new_request: bool,
     ) -> Result<(), SlotError>;
 
     fn record_start_iteration(&mut self, iteration: u64) -> Result<(), SlotError>;
@@ -592,6 +593,7 @@ impl Slot for VllmConnectorSlot {
         tokens: &[u32],
         block_ids: &[usize],
         computed_position: usize,
+        is_new_request: bool,
     ) -> Result<(), SlotError> {
         // TRTLLM's KV Connector Manager will have (computed_position - external matches)
         // in onborading case
@@ -630,10 +632,21 @@ impl Slot for VllmConnectorSlot {
             self.device_blocks.extend(block_ids);
         }
 
-        let num_candidate_blocks =
-            ((computed_position + 1) / self.block_size) - self.evaluated_blocks;
+        // This approach is fragile, but it’s the only way currently to skip evaluating
+        // the device matched blocks and to avoid offloading them again.
+        // TODO: Consider adding an indicator in the scheduler output to distinguish between
+        // matched and unmatched device blocks/tokens from the scheduler.
+        let maybe_have_device_matched_blocks =
+            is_new_request && computed_position > 0 && self.evaluated_blocks == 0;
 
-        if num_candidate_blocks != 0 {
+        if maybe_have_device_matched_blocks {
+            self.evaluated_blocks = (computed_position + 1) / self.block_size;
+        }
+
+        let num_candidate_blocks =
+            ((computed_position + 1) / self.block_size).saturating_sub(self.evaluated_blocks);
+
+        if num_candidate_blocks > 0 {
             // do we have a mechanism for skipping gpu cache hit blocks?  not sure yet.
             // for now, offload all the blocks to the host
             let offload_block_ids: Vec<usize> = self
