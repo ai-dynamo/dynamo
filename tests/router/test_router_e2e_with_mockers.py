@@ -833,7 +833,6 @@ def test_indexers_sync(request, runtime_services, predownload_tokenizers):
             kv_router_config = KvRouterConfig(router_snapshot_threshold=20)
 
             async def send_requests_to_router(router, num_requests, router_name):
-
                 # Initialize and check the readiness of the mockers by sending dummy request
                 # Generate small test token IDs
                 test_token_ids = [random.randint(1, 10000) for _ in range(10)]
