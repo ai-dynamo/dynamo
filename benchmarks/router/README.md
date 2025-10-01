@@ -96,14 +96,12 @@ In a **new terminal**, launch the Dynamo router using the Python CLI:
 ```bash
 python -m dynamo.frontend \
     --router-mode kv \
-    --kv-cache-block-size 64 \
     --router-reset-states \
     --http-port 8000
 ```
 
 This starts the router with:
 - KV cache routing mode
-- Block size of 64 (**Important:** This should match the `--block-size` used by your engines)
 - `--router-reset-states` flag to clear the event cache (JetStream) from previous runs (useful for single router benchmarking)
 - HTTP port 8000
 
@@ -122,7 +120,6 @@ If you're using disaggregated serving with separate prefill and decode workers, 
 # Start the decode router with pure load balancing
 python -m dynamo.frontend \
     --router-mode kv \
-    --kv-cache-block-size 64 \
     --router-reset-states \
     --http-port 8000 \
     --kv-overlap-score-weight 0
@@ -142,7 +139,6 @@ The `--router-reset-states` flag clears any previous state, and `--no-track-acti
 ```bash
 python -m dynamo.frontend \
     --router-mode kv \
-    --kv-cache-block-size 64 \
     --http-port 8000 \
     --no-kv-events
 ```

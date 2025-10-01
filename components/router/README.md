@@ -49,7 +49,6 @@ See [`components/backends/vllm/launch/disagg_router.sh`](../backends/vllm/launch
 python -m dynamo.frontend \
     --router-mode kv \
     --http-port 8000 \
-    --kv-cache-block-size 64 \
     --kv-overlap-score-weight 0  # Pure load balancing for decode
 
 # Start standalone router for prefill workers
@@ -69,6 +68,9 @@ python -m dynamo.vllm --model MODEL_NAME --block-size 64 --is-prefill-worker &
 >[!Note]
 > **Why `--no-track-active-blocks` for prefill routing?**
 > Active block tracking is used for load balancing across decode (generation) phases. For prefill-only routing, decode load is not relevant, so disabling this reduces overhead and simplifies the router state.
+>
+> **Why `--block-size` is required for standalone routers:**
+> Unlike the frontend router which can infer block size from the ModelDeploymentCard (MDC) during worker registration, standalone routers cannot access the MDC and must have the block size explicitly specified. This is a work in progress to enable automatic inference.
 
 ## Configuration Best Practices
 
@@ -76,7 +78,6 @@ python -m dynamo.vllm --model MODEL_NAME --block-size 64 --is-prefill-worker &
 > **Block Size Matching:**
 > The block size must match across:
 > - Standalone router (`--block-size`)
-> - Frontend router (`--kv-cache-block-size`)
 > - All worker instances (`--block-size`)
 >
 > **Endpoint Matching:**

@@ -15,7 +15,6 @@ BLOCK_SIZE=64
 python -m dynamo.frontend \
     --router-mode kv \
     --http-port 8000 \
-    --kv-cache-block-size $BLOCK_SIZE \
     --kv-overlap-score-weight 0 \
     --router-reset-states &
 
