@@ -5,9 +5,9 @@ from .decode_handler import DecodeWorkerHandler
 
 # Base handlers
 from .handler_base import BaseWorkerHandler
-from .multimodal_encode_worker_handler import MultimodalEncodeWorkerHandler
 
 # Multimodal handlers
+from .multimodal_encode_worker_handler import MultimodalEncodeWorkerHandler
 from .multimodal_processor_handler import MultimodalProcessorHandler
 from .multimodal_worker_handler import (
     MultimodalPrefillWorkerHandler,

@@ -103,18 +103,6 @@ class DynamoArgs:
     multimodal_worker: bool = False
 
 
-@dataclass
-class MultimodalDynamoArgs:
-    """
-    Used by multimodal examples.
-    """
-
-    namespace: str
-    component: str
-    endpoint: str
-    downstream_endpoint: Optional[str] = None
-
-
 class DisaggregationMode(Enum):
     AGGREGATED = "agg"
     PREFILL = "prefill"
