@@ -178,6 +178,13 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         runtime, component, engine_client, default_sampling_params
     )
 
+    # Set up KV event publisher for prefix caching if enabled
+    kv_publisher = setup_kv_event_publisher(
+        config, component, generate_endpoint, vllm_config
+    )
+    if kv_publisher:
+        handler.kv_publisher = kv_publisher
+
     health_check_payload = VllmPrefillHealthCheckPayload(engine_client).to_dict()
 
     try:
