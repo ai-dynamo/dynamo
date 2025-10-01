@@ -49,11 +49,17 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "choices": get_reasoning_parser_names(),
         "help": "Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
     },
+    "custom-jinja-template": {
+        "flags": ["--custom-jinja-template"],
+        "type": str,
+        "default": None,
+        "help": "Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository. This template will be applied by Dynamo's preprocessor and cannot be used with --use-sglang-tokenizer.",
+    },
     "use-sglang-tokenizer": {
         "flags": ["--use-sglang-tokenizer"],
         "action": "store_true",
         "default": False,
-        "help": "Use SGLang's tokenizer. This will skip tokenization of the input and output and only v1/chat/completions will be available when using the dynamo frontend",
+        "help": "Use SGLang's tokenizer. This will skip tokenization of the input and output and only v1/chat/completions will be available when using the dynamo frontend. Cannot be used with --custom-jinja-template.",
     },
 }
 
@@ -68,6 +74,7 @@ class DynamoArgs:
     # tool and reasoning parser options
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
+    custom_jinja_template: Optional[str] = None
 
     # preprocessing options
     use_sglang_tokenizer: bool = False
@@ -198,6 +205,23 @@ def parse_args(args: list[str]) -> Config:
         "reasoning-parser",
     )
 
+    if parsed_args.custom_jinja_template and parsed_args.use_sglang_tokenizer:
+        logging.error(
+            "Cannot use --custom-jinja-template and --use-sglang-tokenizer together. "
+            "--custom-jinja-template requires Dynamo's preprocessor to apply the template, "
+            "while --use-sglang-tokenizer bypasses Dynamo's preprocessor entirely."
+            "If you want to use the SGLang tokenizer with a custom chat template, "
+            "please use the --chat-template argument from SGLang."
+        )
+        sys.exit(1)
+
+    # Replaces any environment variables or home dir (~) to get absolute path
+    expanded_template_path = None
+    if parsed_args.custom_jinja_template:
+        expanded_template_path = os.path.expandvars(
+            os.path.expanduser(parsed_args.custom_jinja_template)
+        )
+
     dynamo_args = DynamoArgs(
         namespace=parsed_namespace,
         component=parsed_component_name,
@@ -205,6 +229,7 @@ def parse_args(args: list[str]) -> Config:
         migration_limit=parsed_args.migration_limit,
         tool_call_parser=tool_call_parser,
         reasoning_parser=reasoning_parser,
+        custom_jinja_template=expanded_template_path,
         use_sglang_tokenizer=parsed_args.use_sglang_tokenizer,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")

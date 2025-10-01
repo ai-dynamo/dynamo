@@ -625,6 +625,12 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								},
 							},
 						},
+						Envs: []corev1.EnvVar{
+							{
+								Name:  "TEST_ENV",
+								Value: "test-value",
+							},
+						},
 					},
 				},
 			},
@@ -666,6 +672,12 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									Args:    []string{"echo hello world", "sleep 99999"},
 								},
 							},
+							Envs: []corev1.EnvVar{
+								{
+									Name:  "TEST_ENV",
+									Value: "test-value",
+								},
+							},
 						},
 					},
 				},
@@ -699,6 +711,12 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								},
 							},
 							Autoscaling: nil,
+							Envs: []corev1.EnvVar{
+								{
+									Name:  "TEST_ENV",
+									Value: "test-value",
+								},
+							},
 						},
 					},
 				},
@@ -1501,7 +1519,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "http://localhost:9090",
 													},
 													{
-														Name:  "PROMETHEUS_PORT",
+														Name:  "PLANNER_PROMETHEUS_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort),
 													},
 												},
@@ -1657,7 +1675,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												"-c",
 											},
 											Args: []string{
-												"python3 -m dynamo.sglang.worker --custom-flag custom-value",
+												"python3 -m dynamo.sglang --custom-flag custom-value",
 											},
 										},
 									},
@@ -1810,7 +1828,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													"-c",
 												},
 												Args: []string{
-													"python3 -m dynamo.sglang.worker --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 3 --node-rank 0 --custom-flag custom-value",
+													"python3 -m dynamo.sglang --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 3 --node-rank 0 --custom-flag custom-value",
 												},
 												Ports: []corev1.ContainerPort{
 													{
@@ -1962,7 +1980,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													"-c",
 												},
 												Args: []string{
-													"python3 -m dynamo.sglang.worker --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 3 --node-rank $((GROVE_PCLQ_POD_INDEX + 1)) --custom-flag custom-value",
+													"python3 -m dynamo.sglang --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 3 --node-rank $((GROVE_PCLQ_POD_INDEX + 1)) --custom-flag custom-value",
 												},
 												Ports: []corev1.ContainerPort{
 													{
@@ -2276,7 +2294,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "test-namespace",
 													},
 													{
-														Name:  "PROMETHEUS_PORT",
+														Name:  "PLANNER_PROMETHEUS_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort),
 													},
 												},
@@ -3067,7 +3085,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "test-namespace",
 													},
 													{
-														Name:  "PROMETHEUS_PORT",
+														Name:  "PLANNER_PROMETHEUS_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort),
 													},
 												},
@@ -3189,7 +3207,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 					ComponentType: commonconsts.ComponentTypeWorker,
 					ExtraPodSpec: &common.ExtraPodSpec{
 						MainContainer: &corev1.Container{
-							Args: []string{"python3 -m dynamo.sglang.worker"},
+							Args: []string{"python3 -m dynamo.sglang"},
 						},
 					},
 				},
@@ -3198,7 +3216,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 			role:              RoleMain,
 			numberOfNodes:     1,
 			expectError:       false,
-			expectContains:    []string{"python3", "-m", "dynamo.sglang.worker"},
+			expectContains:    []string{"python3", "-m", "dynamo.sglang"},
 			expectNotContains: []string{"dist-init-addr", "nnodes", "tp-size"},
 		},
 		{
@@ -3208,7 +3226,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 					ComponentType: commonconsts.ComponentTypeWorker,
 					ExtraPodSpec: &common.ExtraPodSpec{
 						MainContainer: &corev1.Container{
-							Args: []string{"python3 -m dynamo.sglang.worker"},
+							Args: []string{"python3 -m dynamo.sglang"},
 						},
 					},
 				},
@@ -3217,7 +3235,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 			role:             RoleLeader,
 			numberOfNodes:    3,
 			expectError:      false,
-			expectContains:   []string{"python3", "-m", "dynamo.sglang.worker", "dist-init-addr", "nnodes", "node-rank"},
+			expectContains:   []string{"python3", "-m", "dynamo.sglang", "dist-init-addr", "nnodes", "node-rank"},
 		},
 		{
 			name: "SGLang multinode worker",
@@ -3226,7 +3244,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 					ComponentType: commonconsts.ComponentTypeWorker,
 					ExtraPodSpec: &common.ExtraPodSpec{
 						MainContainer: &corev1.Container{
-							Args: []string{"python3 -m dynamo.sglang.worker"},
+							Args: []string{"python3 -m dynamo.sglang"},
 						},
 					},
 				},
@@ -3235,7 +3253,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 			role:             RoleWorker,
 			numberOfNodes:    3,
 			expectError:      false,
-			expectContains:   []string{"python3", "-m", "dynamo.sglang.worker", "dist-init-addr", "nnodes", "node-rank"},
+			expectContains:   []string{"python3", "-m", "dynamo.sglang", "dist-init-addr", "nnodes", "node-rank"},
 		},
 		{
 			name: "SGLang with user command override",
@@ -3667,7 +3685,7 @@ func TestDetectBackendFrameworkFromArgs(t *testing.T) {
 		{
 			name:     "detect SGLang from args",
 			command:  []string{"/bin/sh", "-c"},
-			args:     []string{"python -m dynamo.sglang.worker --model test"},
+			args:     []string{"python -m dynamo.sglang --model test"},
 			expected: BackendFrameworkSGLang,
 		},
 		{
@@ -3685,7 +3703,7 @@ func TestDetectBackendFrameworkFromArgs(t *testing.T) {
 		{
 			name:     "detect from python3.11",
 			command:  []string{},
-			args:     []string{"python3.11 -m dynamo.sglang.decode_worker"},
+			args:     []string{"python3.11 -m dynamo.sglang"},
 			expected: BackendFrameworkSGLang,
 		},
 		{
@@ -3697,7 +3715,7 @@ func TestDetectBackendFrameworkFromArgs(t *testing.T) {
 		{
 			name:        "multiple backends detected",
 			command:     []string{},
-			args:        []string{"python -m dynamo.vllm.worker && python -m dynamo.sglang.worker"},
+			args:        []string{"python -m dynamo.vllm.worker && python -m dynamo.sglang"},
 			expectError: true,
 		},
 	}
@@ -3759,7 +3777,7 @@ func TestDetermineBackendFramework(t *testing.T) {
 		{
 			name:                     "worker with detected matching explicit",
 			componentType:            "worker",
-			args:                     []string{"python -m dynamo.sglang.worker"},
+			args:                     []string{"python -m dynamo.sglang"},
 			explicitBackendFramework: "sglang",
 			expected:                 BackendFrameworkSGLang,
 		},
@@ -3863,7 +3881,7 @@ func TestGetBackendFrameworkFromComponent(t *testing.T) {
 					ComponentType: "worker", // Worker component
 					ExtraPodSpec: &common.ExtraPodSpec{
 						MainContainer: &corev1.Container{
-							Args: []string{"python -m dynamo.sglang.worker"},
+							Args: []string{"python -m dynamo.sglang"},
 						},
 					},
 				},
@@ -4345,6 +4363,24 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 			backendFramework: BackendFrameworkVLLM,
 			wantEnvVars: map[string]string{
 				"DYN_HTTP_PORT": fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+			},
+		},
+		{
+			name: "frontend with overriding env var",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Envs: []corev1.EnvVar{
+						{
+							Name:  "DYN_HTTP_PORT",
+							Value: "3000",
+						},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			wantEnvVars: map[string]string{
+				"DYN_HTTP_PORT": "3000",
 			},
 		},
 	}

@@ -157,8 +157,8 @@ def parse_args():
     parser.add_argument(
         "--router-snapshot-threshold",
         type=int,
-        default=10000,
-        help="KV Router: Number of messages in stream before triggering a snapshot. Defaults to 10000.",
+        default=1000000,
+        help="KV Router: Number of messages in stream before triggering a snapshot. Defaults to 1000000.",
     )
     parser.add_argument(
         "--router-reset-states",
@@ -166,6 +166,13 @@ def parse_args():
         dest="router_reset_states",
         default=False,
         help="KV Router: Reset router state on startup, purging stream and object store. By default, states are persisted. WARNING: This can affect existing router replicas.",
+    )
+    parser.add_argument(
+        "--no-track-active-blocks",
+        action="store_false",
+        dest="router_track_active_blocks",
+        default=True,
+        help="KV Router: Disable tracking of active blocks (blocks being used for ongoing generation). By default, active blocks are tracked for load balancing.",
     )
     parser.add_argument(
         "--busy-threshold",
@@ -232,6 +239,7 @@ async def async_main():
             router_replica_sync=flags.router_replica_sync,
             router_snapshot_threshold=flags.router_snapshot_threshold,
             router_reset_states=flags.router_reset_states,
+            router_track_active_blocks=flags.router_track_active_blocks,
         )
     elif flags.router_mode == "random":
         router_mode = RouterMode.Random

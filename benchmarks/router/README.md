@@ -96,14 +96,12 @@ In a **new terminal**, launch the Dynamo router using the Python CLI:
 ```bash
 python -m dynamo.frontend \
     --router-mode kv \
-    --kv-cache-block-size 64 \
     --router-reset-states \
     --http-port 8000
 ```
 
 This starts the router with:
 - KV cache routing mode
-- Block size of 64 (**Important:** This should match the `--block-size` used by your engines)
 - `--router-reset-states` flag to clear the event cache (JetStream) from previous runs (useful for single router benchmarking)
 - HTTP port 8000
 
@@ -114,33 +112,33 @@ python -m dynamo.frontend --help
 
 For detailed explanations of router arguments (especially KV cache routing parameters), see the [KV Cache Routing documentation](../../docs/architecture/kv_cache_routing.md).
 
-#### Launching a Prefill Router (Optional)
+#### Launching a Standalone Router for Prefill Workers (Optional)
 
-If you're using disaggregated serving with separate prefill and decode workers, you should also launch a prefill router. The prefill router handles routing prefill requests to dedicated prefill workers. When using a prefill router, it's recommended to start the frontend (decode router) with `--kv-overlap-score-weight 0` for pure load balancing (as prefix-aware routing is now handled by the prefill router):
+If you're using disaggregated serving with separate prefill and decode workers, you should also launch a standalone router for prefill workers. This router handles routing prefill requests to dedicated prefill workers. When using a standalone prefill router, it's recommended to start the frontend (decode router) with `--kv-overlap-score-weight 0` for pure load balancing (as prefix-aware routing is now handled by the standalone router):
 
 ```bash
 # Start the decode router with pure load balancing
 python -m dynamo.frontend \
     --router-mode kv \
-    --kv-cache-block-size 64 \
     --router-reset-states \
     --http-port 8000 \
     --kv-overlap-score-weight 0
 
-# In another terminal, start the prefill router (currently only supports vLLM)
-python -m dynamo.vllm_prefill_router \
-    --namespace dynamo \
-    --block-size 64
+# In another terminal, start the standalone router for prefill workers
+python -m dynamo.router \
+    --endpoint dynamo.prefill.generate \
+    --block-size 64 \
+    --router-reset-states \
+    --no-track-active-blocks
 ```
 
-The prefill router will automatically coordinate with the decode router to handle request routing between prefill and decode workers.
+The `--router-reset-states` flag clears any previous state, and `--no-track-active-blocks` disables active block tracking (suitable for prefill-only routing where decode load is not relevant).
 
 **Note**: If you're unsure whether your backend engines correctly emit KV events for certain models (e.g., hybrid models like gpt-oss or nemotron nano 2), use the `--no-kv-events` flag to disable KV event tracking and use approximate KV indexing instead:
 
 ```bash
 python -m dynamo.frontend \
     --router-mode kv \
-    --kv-cache-block-size 64 \
     --http-port 8000 \
     --no-kv-events
 ```
@@ -196,10 +194,10 @@ python prefix_ratio_benchmark.py --output-dir results/experiment1
 Instead of synthetic benchmarks with controlled prefix ratios, you can benchmark using real trace data in [mooncake-style format](https://github.com/kvcache-ai/Mooncake/blob/d21da178bae8db9651cf18a76824c084145fc725/mooncake_trace.jsonl). This approach uses actual request patterns from production traces, potentially modified with synthesis parameters.
 
 ```bash
-python real_data_benchmark.py --input-file mooncake_trace.jsonl
+python real_data_benchmark.py --input-dataset mooncake_trace.jsonl
 ```
 
-The script can apply various modifications on top of the original trace file to simulate different scenarios and workload conditions. This script accepts the same synthesis parameters as the [prefix data generator](../prefix_data_generator/README.md):
+The script can apply various modifications on top of the original trace dataset to simulate different scenarios and workload conditions. This script accepts the same synthesis parameters as the [prefix data generator](../prefix_data_generator/README.md):
 
 **Key parameters:**
 - `--num-requests`: Number of requests to synthesize from the trace (default: use all)
@@ -212,18 +210,25 @@ The script can apply various modifications on top of the original trace file to 
 Examples:
 
 ```bash
-# Use original trace file as-is (no synthesis parameters specified)
-python real_data_benchmark.py --input-file trace.jsonl
+# Use original trace dataset as-is (no synthesis parameters specified)
+python real_data_benchmark.py --input-dataset trace.jsonl
 
 # Speed up request rate by 2x and use only first 1000 requests
-python real_data_benchmark.py --input-file trace.jsonl --num-requests 1000 --speedup-ratio 2.0
+python real_data_benchmark.py --input-dataset trace.jsonl --num-requests 1000 --speedup-ratio 2.0
 
 # Double prefix lengths to test cache efficiency with longer shared contexts
-python real_data_benchmark.py --input-file trace.jsonl --prefix-len-multiplier 2.0
+python real_data_benchmark.py --input-dataset trace.jsonl --prefix-len-multiplier 2.0
 
 # Create more diverse workload by replicating prefix tree 3 times
-python real_data_benchmark.py --input-file trace.jsonl --prefix-root-multiplier 3
+python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multiplier 3
 ```
+
+> [!Note]
+> At the time of writing this documentation, you may need to install the latest genai-perf from the main source branch to loadgen on the trace files:
+> ```bash
+> pip install git+https://github.com/triton-inference-server/perf_analyzer.git#subdirectory=genai-perf
+> ```
+> However, by the time of release, the genai-perf version included in the vLLM runtime container should be up to date enough to use as-is.
 
 ## Troubleshooting
 
