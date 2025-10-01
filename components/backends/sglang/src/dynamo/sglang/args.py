@@ -113,7 +113,17 @@ class Config:
     def __init__(self, server_args: ServerArgs, dynamo_args: DynamoArgs) -> None:
         self.server_args = server_args
         self.dynamo_args = dynamo_args
-        self.serving_mode = _set_serving_strategy(server_args)
+        self.serving_mode = self._set_serving_strategy()
+
+    def _set_serving_strategy(self):
+        if self.server_args.disaggregation_mode == "null":
+            return DisaggregationMode.AGGREGATED
+        elif self.server_args.disaggregation_mode == "prefill":
+            return DisaggregationMode.PREFILL
+        elif self.server_args.disaggregation_mode == "decode":
+            return DisaggregationMode.DECODE
+        else:
+            return DisaggregationMode.AGGREGATED
 
 
 def _set_parser(
@@ -156,10 +166,32 @@ def parse_args(args: list[str]) -> Config:
         "--version", action="version", version=f"Dynamo Backend SGLang {__version__}"
     )
 
-    _setup_common_parser_args(parser, include_dynamo_args=True)
+    # Dynamo args
+    for info in DYNAMO_ARGS.values():
+        kwargs = {
+            "default": info["default"] if "default" in info else None,
+            "help": info["help"],
+        }
+        if "type" in info:
+            kwargs["type"] = info["type"]
+        if "choices" in info:
+            kwargs["choices"] = info["choices"]
+        if "action" in info:
+            kwargs["action"] = info["action"]
+
+        parser.add_argument(*info["flags"], **kwargs)
+
+    # SGLang args
+    bootstrap_port = _reserve_disaggregation_bootstrap_port()
+    ServerArgs.add_cli_args(parser)
 
     parsed_args = parser.parse_args(args)
-    parsed_args = _setup_bootstrap_port(args, parsed_args)
+
+    # Auto-set bootstrap port if not provided
+    if not any(arg.startswith("--disaggregation-bootstrap-port") for arg in args):
+        args_dict = vars(parsed_args)
+        args_dict["disaggregation_bootstrap_port"] = bootstrap_port
+        parsed_args = Namespace(**args_dict)
 
     # Dynamo argument processing
     # If an endpoint is provided, validate and use it
@@ -233,7 +265,7 @@ def parse_args(args: list[str]) -> Config:
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
 
-    server_args = _create_server_args(parsed_args)
+    server_args = ServerArgs.from_cli_args(parsed_args)
 
     if parsed_args.use_sglang_tokenizer:
         logging.info(
@@ -286,51 +318,3 @@ def parse_endpoint(endpoint: str) -> List[str]:
         raise ValueError(error_msg)
 
     return endpoint_parts
-
-
-def _setup_bootstrap_port(args_list: List[str], parsed_args: Namespace) -> Namespace:
-    if not any(arg.startswith("--disaggregation-bootstrap-port") for arg in args_list):
-        bootstrap_port = _reserve_disaggregation_bootstrap_port()
-        args_dict = vars(parsed_args)
-        args_dict["disaggregation_bootstrap_port"] = bootstrap_port
-        parsed_args = Namespace(**args_dict)
-    return parsed_args
-
-
-def _create_server_args(parsed_args: Namespace) -> ServerArgs:
-    return ServerArgs.from_cli_args(parsed_args)
-
-
-def _set_serving_strategy(server_args: ServerArgs) -> DisaggregationMode:
-    """Set serving mode based on disaggregation_mode."""
-    if server_args.disaggregation_mode == "null":
-        return DisaggregationMode.AGGREGATED
-    elif server_args.disaggregation_mode == "prefill":
-        return DisaggregationMode.PREFILL
-    elif server_args.disaggregation_mode == "decode":
-        return DisaggregationMode.DECODE
-    else:
-        return DisaggregationMode.AGGREGATED
-
-
-def _setup_common_parser_args(
-    parser: argparse.ArgumentParser, include_dynamo_args: bool = True
-) -> None:
-    if include_dynamo_args:
-        # Dynamo args
-        for info in DYNAMO_ARGS.values():
-            kwargs = {
-                "default": info["default"] if "default" in info else None,
-                "help": info["help"],
-            }
-            if "type" in info:
-                kwargs["type"] = info["type"]
-            if "choices" in info:
-                kwargs["choices"] = info["choices"]
-            if "action" in info:
-                kwargs["action"] = info["action"]
-
-            parser.add_argument(*info["flags"], **kwargs)
-
-    # SGLang args
-    ServerArgs.add_cli_args(parser)
