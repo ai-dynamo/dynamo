@@ -53,13 +53,14 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 uuid = { version = "1.17", features = ["v4", "serde"] }
 
 # "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
-# "abi3-py39" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.9
+# "abi3-py310" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.10, which is the minimum version in pyproject.toml
 pyo3 = { version = "0.23.4", default-features = false, features = [
   "macros",
   "experimental-async",
   "experimental-inspect",
   "extension-module",
   "py-clone",
+  # "abi3-py310" # TODO: Add abi feature in follow-up, since docker build can be simplified.
 ] }
 
 pyo3-async-runtimes = { version = "0.23.0", default-features = false, features = [

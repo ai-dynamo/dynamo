@@ -73,6 +73,9 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// ComponentType indicates the role of this component (for example, "main").
 	ComponentType string `json:"componentType,omitempty"`
 
+	// SubComponentType indicates the sub-role of this component (for example, "prefill").
+	SubComponentType string `json:"subComponentType,omitempty"`
+
 	// Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive)
 	DynamoNamespace *string `json:"dynamoNamespace,omitempty"`
 

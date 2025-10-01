@@ -729,7 +729,7 @@ func GenerateBasePodSpec(
 			}
 		}
 	}
-	container.Env = MergeEnvs(component.Envs, container.Env)
+	container.Env = MergeEnvs(container.Env, component.Envs)
 
 	// Merge probes entirely if they are passed (no partial merge)
 	if component.LivenessProbe != nil {
@@ -991,6 +991,9 @@ func generateLabels(component *v1alpha1.DynamoComponentDeploymentOverridesSpec, 
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
 	if component.ComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoComponentType] = component.ComponentType
+	}
+	if component.SubComponentType != "" {
+		labels[commonconsts.KubeLabelDynamoSubComponentType] = component.SubComponentType
 	}
 	setMetricsLabels(labels, dynamoDeployment)
 	if component.Labels != nil {

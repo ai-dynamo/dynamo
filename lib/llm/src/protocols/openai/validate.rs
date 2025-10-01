@@ -82,12 +82,7 @@ pub const BEST_OF_RANGE: (u8, u8) = (MIN_BEST_OF, MAX_BEST_OF);
 pub const MAX_STOP_SEQUENCES: usize = 4;
 /// Maximum allowed number of tools
 pub const MAX_TOOLS: usize = 128;
-/// Maximum allowed number of metadata key-value pairs
-pub const MAX_METADATA_PAIRS: usize = 16;
-/// Maximum allowed length for metadata keys
-pub const MAX_METADATA_KEY_LENGTH: usize = 64;
-/// Maximum allowed length for metadata values
-pub const MAX_METADATA_VALUE_LENGTH: usize = 512;
+// Metadata validation constants removed - we are no longer restricting the metadata field char limits
 /// Maximum allowed length for function names
 pub const MAX_FUNCTION_NAME_LENGTH: usize = 64;
 /// Maximum allowed value for Prompt IntegerArray elements
@@ -359,45 +354,6 @@ pub fn validate_tools(
         }
         if tool.function.name.trim().is_empty() {
             anyhow::bail!("Function name at index {} cannot be empty", i);
-        }
-    }
-    Ok(())
-}
-
-/// Validates metadata
-pub fn validate_metadata(metadata: &Option<serde_json::Value>) -> Result<(), anyhow::Error> {
-    let metadata = match metadata {
-        Some(val) => val,
-        None => return Ok(()),
-    };
-
-    if let Some(obj) = metadata.as_object() {
-        if obj.len() > MAX_METADATA_PAIRS {
-            anyhow::bail!(
-                "Metadata cannot have more than {} key-value pairs, got {}",
-                MAX_METADATA_PAIRS,
-                obj.len()
-            );
-        }
-
-        for (key, value) in obj {
-            if key.len() > MAX_METADATA_KEY_LENGTH {
-                anyhow::bail!(
-                    "Metadata key '{}' exceeds {} character limit",
-                    key,
-                    MAX_METADATA_KEY_LENGTH
-                );
-            }
-
-            if let Some(value_str) = value.as_str()
-                && value_str.len() > MAX_METADATA_VALUE_LENGTH
-            {
-                anyhow::bail!(
-                    "Metadata value for key '{}' exceeds {} character limit",
-                    key,
-                    MAX_METADATA_VALUE_LENGTH
-                );
-            }
         }
     }
     Ok(())

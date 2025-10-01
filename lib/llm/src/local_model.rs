@@ -8,6 +8,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
+use dynamo_runtime::storage::key_value_store::Key;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{
     component::Endpoint,
@@ -410,18 +411,28 @@ impl LocalModel {
         let Some(etcd_client) = endpoint.drt().etcd_client() else {
             anyhow::bail!("Cannot attach to static endpoint");
         };
+        self.card.model_type = model_type;
+        self.card.model_input = model_input;
 
         // Store model config files in NATS object store
         let nats_client = endpoint.drt().nats_client();
         self.card.move_to_nats(nats_client.clone()).await?;
 
-        // Publish the Model Deployment Card to etcd
+        // Publish the Model Deployment Card to KV store
         let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
         let key = self.card.slug().to_string();
+        // TODO: Next PR will use this
+        //let lease_id = endpoint.drt().primary_lease().map(|l| l.id()).unwrap_or(0);
+        //let key = Key::from_raw(endpoint.unique_path(lease_id));
 
         card_store
-            .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
+            .publish(
+                model_card::ROOT_PATH,
+                None,
+                &Key::from_raw(key),
+                &mut self.card,
+            )
             .await?;
 
         // Publish our ModelEntry to etcd. This allows ingress to find the model card.
@@ -431,9 +442,7 @@ impl LocalModel {
         let model_registration = ModelEntry {
             name: self.display_name().to_string(),
             endpoint_id: endpoint.id(),
-            model_type,
             runtime_config: Some(self.runtime_config.clone()),
-            model_input,
         };
         etcd_client
             .kv_create(

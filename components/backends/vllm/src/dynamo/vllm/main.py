@@ -178,6 +178,13 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         runtime, component, engine_client, default_sampling_params
     )
 
+    # Set up KV event publisher for prefix caching if enabled
+    kv_publisher = setup_kv_event_publisher(
+        config, component, generate_endpoint, vllm_config
+    )
+    if kv_publisher:
+        handler.kv_publisher = kv_publisher
+
     health_check_payload = VllmPrefillHealthCheckPayload(engine_client).to_dict()
 
     try:
@@ -219,14 +226,14 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     prefill_router_client = (
         await runtime.namespace(config.namespace)
-        .component("prefill_router")  # TODO don't hardcode
+        .component("router")  # Standalone router for prefill workers
         .endpoint("find_best_worker")
         .client()
     )
 
     prefill_router_free_client = (
         await runtime.namespace(config.namespace)
-        .component("prefill_router")  # TODO don't hardcode
+        .component("router")  # Standalone router for prefill workers
         .endpoint("free")
         .client()
     )
