@@ -72,13 +72,6 @@ class StandaloneRouterHandler:
                 kv_router_config=self.kv_router_config,
             )
 
-            logger.info(
-                f"KvRouter initialized for workers at {self.worker_endpoint_path} "
-                f"with block_size={self.block_size}, "
-                f"router_track_active_blocks={self.kv_router_config.router_track_active_blocks}, "
-                f"router_reset_states={self.kv_router_config.router_reset_states}"
-            )
-
         except Exception as e:
             logger.error(f"Failed to initialize KvRouter: {e}")
             raise
