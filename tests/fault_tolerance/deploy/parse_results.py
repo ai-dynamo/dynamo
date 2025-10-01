@@ -13,441 +13,515 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Parser for AI-Perf results in fault tolerance tests."""
+
 import argparse
 import json
+import logging
 import os
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import pandas as pd
+import numpy as np
 from tabulate import tabulate
 
 
-def parse_test_log(file_path):
+def parse_test_log(
+    file_path: str,
+) -> Tuple[Optional[float], Optional[List[str]]]:
+    """
+    Parse test log for startup time and failure info.
+
+    Args:
+        file_path: Path to test.log.txt
+
+    Returns:
+        Tuple of (startup_time_seconds, failure_info)
+    """
     start_time = None
     ready_time = None
-    fault_time = None
-    start_cmd: Optional[List[str]] = None
+    failure_info: Optional[List[str]] = None
+
     if not os.path.isfile(file_path):
-        return None, None, None
+        return None, None
+
     with open(file_path, "r") as f:
         for line in f:
-            line = line.strip()
-            if "Starting Deployment fault-tolerance-test with spec" in line:
-                start_time = datetime.fromisoformat(
-                    line.split(" ")[1].replace("T", " ")
-                )
-                start_cmd = []
-            elif "Deployment fault-tolerance-test is ready" in line:
-                ready_time = datetime.fromisoformat(
-                    line.split(" ")[1].replace("T", " ")
-                )
-            elif "Injecting failure for:" in line:
-                fault_time = datetime.fromisoformat(
-                    line.split(" ")[1].replace("T", " ")
-                )
-    startup_time = (
-        (ready_time - start_time).total_seconds() if start_time and ready_time else None
-    )
-    return startup_time, fault_time, start_cmd
+            # Extract timestamp using regex to handle different log formats
+            timestamp_match = re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", line)
+
+            # Look for deployment start
+            if "Starting Deployment" in line and timestamp_match:
+                timestamp = timestamp_match.group(1)
+                start_time = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S")
+
+            # Look for deployment ready
+            if "Deployment fault-tolerance-test is ready" in line and timestamp_match:
+                timestamp = timestamp_match.group(1)
+                ready_time = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S")
+
+            # Look for fault injection
+            if "Injecting failure for:" in line:
+                # Extract failure details
+                match = re.search(r"Failure\((.*?)\)", line)
+                if match:
+                    failure_str = match.group(1)
+                    parts = failure_str.split(", ")
+                    failure_dict = {}
+                    for part in parts:
+                        key_val = part.split("=")
+                        if len(key_val) == 2:
+                            failure_dict[key_val[0]] = key_val[1]
+
+                    # Build command list from failure info
+                    if failure_dict:
+                        failure_info = [
+                            failure_dict.get("pod_name", "unknown").strip("'\""),
+                            failure_dict.get("command", "unknown").strip("'\""),
+                        ]
+
+    # Calculate startup time in seconds
+    startup_time = None
+    if start_time and ready_time:
+        startup_time = (ready_time - start_time).total_seconds()
+
+    return startup_time, failure_info
 
 
-def parse_client_logs(test_dir, expected_length=100):
-    all_logs = []
-    for file in os.listdir(test_dir):
-        if file.startswith("client_") and file.endswith(".log.txt"):
-            with open(os.path.join(test_dir, file), "r") as f:
-                request_number = 0
-                for line in f:
-                    request_number += 1
-                    data = json.loads(line.strip())
-                    for result in data["results"]:
-                        log_entry = {
-                            "time": datetime.fromisoformat(
-                                data["time"].replace("T", " ")
-                            ),
-                            "status": result["status"],
-                            "request_elapsed_time": result["request_elapsed_time"],
-                            "request_number": request_number - 1,
-                            "client": file.split("_")[1].split(".")[0],
-                        }
-                        if (
-                            "result" in result
-                            and result["result"]
-                            and "choices" in result["result"]
-                            and result["result"]["choices"]
-                        ):
-                            log_entry["success"] = True
-                            if "content" in result["result"]["choices"][0]["message"]:
-                                content = result["result"]["choices"][0]["message"][
-                                    "content"
-                                ]
-                            elif (
-                                "reasoning_content"
-                                in result["result"]["choices"][0]["message"]
-                            ):
-                                content = result["result"]["choices"][0]["message"][
-                                    "reasoning_content"
-                                ]
+def calculate_recovery_time(
+    failure_info: Optional[List[str]],
+    process_logs_dir: str,
+) -> Optional[float]:
+    """
+    Calculate recovery time by comparing last timestamp in .previous.log with first in current log.
+    This avoids timezone issues between test.log.txt and container logs.
 
-                            if not content or len(content) < expected_length:
-                                log_entry["success"] = False
-                        else:
-                            log_entry["success"] = False
-                        all_logs.append(log_entry)
-    if len(all_logs):
-        df = pd.DataFrame(all_logs)
-        df.sort_values("time", inplace=True)
-        return df
+    Args:
+        failure_info: List with [pod_name, command] from fault injection
+        process_logs_dir: Directory containing process log files
+
+    Returns:
+        Recovery time in seconds or None if not found
+    """
+    if not failure_info:
+        return None
+
+    # Determine component type from failure info (strip any quotes)
+    component_type = failure_info[0].strip("'\"")  # e.g., "Frontend" or "decode"
+    component_dir = os.path.join(process_logs_dir, component_type)
+
+    if not os.path.exists(component_dir):
+        return None
+
+    last_timestamp_before = None
+    first_timestamp_after = None
+
+    # Find the last timestamp from .previous.log (container before restart)
+    for log_file in os.listdir(component_dir):
+        if log_file.endswith(".previous.log"):
+            log_path = os.path.join(component_dir, log_file)
+            try:
+                with open(log_path, "r") as f:
+                    # Read last few lines to find last valid timestamp
+                    lines = f.readlines()
+                    for line in reversed(lines[-10:]):  # Check last 10 lines
+                        if '"time":"' in line:
+                            try:
+                                log_entry = json.loads(line)
+                                timestamp_str = log_entry.get("time", "")[:19]
+                                last_timestamp_before = datetime.strptime(
+                                    timestamp_str, "%Y-%m-%dT%H:%M:%S"
+                                )
+                                break
+                            except (json.JSONDecodeError, ValueError):
+                                continue
+            except IOError as e:
+                logging.debug(f"Could not read {log_file}: {e}")
+
+    # Find the first timestamp from current container log
+    for log_file in os.listdir(component_dir):
+        if log_file.endswith(".log") and not log_file.endswith(
+            (".previous.log", ".metrics.log")
+        ):
+            log_path = os.path.join(component_dir, log_file)
+            try:
+                with open(log_path, "r") as f:
+                    first_line = f.readline()
+                    if first_line and '"time":"' in first_line:
+                        log_entry = json.loads(first_line)
+                        timestamp_str = log_entry.get("time", "")[:19]
+                        first_timestamp_after = datetime.strptime(
+                            timestamp_str, "%Y-%m-%dT%H:%M:%S"
+                        )
+            except (json.JSONDecodeError, ValueError, IOError) as e:
+                logging.debug(f"Could not parse timestamp from {log_file}: {e}")
+
+    # Calculate recovery time from container timestamps (both in UTC)
+    if last_timestamp_before and first_timestamp_after:
+        recovery_time = (first_timestamp_after - last_timestamp_before).total_seconds()
+        # Sanity check - recovery should be seconds/minutes, not hours
+        if recovery_time > 3600:  # More than 1 hour is likely wrong
+            logging.warning(
+                f"Recovery time {recovery_time}s seems too large, possible timezone issue"
+            )
+        return recovery_time
 
     return None
 
 
-def calculate_metrics(df, fault_time, sla=None):
-    if fault_time:
-        before_fault = df[df["time"] <= fault_time]
-        after_fault = df[df["time"] > fault_time]
-    else:
-        before_fault = df
-        after_fault = None
+def parse_aiperf_client_results(log_dir: str) -> Dict[str, Any]:
+    """
+    Parse AI-Perf results from all client directories.
 
-    # Existing latency metrics (only successful requests)
-    successful_before = before_fault[before_fault["success"]]
-    avg_before = successful_before["request_elapsed_time"].mean()
-    std_before = successful_before["request_elapsed_time"].std()
-    success_before_count = before_fault["success"].sum()
-    failure_before_count = len(before_fault) - success_before_count
+    Args:
+        log_dir: Directory containing client result directories
 
-    avg_after, std_after, success_after_count, failure_after_count = (
-        None,
-        None,
-        None,
-        None,
-    )
-    if after_fault is not None and not after_fault.empty:
-        successful_after = after_fault[after_fault["success"]]
-        avg_after = successful_after["request_elapsed_time"].mean()
-        std_after = successful_after["request_elapsed_time"].std()
-        success_after_count = after_fault["success"].sum()
-        failure_after_count = len(after_fault) - success_after_count
-
-    if sla:
-        # SLA violations (only successful requests exceeding the SLA)
-        violations_before = (successful_before["request_elapsed_time"] > sla).sum()
-        violations_after = (
-            (successful_after["request_elapsed_time"] > sla).sum()
-            if after_fault is not None and not after_fault.empty
-            else None
-        )
-    else:
-        violations_before = None
-        violations_after = None
-
-    return (
-        success_before_count,
-        failure_before_count,
-        success_after_count,
-        failure_after_count,
-        avg_before,
-        std_before,
-        avg_after,
-        std_after,
-        violations_before,
-        violations_after,
-    )
-
-
-def parse_process_log(log_dir, process_name):
-    process_ready_pattern = {
-        "Frontend": re.compile(r"added model"),
-        "VllmDecodeWorker": re.compile(
-            r"VllmWorker for (?P<model_name>.*?) has been initialized"
-        ),
-        "VllmPrefillWorker": re.compile(
-            r"VllmWorker for (?P<model_name>.*?) has been initialized"
-        ),
+    Returns:
+        Dictionary with aggregated metrics and client count
+    """
+    all_metrics: Dict[str, Any] = {
+        "total_requests": 0,
+        "successful_requests": 0,
+        "failed_requests": 0,
+        "latencies": [],
+        "ttft": [],  # Time to First Token
+        "itl": [],  # Inter-Token Latency
+        "throughputs": [],
+        "p50_latencies": [],
+        "p90_latencies": [],
+        "p99_latencies": [],
+        "num_clients": 0,
     }
-    if not os.path.isdir(log_dir):
-        return {}
-    ready_times: Dict[str, List[Tuple[datetime, str, float]]] = {}
 
-    for entry in os.listdir(log_dir):
-        if entry.endswith(".log") and "metrics" not in entry:
-            replica_number = entry.split(".")[0]
+    # Iterate over actual client directories
+    for item in sorted(os.listdir(log_dir)):
+        if not item.startswith("client_") or not os.path.isdir(
+            os.path.join(log_dir, item)
+        ):
+            continue
 
-            if replica_number not in ready_times:
-                ready_times[replica_number] = []
+        client_dir = Path(log_dir) / item
+        all_metrics["num_clients"] += 1
 
-            process_start_time = None
+        # Look for AI-Perf results in attempt directories
+        profile_json = None
 
-            with open(os.path.join(log_dir, entry), "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
+        # Check for attempt directories (attempt_0, attempt_1, etc.)
+        for attempt_dir in sorted(client_dir.glob("attempt_*")):
+            json_path = attempt_dir / "profile_export_aiperf.json"
+            if json_path.exists():
+                profile_json = json_path
+                break  # Use the first successful attempt
 
-                    # Try to parse as JSONL first
-                    try:
-                        json_data = json.loads(line)
-                        # Extract timestamp and message from JSON format
-                        if "time" in json_data:
-                            timestamp = datetime.fromisoformat(
-                                json_data["time"].replace("Z", "")
-                            )
-                            log_message = json_data.get("message", "")
-                        else:
-                            continue
-                    except (json.JSONDecodeError, ValueError, KeyError):
-                        # Fall back to readable format parsing
-                        clean_line = re.sub(
-                            r"\x1b\[.*?m", "", line
-                        )  # Remove ANSI codes
-                        if not clean_line:
-                            continue
+        if not profile_json:
+            logging.warning(f"No AI-Perf results found for {item} in {client_dir}")
+        else:
+            try:
+                with open(profile_json) as f:
+                    client_metrics = json.load(f)
 
-                        parts = clean_line.split()
-                        if len(parts) < 2:
-                            continue
+                # AI-Perf format has "records" dictionary at the top level
+                records = client_metrics.get("records", {})
 
-                        try:
-                            # Parse timestamp (remove 'Z' for naive datetime)
-                            timestamp = datetime.fromisoformat(
-                                parts[0].replace("Z", "")
-                            )
-                        except ValueError:
-                            continue
+                # Extract request count (this is the total requests made)
+                request_count_record = records.get("request_count", {})
+                request_count = (
+                    int(request_count_record.get("avg", 0))
+                    if request_count_record
+                    else 0
+                )
 
-                        log_message = " ".join(parts[1:])
-                    if not process_start_time:
-                        process_start_time = timestamp
+                # Check for errors in error_summary
+                error_summary = client_metrics.get("error_summary", [])
+                error_count = len(error_summary)
 
-                    relative_time = (timestamp - process_start_time).total_seconds()
+                # Check if test was cancelled
+                was_cancelled = client_metrics.get("was_cancelled", False)
+                if was_cancelled:
+                    error_count = request_count  # Mark all as failed if cancelled
 
-                    # Check for process start lines
-                    if process_name in process_ready_pattern:
-                        if process_ready_pattern[process_name].search(log_message):
-                            if "previous" in entry:
-                                location = 0
-                            else:
-                                location = -1
-                            ready_times[replica_number].insert(
-                                location, (timestamp, log_message, relative_time)
-                            )
+                all_metrics["total_requests"] += request_count
+                all_metrics["successful_requests"] += request_count - error_count
+                all_metrics["failed_requests"] += error_count
 
-    return ready_times
+                # Extract latency from request_latency record
+                request_latency = records.get("request_latency", {})
 
+                if request_latency:
+                    # Convert milliseconds to seconds for consistency
+                    if "avg" in request_latency:
+                        all_metrics["latencies"].append(request_latency["avg"] / 1000.0)
+                    if "p50" in request_latency:
+                        all_metrics["p50_latencies"].append(
+                            request_latency["p50"] / 1000.0
+                        )
+                    if "p90" in request_latency:
+                        all_metrics["p90_latencies"].append(
+                            request_latency["p90"] / 1000.0
+                        )
+                    if "p99" in request_latency:
+                        all_metrics["p99_latencies"].append(
+                            request_latency["p99"] / 1000.0
+                        )
 
-def calculate_recovery_time(test_dir, failure_type, fault_time):
-    if not fault_time:
-        return None
+                # Time to first token (if available in records)
+                ttft = records.get("time_to_first_token", {}) or records.get("ttft", {})
+                if ttft and "avg" in ttft:
+                    all_metrics["ttft"].append(ttft["avg"] / 1000.0)  # Convert ms to s
 
-    processes = [
-        "Frontend",
-        "VllmDecodeWorker",
-        "VllmPrefillWorker",
-    ]
+                # Inter-token latency (if available in records)
+                itl = records.get("inter_token_latency", {}) or records.get("itl", {})
+                if itl and "avg" in itl:
+                    all_metrics["itl"].append(itl["avg"] / 1000.0)  # Convert ms to s
 
-    process_start = {}
-    start_time = None
+                # Throughput from request_throughput record
+                request_throughput = records.get("request_throughput", {})
+                req_throughput = request_throughput.get("avg", 0)
+                if req_throughput:
+                    all_metrics["throughputs"].append(req_throughput)
 
-    for process in processes:
-        starts = parse_process_log(os.path.join(test_dir, process), process)
-        if starts:
-            process_start[process] = starts
+            except Exception as e:
+                logging.error(f"Error parsing {item} results: {e}")
 
-    last_recovery_time = 0
-    for process, replicas in process_start.items():
-        for replica, container_starts in replicas.items():
-            for starts in container_starts:
-                start_time = starts[0]
-                recovery_time = (start_time - fault_time).total_seconds()
-                if recovery_time > last_recovery_time:
-                    last_recovery_time = recovery_time
-    if last_recovery_time == 0:
-        return None
-    return last_recovery_time
+    return all_metrics
 
 
-def process_test_directory(test_dir, sla):
-    if "test_fault_scenario" not in test_dir:
-        return {}
-    test_name = test_dir.split("test_fault_scenario[", 1)[1].rstrip("]")
-    failure_type = test_name.split("-")[-1]
-    test_prefix = "-".join(test_name.split("-")[:-1])
+def print_summary_table(
+    log_dir: str,
+    num_clients: int,
+    startup_time: Optional[float],
+    recovery_time: Optional[float],
+    metrics: Dict[str, Any],
+    tablefmt: str = "grid",
+    sla: Optional[float] = None,
+) -> None:
+    """
+    Print formatted summary table with AI-Perf metrics.
 
-    startup_time, fault_time, start_cmd = parse_test_log(
-        os.path.join(test_dir, "test.log.txt")
+    Args:
+        log_dir: Test directory path
+        num_clients: Number of client processes
+        startup_time: Time to start deployment (seconds)
+        recovery_time: Time to recover from fault (seconds)
+        metrics: Aggregated metrics from AI-Perf
+        tablefmt: Table format for output
+        sla: Service level agreement for latency (optional)
+    """
+    headers = ["Metric", "Value"]
+    rows = []
+
+    # Test info
+    rows.append(["Test Directory", log_dir])
+    rows.append(["Number of Clients", str(num_clients)])
+    rows.append(["", ""])
+
+    # Deployment metrics
+    rows.append(["=== Deployment Metrics ===", ""])
+    if startup_time:
+        rows.append(["Startup Time", f"{startup_time:.2f} sec"])
+    else:
+        rows.append(["Startup Time", "N/A"])
+
+    if recovery_time:
+        rows.append(["Recovery Time", f"{recovery_time:.2f} sec"])
+    else:
+        rows.append(["Recovery Time", "N/A"])
+    rows.append(["", ""])
+
+    # Request metrics
+    rows.append(["=== Request Metrics ===", ""])
+    rows.append(["Total Requests", metrics["total_requests"]])
+    rows.append(["Successful Requests", metrics["successful_requests"]])
+    rows.append(["Failed Requests", metrics["failed_requests"]])
+
+    if metrics["total_requests"] > 0:
+        success_rate = (
+            metrics["successful_requests"] / metrics["total_requests"]
+        ) * 100
+        rows.append(["Success Rate", f"{success_rate:.2f}%"])
+    rows.append(["", ""])
+
+    # Latency metrics
+    rows.append(["=== Latency Metrics (seconds) ===", ""])
+
+    if metrics["latencies"]:
+        mean_latency = np.mean(metrics["latencies"])
+        rows.append(["Mean Latency", f"{mean_latency:.3f}"])
+
+        # Check SLA if provided
+        if sla is not None:
+            sla_status = "✓ PASS" if mean_latency <= sla else "✗ FAIL"
+            rows.append(["SLA Status", f"{sla_status} (target: {sla:.3f}s)"])
+
+    if metrics["p50_latencies"]:
+        rows.append(["P50 Latency", f"{np.mean(metrics['p50_latencies']):.3f}"])
+
+    if metrics["p90_latencies"]:
+        rows.append(["P90 Latency", f"{np.mean(metrics['p90_latencies']):.3f}"])
+
+    if metrics["p99_latencies"]:
+        rows.append(["P99 Latency", f"{np.mean(metrics['p99_latencies']):.3f}"])
+    rows.append(["", ""])
+
+    # Token generation metrics
+    rows.append(["=== Token Generation Metrics ===", ""])
+
+    if metrics["ttft"]:
+        rows.append(
+            ["Time to First Token (mean)", f"{np.mean(metrics['ttft']):.3f} sec"]
+        )
+
+    if metrics["itl"]:
+        rows.append(
+            ["Inter-Token Latency (mean)", f"{np.mean(metrics['itl']):.4f} sec"]
+        )
+    rows.append(["", ""])
+
+    # Throughput metrics
+    rows.append(["=== Throughput Metrics ===", ""])
+
+    if metrics["throughputs"]:
+        total_throughput = sum(metrics["throughputs"])
+        rows.append(["Total Throughput", f"{total_throughput:.2f} req/s"])
+        rows.append(
+            ["Avg Client Throughput", f"{np.mean(metrics['throughputs']):.2f} req/s"]
+        )
+
+    # Print table
+    print("\n" + "=" * 60)
+    print("FAULT TOLERANCE TEST SUMMARY - AI-PERF")
+    print("=" * 60)
+    print(tabulate(rows, headers=headers, tablefmt=tablefmt))
+    print("=" * 60 + "\n")
+
+
+def process_single_test(
+    log_dir: str, tablefmt: str = "grid", sla: Optional[float] = None
+) -> Dict[str, Any]:
+    """
+    Process a single test log directory.
+
+    Args:
+        log_dir: Directory containing test results
+        tablefmt: Table format for output
+        sla: Service level agreement for latency (optional)
+
+    Returns:
+        Dictionary with test results
+    """
+    # Parse test configuration
+    test_log = os.path.join(log_dir, "test.log.txt")
+    startup_time, failure_info = parse_test_log(test_log)
+
+    # Calculate recovery time only if fault was injected
+    recovery_time = None
+    if failure_info:
+        recovery_time = calculate_recovery_time(failure_info, log_dir)
+
+    # Parse AI-Perf results (also counts clients)
+    metrics = parse_aiperf_client_results(log_dir)
+
+    # Extract client count from metrics
+    num_clients = metrics.get("num_clients", 0)
+
+    # Print summary
+    print_summary_table(
+        log_dir, num_clients, startup_time, recovery_time, metrics, tablefmt, sla
     )
-    df = parse_client_logs(test_dir)
-
-    if df is None or df.empty:
-        return None
-    (
-        success_before,
-        failure_before,
-        success_after,
-        failure_after,
-        avg_before,
-        std_before,
-        avg_after,
-        std_after,
-        violations_before,
-        violations_after,
-    ) = calculate_metrics(df, fault_time, sla)
-
-    recovery_time = calculate_recovery_time(test_dir, failure_type, fault_time)
 
     return {
-        "test": test_prefix,
-        "cmd": start_cmd,
-        "failure": failure_type,
-        "start_time": startup_time,
-        "success_before_requests": success_before,
-        "failed_before_requests": failure_before,
-        "success_after_requests": success_after,
-        "failed_after_requests": failure_after,
-        "avg_latency_before": avg_before,
-        "std_latency_before": std_before,
-        "avg_latency_after": avg_after,
-        "std_latency_after": std_after,
-        "violations_before": violations_before,
-        "violations_after": violations_after,
+        "log_dir": log_dir,
+        "num_clients": num_clients,
+        "startup_time": startup_time,
         "recovery_time": recovery_time,
+        "metrics": metrics,
     }
 
 
-def main(logs_dir, tablefmt, log_paths=None, sla=None):
-    results = []
+def main(
+    logs_dir: Optional[str] = None,
+    log_paths: Optional[List[str]] = None,
+    tablefmt: str = "grid",
+    sla: Optional[float] = None,
+):
+    """
+    Main parser entry point with support for multiple log paths.
+
+    Args:
+        logs_dir: Base directory for logs (optional)
+        log_paths: List of log directories to process
+        tablefmt: Table format for output
+        sla: Service level agreement for latency (optional)
+
+    Returns:
+        Combined results from all processed tests
+    """
+    # Handle different input formats
     if log_paths:
+        # Process multiple log paths
+        all_results = []
         for log_path in log_paths:
-            result = process_test_directory(log_path, sla)
-            if result:
-                results.append(result)
-    elif logs_dir:
-        for entry in os.listdir(logs_dir):
-            if entry.startswith("test_fault_scenario[") and os.path.isdir(
-                os.path.join(logs_dir, entry)
-            ):
-                result = process_test_directory(os.path.join(logs_dir, entry), sla)
-                if result:
-                    results.append(result)
-
-    # Group results by test prefix
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    commands = {}
-    for res in results:
-        test_prefix = res["test"]
-        if test_prefix not in grouped:
-            grouped[test_prefix] = []
-            commands[test_prefix] = res["cmd"]
-        grouped[test_prefix].append(res)
-
-    order = [
-        "none",
-        "frontend",
-        "frontend_pod",
-        "decode_worker",
-        "decode_worker_pod",
-        "prefill_worker",
-        "prefill_worker_pod",
-        "vllm_decode_engine_core",
-        "vllm_prefill_engine_core",
-    ]
-
-    # Print grouped tables
-    for test_prefix, group in grouped.items():
-        new_group = []
-        for failure in order:
-            for res in group:
-                if failure == res["failure"]:
-                    new_group.append(res)
-        group = new_group
-        if sla:
-            headers = [
-                "Failure",
-                "Startup",
-                "Success\nBefore",
-                "Failed\nBefore",
-                "Success\nAfter",
-                "Failed\nAfter",
-                "Latency\nBefore",
-                "Latency\nAfter",
-                "Violations\nBefore",
-                "Violations\nAfter",
-                "Recovery",
-            ]
-        else:
-            headers = [
-                "Failure",
-                "Startup",
-                "Success\nBefore",
-                "Failed\nBefore",
-                "Success\nAfter",
-                "Failed\nAfter",
-                "Latency\nBefore",
-                "Latency\nAfter",
-                "Recovery",
-            ]
-        rows = []
-        for res in group:
-            if sla:
-                row = [
-                    res["failure"],
-                    res["start_time"],  # if res["start_time"] is not None else "N/A",
-                    res["success_before_requests"],
-                    res["failed_before_requests"],
-                    res["success_after_requests"],
-                    res["failed_after_requests"],
-                    res["avg_latency_before"],
-                    res["avg_latency_after"],
-                    res["violations_before"],
-                    res["violations_after"],
-                    res["recovery_time"],
-                ]
+            if logs_dir:
+                full_path = os.path.join(logs_dir, log_path)
             else:
-                row = [
-                    res["failure"],
-                    res["start_time"],  # if res["start_time"] is not None else "N/A",
-                    res["success_before_requests"],
-                    res["failed_before_requests"],
-                    res["success_after_requests"],
-                    res["failed_after_requests"],
-                    res["avg_latency_before"],
-                    res["avg_latency_after"],
-                    res["recovery_time"],
-                ]
-            rows.append(row)
+                full_path = log_path
 
-        print(f"\nTest Group: {test_prefix}")
-        #     print(f"\nTest Command: {commands[test_prefix]}")
-        print(
-            tabulate(
-                rows,
-                headers,
-                tablefmt=tablefmt,
-                floatfmt=".2f",
-                missingval="N/A",
-                numalign="right",
-                stralign="center",
+            if os.path.isdir(full_path):
+                print(f"\nProcessing: {full_path}")
+                results = process_single_test(full_path, tablefmt, sla)
+                all_results.append(results)
+            else:
+                print(f"Warning: {full_path} is not a valid directory, skipping...")
+
+        # If multiple tests, also print combined summary
+        if len(all_results) > 1:
+            print("\n" + "=" * 60)
+            print("COMBINED TEST SUMMARY")
+            print("=" * 60)
+
+            total_requests = sum(r["metrics"]["total_requests"] for r in all_results)
+            total_successful = sum(
+                r["metrics"]["successful_requests"] for r in all_results
             )
-        )
-        print("\n" + "=" * 80)
+            total_failed = sum(r["metrics"]["failed_requests"] for r in all_results)
+
+            print(f"Total Tests: {len(all_results)}")
+            print(f"Total Requests: {total_requests}")
+            print(f"Total Successful: {total_successful}")
+            print(f"Total Failed: {total_failed}")
+
+            if total_requests > 0:
+                print(
+                    f"Overall Success Rate: {(total_successful/total_requests)*100:.2f}%"
+                )
+
+            print("=" * 60 + "\n")
+
+        return all_results
+
+    elif logs_dir:
+        # Process single directory
+        return process_single_test(logs_dir, tablefmt, sla)
+    else:
+        print("Error: Must provide either logs_dir or log_paths")
+        return None
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Parse test results")
-    parser.add_argument("--log-dir", default=".", help="Path to the logs directory")
+    # Configure logging
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    parser = argparse.ArgumentParser(description="Parse fault tolerance test results")
     parser.add_argument(
-        "--format", choices=["fancy", "markdown"], default="fancy", help="Table format"
+        "log_dir", type=str, help="Directory containing test logs and results"
     )
-    parser.add_argument("--sla", type=float, default=None)
 
     args = parser.parse_args()
 
-    # Map format choices to tabulate formats
-    tablefmt = (
-        "fancy_grid" if args.format == "fancy" else "pipe"
-    )  # Using pipe for markdown compatibility
+    if not os.path.isdir(args.log_dir):
+        logging.error(f"{args.log_dir} is not a valid directory")
+        exit(1)
 
-    main(args.log_dir, tablefmt, args.sla)
+    main(args.log_dir)

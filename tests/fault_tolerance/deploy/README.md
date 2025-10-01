@@ -28,11 +28,12 @@ conditions.
 
 The fault tolerance test suite is designed as a set of pytest
 configurations that launch typical dynamo deployments in a Kubernetes
-environemnt and then inject failures by terminating processes or
-pods. To test the recovery time and impact of failures a set number of
-clients are launched in parallel. Each client sends a set number of
-synchronous requests. Log files are stored for each pod as well as for
-each client and inspected using a post-processing script.
+environment and then inject failures by terminating processes or
+pods. To test the recovery time and impact of failures, a set number of
+clients are launched in parallel using **AI-Perf (aiperf)** for load generation.
+Each client sends synthetic requests with configurable token patterns.
+Log files are stored for each pod as well as for each client and inspected
+using a post-processing script that parses AI-Perf metrics.
 
 > [!NOTE]
 > Test pass / failure is not an indication of SLA for recovery or resilience
@@ -82,12 +83,18 @@ Below are some representative examples of the generated scenarios:
 
 The full test matrix is generated from these parameters, creating comprehensive test coverage across all configurations.
 
-#### Client Load
+#### Client Load (AI-Perf Configuration)
 
-- **Concurrent Clients**: 10 clients by default, adjustable per scenario.
-- **Requests per Client**: 100 requests, simulating sustained load.
-- **Input/Output Token Length**: 100 tokens for both input prompts and generated outputs.
-- **Request Rate Limit**: Ensures clients do not overwhelm the service, with a maximum of 1 request per second per client.
+- **Load Generator**: AI-Perf (`aiperf`) with synthetic token generation
+- **Concurrent Clients**: 10 clients by default, adjustable per scenario
+- **Requests per Client**: 150 requests per client (configurable)
+- **Input/Output Token Configuration**:
+  - Input tokens: mean=100, stddev=0 (consistent length)
+  - Output tokens: mean=100, stddev=0 (consistent length)
+- **Concurrency**: Sequential requests (concurrency=1) per client
+- **Retry Logic**: 3 retry attempts for fault tolerance
+- **Streaming Support**: Optional `--streaming` flag for TTFT/ITL metrics
+- **No warmup**: warmup-request-count=0 to avoid initial failures
 
 #### Failures
 
@@ -131,83 +138,107 @@ pytest tests/fault_tolerance/deploy/test_deployment.py -s -v --namespace ${NAMES
 
 ### Test Results Directory
 
-For each test scenario a directory of log files is created and post processed to summarize the test.
+For each test scenario a directory of log files is created and post-processed to summarize the test.
 
 ```
-test_fault_scenario[agg-tp-1-dp-1-none]
+test_fault_scenario[sglang-agg-tp-1-dp-1-frontend]
 .
-├── client_0.log.txt
-├── client_1.log.txt
-├── client_2.log.txt
-├── client_3.log.txt
-├── client_4.log.txt
-├── client_5.log.txt
-├── client_6.log.txt
-├── client_7.log.txt
-├── client_8.log.txt
-├── client_9.log.txt
-├── Frontend
+├── client_0/
+│   └── attempt_0/
+│       ├── profile_export_aiperf.json    # AI-Perf metrics in JSON format
+│       ├── profile_export_aiperf.csv     # AI-Perf metrics in CSV format
+│       ├── genai_perf.log                # AI-Perf execution log
+│       └── logs/
+│           └── aiperf.log                # Detailed AI-Perf logs
+├── client_1/
+│   ├── attempt_0/                        # First attempt (may fail during fault)
+│   └── attempt_1/                        # Retry attempt after failure
+│       └── [same structure as above]
+├── [client_2 through client_9...]
+├── Frontend/
 │   ├── fault-tolerance-test-frontend-576bd784dc-jv68q.log
 │   ├── fault-tolerance-test-frontend-576bd784dc-jv68q.metrics.log
-│   ├── fault-tolerance-test-frontend-576bd784dc-jv68q.previous.log
+│   ├── fault-tolerance-test-frontend-576bd784dc-jv68q.previous.log  # Pre-restart logs
 │   └── fault-tolerance-test-frontend-576bd784dc-jv68q.yaml
-├── test.log.txt
-└── VllmDecodeWorker
-    ├── fault-tolerance-test-vllmdecodeworker-56b7bdf447-6tzqq.log
-    ├── fault-tolerance-test-vllmdecodeworker-56b7bdf447-6tzqq.metrics.log
-    ├── fault-tolerance-test-vllmdecodeworker-56b7bdf447-6tzqq.previous.log
-    └── fault-tolerance-test-vllmdecodeworker-56b7bdf447-6tzqq.yaml
+├── decode/                                # Or VllmDecodeWorker for vLLM backend
+│   └── [same structure as Frontend]
+└── test.log.txt
 
 ```
 
 | File/Directory Name                | Description                                                                                      |
 |------------------------------------|------------------------------------------------------------------------------------------------|
-| **client_*.log.txt**               | Request/response logs for each client instance (contains JSON-formatted request details)        |
-| **{Service}/*.log                  | Container log for pod at end of test (Frontend, VllmDecodeWroer, etc.)                                                                         |
-| **{Service}/*.previous.log**       | Previous container log for pod in case of crash / exit. (Frontend, VllmDecodeWroer, etc.). Empty if N/A.               |
-| **{Service}/*.metrics.log**        | Metrics as reported by `/metrics` for the service                           |
-| **{Service}/*.yaml**               | yaml for pod including status transitions                    |
-| **test.log.txt**                   | Primary test execution log (contains fault injection timing, process management, and test status)|
+| **client_N/attempt_M/**            | AI-Perf results for client N, attempt M (supports multiple retry attempts)                      |
+| **profile_export_aiperf.json**     | Complete AI-Perf metrics including latencies (P50/P90/P99), throughput, token counts           |
+| **profile_export_aiperf.csv**      | Tabular format of key metrics for easy analysis                                                |
+| **genai_perf.log**                 | AI-Perf execution output (stdout/stderr)                                                       |
+| **{Service}/*.log**                | Current container log for pod (Frontend, decode, etc.)                                         |
+| **{Service}/*.previous.log**       | Previous container log before restart (contains pre-fault logs)                                |
+| **{Service}/*.metrics.log**        | Prometheus metrics from `/metrics` endpoint                                                    |
+| **{Service}/*.yaml**               | Pod specification and status transitions                                                       |
+| **test.log.txt**                   | Primary test execution log (deployment timing, fault injection, recovery events)               |
 
 ### Summary Results
 
-Results are presented in table format after each test providing summary statistics.
+Results are parsed from AI-Perf metrics and presented in table format after each test. The parsing script (`parse_results.py`) extracts comprehensive metrics for each scenario:
+
+#### Per-Test Output Format
 ```
-Test Group: agg-tp-1-dp-1
-╒═════════════════════════╤═══════════╤═══════════╤══════════╤═══════════╤══════════╤═══════════╤═══════════╤════════════╕
-│         Failure         │   Startup │   Success │   Failed │   Success │   Failed │   Latency │   Latency │   Recovery │
-│                         │           │    Before │   Before │     After │    After │    Before │     After │            │
-╞═════════════════════════╪═══════════╪═══════════╪══════════╪═══════════╪══════════╪═══════════╪═══════════╪════════════╡
-│          none           │    180.00 │   1500.00 │     0.00 │       N/A │      N/A │      1.19 │       N/A │        N/A │
-├─────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│        frontend         │    181.00 │    153.00 │     0.00 │    820.00 │   527.00 │      1.21 │      1.18 │       3.36 │
-├─────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│      frontend_pod       │    169.00 │    140.00 │     0.00 │    785.00 │   305.00 │      1.20 │      1.18 │       5.39 │
-├─────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│      decode_worker      │    161.00 │    140.00 │     0.00 │    510.00 │   850.00 │      1.21 │      1.18 │     154.11 │
-├─────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│    decode_worker_pod    │    181.00 │    140.00 │     0.00 │    511.00 │   849.00 │      1.22 │      1.18 │     156.47 │
-├─────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│ vllm_decode_engine_core │    181.00 │    140.00 │     0.00 │    524.00 │   836.00 │      1.21 │      1.19 │     152.52 │
-╘═════════════════════════╧═══════════╧═══════════╧══════════╧═══════════╧══════════╧═══════════╧═══════════╧════════════╛
+============================================================
+FAULT TOLERANCE TEST SUMMARY - AI-PERF
+============================================================
+╒═══════════════════════════════════╤════════════════════════════════════════════════════╕
+│ Metric                            │ Value                                              │
+╞═══════════════════════════════════╪════════════════════════════════════════════════════╡
+│ Test Directory                    │ test_fault_scenario[sglang-agg-tp-1-dp-1-frontend] │
+├───────────────────────────────────┼────────────────────────────────────────────────────┤
+│ Number of Clients                 │ 10                                                 │
+├───────────────────────────────────┼────────────────────────────────────────────────────┤
+│ === Deployment Metrics ===        │                                                    │
+├───────────────────────────────────┼────────────────────────────────────────────────────┤
+│ Startup Time                      │ 69.00 sec                                          │
+├───────────────────────────────────┼────────────────────────────────────────────────────┤
+│ Recovery Time                     │ 2.00 sec                                           │
+├───────────────────────────────────┼────────────────────────────────────────────────────┤
+│ === Request Metrics ===           │                                                    │
+├───────────────────────────────────┼────────────────────────────────────────────────────┤
+│ Total Requests                    │ 1500                                               │
+├───────────────────────────────────┼────────────────────────────────────────────────────┤
+│ Successful Requests               │ 1470                                               │
+├───────────────────────────────────┼────────────────────────────────────────────────────┤
+│ Failed Requests                   │ 30                                                 │
+├───────────────────────────────────┼────────────────────────────────────────────────────┤
+│ Success Rate                      │ 98.00%                                             │
+├───────────────────────────────────┼────────────────────────────────────────────────────┤
+│ === Latency Metrics (seconds) === │                                                    │
+├───────────────────────────────────┼────────────────────────────────────────────────────┤
+│ Mean Latency                      │ 0.502                                              │
+├───────────────────────────────────┼────────────────────────────────────────────────┤
+│ P50 Latency                       │ 0.396                                              │
+├───────────────────────────────────┼────────────────────────────────────────────────────┤
+│ P90 Latency                       │ 0.422                                              │
+├───────────────────────────────────┼────────────────────────────────────────────────────┤
+│ P99 Latency                       │ 0.761                                              │
+├───────────────────────────────────┼────────────────────────────────────────────────────┤
+│ === Throughput Metrics ===        │                                                    │
+├───────────────────────────────────┼────────────────────────────────────────────────────┤
+│ Total Throughput                  │ 19.72 req/s                                        │
+├───────────────────────────────────┼────────────────────────────────────────────────────┤
+│ Avg Client Throughput             │ 1.97 req/s                                         │
+╘═══════════════════════════════════╧════════════════════════════════════════════════════╛
 ```
 
-
-| Column Name           | Description                                                                 |
+| Metric Category       | Metrics Included                                                            |
 |-----------------------|-----------------------------------------------------------------------------|
-| **Failure**           | Type of fault injection applied during the test (or 'none' for baseline)     |
-| **Startup**      | Time (seconds) taken for the service to become ready after initialization    |
-| **Succes/nBefore**   | Numoer of client requests that succeeded before fault injection                                   |
-| **Failed/nBefore**    | Number of client requests that failed or were invalid before fault injection                      |
-| **Success/nAftere**   | Number of client requests that  succeeded after fault injection |
-| **Latency Before**     | Average request latency (seconds) for successful requests before fault injection |
-| **Latency After**     | Average request latency (seconds) for successful requests after fault injection |
-| **Recovery Time**     | Time (seconds) taken for failed components to recover after fault injection  |
+| **Deployment Metrics**| Startup Time, Recovery Time                                                |
+| **Request Metrics**   | Total/Successful/Failed Requests, Success Rate                             |
+| **Latency Metrics**   | Mean, P50, P90, P99 latencies (in seconds)                                |
+| **Token Metrics**     | TTFT (Time to First Token), ITL (Inter-Token Latency) when streaming enabled |
+| **Throughput Metrics**| Total and per-client request throughput                                    |
 
-## Example Results
+## Example Deployment Architectures
 
-The following results were obtained running on a cluster of A100
-nodes.
+The following architectures are tested with various failure scenarios:
 
 ### Aggregated Workers
 
@@ -237,32 +268,9 @@ graph LR
     style DecodePool stroke:#000,stroke-width:2px
 ```
 
-#### Results:
 
-```
-Test Group: agg-tp-1-dp-1
-╒═════════════════════════╤═══════════╤═══════════╤══════════╤═══════════╤══════════╤═══════════╤═══════════╤════════════╕
-│         Failure         │   Startup │   Success │   Failed │   Success │   Failed │   Latency │   Latency │   Recovery │
-│                         │           │    Before │   Before │     After │    After │    Before │     After │            │
-╞═════════════════════════╪═══════════╪═══════════╪══════════╪═══════════╪══════════╪═══════════╪═══════════╪════════════╡
-│          none           │    180.00 │   1500.00 │     0.00 │       N/A │      N/A │      1.19 │       N/A │        N/A │
-├─────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│        frontend         │    181.00 │    153.00 │     0.00 │    820.00 │   527.00 │      1.21 │      1.18 │       3.36 │
-├─────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│      frontend_pod       │    169.00 │    140.00 │     0.00 │    785.00 │   305.00 │      1.20 │      1.18 │       5.39 │
-├─────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│      decode_worker      │    161.00 │    140.00 │     0.00 │    510.00 │   850.00 │      1.21 │      1.18 │     154.11 │
-├─────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│    decode_worker_pod    │    181.00 │    140.00 │     0.00 │    511.00 │   849.00 │      1.22 │      1.18 │     156.47 │
-├─────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│ vllm_decode_engine_core │    181.00 │    140.00 │     0.00 │    524.00 │   836.00 │      1.21 │      1.19 │     152.52 │
-╘═════════════════════════╧═══════════╧═══════════╧══════════╧═══════════╧══════════╧═══════════╧═══════════╧════════════╛
-```
 
-#### Summary:
 
-1. Recovery time for the decode worker itself is the largest and a decode worker failure has the largest impact (as expected)
-2. Recovery time doesn't include time for the ready probe to return `ready` so even if the process is recovered early (as in the case of the Frontend) requests may fail until the pod is probed.
 
 #### Redundant Workers (Over Provisoned)
 
@@ -296,30 +304,6 @@ graph LR
 
     style DecodePool stroke:#000,stroke-width:2px
 ```
-
-#### Results:
-```
-Test Group: agg-tp-1-dp-2
-╒═════════════════════════╤═══════════╤═══════════╤══════════╤═══════════╤══════════╤═══════════╤═══════════╤════════════╕
-│         Failure         │   Startup │   Success │   Failed │   Success │   Failed │   Latency │   Latency │   Recovery │
-│                         │           │    Before │   Before │     After │    After │    Before │     After │            │
-╞═════════════════════════╪═══════════╪═══════════╪══════════╪═══════════╪══════════╪═══════════╪═══════════╪════════════╡
-│          none           │    181.00 │   1500.00 │     0.00 │       N/A │      N/A │      1.18 │       N/A │        N/A │
-├─────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│        frontend         │    181.00 │    121.00 │     0.00 │   1373.00 │     6.00 │      1.21 │      1.17 │       4.37 │
-├─────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│      frontend_pod       │    182.00 │    122.00 │     0.00 │   1378.00 │     0.00 │      1.21 │      1.17 │       5.24 │
-├─────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│      decode_worker      │    169.00 │    121.00 │     0.00 │   1374.00 │     5.00 │      1.20 │      1.18 │     153.09 │
-├─────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│    decode_worker_pod    │    181.00 │    125.00 │     0.00 │   1369.00 │     6.00 │      1.21 │      1.18 │     152.72 │
-├─────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│ vllm_decode_engine_core │    182.00 │    120.00 │     0.00 │   1375.00 │     5.00 │      1.20 │      1.18 │     154.75 │
-╘═════════════════════════╧═══════════╧═══════════╧══════════╧═══════════╧══════════╧═══════════╧═══════════╧════════════╛
-```
-
-#### Summary:
-
 1. By immediately detecting a decode worker failure, Dynamo can limit
    the failures and reroute requests to healthy workers with minimal
    impact.
@@ -367,34 +351,6 @@ graph LR
     style DecodePool stroke:#000,stroke-width:2px
 ```
 
-#### Results:
-
-```
-Test Group: disagg-tp-1-dp-1
-╒══════════════════════════╤═══════════╤═══════════╤══════════╤═══════════╤══════════╤═══════════╤═══════════╤════════════╕
-│         Failure          │   Startup │   Success │   Failed │   Success │   Failed │   Latency │   Latency │   Recovery │
-│                          │           │    Before │   Before │     After │    After │    Before │     After │            │
-╞══════════════════════════╪═══════════╪═══════════╪══════════╪═══════════╪══════════╪═══════════╪═══════════╪════════════╡
-│           none           │    175.00 │   1500.00 │     0.00 │       N/A │      N/A │      1.99 │       N/A │        N/A │
-├──────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│         frontend         │    182.00 │    100.00 │     0.00 │    817.00 │   583.00 │      1.91 │      2.00 │       4.28 │
-├──────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│       frontend_pod       │    181.00 │     81.00 │     0.00 │   1024.00 │   395.00 │      2.31 │      1.96 │       5.53 │
-├──────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│      decode_worker       │    181.00 │     82.00 │     0.00 │    560.00 │   858.00 │      2.26 │      1.98 │     155.79 │
-├──────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│    decode_worker_pod     │    181.00 │     92.00 │     0.00 │    566.00 │   842.00 │      2.21 │      1.83 │     174.15 │
-├──────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│      prefill_worker      │    182.00 │     84.00 │     0.00 │   1346.00 │    70.00 │      2.22 │      1.49 │     153.53 │
-├──────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│    prefill_worker_pod    │    161.00 │     83.00 │     0.00 │   1362.00 │    55.00 │      2.21 │      1.51 │     154.18 │
-├──────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│ vllm_decode_engine_core  │    167.00 │     81.00 │     0.00 │    569.00 │   850.00 │      2.33 │      2.12 │     153.81 │
-├──────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│ vllm_prefill_engine_core │    182.00 │     83.00 │     0.00 │    568.00 │   849.00 │      2.24 │      2.00 │     153.84 │
-╘══════════════════════════╧═══════════╧═══════════╧══════════╧═══════════╧══════════╧═══════════╧═══════════╧════════════╛
-
-```
 
 #### Summary:
 
@@ -456,34 +412,7 @@ graph LR
     style DecodePool stroke:#000,stroke-width:2px
 ```
 
-#### Results:
 
-```
-Test Group: disagg-tp-1-dp-2
-╒══════════════════════════╤═══════════╤═══════════╤══════════╤═══════════╤══════════╤═══════════╤═══════════╤════════════╕
-│         Failure          │   Startup │   Success │   Failed │   Success │   Failed │   Latency │   Latency │   Recovery │
-│                          │           │    Before │   Before │     After │    After │    Before │     After │            │
-╞══════════════════════════╪═══════════╪═══════════╪══════════╪═══════════╪══════════╪═══════════╪═══════════╪════════════╡
-│           none           │    181.00 │   1500.00 │     0.00 │       N/A │      N/A │      1.47 │       N/A │        N/A │
-├──────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│         frontend         │    182.00 │    100.00 │     0.00 │   1390.00 │    10.00 │      1.75 │      1.43 │       4.32 │
-├──────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│       frontend_pod       │    182.00 │     91.00 │     0.00 │   1409.00 │     0.00 │      1.78 │      1.43 │       5.48 │
-├──────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│      decode_worker       │    182.00 │     94.00 │     0.00 │   1404.00 │     2.00 │      1.78 │      1.58 │     154.30 │
-├──────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│    decode_worker_pod     │    181.00 │    100.00 │     0.00 │   1394.00 │     6.00 │      1.75 │      1.57 │     153.00 │
-├──────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│      prefill_worker      │    172.00 │     90.00 │     0.00 │   1408.00 │     2.00 │      1.78 │      1.44 │     154.68 │
-├──────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│    prefill_worker_pod    │    174.00 │    100.00 │     0.00 │   1398.00 │     2.00 │      1.74 │      1.41 │     155.59 │
-├──────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│ vllm_decode_engine_core  │    181.00 │     91.00 │     0.00 │   1403.00 │     6.00 │      1.79 │      1.56 │     157.54 │
-├──────────────────────────┼───────────┼───────────┼──────────┼───────────┼──────────┼───────────┼───────────┼────────────┤
-│ vllm_prefill_engine_core │    181.00 │     94.00 │     0.00 │   1404.00 │     2.00 │      1.77 │      1.43 │     154.10 │
-╘══════════════════════════╧═══════════╧═══════════╧══════════╧═══════════╧══════════╧═══════════╧═══════════╧════════════╛
-
-```
 
 #### Summary:
 
@@ -512,7 +441,7 @@ Then run the development container mounting the workspace and your kube config.
 
 ### Run the tests
 
-```
+```bash
 pytest tests/fault_tolerance/deploy/test_deployment.py -s -v --namespace ${NAMESPACE} --image ${IMAGE}
 ```
 

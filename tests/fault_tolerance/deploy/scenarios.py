@@ -13,11 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, Optional, Pattern
 
 from tests.utils.managed_deployment import DeploymentSpec
 
+# Worker name mapping for different backends
 WORKER_MAP = {
     "vllm": {
         "decode": "VllmDecodeWorker",
@@ -29,6 +31,51 @@ WORKER_MAP = {
     },
 }
 
+# Process ready patterns for recovery detection
+WORKER_READY_PATTERNS: Dict[str, Pattern] = {
+    # Frontend
+    "Frontend": re.compile(r"added model"),
+    # vLLM workers
+    "VllmDecodeWorker": re.compile(
+        r"VllmWorker for (?P<model_name>.*?) has been initialized"
+    ),
+    "VllmPrefillWorker": re.compile(
+        r"VllmWorker for (?P<model_name>.*?) has been initialized"
+    ),
+    # SGLang workers - look for their specific initialization messages
+    "decode": re.compile(
+        r"Model registration succeeded|Decode worker handler initialized|Worker handler initialized"
+    ),
+    "prefill": re.compile(
+        r"Model registration succeeded|Prefill worker handler initialized|Worker handler initialized"
+    ),
+}
+
+
+def get_all_worker_types() -> list[str]:
+    """Get all worker type names for both vLLM and SGLang."""
+    worker_types = ["Frontend"]
+    for backend in WORKER_MAP.values():
+        worker_types.extend(backend.values())
+    # Remove duplicates while preserving order
+    seen = set()
+    result = []
+    for x in worker_types:
+        if x not in seen:
+            seen.add(x)
+            result.append(x)
+    return result
+
+
+def get_worker_ready_pattern(worker_name: str) -> Optional[Pattern]:
+    """Get the ready pattern for a specific worker type."""
+    return WORKER_READY_PATTERNS.get(worker_name)
+
+
+def get_backend_workers(backend: str) -> Dict[str, str]:
+    """Get worker mapping for a specific backend."""
+    return WORKER_MAP.get(backend, {})
+
 
 @dataclass
 class Load:
@@ -36,8 +83,7 @@ class Load:
     requests_per_client: int = 150
     input_token_length: int = 100
     output_token_length: int = 100
-    max_retries: int = 1
-    max_request_rate: float = 1
+    max_retries: int = 3  # Increased for fault tolerance
     sla: Optional[float] = None
 
 
