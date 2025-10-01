@@ -320,25 +320,25 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_reasoning_parser_with_gpt_oss_parser() {
-        // Create a mock runtime config with gpt-oss reasoning parser
-        let runtime_config = dynamo_llm::local_model::runtime_config::ModelRuntimeConfig {
-            reasoning_parser: Some("gpt_oss".to_string()),
-            ..Default::default()
-        };
-
-        // Create test input stream with GPT-OSS style reasoning
-        // Note: GPT-OSS parser may have different tag formats or behavior
         let input_chunks = vec![
-            create_mock_response_chunk("I need to think about this carefully. <thinking>This is GPT-OSS reasoning content that might use different markers or patterns.</thinking> Based on my analysis, here's the answer.".to_string(), None),
+            // Chunk 1: Start of analysis channel
+            create_mock_response_chunk("<|channel|>".to_string(), None),
+            // Chunk 2: Analysis channel with reasoning content
+            create_mock_response_chunk("analysis<|message|>Let me analyze this question carefully.".to_string(), None),
+            // Chunk 3: Continue reasoning content
+            create_mock_response_chunk(" The user is asking about weather in San Francisco.".to_string(), None),
+            // Chunk 4: End analysis and start assistant final channel
+            create_mock_response_chunk("<|end|><|start|>assistant<|channel|>final<|message|>".to_string(), None),
+            // Chunk 5: Normal content (final response)
+            create_mock_response_chunk("I can help you with the weather in San Francisco.".to_string(), None),
         ];
         let input_stream = stream::iter(input_chunks);
 
         // Apply the reasoning parser transformation
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
-            runtime_config.reasoning_parser.unwrap(),
+            "gpt_oss".to_string(),
         );
 
         // Pin the stream and collect all output chunks
@@ -348,36 +348,44 @@ mod tests {
             output_chunks.push(chunk);
         }
 
-        // Verify that GPT-OSS reasoning is parsed correctly
-        assert_eq!(output_chunks.len(), 1);
-        let output_choice = &output_chunks[0].data.as_ref().unwrap().choices[0];
+        // Verify we got output chunks
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
 
-        // GPT-OSS parser should extract reasoning content
-        assert!(
-            output_choice.delta.reasoning_content.is_some(),
-            "Should extract GPT-OSS reasoning content"
-        );
-        assert!(
-            output_choice.delta.content.is_some(),
-            "Should have normal content"
+        // Collect all reasoning content and normal content across all chunks
+        let mut all_reasoning = String::new();
+        let mut all_normal_content = String::new();
+
+        for chunk in output_chunks.iter() {
+            if let Some(ref response_data) = chunk.data {
+                for choice in &response_data.choices {
+                    // Collect reasoning content
+                    if let Some(ref reasoning) = choice.delta.reasoning_content {
+                        all_reasoning.push_str(reasoning);
+                    }
+
+                    // Collect normal content
+                    if let Some(ref content) = choice.delta.content {
+                        all_normal_content.push_str(content);
+                    }
+                }
+            }
+        }
+
+        // Assert reasoning content was parsed correctly
+        assert_eq!(
+            all_reasoning,
+            "Let me analyze this question carefully. The user is asking about weather in San Francisco.",
+            "Reasoning content should exactly match expected text. Got: {}",
+            all_reasoning
         );
 
-        let reasoning_content = output_choice.delta.reasoning_content.as_ref().unwrap();
-        let normal_content = output_choice.delta.content.as_ref().unwrap();
-
-        // Verify the content was parsed correctly
-        assert!(
-            !reasoning_content.is_empty(),
-            "GPT-OSS reasoning content should not be empty"
+        // Assert normal content was parsed correctly
+        assert_eq!(
+            all_normal_content,
+            "I can help you with the weather in San Francisco.",
+            "Normal content should exactly match expected text. Got: {}",
+            all_normal_content
         );
-        assert!(
-            !normal_content.is_empty(),
-            "Normal content should not be empty"
-        );
-
-        // Log the results for debugging
-        println!("GPT-OSS Normal content: {:?}", normal_content);
-        println!("GPT-OSS Reasoning content: {:?}", reasoning_content);
     }
 
     #[tokio::test]
@@ -434,4 +442,191 @@ mod tests {
             "Should contain normal content"
         );
     }
+
+    #[tokio::test]
+    async fn test_nemotron_with_reasoning_and_tool_calls() {
+        let input_chunks = vec![
+            // Chunk 1: Start of reasoning
+            create_mock_response_chunk("<think>I need to".to_string(), None),
+            // Chunk 2: Continue reasoning
+            create_mock_response_chunk(" check the weather first</think>".to_string(), None),
+            // Chunk 3: Normal text after reasoning
+            create_mock_response_chunk("Let me help you with that. ".to_string(), None),
+            // Chunk 4: Tool call start
+            create_mock_response_chunk("<TOOLCALL>[{\"name\": \"get_weather\",".to_string(), None),
+            // Chunk 5: Tool call arguments
+            create_mock_response_chunk(" \"arguments\": {\"location\": \"San Francisco\"}}]".to_string(), None),
+            // Chunk 6: Tool call end
+            create_mock_response_chunk("</TOOLCALL>".to_string(), None),
+        ];
+        let input_stream = stream::iter(input_chunks);
+
+        // Step 1: Apply reasoning parser transformation
+        let reasoning_parsed_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
+            input_stream,
+            "nemotron_deci".to_string(),
+        );
+
+        // Step 2: Apply tool calling jail transformation
+        let tool_parsed_stream = OpenAIPreprocessor::apply_tool_calling_jail(
+            "nemotron_deci".to_string(),
+            reasoning_parsed_stream,
+        );
+
+        // Collect all output chunks
+        let mut tool_parsed_stream = std::pin::pin!(tool_parsed_stream);
+        let mut output_chunks = Vec::new();
+        while let Some(chunk) = tool_parsed_stream.next().await {
+            output_chunks.push(chunk);
+        }
+
+        // Verify we got output chunks
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        // Collect all reasoning content, normal content, and check for tool calls
+        let mut all_reasoning = String::new();
+        let mut all_normal_content = String::new();
+        let mut found_tool_calls = false;
+        let mut tool_call_function_name: Option<String> = None;
+        let mut tool_call_arguments: Option<serde_json::Value> = None;
+
+        for chunk in output_chunks.iter() {
+            if let Some(ref response_data) = chunk.data {
+                for choice in &response_data.choices {
+                    // Collect reasoning content
+                    if let Some(ref reasoning) = choice.delta.reasoning_content {
+                        all_reasoning.push_str(reasoning);
+                    }
+
+                    // Collect normal content
+                    if let Some(ref content) = choice.delta.content {
+                        all_normal_content.push_str(content);
+                    }
+
+                    // Check for tool calls
+                    if let Some(ref tool_calls) = choice.delta.tool_calls {
+                        if !tool_calls.is_empty() {
+                            found_tool_calls = true;
+                            
+                            // Extract tool call details
+                            for tool_call in tool_calls {
+                                if let Some(ref function) = tool_call.function {
+                                    if let Some(ref name) = function.name {
+                                        tool_call_function_name = Some(name.clone());
+                                    }
+                                    if let Some(ref args) = function.arguments {
+                                        tool_call_arguments = Some(serde_json::from_str(args).unwrap());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Assert reasoning content was parsed correctly
+        assert_eq!(
+            all_reasoning,
+            "I need to check the weather first",
+            "Reasoning content should exactly match expected text. Got: {}",
+            all_reasoning
+        );
+
+        // Assert normal content was parsed correctly
+        assert_eq!(
+            all_normal_content,
+            "Let me help you with that. ",
+            "Normal content should exactly match expected text. Got: {}",
+            all_normal_content
+        );
+
+        // Assert tool calls were parsed correctly
+        assert!(
+            found_tool_calls,
+            "Should have found tool calls in the output"
+        );
+        assert_eq!(
+            tool_call_function_name.as_deref(),
+            Some("get_weather"),
+            "Tool call function name should be 'get_weather'"
+        );
+        assert_eq!(
+            tool_call_arguments.as_ref(),
+            Some(&serde_json::json!({"location": "San Francisco"})),
+            "Tool call arguments should exactly match expected value"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]  // TODO: Harmony tool calling in streaming mode with reasoning parser has integration issues
+    async fn test_gpt_oss_with_reasoning_and_tool_calls_full() {        
+        let input_chunks = vec![
+            create_mock_response_chunk("<|channel|>analysis<|message|>Let me help you with that. I need to check the weather first.<|end|>".to_string(), None),
+            create_mock_response_chunk("<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"location\":\"San Francisco\"}".to_string(), None),
+            create_mock_response_chunk("<|start|>assistant<|channel|>final<|message|>I'll check the weather for you.".to_string(), None),
+        ];
+        let input_stream = stream::iter(input_chunks);
+
+        let reasoning_parsed_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
+            input_stream,
+            "gpt_oss".to_string(),
+        );
+
+        // Add debug statements to inspect the chunks after reasoning parsing
+        let mut debug_stream = std::pin::pin!(reasoning_parsed_stream);
+        let mut debug_chunks = Vec::new();
+        while let Some(chunk) = debug_stream.next().await {
+            // Print the chunk for debugging
+            println!("DEBUG: Reasoning parsed chunk: {:#?}", chunk);
+            debug_chunks.push(chunk);
+        }
+        // Re-create a stream from the debug_chunks for further processing
+        let reasoning_parsed_stream = stream::iter(debug_chunks);
+
+        let tool_parsed_stream = OpenAIPreprocessor::apply_tool_calling_jail(
+            "harmony".to_string(),
+            reasoning_parsed_stream,
+        );
+
+
+        let mut tool_parsed_stream = std::pin::pin!(tool_parsed_stream);
+        let mut output_chunks = Vec::new();
+        while let Some(chunk) = tool_parsed_stream.next().await {
+            println!("DEBUG: Tool parsed chunk: {:#?}", chunk);
+            output_chunks.push(chunk);
+        }
+
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        let mut all_reasoning = String::new();
+        let mut all_normal_content = String::new();
+        let mut found_tool_calls = false;
+
+        for chunk in output_chunks.iter() {
+            if let Some(ref response_data) = chunk.data {
+                for choice in &response_data.choices {
+                    if let Some(ref reasoning) = choice.delta.reasoning_content {
+                        all_reasoning.push_str(reasoning);
+                    }
+                    if let Some(ref content) = choice.delta.content {
+                        all_normal_content.push_str(content);
+                    }
+                    if let Some(ref tool_calls) = choice.delta.tool_calls {
+                        if !tool_calls.is_empty() {
+                            found_tool_calls = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            all_reasoning,
+            "Let me analyze this request. I need to get the current weather for San Francisco."
+        );
+        assert!(all_normal_content.contains("I'll check the weather for you"));
+        assert!(found_tool_calls, "Should have found tool calls");
+    }
+    
 }
