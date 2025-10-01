@@ -252,6 +252,7 @@ ENV LD_LIBRARY_PATH="/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
 COPY --from=framework /usr/local/cuda/lib64/libcusparseLt* /usr/local/cuda/lib64/
 
 # Copy tests, benchmarks, deploy and components for CI
+COPY pyproject.toml /workspace/
 COPY tests /workspace/tests
 COPY examples /workspace/examples
 COPY benchmarks /workspace/benchmarks

@@ -221,6 +221,7 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
 COPY components/ /workspace/components/
 # Copy benchmarks, examples, and tests for CI
 # TODO: Remove this once we have a functional CI image built on top of the runtime image
+COPY pyproject.toml /workspace/
 COPY tests /workspace/tests
 COPY benchmarks /workspace/benchmarks
 COPY examples /workspace/examples
