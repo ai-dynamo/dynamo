@@ -27,12 +27,11 @@ logger.addHandler(console_handler)
 def get_genai_perf_cmd_for_trace(
     model,
     tokenizer,
-    input_file,
+    input_dataset,
     artifact_dir,
     seed,
     url="http://localhost:8888",
 ):
-    """Build genai-perf command for trace file input"""
     return [
         "genai-perf",
         "profile",
@@ -48,7 +47,9 @@ def get_genai_perf_cmd_for_trace(
         "--url",
         url,
         "--input-file",
-        input_file,
+        f"payload:{input_dataset}",
+        "--fixed-schedule",
+        "True",
         "--random-seed",
         str(seed),
         "--artifact-dir",
@@ -67,22 +68,22 @@ def get_genai_perf_cmd_for_trace(
 def run_benchmark_with_trace(
     model,
     tokenizer,
-    trace_file,
+    trace_dataset,
     artifact_dir,
     url,
     seed,
 ):
-    """Run genai-perf benchmark with a trace file"""
+    """Run genai-perf benchmark with a trace dataset"""
     genai_perf_cmd = get_genai_perf_cmd_for_trace(
         model,
         tokenizer,
-        trace_file,
+        trace_dataset,
         artifact_dir,
         seed,
         url,
     )
 
-    logger.info(f"Running genai-perf with trace file: {trace_file}")
+    logger.info(f"Running genai-perf with trace dataset: {trace_dataset}")
     logger.info(f"Command: {' '.join(genai_perf_cmd)}")
 
     try:
@@ -128,12 +129,12 @@ def main():
         help="Output directory for results",
     )
 
-    # Trace file and synthesis configuration (similar to synthesizer.py)
+    # Trace dataset and synthesis configuration (similar to synthesizer.py)
     parser.add_argument(
-        "--input-file",
+        "--input-dataset",
         type=str,
         default="mooncake_trace.jsonl",
-        help="Path to the input mooncake-style trace file",
+        help="Path to the input mooncake-style trace dataset file",
     )
     parser.add_argument(
         "--num-requests",
@@ -172,6 +173,24 @@ def main():
         help="Maximum input sequence length to include in output (default: None, no filtering)",
     )
     parser.add_argument(
+        "--min-isl",
+        type=int,
+        default=None,
+        help="Minimum input sequence length to include in output (default: None, no filtering)",
+    )
+    parser.add_argument(
+        "--min-osl",
+        type=int,
+        default=None,
+        help="Minimum output sequence length - clips values below this threshold (default: None, no clipping)",
+    )
+    parser.add_argument(
+        "--max-osl",
+        type=int,
+        default=None,
+        help="Maximum output sequence length - clips values above this threshold (default: None, no clipping)",
+    )
+    parser.add_argument(
         "--block-size",
         type=int,
         default=512,
@@ -202,18 +221,21 @@ def main():
         or args.prefix_root_multiplier != 1
         or args.prompt_len_multiplier != 1.0
         or args.max_isl is not None
+        or args.min_isl is not None
+        or args.min_osl is not None
+        or args.max_osl is not None
     )
 
     if not needs_synthesis:
-        # No synthesis needed, use original file
-        trace_file_path = args.input_file
+        # No synthesis needed, use original dataset
+        trace_dataset_path = args.input_dataset
         logger.info(
-            f"Using original trace file (no synthesis parameters modified): {trace_file_path}"
+            f"Using original trace dataset (no synthesis parameters modified): {trace_dataset_path}"
         )
     else:
-        # Generate synthetic data based on input file
+        # Generate synthetic data based on input dataset
         logger.info("Generating synthetic trace data...")
-        logger.info(f"  Base file: {args.input_file}")
+        logger.info(f"  Base dataset: {args.input_dataset}")
         logger.info(
             f"  Num requests: {args.num_requests if args.num_requests else 'all'}"
         )
@@ -221,7 +243,18 @@ def main():
         logger.info(f"  Prefix len multiplier: {args.prefix_len_multiplier}")
         logger.info(f"  Prefix root multiplier: {args.prefix_root_multiplier}")
         logger.info(f"  Prompt len multiplier: {args.prompt_len_multiplier}")
-        logger.info(f"  Max ISL: {args.max_isl if args.max_isl else 'no limit'}")
+        logger.info(
+            f"  Max ISL: {args.max_isl if args.max_isl else 'no limit'} (filtering)"
+        )
+        logger.info(
+            f"  Min ISL: {args.min_isl if args.min_isl else 'no limit'} (filtering)"
+        )
+        logger.info(
+            f"  Min OSL: {args.min_osl if args.min_osl else 'no clipping'} (clipping)"
+        )
+        logger.info(
+            f"  Max OSL: {args.max_osl if args.max_osl else 'no clipping'} (clipping)"
+        )
         logger.info(f"  Random seed: {args.seed}")
 
         # Set random seed for reproducibility
@@ -229,7 +262,7 @@ def main():
 
         # Create synthesizer
         synthesizer = Synthesizer(
-            args.input_file,
+            args.input_dataset,
             block_size=args.block_size,
             speedup_ratio=args.speedup_ratio,
             prefix_len_multiplier=args.prefix_len_multiplier,
@@ -239,36 +272,42 @@ def main():
 
         # Determine number of requests
         if args.num_requests is None:
-            # Count requests in original file
-            with open(args.input_file, "r") as f:
+            # Count requests in original dataset
+            with open(args.input_dataset, "r") as f:
                 num_requests = sum(1 for _ in f)
-            logger.info(f"Using all {num_requests} requests from input file")
+            logger.info(f"Using all {num_requests} requests from input dataset")
         else:
             num_requests = args.num_requests
 
         # Generate synthetic requests
-        requests = synthesizer.synthesize_requests(num_requests, args.max_isl)
+        requests = synthesizer.synthesize_requests(
+            num_requests,
+            max_isl=args.max_isl,
+            min_isl=args.min_isl,
+            min_osl=args.min_osl,
+            max_osl=args.max_osl,
+        )
         logger.info(f"Generated {len(requests)} synthetic requests")
 
         # Save synthetic data to a permanent file in output directory
         synthetic_trace_filename = "synthetic_trace.jsonl"
-        trace_file_path = os.path.join(args.output_dir, synthetic_trace_filename)
+        trace_dataset_path = os.path.join(args.output_dir, synthetic_trace_filename)
 
         # Write synthetic data to file
-        with open(trace_file_path, "w") as f:
+        with open(trace_dataset_path, "w") as f:
             for request in requests:
                 f.write(json.dumps(request) + "\n")
 
-        logger.info(f"Synthetic trace data saved to: {trace_file_path}")
+        logger.info(f"Synthetic trace data saved to: {trace_dataset_path}")
 
-    # Run benchmark with the trace file
+    # Run benchmark with the trace dataset
     artifact_dir = os.path.join(args.output_dir, "genai_perf_artifacts")
     os.makedirs(artifact_dir, exist_ok=True)
 
     run_benchmark_with_trace(
         args.model,
         args.tokenizer,
-        trace_file_path,
+        trace_dataset_path,
         artifact_dir,
         args.url,
         args.seed,

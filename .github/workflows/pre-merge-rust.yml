@@ -35,53 +35,39 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  pre-merge-rust:
+  tests:
     runs-on:
       group: Fastchecker
     strategy:
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run'] }
     permissions:
       contents: read
     steps:
     - uses: actions/checkout@v4
     - name: Set up system dependencies
       run: |
-        sudo apt-get update -y
-        sudo apt-get install -y protobuf-compiler
+        # Install protoc for Rust build dependencies (NOTE: much faster than apt install)
+        PB_REL="https://github.com/protocolbuffers/protobuf/releases"
+        curl -LO $PB_REL/download/v30.2/protoc-30.2-linux-x86_64.zip
+        unzip protoc-30.2-linux-x86_64.zip -d $HOME/.local
+        rm protoc-30.2-linux-x86_64.zip
+        export PATH="$PATH:$HOME/.local/bin"
+        protoc --version
 
-    # TODO: Caching target/ dir handles most of the build caching improvements
-    #       currently, so sccache artifacts are mostly duplicates wasting disk space.
-    #       Revisit this to see if sccache can improve current caching behavior.
-    # TODO: Consider single target/ directory for all subdirectories/crates instead.
     - name: Cache cargo artifacts
       uses: actions/cache@v4
       with:
         path: |
           ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          ${{ matrix.dir }}/target/
-        key: ${{ runner.os }}-cargo-${{ matrix.dir }}-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: ${{ runner.os }}-cargo-${{ matrix.dir }}-
+          ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-
 
-    - name: Install Rust in dev environment
-      # Install Rust only to run GitHub Local Actions in (dev environment) using the `ACT` environment variable.
-      # See act usage: https://nektosact.com/introduction.html
-      # https://nektosact.com/usage/index.html?highlight=env.Act#skipping-steps
-      if: ${{ env.ACT }}
-      run: |
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        rustup toolchain install 1.86.0-x86_64-unknown-linux-gnu
-        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
     - name: Set up Rust Toolchain Components
-      run: rustup component add rustfmt clippy
+      run: rustup component add rustfmt
     - name: Verify Code Formatting
       working-directory: ${{ matrix.dir }}
       run: cargo fmt -- --check
-    - name: Run Clippy Checks
-      working-directory: ${{ matrix.dir }}
-      run: cargo clippy --no-deps --all-targets -- -D warnings
     - name: Install and Run cargo-deny
       working-directory: ${{ matrix.dir }}
       run: |
@@ -90,11 +76,44 @@ jobs:
     # Have an explicit step to build tests first to separate time spent on build vs execution.
     - name: Compile Tests
       working-directory: ${{ matrix.dir }}
-      run: cargo test --locked --no-run --target-dir ${HOME}/tmp || df -h
+      run: cargo test --locked --no-run
     - name: Run Doc Tests
       working-directory: ${{ matrix.dir }}
       run: cargo doc --no-deps && cargo test --locked --doc
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
-      run: cargo test --locked --all-targets --target-dir ${HOME}/tmp
+      run: cargo test --locked --all-targets
+
+  clippy:
+    runs-on:
+      group: Fastchecker
+    strategy:
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run'] }
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up system dependencies
+      run: |
+        # Install protoc for Rust build dependencies (NOTE: much faster than apt install)
+        PB_REL="https://github.com/protocolbuffers/protobuf/releases"
+        curl -LO $PB_REL/download/v30.2/protoc-30.2-linux-x86_64.zip
+        unzip protoc-30.2-linux-x86_64.zip -d $HOME/.local
+        rm protoc-30.2-linux-x86_64.zip
+        export PATH="$PATH:$HOME/.local/bin"
+        protoc --version
+    - name: Cache cargo artifacts
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-
+    - name: Set up Rust Toolchain Components
+      run: rustup component add clippy
+    - name: Run Clippy Checks
+      working-directory: ${{ matrix.dir }}
+      run: cargo clippy --no-deps --all-targets -- -D warnings
+

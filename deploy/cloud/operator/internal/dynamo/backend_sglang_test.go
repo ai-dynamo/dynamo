@@ -68,9 +68,9 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 			role:              RoleMain,
 			multinodeDeployer: &MockSimpleDeployer{},
 			initialCommand:    []string{"python3"},
-			initialArgs:       []string{"-m", "dynamo.sglang.worker"},
+			initialArgs:       []string{"-m", "dynamo.sglang"},
 			expectedCommand:   []string{"python3"},
-			expectedArgs:      []string{"-m", "dynamo.sglang.worker"},
+			expectedArgs:      []string{"-m", "dynamo.sglang"},
 			description:       "Single node should not modify python commands",
 		},
 		{
@@ -79,9 +79,9 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 			role:              RoleWorker,
 			multinodeDeployer: &MockSimpleDeployer{},
 			initialCommand:    []string{"python3"},
-			initialArgs:       []string{"-m", "dynamo.sglang.worker", "--model", "llama"},
+			initialArgs:       []string{"-m", "dynamo.sglang", "--model", "llama"},
 			expectedCommand:   []string{"python3"},
-			expectedArgs:      []string{"-m", "dynamo.sglang.worker", "--model", "llama", "--dist-init-addr", "leader.example.com:29500", "--nnodes", "2", "--node-rank", "1"},
+			expectedArgs:      []string{"-m", "dynamo.sglang", "--model", "llama", "--dist-init-addr", "leader.example.com:29500", "--nnodes", "2", "--node-rank", "1"},
 			description:       "Direct python command with simple deployer should append flags",
 		},
 		{
@@ -90,9 +90,9 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 			role:              RoleWorker,
 			multinodeDeployer: &MockShellDeployer{},
 			initialCommand:    []string{"python3"},
-			initialArgs:       []string{"-m", "dynamo.sglang.worker", "--model", "llama"},
+			initialArgs:       []string{"-m", "dynamo.sglang", "--model", "llama"},
 			expectedCommand:   []string{"sh", "-c"},
-			expectedArgs:      []string{"exec python3 -m dynamo.sglang.worker --model llama --dist-init-addr $(LEADER_HOST):29500 --nnodes 2 --node-rank $(WORKER_INDEX)"},
+			expectedArgs:      []string{"exec python3 -m dynamo.sglang --model llama --dist-init-addr $(LEADER_HOST):29500 --nnodes 2 --node-rank $(WORKER_INDEX)"},
 			description:       "Direct python command with shell deployer should wrap with sh -c exec",
 		},
 		{
@@ -101,9 +101,9 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 			role:              RoleLeader,
 			multinodeDeployer: &MockShellDeployer{},
 			initialCommand:    []string{"python"},
-			initialArgs:       []string{"-m", "dynamo.sglang.worker"},
+			initialArgs:       []string{"-m", "dynamo.sglang"},
 			expectedCommand:   []string{"python"},
-			expectedArgs:      []string{"-m", "dynamo.sglang.worker", "--dist-init-addr", "$(LEADER_HOST):29500", "--nnodes", "3", "--node-rank", "0"},
+			expectedArgs:      []string{"-m", "dynamo.sglang", "--dist-init-addr", "$(LEADER_HOST):29500", "--nnodes", "3", "--node-rank", "0"},
 			description:       "Leader role should never use shell wrapping",
 		},
 		{
@@ -112,9 +112,9 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 			role:              RoleWorker,
 			multinodeDeployer: &MockSimpleDeployer{},
 			initialCommand:    []string{"python3.11"},
-			initialArgs:       []string{"-m", "dynamo.sglang.worker"},
+			initialArgs:       []string{"-m", "dynamo.sglang"},
 			expectedCommand:   []string{"python3.11"},
-			expectedArgs:      []string{"-m", "dynamo.sglang.worker", "--dist-init-addr", "leader.example.com:29500", "--nnodes", "2", "--node-rank", "1"},
+			expectedArgs:      []string{"-m", "dynamo.sglang", "--dist-init-addr", "leader.example.com:29500", "--nnodes", "2", "--node-rank", "1"},
 			description:       "Python version variants should be recognized",
 		},
 		{
@@ -202,8 +202,8 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 			role:              RoleMain,
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialCommand:    []string{"sh", "-c"},
-			initialArgs:       []string{"python -m dynamo.sglang.worker"},
-			expectedArgs:      []string{"python -m dynamo.sglang.worker"},
+			initialArgs:       []string{"python -m dynamo.sglang"},
+			expectedArgs:      []string{"python -m dynamo.sglang"},
 			description:       "Single node should not modify shell commands",
 		},
 		{
@@ -212,8 +212,8 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 			role:              RoleLeader,
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialCommand:    []string{"sh", "-c"},
-			initialArgs:       []string{"python -m dynamo.sglang.worker"},
-			expectedArgs:      []string{"python -m dynamo.sglang.worker --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 2 --node-rank 0"},
+			initialArgs:       []string{"python -m dynamo.sglang"},
+			expectedArgs:      []string{"python -m dynamo.sglang --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 2 --node-rank 0"},
 			description:       "Shell commands should use regex injection for python commands",
 		},
 		{
@@ -222,8 +222,8 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 			role:              RoleLeader,
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialCommand:    []string{"sh", "-c"},
-			initialArgs:       []string{"echo blah | wc -l && python -m dynamo.sglang.worker && ls -al"},
-			expectedArgs:      []string{"echo blah | wc -l && python -m dynamo.sglang.worker --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 2 --node-rank 0 && ls -al"},
+			initialArgs:       []string{"echo blah | wc -l && python -m dynamo.sglang && ls -al"},
+			expectedArgs:      []string{"echo blah | wc -l && python -m dynamo.sglang --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 2 --node-rank 0 && ls -al"},
 			description:       "Complex shell commands should inject flags only into python part",
 		},
 		{
@@ -232,8 +232,8 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 			role:              RoleWorker,
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialCommand:    []string{"sh", "-c"},
-			initialArgs:       []string{"python -m dynamo.sglang.worker"},
-			expectedArgs:      []string{"python -m dynamo.sglang.worker --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 3 --node-rank $((GROVE_PCLQ_POD_INDEX + 1))"},
+			initialArgs:       []string{"python -m dynamo.sglang"},
+			expectedArgs:      []string{"python -m dynamo.sglang --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 3 --node-rank $((GROVE_PCLQ_POD_INDEX + 1))"},
 			description:       "Shell command worker should get grove env vars in node rank",
 		},
 		{
@@ -242,8 +242,8 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 			role:              RoleLeader,
 			multinodeDeployer: &LWSMultinodeDeployer{},
 			initialCommand:    []string{"sh", "-c"},
-			initialArgs:       []string{"python -m dynamo.sglang.worker"},
-			expectedArgs:      []string{"python -m dynamo.sglang.worker --dist-init-addr $(LWS_LEADER_ADDRESS):29500 --nnodes 2 --node-rank 0"},
+			initialArgs:       []string{"python -m dynamo.sglang"},
+			expectedArgs:      []string{"python -m dynamo.sglang --dist-init-addr $(LWS_LEADER_ADDRESS):29500 --nnodes 2 --node-rank 0"},
 			description:       "LWS shell commands should use LWS variables",
 		},
 		{
@@ -252,8 +252,8 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 			role:              RoleLeader,
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialCommand:    []string{"sh", "-c"},
-			initialArgs:       []string{"python -m dynamo.sglang.worker | tee /tmp/log"},
-			expectedArgs:      []string{"python -m dynamo.sglang.worker --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 2 --node-rank 0 | tee /tmp/log"},
+			initialArgs:       []string{"python -m dynamo.sglang | tee /tmp/log"},
+			expectedArgs:      []string{"python -m dynamo.sglang --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 2 --node-rank 0 | tee /tmp/log"},
 			description:       "Shell commands with pipes should inject flags before pipe",
 		},
 		{
@@ -262,8 +262,8 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 			role:              RoleLeader,
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialCommand:    []string{"sh", "-c"},
-			initialArgs:       []string{"echo start", "python -m dynamo.sglang.worker", "echo done"},
-			expectedArgs:      []string{"echo start", "python -m dynamo.sglang.worker --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 2 --node-rank 0", "echo done"},
+			initialArgs:       []string{"echo start", "python -m dynamo.sglang", "echo done"},
+			expectedArgs:      []string{"echo start", "python -m dynamo.sglang --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 2 --node-rank 0", "echo done"},
 			description:       "Shell commands with multiple args should process each individually, modify only the python arg",
 		},
 		{
@@ -282,8 +282,8 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 			role:              RoleLeader,
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialCommand:    []string{"sh", "-c"},
-			initialArgs:       []string{"python -m dynamo.sglang.worker", "python -m dynamo.sglang.worker --other-flags"},
-			expectedArgs:      []string{"python -m dynamo.sglang.worker --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 2 --node-rank 0", "python -m dynamo.sglang.worker --other-flags"},
+			initialArgs:       []string{"python -m dynamo.sglang", "python -m dynamo.sglang --other-flags"},
+			expectedArgs:      []string{"python -m dynamo.sglang --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 2 --node-rank 0", "python -m dynamo.sglang --other-flags"},
 			description:       "Should stop processing after first successful python flag injection",
 		},
 	}
@@ -301,7 +301,6 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 				t.Errorf("UpdateContainer() args = %v, want %v", container.Args, tt.expectedArgs)
 			}
 
-			// Verify command is still sh -c for shell commands
 			expectedCommand := tt.initialCommand
 			if !reflect.DeepEqual(container.Command, expectedCommand) {
 				t.Errorf("UpdateContainer() should preserve shell command, got: %v, want: %v", container.Command, expectedCommand)
@@ -438,13 +437,12 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create initial probes
 			livenessProbe := &corev1.Probe{InitialDelaySeconds: 30}
 			readinessProbe := &corev1.Probe{InitialDelaySeconds: 10}
 			startupProbe := &corev1.Probe{InitialDelaySeconds: 5}
 
 			container := &corev1.Container{
-				Args:           []string{"python -m dynamo.sglang.worker"},
+				Args:           []string{"python -m dynamo.sglang"},
 				LivenessProbe:  livenessProbe,
 				ReadinessProbe: readinessProbe,
 				StartupProbe:   startupProbe,
@@ -473,6 +471,104 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 					t.Errorf("Expected StartupProbe to be preserved, but it was removed")
 				}
 			}
+		})
+	}
+}
+
+func TestSGLangBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
+	backend := &SGLangBackend{}
+
+	tests := []struct {
+		name                       string
+		component                  *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		volumeMounts               []corev1.VolumeMount
+		expectNoEnvVarChanges      bool
+		expectLoggedPartialSupport bool
+	}{
+		{
+			name: "SGLang backend with useAsCompilationCache volume mount",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "sglang-cache",
+							MountPoint:            "/cache/sglang",
+							UseAsCompilationCache: true,
+						},
+					},
+				},
+			},
+			volumeMounts:               []corev1.VolumeMount{},
+			expectNoEnvVarChanges:      true, // SGLang doesn't set env vars yet
+			expectLoggedPartialSupport: true,
+		},
+		{
+			name: "SGLang backend with useAsCompilationCache at custom volume mount",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "custom-cache",
+							MountPoint:            "/custom/cache/path",
+							UseAsCompilationCache: true,
+						},
+					},
+				},
+			},
+			volumeMounts:               []corev1.VolumeMount{},
+			expectNoEnvVarChanges:      true, // SGLang doesn't set env vars yet
+			expectLoggedPartialSupport: true,
+		},
+		{
+			name: "SGLang backend without useAsCompilationCache volume mount",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:       "regular-volume",
+							MountPoint: "/data",
+						},
+					},
+				},
+			},
+			volumeMounts:               []corev1.VolumeMount{},
+			expectNoEnvVarChanges:      true,
+			expectLoggedPartialSupport: false,
+		},
+		{
+			name: "SGLang backend with no volume mounts",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					VolumeMounts: nil,
+				},
+			},
+			volumeMounts:               []corev1.VolumeMount{},
+			expectNoEnvVarChanges:      true,
+			expectLoggedPartialSupport: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a container with initial state including volume mounts
+			container := &corev1.Container{
+				Env:          []corev1.EnvVar{},
+				VolumeMounts: tt.volumeMounts,
+			}
+
+			// Store original env vars for comparison
+			originalEnvCount := len(container.Env)
+
+			// Call UpdateContainer (single node to avoid multinode logic)
+			backend.UpdateContainer(container, 1, RoleMain, tt.component, "test-service", &GroveMultinodeDeployer{})
+
+			if tt.expectNoEnvVarChanges {
+				// Check that no new environment variables were added
+				if len(container.Env) != originalEnvCount {
+					t.Errorf("Expected no environment variable changes, but env count changed from %d to %d", originalEnvCount, len(container.Env))
+				}
+			}
+
 		})
 	}
 }

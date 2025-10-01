@@ -2229,6 +2229,7 @@ version = "0.5.1"
 dependencies = [
  "anyhow",
  "dynamo-async-openai",
+ "dynamo-llm",
  "lazy_static",
  "num-traits",
  "openai-harmony",

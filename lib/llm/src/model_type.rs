@@ -30,7 +30,7 @@ bitflags! {
     /// Using bitflags avoids deep branching on a single enum variant,
     /// simplifies checks like `supports_chat()`, and enables efficient,
     /// type-safe combinations of multiple endpoint types within a single byte.
-    #[derive(Copy, Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+    #[derive(Copy, Debug, Default, Clone, Serialize, Deserialize, Eq, PartialEq)]
     pub struct ModelType: u8 {
         const Chat = 1 << 0;
         const Completions = 1 << 1;
@@ -100,9 +100,10 @@ impl fmt::Display for ModelType {
     }
 }
 
-#[derive(Copy, Debug, Clone, Display, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Copy, Debug, Default, Clone, Display, Serialize, Deserialize, Eq, PartialEq)]
 pub enum ModelInput {
     /// Raw text input
+    #[default]
     Text,
     /// Pre-processed input
     Tokens,

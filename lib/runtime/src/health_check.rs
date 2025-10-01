@@ -425,8 +425,8 @@ mod integration_tests {
         let request_timeout = Duration::from_secs(3);
 
         let config = HealthCheckConfig {
-            canary_wait_time: canary_wait_time,
-            request_timeout: request_timeout,
+            canary_wait_time,
+            request_timeout,
         };
 
         let manager = HealthCheckManager::new(drt.clone(), config);

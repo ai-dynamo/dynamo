@@ -216,20 +216,6 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 # Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
 ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 
-# Install prometheus
-ARG PROM_VERSION=3.4.1
-RUN ARCH=$(dpkg --print-architecture) && \
-    case "$ARCH" in \
-        amd64) PLATFORM=linux-amd64 ;; \
-        arm64) PLATFORM=linux-arm64 ;; \
-        *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
-    esac && \
-    curl -fsSL --retry 5 --retry-delay 5 "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PLATFORM}.tar.gz" \
-    | tar -xz -C /tmp && \
-    mv "/tmp/prometheus-${PROM_VERSION}.${PLATFORM}/prometheus" /usr/local/bin/ && \
-    chmod +x /usr/local/bin/prometheus && \
-    rm -rf "/tmp/prometheus-${PROM_VERSION}.${PLATFORM}"
-
 # Copy UCX from dev image as plugin for NIXL
 # Copy NIXL source from devr image
 # Copy dynamo wheels for gitlab artifacts
@@ -351,12 +337,10 @@ COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
 # Much better than chown -R $USERNAME:$USERNAME /opt/dynamo/venv (~10min on my cpu)
 COPY --from=runtime ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
-# so we can use maturin develop
-RUN uv pip install maturin[patchelf]
-
-# Make sure to sync this with the one specified on README.md.
-# This is a generic PYTHONPATH which works for all the frameworks, so some paths may not be relevant for this particular framework.
-ENV PYTHONPATH=${WORKSPACE_DIR}/components/metrics/src:${WORKSPACE_DIR}/components/frontend/src:${WORKSPACE_DIR}/components/planner/src:${WORKSPACE_DIR}/components/backends/mocker/src:${WORKSPACE_DIR}/components/backends/trtllm/src:${WORKSPACE_DIR}/components/backends/vllm/src:${WORKSPACE_DIR}/components/backends/sglang/src:${WORKSPACE_DIR}/components/backends/llama_cpp/src
+# Install maturin, for maturin develop
+# Editable install of dynamo
+RUN uv pip install maturin[patchelf] && \
+    uv pip install --no-deps -e .
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
