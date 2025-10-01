@@ -59,6 +59,7 @@ class Config:
         self.max_file_size_mb: int = 50
         self.reasoning_parser: Optional[str] = None
         self.tool_call_parser: Optional[str] = None
+        self.custom_jinja_template: Optional[str] = None
 
     def __str__(self) -> str:
         return (
@@ -89,7 +90,8 @@ class Config:
             f"allowed_local_media_path={self.allowed_local_media_path}, "
             f"max_file_size_mb={self.max_file_size_mb}, "
             f"reasoning_parser={self.reasoning_parser}, "
-            f"tool_call_parser={self.tool_call_parser}"
+            f"tool_call_parser={self.tool_call_parser}, "
+            f"custom_jinja_template={self.custom_jinja_template}"
         )
 
 
@@ -296,6 +298,12 @@ def cmd_line_args():
         choices=get_reasoning_parser_names(),
         help="Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
     )
+    parser.add_argument(
+        "--custom-jinja-template",
+        type=str,
+        default=None,
+        help="Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
+    )
 
     args = parser.parse_args()
 
@@ -366,6 +374,15 @@ def cmd_line_args():
 
     config.reasoning_parser = args.dyn_reasoning_parser
     config.tool_call_parser = args.dyn_tool_call_parser
+
+    # Handle custom jinja template path expansion (environment variables and home directory)
+    if args.custom_jinja_template:
+        expanded_template_path = os.path.expandvars(
+            os.path.expanduser(args.custom_jinja_template)
+        )
+        config.custom_jinja_template = expanded_template_path
+    else:
+        config.custom_jinja_template = None
 
     return config
 

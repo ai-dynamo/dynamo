@@ -919,8 +919,8 @@ impl DRTNatsClientPrometheusMetrics {
             &[],
         )?;
         let connects = drt.create_intgauge(
-            nats_metrics::CONNECTS,
-            "Total number of connections established by NATS client",
+            nats_metrics::CURRENT_CONNECTIONS,
+            "Current number of active connections for NATS client",
             &[],
         )?;
         let connection_state = drt.create_intgauge(
