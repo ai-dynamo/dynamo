@@ -37,6 +37,11 @@ pub struct KvbmLeaderNumBlocksConfig {
     #[builder(default = "0")]
     pub num_blocks_overriden: usize,
 }
+#[derive(Debug, Clone)]
+pub enum OffloadMode {
+    Eager,
+    Delayed,
+}
 
 fn compute_num_blocks(
     num_blocks_config: &KvbmLeaderNumBlocksConfig,
@@ -71,6 +76,9 @@ pub struct KvbmLeaderConfig {
 
     #[builder(default = "KvbmLeaderNumBlocksConfig::default()")]
     disk_blocks_config: KvbmLeaderNumBlocksConfig,
+
+    #[builder(default = "OffloadMode::Eager")]
+    offload_mode: OffloadMode,
 }
 
 impl KvbmLeaderConfig {

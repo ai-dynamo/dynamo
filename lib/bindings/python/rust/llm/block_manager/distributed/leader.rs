@@ -7,6 +7,7 @@ use utils::get_barrier_id_prefix;
 use derive_getters::Dissolve;
 use llm_rs::block_manager::distributed::{
     KvbmLeader as KvbmLeaderImpl, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig,
+    OffloadMode,
 };
 
 const CPU_CACHE: &str = "DYN_KVBM_CPU_CACHE_GB";
@@ -18,6 +19,13 @@ const DISK_CACHE_OVERRIDE: &str = "DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS";
 const LEADER_WORKER_INIT_TIMEOUT_SECS: &str = "DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS";
 const DEFAULT_INIT_TIMEOUT_SECS: u64 = 120;
 
+const OFFLOAD_MODE: &str = "DYN_KVBM_OFFLOAD_MODE";
+const DEFAULT_OFFLOAD_MODE: OffloadMode = OffloadMode::Eager;
+
+fn read_env_str(key: &str) -> Option<String> {
+    std::env::var(key).ok()?.trim.parse::<String>().ok()
+}
+
 fn read_env_usize(key: &str) -> Option<usize> {
     std::env::var(key).ok()?.trim().parse::<usize>().ok()
 }
@@ -27,6 +35,25 @@ fn read_cache_size_float(key: &str) -> f64 {
         .unwrap_or_default()
         .parse::<f64>()
         .unwrap_or(0.0)
+}
+
+fn get_offload_mode_config(key: &str) -> OffloadMode {
+    if let Some(offload_mode) = read_env_str(key) {
+        match offload_mode.to_lowercase().to_str() {
+            "eager" => OffloadMode::Eager,
+            "delayed" => OffloadMode::Delayed,
+            _ => panic!(
+                "KVBM Configuration Error: OffloadMode was set to an incorrect value.\n\
+                \n\
+                To fix this, set the environment variable to one of the following,\n\
+                or omit this environment variable entirely:\n\
+                • DYN_KVBM_OFFLOAD_MODE=eager   (default value if DYN_KVBM_OFFLOAD_MODE is not set)\n\
+                • DYN_KVBM_OFFLOAD_MODE=delayed"
+            )
+        }
+    }
+
+    OffloadMode::Eager   // default behavior if not set.
 }
 
 fn get_blocks_config(cache_size_key: &str, override_key: &str) -> KvbmLeaderNumBlocksConfig {
@@ -83,6 +110,7 @@ impl KvbmLeader {
             .drt(drt.inner().clone())
             .host_blocks_config(get_blocks_config(CPU_CACHE, CPU_CACHE_OVERRIDE))
             .disk_blocks_config(get_blocks_config(DISK_CACHE, DISK_CACHE_OVERRIDE))
+            .offload_mode(get_offload_mode_config(OFFLOAD_MODE))
             .build()
             .map_err(to_pyerr)?;
 
