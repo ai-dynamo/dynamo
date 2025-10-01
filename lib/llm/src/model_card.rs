@@ -411,12 +411,13 @@ impl ModelDeploymentCard {
         };
         let store: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client));
         let card_store = Arc::new(KeyValueStoreManager::new(store));
-        let Some(card) = card_store
+        let Some(mut card) = card_store
             .load::<ModelDeploymentCard>(ROOT_PATH, mdc_key)
             .await?
         else {
             return Ok(None);
         };
+        card.move_from_nats(drt.nats_client()).await?;
         Ok(Some(card))
     }
 

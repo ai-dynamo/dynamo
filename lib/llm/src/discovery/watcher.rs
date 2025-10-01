@@ -109,10 +109,10 @@ impl ModelWatcher {
                         Err(err) => {
                             match kv.value_str() {
                                 Ok(value) => {
-                                    tracing::error!(%err, value, "Invalid JSON in model entry")
+                                    tracing::error!(%err, value, "Invalid JSON in model card")
                                 }
                                 Err(value_str_err) => {
-                                    tracing::error!(original_error = %err, %value_str_err, "Invalid UTF-8 string in model entry, expected JSON")
+                                    tracing::error!(original_error = %err, %value_str_err, "Invalid UTF-8 string in model card, expected JSON")
                                 }
                             }
                             continue;
@@ -121,14 +121,14 @@ impl ModelWatcher {
                     let key = match kv.key_str() {
                         Ok(k) => k,
                         Err(err) => {
-                            tracing::error!(%err, ?kv, "Invalid UTF-8 string in model entry key, skipping");
+                            tracing::error!(%err, ?kv, "Invalid UTF-8 string in model card key, skipping");
                             continue;
                         }
                     };
                     let endpoint_id = match etcd_key_to_endpoint_id(key) {
                         Ok(eid) => eid,
                         Err(err) => {
-                            tracing::error!(%key, model_name = card.name(), %err, "Failed extracing EndpointId from etcd key. Ignoring instance.");
+                            tracing::error!(%key, model_name = card.name(), %err, "Failed extracting EndpointId from key. Ignoring instance.");
                             continue;
                         }
                     };
@@ -468,10 +468,10 @@ impl ModelWatcher {
                 Err(err) => {
                     match kv.value_str() {
                         Ok(value) => {
-                            tracing::error!(%err, value, "Invalid JSON in model entry")
+                            tracing::error!(%err, value, "Invalid JSON in model card")
                         }
                         Err(value_str_err) => {
-                            tracing::error!(original_error = %err, %value_str_err, "Invalid UTF-8 string in model entry, expected JSON")
+                            tracing::error!(original_error = %err, %value_str_err, "Invalid UTF-8 string in model card, expected JSON")
                         }
                     }
                     continue;
@@ -510,8 +510,6 @@ impl ModelWatcher {
 /// Extract the EndpointId from that.
 fn etcd_key_to_endpoint_id(s: &str) -> anyhow::Result<EndpointId> {
     let parts: Vec<&str> = s.split('/').collect();
-
-    // Determine starting index, skipping "v1" if present
     let start_idx = if !parts.is_empty() && parts[0] == "v1" {
         1
     } else {
@@ -523,19 +521,14 @@ fn etcd_key_to_endpoint_id(s: &str) -> anyhow::Result<EndpointId> {
         anyhow::bail!("Invalid format: not enough path segments in {s}");
     }
 
-    // Expect "cards" right after optional "v1"
     if parts.get(start_idx) != Some(&model_card::ROOT_PATH) {
         anyhow::bail!("Invalid format: expected model card ROOT_PATH segment in {s}");
     }
 
-    let namespace = parts[start_idx + 1].to_string();
-    let component = parts[start_idx + 2].to_string();
-    let name = parts[start_idx + 3].to_string();
-
     Ok(EndpointId {
-        namespace,
-        component,
-        name,
+        namespace: parts[start_idx + 1].to_string(),
+        component: parts[start_idx + 2].to_string(),
+        name: parts[start_idx + 3].to_string(),
     })
 }
 

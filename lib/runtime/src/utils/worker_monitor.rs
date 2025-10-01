@@ -89,9 +89,12 @@ impl WorkerMonitor {
             return Ok(());
         };
 
+        // WorkerMonitor is in the wrong crate. It deals with LLM things (KV) so it should be in
+        // dynamo-llm not dynamo-runtime.
+        // That means we cannot use ModelDeploymentCard, so use serde_json::Value for now .
         let runtime_configs_watcher = watch_prefix_with_extraction(
             etcd_client,
-            "mdc/",
+            "mdc/", // should be model_card::ROOT_PREFIX but wrong crate
             key_extractors::lease_id,
             |card: serde_json::Value| {
                 card.get("runtime_config")
