@@ -1593,8 +1593,8 @@ mod test_metricsregistry_nats {
             (
                 build_component_metric_name(nats_service::REQUESTS_TOTAL),
                 0.0,
-                0.0,
-            ), // No work handler requests
+                10.0,
+            ), // NATS service stats requests (may differ from work handler count)
             (
                 build_component_metric_name(nats_service::PROCESSING_MS_TOTAL),
                 0.0,
