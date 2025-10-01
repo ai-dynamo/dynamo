@@ -293,10 +293,8 @@ async fn test_metrics_with_mock_model() {
 mod integration_tests {
     use super::*;
     use dynamo_llm::{
-        discovery::{MODEL_ROOT_PATH, ModelEntry, ModelWatcher},
-        engines::make_echo_engine,
-        entrypoint::EngineConfig,
-        local_model::LocalModelBuilder,
+        discovery::ModelWatcher, engines::make_echo_engine, entrypoint::EngineConfig,
+        local_model::LocalModelBuilder, model_card,
     };
     use dynamo_runtime::DistributedRuntime;
     use dynamo_runtime::pipeline::RouterMode;
@@ -348,7 +346,7 @@ mod integration_tests {
         // Start watching etcd for model registrations
         if let Some(etcd_client) = distributed_runtime.etcd_client() {
             let models_watcher = etcd_client
-                .kv_get_and_watch_prefix(MODEL_ROOT_PATH)
+                .kv_get_and_watch_prefix(model_card::ROOT_PATH)
                 .await
                 .unwrap();
             let (_prefix, _watcher, receiver) = models_watcher.dissolve();
@@ -376,7 +374,7 @@ mod integration_tests {
         let test_component = namespace.component("test-mdc-component").unwrap();
         let test_endpoint = test_component.endpoint("test-mdc-endpoint");
 
-        // This will store the MDC in etcd and create the ModelEntry for discovery
+        // This will store the MDC in etcd for discovery
         local_model
             .attach(
                 &test_endpoint,
@@ -500,8 +498,13 @@ mod integration_tests {
         assert!(metrics_body.contains("request_type=\"stream\""));
         assert!(metrics_body.contains("status=\"success\""));
 
-        // Now test the complete lifecycle: remove the model from etcd
+        // etcd lease will ensure we everything is deleted from etcd
 
+        // Now test the complete lifecycle: remove the model from etcd
+        // We don't need to cleanup model manager because it's local to this test
+
+        /*
+        // Clean up
         // Remove the model using the cleaner ModelWatcher approach
         if let Some(etcd_client) = distributed_runtime.etcd_client() {
             // Use ModelWatcher to find and remove the model (following ModelWatcher::handle_delete pattern)
@@ -514,10 +517,7 @@ mod integration_tests {
             );
 
             // Get all model entries for our test model
-            let model_entries = watcher
-                .entries_for_model("test-mdc-model", None, true)
-                .await
-                .unwrap();
+            let model_entries = watcher.entries_for_model("test-mdc-model").await.unwrap();
 
             if !model_entries.is_empty() {
                 // For each model entry, we need to find its etcd key and remove it
@@ -566,8 +566,8 @@ mod integration_tests {
                 }
             }
         }
+        */
 
-        // Clean up
         cancel_token.cancel();
         task.await.unwrap().unwrap();
     }

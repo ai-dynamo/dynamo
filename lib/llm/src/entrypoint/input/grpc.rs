@@ -4,11 +4,12 @@
 use std::sync::Arc;
 
 use crate::{
-    discovery::{MODEL_ROOT_PATH, ModelManager, ModelWatcher},
+    discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::{self, EngineConfig, input::common},
     grpc::service::kserve,
     kv_router::KvRouterConfig,
+    model_card,
     namespace::is_global_namespace,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -46,7 +47,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                         distributed_runtime,
                         grpc_service.state().manager_clone(),
                         etcd_client.clone(),
-                        MODEL_ROOT_PATH,
+                        model_card::ROOT_PATH,
                         router_config.router_mode,
                         Some(router_config.kv_router_config),
                         router_config.busy_threshold,

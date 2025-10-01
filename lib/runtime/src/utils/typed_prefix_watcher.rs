@@ -67,12 +67,12 @@ where
 ///
 /// # Example
 /// ```ignore
-/// // Watch for ModelEntry objects and extract runtime_config field
+/// // Watch for ModelDeploymentCard objects and extract runtime_config field
 /// let watcher = watch_prefix_with_extraction(
 ///     etcd_client,
-///     "models/",
+///     "mdc/",
 ///     |kv| Some(kv.lease()),  // Use lease_id as key
-///     |entry: ModelEntry| entry.runtime_config,  // Extract runtime_config field
+///     |card: ModelDeploymentCard| card.runtime_config,  // Extract runtime_config field
 ///     cancellation_token,
 /// ).await?;
 /// ```

@@ -189,6 +189,12 @@ impl ModelDeploymentCard {
         Ok(())
     }
 
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.display_name
+    }
+
+    #[inline]
     pub fn slug(&self) -> &Slug {
         &self.slug
     }
@@ -291,9 +297,7 @@ impl ModelDeploymentCard {
 
     /// Move the files this MDC uses from the NATS object store to local disk.
     /// Updates the URI's to point to the created files.
-    ///
-    /// The returned TempDir must be kept alive, it cleans up on drop.
-    async fn move_from_nats(&mut self, nats_client: nats::Client) -> Result<tempfile::TempDir> {
+    pub async fn move_from_nats(&mut self, nats_client: nats::Client) -> Result<()> {
         let nats_addr = nats_client.addr();
         let bucket_name = self.slug();
         let target_dir = tempfile::TempDir::with_prefix(bucket_name.to_string())?;
@@ -345,7 +349,9 @@ impl ModelDeploymentCard {
             "tokenizer.json"
         );
 
-        Ok(target_dir)
+        // This cache_dir is a tempfile::TempDir will be deleted on drop, so keep it alive.
+        self.cache_dir = Some(Arc::new(target_dir));
+        Ok(())
     }
 
     /// Delete this card from the key-value store and it's URLs from the object store
@@ -405,14 +411,12 @@ impl ModelDeploymentCard {
         };
         let store: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client));
         let card_store = Arc::new(KeyValueStoreManager::new(store));
-        let Some(mut card) = card_store
+        let Some(card) = card_store
             .load::<ModelDeploymentCard>(ROOT_PATH, mdc_key)
             .await?
         else {
             return Ok(None);
         };
-        // This cache_dir is a tempfile::TempDir will be deleted on drop, so keep it alive.
-        card.cache_dir = Some(Arc::new(card.move_from_nats(drt.nats_client()).await?));
         Ok(Some(card))
     }
 

@@ -13,8 +13,7 @@ use dynamo_runtime::{
         ManyOut, Operator, RouterMode, SegmentSource, ServiceBackend, SingleIn, Source,
         network::egress::push_router::PushRouter,
     },
-    protocols::annotated::Annotated,
-    storage::key_value_store::Key,
+    protocols::{EndpointId, annotated::Annotated},
     transports::etcd::{KeyValue, WatchEvent},
 };
 
@@ -22,7 +21,7 @@ use crate::{
     backend::Backend,
     entrypoint,
     kv_router::KvRouterConfig,
-    model_card::ModelDeploymentCard,
+    model_card::{self, ModelDeploymentCard},
     model_type::{ModelInput, ModelType},
     preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::PromptFormatter},
     protocols::{
@@ -38,7 +37,7 @@ use crate::{
     },
 };
 
-use super::{MODEL_ROOT_PATH, ModelEntry, ModelManager};
+use super::ModelManager;
 use crate::namespace::is_global_namespace;
 
 #[derive(Debug, Clone)]
@@ -105,8 +104,8 @@ impl ModelWatcher {
         while let Some(event) = events_rx.recv().await {
             match event {
                 WatchEvent::Put(kv) => {
-                    let model_entry = match serde_json::from_slice::<ModelEntry>(kv.value()) {
-                        Ok(model_entry) => model_entry,
+                    let mut card = match serde_json::from_slice::<ModelDeploymentCard>(kv.value()) {
+                        Ok(card) => card,
                         Err(err) => {
                             match kv.value_str() {
                                 Ok(value) => {
@@ -119,21 +118,6 @@ impl ModelWatcher {
                             continue;
                         }
                     };
-
-                    // Filter by namespace if target_namespace is specified
-                    if !global_namespace
-                        && let Some(target_ns) = target_namespace
-                        && model_entry.endpoint_id.namespace != target_ns
-                    {
-                        tracing::debug!(
-                            model_namespace = model_entry.endpoint_id.namespace,
-                            target_namespace = target_ns,
-                            model_name = model_entry.name,
-                            "Skipping model from different namespace"
-                        );
-                        continue;
-                    }
-
                     let key = match kv.key_str() {
                         Ok(k) => k,
                         Err(err) => {
@@ -141,12 +125,33 @@ impl ModelWatcher {
                             continue;
                         }
                     };
+                    let endpoint_id = match etcd_key_to_endpoint_id(key) {
+                        Ok(eid) => eid,
+                        Err(err) => {
+                            tracing::error!(%key, model_name = card.name(), %err, "Failed extracing EndpointId from etcd key. Ignoring instance.");
+                            continue;
+                        }
+                    };
 
-                    match self.handle_put(key, &model_entry).await {
+                    // Filter by namespace if target_namespace is specified
+                    if !global_namespace
+                        && let Some(target_ns) = target_namespace
+                        && endpoint_id.namespace != target_ns
+                    {
+                        tracing::debug!(
+                            model_namespace = endpoint_id.namespace,
+                            target_namespace = target_ns,
+                            model_name = card.name(),
+                            "Skipping model from different namespace"
+                        );
+                        continue;
+                    }
+
+                    match self.handle_put(key, &endpoint_id, &mut card).await {
                         Ok(()) => {
                             tracing::info!(
-                                model_name = model_entry.name,
-                                namespace = model_entry.endpoint_id.namespace,
+                                model_name = card.name(),
+                                namespace = endpoint_id.namespace,
                                 "added model"
                             );
                             self.notify_on_model.notify_waiters();
@@ -155,8 +160,8 @@ impl ModelWatcher {
                             tracing::error!(
                                 error = format!("{err:#}"),
                                 "error adding model {} from namespace {}",
-                                model_entry.name,
-                                model_entry.endpoint_id.namespace,
+                                card.name(),
+                                endpoint_id.namespace,
                             );
                         }
                     }
@@ -194,9 +199,9 @@ impl ModelWatcher {
                 anyhow::bail!("Missing ModelDeploymentCard for {key}");
             }
         };
-        let model_name = card.display_name.clone();
+        let model_name = card.name().to_string();
         let active_instances = self
-            .entries_for_model(&model_name, target_namespace, is_global_namespace)
+            .cards_for_model(&model_name, target_namespace, is_global_namespace)
             .await
             .with_context(|| model_name.clone())?;
         if !active_instances.is_empty() {
@@ -265,44 +270,25 @@ impl ModelWatcher {
 
     // Handles a PUT event from etcd, this usually means adding a new model to the list of served
     // models.
-    async fn handle_put(&self, key: &str, model_entry: &ModelEntry) -> anyhow::Result<()> {
-        let endpoint_id = &model_entry.endpoint_id;
+    async fn handle_put(
+        &self,
+        key: &str,
+        endpoint_id: &EndpointId,
+        card: &mut ModelDeploymentCard,
+    ) -> anyhow::Result<()> {
+        card.move_from_nats(self.drt.nats_client()).await?;
         let component = self
             .drt
             .namespace(&endpoint_id.namespace)?
             .component(&endpoint_id.component)?;
         let client = component.endpoint(&endpoint_id.name).client().await?;
-        let model_slug = model_entry.slug();
-        let card = match ModelDeploymentCard::load_from_store(
-            &Key::from_raw(model_slug.to_string()),
-            &self.drt,
-        )
-        .await
-        {
-            Ok(Some(mut card)) => {
-                tracing::debug!(card.display_name, "adding model");
-                // Ensure runtime_config is populated
-                if let Some(rc) = model_entry.runtime_config.clone() {
-                    card.runtime_config = rc;
-                }
-                card
-            }
-            Ok(None) => {
-                anyhow::bail!("Missing ModelDeploymentCard in storage under key {model_slug}");
-            }
-            Err(err) => {
-                anyhow::bail!(
-                    "Error fetching ModelDeploymentCard from storage under key {model_slug}. {err}"
-                );
-            }
-        };
-
+        tracing::debug!(model_name = card.name(), "adding model");
         self.manager.save_model_card(key, card.clone());
 
-        if self.manager.has_model_any(&model_entry.name) {
+        if self.manager.has_model_any(card.name()) {
             tracing::trace!(
-                name = model_entry.name,
-                namespace = model_entry.endpoint_id.namespace,
+                model_name = card.name(),
+                namespace = endpoint_id.namespace,
                 "New endpoint for existing model"
             );
             self.notify_on_model.notify_waiters();
@@ -324,7 +310,7 @@ impl ModelWatcher {
                 Some(
                     self.manager
                         .kv_chooser_for(
-                            &model_entry.name,
+                            card.name(),
                             &component,
                             card.kv_cache_block_size,
                             self.kv_router_config,
@@ -344,7 +330,7 @@ impl ModelWatcher {
                     NvCreateChatCompletionRequest,
                     NvCreateChatCompletionStreamResponse,
                 >(
-                    &card,
+                    card,
                     &client,
                     self.router_mode,
                     self.busy_threshold,
@@ -354,7 +340,7 @@ impl ModelWatcher {
                 .await
                 .context("build_routed_pipeline")?;
                 self.manager
-                    .add_chat_completions_model(&model_entry.name, chat_engine)
+                    .add_chat_completions_model(card.name(), chat_engine)
                     .context("add_chat_completions_model")?;
                 tracing::info!("Chat completions is ready");
             }
@@ -373,7 +359,7 @@ impl ModelWatcher {
                     NvCreateCompletionRequest,
                     NvCreateCompletionResponse,
                 >(
-                    &card,
+                    card,
                     &client,
                     self.router_mode,
                     self.busy_threshold,
@@ -384,7 +370,7 @@ impl ModelWatcher {
                 .await
                 .context("build_routed_pipeline_with_preprocessor")?;
                 self.manager
-                    .add_completions_model(&model_entry.name, completions_engine)
+                    .add_completions_model(card.name(), completions_engine)
                     .context("add_completions_model")?;
                 tracing::info!("Completions is ready");
             }
@@ -399,7 +385,7 @@ impl ModelWatcher {
             .await?;
             let engine = Arc::new(push_router);
             self.manager
-                .add_chat_completions_model(&model_entry.name, engine)?;
+                .add_chat_completions_model(card.name(), engine)?;
         } else if card.model_input == ModelInput::Text && card.model_type.supports_completions() {
             // Case 2: Text + Completions
             let push_router = PushRouter::<
@@ -410,8 +396,7 @@ impl ModelWatcher {
             )
             .await?;
             let engine = Arc::new(push_router);
-            self.manager
-                .add_completions_model(&model_entry.name, engine)?;
+            self.manager.add_completions_model(card.name(), engine)?;
         } else if card.model_input == ModelInput::Tokens && card.model_type.supports_embedding() {
             // Case 4: Tokens + Embeddings
 
@@ -422,7 +407,7 @@ impl ModelWatcher {
             >::new();
 
             let preprocessor = OpenAIPreprocessor::new(card.clone())?.into_operator();
-            let backend = Backend::from_mdc(&card).into_operator();
+            let backend = Backend::from_mdc(card).into_operator();
 
             let router = PushRouter::<
                 PreprocessedEmbeddingRequest,
@@ -445,7 +430,7 @@ impl ModelWatcher {
                 .link(frontend)?;
 
             self.manager
-                .add_embeddings_model(&model_entry.name, embedding_engine)?;
+                .add_embeddings_model(card.name(), embedding_engine)?;
         } else if card.model_input == ModelInput::Tensor && card.model_type.supports_tensor() {
             // Case 5: Tensor + Tensor (non-LLM)
             let push_router = PushRouter::<
@@ -456,7 +441,7 @@ impl ModelWatcher {
             )
             .await?;
             let engine = Arc::new(push_router);
-            self.manager.add_tensor_model(&model_entry.name, engine)?;
+            self.manager.add_tensor_model(card.name(), engine)?;
         } else {
             // Reject unsupported combinations
             anyhow::bail!(
@@ -470,16 +455,16 @@ impl ModelWatcher {
         Ok(())
     }
 
-    /// All the registered ModelEntry, one per instance
-    pub async fn all_entries(&self) -> anyhow::Result<Vec<ModelEntry>> {
+    /// All the registered ModelDeploymentCard, one per instance
+    pub async fn all_cards(&self) -> anyhow::Result<Vec<ModelDeploymentCard>> {
         let Some(etcd_client) = self.drt.etcd_client() else {
-            anyhow::bail!("all_entries: Missing etcd client");
+            anyhow::bail!("all_cards: Missing etcd client");
         };
-        let kvs = etcd_client.kv_get_prefix(MODEL_ROOT_PATH).await?;
-        let mut entries = Vec::with_capacity(kvs.len());
+        let kvs = etcd_client.kv_get_prefix(model_card::ROOT_PATH).await?;
+        let mut cards = Vec::with_capacity(kvs.len());
         for kv in kvs {
-            let model_entry = match serde_json::from_slice::<ModelEntry>(kv.value()) {
-                Ok(model_entry) => model_entry,
+            let card = match serde_json::from_slice::<ModelDeploymentCard>(kv.value()) {
+                Ok(card) => card,
                 Err(err) => {
                     match kv.value_str() {
                         Ok(value) => {
@@ -492,27 +477,90 @@ impl ModelWatcher {
                     continue;
                 }
             };
-            entries.push(model_entry);
+            cards.push(card);
         }
-        Ok(entries)
+        Ok(cards)
     }
 
-    pub async fn entries_for_model(
+    pub async fn cards_for_model(
         &self,
         model_name: &str,
-        target_namespace: Option<&str>,
-        is_global_namespace: bool,
-    ) -> anyhow::Result<Vec<ModelEntry>> {
-        let mut all = self.all_entries().await?;
-        all.retain(|entry| {
-            let matches_name = entry.name == model_name;
+        _target_namespace: Option<&str>,
+        _is_global_namespace: bool,
+    ) -> anyhow::Result<Vec<ModelDeploymentCard>> {
+        let mut all = self.all_cards().await?;
+        all.retain(|card| {
+            card.name() == model_name
+            // TODO Restore namespace matching
+            /*
+            let matches_name = card.name() == model_name;
             let matches_namespace = match (is_global_namespace, target_namespace) {
                 (true, _) => true,
                 (false, None) => true,
                 (false, Some(target_ns)) => entry.endpoint_id.namespace == target_ns,
             };
             matches_name && matches_namespace
+            */
         });
         Ok(all)
+    }
+}
+
+/// The ModelDeploymentCard is published in etcd with a key like "v1/mdc/dynamo/backend/generate/694d9981145a61ad".
+/// Extract the EndpointId from that.
+fn etcd_key_to_endpoint_id(s: &str) -> anyhow::Result<EndpointId> {
+    let parts: Vec<&str> = s.split('/').collect();
+
+    // Determine starting index, skipping "v1" if present
+    let start_idx = if !parts.is_empty() && parts[0] == "v1" {
+        1
+    } else {
+        0
+    };
+
+    // Need at least prefix model_card::ROOT_PATH + 3 parts: namespace, component, name
+    if parts.len() <= start_idx + 3 {
+        anyhow::bail!("Invalid format: not enough path segments in {s}");
+    }
+
+    // Expect "cards" right after optional "v1"
+    if parts.get(start_idx) != Some(&model_card::ROOT_PATH) {
+        anyhow::bail!("Invalid format: expected model card ROOT_PATH segment in {s}");
+    }
+
+    let namespace = parts[start_idx + 1].to_string();
+    let component = parts[start_idx + 2].to_string();
+    let name = parts[start_idx + 3].to_string();
+
+    Ok(EndpointId {
+        namespace,
+        component,
+        name,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_etcd_key_to_endpoint_id() {
+        let input = format!(
+            "v1/{}/dynamo/backend/generate/694d9981145a61ad",
+            model_card::ROOT_PATH
+        );
+        let result = etcd_key_to_endpoint_id(&input).unwrap();
+        assert_eq!(result.namespace, "dynamo");
+        assert_eq!(result.component, "backend");
+        assert_eq!(result.name, "generate");
+
+        let input = format!(
+            "{}/dynamo/backend/generate/694d9981145a61ad",
+            model_card::ROOT_PATH
+        );
+        let result = etcd_key_to_endpoint_id(&input).unwrap();
+        assert_eq!(result.namespace, "dynamo");
+        assert_eq!(result.component, "backend");
+        assert_eq!(result.name, "generate");
     }
 }
