@@ -99,7 +99,6 @@ if [ -n "${PYTHONPATH:-}" ]; then
     fi
 fi
 
-{ set +x; } 2>/dev/null
 
 if ! grep -q "export GPG_TTY=" ~/.bashrc; then
     show_and_run echo 'export GPG_TTY=$(tty)' >> ~/.bashrc
