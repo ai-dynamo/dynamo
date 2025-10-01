@@ -74,8 +74,8 @@ sglang_configs = {
     ),
     "multimodal_agg_qwen": SGLangConfig(
         name="multimodal_agg_qwen",
-        directory="/workspace/examples/multimodal/sglang",
-        script_name="agg.sh",
+        directory=sglang_dir,
+        script_name="multimodal_agg.sh",
         marks=[pytest.mark.gpu_2],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         delayed_start=0,

@@ -6,7 +6,6 @@ import contextlib
 import logging
 import os
 import socket
-import sys
 from argparse import Namespace
 from dataclasses import dataclass
 from enum import Enum
@@ -55,6 +54,24 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": False,
         "help": "Use SGLang's tokenizer. This will skip tokenization of the input and output and only v1/chat/completions will be available when using the dynamo frontend",
     },
+    "multimodal-processor": {
+        "flags": ["--multimodal-processor"],
+        "action": "store_true",
+        "default": False,
+        "help": "Run as multimodal processor component for handling multimodal requests",
+    },
+    "multimodal-encode-worker": {
+        "flags": ["--multimodal-encode-worker"],
+        "action": "store_true",
+        "default": False,
+        "help": "Run as multimodal encode worker component for processing images/videos",
+    },
+    "multimodal-worker": {
+        "flags": ["--multimodal-worker"],
+        "action": "store_true",
+        "default": False,
+        "help": "Run as multimodal worker component for LLM inference with multimodal data",
+    },
 }
 
 
@@ -71,6 +88,11 @@ class DynamoArgs:
 
     # preprocessing options
     use_sglang_tokenizer: bool = False
+
+    # multimodal options
+    multimodal_processor: bool = False
+    multimodal_encode_worker: bool = False
+    multimodal_worker: bool = False
 
 
 @dataclass
@@ -96,26 +118,6 @@ class Config:
         self.server_args = server_args
         self.dynamo_args = dynamo_args
         self.serving_mode = _set_serving_strategy(server_args)
-
-
-class MultimodalConfig:
-    """
-    Used by multimodal examples.
-    """
-
-    def __init__(self, server_args: ServerArgs, dynamo_args: MultimodalDynamoArgs):
-        self.server_args = server_args
-        self.dynamo_args = dynamo_args
-        self.serving_mode = _set_serving_strategy(server_args)
-
-        # Convenient access to common attributes
-        self.model = server_args.model_path
-        self.served_model_name = getattr(server_args, "served_model_name", None)
-        self.block_size = getattr(server_args, "kv_cache_block_size", None)
-        self.namespace = dynamo_args.namespace
-        self.component = dynamo_args.component
-        self.endpoint = dynamo_args.endpoint
-        self.downstream_endpoint = dynamo_args.downstream_endpoint
 
 
 def _set_parser(
@@ -175,6 +177,15 @@ def parse_args(args: list[str]) -> Config:
             and parsed_args.disaggregation_mode == "prefill"
         ):
             endpoint = f"dyn://{namespace}.prefill.generate"
+        elif parsed_args.multimodal_processor:
+            endpoint = f"dyn://{namespace}.processor.generate"
+        elif parsed_args.multimodal_encode_worker:
+            endpoint = f"dyn://{namespace}.encoder.generate"
+        elif (
+            parsed_args.multimodal_worker
+            and parsed_args.disaggregation_mode == "prefill"
+        ):
+            endpoint = f"dyn://{namespace}.prefill.generate"
         else:
             endpoint = f"dyn://{namespace}.backend.generate"
 
@@ -202,6 +213,9 @@ def parse_args(args: list[str]) -> Config:
         tool_call_parser=tool_call_parser,
         reasoning_parser=reasoning_parser,
         use_sglang_tokenizer=parsed_args.use_sglang_tokenizer,
+        multimodal_processor=parsed_args.multimodal_processor,
+        multimodal_encode_worker=parsed_args.multimodal_encode_worker,
+        multimodal_worker=parsed_args.multimodal_worker,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
 
@@ -306,105 +320,3 @@ def _setup_common_parser_args(
 
     # SGLang args
     ServerArgs.add_cli_args(parser)
-
-
-def parse_args_multimodal(
-    component: str, args_list: Optional[List[str]] = None
-) -> MultimodalConfig:
-    """
-    Parse arguments for multimodal pipeline components with component-specific defaults.
-
-    Args:
-        component: The component type (processor, worker, encoder, prefill)
-        args_list: Optional list of arguments to parse, defaults to sys.argv[1:]
-
-    Returns:
-        MultimodalConfig: Configuration object with server_args and multimodal dynamo_args
-    """
-    if args_list is None:
-        args_list = sys.argv[1:]
-
-    parser = argparse.ArgumentParser(
-        description=f"SGLang {component.title()} for Dynamo Multimodal Pipeline"
-    )
-
-    parser.add_argument(
-        "--endpoint",
-        type=str,
-        help=f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Example: {DEFAULT_ENDPOINT}",
-    )
-    parser.add_argument(
-        "--downstream-endpoint",
-        type=str,
-        help="Downstream endpoint for pipeline communication",
-    )
-
-    _setup_common_parser_args(parser, include_dynamo_args=False)
-
-    parsed_args = parser.parse_args(args_list)
-    parsed_args = _setup_bootstrap_port(args_list, parsed_args)
-
-    # Dynamo argument processing - determine endpoints with multimodal pipeline logic
-    namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
-    endpoint = parsed_args.endpoint
-
-    if endpoint is None:
-        # Set default endpoints based on component and disaggregation mode
-        if (
-            hasattr(parsed_args, "disaggregation_mode")
-            and parsed_args.disaggregation_mode == "prefill"
-        ):
-            endpoint = f"dyn://{namespace}.prefill.generate"
-        elif (
-            hasattr(parsed_args, "disaggregation_mode")
-            and parsed_args.disaggregation_mode == "decode"
-        ):
-            endpoint = f"dyn://{namespace}.llm.generate"
-        else:
-            # Default endpoints for different components
-            component_endpoint_map = {
-                "processor": f"dyn://{namespace}.processor.generate",
-                "encoder": f"dyn://{namespace}.encoder.generate",
-                "worker": f"dyn://{namespace}.llm.generate",
-                "prefill": f"dyn://{namespace}.prefill.generate",
-            }
-            endpoint = component_endpoint_map.get(
-                component, f"dyn://{namespace}.{component}.generate"
-            )
-
-    # Set downstream endpoint if not provided (pipeline communication)
-    downstream_endpoint = parsed_args.downstream_endpoint
-    if downstream_endpoint is None:
-        downstream_endpoint_map = {
-            "processor": f"dyn://{namespace}.encoder.generate",  # processor -> encoder
-            "encoder": f"dyn://{namespace}.llm.generate",  # encoder -> pd worker
-            "worker": f"dyn://{namespace}.prefill.generate",  # pd worker -> prefill worker
-            "prefill": None,  # end of pipeline
-        }
-        downstream_endpoint = downstream_endpoint_map.get(component)
-
-    # Parse endpoint
-    parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
-        endpoint
-    )
-
-    dynamo_args = MultimodalDynamoArgs(
-        namespace=parsed_namespace,
-        component=parsed_component_name,
-        endpoint=parsed_endpoint_name,
-        downstream_endpoint=downstream_endpoint,
-    )
-
-    # Create ServerArgs using SGLang's method
-    server_args = _create_server_args(parsed_args)
-
-    # Auto-configure skip_tokenizer_init for multimodal pipeline usage
-    if not server_args.skip_tokenizer_init:
-        logging.info(
-            "When using multimodal processor, we handle tokenization in the pipeline. "
-            "Automatically setting --skip-tokenizer-init to True for worker components."
-        )
-        if component in ["worker", "llm"]:
-            server_args.skip_tokenizer_init = True
-
-    return MultimodalConfig(server_args, dynamo_args)
