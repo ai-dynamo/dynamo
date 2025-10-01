@@ -827,9 +827,7 @@ def test_indexers_sync(request, runtime_services, predownload_tokenizers):
             component = namespace.component("mocker")
             endpoint = component.endpoint("generate")
 
-            # Create first KV router
-            # from dynamo._core import KvPushRouter, KvRouterConfig
-
+            # Create KvRouterConfig with lower snapshot threshold for testing
             kv_router_config = KvRouterConfig(router_snapshot_threshold=20)
 
             async def send_requests_to_router(router, num_requests, router_name):
@@ -877,6 +875,7 @@ def test_indexers_sync(request, runtime_services, predownload_tokenizers):
                 )
                 return successful
 
+            # Launch first router
             logger.info("Creating first KV router")
             kv_push_router1 = KvPushRouter(
                 endpoint=endpoint,
