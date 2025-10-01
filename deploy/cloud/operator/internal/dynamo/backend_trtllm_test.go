@@ -143,10 +143,8 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 				StartupProbe:   &corev1.Probe{},
 			}
 
-			// Call UpdateContainer
 			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, tt.component, "test-service", tt.multinodeDeployer)
 
-			// Use helper functions to validate results
 			validateVolumeMounts(t, container, tt.expectedVolumeMounts)
 			validateCommand(t, container, tt.expectedCommand)
 			validateArgs(t, container, tt.expectedArgs)
@@ -812,6 +810,103 @@ func TestTRTLLMBackend_getGPUsPerNode(t *testing.T) {
 			result := getGPUsPerNode(tt.resources)
 			if result != tt.expected {
 				t.Errorf("getGPUsPerNode() = %d, want %d", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestTRTLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
+	backend := &TRTLLMBackend{}
+
+	tests := []struct {
+		name                       string
+		component                  *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		volumeMounts               []corev1.VolumeMount
+		expectNoEnvVarChanges      bool
+		expectLoggedPartialSupport bool
+	}{
+		{
+			name: "TensorRT-LLM backend with useAsCompilationCache volume mount",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "trtllm-cache",
+							MountPoint:            "/cache/trtllm",
+							UseAsCompilationCache: true,
+						},
+					},
+				},
+			},
+			volumeMounts:               []corev1.VolumeMount{},
+			expectNoEnvVarChanges:      true, // TensorRT-LLM doesn't set env vars yet
+			expectLoggedPartialSupport: true,
+		},
+		{
+			name: "TensorRT-LLM backend with useAsCompilationCache at custom mount point",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "custom-cache",
+							MountPoint:            "/custom/cache/path",
+							UseAsCompilationCache: true,
+						},
+					},
+				},
+			},
+			volumeMounts:               []corev1.VolumeMount{},
+			expectNoEnvVarChanges:      true, // TensorRT-LLM doesn't set env vars yet
+			expectLoggedPartialSupport: true,
+		},
+		{
+			name: "TensorRT-LLM backend without useAsCompilationCache",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:       "regular-volume",
+							MountPoint: "/data",
+						},
+					},
+				},
+			},
+			volumeMounts:               []corev1.VolumeMount{},
+			expectNoEnvVarChanges:      true,
+			expectLoggedPartialSupport: false,
+		},
+		{
+			name: "TensorRT-LLM backend with no volume mounts",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					VolumeMounts: nil,
+				},
+			},
+			volumeMounts:               []corev1.VolumeMount{},
+			expectNoEnvVarChanges:      true,
+			expectLoggedPartialSupport: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a container with initial state including volume mounts
+			container := &corev1.Container{
+				Env:          []corev1.EnvVar{},
+				VolumeMounts: tt.volumeMounts,
+			}
+
+			// Store original env vars for comparison
+			originalEnvCount := len(container.Env)
+
+			// Call UpdateContainer (single node to avoid multinode logic)
+			backend.UpdateContainer(container, 1, RoleMain, tt.component, "test-service", &GroveMultinodeDeployer{})
+
+			if tt.expectNoEnvVarChanges {
+				// Check that no new environment variables were added
+				if len(container.Env) != originalEnvCount {
+					t.Errorf("Expected no environment variable changes, but env count changed from %d to %d", originalEnvCount, len(container.Env))
+				}
 			}
 		})
 	}

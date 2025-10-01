@@ -178,6 +178,8 @@ kind: DynamoGraphDeployment
 metadata:
   name: model-caching
 spec:
+  pvcs:
+    - name: s3-model
   envs:
     - name: HF_HOME
       value: /model
@@ -185,13 +187,13 @@ spec:
       value: '{"Common": {"model": "/model", ...}}'
   services:
     VllmWorker:
-      pvc:
-        name: s3-model
-        mountPoint: /model
+      volumeMounts:
+        - name: s3-model
+          mountPoint: /model
     Processor:
-      pvc:
-        name: s3-model
-        mountPoint: /model
+      volumeMounts:
+        - name: s3-model
+          mountPoint: /model
 ```
 
 
@@ -286,15 +288,17 @@ spec:
       16384, "enable-prefix-caching": true, "ServiceArgs": {"workers": 1, "resources":
       {"gpu": "4", "memory": "40Gi"}}, "common-configs": ["model", "block-size", "max-model-len"]},
       "Planner": {"environment": "kubernetes", "no-operation": true}}'
+  pvcs:
+    - name: llama-3-3-70b-instruct-model
   services:
     Processor:
-      pvc:
-        mountPoint: /model
-        name: llama-3-3-70b-instruct-model
+      volumeMounts:
+        - name: llama-3-3-70b-instruct-model
+          mountPoint: /model
     VllmWorker:
-      pvc:
-        mountPoint: /model
-        name: llama-3-3-70b-instruct-model
+      volumeMounts:
+        - name: llama-3-3-70b-instruct-model
+          mountPoint: /model
       extraPodSpec:
         affinity:
           nodeAffinity:

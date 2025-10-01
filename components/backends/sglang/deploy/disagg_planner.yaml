@@ -9,6 +9,9 @@ spec:
   envs:
     - name: DYNAMO_NAMESPACE
       value: "dynamo"
+  pvcs:
+    - name: dynamo-pvc
+      create: false # Must be pre-created before deployment and SLA profiler must have been run
   services:
     Frontend:
       dynamoNamespace: dynamo
@@ -41,10 +44,9 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      pvc:
-        create: false
-        name: dynamo-pvc # Must be pre-created before deployment and SLA profiler must have been run
-        mountPoint: /data
+      volumeMounts:
+        - name: dynamo-pvc
+          mountPoint: /data
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag

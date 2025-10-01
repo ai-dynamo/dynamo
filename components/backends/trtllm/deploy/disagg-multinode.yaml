@@ -79,6 +79,8 @@ metadata:
   name: trtllm-disagg-tp8
 spec:
   backendFramework: trtllm
+  pvcs:
+    - name: models
   envs:
     - name: OMPI_ALLOW_RUN_AS_ROOT
       value: "1"
@@ -103,9 +105,9 @@ spec:
             - --http-port
             - "8000"
     prefill:
-      pvc:
-        name: models
-        mountPoint: /models
+      volumeMounts:
+        - name: models
+          mountPoint: /models
       dynamoNamespace: trtllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
@@ -143,9 +145,9 @@ spec:
             - --disaggregation-strategy
             - decode_first
     decode:
-      pvc:
-        name: models
-        mountPoint: /models
+      volumeMounts:
+        - name: models
+          mountPoint: /models
       dynamoNamespace: trtllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker

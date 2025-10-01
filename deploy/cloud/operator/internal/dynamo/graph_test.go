@@ -1200,9 +1200,11 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 											Value: "2",
 										},
 									},
-									PVC: &v1alpha1.PVC{
-										Name:       &[]string{"planner-pvc"}[0],
-										MountPoint: &[]string{"/planner"}[0],
+									VolumeMounts: []v1alpha1.VolumeMount{
+										{
+											Name:       "planner-pvc",
+											MountPoint: "/planner",
+										},
 									},
 									EnvFromSecret: &[]string{"planner-secret"}[0],
 									LivenessProbe: &corev1.Probe{
@@ -1719,9 +1721,11 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 											Value: "2",
 										},
 									},
-									PVC: &v1alpha1.PVC{
-										Name:       &[]string{"planner-pvc"}[0],
-										MountPoint: &[]string{"/planner"}[0],
+									VolumeMounts: []v1alpha1.VolumeMount{
+										{
+											Name:       "planner-pvc",
+											MountPoint: "/planner",
+										},
 									},
 									EnvFromSecret: &[]string{"planner-secret"}[0],
 									LivenessProbe: &corev1.Probe{
@@ -2517,9 +2521,11 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 											Value: "2",
 										},
 									},
-									PVC: &v1alpha1.PVC{
-										Name:       &[]string{"planner-pvc"}[0],
-										MountPoint: &[]string{"/planner"}[0],
+									VolumeMounts: []v1alpha1.VolumeMount{
+										{
+											Name:       "planner-pvc",
+											MountPoint: "/planner",
+										},
 									},
 									EnvFromSecret: &[]string{"planner-secret"}[0],
 									LivenessProbe: &corev1.Probe{
@@ -4756,6 +4762,347 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 			diff := cmp.Diff(tt.expectedPodSpec, podSpec)
 			if diff != "" {
 				t.Errorf("GenerateBasePodSpec() podSpec = %v, want %v, diff = %v", podSpec, tt.expectedPodSpec, diff)
+			}
+		})
+	}
+}
+
+func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
+	secretsRetriever := &mockSecretsRetriever{}
+	controllerConfig := controller_common.Config{}
+
+	tests := []struct {
+		name           string
+		component      *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		expectError    bool
+		expectedPVCs   []string
+		expectedMounts []corev1.VolumeMount
+	}{
+		{
+			name: "valid volumeMounts",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:       "test-pvc",
+							MountPoint: "/data",
+						},
+					},
+				},
+			},
+			expectError:  false,
+			expectedPVCs: []string{"test-pvc"},
+			expectedMounts: []corev1.VolumeMount{
+				{Name: "test-pvc", MountPath: "/data"},
+				{Name: "shared-memory", MountPath: "/dev/shm"},
+			},
+		},
+		{
+			name: "multiple volumeMounts",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{Name: "pvc1", MountPoint: "/data1"},
+						{Name: "pvc2", MountPoint: "/data2"},
+					},
+				},
+			},
+			expectError:  false,
+			expectedPVCs: []string{"pvc1", "pvc2"},
+			expectedMounts: []corev1.VolumeMount{
+				{Name: "pvc1", MountPath: "/data1"},
+				{Name: "pvc2", MountPath: "/data2"},
+				{Name: "shared-memory", MountPath: "/dev/shm"},
+			},
+		},
+		{
+			name: "empty volumeMount name",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{Name: "", MountPoint: "/data"},
+					},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "empty volumeMount mountPoint",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{Name: "test-pvc", MountPoint: ""},
+					},
+				},
+			},
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			podSpec, err := GenerateBasePodSpec(
+				tt.component,
+				BackendFrameworkVLLM,
+				secretsRetriever,
+				"test-deployment",
+				"default",
+				RoleMain,
+				1,
+				controllerConfig,
+				commonconsts.MultinodeDeploymentTypeGrove,
+				"test-service",
+			)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("GenerateBasePodSpec() expected error, got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("GenerateBasePodSpec() unexpected error: %v", err)
+				return
+			}
+
+			// Check expected PVCs are present in volumes
+			for _, expectedPVC := range tt.expectedPVCs {
+				found := false
+				for _, volume := range podSpec.Volumes {
+					if volume.Name == expectedPVC && volume.PersistentVolumeClaim != nil {
+						if volume.PersistentVolumeClaim.ClaimName == expectedPVC {
+							found = true
+							break
+						}
+					}
+				}
+				if !found {
+					t.Errorf("GenerateBasePodSpec() expected PVC volume %s not found", expectedPVC)
+				}
+			}
+
+			// Check expected mounts are present
+			if len(podSpec.Containers) == 0 {
+				t.Errorf("GenerateBasePodSpec() no containers found")
+				return
+			}
+
+			container := podSpec.Containers[0]
+			for _, expectedMount := range tt.expectedMounts {
+				found := false
+				for _, mount := range container.VolumeMounts {
+					if mount.Name == expectedMount.Name && mount.MountPath == expectedMount.MountPath {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("GenerateBasePodSpec() expected volume mount %+v not found", expectedMount)
+				}
+			}
+		})
+	}
+}
+
+func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) {
+	secretsRetriever := &mockSecretsRetriever{}
+	controllerConfig := controller_common.Config{}
+
+	tests := []struct {
+		name             string
+		component        *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		backendFramework BackendFramework
+		expectError      bool
+		expectedMount    *corev1.VolumeMount
+	}{
+		{
+			name: "useAsCompilationCache with custom mount point",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "cache-pvc",
+							MountPoint:            "/custom/cache",
+							UseAsCompilationCache: true,
+						},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			expectError:      false,
+			expectedMount:    &corev1.VolumeMount{Name: "cache-pvc", MountPath: "/custom/cache"},
+		},
+		{
+			name: "useAsCompilationCache with default mount point for VLLM",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "cache-pvc",
+							UseAsCompilationCache: true,
+						},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			expectError:      false,
+			expectedMount:    &corev1.VolumeMount{Name: "cache-pvc", MountPath: commonconsts.DefaultVLLMCacheMountPoint},
+		},
+		{
+			name: "useAsCompilationCache without mount point for SGLang - should error",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "cache-pvc",
+							UseAsCompilationCache: true,
+						},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkSGLang,
+			expectError:      true, // SGLang doesn't support compilation cache, requires explicit mount point
+			expectedMount:    nil,
+		},
+		{
+			name: "useAsCompilationCache with explicit mount point for SGLang - should work",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "cache-pvc",
+							MountPoint:            "/custom/sglang/cache",
+							UseAsCompilationCache: true,
+						},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkSGLang,
+			expectError:      false,
+			expectedMount:    &corev1.VolumeMount{Name: "cache-pvc", MountPath: "/custom/sglang/cache"},
+		},
+		{
+			name: "useAsCompilationCache without mount point for TensorRT-LLM - should error",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "cache-pvc",
+							UseAsCompilationCache: true,
+						},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkTRTLLM,
+			expectError:      true, // TensorRT-LLM doesn't support compilation cache, requires explicit mount point
+			expectedMount:    nil,
+		},
+		{
+			name: "useAsCompilationCache with explicit mount point for TensorRT-LLM - should work",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:                  "cache-pvc",
+							MountPoint:            "/custom/trtllm/cache",
+							UseAsCompilationCache: true,
+						},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkTRTLLM,
+			expectError:      false,
+			expectedMount:    &corev1.VolumeMount{Name: "cache-pvc", MountPath: "/custom/trtllm/cache"},
+		},
+		{
+			name: "no useAsCompilationCache volumes - should be ignored",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{
+							Name:       "regular-pvc",
+							MountPoint: "/data",
+						},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			expectError:      false,
+			expectedMount:    nil, // Should be ignored, not error
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			podSpec, err := GenerateBasePodSpec(
+				tt.component,
+				tt.backendFramework,
+				secretsRetriever,
+				"test-deployment",
+				"default",
+				RoleMain,
+				1,
+				controllerConfig,
+				commonconsts.MultinodeDeploymentTypeGrove,
+				"test-service",
+			)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("GenerateBasePodSpec() expected error, got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("GenerateBasePodSpec() unexpected error: %v", err)
+				return
+			}
+
+			if tt.expectedMount != nil {
+				// Check PVC volume exists
+				found := false
+				for _, volume := range podSpec.Volumes {
+					if volume.Name == tt.expectedMount.Name && volume.PersistentVolumeClaim != nil {
+						if volume.PersistentVolumeClaim.ClaimName == tt.expectedMount.Name {
+							found = true
+							break
+						}
+					}
+				}
+				if !found {
+					t.Errorf("GenerateBasePodSpec() expected PVC volume %s not found", tt.expectedMount.Name)
+				}
+
+				// Check volume mount exists
+				if len(podSpec.Containers) == 0 {
+					t.Errorf("GenerateBasePodSpec() no containers found")
+					return
+				}
+
+				container := podSpec.Containers[0]
+				found = false
+				for _, mount := range container.VolumeMounts {
+					if mount.Name == tt.expectedMount.Name && mount.MountPath == tt.expectedMount.MountPath {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("GenerateBasePodSpec() expected volume mount %+v not found", tt.expectedMount)
+				}
 			}
 		})
 	}

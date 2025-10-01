@@ -6,6 +6,9 @@ kind: DynamoGraphDeployment
 metadata:
   name: sgl-dsr1-16gpu
 spec:
+  pvcs:
+    - name: model-cache
+      create: false
   services:
     Frontend:
       dynamoNamespace: sgl-dsr1-16gpu
@@ -30,10 +33,9 @@ spec:
       resources:
         limits:
           gpu: "8"
-      pvc:
-        create: false
-        name: model-cache
-        mountPoint: /root/.cache/huggingface
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /root/.cache/huggingface
       sharedMemory:
         size: 80Gi
       extraPodSpec:
@@ -74,10 +76,9 @@ spec:
       resources:
         limits:
           gpu: "8"
-      pvc:
-        create: false
-        name: model-cache
-        mountPoint: /root/.cache/huggingface
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /root/.cache/huggingface
       sharedMemory:
         size: 80Gi
       extraPodSpec:
