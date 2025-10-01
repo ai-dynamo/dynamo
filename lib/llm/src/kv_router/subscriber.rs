@@ -113,8 +113,8 @@ pub async fn start_kv_router_background(
         if let Err(e) = nats_client.object_store_delete_bucket(&bucket_name).await {
             tracing::warn!("Failed to delete bucket (may not exist): {e:?}");
         }
-    } else {
-        // Try to download initial state from object store
+    } else if router_snapshot_threshold.is_some() {
+        // Only try to download initial state from object store if snapshotting is enabled
         let url = url::Url::parse(&format!(
             "nats://{}/{bucket_name}/{RADIX_STATE_FILE}",
             nats_client.addr()
@@ -143,6 +143,8 @@ pub async fn start_kv_router_background(
                 );
             }
         }
+    } else {
+        tracing::info!("Did not initialize radix state (router_snapshot_threshold is None)");
     }
 
     // Get etcd client (needed for both snapshots and router watching)
