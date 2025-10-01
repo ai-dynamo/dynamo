@@ -2011,29 +2011,14 @@ class DynamoFrameworkInfo(NodeInfo):
         if not workspace_dir:
             return components
 
-        # Scan components directory (frontend, planner, etc.)
-        components_path = os.path.join(workspace_dir, "components")
+        # Scan components python src directory (frontend, planner, etc.)
+        components_path = os.path.join(workspace_dir, "components", "src", "dynamo")
         if os.path.exists(components_path):
             for item in os.listdir(components_path):
                 item_path = os.path.join(components_path, item)
                 if os.path.isdir(item_path):
                     # Check for dynamo module in src
-                    module_path = os.path.join(
-                        item_path, "src", "dynamo", item, "__init__.py"
-                    )
-                    if os.path.exists(module_path):
-                        components.append(f"dynamo.{item}")
-
-        # Scan backends directory (vllm, sglang, trtllm, etc.)
-        backends_path = os.path.join(workspace_dir, "components", "backends")
-        if os.path.exists(backends_path):
-            for item in os.listdir(backends_path):
-                item_path = os.path.join(backends_path, item)
-                if os.path.isdir(item_path):
-                    # Check for dynamo module in src
-                    module_path = os.path.join(
-                        item_path, "src", "dynamo", item, "__init__.py"
-                    )
+                    module_path = os.path.join(item_path, "__init__.py")
                     if os.path.exists(module_path):
                         components.append(f"dynamo.{item}")
 
@@ -2228,20 +2213,9 @@ def show_pythonpath_recommendation():
     # Collect all component source paths
     comp_path = os.path.join(workspace_dir, "components")
     if os.path.exists(comp_path):
-        for item in os.listdir(comp_path):
-            if item == "backends":
-                continue  # Handle backends separately
-            src_path = os.path.join(comp_path, item, "src")
-            if os.path.exists(src_path):
-                paths.append(src_path)
-
-    # Collect all backend source paths
-    backend_path = os.path.join(workspace_dir, "components", "backends")
-    if os.path.exists(backend_path):
-        for item in os.listdir(backend_path):
-            src_path = os.path.join(backend_path, item, "src")
-            if os.path.exists(src_path):
-                paths.append(src_path)
+        src_path = os.path.join(comp_path, "src")
+        if os.path.exists(src_path):
+            paths.append(src_path)
 
     # Also add runtime path
     runtime_path = os.path.join(workspace_dir, "lib/bindings/python/src")

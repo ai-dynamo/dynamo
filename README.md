@@ -314,13 +314,8 @@ maturin develop --uv
 
 ```
 cd $PROJECT_ROOT
-uv pip install .
-# For development, use
-export PYTHONPATH="${PYTHONPATH}:$(pwd)/components/frontend/src:$(pwd)/components/planner/src:$(pwd)/components/backends/vllm/src:$(pwd)/components/backends/sglang/src:$(pwd)/components/backends/trtllm/src:$(pwd)/components/backends/llama_cpp/src:$(pwd)/components/backends/mocker/src"
+uv pip install -e .
 ```
-
-> [!Note]
-> Editable (`-e`) does not work because the `dynamo` package is split over multiple directories, one per backend.
 
 You should now be able to run `python -m dynamo.frontend`.
 

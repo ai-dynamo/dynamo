@@ -77,14 +77,7 @@ path = "hatch_build.py"
 
 [tool.hatch.build.targets.wheel]
 packages = [
-    "components/frontend/src/dynamo",
-    "components/planner/src/dynamo",
-    "components/router/src/dynamo",
-    "components/backends/llama_cpp/src/dynamo",
-    "components/backends/mocker/src/dynamo",
-    "components/backends/trtllm/src/dynamo",
-    "components/backends/sglang/src/dynamo",
-    "components/backends/vllm/src/dynamo"
+    "components/src/dynamo",
 ]
 
 [tool.hatch.metadata]
@@ -139,7 +132,7 @@ addopts = [
     "--ignore-glob=*_inc.py",
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
-    "--ignore-glob=components/backends/sglang/src/dynamo/sglang/request_handlers/*",
+    "--ignore-glob=components/src/dynamo/sglang/request_handlers/*",
     "--ignore-glob=components/backends/sglang/slurm_jobs/*",
     # FIXME: Get relative/generic blob paths to work here
 ]

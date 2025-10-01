@@ -116,11 +116,9 @@ uv pip install maturin
 cd $DYNAMO_HOME/lib/bindings/python
 maturin develop --uv
 cd $DYNAMO_HOME
-uv pip install .
-export PYTHONPATH="${PYTHONPATH}:$(pwd)/components/backends/sglang/src"
-# install target sglang version (you can choose any version)
-# we include the prerelease flag in order to install flashinfer rc versions
-uv pip install --prerelease=allow sglang[all]==0.4.9.post6
+# installs sglang supported version along with dynamo
+# include the prerelease flag to install flashinfer rc versions
+uv pip install --prerelease=allow -e .[sglang]
 ```
 
 </details>

@@ -337,12 +337,10 @@ COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
 # Much better than chown -R $USERNAME:$USERNAME /opt/dynamo/venv (~10min on my cpu)
 COPY --from=runtime ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
-# so we can use maturin develop
-RUN uv pip install maturin[patchelf]
-
-# Make sure to sync this with the one specified on README.md.
-# This is a generic PYTHONPATH which works for all the frameworks, so some paths may not be relevant for this particular framework.
-ENV PYTHONPATH=${WORKSPACE_DIR}/components/metrics/src:${WORKSPACE_DIR}/components/frontend/src:${WORKSPACE_DIR}/components/planner/src:${WORKSPACE_DIR}/components/backends/mocker/src:${WORKSPACE_DIR}/components/backends/trtllm/src:${WORKSPACE_DIR}/components/backends/vllm/src:${WORKSPACE_DIR}/components/backends/sglang/src:${WORKSPACE_DIR}/components/backends/llama_cpp/src
+# Install maturin, for maturin develop
+# Editable install of dynamo
+RUN uv pip install maturin[patchelf] && \
+    uv pip install --no-deps -e .
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

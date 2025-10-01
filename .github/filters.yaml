@@ -29,18 +29,21 @@ vllm: &vllm
   - 'container/deps/requirements.vllm.txt'
   - 'container/deps/vllm/**'
   - 'components/backends/vllm/**'
+  - 'components/src/dynamo/vllm/**'
   - 'tests/serve/test_vllm.py'
 
 sglang: &sglang
   - 'container/Dockerfile.sglang'
   - 'container/Dockerfile.sglang-wideep'
   - 'components/backends/sglang/**'
+  - 'components/src/dynamo/sglang/**'
   - 'container/build.sh'
   - 'tests/serve/test_sglang.py'
 
 trtllm: &trtllm
   - 'container/Dockerfile.trtllm'
   - 'components/backends/trtllm/**'
+  - 'components/src/dynamo/trtllm/**'
   - 'container/build.sh'
   - 'container/build_trtllm_wheel.sh'
   - 'container/deps/**'

@@ -61,8 +61,8 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ### Large Scale P/D and WideEP Features
 
-| Feature            | TensorRT-LLM | Notes                                                                 |
-|--------------------|--------------|-----------------------------------------------------------------------|
+| Feature            | TensorRT-LLM | Notes                                                           |
+|--------------------|--------------|-----------------------------------------------------------------|
 | **WideEP**         | ✅           |                                                                 |
 | **DP Rank Routing**| ✅           |                                                                 |
 | **GB200 Support**  | ✅           |                                                                 |

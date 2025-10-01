@@ -332,11 +332,11 @@ COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
 
 COPY --from=runtime ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
-# so we can use maturin develop
+# Install maturin, for maturin develop
 RUN uv pip install maturin[patchelf]
 
-# Make sure to sync this with the one specified on README.md.
-# This is a generic PYTHONPATH which works for all the frameworks, so some paths may not be relevant for this particular framework.
-ENV PYTHONPATH=${WORKSPACE_DIR}:${WORKSPACE_DIR}/components/metrics/src:${WORKSPACE_DIR}/components/frontend/src:${WORKSPACE_DIR}/components/planner/src:${WORKSPACE_DIR}/components/backends/mocker/src:${WORKSPACE_DIR}/components/backends/trtllm/src:${WORKSPACE_DIR}/components/backends/vllm/src:${WORKSPACE_DIR}/components/backends/sglang/src:${WORKSPACE_DIR}/components/backends/llama_cpp/src
+# Editable install of dynamo
+COPY pyproject.toml README.md hatch_build.py /workspace/
+RUN uv pip install --no-deps -e .
 
 CMD []
