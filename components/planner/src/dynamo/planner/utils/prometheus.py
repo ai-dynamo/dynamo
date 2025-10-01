@@ -14,28 +14,48 @@
 # limitations under the License.
 
 import logging
+import typing
 
 from prometheus_api_client import PrometheusConnect
+from pydantic import BaseModel, ValidationError
 
+from dynamo._core import prometheus_names
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
+class FrontendMetric(BaseModel):
+    container: typing.Optional[str] = None
+    dynamo_namespace: typing.Optional[str] = None
+    endpoint: typing.Optional[str] = None
+    instance: typing.Optional[str] = None
+    job: typing.Optional[str] = None
+    model: typing.Optional[str] = None
+    namespace: typing.Optional[str] = None
+    pod: typing.Optional[str] = None
+
+
+class FrontendMetricContainer(BaseModel):
+    metric: FrontendMetric
+    value: typing.Tuple[float, float]  # [timestamp, value]
+
+
 class PrometheusAPIClient:
-    def __init__(self, url: str):
+    def __init__(self, url: str, dynamo_namespace: str):
         self.prom = PrometheusConnect(url=url, disable_ssl=True)
+        self.dynamo_namespace = dynamo_namespace
 
     def _get_average_metric(
-        self, metric_name: str, interval: str, operation_name: str
+        self, full_metric_name: str, interval: str, operation_name: str, model_name: str
     ) -> float:
         """
         Helper method to get average metrics using the pattern:
         increase(metric_sum[interval])/increase(metric_count[interval])
 
         Args:
-            metric_name: Base metric name (e.g., 'inter_token_latency_seconds')
+            full_metric_name: Full metric name (e.g., 'dynamo_frontend_inter_token_latency_seconds')
             interval: Time interval for the query (e.g., '60s')
             operation_name: Human-readable name for error logging
 
@@ -43,64 +63,98 @@ class PrometheusAPIClient:
             Average metric value or 0 if no data/error
         """
         try:
-            # TODO: use prometheus_names.rs
-            full_metric_name = f"dynamo_frontend_{metric_name}"
             query = f"increase({full_metric_name}_sum[{interval}])/increase({full_metric_name}_count[{interval}])"
             result = self.prom.custom_query(query=query)
             if not result:
                 # No data available yet (no requests made) - return 0 silently
                 return 0
-            return float(result[0]["value"][1])
+            metrics_containers = parse_frontend_metric_containers(result)
+
+            values = []
+            for container in metrics_containers:
+                if (
+                    container.metric.model == model_name
+                    and container.metric.dynamo_namespace == self.dynamo_namespace
+                ):
+                    values.append(container.value[1])
+
+            if not values:
+                return 0
+            return sum(values) / len(values)
+
         except Exception as e:
             logger.error(f"Error getting {operation_name}: {e}")
             return 0
 
-    def get_avg_inter_token_latency(self, interval: str):
+    def get_avg_inter_token_latency(self, interval: str, model_name: str):
         return self._get_average_metric(
-            "inter_token_latency_seconds",
+            prometheus_names.frontend.inter_token_latency_seconds,
             interval,
             "avg inter token latency",
+            model_name,
         )
 
-    def get_avg_time_to_first_token(self, interval: str):
+    def get_avg_time_to_first_token(self, interval: str, model_name: str):
         return self._get_average_metric(
-            "time_to_first_token_seconds",
+            prometheus_names.frontend.time_to_first_token_seconds,
             interval,
             "avg time to first token",
+            model_name,
         )
 
-    def get_avg_request_duration(self, interval: str):
+    def get_avg_request_duration(self, interval: str, model_name: str):
         return self._get_average_metric(
-            "request_duration_seconds",
+            prometheus_names.frontend.request_duration_seconds,
             interval,
             "avg request duration",
+            model_name,
         )
 
-    def get_avg_request_count(self, interval: str):
+    def get_avg_request_count(self, interval: str, model_name: str):
         # This function follows a different query pattern than the other metrics
         try:
+            requests_total_metric = prometheus_names.frontend.requests_total
             raw_res = self.prom.custom_query(
-                query=f"increase(dynamo_frontend_requests_total[{interval}])"
+                query=f"increase({requests_total_metric}[{interval}])"
             )
+            metrics_containers = parse_frontend_metric_containers(raw_res)
             total_count = 0.0
-            for res in raw_res:
-                # count all success/failed and stream/non-stream requests
-                total_count += float(res["value"][1])
+            for container in metrics_containers:
+                if (
+                    container.metric.model == model_name
+                    and container.metric.dynamo_namespace == self.dynamo_namespace
+                ):
+                    total_count += container.value[1]
             return total_count
         except Exception as e:
             logger.error(f"Error getting avg request count: {e}")
             return 0
 
-    def get_avg_input_sequence_tokens(self, interval: str):
+    def get_avg_input_sequence_tokens(self, interval: str, model_name: str):
         return self._get_average_metric(
-            "input_sequence_tokens",
+            prometheus_names.frontend.input_sequence_tokens,
             interval,
             "avg input sequence tokens",
+            model_name,
         )
 
-    def get_avg_output_sequence_tokens(self, interval: str):
+    def get_avg_output_sequence_tokens(self, interval: str, model_name: str):
         return self._get_average_metric(
-            "output_sequence_tokens",
+            prometheus_names.frontend.output_sequence_tokens,
             interval,
             "avg output sequence tokens",
+            model_name,
         )
+
+
+def parse_frontend_metric_containers(
+    result: list[dict],
+) -> list[FrontendMetricContainer]:
+    metrics_containers: list[FrontendMetricContainer] = []
+    for res in result:
+        try:
+            metrics_containers.append(FrontendMetricContainer.model_validate(res))
+        except ValidationError as e:
+            logger.error(f"Error parsing frontend metric container: {e}")
+            continue
+    return metrics_containers

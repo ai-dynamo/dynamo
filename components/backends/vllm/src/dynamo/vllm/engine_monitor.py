@@ -4,6 +4,7 @@
 import asyncio
 import logging
 import os
+import traceback
 
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineDeadError
@@ -49,6 +50,7 @@ class VllmEngineMonitor:
                 await self.engine_client.check_health()
                 await asyncio.sleep(HEALTH_CHECK_INTERVAL)
             except EngineDeadError as e:
+                logger.error(f"Traceback: {traceback.format_exc()}")
                 logger.error(f"vLLM AsyncLLM health check failed: {e}")
                 logger.warning("Initiating Dynamo Runtime shutdown.")
                 self.runtime.shutdown()
