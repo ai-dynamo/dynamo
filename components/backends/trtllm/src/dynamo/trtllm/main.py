@@ -335,6 +335,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 kv_cache_block_size=config.kv_block_size,
                 migration_limit=config.migration_limit,
                 runtime_config=runtime_config,
+                custom_template_path=config.custom_jinja_template,
             )
 
         # Get health check payload (checks env var and falls back to TensorRT-LLM default)
