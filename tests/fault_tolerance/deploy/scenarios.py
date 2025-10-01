@@ -44,10 +44,10 @@ WORKER_READY_PATTERNS: Dict[str, Pattern] = {
     ),
     # SGLang workers - look for their specific initialization messages
     "decode": re.compile(
-        r"Model registration succeeded|Decode worker handler initialized|worker handler initialized"
+        r"Model registration succeeded|Decode worker handler initialized|Worker handler initialized"
     ),
     "prefill": re.compile(
-        r"Model registration succeeded|Prefill worker handler initialized"
+        r"Model registration succeeded|Prefill worker handler initialized|Worker handler initialized"
     ),
 }
 
