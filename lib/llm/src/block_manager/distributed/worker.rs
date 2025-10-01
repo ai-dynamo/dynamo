@@ -106,8 +106,14 @@ pub struct KvbmWorkerConfig {
     #[builder(default = "2")]
     dtype_width_bytes: usize,
 
-    #[builder(default = false)]
-    is_fully_contiguous_layout: bool,
+    #[builder(default = "LayoutType::FullyContiguous")]
+    device_layout_type: LayoutType,
+
+    #[builder(default = "LayoutType::FullyContiguous")]
+    host_layout_type: LayoutType,
+
+    #[builder(default = "LayoutType::FullyContiguous")]
+    disk_layout_type: LayoutType,
 
     #[builder(default = "String::from(\"kvbm\")")]
     barrier_id_prefix: String,
@@ -161,53 +167,51 @@ impl KvbmWorker {
             )));
         }
 
-        let (layout_type, num_layers, outer_dim, inner_dim) = if !config.is_fully_contiguous_layout
-        {
-            let (outer_contiguous, outer_dim) = if shape[0] >= config.num_device_blocks {
-                (false, shape[1])
-            } else if shape[1] >= config.num_device_blocks {
-                (true, shape[0])
-            } else {
-                return Err(anyhow::anyhow!(format!(
-                    "Unsupported kv cache layout. Got shape: {:?}",
-                    shape
-                )));
-            };
-            let num_layers = device_tensors.len();
-            let inner_dim = shape[2..].iter().product::<usize>() / config.page_size;
+        let (layout_type, num_layers, outer_dim, inner_dim) = match config.device_layout_type {
+            LayoutType::FullyContiguous => {
+                let num_layers = shape[1];
+                let outer_dim = shape[2];
+                let inner_dim = shape[3..].iter().product::<usize>() / config.page_size;
+                tracing::info!(
+                    "Inferred layout: num_layers={}, outer_dim={}, page_size={}, inner_dim={}",
+                    num_layers,
+                    outer_dim,
+                    config.page_size,
+                    inner_dim
+                );
 
-            tracing::info!(
-                "Inferred layout: num_layers={}, outer_dim={}, page_size={}, inner_dim={}",
-                device_tensors.len(),
-                outer_dim,
-                config.page_size,
-                inner_dim
-            );
+                (
+                    LayoutType::FullyContiguous,
+                    num_layers,
+                    outer_dim,
+                    inner_dim,
+                )
+            }
+            LayoutType::LayerSeparate { outer_contiguous } => {
+                // Use the already-detected layout type from config (no re-detection needed)
+                let layout_type = config.device_layout_type;
 
-            (
-                LayoutType::LayerSeparate { outer_contiguous },
-                num_layers,
-                outer_dim,
-                inner_dim,
-            )
-        } else {
-            let num_layers = shape[1];
-            let outer_dim = shape[2];
-            let inner_dim = shape[3..].iter().product::<usize>() / config.page_size;
-            tracing::info!(
-                "Inferred layout: num_layers={}, outer_dim={}, page_size={}, inner_dim={}",
-                num_layers,
-                outer_dim,
-                config.page_size,
-                inner_dim
-            );
+                // Extract outer_dim based on the provided outer_contiguous value
+                let outer_dim = if outer_contiguous {
+                    shape[0] // Outer contiguous: [outer_dim, n_blocks, ...]
+                } else {
+                    shape[1] // Block contiguous: [n_blocks, outer_dim, ...]
+                };
 
-            (
-                LayoutType::FullyContiguous,
-                num_layers,
-                outer_dim,
-                inner_dim,
-            )
+                let num_layers = device_tensors.len();
+                let inner_dim = shape[2..].iter().product::<usize>() / config.page_size;
+
+                tracing::info!(
+                    "Inferred layout: num_layers={}, outer_dim={}, outer_contiguous={}, page_size={}, inner_dim={}",
+                    num_layers,
+                    outer_dim,
+                    outer_contiguous,
+                    config.page_size,
+                    inner_dim
+                );
+
+                (layout_type, num_layers, outer_dim, inner_dim)
+            }
         };
 
         let bytes_per_block =
@@ -556,7 +560,7 @@ impl KvbmWorker {
         device_layout: Box<dyn NixlLayout<StorageType = DeviceStorage>>,
         mut layout_builder: LayoutConfigBuilder,
         leader_data: KvbmLeaderData,
-        layout_type: LayoutType,
+        _layout_type: LayoutType,
         config: KvbmWorkerConfig,
         cancel_token: CancellationToken,
         handler_tx: oneshot::Sender<BlockTransferHandler>,
@@ -606,7 +610,7 @@ impl KvbmWorker {
             let host_layout = layout_builder
                 .num_blocks(leader_data.num_host_blocks)
                 .build()?
-                .allocate_layout(layout_type, host_allocator)?;
+                .allocate_layout(config.host_layout_type, host_allocator)?;
 
             Some(Self::make_layout::<_, BasicMetadata>(
                 host_layout,
@@ -623,7 +627,7 @@ impl KvbmWorker {
             let disk_layout = layout_builder
                 .num_blocks(leader_data.num_disk_blocks)
                 .build()?
-                .allocate_layout(layout_type, disk_allocator)?;
+                .allocate_layout(config.disk_layout_type, disk_allocator)?;
 
             Some(Self::make_layout::<_, BasicMetadata>(
                 disk_layout,
