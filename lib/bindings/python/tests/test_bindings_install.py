@@ -24,3 +24,9 @@ def test_bindings_install():
 
     # Placeholder to avoid unused import errors or removal by linters
     assert tdr
+
+
+def test_version():
+    from dynamo._core import __version__
+
+    assert __version__[0].isdigit()  # semver should start with a digit

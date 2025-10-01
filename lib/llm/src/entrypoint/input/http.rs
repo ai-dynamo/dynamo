@@ -239,10 +239,7 @@ async fn run_watcher(
     // Spawn a task to watch for model type changes and update HTTP service endpoints and metrics
     let _endpoint_enabler_task = tokio::spawn(async move {
         while let Some(model_update) = rx.recv().await {
-            // Update HTTP endpoints (existing functionality)
             update_http_endpoints(http_service.clone(), model_update.clone());
-
-            // Update metrics (only for added models)
             update_model_metrics(model_update, metrics.clone());
         }
     });

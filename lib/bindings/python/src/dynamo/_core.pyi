@@ -12,6 +12,9 @@ from typing import (
     Tuple,
 )
 
+# Prometheus metric names are defined in a separate module
+from ._prometheus_names import prometheus_names
+
 def log_message(level: str, message: str, module: str, file: str, line: int) -> None:
     """
     Log a message from Python with file and line info
@@ -52,6 +55,26 @@ class DistributedRuntime:
         Shutdown the runtime by triggering the cancellation token
         """
         ...
+
+    def child_token(self) -> CancellationToken:
+        """
+        Get a child cancellation token that can be passed to async tasks
+        """
+        ...
+
+class CancellationToken:
+    def cancel(self) -> None:
+        """
+        Cancel the token and all its children
+        """
+        ...
+
+    async def cancelled(self) -> None:
+        """
+        Await until the token is cancelled
+        """
+        ...
+
 
 class Namespace:
     """
@@ -227,6 +250,93 @@ def compute_block_hash_for_seq_py(tokens: List[int], kv_block_size: int) -> List
     """
 
     ...
+
+class Context:
+    """
+    Context wrapper around AsyncEngineContext for Python bindings.
+    Provides tracing and cancellation capabilities for request handling.
+    """
+
+    def __init__(self, id: Optional[str] = None) -> None:
+        """
+        Create a new Context instance.
+
+        Args:
+            id: Optional request ID. If None, a default ID will be generated.
+        """
+        ...
+
+    def is_stopped(self) -> bool:
+        """
+        Check if the context has been stopped (synchronous).
+
+        Returns:
+            True if the context is stopped, False otherwise.
+        """
+        ...
+
+    def is_killed(self) -> bool:
+        """
+        Check if the context has been killed (synchronous).
+
+        Returns:
+            True if the context is killed, False otherwise.
+        """
+        ...
+
+    def stop_generating(self) -> None:
+        """
+        Issue a stop generating signal to the context.
+        """
+        ...
+
+    def id(self) -> Optional[str]:
+        """
+        Get the context ID.
+
+        Returns:
+            The context identifier string, or None if not set.
+        """
+        ...
+
+    async def async_killed_or_stopped(self) -> bool:
+        """
+        Asynchronously wait until the context is killed or stopped.
+
+        Returns:
+            True when the context is killed or stopped.
+        """
+        ...
+
+    @property
+    def trace_id(self) -> Optional[str]:
+        """
+        Get the distributed trace ID if available.
+
+        Returns:
+            The trace ID string, or None if no trace context.
+        """
+        ...
+
+    @property
+    def span_id(self) -> Optional[str]:
+        """
+        Get the distributed span ID if available.
+
+        Returns:
+            The span ID string, or None if no trace context.
+        """
+        ...
+
+    @property
+    def parent_span_id(self) -> Optional[str]:
+        """
+        Get the parent span ID if available.
+
+        Returns:
+            The parent span ID string, or None if no trace context.
+        """
+        ...
 
 class WorkerStats:
     """
@@ -700,13 +810,6 @@ class HttpService:
     """
     A HTTP service for dynamo applications.
     It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
-    """
-
-    ...
-
-class HttpError:
-    """
-    An error that occurred in the HTTP service
     """
 
     ...
@@ -1276,134 +1379,7 @@ class VirtualConnectorClient:
         """Blocks until there is a new decision to fetch using 'get'"""
         ...
 
-class PrometheusNames:
-    """
-    Main container for all Prometheus metric name constants
-    """
-
-    @property
-    def frontend(self) -> FrontendService:
-        """
-        Frontend service metrics
-        """
-        ...
-
-    @property
-    def work_handler(self) -> WorkHandler:
-        """
-        Work handler metrics
-        """
-        ...
-
-class FrontendService:
-    """
-    Frontend service metrics (LLM HTTP service)
-    These methods return the full metric names with the "dynamo_frontend_" prefix
-    """
-
-    @property
-    def requests_total(self) -> str:
-        """
-        Total number of LLM requests processed
-        """
-        ...
-
-    @property
-    def queued_requests_total(self) -> str:
-        """
-        Number of requests waiting in HTTP queue before receiving the first response
-        """
-        ...
-
-    @property
-    def inflight_requests_total(self) -> str:
-        """
-        Number of inflight requests going to the engine (vLLM, SGLang, ...)
-        """
-        ...
-
-    @property
-    def request_duration_seconds(self) -> str:
-        """
-        Duration of LLM requests
-        """
-        ...
-
-    @property
-    def input_sequence_tokens(self) -> str:
-        """
-        Input sequence length in tokens
-        """
-        ...
-
-    @property
-    def output_sequence_tokens(self) -> str:
-        """
-        Output sequence length in tokens
-        """
-        ...
-
-    @property
-    def time_to_first_token_seconds(self) -> str:
-        """
-        Time to first token in seconds
-        """
-        ...
-
-    @property
-    def inter_token_latency_seconds(self) -> str:
-        """
-        Inter-token latency in seconds
-        """
-        ...
-
-class WorkHandler:
-    """
-    Work handler metrics (component request processing)
-    These methods return the full metric names with the "dynamo_component_" prefix
-    """
-
-    @property
-    def requests_total(self) -> str:
-        """
-        Total number of requests processed by work handler
-        """
-        ...
-
-    @property
-    def request_bytes_total(self) -> str:
-        """
-        Total number of bytes received in requests by work handler
-        """
-        ...
-
-    @property
-    def response_bytes_total(self) -> str:
-        """
-        Total number of bytes sent in responses by work handler
-        """
-        ...
-
-    @property
-    def inflight_requests(self) -> str:
-        """
-        Number of requests currently being processed by work handler
-        """
-        ...
-
-    @property
-    def request_duration_seconds(self) -> str:
-        """
-        Time spent processing requests by work handler (histogram)
-        """
-        ...
-
-    @property
-    def errors_total(self) -> str:
-        """
-        Total number of errors in work handler processing
-        """
-        ...
-
-# Module-level singleton instance for convenient access
-prometheus_names: PrometheusNames
+__all__ = [
+    # ... existing exports ...
+    "prometheus_names"
+]

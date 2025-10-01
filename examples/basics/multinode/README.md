@@ -3,12 +3,14 @@
 This example demonstrates running Dynamo across multiple nodes with **KV-aware routing** to distribute requests between two replicas of a disaggregated model. Each replica consists of dedicated prefill and decode workers, providing high availability and load distribution.
 
 For more information about the core concepts, see:
+
 - [Dynamo Disaggregated Serving](../../../docs/architecture/disagg_serving.md)
 - [KV Cache Routing Architecture](../../../docs/architecture/kv_cache_routing.md)
 
 ## Architecture Overview
 
 The multi-node setup consists of:
+
 - **1 Frontend**: Receives HTTP requests and uses KV routing to distribute them
 - **2 Model Replicas**: Each with dedicated prefill and decode workers
 - **Smart KV-Aware Routing**: Intelligently routes requests based on KV cache locality across **all workers**
@@ -57,6 +59,7 @@ KV-aware routing optimizes LLM inference by directing requests to workers that a
 - **Balances load**: Considers both cache efficiency and worker utilization when making routing decisions
 
 This is particularly beneficial for:
+
 - **Shared system prompts**: Cached across workers and reused efficiently
 - **Multi-turn conversations**: Full conversation history benefits from caching
 - **Similar queries**: Common prefixes are computed once and reused
@@ -90,6 +93,7 @@ For more information about the SGLang backend and its integration with Dynamo, s
 ### 3. Network Requirements
 
 Ensure the following ports are accessible between nodes:
+
 - **2379**: etcd client port
 - **4222**: NATS client port
 - **8000**: Frontend HTTP port (only needed on frontend node)
@@ -98,6 +102,7 @@ Ensure the following ports are accessible between nodes:
 ### 4. Hardware Setup
 
 This example assumes:
+
 - **Node 1**: At least 2 GPUs (for Replica 1's decode and prefill workers)
 - **Node 2**: At least 2 GPUs (for Replica 2's decode and prefill workers)
 - **Frontend Node**: Can be on Node 1, Node 2, or a separate node (no GPU required)
@@ -131,7 +136,7 @@ Open a terminal on Node 1 and launch both workers:
 
 ```bash
 # Launch prefill worker in background
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.sglang.worker \
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.sglang \
     --model-path Qwen/Qwen3-0.6B \
     --served-model-name Qwen/Qwen3-0.6B \
     --page-size 16 \
@@ -141,7 +146,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.sglang.worker \
     --disaggregation-mode prefill \
     --disaggregation-transfer-backend nixl &
 
-CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang.decode_worker \
+CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
     --model-path Qwen/Qwen3-0.6B \
     --served-model-name Qwen/Qwen3-0.6B \
     --page-size 16 \
@@ -153,6 +158,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang.decode_worker \
 ```
 
 > [!INFO]
+>
 > - `CUDA_VISIBLE_DEVICES`: Controls which GPU each worker uses (0 and 1 for different > GPUs)
 > - `--page-size 16`: Sets the KV cache block size - must be identical across all workers
 > - `--disaggregation-mode`: Separates prefill (prompt processing) from decode (token > generation)
@@ -165,7 +171,7 @@ Open a terminal on Node 2 and launch both workers:
 
 ```bash
 # Launch prefill worker in background
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.sglang.worker \
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.sglang \
     --model-path Qwen/Qwen3-0.6B \
     --served-model-name Qwen/Qwen3-0.6B \
     --page-size 16 \
@@ -176,7 +182,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.sglang.worker \
     --disaggregation-transfer-backend nixl &
 
 # Launch decode worker in foreground
-CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang.decode_worker \
+CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
     --model-path Qwen/Qwen3-0.6B \
     --served-model-name Qwen/Qwen3-0.6B \
     --page-size 16 \
@@ -206,6 +212,7 @@ hostname -I | awk '{print $1}'
 ```
 
 The frontend will:
+
 - Discover all available decode workers via etcd
 - Enable KV-aware routing for intelligent request distribution
 - Monitor worker health and adjust routing accordingly
@@ -418,6 +425,7 @@ curl http://${DYN_FRONTEND_IP}:8000/health
 ### Workers Not Discovering Each Other
 
 1. Verify etcd connectivity from all nodes:
+
    ```bash
    etcdctl --endpoints=$ETCD_ENDPOINTS endpoint health
    ```
@@ -461,9 +469,11 @@ Stop all components in reverse order:
 
 1. Stop Frontend (Ctrl+C in the frontend terminal)
 2. Stop workers on each node:
+
    - On Node 1: Press Ctrl+C in the terminal (this stops the decode worker)
    - On Node 2: Press Ctrl+C in the terminal (this stops the decode worker)
    - To stop the background prefill workers, use one of these methods:
+
      ```bash
      # Method 1: Kill background jobs in the same terminal
      jobs           # See background jobs
@@ -473,8 +483,9 @@ Stop all components in reverse order:
      exit
 
      # Method 3: Kill by process name (from any terminal)
-     pkill -f "dynamo.sglang.worker.*prefill"
+     pkill -f "dynamo.sglang.*prefill"
      ```
+
 3. Stop infrastructure services:
    ```bash
    docker compose -f deploy/docker-compose.yml down

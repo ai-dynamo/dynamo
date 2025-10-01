@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Note: This Dockerfile will be deprecated in favor of Dockerfile.sglang-wideep soon. Please build the container with that Dockerfile instead.
+
 ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # TODO OPS-612: NCCL will hang with 25.03, so use 25.01 for now
 # Please check https://github.com/ai-dynamo/dynamo/pull/1065

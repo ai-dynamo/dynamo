@@ -65,6 +65,9 @@ const (
 	DefaultSharedMemoryMountPath = "/dev/shm"
 	DefaultSharedMemorySize      = "8Gi"
 
+	// Compilation cache default mount points
+	DefaultVLLMCacheMountPoint = "/root/.cache/vllm"
+
 	// Kai-scheduler related constants
 	KubeAnnotationKaiSchedulerQueue = "nvidia.com/kai-scheduler-queue" // User-provided annotation to specify queue name
 	KubeLabelKaiSchedulerQueue      = "kai.scheduler/queue"            // Label injected into pods for kai-scheduler
