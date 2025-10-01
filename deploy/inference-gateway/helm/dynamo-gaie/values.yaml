@@ -50,7 +50,7 @@ httpRoute:
 
 extension:
   # default (non-epp-aware) EPP image for the GAIE extension
-  image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.4.0
+  image: us-central1-docker.pkg.dev/k8s-artifacts-prod/images/gateway-api-inference-extension/epp:v0.4.0
 
 # generic knobs you may want in both modes
 imagePullSecrets: []     # e.g. ["docker-imagepullsecret"]
