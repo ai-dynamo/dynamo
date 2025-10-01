@@ -18,10 +18,12 @@ python -m dynamo.frontend \
     --kv-overlap-score-weight 0 \
     --router-reset-states &
 
-# run prefill router service
-python -m dynamo.vllm_prefill_router \
-    --namespace dynamo \
-    --block-size $BLOCK_SIZE &
+# run standalone router service for prefill workers
+python -m dynamo.router \
+    --endpoint dynamo.prefill.generate \
+    --block-size $BLOCK_SIZE \
+    --router-reset-states \
+    --no-track-active-blocks &
 
 # two decode workers
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag

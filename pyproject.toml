@@ -79,6 +79,7 @@ path = "hatch_build.py"
 packages = [
     "components/frontend/src/dynamo",
     "components/planner/src/dynamo",
+    "components/router/src/dynamo",
     "components/backends/llama_cpp/src/dynamo",
     "components/backends/mocker/src/dynamo",
     "components/backends/trtllm/src/dynamo",

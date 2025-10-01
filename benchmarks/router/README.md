@@ -96,14 +96,12 @@ In a **new terminal**, launch the Dynamo router using the Python CLI:
 ```bash
 python -m dynamo.frontend \
     --router-mode kv \
-    --kv-cache-block-size 64 \
     --router-reset-states \
     --http-port 8000
 ```
 
 This starts the router with:
 - KV cache routing mode
-- Block size of 64 (**Important:** This should match the `--block-size` used by your engines)
 - `--router-reset-states` flag to clear the event cache (JetStream) from previous runs (useful for single router benchmarking)
 - HTTP port 8000
 
@@ -114,33 +112,33 @@ python -m dynamo.frontend --help
 
 For detailed explanations of router arguments (especially KV cache routing parameters), see the [KV Cache Routing documentation](../../docs/architecture/kv_cache_routing.md).
 
-#### Launching a Prefill Router (Optional)
+#### Launching a Standalone Router for Prefill Workers (Optional)
 
-If you're using disaggregated serving with separate prefill and decode workers, you should also launch a prefill router. The prefill router handles routing prefill requests to dedicated prefill workers. When using a prefill router, it's recommended to start the frontend (decode router) with `--kv-overlap-score-weight 0` for pure load balancing (as prefix-aware routing is now handled by the prefill router):
+If you're using disaggregated serving with separate prefill and decode workers, you should also launch a standalone router for prefill workers. This router handles routing prefill requests to dedicated prefill workers. When using a standalone prefill router, it's recommended to start the frontend (decode router) with `--kv-overlap-score-weight 0` for pure load balancing (as prefix-aware routing is now handled by the standalone router):
 
 ```bash
 # Start the decode router with pure load balancing
 python -m dynamo.frontend \
     --router-mode kv \
-    --kv-cache-block-size 64 \
     --router-reset-states \
     --http-port 8000 \
     --kv-overlap-score-weight 0
 
-# In another terminal, start the prefill router (currently only supports vLLM)
-python -m dynamo.vllm_prefill_router \
-    --namespace dynamo \
-    --block-size 64
+# In another terminal, start the standalone router for prefill workers
+python -m dynamo.router \
+    --endpoint dynamo.prefill.generate \
+    --block-size 64 \
+    --router-reset-states \
+    --no-track-active-blocks
 ```
 
-The prefill router will automatically coordinate with the decode router to handle request routing between prefill and decode workers.
+The `--router-reset-states` flag clears any previous state, and `--no-track-active-blocks` disables active block tracking (suitable for prefill-only routing where decode load is not relevant).
 
 **Note**: If you're unsure whether your backend engines correctly emit KV events for certain models (e.g., hybrid models like gpt-oss or nemotron nano 2), use the `--no-kv-events` flag to disable KV event tracking and use approximate KV indexing instead:
 
 ```bash
 python -m dynamo.frontend \
     --router-mode kv \
-    --kv-cache-block-size 64 \
     --http-port 8000 \
     --no-kv-events
 ```
