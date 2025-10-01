@@ -314,7 +314,7 @@ async def send_request_via_python_kv_router(
                 sampling_options=sampling_options,
                 output_options=output_options,
                 router_config_override=router_config_override,
-                worker_id=worker_id,
+                # worker_id=worker_id,
             )
 
             if stream is not None:
