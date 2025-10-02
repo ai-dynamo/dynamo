@@ -36,7 +36,7 @@ def get_json_paths(search_paths):
             raise Exception(f"deployment_config.json not found in {search_path}")
         for root, dirs, files in os.walk(search_path):
             for file in files:
-                if file == "profile_export_genai_perf.json":
+                if file == "profile_export_aiperf.json":
                     genai_perf_profile_export_json_paths.append(
                         os.path.join(root, file)
                     )
@@ -246,7 +246,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--artifacts-root-dir",
         required=True,
-        help="Root directory containing artifact directories to search for profile_export_genai_perf.json files",
+        help="Root directory containing artifact directories to search for profile_export_aiperf.json files",
     )
     parser.add_argument(
         "--title",
