@@ -9,6 +9,9 @@ spec:
   envs:
     - name: DYNAMO_NAMESPACE
       value: "dynamo"
+  pvcs:
+    - name: planner-pvc
+      create: false # Must be pre-created before deployment and SLA profiler must have been run
   services:
     Frontend:
       dynamoNamespace: dynamo
@@ -22,24 +25,22 @@ spec:
       envFromSecret: hf-token-secret
       componentType: planner
       replicas: 1
-      pvc:
-        create: false
-        name: planner-pvc # Must be pre-created before deployment and SLA profiler must have been run
-        mountPoint: /data
+      volumeMounts:
+        - name: planner-pvc
+          mountPoint: /data
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/planner/src/dynamo/planner
           command:
-            - /bin/sh
-            - -c
+          - python3
+          - -m
+          - planner_sla
           args:
-            - >-
-              exec python3 -m planner_sla
-              --environment=kubernetes
-              --backend=sglang
-              --adjustment-interval=60
-              --profile-results-dir=/data/profiling_results
+            - --environment=kubernetes
+            - --backend=sglang
+            - --adjustment-interval=60
+            - --profile-results-dir=/data/profiling_results
     decode:
       dynamoNamespace: dynamo
       envFromSecret: hf-token-secret

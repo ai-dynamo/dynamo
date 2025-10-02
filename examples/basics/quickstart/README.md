@@ -17,8 +17,8 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ## Components
 
-- [Frontend](../../../components/frontend/README.md) - A built-in component that launches an OpenAI compliant HTTP server, a pre-processor, and a router in a single process
-- [vLLM Backend](../../../components/backends/vllm/README.md) - A built-in component that runs vLLM within the Dynamo runtime
+- [Frontend](/components/src/dynamo/frontend/README.md) - A built-in component that launches an OpenAI compliant HTTP server, a pre-processor, and a router in a single process
+- [vLLM Backend](/components/backends/vllm/README.md) - A built-in component that runs vLLM within the Dynamo runtime
 
 ```mermaid
 ---

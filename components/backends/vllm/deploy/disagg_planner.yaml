@@ -6,6 +6,9 @@ kind: DynamoGraphDeployment
 metadata:
   name: vllm-disagg-planner
 spec:
+  pvcs:
+    - name: planner-pvc
+      create: false # Must be pre-created before deployment and SLA profiler must have been run
   envs:
     - name: DYNAMO_NAMESPACE
       value: "vllm-disagg-planner"
@@ -21,24 +24,22 @@ spec:
       dynamoNamespace: vllm-disagg-planner
       componentType: planner
       replicas: 1
-      pvc:
-        create: false
-        name: planner-pvc # Must be pre-created before deployment and SLA profiler must have been run
-        mountPoint: /data
+      volumeMounts:
+        - name: planner-pvc
+          mountPoint: /data
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/components/planner/src/dynamo/planner
           command:
-            - /bin/sh
-            - -c
+          - python3
+          - -m
+          - planner_sla
           args:
-            - >-
-              exec python3 -m planner_sla
-              --environment=kubernetes
-              --backend=vllm
-              --adjustment-interval=60
-              --profile-results-dir=/data/profiling_results
+            - --environment=kubernetes
+            - --backend=vllm
+            - --adjustment-interval=60
+            - --profile-results-dir=/data/profiling_results
     VllmDecodeWorker:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret

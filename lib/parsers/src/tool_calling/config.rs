@@ -19,10 +19,6 @@ pub enum ToolCallParserType {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct JsonParserConfig {
-    /// Start token for list of parallel tool calls (e.g., "<TOOLCALLS>")
-    pub parallel_tool_calls_start_tokens: Vec<String>,
-    /// End token for list of parallel tool calls (e.g., "</TOOLCALLS>")
-    pub parallel_tool_calls_end_tokens: Vec<String>,
     /// Start token for individual tool calls (e.g., "<TOOLCALL>")
     pub tool_call_start_tokens: Vec<String>,
     /// End token for individual tool calls (e.g., "</TOOLCALL>")
@@ -44,8 +40,6 @@ pub struct JsonParserConfig {
 impl Default for JsonParserConfig {
     fn default() -> Self {
         Self {
-            parallel_tool_calls_start_tokens: vec![],
-            parallel_tool_calls_end_tokens: vec![],
             tool_call_start_tokens: vec!["<TOOLCALL>".to_string(), "<|python_tag|>".to_string()],
             tool_call_end_tokens: vec!["</TOOLCALL>".to_string(), "".to_string()],
             function_name_keys: vec!["name".to_string()],
@@ -117,7 +111,6 @@ impl ToolCallConfig {
         Self {
             format: ToolCallParserType::Json,
             json: JsonParserConfig {
-                // TODO(elyas): remove the duplicate token
                 tool_call_start_tokens: vec!["[TOOL_CALLS]".to_string()],
                 tool_call_end_tokens: vec!["[/TOOL_CALLS]".to_string(), "".to_string()],
                 ..Default::default()
@@ -158,7 +151,10 @@ impl ToolCallConfig {
         Self {
             format: ToolCallParserType::Json,
             json: JsonParserConfig {
-                tool_call_start_tokens: vec!["<｜tool▁calls▁begin｜>".to_string()],
+                tool_call_start_tokens: vec![
+                    "<｜tool▁calls▁begin｜>".to_string(),
+                    "<｜tool▁call▁begin｜>".to_string(),
+                ],
                 tool_call_end_tokens: vec!["<｜tool▁calls▁end｜>".to_string()],
                 parser_type: JsonParserType::DeepseekV31,
                 ..Default::default()

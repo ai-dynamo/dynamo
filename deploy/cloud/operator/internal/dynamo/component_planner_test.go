@@ -55,7 +55,7 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 					{Name: "DYN_NAMESPACE", Value: "dynamo-namespace"},
 					{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "name"},
 					{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "namespace"},
-					{Name: "PROMETHEUS_PORT", Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort)},
+					{Name: "PLANNER_PROMETHEUS_PORT", Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort)},
 				},
 			},
 		},

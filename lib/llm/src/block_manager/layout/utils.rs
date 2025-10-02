@@ -44,21 +44,63 @@ pub struct LayoutVerificationStats {
     pub successful_verifications: usize,
 }
 
+/// A utility for verifying the consistency and correctness of memory layout implementations.
+///
+/// This verifier systematically checks all memory regions within a layout to ensure:
+/// - Memory addresses are calculated correctly
+/// - Memory region sizes match expected values
+/// - Layout configuration is internally consistent
+///
+/// The verifier maintains statistics about verification results and can identify
+/// critical mismatches that indicate layout implementation errors.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct WorkerLayoutVerifier {
     stats: LayoutVerificationStats,
 }
 
+impl Default for WorkerLayoutVerifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[allow(dead_code)]
 impl WorkerLayoutVerifier {
-    // Constructor: Start with clean slate
+    /// Creates a new layout verifier with clean statistics.
+    ///
+    /// The verifier starts with zero counts for all verification metrics
+    /// and is ready to verify layout consistency.
     pub fn new() -> Self {
         Self {
             stats: LayoutVerificationStats::default(),
         }
     }
 
+    /// Verifies the consistency of all memory regions in a layout.
+    ///
+    /// This is the main orchestrator method that systematically checks every memory region
+    /// in the layout to ensure consistency. It resets the internal statistics and then
+    /// iterates through all valid combinations of block, layer, and outer dimension indices.
+    ///
+    /// # Arguments
+    ///
+    /// * `layout` - The layout to verify
+    ///
+    /// # Returns
+    ///
+    /// A vector of verification results for each memory region, or an error if
+    /// verification fails for any region.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let mut verifier = WorkerLayoutVerifier::new();
+    /// let results = verifier.verify_layout_consistency(&layout)?;
+    /// if verifier.has_critical_mismatches() {
+    ///     // Handle verification failures
+    /// }
+    /// ```
     pub fn verify_layout_consistency<L: GenericBlockLayout>(
         &mut self,
         layout: &L,
@@ -85,6 +127,22 @@ impl WorkerLayoutVerifier {
         Ok(results)
     }
 
+    /// Verifies a specific memory region within a layout.
+    ///
+    /// This method checks a single memory region identified by the provided indices
+    /// and compares the actual memory address and size against expected values.
+    ///
+    /// # Arguments
+    ///
+    /// * `layout` - The layout containing the memory region to verify
+    /// * `block_idx` - The block index (must be < layout.num_blocks())
+    /// * `layer_idx` - The layer index (must be < layout.num_layers())
+    /// * `outer_idx` - The outer dimension index (must be < layout.outer_dim())
+    ///
+    /// # Returns
+    ///
+    /// A verification result containing the comparison between expected and actual
+    /// values, or an error if the indices are invalid or layout access fails.
     pub fn verify_memory_region<L: GenericBlockLayout>(
         &mut self,
         layout: &L,
@@ -125,6 +183,15 @@ impl WorkerLayoutVerifier {
         }
     }
 
+    /// Checks if any critical mismatches were found during verification.
+    ///
+    /// Critical mismatches are currently defined as size mismatches, which indicate
+    /// that the layout is calculating memory region sizes incorrectly. This is
+    /// considered more critical than address mismatches as it affects memory safety.
+    ///
+    /// # Returns
+    ///
+    /// `true` if any memory regions had size mismatches, `false` otherwise.
     pub fn has_critical_mismatches(&self) -> bool {
         self.stats.size_mismatches > 0
     }
@@ -144,7 +211,12 @@ pub fn validate_power_of_2(alignment: usize) -> Result<(), ValidationError> {
 
 /// Helper to align a value up to the nearest multiple of alignment.
 /// Alignment must be a power of 2.
+#[inline(always)]
 pub fn align_up(value: usize, alignment: usize) -> usize {
+    debug_assert!(
+        alignment.is_power_of_two(),
+        "Alignment must be a power of 2"
+    );
     (value + alignment - 1) & !(alignment - 1)
 }
 
@@ -191,6 +263,7 @@ pub fn validate_storage<S: Storage, C: BlockLayoutConfig>(
     Ok(base_offset)
 }
 
+/// Validate that the provided indices are within bounds for the given layout configuration
 pub fn validate_indices<C: BlockLayoutConfig>(
     config: &C,
     block_idx: usize,
