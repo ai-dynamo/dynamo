@@ -54,7 +54,7 @@ Key features include:
      - ✅
      - TensorRT-LLM
    * -
-     - ❌
+     - ✅
      - SGLang
    * - **Serving Type**
      - ✅
@@ -63,7 +63,7 @@ Key features include:
      - ✅
      - Disaggregated
    * - **Planner Actions**
-     - ✅
+     - ❌
      - Load-based scaling up/down prefill/decode workers
    * -
      - ✅
