@@ -25,9 +25,6 @@ inputs:
   aws_default_region:
     description: 'AWS Default Region'
     required: false
-  aws_account_id:
-    description: 'AWS Account ID'
-    required: false
   sccache_s3_bucket:
     description: 'SCCache S3 Bucket'
     required: false
@@ -72,13 +69,13 @@ runs:
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
         PLATFORM: ${{ inputs.platform }}
       run: |
-        set +x
         # Determine image tag
         if [ -n "${{ inputs.image_tag }}" ]; then
           IMAGE_TAG="${{ inputs.image_tag }}"
         else
           IMAGE_TAG="${{ inputs.framework }}:latest"
         fi
+
         echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
         ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \
