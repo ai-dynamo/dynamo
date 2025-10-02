@@ -140,7 +140,9 @@ RUN apt-get update -y \
         libibumad-dev \
         libnuma-dev \
         librdmacm-dev \
-        ibverbs-providers
+        ibverbs-providers \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 ##################################
 ########## External Services #####
