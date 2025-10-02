@@ -9,7 +9,7 @@ import socket
 import sglang as sgl
 from sglang.srt.utils import get_ip
 
-from dynamo._core import Component
+from dynamo._core import Component, Context
 from dynamo.sglang.args import Config
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
@@ -45,7 +45,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         return bootstrap_host, bootstrap_port
 
-    async def generate(self, request: dict):
+    async def generate(self, request: dict, context: Context):
+        logging.debug(f"New Request ID: {context.id()}")
         bootstrap_room = self._generate_bootstrap_room()
 
         bootstrap_info = {
@@ -67,8 +68,33 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             bootstrap_room=bootstrap_room,
         )
 
-        asyncio.create_task(self._consume_results(results))
+        asyncio.create_task(self._consume_results(results, context))
 
-    async def _consume_results(self, results):
-        async for _ in results:
-            pass
+    async def _consume_results(self, results, context):
+        cancellation_task = None
+
+        async for res in results:
+            # Extract SGLang request ID from the first response and start cancellation monitoring
+            if cancellation_task is None:
+                meta_info = res.get("meta_info", {})
+                sglang_request_id = meta_info.get("id")
+                if sglang_request_id:
+                    # Now we have the request ID, start the cancellation monitor
+                    cancellation_context = self._cancellation_monitor(
+                        sglang_request_id, context
+                    )
+                    cancellation_task = await cancellation_context.__aenter__()
+
+            # Check for cancellation on each iteration
+            if context.is_stopped() or context.is_killed():
+                logging.info(f"Aborted Prefill Request ID: {context.id()}")
+                break
+
+        # Clean up cancellation monitor if it was created
+        if cancellation_task is not None:
+            try:
+                await cancellation_context.__aexit__(None, None, None)
+            except Exception as e:
+                logging.error(
+                    f"Error cleaning up cancellation monitor for prefill stream: {e}"
+                )
