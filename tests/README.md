@@ -58,14 +58,10 @@ Markers are required for all tests. They are used for test selection in CI and l
 ### Marker Table
 | Category                | Marker(s)                | Description                        |
 |-------------------------|--------------------------|------------------------------------|
-| Lifecycle [required]    | pre_merge, post_merge,   | When the test should run           |
-|                         | nightly,  weekly, release|                                    |
-| Test Type [required]    | unit, integration, e2e,  | Nature of the test                 |
-|                         | benchmark, stress        |                                    |
-| Hardware [required]     | gpu_0, gpu_1, gpu_2,     | Number/type of GPUs required       |
-|                         | gpu_4, gpu_8, h100       |                                    |
-| Component/Framework     | vllm, trtllm, sglang,    | Backend or component specificity   |
-|                         | kvbm, planner, router    |                                    |
+| Lifecycle [required]    | pre_merge, post_merge, nightly,  weekly, release   | When the test should run           |
+| Test Type [required]    | unit, integration, e2e, benchmark, stress   | Nature of the test                 |
+| Hardware [required]     | gpu_0, gpu_1, gpu_2,  gpu_4, gpu_8, h100      | Number/type of GPUs required       |
+| Component/Framework     | vllm, trtllm, sglang, kvbm, planner, router    | Backend or component specificity   |
 | Other                   | slow, skip, xfail        | Special handling                   |
 
 ### Example
