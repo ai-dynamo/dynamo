@@ -27,7 +27,7 @@ prometheus-api-client
 prometheus_client
 prophet
 protobuf==5.29.5
-pydantic==2.10.6
+pydantic==2.11.4
 pyright
 PyYAML
 scikit-learn
