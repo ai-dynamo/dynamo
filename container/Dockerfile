@@ -122,19 +122,25 @@ RUN apt-get update -y \
         net-tools \
         ninja-build \
         pybind11-dev \
-        # These headers are missing with the hpcx installer, required
-        # by UCX to find RDMA devices
-        ibverbs-providers \
-        ibverbs-utils \
-        libibumad-dev \
-        libibverbs-dev \
-        librdmacm-dev \
-        libnuma-dev \
-        rdma-core \
         # Rust build dependencies
         clang \
         libclang-dev \
         protobuf-compiler \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# These headers are missing with the hpcx installer, required
+# by UCX to build and use RDMA devices. Reinstall to make sure to recreate
+# symlink .so to .so.1 in case some packages are already found.
+RUN apt-get update -y \
+    && DEBIAN_FRONTEND=noninteractive apt-get -y install --reinstall --no-install-recommends \
+        libibverbs-dev \
+        rdma-core \
+        ibverbs-utils \
+        libibumad-dev \
+        libnuma-dev \
+        librdmacm-dev \
+        ibverbs-providers \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
