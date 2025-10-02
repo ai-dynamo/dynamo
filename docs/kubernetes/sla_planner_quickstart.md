@@ -28,13 +28,13 @@ The deployment process consists of two mandatory phases:
 
 ```mermaid
 flowchart TD
-    A[🚀 Start Setup] --> B{📊 Profiling Done?}
-    B -->|❌ No| C[⏱️ Run Profiling<br/>2-4 hours]
-    C --> D[✅ Verify Results]
-    D --> E[🚀 Deploy Planner<br/>5-10 minutes]
-    B -->|✅ Yes| E
-    E --> F[🧪 Test System]
-    F --> G[🎉 Ready!]
+    A[Start Setup] --> B{Profiling Done?}
+    B -->|No| C[Run Profiling<br/>2-4 hours]
+    C --> D[Verify Results]
+    D --> E[Deploy Planner<br/>5-10 minutes]
+    B -->|Yes| E
+    E --> F[Test System]
+    F --> G[Ready!]
 
     style A fill:#e1f5fe
     style C fill:#fff3e0
