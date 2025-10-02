@@ -2188,48 +2188,12 @@ def has_framework_errors(tree: NodeInfo) -> bool:
     return False
 
 
-def show_pythonpath_recommendation():
-    """Show PYTHONPATH recommendation for fixing import errors.
-
-    Generates and displays the recommended PYTHONPATH based on discovered
-    component source paths in the workspace.
-    """
-    paths = []
-
-    # Try to find workspace directory
-    workspace_dir = None
-    candidates = [
-        os.getcwd(),
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        os.environ.get("DYNAMO_HOME", ""),
-        os.path.expanduser("~/dynamo"),
-    ]
-    for candidate in candidates:
-        if os.path.exists(os.path.join(candidate, "lib/bindings/python/src/dynamo")):
-            workspace_dir = os.path.abspath(candidate)
-            break
-
-    if not workspace_dir:
-        return
-
-    # Collect consolidated component source path
-    comp_src_path = os.path.join(workspace_dir, "components", "src")
-    if os.path.exists(comp_src_path):
-        paths.append(comp_src_path)
-
-    # Also add runtime path
-    runtime_path = os.path.join(workspace_dir, "lib/bindings/python/src")
-    if os.path.exists(runtime_path):
-        paths.insert(0, runtime_path)  # Add at beginning for priority
-
-    if paths:
-        pythonpath = ":".join(paths)
-        # Replace home directory with $HOME
-        home = os.path.expanduser("~")
-        if home in pythonpath:
-            pythonpath = pythonpath.replace(home, "$HOME")
-
-        print(f'\nSet PYTHONPATH for development:\nexport PYTHONPATH="{pythonpath}"\n')
+def show_installation_recommendation():
+    """Show installation recommendations for missing components."""
+    print("\nTo install missing components for development (not production):")
+    print("  Runtime:   (cd lib/bindings/python && maturin develop)")
+    print("  Framework: uv pip install -e .")
+    print("             or export PYTHONPATH=$DYNAMO_HOME/components/src\n")
 
 
 def main():
@@ -2261,9 +2225,9 @@ def main():
     tree = SystemInfo(thorough_check=args.thorough_check, terse=args.terse)
     tree.print_tree()
 
-    # Check if there are framework component errors and show PYTHONPATH recommendation
+    # Check if there are framework component errors and show installation recommendation
     if has_framework_errors(tree):
-        show_pythonpath_recommendation()
+        show_installation_recommendation()
 
     # Exit with non-zero status if there are any errors
     if tree.has_errors():
