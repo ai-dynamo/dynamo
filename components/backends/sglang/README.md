@@ -23,6 +23,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ## Table of Contents
 - [Feature Support Matrix](#feature-support-matrix)
+- [Dynamo SGLang Integration](#dynamo-sglang-integration)
 - [Quick Start](#quick-start)
 - [Single Node Examples](#run-single-node-examples)
 - [Multi-Node and Advanced Examples](#advanced-examples)
@@ -38,6 +39,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**Conditional Disaggregation**](../../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
 | [**KV-Aware Routing**](../../../docs/architecture/kv_cache_routing.md) | ✅ |  |
 | [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | ✅ |  |
+| [**Multimodal EPD Disaggregation**](docs/multimodal_epd.md) | ✅ |  |
 | [**Load Based Planner**](../../../docs/architecture/load_planner.md) | ❌ | Planned |
 | [**KVBM**](../../../docs/architecture/kvbm_architecture.md) | ❌ | Planned |
 
@@ -49,6 +51,32 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | **DP Rank Routing** | 🚧     | Direct routing supported. Dynamo KV router does not router to DP worker |
 | **GB200 Support**   | ✅     |                                                              |
 
+
+## Dynamo SGLang Integration
+
+Dynamo SGLang integrates SGLang engines into Dynamo's distributed runtime, enabling advanced features like disaggregated serving, KV-aware routing, and request migration while maintaining full compatibility with SGLang's engine arguments.
+
+### Argument Handling
+
+Dynamo SGLang uses SGLang's native argument parser, so **most SGLang engine arguments work identically**. You can pass any SGLang argument (like `--model-path`, `--tp`, `--trust-remote-code`) directly to `dynamo.sglang`.
+
+#### Dynamo-Specific Arguments
+
+| Argument | Description | Default | SGLang Equivalent |
+|----------|-------------|---------|-------------------|
+| `--endpoint` | Dynamo endpoint in `dyn://namespace.component.endpoint` format | Auto-generated based on mode | N/A |
+| `--migration-limit` | Max times a request can migrate between workers | `0` (disabled) | N/A |
+| `--dyn-tool-call-parser` | Tool call parser for structured outputs (takes precedence over `--tool-call-parser`) | `None` | `--tool-call-parser` |
+| `--dyn-reasoning-parser` | Reasoning parser for CoT models (takes precedence over `--reasoning-parser`) | `None` | `--reasoning-parser` |
+| `--use-sglang-tokenizer` | Use SGLang's tokenizer instead of Dynamo's | `False` | N/A |
+| `--custom-jinja-template` | Use custom chat template for that model (takes precedence over default chat template in model repo) | `None` | `--chat-template` |
+
+#### Tokenizer Behavior
+
+- **Default (`--use-sglang-tokenizer` not set)**: Dynamo handles tokenization and passes `input_ids` to SGLang
+- **With `--use-sglang-tokenizer`**: SGLang handles tokenization, Dynamo passes raw prompts
+
+> **Note**: When using `--use-sglang-tokenizer`, only `v1/chat/completions` endpoints are available through Dynamo's frontend.
 
 ## SGLang Quick Start
 
@@ -89,11 +117,9 @@ uv pip install maturin
 cd $DYNAMO_HOME/lib/bindings/python
 maturin develop --uv
 cd $DYNAMO_HOME
-uv pip install .
-export PYTHONPATH="${PYTHONPATH}:$(pwd)/components/backends/sglang/src"
-# install target sglang version (you can choose any version)
-# we include the prerelease flag in order to install flashinfer rc versions
-uv pip install --prerelease=allow sglang[all]==0.4.9.post6
+# installs sglang supported version along with dynamo
+# include the prerelease flag to install flashinfer rc versions
+uv pip install --prerelease=allow -e .[sglang]
 ```
 
 </details>
@@ -104,7 +130,7 @@ uv pip install --prerelease=allow sglang[all]==0.4.9.post6
 <summary>Instructions</summary>
 
 ```bash
-docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.3.2
+docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:my-tag
 ```
 
 </details>
@@ -228,6 +254,9 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 
 ### Hierarchical Cache (HiCache)
 - **[Enable SGLang Hierarchical Cache (HiCache)](docs/sgl-hicache-example.md)**
+
+### Multimodal Encode-Prefill-Decode (EPD) Disaggregation with NIXL
+- **[Run a multimodal model with EPD Disaggregation](docs/multimodal_epd.md)**
 
 ## Deployment
 

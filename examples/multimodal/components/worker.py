@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import argparse
 import asyncio
@@ -40,7 +28,7 @@ from publisher import StatLoggerFactory
 from utils.args import (
     Config,
     base_parse_args,
-    configure_ports_with_etcd,
+    configure_ports,
     overwrite_args,
     parse_endpoint,
 )
@@ -84,17 +72,23 @@ class VllmBaseWorker:
 
         # use endpoint_overwrite to set the default endpoint based on worker type
         def endpoint_overwrite(args):
+            DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
             # default endpoint for this worker
             if args.worker_type == "prefill":
-                args.endpoint = args.endpoint or "dyn://dynamo.llm.generate"
+                args.endpoint = args.endpoint or f"dyn://{DYN_NAMESPACE}.llm.generate"
             elif args.worker_type == "decode":
-                args.endpoint = args.endpoint or "dyn://dynamo.decoder.generate"
+                args.endpoint = (
+                    args.endpoint or f"dyn://{DYN_NAMESPACE}.decoder.generate"
+                )
             elif args.worker_type == "encode_prefill":
-                args.endpoint = args.endpoint or "dyn://dynamo.encoder.generate"
+                args.endpoint = (
+                    args.endpoint or f"dyn://{DYN_NAMESPACE}.encoder.generate"
+                )
             # set downstream endpoint for disaggregated workers
             if args.enable_disagg:
                 args.downstream_endpoint = (
-                    args.downstream_endpoint or "dyn://dynamo.decoder.generate"
+                    args.downstream_endpoint
+                    or f"dyn://{DYN_NAMESPACE}.decoder.generate"
                 )
 
             return args
@@ -426,8 +420,7 @@ async def worker(runtime: DistributedRuntime):
     args, config = VllmBaseWorker.parse_args()
 
     # vLLM config overwrites
-    etcd_client = runtime.etcd_client()
-    await configure_ports_with_etcd(config, etcd_client)
+    await configure_ports(runtime, config)
     overwrite_args(config)
     await init(runtime, args, config)
 

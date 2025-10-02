@@ -5,8 +5,8 @@ use futures::StreamExt;
 use service_metrics::DEFAULT_NAMESPACE;
 
 use dynamo_runtime::{
-    logging, pipeline::PushRouter, protocols::annotated::Annotated, utils::Duration,
-    DistributedRuntime, Result, Runtime, Worker,
+    DistributedRuntime, Result, Runtime, Worker, logging, pipeline::PushRouter,
+    protocols::annotated::Annotated, utils::Duration,
 };
 
 fn main() -> Result<()> {

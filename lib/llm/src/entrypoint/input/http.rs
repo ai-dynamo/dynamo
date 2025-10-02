@@ -80,6 +80,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                         router_config.busy_threshold,
                         target_namespace,
                         Arc::new(http_service.clone()),
+                        http_service.state().metrics_clone(),
                     )
                     .await?;
                 }
@@ -217,6 +218,7 @@ async fn run_watcher(
     busy_threshold: Option<f64>,
     target_namespace: Option<String>,
     http_service: Arc<HttpService>,
+    metrics: Arc<crate::http::service::metrics::Metrics>,
 ) -> anyhow::Result<()> {
     let mut watch_obj = ModelWatcher::new(
         runtime,
@@ -234,11 +236,11 @@ async fn run_watcher(
 
     watch_obj.set_notify_on_model_update(tx);
 
-    // Spawn a task to watch for model type changes and update HTTP service endpoints
+    // Spawn a task to watch for model type changes and update HTTP service endpoints and metrics
     let _endpoint_enabler_task = tokio::spawn(async move {
-        while let Some(model_type) = rx.recv().await {
-            tracing::debug!("Received model type update: {:?}", model_type);
-            update_http_endpoints(http_service.clone(), model_type);
+        while let Some(model_update) = rx.recv().await {
+            update_http_endpoints(http_service.clone(), model_update.clone());
+            update_model_metrics(model_update, metrics.clone());
         }
     });
 
@@ -257,17 +259,37 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
         model_type
     );
     match model_type {
-        ModelUpdate::Added(model_type) => {
+        ModelUpdate::Added(card) => {
             // Handle all supported endpoint types, not just the first one
-            for endpoint_type in model_type.as_endpoint_types() {
+            for endpoint_type in card.model_type.as_endpoint_types() {
                 service.enable_model_endpoint(endpoint_type, true);
             }
         }
-        ModelUpdate::Removed(model_type) => {
+        ModelUpdate::Removed(card) => {
             // Handle all supported endpoint types, not just the first one
-            for endpoint_type in model_type.as_endpoint_types() {
+            for endpoint_type in card.model_type.as_endpoint_types() {
                 service.enable_model_endpoint(endpoint_type, false);
             }
+        }
+    }
+}
+
+/// Updates metrics for model type changes
+fn update_model_metrics(
+    model_type: ModelUpdate,
+    metrics: Arc<crate::http::service::metrics::Metrics>,
+) {
+    match model_type {
+        ModelUpdate::Added(card) => {
+            tracing::debug!("Updating metrics for added model: {}", card.display_name);
+            if let Err(err) = metrics.update_metrics_from_mdc(&card) {
+                tracing::warn!(%err, model_name=card.display_name, "update_metrics_from_mdc failed");
+            }
+        }
+        ModelUpdate::Removed(card) => {
+            tracing::debug!(model_name = card.display_name, "Model removed");
+            // Note: Metrics are typically not removed to preserve historical data
+            // This matches the behavior in the polling task
         }
     }
 }

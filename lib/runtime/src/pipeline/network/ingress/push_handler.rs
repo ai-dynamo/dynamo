@@ -126,6 +126,14 @@ where
         Ingress::add_metrics(self, endpoint, metrics_labels)
     }
 
+    fn set_endpoint_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
+        use crate::pipeline::network::Ingress;
+        self.endpoint_health_check_notifier
+            .set(notifier)
+            .map_err(|_| anyhow::anyhow!("Endpoint health check notifier already set"))?;
+        Ok(())
+    }
+
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError> {
         let start_time = std::time::Instant::now();
 
@@ -256,13 +264,12 @@ where
         let mut send_complete_final = true;
         while let Some(resp) = stream.next().await {
             tracing::trace!("Sending response: {:?}", resp);
-            if let Some(err) = resp.err() {
-                const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
-                if format!("{:?}", err) == STREAM_ERR_MSG {
-                    tracing::warn!(STREAM_ERR_MSG);
-                    send_complete_final = false;
-                    break;
-                }
+            if let Some(err) = resp.err()
+                && format!("{:?}", err) == STREAM_ERR_MSG
+            {
+                tracing::warn!(STREAM_ERR_MSG);
+                send_complete_final = false;
+                break;
             }
             let resp_wrapper = NetworkStreamWrapper {
                 data: Some(resp),
@@ -305,6 +312,11 @@ where
                         .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
                         .inc();
                 }
+            }
+            // Notify the health check manager that the stream has finished.
+            // This resets the timer, delaying the next canary health check.
+            if let Some(notifier) = self.endpoint_health_check_notifier.get() {
+                notifier.notify_one();
             }
         }
 

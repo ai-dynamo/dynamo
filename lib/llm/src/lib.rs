@@ -22,6 +22,7 @@ pub mod grpc;
 pub mod http;
 pub mod hub;
 // pub mod key_value_store;
+pub mod audit;
 pub mod kv_router;
 pub mod local_model;
 pub mod migration;
@@ -37,6 +38,7 @@ pub mod request_template;
 pub mod tokenizers;
 pub mod tokens;
 pub mod types;
+pub mod utils;
 
 #[cfg(feature = "block-manager")]
 pub mod block_manager;

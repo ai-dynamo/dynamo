@@ -25,7 +25,6 @@ python3 -m dynamo.sglang \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
-  --skip-tokenizer-init \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' &
 WORKER_PID=$!
 
@@ -35,5 +34,4 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
-  --skip-tokenizer-init \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5558"}'

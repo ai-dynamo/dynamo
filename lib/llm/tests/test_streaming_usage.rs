@@ -146,6 +146,7 @@ fn create_chat_request(include_usage: Option<bool>) -> NvCreateChatCompletionReq
         inner,
         common: Default::default(),
         nvext: None,
+        chat_template_args: None,
     }
 }
 
@@ -158,11 +159,14 @@ async fn test_streaming_without_usage() {
 
     // Create mock backend stream
     let ctx = Arc::new(MockContext::new());
-    let backend_stream = create_mock_backend_stream(ctx);
+    let backend_stream = create_mock_backend_stream(ctx.clone());
 
     // Transform the stream
-    let transformed_stream =
-        OpenAIPreprocessor::transform_postprocessor_stream(backend_stream, response_generator);
+    let transformed_stream = OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        response_generator,
+        ctx.clone(),
+    );
 
     // Collect all chunks
     let chunks: Vec<_> = transformed_stream.collect().await;
@@ -196,11 +200,14 @@ async fn test_streaming_with_usage_compliance() {
 
     // Create mock backend stream
     let ctx = Arc::new(MockContext::new());
-    let backend_stream = create_mock_backend_stream(ctx);
+    let backend_stream = create_mock_backend_stream(ctx.clone());
 
     // Transform the stream
-    let transformed_stream =
-        OpenAIPreprocessor::transform_postprocessor_stream(backend_stream, response_generator);
+    let transformed_stream = OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        response_generator,
+        ctx.clone(),
+    );
 
     // Collect all chunks
     let chunks: Vec<_> = transformed_stream.collect().await;
@@ -266,11 +273,14 @@ async fn test_streaming_with_usage_false() {
 
     // Create mock backend stream
     let ctx = Arc::new(MockContext::new());
-    let backend_stream = create_mock_backend_stream(ctx);
+    let backend_stream = create_mock_backend_stream(ctx.clone());
 
     // Transform the stream
-    let transformed_stream =
-        OpenAIPreprocessor::transform_postprocessor_stream(backend_stream, response_generator);
+    let transformed_stream = OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        response_generator,
+        ctx.clone(),
+    );
 
     // Collect all chunks
     let chunks: Vec<_> = transformed_stream.collect().await;

@@ -1,5 +1,5 @@
 # Dynamo Deployment of vLLM Example on AWS ECS
-## 1. ECS Cluster Setup
+## 1. EC2 Cluster Setup (for vLLM workloads)
 1. Go to AWS ECS console, **Clusters** tab and click on **Create cluster** with name `dynamo-GPU`
 2. Input the cluster name and choose **AWS EC2 instances** as the infrastructure. This option will create a cluster with EC2 instances to deploy containers.
 3. Choose the ECS-optimized GPU AMI `Amazon Linux 2 (GPU)` (Amazon ECS–optimized), which includes NVIDIA drivers and the Docker GPU runtime out of the box.
@@ -11,8 +11,17 @@
 7. Select `Turn on` for **Auto-assign public IP** option.
 8. Click on **Create** and a cluster will be deployed through cloudformation.
 
-## 2. ETCD/NATS Task Definitions Setup
-Add a task for ETCD and NATS services. A sample task definition JSON is attached.
+## 2. Fargate Cluster Setup (for ETCD/NATS services)
+1. Go to AWS ECS console, **Clusters** tab and click on **Create cluster**
+2. Input the cluster name as `dynamo-fargate`
+3. Choose **AWS Fargate (serverless)** as the infrastructure
+4. For networking, use the same VPC and subnets as the EC2 cluster to ensure connectivity between services
+5. For the security group, use the same security group as the EC2 cluster. This automatically allows communication between all services.
+6. Ensure outbound rules allow all traffic (default setting) so the Fargate tasks can download container images and communicate externally
+7. Click on **Create** to deploy the Fargate cluster
+
+## 3. ETCD/NATS Task Definitions Setup
+Add a task for ETCD and NATS services to run on Fargate. A sample task definition JSON is attached.
 1. ETCD container
 - Container name use `etcd`
 - Image URL is `bitnami/etcd` and **Yes** for Essential container
@@ -35,7 +44,7 @@ Add a task for ETCD and NATS services. A sample task definition JSON is attached
 |8222|TCP|8222|HTTP|
 - Docker configuration, add `-js, --trace` in **Command**
 
-## 3. vLLM Task Definitions Setup
+## 4. vLLM Task Definitions Setup
 1. Dynamo vLLM Frontend Task
 This task will create vLLM frontend, processors, routers and a decode worker.
 Please follow steps below to create this task
@@ -65,19 +74,23 @@ Create the PrefillWorker task same as the frontend worker, except for following 
 - No container port mapping
 - Docker configuration with command `cd components/backends/vllm && python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --is-prefill-worker`
 
-## 4. Task Deployment
+## 5. Task Deployment
 You can create a service or directly run the task from the task definition
 1. ETCD/NATS Task
-- Choose the Fargate cluster for **Existing cluster** created in the hello world example.
+- Choose the Fargate cluster (`dynamo-fargate`) for **Existing cluster** created in step 2.
+- Select **Launch type** as `FARGATE`
+- In the **Networking** section, select the same VPC and subnets used for the EC2 cluster
+- For **Security group**, select the same security group used by the EC2 cluster
+- Verify that outbound rules allow all traffic for downloading images and external communication
 - Wait for this deployment to finish, and get the **Private IP** of this task.
 2. Dynamo Frontend Task
-- Choose the EC2 cluster for **Existing cluster** created in step 1.
+- Choose the EC2 cluster (`dynamo-GPU`) for **Existing cluster** created in step 1.
 - In the **Container Overrides**, use the IP for ETCD/NATS task for the `ETCD_ENDPOINTS` and `NATS_SERVER` values.
 3. Dynamo PrefillWorker Task
-- Choose the EC2 cluster for **Existing cluster** created in step 1.
+- Choose the EC2 cluster (`dynamo-GPU`) for **Existing cluster** created in step 1.
 - In the **Container Overrides**, use the IP for ETCD/NATS task for the `ETCD_ENDPOINTS` and `NATS_SERVER` values.
 
-## 5. Testing
+## 6. Testing
 Find the public IP of the dynamo frontend task from the task page. Run following commands to query the endpoint.
 ```sh
 export DYNAMO_IP_ADDRESS=TASK_PUBLIC_IP_ADDRESS

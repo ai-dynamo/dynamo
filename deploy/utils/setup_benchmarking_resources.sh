@@ -56,7 +56,7 @@ fi
 if ! kubectl get pods -n "$NAMESPACE" | grep -q "dynamo-platform"; then
   warn "Dynamo platform pods not found in namespace $NAMESPACE"
   warn "Please ensure Dynamo Cloud platform is installed first:"
-  warn "  See: docs/guides/dynamo_deploy/installation_guide.md"
+  warn "  See: docs/kubernetes/installation_guide.md"
   if [[ -z "${FORCE:-}" && -z "${YES:-}" ]]; then
     read -p "Continue anyway? [y/N]: " -r ans
     [[ "$ans" =~ ^[Yy]$ ]] || exit 1
@@ -70,6 +70,12 @@ log "Applying benchmarking manifests to namespace $NAMESPACE"
 export NAMESPACE  # ensure envsubst can see it
 for mf in "$(dirname "$0")/manifests"/*.yaml; do
   if [[ -f "$mf" ]]; then
+    # Skip pvc-access-pod.yaml as it's managed by inject_manifest.py
+    if [[ "$(basename "$mf")" == "pvc-access-pod.yaml" ]]; then
+      log "Skipping $mf (managed by inject_manifest.py)"
+      continue
+    fi
+
     if command -v envsubst >/dev/null 2>&1; then
       envsubst < "$mf" | kubectl -n "$NAMESPACE" apply -f -
     else

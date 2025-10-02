@@ -316,9 +316,6 @@ class SystemInfo(NodeInfo):
         # Add Framework info (vllm, sglang, tensorrt_llm)
         self.add_child(FrameworkInfo())
 
-        # Add Dynamo workspace info (always show, even if not found)
-        self.add_child(DynamoInfo(thorough_check=self.thorough_check))
-
         # In terse mode, only add other components if they have errors
         if not self.terse:
             # Add file permissions check
@@ -335,6 +332,9 @@ class SystemInfo(NodeInfo):
         else:
             # In terse mode, only add components that have errors
             self._add_error_only_components()
+
+        # Add Dynamo workspace info (always show, even if not found)
+        self.add_child(DynamoInfo(thorough_check=self.thorough_check))
 
     def _get_ip_address(self) -> Optional[str]:
         """Get the primary IP address of the system."""
@@ -1594,69 +1594,7 @@ class FrameworkInfo(NodeInfo):
         frameworks_found = 0
 
         for module_name, display_name in frameworks_to_check:
-            # Special handling for TensorRT-LLM to avoid NVML crashes
-            if module_name == "tensorrt_llm":
-                # Check if it's installed in system packages first
-                python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
-                system_packages = [
-                    f"/usr/local/lib/python{python_version}/dist-packages",
-                    f"/usr/lib/python{python_version}/dist-packages",
-                ]
-
-                for pkg_path in system_packages:
-                    if os.path.exists(pkg_path):
-                        tensorrt_dirs = [
-                            d for d in os.listdir(pkg_path) if "tensorrt_llm" in d
-                        ]
-                        if tensorrt_dirs:
-                            frameworks_found += 1
-                            # Try to get version safely
-                            try:
-                                result = subprocess.run(
-                                    [
-                                        sys.executable,
-                                        "-c",
-                                        "import tensorrt_llm; print(tensorrt_llm.__version__)",
-                                    ],
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=10,
-                                )
-                                if result.returncode == 0:
-                                    version = result.stdout.strip()
-                                    package_info = PythonPackageInfo(
-                                        package_name=display_name,
-                                        version=version,
-                                        module_path=f"{pkg_path}/tensorrt_llm/__init__.py",
-                                        is_framework=True,
-                                        is_installed=True,
-                                    )
-                                else:
-                                    package_info = PythonPackageInfo(
-                                        package_name=display_name,
-                                        version=f"Found in {pkg_path} but not importable",
-                                        is_framework=True,
-                                        is_installed=True,
-                                    )
-                                self.add_child(package_info)
-                                break
-                            except (
-                                subprocess.TimeoutExpired,
-                                subprocess.CalledProcessError,
-                            ):
-                                package_info = PythonPackageInfo(
-                                    package_name=display_name,
-                                    version=f"Found in {pkg_path} but not importable",
-                                    is_framework=True,
-                                    is_installed=True,
-                                )
-                                self.add_child(package_info)
-                                break
-
-                # Don't add anything if not found in system
-                continue
-
-            # Regular import for other frameworks
+            # Regular import for all frameworks
             try:
                 module = __import__(module_name)
                 version = getattr(module, "__version__", "installed")
@@ -2073,29 +2011,14 @@ class DynamoFrameworkInfo(NodeInfo):
         if not workspace_dir:
             return components
 
-        # Scan components directory (frontend, planner, etc.)
-        components_path = os.path.join(workspace_dir, "components")
+        # Scan components python src directory (frontend, planner, etc.)
+        components_path = os.path.join(workspace_dir, "components", "src", "dynamo")
         if os.path.exists(components_path):
             for item in os.listdir(components_path):
                 item_path = os.path.join(components_path, item)
                 if os.path.isdir(item_path):
                     # Check for dynamo module in src
-                    module_path = os.path.join(
-                        item_path, "src", "dynamo", item, "__init__.py"
-                    )
-                    if os.path.exists(module_path):
-                        components.append(f"dynamo.{item}")
-
-        # Scan backends directory (vllm, sglang, trtllm, etc.)
-        backends_path = os.path.join(workspace_dir, "components", "backends")
-        if os.path.exists(backends_path):
-            for item in os.listdir(backends_path):
-                item_path = os.path.join(backends_path, item)
-                if os.path.isdir(item_path):
-                    # Check for dynamo module in src
-                    module_path = os.path.join(
-                        item_path, "src", "dynamo", item, "__init__.py"
-                    )
+                    module_path = os.path.join(item_path, "__init__.py")
                     if os.path.exists(module_path):
                         components.append(f"dynamo.{item}")
 
@@ -2290,20 +2213,9 @@ def show_pythonpath_recommendation():
     # Collect all component source paths
     comp_path = os.path.join(workspace_dir, "components")
     if os.path.exists(comp_path):
-        for item in os.listdir(comp_path):
-            if item == "backends":
-                continue  # Handle backends separately
-            src_path = os.path.join(comp_path, item, "src")
-            if os.path.exists(src_path):
-                paths.append(src_path)
-
-    # Collect all backend source paths
-    backend_path = os.path.join(workspace_dir, "components", "backends")
-    if os.path.exists(backend_path):
-        for item in os.listdir(backend_path):
-            src_path = os.path.join(backend_path, item, "src")
-            if os.path.exists(src_path):
-                paths.append(src_path)
+        src_path = os.path.join(comp_path, "src")
+        if os.path.exists(src_path):
+            paths.append(src_path)
 
     # Also add runtime path
     runtime_path = os.path.join(workspace_dir, "lib/bindings/python/src")

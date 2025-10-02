@@ -27,7 +27,7 @@ To learn what KVBM is, please check [here](https://docs.nvidia.com/dynamo/latest
 > - KVBM only supports TensorRT-LLM’s PyTorch backend.
 > - To enable disk cache offloading, you must first enable a CPU memory cache offloading.
 > - Disable partial reuse `enable_partial_reuse: false` in the LLM API config’s `kv_connector_config` to increase offloading cache hits.
-> - KVBM requires TensorRT-LLM at commit ce580ce4f52af3ad0043a800b3f9469e1f1109f6 or newer.
+> - KVBM requires TensorRT-LLM v1.1.0rc5 or newer.
 > - Enabling KVBM metrics with TensorRT-LLM is still a work in progress.
 
 ## Quick Start
@@ -38,19 +38,19 @@ To use KVBM in TensorRT-LLM, you can follow the steps below:
 # start up etcd for KVBM leader/worker registration and discovery
 docker compose -f deploy/docker-compose.yml up -d
 
-# Build a container that includes TensorRT-LLM and KVBM. Note: KVBM integration is only available in TensorRT-LLM commit ce580ce4f52af3ad0043a800b3f9469e1f1109f6 or newer.
-./container/build.sh --framework trtllm --tensorrtllm-commit ce580ce4f52af3ad0043a800b3f9469e1f1109f6 --enable-kvbm
+# Build a container that includes TensorRT-LLM and KVBM.
+./container/build.sh --framework trtllm --enable-kvbm
 
 # launch the container
 ./container/run.sh --framework trtllm -it --mount-workspace --use-nixl-gds
 
 # enable kv offloading to CPU memory
-# 60 means 60GB of pinned CPU memory would be used
-export DYN_KVBM_CPU_CACHE_GB=60
+# 4 means 4GB of pinned CPU memory would be used
+export DYN_KVBM_CPU_CACHE_GB=4
 
 # enable kv offloading to disk. Note: To enable disk cache offloading, you must first enable a CPU memory cache offloading.
-# 20 means 20GB of disk would be used
-export DYN_KVBM_DISK_CACHE_GB=20
+# 8 means 8GB of disk would be used
+export DYN_KVBM_DISK_CACHE_GB=8
 
 # Allocating memory and disk storage can take some time.
 # We recommend setting a higher timeout for leader–worker initialization.
@@ -73,10 +73,10 @@ kv_connector_config:
   connector_worker_class: DynamoKVBMConnectorWorker
 EOF
 
-# start dynamo frontend
+# [DYNAMO] start dynamo frontend
 python3 -m dynamo.frontend --http-port 8000 &
 
-# To serve an LLM model with dynamo
+# [DYNAMO] To serve an LLM model with dynamo
 python3 -m dynamo.trtllm \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
@@ -95,7 +95,32 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
     "max_tokens": 30
   }'
 
-# Optionally, we could also serve an LLM with trtllm-serve to utilize the KVBM feature.
-trtllm-serve deepseek-ai/DeepSeek-R1-Distill-Llama-8B --host localhost --port 8001 --backend pytorch --extra_llm_api_options /tmp/kvbm_llm_api_config.yaml
-
 ```
+
+Alternatively, can use "trtllm-serve" with KVBM by replacing the above two [DYNAMO] cmds with below:
+```bash
+trtllm-serve deepseek-ai/DeepSeek-R1-Distill-Llama-8B --host localhost --port 8000 --backend pytorch --extra_llm_api_options /tmp/kvbm_llm_api_config.yaml
+```
+
+## Enable and View KVBM Metrics
+
+Follow below steps to enable metrics collection and view via Grafana dashboard:
+```bash
+# Start the basic services (etcd & natsd), along with Prometheus and Grafana
+docker compose -f deploy/docker-compose.yml --profile metrics up -d
+
+# set env var DYN_SYSTEM_ENABLED to true, DYN_SYSTEM_PORT to 6880, DYN_KVBM_SLEEP to 5, when launch via dynamo
+# NOTE: Make sure port 6881 (for KVBM worker metrics) and port 6882 (for KVBM leader metrics) are available.
+# NOTE: DYN_KVBM_SLEEP is needed to avoid metrics port conflict between KVBM leader and worker
+DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=6880 DYN_KVBM_SLEEP=5 \
+python3 -m dynamo.trtllm \
+  --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+  --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+  --extra-engine-args /tmp/kvbm_llm_api_config.yaml &
+
+# optional if firewall blocks KVBM metrics ports to send prometheus metrics
+sudo ufw allow 6881/tcp
+sudo ufw allow 6882/tcp
+```
+
+View grafana metrics via http://localhost:3001 (default login: dynamo/dynamo) and look for KVBM Dashboard

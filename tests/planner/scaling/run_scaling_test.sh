@@ -14,7 +14,9 @@ set -e
 
 # Configuration
 NAMESPACE=${NAMESPACE:-default}
-YAML_FILE="disagg_planner.yaml"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+YAML_FILE="$SCRIPT_DIR/disagg_planner.yaml"
+TEST_FILE="$SCRIPT_DIR/../test_scaling_e2e.py"
 FRONTEND_PORT=8000
 LOCAL_PORT=8000
 DEPLOYMENT_NAME="vllm-disagg-planner"
@@ -194,7 +196,7 @@ cleanup_deployment() {
 }
 
 run_test() {
-    log_info "Running scaling test (graduated 8->15->25 req/s)..."
+    log_info "Running scaling test (graduated 8->18 req/s)..."
 
     local python_cmd="python3"
     if ! command -v python3 &> /dev/null; then
@@ -207,7 +209,7 @@ run_test() {
         log_info "Results will be saved to tests/planner/e2e_scaling_results"
     fi
 
-    if $python_cmd test_scaling_e2e.py $test_args; then
+    if $python_cmd "$TEST_FILE" $test_args; then
         log_success "Scaling test PASSED"
         return 0
     else
@@ -248,7 +250,7 @@ main() {
 
     log_info "SLA Planner Scaling Test"
     log_info "Namespace: $NAMESPACE"
-    log_info "Scenario: Graduated 8->15->25 req/s (1P1D -> 2P1D prefill scaling, ISL=4000/OSL=150)"
+    log_info "Scenario: Graduated 8->18 req/s (1P1D -> 2P1D prefill scaling, ISL=4000/OSL=150)"
 
     check_prerequisites
 

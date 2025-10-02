@@ -18,6 +18,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::local_model::runtime_config::ModelRuntimeConfig;
+use crate::model_card::ModelDeploymentCard;
+use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
+
 pub use prometheus::Registry;
 
 use super::RouteDoc;
@@ -32,6 +36,16 @@ pub struct Metrics {
     output_sequence_length: HistogramVec,
     time_to_first_token: HistogramVec,
     inter_token_latency: HistogramVec,
+
+    // Runtime configuration metrics. Note: Some of these metrics represent counter-like values from
+    // source systems, but are implemented as gauges because they are copied/synchronized from upstream
+    // counter values rather than being directly incremented.
+    model_total_kv_blocks: IntGaugeVec,
+    model_max_num_seqs: IntGaugeVec,
+    model_max_num_batched_tokens: IntGaugeVec,
+    model_context_length: IntGaugeVec,
+    model_kv_cache_block_size: IntGaugeVec,
+    model_migration_limit: IntGaugeVec,
 }
 
 // Inflight tracks requests from HTTP handler start until complete response is finished.
@@ -73,6 +87,9 @@ pub enum Endpoint {
 
     /// OAI Responses
     Responses,
+
+    /// Tensor
+    Tensor,
 }
 
 /// Metrics for the HTTP service
@@ -117,12 +134,33 @@ impl Metrics {
     ///
     /// The following metrics will be created with the configured prefix:
     /// - `{prefix}_requests_total` - IntCounterVec for the total number of requests processed
-    /// - `{prefix}_inflight_requests` - IntGaugeVec for the number of inflight requests
+    /// - `{prefix}_inflight_requests` - IntGaugeVec for the number of inflight/concurrent requests
+    /// - `{prefix}_disconnected_clients` - IntGauge for the number of disconnected clients
     /// - `{prefix}_request_duration_seconds` - HistogramVec for the duration of requests
     /// - `{prefix}_input_sequence_tokens` - HistogramVec for input sequence length in tokens
     /// - `{prefix}_output_sequence_tokens` - HistogramVec for output sequence length in tokens
     /// - `{prefix}_time_to_first_token_seconds` - HistogramVec for time to first token in seconds
     /// - `{prefix}_inter_token_latency_seconds` - HistogramVec for inter-token latency in seconds
+    ///
+    /// ## Model Configuration Metrics
+    ///
+    /// Runtime config metrics (from ModelRuntimeConfig):
+    /// - `{prefix}_model_total_kv_blocks` - IntGaugeVec for total KV cache blocks available for a worker serving the model
+    /// - `{prefix}_model_max_num_seqs` - IntGaugeVec for maximum sequences for a worker serving the model
+    /// - `{prefix}_model_max_num_batched_tokens` - IntGaugeVec for maximum batched tokens for a worker serving the model
+    ///
+    /// MDC metrics (from ModelDeploymentCard):
+    /// - `{prefix}_model_context_length` - IntGaugeVec for maximum context length for a worker serving the model
+    /// - `{prefix}_model_kv_cache_block_size` - IntGaugeVec for KV cache block size for a worker serving the model
+    /// - `{prefix}_model_migration_limit` - IntGaugeVec for request migration limit for a worker serving the model
+    ///
+    /// ## Runtime Config Polling Configuration
+    ///
+    /// The polling behavior can be configured via environment variables:
+    /// - `DYN_HTTP_SVC_CONFIG_METRICS_POLL_INTERVAL_SECS`: Poll interval in seconds (must be > 0, supports fractional seconds, defaults to 8)
+    ///
+    /// Metrics are never removed to preserve historical data. Runtime config and MDC
+    /// metrics are updated when models are discovered and their configurations are available.
     pub fn new() -> Self {
         let raw_prefix = std::env::var(frontend_service::METRICS_PREFIX_ENV)
             .unwrap_or_else(|_| name_prefix::FRONTEND.to_string());
@@ -148,7 +186,7 @@ impl Metrics {
 
         let inflight_gauge = IntGaugeVec::new(
             Opts::new(
-                frontend_metric_name(frontend_service::INFLIGHT_REQUESTS_TOTAL),
+                frontend_metric_name(frontend_service::INFLIGHT_REQUESTS),
                 "Number of inflight requests",
             ),
             &["model"],
@@ -156,14 +194,14 @@ impl Metrics {
         .unwrap();
 
         let client_disconnect_gauge = prometheus::IntGauge::new(
-            frontend_metric_name("client_disconnects"),
-            "Number of connections dropped by clients",
+            frontend_metric_name(frontend_service::DISCONNECTED_CLIENTS),
+            "Number of disconnected clients",
         )
         .unwrap();
 
         let http_queue_gauge = IntGaugeVec::new(
             Opts::new(
-                frontend_metric_name(frontend_service::QUEUED_REQUESTS_TOTAL),
+                frontend_metric_name(frontend_service::QUEUED_REQUESTS),
                 "Number of requests in HTTP processing queue",
             ),
             &["model"],
@@ -232,6 +270,64 @@ impl Metrics {
         )
         .unwrap();
 
+        // Runtime configuration metrics
+        // Note: Some of these metrics represent counter-like values from source systems,
+        // but are implemented as gauges because they are copied/synchronized from upstream
+        // counter values rather than being directly incremented.
+        let model_total_kv_blocks = IntGaugeVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_TOTAL_KV_BLOCKS),
+                "Total KV cache blocks available for a worker serving the model",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
+        let model_max_num_seqs = IntGaugeVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_MAX_NUM_SEQS),
+                "Maximum number of sequences for a worker serving the model",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
+        let model_max_num_batched_tokens = IntGaugeVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_MAX_NUM_BATCHED_TOKENS),
+                "Maximum number of batched tokens for a worker serving the model",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
+        let model_context_length = IntGaugeVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_CONTEXT_LENGTH),
+                "Maximum context length in tokens for a worker serving the model",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
+        let model_kv_cache_block_size = IntGaugeVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_KV_CACHE_BLOCK_SIZE),
+                "KV cache block size in tokens for a worker serving the model",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
+        let model_migration_limit = IntGaugeVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_MIGRATION_LIMIT),
+                "Maximum number of request migrations allowed for the model",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
         Metrics {
             request_counter,
             inflight_gauge,
@@ -242,6 +338,12 @@ impl Metrics {
             output_sequence_length,
             time_to_first_token,
             inter_token_latency,
+            model_total_kv_blocks,
+            model_max_num_seqs,
+            model_max_num_batched_tokens,
+            model_context_length,
+            model_kv_cache_block_size,
+            model_migration_limit,
         }
     }
 
@@ -330,6 +432,66 @@ impl Metrics {
         registry.register(Box::new(self.output_sequence_length.clone()))?;
         registry.register(Box::new(self.time_to_first_token.clone()))?;
         registry.register(Box::new(self.inter_token_latency.clone()))?;
+
+        // Register runtime configuration metrics
+        registry.register(Box::new(self.model_total_kv_blocks.clone()))?;
+        registry.register(Box::new(self.model_max_num_seqs.clone()))?;
+        registry.register(Box::new(self.model_max_num_batched_tokens.clone()))?;
+        registry.register(Box::new(self.model_context_length.clone()))?;
+        registry.register(Box::new(self.model_kv_cache_block_size.clone()))?;
+        registry.register(Box::new(self.model_migration_limit.clone()))?;
+
+        Ok(())
+    }
+
+    /// Update runtime configuration metrics for a model
+    /// This should be called when model runtime configuration is available or updated
+    pub fn update_runtime_config_metrics(
+        &self,
+        model_name: &str,
+        runtime_config: &ModelRuntimeConfig,
+    ) {
+        if let Some(total_kv_blocks) = runtime_config.total_kv_blocks {
+            self.model_total_kv_blocks
+                .with_label_values(&[model_name])
+                .set(clamp_u64_to_i64(total_kv_blocks));
+        }
+
+        if let Some(max_num_seqs) = runtime_config.max_num_seqs {
+            self.model_max_num_seqs
+                .with_label_values(&[model_name])
+                .set(clamp_u64_to_i64(max_num_seqs));
+        }
+
+        if let Some(max_batched_tokens) = runtime_config.max_num_batched_tokens {
+            self.model_max_num_batched_tokens
+                .with_label_values(&[model_name])
+                .set(clamp_u64_to_i64(max_batched_tokens));
+        }
+    }
+
+    /// Update metrics from a ModelDeploymentCard
+    /// This updates both runtime config metrics and MDC-specific metrics
+    pub fn update_metrics_from_mdc(&self, card: &ModelDeploymentCard) -> anyhow::Result<()> {
+        self.update_runtime_config_metrics(&card.display_name, &card.runtime_config);
+
+        self.model_context_length
+            .with_label_values(&[&card.display_name])
+            .set(card.context_length as i64);
+
+        self.model_kv_cache_block_size
+            .with_label_values(&[&card.display_name])
+            .set(card.kv_cache_block_size as i64);
+
+        self.model_migration_limit
+            .with_label_values(&[&card.display_name])
+            .set(card.migration_limit as i64);
+
+        tracing::debug!(
+            model = %card.display_name,
+            "Successfully updated MDC metrics"
+        );
+
         Ok(())
     }
 
@@ -456,6 +618,7 @@ impl std::fmt::Display for Endpoint {
             Endpoint::ChatCompletions => write!(f, "chat_completions"),
             Endpoint::Embeddings => write!(f, "embeddings"),
             Endpoint::Responses => write!(f, "responses"),
+            Endpoint::Tensor => write!(f, "tensor"),
         }
     }
 }
@@ -467,6 +630,7 @@ impl Endpoint {
             Endpoint::ChatCompletions => "chat_completions",
             Endpoint::Embeddings => "embeddings",
             Endpoint::Responses => "responses",
+            Endpoint::Tensor => "tensor",
         }
     }
 }
