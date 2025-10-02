@@ -9,7 +9,7 @@ Complete workflow to deploy SLA-based autoscaling for Dynamo deployments. This g
 
 The SLA Planner automatically scales prefill and decode workers to meet your TTFT (Time To First Token) and ITL (Inter-Token Latency) targets. The deployment process consists of two mandatory phases:
 
-1. **Pre-Deployment Profiling** (2-4 hours) - Generates performance data
+1. **Pre-Deployment Profiling** (2-4 hours on real silicon or a few minutes using simulator) - Generates performance data
 2. **SLA Planner Deployment** (5-10 minutes) - Enables autoscaling
 
 ```mermaid
