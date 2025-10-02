@@ -15,7 +15,6 @@
 
 import logging
 import os
-import shlex
 from typing import Optional
 
 from pydantic import BaseModel
@@ -38,6 +37,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
 
 class TargetReplica(BaseModel):
     sub_component_type: SubComponentType
