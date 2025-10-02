@@ -70,7 +70,7 @@ impl KeyValueBucket for EtcdBucket {
     }
 
     async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StorageError> {
-        let k = format!("{}/{key}", self.bucket_name);
+        let k = make_key(&self.bucket_name, key);
         tracing::trace!("etcd get: {k}");
 
         let mut kvs = self
@@ -86,9 +86,11 @@ impl KeyValueBucket for EtcdBucket {
     }
 
     async fn delete(&self, key: &Key) -> Result<(), StorageError> {
+        let k = make_key(&self.bucket_name, key);
+        tracing::trace!("etcd delete: {k}");
         let _ = self
             .client
-            .kv_delete(key.0.clone(), None)
+            .kv_delete(k, None)
             .await
             .map_err(|e| StorageError::EtcdError(e.to_string()))?;
         Ok(())

@@ -17,6 +17,7 @@ async def register_llm_with_runtime_config(
     endpoint: Endpoint,
     server_args: ServerArgs,
     dynamo_args: DynamoArgs,
+    input_type: Optional[ModelInput] = ModelInput.Tokens,
 ) -> bool:
     """Register LLM with runtime config
 
@@ -24,7 +25,7 @@ async def register_llm_with_runtime_config(
         bool: True if registration succeeded, False if it failed
     """
     runtime_config = await _get_runtime_config(engine, server_args, dynamo_args)
-    input_type = ModelInput.Tokens
+    input_type = input_type
     output_type = ModelType.Chat | ModelType.Completions
     if not server_args.skip_tokenizer_init:
         logging.warning(
