@@ -584,7 +584,7 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			expected:          "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 0 -H $(LWS_LEADER_ADDRESS),$(LWS_WORKER_1_ADDRESS) --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" -x CUDA_VISIBLE_DEVICES -x HF_DATASETS_CACHE -x HF_ENDPOINT -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x USER bash -c 'source /opt/dynamo/venv/bin/activate && trtllm-llmapi-launch python -m worker'",
 		},
 		{
-			name:              "Leader with both command and args (args take precedence)",
+			name:              "Leader with both command and args (shell command - args take precedence)",
 			numberOfNodes:     2,
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			serviceName:       "test",
@@ -598,8 +598,62 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 				},
 			},
 			initialArgs:    []string{"launch", "--config", "test.yaml"},
-			initialCommand: []string{"ignored-command"},
+			initialCommand: []string{"sh", "-c"},
 			expected:       "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 2 -H $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-ldr-0.$(GROVE_HEADLESS_SERVICE),$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-wkr-0.$(GROVE_HEADLESS_SERVICE) --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" -x CUDA_VISIBLE_DEVICES -x HF_DATASETS_CACHE -x HF_ENDPOINT -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x USER bash -c 'source /opt/dynamo/venv/bin/activate && trtllm-llmapi-launch launch --config test.yaml'",
+		},
+		{
+			name:              "Leader with python command and args (combined)",
+			numberOfNodes:     2,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			serviceName:       "test",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					Resources: &common.Resources{
+						Limits: &common.ResourceItem{
+							GPU: "1",
+						},
+					},
+				},
+			},
+			initialArgs:    []string{"-m", "dynamo.trtllm", "--model-path", "test"},
+			initialCommand: []string{"python3"},
+			expected:       "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 2 -H $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-ldr-0.$(GROVE_HEADLESS_SERVICE),$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-wkr-0.$(GROVE_HEADLESS_SERVICE) --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" -x CUDA_VISIBLE_DEVICES -x HF_DATASETS_CACHE -x HF_ENDPOINT -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x USER bash -c 'source /opt/dynamo/venv/bin/activate && trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path test'",
+		},
+		{
+			name:              "Leader with python module command and separate args",
+			numberOfNodes:     2,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			serviceName:       "test",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					Resources: &common.Resources{
+						Limits: &common.ResourceItem{
+							GPU: "1",
+						},
+					},
+				},
+			},
+			initialArgs:    []string{"--model-path", "Qwen/Qwen3-0.6B", "--served-model-name", "Qwen/Qwen3-0.6B", "--disaggregation-mode", "prefill"},
+			initialCommand: []string{"python3", "-m", "dynamo.trtllm"},
+			expected:       "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 2 -H $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-ldr-0.$(GROVE_HEADLESS_SERVICE),$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-wkr-0.$(GROVE_HEADLESS_SERVICE) --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" -x CUDA_VISIBLE_DEVICES -x HF_DATASETS_CACHE -x HF_ENDPOINT -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x USER bash -c 'source /opt/dynamo/venv/bin/activate && trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B --disaggregation-mode prefill'",
+		},
+		{
+			name:              "Leader with absolute path python command",
+			numberOfNodes:     2,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			serviceName:       "test",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					Resources: &common.Resources{
+						Limits: &common.ResourceItem{
+							GPU: "1",
+						},
+					},
+				},
+			},
+			initialArgs:    []string{"-m", "dynamo.trtllm", "--model-path", "test"},
+			initialCommand: []string{"/usr/bin/python3.8"},
+			expected:       "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 2 -H $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-ldr-0.$(GROVE_HEADLESS_SERVICE),$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-wkr-0.$(GROVE_HEADLESS_SERVICE) --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" -x CUDA_VISIBLE_DEVICES -x HF_DATASETS_CACHE -x HF_ENDPOINT -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x USER bash -c 'source /opt/dynamo/venv/bin/activate && trtllm-llmapi-launch /usr/bin/python3.8 -m dynamo.trtllm --model-path test'",
 		},
 		{
 			name:              "Leader with all environment variables forwarded",
