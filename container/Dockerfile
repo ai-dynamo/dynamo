@@ -133,7 +133,7 @@ RUN apt-get update -y \
 # by UCX to build and use RDMA devices. Reinstall to make sure to recreate
 # symlink .so to .so.1 in case some packages are already found.
 RUN apt-get update -y \
-    && DEBIAN_FRONTEND=noninteractive apt-get -y install --reinstall \
+    && DEBIAN_FRONTEND=noninteractive apt-get -y install --reinstall --no-install-recommends \
         libibverbs-dev \
         rdma-core \
         ibverbs-utils \
