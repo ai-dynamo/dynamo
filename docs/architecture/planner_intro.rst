@@ -23,7 +23,6 @@ Currently, the planner can scale the number of vllm workers up and down based on
 
 Key features include:
 
-* **Load-based scaling** that monitors KV cache utilization and prefill queue size to make scaling decisions
 * **SLA-based scaling** that uses predictive modeling and performance interpolation to proactively meet TTFT and ITL targets
 * **Graceful scaling** that ensures no requests are dropped during scale-down operations
 
@@ -42,7 +41,7 @@ Key features include:
      -
      - Feature
    * - **Backend**
-     - ✅
+     - ❌
      - Local
    * -
      - ✅
@@ -80,5 +79,4 @@ Key features include:
    Overview <self>
    SLA Planner Quick Start <../kubernetes/sla_planner_quickstart>
    Pre-Deployment Profiling <../benchmarks/pre_deployment_profiling.md>
-   Load-based Planner <load_planner.md>
    SLA-based Planner <sla_planner.md>
