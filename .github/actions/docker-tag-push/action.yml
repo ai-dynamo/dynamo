@@ -47,6 +47,7 @@ runs:
   steps:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
+    # OPS-1145: Uncomment AWS lines for ECR uploads
     # - name: Install awscli
     #   shell: bash
     #   run: |
@@ -65,16 +66,17 @@ runs:
       if: ${{ inputs.azure_push == 'true' }}
       run: |
         echo "${{ inputs.azure_acr_password }}" | docker login ${{ inputs.azure_acr_hostname }} --username ${{ inputs.azure_acr_user }} --password-stdin
-    - name: ECR Tag and Push
-      shell: bash
-      if: ${{ inputs.aws_push == 'true' }}
-      env:
-        LOCAL_IMAGE: ${{ inputs.local_image }}
-        PUSH_TAG: ${{ inputs.push_tag }}
-        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
-      run: |
-        docker tag ${LOCAL_IMAGE} ${ECR_HOSTNAME}/${PUSH_TAG}
-        docker push ${ECR_HOSTNAME}/${PUSH_TAG}
+    # OPS-1145: Uncomment AWS lines for ECR uploads
+    # - name: ECR Tag and Push
+    #   shell: bash
+    #   if: ${{ inputs.aws_push == 'true' }}
+    #   env:
+    #     LOCAL_IMAGE: ${{ inputs.local_image }}
+    #     PUSH_TAG: ${{ inputs.push_tag }}
+    #     ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+    #   run: |
+    #     docker tag ${LOCAL_IMAGE} ${ECR_HOSTNAME}/${PUSH_TAG}
+    #     docker push ${ECR_HOSTNAME}/${PUSH_TAG}
     - name: ACR Tag and Push
       shell: bash
       if: ${{ inputs.azure_push == 'true' }}
