@@ -7,21 +7,35 @@ Complete workflow to deploy SLA-based autoscaling for Dynamo deployments. This g
 
 ## Overview
 
-The SLA Planner automatically scales prefill and decode workers to meet your TTFT (Time To First Token) and ITL (Inter-Token Latency) targets. The deployment process consists of two mandatory phases:
+The SLA Planner automatically scales prefill and decode workers to meet your TTFT (Time To First Token) and ITL (Inter-Token Latency) targets.
 
-1. **Pre-Deployment Profiling** (2-4 hours on real silicon or a few minutes using simulator) - Generates performance data
+### Architecture
+```mermaid
+flowchart LR
+  Frontend --"/metrics"--> Prometheus
+  Planner --"query API"--> Prometheus
+  Planner --"scaling decisions"--> Workers["prefill<br/>backend"]
+  Frontend -.->|"requests"| Workers
+```
+
+The deployment process consists of two mandatory phases:
+
+1. **Pre-Deployment Profiling** (2-4 hours) - Generates performance data
 2. **SLA Planner Deployment** (5-10 minutes) - Enables autoscaling
+
+> [!TIP]
+> **Fast Profiling with AI Configurator**: For TensorRT-LLM users, we provide AI Configurator (AIC) that can complete profiling in 20-30 seconds using performance simulation instead of real deployments. Support for vLLM and SGLang coming soon. See [AI Configurator section](/docs/benchmarks/pre_deployment_profiling.md#running-the-profiling-script-with-aiconfigurator) in the Profiling Guide.
 
 ```mermaid
 flowchart TD
-    A[🚀 Start SLA Planner Setup] --> B{📊 Profiling Complete?}
-    B -->|❌ No| C[⏱️ Run Pre-Deployment Profiling<br/>Duration: 2-4 hours<br/>Purpose: Generate performance data]
-    C --> D[✅ Verify Profiling Results]
-    D --> E[🚀 Deploy SLA Planner<br/>Duration: 5-10 minutes<br/>Purpose: Enable autoscaling]
+    A[🚀 Start Setup] --> B{📊 Profiling Done?}
+    B -->|❌ No| C[⏱️ Run Profiling<br/>2-4 hours]
+    C --> D[✅ Verify Results]
+    D --> E[🚀 Deploy Planner<br/>5-10 minutes]
     B -->|✅ Yes| E
-    E --> F[🧪 Test & Monitor]
-    F --> G[🎉 Production Ready]
-
+    E --> F[🧪 Test System]
+    F --> G[🎉 Ready!]
+    
     style A fill:#e1f5fe
     style C fill:#fff3e0
     style E fill:#e8f5e8
@@ -115,28 +129,16 @@ kubectl logs job/profile-sla -n $NAMESPACE
 > [!NOTE]
 > **Time Investment**: This profiling process is comprehensive and typically takes **2-4 hours** to complete. The script systematically tests multiple tensor parallelism configurations and load conditions to find optimal performance settings.
 
-### Step 1.6: Download Profiling Results
+### Step 1.6: Download Profiling Results (Optional)
 
-After the profiling job completes successfully:
+If you want to view the profiling results and performance plots:
 
 ```bash
 # Download to directory
 python3 -m deploy.utils.download_pvc_results --namespace $NAMESPACE --output-dir ./results --folder /data/profiling_results
 ```
 
-**Expected Output Structure:**
-```
-./results/
-├── prefill_performance.png                    # Main prefill performance plot
-├── decode_performance.png                     # Main decode performance plot
-├── selected_prefill_interpolation/
-│   ├── raw_data.npz                           # Prefill interpolation data
-│   ├── prefill_ttft_interpolation.png         # TTFT vs ISL plot
-│   └── prefill_throughput_interpolation.png   # Throughput vs ISL plot
-└── selected_decode_interpolation/
-    ├── raw_data.npz                           # Decode interpolation data
-    └── decode_tp{best_tp}.png                 # 3D ITL surface plot
-```
+For detailed information about the output structure, performance plots, and how to analyze the results, see the [Viewing Profiling Results](/docs/benchmarks/pre_deployment_profiling.md#viewing-profiling-results) section in the Profiling Guide.
 
 **Verify Success**: Look for terminal output like:
 ```
@@ -246,11 +248,19 @@ curl http://localhost:8000/metrics | grep nv_llm_http_service
 - Check worker logs: `kubectl logs -n $NAMESPACE deployment/vllm-disagg-planner-backend`
 - Ensure GPU resources are available for workers
 
+**Unknown Field subComponentType:**
+
+If you encounter the following error when applying the deployment:
+```bash
+Error from server (BadRequest): error when creating "components/backends/vllm/deploy/disagg.yaml": DynamoGraphDeployment in version "v1alpha1" cannot be handled as a DynamoGraphDeployment: strict decoding error: unknown field "spec.services.DecodeWorker.subComponentType", unknown field "spec.services.PrefillWorker.subComponentType"
+```
+This is because the `subComponentType` field has only been added in newer versions of the DynamoGraphDeployment CRD (> 0.5.0). You can upgrade the CRD version by following the instructions [here](/docs/kubernetes/installation_guide.md).
+
 ## Next Steps
 
-- **Advanced Configuration**: See [SLA Planner Advanced Guide](sla_planner_deployment.md) for detailed configuration options
 - **Architecture Details**: See [SLA-based Planner Architecture](/docs/architecture/sla_planner.md) for technical details
 - **Performance Tuning**: See [Pre-Deployment Profiling Guide](/docs/benchmarks/pre_deployment_profiling.md) for advanced profiling options
+- **Load Testing**: See [SLA Planner Load Test](/tests/planner/README.md) for comprehensive testing tools
 
 ## Quick Reference
 
