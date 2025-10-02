@@ -10,7 +10,7 @@ import sys
 from argparse import Namespace
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from sglang.srt.server_args import ServerArgs
 
@@ -61,6 +61,24 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": False,
         "help": "Use SGLang's tokenizer. This will skip tokenization of the input and output and only v1/chat/completions will be available when using the dynamo frontend. Cannot be used with --custom-jinja-template.",
     },
+    "multimodal-processor": {
+        "flags": ["--multimodal-processor"],
+        "action": "store_true",
+        "default": False,
+        "help": "Run as multimodal processor component for handling multimodal requests",
+    },
+    "multimodal-encode-worker": {
+        "flags": ["--multimodal-encode-worker"],
+        "action": "store_true",
+        "default": False,
+        "help": "Run as multimodal encode worker component for processing images/videos",
+    },
+    "multimodal-worker": {
+        "flags": ["--multimodal-worker"],
+        "action": "store_true",
+        "default": False,
+        "help": "Run as multimodal worker component for LLM inference with multimodal data",
+    },
 }
 
 
@@ -78,6 +96,11 @@ class DynamoArgs:
 
     # preprocessing options
     use_sglang_tokenizer: bool = False
+
+    # multimodal options
+    multimodal_processor: bool = False
+    multimodal_encode_worker: bool = False
+    multimodal_worker: bool = False
 
 
 class DisaggregationMode(Enum):
@@ -99,6 +122,8 @@ class Config:
             return DisaggregationMode.PREFILL
         elif self.server_args.disaggregation_mode == "decode":
             return DisaggregationMode.DECODE
+        else:
+            return DisaggregationMode.AGGREGATED
 
 
 def _set_parser(
@@ -180,6 +205,15 @@ def parse_args(args: list[str]) -> Config:
             and parsed_args.disaggregation_mode == "prefill"
         ):
             endpoint = f"dyn://{namespace}.prefill.generate"
+        elif parsed_args.multimodal_processor:
+            endpoint = f"dyn://{namespace}.processor.generate"
+        elif parsed_args.multimodal_encode_worker:
+            endpoint = f"dyn://{namespace}.encoder.generate"
+        elif (
+            parsed_args.multimodal_worker
+            and parsed_args.disaggregation_mode == "prefill"
+        ):
+            endpoint = f"dyn://{namespace}.prefill.generate"
         else:
             endpoint = f"dyn://{namespace}.backend.generate"
 
@@ -231,6 +265,9 @@ def parse_args(args: list[str]) -> Config:
         reasoning_parser=reasoning_parser,
         custom_jinja_template=expanded_template_path,
         use_sglang_tokenizer=parsed_args.use_sglang_tokenizer,
+        multimodal_processor=parsed_args.multimodal_processor,
+        multimodal_encode_worker=parsed_args.multimodal_encode_worker,
+        multimodal_worker=parsed_args.multimodal_worker,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
 
@@ -262,6 +299,21 @@ def reserve_free_port(host: str = "localhost"):
         yield port
     finally:
         sock.close()
+
+
+def parse_endpoint(endpoint: str) -> List[str]:
+    """Parse endpoint string into namespace, component, and endpoint parts."""
+    endpoint_str = endpoint.replace("dyn://", "", 1)
+    endpoint_parts = endpoint_str.split(".")
+    if len(endpoint_parts) != 3:
+        error_msg = (
+            f"Invalid endpoint format: '{endpoint}'. "
+            f"Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
+        )
+        logging.error(error_msg)
+        raise ValueError(error_msg)
+
+    return endpoint_parts
 
 
 def _reserve_disaggregation_bootstrap_port():

@@ -13,7 +13,11 @@ from tests.serve.common import (
     run_serve_deployment,
 )
 from tests.utils.engine_process import EngineConfig
-from tests.utils.payload_builder import chat_payload_default, completion_payload_default
+from tests.utils.payload_builder import (
+    chat_payload,
+    chat_payload_default,
+    completion_payload_default,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +87,32 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(
                 expected_response=["Successfully Applied Chat Template"]
+            )
+        ],
+    ),
+    "multimodal_agg_qwen": SGLangConfig(
+        name="multimodal_agg_qwen",
+        directory=sglang_dir,
+        script_name="multimodal_agg.sh",
+        marks=[pytest.mark.gpu_2],
+        model="Qwen/Qwen2.5-VL-7B-Instruct",
+        delayed_start=0,
+        timeout=360,
+        models_port=8000,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["bus"],
+                temperature=0.0,
             )
         ],
     ),

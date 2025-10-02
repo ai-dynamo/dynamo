@@ -39,6 +39,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**Conditional Disaggregation**](../../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
 | [**KV-Aware Routing**](../../../docs/architecture/kv_cache_routing.md) | ✅ |  |
 | [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | ✅ |  |
+| [**Multimodal EPD Disaggregation**](docs/multimodal_epd.md) | ✅ |  |
 | [**Load Based Planner**](../../../docs/architecture/load_planner.md) | ❌ | Planned |
 | [**KVBM**](../../../docs/architecture/kvbm_architecture.md) | ❌ | Planned |
 
@@ -253,6 +254,9 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 
 ### Hierarchical Cache (HiCache)
 - **[Enable SGLang Hierarchical Cache (HiCache)](docs/sgl-hicache-example.md)**
+
+### Multimodal Encode-Prefill-Decode (EPD) Disaggregation with NIXL
+- **[Run a multimodal model with EPD Disaggregation](docs/multimodal_epd.md)**
 
 ## Deployment
 
