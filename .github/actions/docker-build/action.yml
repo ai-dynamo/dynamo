@@ -95,8 +95,9 @@ runs:
         echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
         ARCH=${PLATFORM##*/}
         echo "docker pull ${ECR_HOSTNAME}/ai-dynamo/dynamo:35776f3c8bae3da632f89e812059fa6946b21cd6-${{ inputs.framework }}-${ARCH}"
-        docker pull ${ECR_HOSTNAME}/ai-dynamo/dynamo:35776f3c8bae3da632f89e812059fa6946b21cd6-${{ inputs.framework }}-${ARCH}
+        docker pull 
         ./container/build.sh --tag "$IMAGE_TAG" \
+          --cache-from ${ECR_HOSTNAME}/ai-dynamo/dynamo:35776f3c8bae3da632f89e812059fa6946b21cd6-${{ inputs.framework }}-${ARCH}" \
           --target ${{ inputs.target }} \
           --framework ${{ inputs.framework }} \
           --platform ${{ inputs.platform }} \
