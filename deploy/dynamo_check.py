@@ -51,7 +51,7 @@ System info (hostname=jensen-linux, IP=10.111.122.133)
 ├─ ✅ Maturin /opt/dynamo/venv/bin/maturin, maturin 1.9.3
 ├─ ✅ Python 3.12.3, /opt/dynamo/venv/bin/python
 │  ├─ ✅ PyTorch 2.7.1+cu128, ✅torch.cuda.is_available
-│  └─ PYTHONPATH $HOME/dynamo/components/frontend/src:$HOME/dynamo/components/planner/src:$HOME/dynamo/components/backends/vllm/src:$HOME/dynamo/components/backends/sglang/src:$HOME/dynamo/components/backends/trtllm/src:$HOME/dynamo/components/backends/llama_cpp/src:$HOME/dynamo/components/backends/mocker/src
+│  └─ PYTHONPATH not set
 ├─ 🤖Framework
 │  ├─ ✅ vLLM: 0.10.1.1, module=/opt/vllm/vllm/__init__.py, exec=/opt/dynamo/venv/bin/vllm
 │  └─ ✅ Sglang: 0.3.0, module=/opt/sglang/sglang/__init__.py
@@ -65,15 +65,15 @@ System info (hostname=jensen-linux, IP=10.111.122.133)
    │  ├─ ✅ dynamo.nixl_connect      $HOME/dynamo/lib/bindings/python/src/dynamo/nixl_connect/__init__.py
    │  ├─ ✅ dynamo.llm               $HOME/dynamo/lib/bindings/python/src/dynamo/llm/__init__.py
    │  └─ ✅ dynamo.runtime           $HOME/dynamo/lib/bindings/python/src/dynamo/runtime/__init__.py
-   └─ ✅ Framework components ai-dynamo (via PYTHONPATH)
+   └─ ✅ Framework components ai-dynamo 0.5.0
       │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo-0.5.0.dist-info: created=2025-09-05 16:20:35 PDT
-      ├─ ✅ dynamo.frontend  $HOME/dynamo/components/frontend/src/dynamo/frontend/__init__.py
-      ├─ ✅ dynamo.llama_cpp $HOME/dynamo/components/backends/llama_cpp/src/dynamo/llama_cpp/__init__.py
-      ├─ ✅ dynamo.mocker    $HOME/dynamo/components/backends/mocker/src/dynamo/mocker/__init__.py
-      ├─ ✅ dynamo.planner   $HOME/dynamo/components/planner/src/dynamo/planner/__init__.py
-      ├─ ✅ dynamo.sglang    $HOME/dynamo/components/backends/sglang/src/dynamo/sglang/__init__.py
-      ├─ ✅ dynamo.trtllm    $HOME/dynamo/components/backends/trtllm/src/dynamo/trtllm/__init__.py
-      └─ ✅ dynamo.vllm      $HOME/dynamo/components/backends/vllm/src/dynamo/vllm/__init__.py
+      ├─ ✅ dynamo.frontend  $HOME/dynamo/components/src/dynamo/frontend/__init__.py
+      ├─ ✅ dynamo.llama_cpp $HOME/dynamo/components/src/dynamo/llama_cpp/__init__.py
+      ├─ ✅ dynamo.mocker    $HOME/dynamo/components/src/dynamo/mocker/__init__.py
+      ├─ ✅ dynamo.planner   $HOME/dynamo/components/src/dynamo/planner/__init__.py
+      ├─ ✅ dynamo.sglang    $HOME/dynamo/components/src/dynamo/sglang/__init__.py
+      ├─ ✅ dynamo.trtllm    $HOME/dynamo/components/src/dynamo/trtllm/__init__.py
+      └─ ✅ dynamo.vllm      $HOME/dynamo/components/src/dynamo/vllm/__init__.py
 
 Usage:
     python dynamo_check.py [--thorough-check] [--terse]
@@ -1704,7 +1704,9 @@ class PythonPathInfo(NodeInfo):
             status = NodeStatus.WARNING if has_invalid_paths else NodeStatus.INFO
         else:
             display_pythonpath = "not set"
-            status = NodeStatus.WARNING  # Show warning when PYTHONPATH is not set
+            status = (
+                NodeStatus.INFO
+            )  # PYTHONPATH not set is fine with editable installs
 
         super().__init__(label="PYTHONPATH", desc=display_pythonpath, status=status)
 
@@ -2004,14 +2006,14 @@ class DynamoFrameworkInfo(NodeInfo):
             List of framework component module names
             Example: ['dynamo.frontend', 'dynamo.planner', 'dynamo.vllm', 'dynamo.sglang', 'dynamo.llama_cpp']
 
-        Note: Scans components/ and components/backends/ directories for modules with __init__.py files.
+        Note: Scans components/src/dynamo/... directory for modules with __init__.py files.
         """
         components: List[str] = []
 
         if not workspace_dir:
             return components
 
-        # Scan components python src directory (frontend, planner, etc.)
+        # Scan the components/src/dynamo/... Python directory for __init__.py files
         components_path = os.path.join(workspace_dir, "components", "src", "dynamo")
         if os.path.exists(components_path):
             for item in os.listdir(components_path):
@@ -2186,50 +2188,12 @@ def has_framework_errors(tree: NodeInfo) -> bool:
     return False
 
 
-def show_pythonpath_recommendation():
-    """Show PYTHONPATH recommendation for fixing import errors.
-
-    Generates and displays the recommended PYTHONPATH based on discovered
-    component source paths in the workspace.
-    """
-    paths = []
-
-    # Try to find workspace directory
-    workspace_dir = None
-    candidates = [
-        os.getcwd(),
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        os.environ.get("DYNAMO_HOME", ""),
-        os.path.expanduser("~/dynamo"),
-    ]
-    for candidate in candidates:
-        if os.path.exists(os.path.join(candidate, "lib/bindings/python/src/dynamo")):
-            workspace_dir = os.path.abspath(candidate)
-            break
-
-    if not workspace_dir:
-        return
-
-    # Collect all component source paths
-    comp_path = os.path.join(workspace_dir, "components")
-    if os.path.exists(comp_path):
-        src_path = os.path.join(comp_path, "src")
-        if os.path.exists(src_path):
-            paths.append(src_path)
-
-    # Also add runtime path
-    runtime_path = os.path.join(workspace_dir, "lib/bindings/python/src")
-    if os.path.exists(runtime_path):
-        paths.insert(0, runtime_path)  # Add at beginning for priority
-
-    if paths:
-        pythonpath = ":".join(paths)
-        # Replace home directory with $HOME
-        home = os.path.expanduser("~")
-        if home in pythonpath:
-            pythonpath = pythonpath.replace(home, "$HOME")
-
-        print(f'\nSet PYTHONPATH for development:\nexport PYTHONPATH="{pythonpath}"\n')
+def show_installation_recommendation():
+    """Show installation recommendations for missing components."""
+    print("\nTo install missing components for development (not production):")
+    print("  Runtime:   (cd lib/bindings/python && maturin develop)")
+    print("  Framework: uv pip install -e .")
+    print("             or export PYTHONPATH=$DYNAMO_HOME/components/src\n")
 
 
 def main():
@@ -2261,9 +2225,9 @@ def main():
     tree = SystemInfo(thorough_check=args.thorough_check, terse=args.terse)
     tree.print_tree()
 
-    # Check if there are framework component errors and show PYTHONPATH recommendation
+    # Check if there are framework component errors and show installation recommendation
     if has_framework_errors(tree):
-        show_pythonpath_recommendation()
+        show_installation_recommendation()
 
     # Exit with non-zero status if there are any errors
     if tree.has_errors():
