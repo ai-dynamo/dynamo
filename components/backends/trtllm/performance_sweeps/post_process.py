@@ -124,7 +124,7 @@ def extract_throughput_data(csv_path: str) -> Tuple[Optional[float], Optional[fl
     Extract throughput data from CSV file
 
     Args:
-        csv_path: Path to profile_export_genai_perf.csv
+        csv_path: Path to profile_export_aiperf.csv
 
     Returns:
         Tuple of (output_token_throughput, output_token_throughput_per_user)
@@ -205,7 +205,7 @@ def process_directory(dir_path: str) -> Optional[List[Dict[str, Any]]]:
     csv_files = []
     for item in artifacts_path.iterdir():
         if item.is_dir():
-            csv_path = item / "profile_export_genai_perf.csv"
+            csv_path = item / "profile_export_aiperf.csv"
             if csv_path.exists():
                 csv_files.append(str(csv_path))
 

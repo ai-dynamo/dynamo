@@ -44,7 +44,7 @@ def run_genai_perf(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
-        "genai-perf",
+        "aiperf",
         "profile",
         "-m",
         model_name,
@@ -76,7 +76,7 @@ def run_genai_perf(
         "--max-threads=300",
     ]
     print(
-        f"Running genai-perf with isl {isl}, osl {osl}, concurrency {concurrency}",
+        f"Running aiperf with isl {isl}, osl {osl}, concurrency {concurrency}",
         flush=True,
     )
 
@@ -89,11 +89,11 @@ def run_genai_perf(
     )
     stdout, stderr = gap_process.communicate()
     if gap_process.returncode == 0:
-        print("Genai-perf profiling completed successfully", flush=True)
+        print("Aiperf profiling completed successfully", flush=True)
         if stdout:
             print(stdout)
     else:
-        print(f"Genai-perf failed with error code: {gap_process.returncode}")
+        print(f"Aiperf failed with error code: {gap_process.returncode}")
         if stderr:
             print(f"stderr: {stderr}")
         raise subprocess.CalledProcessError(
