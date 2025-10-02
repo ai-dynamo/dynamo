@@ -108,9 +108,20 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 
 	// Store original command/args for later use
 	var originalCommand string
-	if len(container.Args) > 0 {
+
+	if len(container.Command) > 0 && isPythonCommand(container.Command[0]) {
+		// Direct Python command: combine command + args
+		var parts []string
+		parts = append(parts, container.Command...)
+		if len(container.Args) > 0 {
+			parts = append(parts, container.Args...)
+		}
+		originalCommand = strings.Join(parts, " ")
+	} else if len(container.Args) > 0 {
+		// Shell command (sh -c): args contains the full command
 		originalCommand = strings.Join(container.Args, " ")
 	} else if len(container.Command) > 0 {
+		// Fallback: just command
 		originalCommand = strings.Join(container.Command, " ")
 	}
 
