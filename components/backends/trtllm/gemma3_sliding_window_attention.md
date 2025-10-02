@@ -34,7 +34,7 @@ VSWA is a mechanism in which a model’s layers alternate between multiple slidi
 >   git fetch
 >   git cherry-pick -n 27dbaa19b2f4574bbfb55122661d58437d01de8e
 >
->   # build the container with the
+>   # build the container with tensorrt-llm==1.2.0rc0
 >   ./container/build.sh --framework trtllm --tensorrtllm-pip-wheel tensorrt-llm==1.2.0rc0
 >
 >   # run the container after build
