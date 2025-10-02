@@ -7,12 +7,10 @@ __all__ = [
     "VirtualConnector",
     "LoadPlannerDefaults",
     "SLAPlannerDefaults",
-    "ServiceConfig",
     "TargetReplica",
     "SubComponentType",
 ]
 # Import the classes
-from dynamo.planner.config import ServiceConfig
 from dynamo.planner.defaults import (
     LoadPlannerDefaults,
     SLAPlannerDefaults,

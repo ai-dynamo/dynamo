@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: profile-sla
+  namespace: ${NAMESPACE}
+spec:
+  template:
+    spec:
+      serviceAccountName: dynamo-sa
+      containers:
+      - name: profile-sla
+        image: ${DOCKER_IMAGE}
+        resources:
+          requests:
+            cpu: "16"
+            memory: "10Gi"
+        env:
+          - name: HUGGING_FACE_HUB_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: hf-token-secret
+                key: HF_TOKEN
+          - name: NATS_SERVER
+            value: nats://${NAMESPACE}-nats:4222
+          - name: ETCD_ENDPOINTS
+            value: ${NAMESPACE}-etcd:2379
+        command: ["python", "-m", "benchmarks.profiler.profile_sla"]
+        args:
+          - --config
+          - ${DGD_CONFIG_FILE}
+          - --output-dir
+          - /data/profiling_results
+          - --namespace
+          - ${NAMESPACE}
+          - --backend
+          - vllm
+          - --min-num-gpus-per-engine
+          - "1"
+          - --max-num-gpus-per-engine
+          - "8"
+          - --isl
+          - "3000"
+          - --osl
+          - "150"
+          - --ttft
+          - "500"
+          - --itl
+          - "30"
+          - --use-ai-configurator
+          - --aic-system
+          - h200_sxm
+          - --aic-model-name
+          - QWEN3_32B
+          - --backend-version
+          - 0.20.0
+        volumeMounts:
+          - name: output-volume
+            mountPath: /data
+      restartPolicy: Never
+      volumes:
+        - name: output-volume
+          persistentVolumeClaim:
+            claimName: dynamo-pvc
+  backoffLimit: 0

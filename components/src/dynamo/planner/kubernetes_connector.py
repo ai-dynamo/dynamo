@@ -15,7 +15,6 @@
 
 import logging
 import os
-import shlex
 from typing import Optional
 
 from pydantic import BaseModel
@@ -38,47 +37,6 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
-
-
-class Service(BaseModel):
-    name: str
-    service: dict
-
-    def number_replicas(self) -> int:
-        return self.service.get("replicas", 0)
-
-    def get_model_name(self) -> Optional[str]:
-        args = (
-            self.service.get("extraPodSpec", {})
-            .get("mainContainer", {})
-            .get("args", [])
-        )
-
-        args = break_arguments(args)
-        if (
-            "--served-model-name" in args
-            and len(args) > args.index("--served-model-name") + 1
-        ):
-            return args[args.index("--served-model-name") + 1]
-        if "--model" in args and len(args) > args.index("--model") + 1:
-            return args[args.index("--model") + 1]
-
-        return None
-
-
-def break_arguments(args: list[str] | None) -> list[str]:
-    ans: list[str] = []
-    if args is None:
-        return ans
-    if isinstance(args, str):
-        # Use shlex.split to properly handle quoted arguments and JSON values
-        ans = shlex.split(args)
-    else:
-        for arg in args:
-            if arg is not None:
-                # Use shlex.split to properly handle quoted arguments
-                ans.extend(shlex.split(arg))
-    return ans
 
 
 class TargetReplica(BaseModel):
@@ -205,11 +163,11 @@ class KubernetesConnector(PlannerConnector):
 
             # TODO: benchmarks/profiler/utils/config.py already contains DGD config parsing
             # and model name logic, should consolidate
-            prefill_service = self.get_service_from_sub_component_type_or_name(
+            prefill_service = get_service_from_sub_component_type_or_name(
                 deployment,
                 SubComponentType.PREFILL,
             )
-            decode_service = self.get_service_from_sub_component_type_or_name(
+            decode_service = get_service_from_sub_component_type_or_name(
                 deployment,
                 SubComponentType.DECODE,
             )
