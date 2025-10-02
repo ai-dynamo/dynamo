@@ -125,7 +125,7 @@ then this test will be included in the nightly run as well.
   ```
 - CI runs use the similar instructions as running inside the container. For example, running E2E tests as part of the nightly suite inside the Dynamo-VLLM container (which requires a single GPU) can be done with:
   ```bash
-  ./container/run.sh --image $VLLM_IMAGE_NAME --name $VLLM_CONTAINER_NAME -- pytest -m "e2e and gpus_needed_1 and (pre_merge or post_merge or nightly) "
+  ./container/run.sh --image $VLLM_IMAGE_NAME --name $VLLM_CONTAINER_NAME -- pytest -m "e2e and gpu_1 and (pre_merge or post_merge or nightly) "
   ```
 
 #### Running tests locally outside of a container
