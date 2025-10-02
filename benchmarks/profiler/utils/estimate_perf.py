@@ -44,13 +44,6 @@ class AIConfiguratorPerfEstimator:
         aiconfigurator = _try_import_aiconfigurator()
 
         logger.info("Loading aiconfigurator database. This might take a few seconds...")
-        if backend != "trtllm":
-            # AiC only supports trtllm now.
-            backend = "trtllm"
-            logger.warning(
-                f"Using trtllm database for {backend} backend. "
-                f"This might not be accurate."
-            )
         self.database = aiconfigurator.sdk.perf_database.get_database(
             system=system,
             backend=backend,
