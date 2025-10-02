@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use dynamo_llm::kv_router::{
     indexer::compute_block_hash_for_seq, protocols::*, publisher::KvEventPublisher,
 };
-use dynamo_runtime::{DistributedRuntime, Worker};
+use dynamo_runtime::{DistributedRuntime, Worker, storage::key_value_store::Key};
 static WK: OnceCell<Worker> = OnceCell::new();
 static DRT: AsyncOnceCell<DistributedRuntime> = AsyncOnceCell::new();
 // [FIXME] shouldn't the publisher be instance passing between API calls?
@@ -972,7 +972,12 @@ pub async fn create_worker_selection_pipeline_chat(
     let client = component.endpoint(GENERATE_ENDPOINT).client().await?;
 
     let model_slug = Slug::from_string(model_name);
-    let card = match ModelDeploymentCard::load_from_store(&model_slug, component.drt()).await {
+    let card = match ModelDeploymentCard::load_from_store(
+        &Key::from_raw(model_slug.to_string()),
+        component.drt(),
+    )
+    .await
+    {
         Ok(Some(card)) => card,
         Ok(None) => anyhow::bail!("ModelDeploymentCard not found for model: {}", model_name),
         Err(err) => anyhow::bail!(
