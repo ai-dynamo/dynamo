@@ -240,6 +240,8 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
 // TODO: Similar function exists in lib/llm/src/grpc/service/openai.rs but with different signature and simpler logic
 fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> String {
     // Try to get request id from trace context
+    // TODO: Site where we are setting http headers before performing a request
+    // I don't know if we have a use case for this just yet
     if let Some(trace_context) = get_distributed_tracing_context()
         && let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id
     {
@@ -286,6 +288,7 @@ async fn handler_completions(
     check_ready(&state)?;
 
     // create the context for the request
+
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
     let request = Context::with_id(request, request_id);
     let context = request.context();
@@ -510,6 +513,7 @@ async fn handler_chat_completions(
     check_ready(&state)?;
 
     // create the context for the request
+    // 
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
     let request = Context::with_id(request, request_id);
     let context = request.context();

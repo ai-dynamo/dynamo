@@ -11,7 +11,7 @@ members = [
     "lib/async-openai",
     "lib/parsers",
     "lib/bindings/c",
-    "lib/engines/*",
+    "lib/engines/*", "rust-tracing-playground",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
 # features from default build, but keep them in workspace for convenience.
@@ -106,6 +106,10 @@ tracing-subscriber = { version = "0.3", features = [
     "local-time",
     "json",
 ] }
+tracing-opentelemetry = { version = "0.21" }
+opentelemetry = { version = "0.20", features = ["trace"] }
+opentelemetry_sdk = { version = "0.20", features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.13", features = ["trace"] }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1.17", features = ["v4", "serde"] }
 url = { version = "2.5", features = ["serde"] }
