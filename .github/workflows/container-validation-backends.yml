@@ -69,7 +69,8 @@ jobs:
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
           push_tag: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
-          aws_push: 'true'
+          # OPS-1145: Switch aws_push to true
+          aws_push: 'false'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -122,7 +123,8 @@ jobs:
           push_tag: ai-dynamo/dynamo:${{ github.sha }}-sglang-amd64
           # OPS-1140: Replace the above line with the uncommented below line
           # push_tag: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
-          aws_push: 'true'
+          # OPS-1145: Switch aws_push to true
+          aws_push: 'false'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -169,7 +171,8 @@ jobs:
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
           push_tag: ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
-          aws_push: 'true'
+          # OPS-1145: Switch aws_push to true
+          aws_push: 'false'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
