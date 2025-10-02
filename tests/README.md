@@ -1,5 +1,3 @@
-# Dynamo Testing Framework
-
 # Dynamo Testing Guidelines
 
 This document provides clear, actionable instructions for writing, organizing, marking, and running tests in the Dynamo project. Follow these guidelines to ensure consistency and maintainability across the test suite.
