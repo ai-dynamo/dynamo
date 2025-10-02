@@ -127,7 +127,7 @@ then this test will be included in the nightly run as well.
   ```bash
   ./container/run.sh --image $VLLM_IMAGE_NAME --name $VLLM_CONTAINER_NAME -- pytest -m "e2e and gpus_needed_1 and (pre_merge or post_merge or nightly) "
   ```
-  
+
 #### Running tests locally outside of a container
 
 To run tests outside of the development container, ensure that you have properly setup your environment and have installed the following dependencies in your `venv`:
