@@ -60,7 +60,7 @@ kubectl apply -f components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
 kubectl get dynamoGraphDeployment -n ${NAMESPACE}
 
 # Test it
-kubectl port-forward svc/agg-vllm-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/vllm-agg-frontend 8000:8000 -n ${NAMESPACE}
 curl http://localhost:8000/v1/models
 ```
 
