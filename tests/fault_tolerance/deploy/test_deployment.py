@@ -155,7 +155,10 @@ async def test_fault_scenario(
                 model = scenario.deployment["decode"].model
             elif scenario.backend == "trtllm":
                 # Determine deployment type from scenario deployment name
-                if "agg" in scenario.deployment.name and "disagg" not in scenario.deployment.name:
+                if (
+                    "agg" in scenario.deployment.name
+                    and "disagg" not in scenario.deployment.name
+                ):
                     model = scenario.deployment["TRTLLMWorker"].model
                 else:
                     model = scenario.deployment["TRTLLMDecodeWorker"].model

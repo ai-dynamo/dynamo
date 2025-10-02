@@ -139,7 +139,7 @@ def _set_replicas(deployment_spec, backend, deploy_type, replicas):
             decode_worker = WORKER_MAP[backend]["decode_agg"]
         else:
             decode_worker = WORKER_MAP[backend]["decode"]
-        
+
         # always scale decode
         spec[decode_worker].replicas = replicas
         # scale prefill only for disagg
@@ -240,19 +240,19 @@ deployment_specs.update(_create_deployments_for_backend("trtllm"))
 # terminates 1 prefill worker after 30 seconds
 def _create_backend_failures(backend, deploy_type="disagg"):
     """Generate backend-specific failure scenarios.
-    
+
     Args:
         backend: Backend type (vllm, sglang, trtllm)
         deploy_type: Deployment type (agg or disagg)
     """
     workers = WORKER_MAP[backend]
-    
+
     # Use correct worker name based on deployment type
     if backend == "trtllm" and deploy_type == "agg":
         decode_worker = workers["decode_agg"]
     else:
         decode_worker = workers["decode"]
-    
+
     prefill_worker = workers["prefill"]
     process_name = f"dynamo.{backend}"
 
@@ -311,13 +311,19 @@ scenarios = {}
 backend_failure_map = {}
 for backend in ["vllm", "sglang", "trtllm"]:
     backend_failure_map[f"{backend}_agg"] = _create_backend_failures(backend, "agg")
-    backend_failure_map[f"{backend}_disagg"] = _create_backend_failures(backend, "disagg")
+    backend_failure_map[f"{backend}_disagg"] = _create_backend_failures(
+        backend, "disagg"
+    )
 
 for deployment_name, deployment_info in deployment_specs.items():
     backend = deployment_info["backend"]
-    
+
     # Determine deployment type from deployment name
-    deploy_type = "agg" if ("agg" in deployment_name and "disagg" not in deployment_name) else "disagg"
+    deploy_type = (
+        "agg"
+        if ("agg" in deployment_name and "disagg" not in deployment_name)
+        else "disagg"
+    )
 
     # Get the appropriate failure set for this backend+deploy_type
     failure_map_key = f"{backend}_{deploy_type}"
