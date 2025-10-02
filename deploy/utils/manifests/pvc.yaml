@@ -3,7 +3,7 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: planner-pvc
+  name: dynamo-pvc
   namespace: ${NAMESPACE}
 spec:
   accessModes:

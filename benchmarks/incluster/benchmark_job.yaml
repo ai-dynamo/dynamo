@@ -61,6 +61,6 @@ spec:
       volumes:
         - name: data-volume
           persistentVolumeClaim:
-            claimName: planner-pvc
+            claimName: dynamo-pvc
   backoffLimit: 0
   ttlSecondsAfterFinished: 3600  # Clean up job after 1 hour

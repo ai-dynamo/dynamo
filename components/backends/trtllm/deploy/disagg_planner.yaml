@@ -7,7 +7,7 @@ metadata:
   name: trtllm-disagg-planner
 spec:
   pvcs:
-    - name: planner-pvc
+    - name: dynamo-pvc
       create: false
   envs:
     - name: DYNAMO_NAMESPACE
@@ -43,7 +43,7 @@ spec:
       componentType: planner
       replicas: 1
       volumeMounts:
-        - name: planner-pvc # Must be pre-created before deployment and SLA profiler must have been run
+        - name: dynamo-pvc # Must be pre-created before deployment and SLA profiler must have been run
           mountPoint: /data
       extraPodSpec:
         mainContainer:

@@ -7,7 +7,7 @@ metadata:
   name: vllm-disagg-planner
 spec:
   pvcs:
-    - name: planner-pvc
+    - name: dynamo-pvc
       create: false # Must be pre-created before deployment and SLA profiler must have been run
   envs:
     - name: DYNAMO_NAMESPACE
@@ -25,7 +25,7 @@ spec:
       componentType: planner
       replicas: 1
       volumeMounts:
-        - name: planner-pvc
+        - name: dynamo-pvc
           mountPoint: /data
       extraPodSpec:
         mainContainer:

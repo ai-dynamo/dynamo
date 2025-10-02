@@ -318,7 +318,7 @@ The server-side benchmarking solution:
 - Runs benchmarks directly within the Kubernetes cluster using internal service URLs
 - Uses Kubernetes service DNS for direct communication (no port forwarding required)
 - Leverages the existing benchmarking infrastructure (`benchmarks.utils.benchmark`)
-- Stores results persistently using `planner-pvc`
+- Stores results persistently using `dynamo-pvc`
 - Provides isolated execution environment with configurable resources
 - Handles high load/speed requirements without timeout issues
 - **Note**: Each benchmark job runs within a single Kubernetes namespace, but can benchmark services across multiple namespaces using the full DNS format `svc_name.namespace.svc.cluster.local`
@@ -490,7 +490,7 @@ kubectl describe pod <pod-name> -n $NAMESPACE
 
 1. **Service not found**: Ensure your DynamoGraphDeployment frontend service is running
 2. **Service account permissions**: Verify `dynamo-sa` has necessary RBAC permissions
-3. **PVC access**: Check that `planner-pvc` is properly configured and accessible
+3. **PVC access**: Check that `dynamo-pvc` is properly configured and accessible
 4. **Image pull issues**: Ensure the Docker image is accessible from the cluster
 5. **Resource constraints**: Adjust resource limits if the job is being evicted
 
@@ -498,7 +498,7 @@ kubectl describe pod <pod-name> -n $NAMESPACE
 
 ```bash
 # Check PVC status
-kubectl get pvc planner-pvc -n $NAMESPACE
+kubectl get pvc dynamo-pvc -n $NAMESPACE
 
 # Verify service account
 kubectl get sa dynamo-sa -n $NAMESPACE

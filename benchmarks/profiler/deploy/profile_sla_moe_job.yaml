@@ -57,5 +57,5 @@ spec:
       volumes:
         - name: output-volume
           persistentVolumeClaim:
-            claimName: planner-pvc
+            claimName: dynamo-pvc
   backoffLimit: 0
