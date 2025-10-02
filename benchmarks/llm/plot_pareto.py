@@ -241,7 +241,7 @@ if __name__ == "__main__":
     import os
 
     parser = argparse.ArgumentParser(
-        description="Plot Pareto graph from GenAI-Perf artifacts"
+        description="Plot Pareto graph from AIPerf artifacts"
     )
     parser.add_argument(
         "--artifacts-root-dir",

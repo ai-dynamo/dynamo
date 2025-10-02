@@ -32,7 +32,7 @@ def parse_benchmark_results(result_dir: Path) -> List[Tuple[int, Dict]]:
             continue
         concurrency = int(match.group(1))
 
-        # Find the genai-perf JSON file
+        # Find the aiperf JSON file
         genai_perf_json = None
         for json_file in concurrency_dir.rglob("profile_export_genai_perf.json"):
             genai_perf_json = json_file
@@ -47,7 +47,7 @@ def parse_benchmark_results(result_dir: Path) -> List[Tuple[int, Dict]]:
             except Exception as e:
                 print(f"Error loading {genai_perf_json}: {e}")
         else:
-            print(f"Warning: No genai-perf JSON found for {concurrency_dir}")
+            print(f"Warning: No aiperf JSON found for {concurrency_dir}")
 
     # Sort by concurrency level
     results.sort(key=lambda x: x[0])

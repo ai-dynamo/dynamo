@@ -128,7 +128,7 @@ RUN git clone --depth=1 \
     cmake --build perf_analyzer/build -- -j$(nproc)
 
 ENV PATH=/sgl-workspace/perf_analyzer/build/perf_analyzer/src/perf-analyzer-build:$PATH
-RUN pip install --break-system-packages genai-perf
+RUN pip install --break-system-packages aiperf
 
 # Enable forceful shutdown of inflight requests
 ENV SGL_FORCE_SHUTDOWN=1
