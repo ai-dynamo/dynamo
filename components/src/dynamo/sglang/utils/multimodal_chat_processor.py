@@ -3,7 +3,7 @@
 
 import logging
 
-from sglang.srt.conversation import chat_templates
+from sglang.srt.parser.conversation import chat_templates
 
 logger = logging.getLogger(__name__)
 

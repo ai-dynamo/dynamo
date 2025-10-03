@@ -5,7 +5,7 @@ import logging
 from typing import AsyncIterator
 
 import torch
-from sglang.srt.conversation import chat_templates
+from sglang.srt.parser.conversation import chat_templates
 from transformers import AutoImageProcessor, AutoModel, AutoTokenizer
 
 import dynamo.nixl_connect as connect
