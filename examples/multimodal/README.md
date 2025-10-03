@@ -39,16 +39,16 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 - processor: Tokenizes the prompt and passes it to the VllmEncodeWorker.
 - frontend: HTTP endpoint to handle incoming requests.
 
-### Graph
+### Workflow
 
-In this graph, we have two workers, [VllmEncodeWorker](components/encode_worker.py) and [VllmPDWorker](components/worker.py).
+In this workflow, we have two workers, [VllmEncodeWorker](components/encode_worker.py) and [VllmPDWorker](components/worker.py).
 The VllmEncodeWorker is responsible for encoding the image and passing the embeddings to the VllmPDWorker via a combination of NATS and RDMA.
 The work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface.
-Its VllmPDWorker then prefills and decodes the prompt, just like the [LLM aggregated serving](/components/backends/vllm/README.md) example.
+Its VllmPDWorker then prefills and decodes the prompt, just like the [LLM aggregated serving](../../components/backends/vllm/README.md) example.
 By separating the encode from the prefill and decode stages, we can have a more flexible deployment and scale the
 VllmEncodeWorker independently from the prefill and decode workers if needed.
 
-This figure shows the flow of the graph:
+This figure illustrates the workflow:
 ```mermaid
 flowchart LR
   HTTP --> processor
@@ -115,16 +115,16 @@ You should see a response similar to this:
 - processor: Tokenizes the prompt and passes it to the VllmEncodeWorker.
 - frontend: HTTP endpoint to handle incoming requests.
 
-### Graph
+### Workflow
 
-In this graph, we have three workers, [VllmEncodeWorker](components/encode_worker.py), [VllmDecodeWorker](components/worker.py), and [VllmPDWorker](components/worker.py).
+In this workflow, we have three workers, [VllmEncodeWorker](components/encode_worker.py), [VllmDecodeWorker](components/worker.py), and [VllmPDWorker](components/worker.py).
 For the Llava model, embeddings are only required during the prefill stage. As such, the VllmEncodeWorker is connected directly to the prefill worker.
 The VllmEncodeWorker is responsible for encoding the image and passing the embeddings to the prefill worker via a combination of NATS and RDMA.
 Its work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface.
 The prefill worker performs the prefilling step and forwards the KV cache to the decode worker for decoding.
-For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](/components/backends/vllm/README.md) example.
+For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](../../components/backends/vllm/README.md) example.
 
-This figure shows the flow of the graph:
+This figure illustrates the workflow:
 ```mermaid
 flowchart LR
   HTTP --> processor
@@ -201,11 +201,11 @@ of the model per node.
 - processor: Tokenizes the prompt and passes it to the VllmPDWorker.
 - frontend: HTTP endpoint to handle incoming requests.
 
-#### Graph
+#### Workflow
 
-In this graph, we have [VllmPDWorker](components/worker.py) which will encode the image, prefill and decode the prompt, just like the [LLM aggregated serving](/components/backends/vllm/README.md) example.
+In this workflow, we have [VllmPDWorker](components/worker.py) which will encode the image, prefill and decode the prompt, just like the [LLM aggregated serving](/components/backends/vllm/README.md) example.
 
-This figure shows the flow of the graph:
+This figure illustrates the workflow:
 ```mermaid
 flowchart LR
   HTTP --> processor
@@ -263,13 +263,13 @@ You should see a response similar to this:
 - processor: Tokenizes the prompt and passes it to the VllmPDWorker.
 - frontend: HTTP endpoint to handle incoming requests.
 
-#### Graph
+#### Workflow
 
-In this graph, we have two workers, [VllmDecodeWorker](components/worker.py), and [VllmPDWorker](components/worker.py).
+In this workflow, we have two workers, [VllmDecodeWorker](components/worker.py), and [VllmPDWorker](components/worker.py).
 The prefill worker performs the encoding and prefilling steps and forwards the KV cache to the decode worker for decoding.
 For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](/components/backends/vllm/README.md) example.
 
-This figure shows the flow of the graph:
+This figure illustrates the workflow:
 ```mermaid
 flowchart LR
   HTTP --> processor
@@ -337,16 +337,16 @@ This example demonstrates deploying an aggregated multimodal model that can proc
 - processor: Tokenizes the prompt and passes it to the VideoEncodeWorker.
 - frontend: HTTP endpoint to handle incoming requests.
 
-### Graph
+### Workflow
 
-In this graph, we have two workers, [VideoEncodeWorker](components/video_encode_worker.py) and [VllmPDWorker](components/worker.py).
+In this workflow, we have two workers, [VideoEncodeWorker](components/video_encode_worker.py) and [VllmPDWorker](components/worker.py).
 The VideoEncodeWorker is responsible for decoding the video into a series of frames. Unlike the image pipeline which generates embeddings,
 this pipeline passes the raw frames directly to the VllmPDWorker via a combination of NATS and RDMA.
 Its VllmPDWorker then prefills and decodes the prompt, just like the [LLM aggregated serving](/components/backends/vllm/README.md) example.
 By separating the video processing from the prefill and decode stages, we can have a more flexible deployment and scale the
 VideoEncodeWorker independently from the prefill and decode workers if needed.
 
-This figure shows the flow of the graph:
+This figure illustrates the workflow:
 ```mermaid
 flowchart LR
   HTTP --> processor
@@ -425,15 +425,15 @@ This example demonstrates deploying a disaggregated multimodal model that can pr
 - processor: Tokenizes the prompt and passes it to the VideoEncodeWorker.
 - frontend: HTTP endpoint to handle incoming requests.
 
-### Graph
+### Workflow
 
-In this graph, we have three workers, [VideoEncodeWorker](components/video_encode_worker.py), [VllmDecodeWorker](components/worker.py), and [VllmPDWorker](components/worker.py).
+In this workflow, we have three workers, [VideoEncodeWorker](components/video_encode_worker.py), [VllmDecodeWorker](components/worker.py), and [VllmPDWorker](components/worker.py).
 For the LLaVA-NeXT-Video-7B model, frames are only required during the prefill stage. As such, the VideoEncodeWorker is connected directly to the prefill worker.
 The VideoEncodeWorker is responsible for decoding the video into a series of frames and passing them to the prefill worker via RDMA.
 The prefill worker performs the prefilling step and forwards the KV cache to the decode worker for decoding.
 For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](/components/backends/vllm/README.md) example.
 
-This figure shows the flow of the graph:
+This figure illustrates the workflow:
 ```mermaid
 flowchart LR
   HTTP --> processor

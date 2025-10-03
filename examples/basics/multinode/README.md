@@ -217,7 +217,7 @@ The frontend will:
 - Enable KV-aware routing for intelligent request distribution
 - Monitor worker health and adjust routing accordingly
 
-For more details about frontend configuration options, see the [Frontend Component Documentation](../../../components/frontend/README.md).
+For more details about frontend configuration options, see the [Frontend Component Documentation](/components/src/dynamo/frontend/README.md).
 
 ## Testing the Setup
 

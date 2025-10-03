@@ -161,7 +161,10 @@ impl ModelWatcher {
                         }
                     }
                 }
-                WatchEvent::Delete(kv) => match self.handle_delete(&kv).await {
+                WatchEvent::Delete(kv) => match self
+                    .handle_delete(&kv, target_namespace, global_namespace)
+                    .await
+                {
                     Ok(Some(model_name)) => {
                         tracing::info!(model_name, "removed model");
                     }
@@ -178,7 +181,12 @@ impl ModelWatcher {
 
     /// If the last instance running this model has gone delete it.
     /// Returns the name of the model we just deleted, if any.
-    async fn handle_delete(&self, kv: &KeyValue) -> anyhow::Result<Option<String>> {
+    async fn handle_delete(
+        &self,
+        kv: &KeyValue,
+        target_namespace: Option<&str>,
+        is_global_namespace: bool,
+    ) -> anyhow::Result<Option<String>> {
         let key = kv.key_str()?;
         let card = match self.manager.remove_model_card(key) {
             Some(card) => card,
@@ -188,10 +196,16 @@ impl ModelWatcher {
         };
         let model_name = card.display_name.clone();
         let active_instances = self
-            .entries_for_model(&model_name)
+            .entries_for_model(&model_name, target_namespace, is_global_namespace)
             .await
             .with_context(|| model_name.clone())?;
         if !active_instances.is_empty() {
+            tracing::debug!(
+                model_name,
+                target_namespace = ?target_namespace,
+                active_instance_count = active_instances.len(),
+                "Model has other active instances, not removing"
+            );
             return Ok(None);
         }
 
@@ -483,9 +497,22 @@ impl ModelWatcher {
         Ok(entries)
     }
 
-    pub async fn entries_for_model(&self, model_name: &str) -> anyhow::Result<Vec<ModelEntry>> {
+    pub async fn entries_for_model(
+        &self,
+        model_name: &str,
+        target_namespace: Option<&str>,
+        is_global_namespace: bool,
+    ) -> anyhow::Result<Vec<ModelEntry>> {
         let mut all = self.all_entries().await?;
-        all.retain(|entry| entry.name == model_name);
+        all.retain(|entry| {
+            let matches_name = entry.name == model_name;
+            let matches_namespace = match (is_global_namespace, target_namespace) {
+                (true, _) => true,
+                (false, None) => true,
+                (false, Some(target_ns)) => entry.endpoint_id.namespace == target_ns,
+            };
+            matches_name && matches_namespace
+        });
         Ok(all)
     }
 }

@@ -116,12 +116,16 @@ COPY --from=framework /usr/local/lib/lib* /usr/local/lib/
 # Copy nats and etcd from dynamo_base image
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+# Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
+ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 
 # Copy UCX from framework image as plugin for NIXL
 # Copy NIXL source from framework image
 # Copy dynamo wheels for gitlab artifacts
 COPY --from=dynamo_base /usr/local/ucx /usr/local/ucx
 COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
+ENV PATH=/usr/local/ucx/bin:$PATH
+
 # Copy OpenMPI from framework image
 COPY --from=framework /opt/hpcx/ompi /opt/hpcx/ompi
 # Copy NUMA library from framework image
@@ -234,8 +238,10 @@ RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*cp312*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-    /opt/dynamo/benchmarks && \
-    rm -rf /opt/dynamo/benchmarks
+    && cd /opt/dynamo/benchmarks \
+    && uv pip install . \
+    && cd - \
+    && rm -rf /opt/dynamo/benchmarks
 
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
@@ -332,11 +338,11 @@ COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
 
 COPY --from=runtime ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
-# so we can use maturin develop
+# Install maturin, for maturin develop
 RUN uv pip install maturin[patchelf]
 
-# Make sure to sync this with the one specified on README.md.
-# This is a generic PYTHONPATH which works for all the frameworks, so some paths may not be relevant for this particular framework.
-ENV PYTHONPATH=${WORKSPACE_DIR}:${WORKSPACE_DIR}/components/metrics/src:${WORKSPACE_DIR}/components/frontend/src:${WORKSPACE_DIR}/components/planner/src:${WORKSPACE_DIR}/components/backends/mocker/src:${WORKSPACE_DIR}/components/backends/trtllm/src:${WORKSPACE_DIR}/components/backends/vllm/src:${WORKSPACE_DIR}/components/backends/sglang/src:${WORKSPACE_DIR}/components/backends/llama_cpp/src
+# Editable install of dynamo
+COPY pyproject.toml README.md hatch_build.py /workspace/
+RUN uv pip install --no-deps -e .
 
 CMD []

@@ -6,6 +6,9 @@ kind: DynamoGraphDeployment
 metadata:
   name: vllm-disagg-planner
 spec:
+  pvcs:
+    - name: dynamo-pvc
+      create: false # Must be pre-created before deployment and SLA profiler must have been run
   envs:
     - name: DYNAMO_NAMESPACE
       value: "vllm-disagg-planner"
@@ -19,32 +22,11 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
     Planner:
       dynamoNamespace: vllm-disagg-planner
-      envFromSecret: hf-token-secret
       componentType: planner
       replicas: 1
-      livenessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      pvc:
-        create: false
-        name: dynamo-pvc # Must be pre-created before deployment and SLA profiler must have been run
-        mountPoint: /data
+      volumeMounts:
+        - name: dynamo-pvc
+          mountPoint: /data
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
@@ -63,18 +45,12 @@ spec:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
-      replicas: 2
+      replicas: 1
       resources:
         limits:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 9090
-            periodSeconds: 10
-            failureThreshold: 60
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/vllm
           command:
@@ -89,18 +65,12 @@ spec:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
-      replicas: 2
+      replicas: 1
       resources:
         limits:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 9090
-            periodSeconds: 10
-            failureThreshold: 60
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/vllm
           command:

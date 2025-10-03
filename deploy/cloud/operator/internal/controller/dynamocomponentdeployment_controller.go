@@ -50,7 +50,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -188,13 +187,6 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	}()
 
 	modified := false
-
-	// Reconcile PVC
-	_, err = r.reconcilePVC(ctx, dynamoComponentDeployment)
-	if err != nil {
-		logs.Error(err, "Unable to create PVC", "crd", req.NamespacedName)
-		return ctrl.Result{}, err
-	}
 
 	// Create the appropriate workload resource based on deployment type
 	var leaderWorkerSets []*leaderworkersetv1.LeaderWorkerSet
@@ -487,15 +479,44 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx 
 
 	leaderPodTemplateSpec.Spec.SchedulerName = "volcano"
 
-	if leaderPodTemplateSpec.Spec.Containers[0].Command == nil {
-		return nil, errors.New("generateLeaderPodTemplateSpec: container Command cannot be nil for LWS leader pod")
-	}
+	err = checkMainContainer(&leaderPodTemplateSpec.Spec)
 
-	if len(leaderPodTemplateSpec.Spec.Containers[0].Args) == 0 {
-		return nil, errors.New("generateLeaderPodTemplateSpec: container Args cannot be empty for LWS leader pod")
+	if err != nil {
+		return nil, errors.Wrap(err, "generateLeaderPodTemplateSpec: failed to check main container")
 	}
 
 	return leaderPodTemplateSpec, nil
+}
+
+func checkMainContainer(spec *corev1.PodSpec) error {
+
+	if len(spec.Containers) == 0 {
+		return errors.New("No containers found in pod spec")
+	}
+
+	mainContainerFound := false
+	for _, container := range spec.Containers {
+		if container.Name != commonconsts.MainContainerName {
+			continue
+		}
+
+		if len(container.Command) == 0 {
+			return errors.New("container Command cannot be nil for LWS pod")
+		}
+
+		if len(container.Args) == 0 {
+			return errors.New("container Args cannot be empty for LWS pod")
+		}
+
+		mainContainerFound = true
+		break
+	}
+
+	if !mainContainerFound {
+		return errors.New("main container not found in pod spec")
+	}
+
+	return nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx context.Context, opt generateResourceOption, kubeName string, labels map[string]string, instanceID int) (*corev1.PodTemplateSpec, error) {
@@ -516,12 +537,10 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 	}
 	workerPodTemplateSpec.ObjectMeta.Annotations["scheduling.k8s.io/group-name"] = kubeName
 
-	if workerPodTemplateSpec.Spec.Containers[0].Command == nil {
-		return nil, errors.New("generateWorkerPodTemplateSpec: container Command cannot be nil for LWS worker pod")
-	}
+	err = checkMainContainer(&workerPodTemplateSpec.Spec)
 
-	if len(workerPodTemplateSpec.Spec.Containers[0].Args) == 0 {
-		return nil, errors.New("generateWorkerPodTemplateSpec: container Args cannot be empty for LWS worker pod")
+	if err != nil {
+		return nil, errors.Wrap(err, "generateWorkerPodTemplateSpec: failed to check LWS worker main container")
 	}
 
 	if opt.dynamoComponentDeployment.Spec.Resources == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits.GPU == "" {
@@ -679,41 +698,6 @@ func IsDeploymentReady(deployment *appsv1.Deployment) bool {
 	}
 	// If we get here, the basic checks passed but the Available condition wasn't found
 	return false
-}
-
-func (r *DynamoComponentDeploymentReconciler) reconcilePVC(ctx context.Context, crd *v1alpha1.DynamoComponentDeployment) (*corev1.PersistentVolumeClaim, error) {
-	logger := log.FromContext(ctx)
-	if crd.Spec.PVC == nil {
-		return nil, nil
-	}
-	pvcConfig := *crd.Spec.PVC
-	pvc := &corev1.PersistentVolumeClaim{}
-	pvcName := types.NamespacedName{Name: getPvcName(crd, pvcConfig.Name), Namespace: crd.GetNamespace()}
-	err := r.Get(ctx, pvcName, pvc)
-	if err != nil && client.IgnoreNotFound(err) != nil {
-		logger.Error(err, "Unable to retrieve PVC", "crd", crd.GetName())
-		return nil, err
-	}
-
-	// If PVC does not exist, create a new one
-	if err != nil {
-		if pvcConfig.Create == nil || !*pvcConfig.Create {
-			logger.Error(err, "Unknown PVC", "pvc", pvc.Name)
-			return nil, err
-		}
-		pvc = constructPVC(crd, pvcConfig)
-		if err := controllerutil.SetControllerReference(crd, pvc, r.Client.Scheme()); err != nil {
-			logger.Error(err, "Failed to set controller reference", "pvc", pvc.Name)
-			return nil, err
-		}
-		err = r.Create(ctx, pvc)
-		if err != nil {
-			logger.Error(err, "Failed to create pvc", "pvc", pvc.Name)
-			return nil, err
-		}
-		logger.Info("PVC created", "pvc", pvcName)
-	}
-	return pvc, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) setStatusConditions(ctx context.Context, req ctrl.Request, conditions ...metav1.Condition) (dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, err error) {
@@ -1170,23 +1154,16 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	isDebugModeEnabled := checkIfIsDebugModeEnabled(resourceAnnotations)
 
-	basePodSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, consts.MultinodeDeploymentTypeLWS)
+	podSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, consts.MultinodeDeploymentTypeLWS)
 	if err != nil {
 		err = errors.Wrap(err, "failed to generate base pod spec")
 		return nil, err
 	}
 
 	// Ensure we have at least one container (the main container should be there from GenerateBasePodSpec)
-	if len(basePodSpec.Containers) == 0 {
+	if len(podSpec.Containers) == 0 {
 		return nil, errors.New("no containers found in base pod spec")
 	}
-
-	// Get the main container from the base spec
-	container := basePodSpec.Containers[0]
-
-	containers := make([]corev1.Container, 0, 2)
-
-	containers = append(containers, container)
 
 	debuggerImage := "python:3.12-slim"
 	debuggerImage_ := os.Getenv("INTERNAL_IMAGES_DEBUGGER")
@@ -1195,7 +1172,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	}
 
 	if opt.isStealingTrafficDebugModeEnabled || isDebugModeEnabled {
-		containers = append(containers, corev1.Container{
+		podSpec.Containers = append(podSpec.Containers, corev1.Container{
 			Name:  "debugger",
 			Image: debuggerImage,
 			Command: []string{
@@ -1223,9 +1200,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	}
 
 	podLabels[commonconsts.KubeLabelDynamoSelector] = kubeName
-
-	podSpec := basePodSpec
-	podSpec.Containers = containers
 
 	extraPodMetadata := opt.dynamoComponentDeployment.Spec.ExtraPodMetadata
 

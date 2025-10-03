@@ -180,6 +180,38 @@ spec:
                       - name
                     type: object
                   type: array
+                pvcs:
+                  description: |-
+                    PVCs defines a list of persistent volume claims that can be referenced by components.
+                    Each PVC must have a unique name that can be referenced in component specifications.
+                  items:
+                    properties:
+                      create:
+                        description: Create indicates to create a new PVC
+                        type: boolean
+                      name:
+                        description: Name is the name of the PVC
+                        type: string
+                      size:
+                        anyOf:
+                          - type: integer
+                          - type: string
+                        description: Size of the volume in Gi, used during PVC creation. Required when create is true.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      storageClass:
+                        description: StorageClass to be used for PVC creation. Required when create is true.
+                        type: string
+                      volumeAccessMode:
+                        description: VolumeAccessMode is the volume access mode of the PVC. Required when create is true.
+                        type: string
+                    required:
+                      - name
+                    type: object
+                    x-kubernetes-validations:
+                      - message: When create is true, size, storageClass, and volumeAccessMode are required
+                        rule: '!has(self.create) || self.create == false || (has(self.size) && has(self.storageClass) && has(self.volumeAccessMode))'
+                  type: array
                 services:
                   additionalProperties:
                     properties:
@@ -10124,31 +10156,6 @@ spec:
                         required:
                           - nodeCount
                         type: object
-                      pvc:
-                        description: PVC config describing volumes to be mounted by the component.
-                        properties:
-                          create:
-                            description: Create indicates to create a new PVC
-                            type: boolean
-                          mountPoint:
-                            type: string
-                          name:
-                            description: Name is the name of the PVC
-                            type: string
-                          size:
-                            anyOf:
-                              - type: integer
-                              - type: string
-                            description: Size of the NIM cache in Gi, used during PVC creation
-                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                            x-kubernetes-int-or-string: true
-                          storageClass:
-                            description: StorageClass to be used for PVC creation. Leave it as empty if the PVC is already created.
-                            type: string
-                          volumeAccessMode:
-                            description: VolumeAccessMode is the volume access mode of the PVC
-                            type: string
-                        type: object
                       readinessProbe:
                         description: ReadinessProbe to signal when the container is ready to receive traffic.
                         properties:
@@ -10356,6 +10363,30 @@ spec:
                       subComponentType:
                         description: SubComponentType indicates the sub-role of this component (for example, "prefill").
                         type: string
+                      volumeMounts:
+                        description: VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component.
+                        items:
+                          description: VolumeMount references a PVC defined at the top level for volumes to be mounted by the component
+                          properties:
+                            mountPoint:
+                              description: |-
+                                MountPoint specifies where to mount the volume.
+                                If useAsCompilationCache is true and mountPoint is not specified,
+                                a backend-specific default will be used.
+                              type: string
+                            name:
+                              description: Name references a PVC name defined in the top-level PVCs map
+                              type: string
+                            useAsCompilationCache:
+                              default: false
+                              description: |-
+                                UseAsCompilationCache indicates this volume should be used as a compilation cache.
+                                When true, backend-specific environment variables will be set and default mount points may be used.
+                              type: boolean
+                          required:
+                            - name
+                          type: object
+                        type: array
                     type: object
                   description: |-
                     Services allows per-service overrides of the component deployment settings.

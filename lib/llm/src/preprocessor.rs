@@ -28,6 +28,7 @@ use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::PreprocessedRequestBuilder;
 use crate::tokenizers::Encoding;
 
+use dynamo_parsers::{ReasoningParser, ReasoningParserType};
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, Error, ManyOut, Operator, SingleIn, async_trait,
@@ -91,6 +92,12 @@ impl LLMMetricAnnotation {
         let metrics: LLMMetricAnnotation = serde_json::from_str(&comments[0])?;
         Ok(Some(metrics))
     }
+}
+
+// Reasoning State for reasoning parsing transformation step
+struct ReasoningState {
+    stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
+    reasoning_parser: Option<Box<dyn ReasoningParser>>,
 }
 
 pub struct OpenAIPreprocessor {
@@ -543,11 +550,14 @@ impl OpenAIPreprocessor {
 
                     Some((response, inner))
                 } else {
-                    // Stream has ended - check if we need to send a usage chunk
+                    // Stream has ended - must set finished to true to prevent unfold from polling
+                    // again. The stream is exhausted and will panic if polled after None.
+                    inner.finished = true;
+
+                    // Check if we need to send a usage chunk
                     if inner.response_generator.is_usage_enabled()
                         && inner.finish_reason_sent
                         && !inner.usage_chunk_sent
-                        && !inner.finished
                     {
                         inner.usage_chunk_sent = true;
 
@@ -568,7 +578,6 @@ impl OpenAIPreprocessor {
                         Some((annotated_usage, inner))
                     } else {
                         // stream closed
-                        inner.finished = true; // Mark as finished
                         None
                     }
                 }
@@ -668,6 +677,56 @@ impl OpenAIPreprocessor {
             .build();
         jail.apply(stream)
     }
+
+    // Motivation: Each transformation on the stream should be a separate step to allow for more flexibility
+    // Earlier reasoning parser logic was nested under delta generation logic in choice_from_postprocessor
+    // Since we have tool calling parsing as separate step, it makes sense to have reasoning parser as separate step as well
+    pub fn parse_reasoning_content_from_stream<S>(
+        stream: S,
+        parser_name: String,
+    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        // Initialize reasoning parser from parser_name
+        let reasoning_parser = Box::new(ReasoningParserType::get_reasoning_parser_from_name(
+            parser_name.as_ref(),
+        )) as Box<dyn ReasoningParser>;
+
+        let state = ReasoningState {
+            stream: Box::pin(stream),
+            reasoning_parser: Some(reasoning_parser),
+        };
+
+        stream::unfold(state, |mut state| async move {
+            if let Some(response) = state.stream.next().await {
+                // Process the response through reasoning parser if available
+                let processed_response = if let Some(ref mut parser) = state.reasoning_parser {
+                    response.map_data(|mut data| {
+                        // Process all choices, not just the first one
+                        for choice in data.choices.iter_mut() {
+                            if let Some(text) = choice.delta.content.as_ref() {
+                                let parser_result =
+                                    parser.parse_reasoning_streaming_incremental(text, &[]);
+
+                                // Update this specific choice with parsed content
+                                choice.delta.content = parser_result.get_some_normal_text();
+                                choice.delta.reasoning_content = parser_result.get_some_reasoning();
+                            }
+                        }
+                        Ok(data)
+                    })
+                } else {
+                    // No reasoning parser configured, pass through unchanged
+                    response
+                };
+
+                Some((processed_response, state))
+            } else {
+                None
+            }
+        })
+    }
 }
 
 // for pals, we do not want to add the generation prompt to the formatted prompt
@@ -715,9 +774,6 @@ impl
 
         let mut response_generator = Box::new(response_generator);
 
-        // set the runtime configuration
-        response_generator.set_reasoning_parser(self.runtime_config.clone());
-
         // update isl
         response_generator.update_isl(common_request.token_ids.len() as u32);
 
@@ -743,6 +799,25 @@ impl
             response_generator,
             context.clone(),
         );
+
+        // Try to parse reasoning content only if parser is configured
+        let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some();
+
+        // Reasoning Content Parsing Transformation Step
+        // Current Solution:
+        // This step operates on Deltas created by the transform_postprocessor_stream function
+        // Only access to text and not token_ids - so can not support parsing based on token_ids for now
+        // Future Solution:
+        // To address the limitation if needed in future: move this step before transform_postprocessor_stream and add new field of reasoning_content to the backend output
+        // Use backend_output.reasoning_content field to fill out the deltas.
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
+            Box::pin(Self::parse_reasoning_content_from_stream(
+                stream,
+                self.runtime_config.reasoning_parser.clone().unwrap(), // Safety: We already checked that parser is some, so gtg
+            ))
+        } else {
+            Box::pin(stream)
+        };
 
         // Check if tools are present and if we should apply jail
         let has_tools =
