@@ -571,8 +571,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
-    // (TODO: Ayush) Fix this test
     async fn test_gpt_oss_with_reasoning_and_tool_calls_full() {
         let input_chunks = vec![
             create_mock_response_chunk("<|channel|>analysis<|message|>Let me help you with that. I need to check the weather first.<|end|>".to_string(), None),
@@ -585,14 +583,6 @@ mod tests {
             input_stream,
             "gpt_oss".to_string(),
         );
-
-        let mut debug_stream = std::pin::pin!(reasoning_parsed_stream);
-        let mut debug_chunks = Vec::new();
-        while let Some(chunk) = debug_stream.next().await {
-            debug_chunks.push(chunk);
-        }
-        // Re-create a stream from the debug_chunks for further processing
-        let reasoning_parsed_stream = stream::iter(debug_chunks);
 
         let tool_parsed_stream = OpenAIPreprocessor::apply_tool_calling_jail(
             "harmony".to_string(),
@@ -610,7 +600,169 @@ mod tests {
         let mut all_reasoning = String::new();
         let mut all_normal_content = String::new();
         let mut found_tool_calls = false;
+        let mut tool_call_function_name = None;
+        let mut tool_call_arguments = None;
 
+        for chunk in output_chunks.iter() {
+            if let Some(ref response_data) = chunk.data {
+                for choice in &response_data.choices {
+                    if let Some(ref reasoning) = choice.delta.reasoning_content {
+                        all_reasoning.push_str(reasoning);
+                    }
+                    if let Some(ref content) = choice.delta.content {
+                        all_normal_content.push_str(content);
+                    }
+                    if let Some(ref tool_calls) = choice.delta.tool_calls
+                        && !tool_calls.is_empty()
+                    {
+                        found_tool_calls = true;
+                        // Assert tool call function name and args
+                        // Only check the first tool call for this test
+                        let call = &tool_calls[0];
+                        if let Some(function) = &call.function {
+                            if let Some(name) = &function.name {
+                                tool_call_function_name = Some(name.clone());
+                            }
+                            if let Some(arguments) = &function.arguments {
+                                let args: serde_json::Value =
+                                    serde_json::from_str(arguments).unwrap();
+                                tool_call_arguments = Some(args);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            all_reasoning,
+            "Let me help you with that. I need to check the weather first."
+        );
+        assert!(all_normal_content.contains("I'll check the weather for you"));
+        assert!(found_tool_calls, "Should have found tool calls");
+        assert_eq!(
+            tool_call_function_name.as_deref(),
+            Some("get_weather"),
+            "Tool call function name should be 'get_weather'"
+        );
+        assert_eq!(
+            tool_call_arguments.as_ref(),
+            Some(&serde_json::json!({"location": "San Francisco"})),
+            "Tool call arguments should exactly match expected value"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gpt_oss_with_reasoning_full_chunked_input() {
+        let input_chunks = vec![
+            create_mock_response_chunk("<|channel|>".to_string(), None),
+            create_mock_response_chunk(
+                "analysis<|message|>The user asks a simple factual question: capital of Brazil."
+                    .to_string(),
+                None,
+            ),
+            create_mock_response_chunk(
+                " The answer is Brasília. No additional explanation needed.".to_string(),
+                None,
+            ),
+            create_mock_response_chunk(
+                "<|end|><|start|>assistant<|channel|>final<|message|>".to_string(),
+                None,
+            ),
+            create_mock_response_chunk("The capital of Brazil is Brasília.".to_string(), None),
+        ];
+        let input_stream = stream::iter(input_chunks);
+        let reasoning_parsed_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
+            input_stream,
+            "gpt_oss".to_string(),
+        );
+
+        let mut debug_stream = std::pin::pin!(reasoning_parsed_stream);
+        let mut debug_chunks = Vec::new();
+        while let Some(chunk) = debug_stream.next().await {
+            debug_chunks.push(chunk);
+        }
+        // Re-create a stream from the debug_chunks for further processing
+        let reasoning_parsed_stream = stream::iter(debug_chunks);
+
+        use futures::StreamExt;
+
+        let mut all_reasoning = String::new();
+        let mut all_normal_content = String::new();
+        let mut stream = std::pin::pin!(reasoning_parsed_stream);
+        while let Some(chunk) = stream.next().await {
+            if let Some(ref response_data) = chunk.data {
+                for choice in &response_data.choices {
+                    if let Some(ref reasoning) = choice.delta.reasoning_content {
+                        all_reasoning.push_str(reasoning);
+                    }
+                    if let Some(ref normal_content) = choice.delta.content {
+                        all_normal_content.push_str(normal_content);
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            all_reasoning,
+            "The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed."
+        );
+        assert!(all_normal_content.contains("The capital of Brazil is Brasília."));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    // (TODO: Ayush) This will work once I add JailedStream concept to reasoning parser
+    async fn test_harmony_with_reasoning_and_tool_calls_full_chunked_input() {
+        let input_chunks = vec![
+            create_mock_response_chunk("<|channel|>".to_string(), None),
+            create_mock_response_chunk("analysis<|message|>".to_string(), None),
+            create_mock_response_chunk(
+                "Let me help you with that. I need to check the weather first.".to_string(),
+                None,
+            ),
+            create_mock_response_chunk("<|end|>".to_string(), None),
+            create_mock_response_chunk("<|start|>assistant".to_string(), None),
+            create_mock_response_chunk("<|channel|>".to_string(), None),
+            create_mock_response_chunk("commentary".to_string(), None),
+            create_mock_response_chunk("to=functions.get_weather".to_string(), None),
+            create_mock_response_chunk("<|constrain|>json".to_string(), None),
+            create_mock_response_chunk("<|message|>".to_string(), None),
+            create_mock_response_chunk("{\"location\":\"San Francisco\"}".to_string(), None),
+            create_mock_response_chunk("<|call|>".to_string(), None),
+            create_mock_response_chunk("<|start|>assistant".to_string(), None),
+            create_mock_response_chunk("<|channel|>".to_string(), None),
+            create_mock_response_chunk("final".to_string(), None),
+            create_mock_response_chunk("<|message|>".to_string(), None),
+            create_mock_response_chunk("I'll check the weather for you.".to_string(), None),
+        ];
+        let input_stream = stream::iter(input_chunks);
+        let reasoning_parsed_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
+            input_stream,
+            "harmony".to_string(),
+        );
+
+        let mut debug_stream = std::pin::pin!(reasoning_parsed_stream);
+        let mut debug_chunks = Vec::new();
+        while let Some(chunk) = debug_stream.next().await {
+            println!("Debug chunk: {:?}", chunk);
+            debug_chunks.push(chunk);
+        }
+        // Re-create a stream from the debug_chunks for further processing
+        let reasoning_parsed_stream = stream::iter(debug_chunks);
+
+        let tool_parsed_stream = OpenAIPreprocessor::apply_tool_calling_jail(
+            "harmony".to_string(),
+            reasoning_parsed_stream,
+        );
+        let mut tool_parsed_stream = std::pin::pin!(tool_parsed_stream);
+        let mut output_chunks = Vec::new();
+        while let Some(chunk) = tool_parsed_stream.next().await {
+            output_chunks.push(chunk);
+        }
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+        let mut all_reasoning = String::new();
+        let mut all_normal_content = String::new();
+        let mut found_tool_calls = false;
         for chunk in output_chunks.iter() {
             if let Some(ref response_data) = chunk.data {
                 for choice in &response_data.choices {
@@ -628,12 +780,11 @@ mod tests {
                 }
             }
         }
-
         assert_eq!(
             all_reasoning,
-            "Let me analyze this request. I need to get the current weather for San Francisco."
+            "Let me help you with that. I need to check the weather first."
         );
-        assert!(all_normal_content.contains("I'll check the weather for you"));
+        assert!(all_normal_content.contains("I'll check the weather for you."));
         assert!(found_tool_calls, "Should have found tool calls");
     }
 }
