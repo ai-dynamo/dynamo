@@ -1,0 +1,152 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: oss-gpt120b-bench
+spec:
+  backoffLimit: 1
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: oss-gpt120b-bench
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: nvidia.com/dynamo-graph-deployment-name
+                    operator: In
+                    values:
+                      - gpt-oss-agg
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - command:
+        - /bin/sh
+        - -c
+        - |
+          apt-get update && apt-get install -y curl jq procps git && apt-get clean
+          pip install git+https://github.com/ai-dynamo/aiperf.git@70af59489df24a601dba57604a7341966150b366;
+          echo "aiperf installation completed";
+          sysctl -w net.ipv4.ip_local_port_range="1024 65000"
+          cat /proc/sys/net/ipv4/ip_local_port_range
+          export COLUMNS=200
+          EPOCH=$(date +%s)
+          ## utility functions -- can be moved to a bash script / configmap
+          wait_for_model_ready() {
+            echo "Waiting for model '$TARGET_MODEL' at $ENDPOINT/v1/models (checking every 5s)..."
+            while ! curl -s "http://$ENDPOINT/v1/models" | jq -e --arg model "$TARGET_MODEL" '.data[]? | select(.id == $model)' >/dev/null 2>&1; do
+                echo "[$(date '+%H:%M:%S')] Model not ready yet, sleeping 5s before checking again http://$ENDPOINT/v1/models"
+                sleep 5
+            done
+            echo "✅ Model '$TARGET_MODEL' is now available!"
+            echo "Model '$TARGET_MODEL' is now available!"
+            curl -s "http://$ENDPOINT/v1/models" | jq .
+          }
+          run_perf() {
+            local concurrency=$1
+            local isl=$2
+            local osl=$3
+            key=concurrency_${concurrency}
+            export ARTIFACT_DIR="${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}/${key}"
+            mkdir -p "$ARTIFACT_DIR"
+            echo "ARTIFACT_DIR: $ARTIFACT_DIR"
+            aiperf profile --artifact-dir $ARTIFACT_DIR \
+                --model $TARGET_MODEL \
+                --tokenizer /model-cache/hub/models--openai--gpt-oss-120b/snapshots/b5c939de8f754692c1647ca79fbf85e8c1e70f8a  \
+                --endpoint-type chat  --endpoint /v1/chat/completions \
+                --streaming \
+                --url http://$ENDPOINT \
+                --synthetic-input-tokens-mean $isl \
+                --synthetic-input-tokens-stddev 0 \
+                --output-tokens-mean $osl \
+                --output-tokens-stddev 0 \
+                --extra-inputs "{\"max_tokens\":$osl}" \
+                --extra-inputs "{\"min_tokens\":$osl}" \
+                --extra-inputs "{\"ignore_eos\":true}" \
+                --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
+                --extra-inputs "{\"repetition_penalty\":1.0}" \
+                --extra-inputs "{\"temperature\": 0.0}" \
+                --concurrency $concurrency \
+                --request-count $((10*concurrency)) \
+                --warmup-request-count $concurrency \
+                --conversation-num 12800 \
+                --random-seed 100 \
+                --workers-max 252 \
+                -H 'Authorization: Bearer NOT USED' \
+                -H 'Accept: text/event-stream'\
+                --record-processors 32 \
+                --ui simple
+            echo "ARTIFACT_DIR: $ARTIFACT_DIR"
+            ls -la $ARTIFACT_DIR
+          }
+          #### Actual execution ####
+          wait_for_model_ready
+          mkdir -p "${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}"
+          # Calculate total concurrency based on per-GPU concurrency and GPU count
+          TOTAL_CONCURRENCY=$((CONCURRENCY_PER_GPU * DEPLOYMENT_GPU_COUNT))
+          echo "Calculated total concurrency: $TOTAL_CONCURRENCY (${CONCURRENCY_PER_GPU} per GPU × ${DEPLOYMENT_GPU_COUNT} GPUs)"
+          # Write input_config.json
+          cat > "${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}/input_config.json" <<EOF
+          {
+            "gpu_count": $DEPLOYMENT_GPU_COUNT,
+            "concurrency_per_gpu": $CONCURRENCY_PER_GPU,
+            "total_concurrency": $TOTAL_CONCURRENCY,
+            "mode": "$DEPLOYMENT_MODE",
+            "isl": $ISL,
+            "osl": $OSL,
+            "endpoint": "$ENDPOINT",
+            "model endpoint": "$TARGET_MODEL"
+          }
+          EOF
+
+          # Run perf with calculated total concurrency
+          run_perf $TOTAL_CONCURRENCY $ISL $OSL
+          echo "done with concurrency $TOTAL_CONCURRENCY"
+        env:
+        - name: TARGET_MODEL
+          value: openai/gpt-oss-120b
+        - name: ENDPOINT
+          value: gpt-oss-agg-frontend:8000
+        - name: CONCURRENCY_PER_GPU
+          value: "900"
+        - name: DEPLOYMENT_GPU_COUNT
+          value: "72"
+        - name: ISL
+          value: "128"
+        - name: OSL
+          value: "1000"
+        - name: DEPLOYMENT_MODE
+          value: agg
+        - name: AIPERF_HTTP_CONNECTION_LIMIT
+          value: "252"
+        - name: JOB_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.labels['job-name']
+        - name: ROOT_ARTIFACT_DIR
+          value: /model-cache/perf
+        - name: HF_HOME
+          value: /model-cache
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        image: python:3.12-slim
+        imagePullPolicy: IfNotPresent
+        name: perf
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: model-cache
+          mountPath: /model-cache
+        workingDir: /workspace
+      imagePullSecrets:
+      - name: nvcrimagepullsecret
+      restartPolicy: Never
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache
