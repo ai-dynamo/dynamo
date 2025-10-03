@@ -332,7 +332,7 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
-        
+
         --vllm-max-jobs)
             if [ "$2" ]; then
                 MAX_JOBS=$2
