@@ -121,6 +121,8 @@ Decode-specific arguments:
 
 ### 4. Launch the Deployment
 
+Note that GPT-OSS is a reasoning model with tool calling support. To ensure the response is being processed correctly, the worker should be launched with proper ```--dyn-reasoning-parser``` and ```--dyn-tool-call-parser```.
+
 You can use the provided launch script or run the components manually:
 
 #### Option A: Using the Launch Script
@@ -149,6 +151,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
   --model-path /model \
   --served-model-name openai/gpt-oss-120b \
   --extra-engine-args engine_configs/gpt_oss/prefill.yaml \
+  --dyn-reasoning-parser gpt_oss \
+  --dyn-tool-call-parser harmony \
   --disaggregation-mode prefill \
   --disaggregation-strategy prefill_first \
   --max-num-tokens 20000 \
@@ -164,6 +168,8 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --model-path /model \
   --served-model-name openai/gpt-oss-120b \
   --extra-engine-args engine_configs/gpt_oss/decode.yaml \
+  --dyn-reasoning-parser gpt_oss \
+  --dyn-tool-call-parser harmony \
   --disaggregation-mode decode \
   --disaggregation-strategy prefill_first \
   --max-num-tokens 16384 \
@@ -209,6 +215,194 @@ curl -X POST http://localhost:8000/v1/responses \
 
 The server exposes a standard OpenAI-compatible API endpoint that accepts JSON requests. You can adjust parameters like `max_tokens`, `temperature`, and others according to your needs.
 
+### 8. Reasoning and Tool Calling
+
+Dynamo has supported reasoning and tool calling in OpenAI Chat Completion endpoint. A typical workflow for application built on top of Dynamo
+is that the application has a set of tools to aid the assistant provide accurate answer, and it is ususally
+multi-turn as it involves tool selection and generation based on the tool result.
+
+In addition, the reasoning effort can be configured through ```chat_template_args```. Increasing the reasoning effort makes the model more accurate but also slower. It supports three levels: ```low```, ```medium```, and ```high```.
+
+Below is an example of sending multi-round requests to complete a user query with reasoning and tool calling:
+**Application setup (pseudocode)**
+```Python
+# The tool defined by the application
+def get_system_health():
+    for component in system.components:
+        if not component.health():
+            return False
+    return True
+
+# The JSON representation of the declaration in ChatCompletion tool style
+tool_choice = '{
+  "type": "function",
+  "function": {
+    "name": "get_system_health",
+    "description": "Returns the current health status of the LLM runtime—use before critical operations to verify the service is live.",
+    "parameters": {
+      "type": "object",
+      "properties": {}
+    }
+  }
+}'
+
+# On user query, perform below workflow.
+def user_query(app_request):
+    # first round
+    # create chat completion with prompt and tool choice
+    request = ...
+    response = send(request)
+
+    if response["finish_reason"] == "tool_calls":
+        # second round
+        function, params = parse_tool_call(response)
+        function_result = function(params)
+        # create request with prompt, assistant response, and function result
+        request = ...
+        response = send(request)
+    return app_response(response)
+```
+
+
+**First request with tools**
+
+
+```bash
+curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '
+{
+  "model": "openai/gpt-oss-120b",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Hey, quick check: is everything up and running?"
+    }
+  ],
+  "chat_template_args": {
+      "reasoning_effort": "low"
+  },
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_system_health",
+        "description": "Returns the current health status of the LLM runtime—use before critical operations to verify the service is live.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    }
+  ],
+  "response_format": {
+    "type": "text"
+  },
+  "stream": false,
+  "max_tokens": 300
+}'
+```
+**First response with tool choice**
+```JSON
+{
+  "id": "chatcmpl-d1c12219-6298-4c83-a6e3-4e7cef16e1a9",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call-1",
+            "type": "function",
+            "function": {
+              "name": "get_system_health",
+              "arguments": "{}"
+            }
+          }
+        ],
+        "role": "assistant",
+        "reasoning_content": "We need to check system health. Use function."
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "created": 1758758741,
+  "model": "openai/gpt-oss-120b",
+  "object": "chat.completion",
+  "usage": null
+}
+```
+**Second request with tool calling result**
+```bash
+curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '
+{
+  "model": "openai/gpt-oss-120b",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Hey, quick check: is everything up and running?"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "call-1",
+          "type": "function",
+          "function": {
+            "name": "get_system_health",
+            "arguments": "{}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call-1",
+      "content": "{\"status\":\"ok\",\"uptime_seconds\":372045}"
+    }
+  ],
+  "chat_template_args": {
+      "reasoning_effort": "low"
+  },
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_system_health",
+        "description": "Returns the current health status of the LLM runtime—use before critical operations to verify the service is live.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    }
+  ],
+  "response_format": {
+    "type": "text"
+  },
+  "stream": false,
+  "max_tokens": 300
+}'
+```
+**Second response with final message**
+```JSON
+{
+  "id": "chatcmpl-9ebfe64a-68b9-4c1d-9742-644cf770ad0e",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": "All systems are green—everything’s up and running smoothly! 🚀 Let me know if you need anything else.",
+        "role": "assistant",
+        "reasoning_content": "The user asks: \"Hey, quick check: is everything up and running?\" We have just checked system health, it's ok. Provide friendly response confirming everything's up."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "created": 1758758853,
+  "model": "openai/gpt-oss-120b",
+  "object": "chat.completion",
+  "usage": null
+}
+```
 ## Benchmarking
 
 ### Performance Testing with GenAI-Perf
