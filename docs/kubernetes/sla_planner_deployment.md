@@ -9,7 +9,7 @@ Quick deployment guide for the disaggregated planner with automatic scaling.
 
 **Components:**
 - **Frontend**: Serves requests and exposes `/metrics`
-- **Prometheus**: Scrapes frontend metrics every adjustment interval
+- **Prometheus**: Scrapes frontend metrics every 5s (by default, can be updated in the podmonitor manifest)
 - **Planner**: Queries Prometheus and adjusts worker scaling every adjustment interval
 - **Workers**: prefill and backend workers handle inference
 
@@ -19,7 +19,7 @@ The adjustment interval can be defined in the planner manifest as an argument. T
 flowchart LR
   Frontend --"/metrics"--> Prometheus
   Planner --"query API"--> Prometheus
-  Planner --"scaling decisions"--> Workers["prefill<br/>backend"]
+  Planner --"scaling decisions"--> Workers
   Frontend -.->|"requests"| Workers
 ```
 
@@ -27,7 +27,7 @@ flowchart LR
 - Kubernetes cluster with GPU nodes
 - [Pre-Deployment Profiling](/docs/benchmarks/pre_deployment_profiling.md) completed and its results saved to `dynamo-pvc` PVC.
 - Prefill and decode worker uses the best parallelization mapping suggested by the pre-deployment profiling script.
-- [kube-prometheus-stack](/docs/kubernetes/metrics.md) installed and running.
+- [kube-prometheus-stack](/docs/kubernetes/metrics.md) installed and running. By default, the prometheus server is not deployed in the `monitoring` namespace. If it is deployed to a different namespace, set `dynamo-operator.dynamo.metrics.prometheusEndpoint="http://prometheus-kube-prometheus-prometheus.<namespace>.svc.cluster.local:9090"`.
 
 > [!NOTE]
 > **Important**: The profiling that occurs before Planner deployment requires additional Kubernetes manifests (ServiceAccount, Role, RoleBinding, PVC) that are not included in standard Dynamo deployments. Apply these manifests in the same namespace as `$NAMESPACE`. For a complete setup, start with the [Quick Start guide](/deploy/utils/README.md#quick-start), which provides a fully encapsulated deployment including all required manifests.
@@ -42,8 +42,10 @@ We use vllm as the backend engine in this guide. SLA planner also supports SGLan
 ```bash
 # Apply the disaggregated planner deployment
 kubectl apply -f components/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE # for vllm
-# kubectl apply -f components/backends/sglang/deploy/disagg_planner.yaml -n $NAMESPACE # for sglang
-# kubectl apply -f components/backends/trtllm/deploy/disagg_planner.yaml -n $NAMESPACE # for trtllm
+
+kubectl apply -f components/backends/sglang/deploy/disagg_planner.yaml -n $NAMESPACE # for sglang
+
+kubectl apply -f components/backends/trtllm/deploy/disagg_planner.yaml -n $NAMESPACE # for trtllm
 
 # Check deployment status
 kubectl get pods -n $NAMESPACE
@@ -60,13 +62,11 @@ vllm-disagg-planner-prefill-*             1/1 Running
 
 ## 2. Test the System
 
-**Important:** Streaming requests (`"stream": true`) are required for the planner to collect latency metrics and make scaling decisions. Non-streaming requests will produce successful inference outputs but won't provide the necessary telemetry for automatic scaling.
-
 ```bash
 # Port forward to frontend
 kubectl port-forward -n $NAMESPACE deployment/vllm-disagg-planner-frontend 8000:8000
 
-# Send a streaming request (required for full metrics)
+# Send a request
 curl -N http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
@@ -98,8 +98,8 @@ kubectl logs -n $NAMESPACE deployment/vllm-disagg-planner-planner --tail=10
 
 ### Metrics Requirements
 - **Basic metrics** (request count): Available with any request type
-- **Latency metrics** (TTFT/ITL): Only available with `"stream": true` requests
-- **Scaling decisions**: Require sufficient request volume and streaming requests
+- **Latency metrics** (TTFT/ITL): Available for both streaming and non-streaming requests
+- **Scaling decisions**: Require sufficient request volume
 
 ## 4. Troubleshooting
 
