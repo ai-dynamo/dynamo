@@ -1937,7 +1937,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													TimeoutSeconds:   5,
 													PeriodSeconds:    10,
 													SuccessThreshold: 0,
-													FailureThreshold: 60,
+													FailureThreshold: 720,
 												},
 											},
 										},
@@ -4721,7 +4721,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							},
 							PeriodSeconds:    10,
 							TimeoutSeconds:   5,
-							FailureThreshold: 60,
+							FailureThreshold: 720,
 						},
 						Ports: []corev1.ContainerPort{
 							{
