@@ -32,6 +32,47 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
+async def pull_model(config: Config):
+    """
+    Pull model using ModelExpress before VLLM initialization.
+    
+    This function attempts to download the model through ModelExpress server.
+    If successful, it updates the config to use the local cached path.
+    If it fails or times out, VLLM will use the original HF model name and
+    leverage the shared HF_HUB_CACHE that ModelExpress may have populated.
+    """
+    import asyncio
+    from dynamo._core import from_hf
+    
+    try:
+        logger.info(f"Resolving model path for {config.model} using ModelExpress...")
+        # 30 minute timeout for large model downloads
+        # If ModelExpress stream doesn't close properly, we fall back to HF name
+        # VLLM will still use any cached files via HF_HUB_CACHE
+        resolved_path = await asyncio.wait_for(
+            from_hf(config.model, ignore_weights=False),
+            timeout=1800.0  # 30 minutes
+        )
+        logger.info(f"Model resolved to local path: {resolved_path}")
+        
+        # Update config to use the resolved local path
+        config.model = str(resolved_path)
+        config.engine_args.model = str(resolved_path)
+        logger.info("Model path updated in config - VLLM will use local cached model")
+        
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"Model resolution timed out after 30 minutes. "
+            f"ModelExpress may still be downloading or the gRPC stream didn't close properly. "
+            f"Keeping original model name '{config.model}' - VLLM will use HF_HUB_CACHE if files are available."
+        )
+    except Exception as e:
+        logger.warning(
+            f"Failed to resolve model path via ModelExpress: {e}. "
+            f"Keeping original model name - VLLM will attempt its own download or use cache."
+        )
+
+
 def setup_lmcache_environment():
     """Setup LMCache environment variables for KV cache offloading"""
     # LMCache configuration for matching logic
@@ -65,6 +106,10 @@ async def worker(runtime: DistributedRuntime):
     config = parse_args()
 
     await configure_ports(runtime, config)
+    
+    # Pull model using ModelExpress before VLLM initialization
+    await pull_model(config)
+    
     overwrite_args(config)
 
     # Set up signal handler for graceful shutdown

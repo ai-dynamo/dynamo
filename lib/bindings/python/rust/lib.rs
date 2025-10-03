@@ -186,6 +186,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     engine::add_to_module(m)?;
     parsers::add_to_module(m)?;
     prometheus_names::add_to_module(m)?;
+    llm::hub::add_to_module(m)?;
 
     #[cfg(feature = "block-manager")]
     llm::block_manager::add_to_module(m)?;
