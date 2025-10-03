@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import json
 import logging
 import os
 import uuid
@@ -226,8 +225,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 else:
                     raise ValueError("No prefill router or worker available")
 
-                # Parse LLMEngineOutput response
-                prefill_output = json.loads(prefill_response.data())
+                # Get LLMEngineOutput response (already a dict, not JSON string)
+                prefill_output = prefill_response.data()
 
                 # Extract kv_transfer_params from response
                 kv_transfer_params = prefill_output.get("extra_args", {}).get(
@@ -307,7 +306,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         ),
                     }
 
-                    yield json.dumps(output)
+                    yield output
             except asyncio.CancelledError:
                 # raise the error because we cannot migrate prefill requests
                 raise GeneratorExit(

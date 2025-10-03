@@ -13,7 +13,6 @@ routing decisions.
 """
 
 import argparse
-import json
 import logging
 from typing import Optional
 
@@ -87,7 +86,7 @@ class StandaloneRouterHandler:
             raise RuntimeError("Router not initialized")
 
         async for output in await self.kv_push_router.generate_from_request(request):
-            yield json.dumps(output)
+            yield output
 
 
 def parse_args():
