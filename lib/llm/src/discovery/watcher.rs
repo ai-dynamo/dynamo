@@ -185,7 +185,7 @@ impl ModelWatcher {
         &self,
         kv: &KeyValue,
         target_namespace: Option<&str>,
-        global_namespace: bool,
+        is_global_namespace: bool,
     ) -> anyhow::Result<Option<String>> {
         let key = kv.key_str()?;
         let card = match self.manager.remove_model_card(key) {
@@ -196,7 +196,7 @@ impl ModelWatcher {
         };
         let model_name = card.display_name.clone();
         let active_instances = self
-            .entries_for_model(&model_name, target_namespace, global_namespace)
+            .entries_for_model(&model_name, target_namespace, is_global_namespace)
             .await
             .with_context(|| model_name.clone())?;
         if !active_instances.is_empty() {
@@ -501,16 +501,16 @@ impl ModelWatcher {
         &self,
         model_name: &str,
         target_namespace: Option<&str>,
-        global_namespace: bool,
+        is_global_namespace: bool,
     ) -> anyhow::Result<Vec<ModelEntry>> {
         let mut all = self.all_entries().await?;
         all.retain(|entry| {
             let matches_name = entry.name == model_name;
-            let matches_namespace = global_namespace
-                || target_namespace.is_none()
-                || target_namespace
-                    .map(|target_ns| entry.endpoint_id.namespace == target_ns)
-                    .unwrap_or(true);
+            let matches_namespace = match (is_global_namespace, target_namespace) {
+                (true, _) => true,
+                (false, None) => true,
+                (false, Some(target_ns)) => entry.endpoint_id.namespace == target_ns,
+            };
             matches_name && matches_namespace
         });
         Ok(all)
