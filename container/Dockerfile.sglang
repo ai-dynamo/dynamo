@@ -226,8 +226,6 @@ COPY components/ /workspace/components/
 # Copy attribution files
 COPY ATTRIBUTION* LICENSE /workspace/
 
-ENV PYTHONPATH=/workspace/examples/sglang/utils:$PYTHONPATH
-
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 
