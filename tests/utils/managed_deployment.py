@@ -97,7 +97,10 @@ class ServiceSpec:
         else:
             return
 
-        self._spec["extraPodSpec"]["mainContainer"]["args"] = [" ".join(parts)]
+        # Store args as a list of separate strings for proper command-line parsing
+        # WRONG: [" ".join(parts)] creates ["--model Qwen/Qwen3-0.6B"] (single string)
+        # RIGHT: parts creates ["--model", "Qwen/Qwen3-0.6B"] (separate strings)
+        self._spec["extraPodSpec"]["mainContainer"]["args"] = parts
 
     # ----- GPUs -----
     @property
@@ -158,7 +161,12 @@ class ServiceSpec:
             # Add new argument
             parts.extend(["--tensor-parallel-size", str(value)])
 
-        self._spec["extraPodSpec"]["mainContainer"]["args"] = [" ".join(parts)]
+        # Store args as a list of separate strings for proper command-line parsing
+        # When TP > 1, this setter is called and adds --tensor-parallel-size to args.
+        # WRONG: [" ".join(parts)] would create ["--model Qwen/Qwen3-0.6B --tensor-parallel-size 2"]
+        #        causing argparse to fail with "IndexError: list index out of range"
+        # RIGHT: parts creates ["--model", "Qwen/Qwen3-0.6B", "--tensor-parallel-size", "2"]
+        self._spec["extraPodSpec"]["mainContainer"]["args"] = parts
 
         # Auto-adjust GPU count to match tensor parallel size
         self.gpus = value
