@@ -27,6 +27,7 @@
 use super::*;
 
 pub mod backend;
+pub mod custom_preprocessor;
 pub mod disagg_router;
 pub mod entrypoint;
 pub mod kv;
