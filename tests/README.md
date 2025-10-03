@@ -147,6 +147,52 @@ uv pip install pytest-asyncio
 ```
 ---
 
+## Rust Testing: Organization and Execution
+
+Rust tests in Dynamo are organized as follows:
+- **Unit tests** are placed within the corresponding Rust source files (e.g., `lib.rs`) using `#[cfg(test)]` modules.
+- **Integration tests** are placed in the crate's `tests/` directory and must be gated behind the `integration` feature.
+
+### Test Segmentation by Features
+- Use Cargo features to enable or disable groups of tests. For example:
+  ```bash
+  cargo test --features planner
+  ```
+- Place all integration tests behind the `integration` feature gate. This ensures they are only run when explicitly enabled:
+  ```bash
+  cargo test --features integration
+  cargo test --all-features
+  ```
+
+### Marking Slow or Special-Case Tests
+- Use `#[ignore]` to mark slow or special-case tests. These tests will not run by default and must be explicitly included:
+  ```bash
+  cargo test -- --ignored
+  ```
+
+### Example
+```rust
+#[cfg(test)]
+mod kv_cache_tests {
+    #[test]
+    fn test_kv_cache_basic() {
+        // ...
+    }
+
+    #[test]
+    #[ignore]
+    fn test_kv_cache_long_running() {
+        // ...
+    }
+}
+```
+
+### CI Integration
+- CI runs integration tests using either `cargo test --features integration` or `cargo test --all-features`.
+- Use feature gates to control which tests are included in each CI pipeline.
+
+---
+
 ## Additional Requirements and Troubleshooting
 
 - Tests must be deterministic; flaky tests are not permitted.
