@@ -116,12 +116,16 @@ COPY --from=framework /usr/local/lib/lib* /usr/local/lib/
 # Copy nats and etcd from dynamo_base image
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+# Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
+ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 
 # Copy UCX from framework image as plugin for NIXL
 # Copy NIXL source from framework image
 # Copy dynamo wheels for gitlab artifacts
 COPY --from=dynamo_base /usr/local/ucx /usr/local/ucx
 COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
+ENV PATH=/usr/local/ucx/bin:$PATH
+
 # Copy OpenMPI from framework image
 COPY --from=framework /opt/hpcx/ompi /opt/hpcx/ompi
 # Copy NUMA library from framework image

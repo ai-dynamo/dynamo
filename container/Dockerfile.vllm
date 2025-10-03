@@ -221,6 +221,7 @@ ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 # Copy dynamo wheels for gitlab artifacts
 COPY --from=dynamo_base /usr/local/ucx /usr/local/ucx
 COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
+ENV PATH=/usr/local/ucx/bin:$PATH
 
 # Copies vllm, DeepEP, DeepGEMM, PPLX repos (all editable installs) and nvshmem binaries
 COPY --from=framework /opt/vllm /opt/vllm
