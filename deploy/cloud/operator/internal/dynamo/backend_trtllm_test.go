@@ -345,7 +345,7 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 				Volumes: tt.initialVolumes,
 				Containers: []corev1.Container{
 					{
-						Name: "main",
+						Name: commonconsts.MainContainerName,
 						Env:  []corev1.EnvVar{},
 					},
 				},
