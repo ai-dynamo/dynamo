@@ -20,10 +20,19 @@ dynamo/
 │   │   └── tests/              # Rust integration tests for llm
 │   └── ...
 ├── components/
-│   ├── planner/
-│   │   └── tests/              # Python unit/integration tests for planner
+│   ├── src/dynamo/
+│   |   └── planner/
+│   │   │   └── tests/              # Python unit/integration tests for planner
+│   |   └── router/
+│   │   │   └── tests/
+│   |   └── ...
 │   ├── backend/
-│   │   └── tests/              # Python unit/integration tests for backend
+│   │   └── vllm
+│   │   │    └── tests/             # Python unit/integration tests for backend
+│   │   └── trtllm
+│   │   │    └── tests/
+│   │   └── trtllm
+│   │   │    └── tests/
 │   └── ...
 ├── tests/                      # End-to-end and cross-component tests
 │   ├── serve/
