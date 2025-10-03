@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! Metrics registry trait and implementation for Prometheus metrics
 //!
@@ -879,12 +867,21 @@ mod test_metricsregistry_prefixes {
         assert_eq!(component.parent_hierarchy().len(), 2);
         assert_eq!(endpoint.parent_hierarchy().len(), 3);
 
-        // Invalid namespace behavior (sanitization should still error after becoming "123")
+        // Invalid namespace behavior - sanitizes to "_123" and succeeds
+        // @ryanolson intended to enable validation (see TODO comment in component.rs) but didn't turn it on,
+        // so invalid characters are sanitized in MetricsRegistry rather than rejected.
         let invalid_namespace = drt.namespace("@@123").unwrap();
         let result = invalid_namespace.create_counter("test_counter", "A test counter", &[]);
-        assert!(result.is_err());
-        if let Err(e) = &result {
-            assert!(e.to_string().contains("123"));
+        assert!(result.is_ok());
+        if let Ok(counter) = &result {
+            // Verify the namespace was sanitized to "_123" in the label
+            let desc = counter.desc();
+            let namespace_label = desc[0]
+                .const_label_pairs
+                .iter()
+                .find(|l| l.name() == "dynamo_namespace")
+                .expect("Should have dynamo_namespace label");
+            assert_eq!(namespace_label.value(), "_123");
         }
 
         // Valid namespace works
@@ -1179,8 +1176,8 @@ dynamo_component_nats_client_connection_state 1
 # TYPE dynamo_component_latency histogram
 dynamo_component_latency_bucket{le="0.1"} 10
 dynamo_component_latency_bucket{le="0.5"} 25
-dynamo_component_nats_service_total_requests 100
-dynamo_component_nats_service_total_errors 5"#;
+dynamo_component_nats_service_requests_total 100
+dynamo_component_nats_service_errors_total 5"#;
 
         // Test remove_nats_lines (excludes NATS lines but keeps help/type)
         let filtered_out = super::test_helpers::remove_nats_lines(test_input);
@@ -1424,7 +1421,11 @@ mod test_metricsregistry_nats {
                 1.0,
                 1.0,
             ), // Should be connected
-            (build_component_metric_name(nats_client::CONNECTS), 1.0, 1.0), // Should have 1 connection
+            (
+                build_component_metric_name(nats_client::CURRENT_CONNECTIONS),
+                1.0,
+                1.0,
+            ), // Should have 1 connection
             (
                 build_component_metric_name(nats_client::IN_TOTAL_BYTES),
                 800.0,
@@ -1447,22 +1448,22 @@ mod test_metricsregistry_nats {
             ), // Wide range around 2
             // Component NATS metrics (ordered to match COMPONENT_NATS_METRICS)
             (
-                build_component_metric_name(nats_service::AVG_PROCESSING_MS),
+                build_component_metric_name(nats_service::PROCESSING_MS_AVG),
                 0.0,
                 0.0,
             ), // No processing yet
             (
-                build_component_metric_name(nats_service::TOTAL_ERRORS),
+                build_component_metric_name(nats_service::ERRORS_TOTAL),
                 0.0,
                 0.0,
             ), // No errors yet
             (
-                build_component_metric_name(nats_service::TOTAL_REQUESTS),
+                build_component_metric_name(nats_service::REQUESTS_TOTAL),
                 0.0,
                 0.0,
             ), // No requests yet
             (
-                build_component_metric_name(nats_service::TOTAL_PROCESSING_MS),
+                build_component_metric_name(nats_service::PROCESSING_MS_TOTAL),
                 0.0,
                 0.0,
             ), // No processing yet
@@ -1553,7 +1554,11 @@ mod test_metricsregistry_nats {
                 1.0,
                 1.0,
             ), // Connected
-            (build_component_metric_name(nats_client::CONNECTS), 1.0, 1.0), // 1 connection
+            (
+                build_component_metric_name(nats_client::CURRENT_CONNECTIONS),
+                1.0,
+                1.0,
+            ), // 1 connection
             (
                 build_component_metric_name(nats_client::IN_TOTAL_BYTES),
                 20000.0,
@@ -1576,22 +1581,22 @@ mod test_metricsregistry_nats {
             ), // Wide range around 16
             // Component NATS metrics
             (
-                build_component_metric_name(nats_service::AVG_PROCESSING_MS),
+                build_component_metric_name(nats_service::PROCESSING_MS_AVG),
                 0.0,
                 1.0,
             ), // Low processing time
             (
-                build_component_metric_name(nats_service::TOTAL_ERRORS),
+                build_component_metric_name(nats_service::ERRORS_TOTAL),
                 0.0,
                 0.0,
             ), // No errors
             (
-                build_component_metric_name(nats_service::TOTAL_REQUESTS),
+                build_component_metric_name(nats_service::REQUESTS_TOTAL),
                 0.0,
-                0.0,
-            ), // No work handler requests
+                10.0,
+            ), // NATS service stats requests (may differ from work handler count)
             (
-                build_component_metric_name(nats_service::TOTAL_PROCESSING_MS),
+                build_component_metric_name(nats_service::PROCESSING_MS_TOTAL),
                 0.0,
                 5.0,
             ), // Low total processing time

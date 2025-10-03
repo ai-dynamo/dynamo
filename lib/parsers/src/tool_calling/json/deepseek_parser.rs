@@ -43,12 +43,7 @@ pub fn parse_tool_calls_deepseek_v3_1(
     }
 
     // If tool call start token is not present then, no tool calls are there, return empty tool calls and the original trimmed string
-    if let Some(start_token) = tool_call_start_tokens.first() {
-        if !trimmed.contains(start_token) {
-            return Ok((vec![], Some(trimmed.to_string())));
-        }
-    } else {
-        // Invalid start token
+    if !detect_tool_call_start_deepseek_v3_1(trimmed, config) {
         return Ok((vec![], Some(trimmed.to_string())));
     }
 
@@ -104,6 +99,42 @@ pub fn parse_tool_calls_deepseek_v3_1(
         .unwrap_or_else(|| trimmed.to_string());
 
     Ok((tool_calls, Some(normal_text)))
+}
+
+pub fn detect_tool_call_start_deepseek_v3_1(chunk: &str, config: &JsonParserConfig) -> bool {
+    let trimmed = chunk.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Check for complete start tokens first
+    let has_complete_token = config
+        .tool_call_start_tokens
+        .iter()
+        .any(|token| !token.is_empty() && trimmed.contains(token));
+
+    if has_complete_token {
+        return true;
+    }
+
+    // Check for partial start tokens (streaming scenario)
+    // This handles cases where start tokens are split across multiple chunks
+    config.tool_call_start_tokens.iter().any(|token| {
+        if token.is_empty() {
+            return false;
+        }
+        // Check if the chunk could be a prefix of this start token
+        // Handle Unicode character boundaries properly
+        for i in 1..=token.chars().count() {
+            if let Some(prefix) = token.chars().take(i).collect::<String>().get(..) {
+                let prefix_str = &prefix[..prefix.len()];
+                if trimmed == prefix_str || trimmed.ends_with(prefix_str) {
+                    return true;
+                }
+            }
+        }
+        false
+    })
 }
 
 #[cfg(test)]
@@ -218,5 +249,83 @@ mod tests {
         let (result, content) = parse_tool_calls_deepseek_v3_1(text, &config).unwrap();
         assert_eq!(content, Some(text.trim().to_string()));
         assert_eq!(result.len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod detect_parser_tests {
+    use super::*;
+    #[test]
+    fn test_detect_tool_call_start_deepseek_v3_1_chunk_with_tool_call_start_token() {
+        let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather宽带}"#;
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<｜tool▁calls▁begin｜>".to_string()],
+            tool_call_end_tokens: vec!["<｜tool▁calls▁end｜>".to_string()],
+            ..Default::default()
+        };
+        let result = detect_tool_call_start_deepseek_v3_1(text, &config);
+        assert!(result);
+    }
+
+    #[test]
+    fn test_detect_tool_call_start_deepseek_v3_1_chunk_without_tool_call_start_token() {
+        let text = r#"<｜tool▁call▁begin｜>get_current_weather宽带}"#;
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<｜tool▁calls▁begin｜>".to_string()],
+            tool_call_end_tokens: vec!["<｜tool▁calls▁end｜>".to_string()],
+            ..Default::default()
+        };
+        let result = detect_tool_call_start_deepseek_v3_1(text, &config);
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_detect_tool_call_start_deepseek_v3_1_chunk_with_tool_call_start_token_in_middle() {
+        let text = r#"The following tool calls retrieve weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather宽带}"#;
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<｜tool▁calls▁begin｜>".to_string()],
+            tool_call_end_tokens: vec!["<｜tool▁calls▁end｜>".to_string()],
+            ..Default::default()
+        };
+        let result = detect_tool_call_start_deepseek_v3_1(text, &config);
+        assert!(result);
+    }
+
+    #[test]
+    fn test_detect_tool_call_start_deepseek_v3_1_partial_tokens() {
+        // Test partial token detection for streaming scenarios with unicode characters
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<｜tool▁calls▁begin｜>".to_string()],
+            tool_call_end_tokens: vec!["<｜tool▁calls▁end｜>".to_string()],
+            ..Default::default()
+        };
+
+        // Test various partial prefixes
+        assert!(
+            detect_tool_call_start_deepseek_v3_1("<", &config),
+            "'<' should be detected as potential start"
+        );
+        assert!(
+            detect_tool_call_start_deepseek_v3_1("<｜", &config),
+            "'<｜' should be detected as potential start"
+        );
+        assert!(
+            detect_tool_call_start_deepseek_v3_1("<｜tool", &config),
+            "'<｜tool' should be detected as potential start"
+        );
+        assert!(
+            detect_tool_call_start_deepseek_v3_1("<｜tool▁calls", &config),
+            "'<｜tool▁calls' should be detected as potential start"
+        );
+
+        // Test that unrelated text is not detected
+        assert!(
+            !detect_tool_call_start_deepseek_v3_1("hello world", &config),
+            "'hello world' should not be detected"
+        );
+        assert!(
+            !detect_tool_call_start_deepseek_v3_1("xyz", &config),
+            "'xyz' should not be detected"
+        );
     }
 }

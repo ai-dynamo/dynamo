@@ -1,17 +1,5 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -22,6 +10,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+
+use crate::storage::key_value_store::Key;
 
 use super::{KeyValueBucket, KeyValueStore, StorageError, StorageOutcome};
 
@@ -112,8 +102,8 @@ impl KeyValueStore for MemoryStorage {
 impl KeyValueBucket for MemoryBucketRef {
     async fn insert(
         &self,
-        key: String,
-        value: String,
+        key: &Key,
+        value: &str,
         revision: u64,
     ) -> Result<StorageOutcome, StorageError> {
         let mut locked_data = self.inner.data.lock().await;
@@ -123,8 +113,11 @@ impl KeyValueBucket for MemoryBucketRef {
         };
         let outcome = match bucket.data.entry(key.to_string()) {
             Entry::Vacant(e) => {
-                e.insert((revision, value.clone()));
-                let _ = self.inner.change_sender.send((key, value));
+                e.insert((revision, value.to_string()));
+                let _ = self
+                    .inner
+                    .change_sender
+                    .send((key.to_string(), value.to_string()));
                 StorageOutcome::Created(revision)
             }
             Entry::Occupied(mut entry) => {
@@ -132,7 +125,7 @@ impl KeyValueBucket for MemoryBucketRef {
                 if *rev == revision {
                     StorageOutcome::Exists(revision)
                 } else {
-                    entry.insert((revision, value));
+                    entry.insert((revision, value.to_string()));
                     StorageOutcome::Created(revision)
                 }
             }
@@ -140,23 +133,23 @@ impl KeyValueBucket for MemoryBucketRef {
         Ok(outcome)
     }
 
-    async fn get(&self, key: &str) -> Result<Option<bytes::Bytes>, StorageError> {
+    async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StorageError> {
         let locked_data = self.inner.data.lock().await;
         let Some(bucket) = locked_data.get(&self.name) else {
             return Ok(None);
         };
         Ok(bucket
             .data
-            .get(key)
+            .get(&key.0)
             .map(|(_, v)| bytes::Bytes::from(v.clone())))
     }
 
-    async fn delete(&self, key: &str) -> Result<(), StorageError> {
+    async fn delete(&self, key: &Key) -> Result<(), StorageError> {
         let mut locked_data = self.inner.data.lock().await;
         let Some(bucket) = locked_data.get_mut(&self.name) else {
             return Err(StorageError::MissingBucket(self.name.to_string()));
         };
-        bucket.data.remove(key);
+        bucket.data.remove(&key.0);
         Ok(())
     }
 

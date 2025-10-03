@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
@@ -27,6 +15,7 @@ bitflags! {
     /// - `ModelType::Chat`
     /// - `ModelType::Completions`
     /// - `ModelType::Embedding`
+    /// - `ModelType::TensorBased`
     ///
     /// For example, a model that supports both chat and completions can be
     /// expressed as:
@@ -41,11 +30,12 @@ bitflags! {
     /// Using bitflags avoids deep branching on a single enum variant,
     /// simplifies checks like `supports_chat()`, and enables efficient,
     /// type-safe combinations of multiple endpoint types within a single byte.
-    #[derive(Copy, Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+    #[derive(Copy, Debug, Default, Clone, Serialize, Deserialize, Eq, PartialEq)]
     pub struct ModelType: u8 {
         const Chat = 1 << 0;
         const Completions = 1 << 1;
         const Embedding = 1 << 2;
+        const TensorBased = 1 << 3;
     }
 }
 
@@ -63,6 +53,9 @@ impl ModelType {
     pub fn supports_embedding(&self) -> bool {
         self.contains(ModelType::Embedding)
     }
+    pub fn supports_tensor(&self) -> bool {
+        self.contains(ModelType::TensorBased)
+    }
 
     pub fn as_vec(&self) -> Vec<&'static str> {
         let mut result = Vec::new();
@@ -74,6 +67,9 @@ impl ModelType {
         }
         if self.supports_embedding() {
             result.push("embedding");
+        }
+        if self.supports_tensor() {
+            result.push("tensor");
         }
         result
     }
@@ -91,6 +87,9 @@ impl ModelType {
         if self.contains(Self::Embedding) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Embedding);
         }
+        // [gluo NOTE] ModelType::Tensor doesn't map to any endpoint type,
+        // current use of endpoint type is LLM specific and so does the HTTP
+        // server that uses it.
         endpoint_types
     }
 }
@@ -101,12 +100,15 @@ impl fmt::Display for ModelType {
     }
 }
 
-#[derive(Copy, Debug, Clone, Display, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Copy, Debug, Default, Clone, Display, Serialize, Deserialize, Eq, PartialEq)]
 pub enum ModelInput {
     /// Raw text input
+    #[default]
     Text,
     /// Pre-processed input
     Tokens,
+    /// Tensor input
+    Tensor,
 }
 
 impl ModelInput {
@@ -114,6 +116,7 @@ impl ModelInput {
         match self {
             Self::Text => "text",
             Self::Tokens => "tokens",
+            Self::Tensor => "tensor",
         }
     }
 }

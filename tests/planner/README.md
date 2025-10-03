@@ -10,6 +10,8 @@ This directory contains comprehensive testing tools for validating the SLA plann
 The SLA planner monitors metrics every 60 seconds (default adjustment interval) and scales
 prefill/decode workers based on TTFT, ITL, and request patterns.
 
+To setup the environment, simply use the released docker images for any backends, or build your own docker image following the READMEs in `./components/backends/<vllm/sglang/trtllm>/README.md`, or follow the `Developing Locally` section in [README.md](../../README.md) to setup the environment locally. If using the local environment, make sure to install dependencies by running `uv pip install -r container/deps/requirements.txt`
+
 ## Pre-Requisite: Pre-Deployment Profiling Data
 
 You have two options to obtain the pre-deployment profiling data:
@@ -148,11 +150,11 @@ Test the replica calculation logic without requiring Kubernetes:
 
 ```bash
 # Set PYTHONPATH to include planner components
-PYTHONPATH=components/planner/src python -m pytest tests/planner/test_replica_calculation.py -v
+PYTHONPATH=components/src python -m pytest tests/planner/test_replica_calculation.py -v
 
 # Or from the tests/planner directory:
 cd tests/planner
-PYTHONPATH=../../components/planner/src python -m pytest test_replica_calculation.py -v
+PYTHONPATH=../../components/src python -m pytest test_replica_calculation.py -v
 ```
 
 **Note**: The unit tests automatically mock external dependencies (prometheus_client, runtime modules) to ensure they can run in isolation without requiring the full Dynamo environment.
@@ -166,7 +168,7 @@ Test complete scaling behavior including Kubernetes deployment and load generati
 
 With custom namespace:
 ```bash
-./scaling/run_scaling_test.sh --namespace production
+./scaling/run_scaling_test.sh --namespace <namespace>
 ```
 
 To save results to `tests/planner/e2e_scaling_results` instead of `/tmp`:
@@ -184,8 +186,7 @@ To save results to `tests/planner/e2e_scaling_results` instead of `/tmp`:
 The main test scenario validates prefill scaling for H200 with 1P1D → 2P1D configuration:
 
 - **Phase 1**: 8 req/s for 90s (baseline - maintains 1P1D)
-- **Phase 2**: 15 req/s for 120s (moderate load - maintains 1P1D)
-- **Phase 3**: 25 req/s for 180s (scaling trigger - scales to 2P1D)
+- **Phase 2**: 18 req/s for 120s (scaling trigger - scales to 2P1D)
 - **ISL/OSL**: 4000/150 tokens (optimized for prefill bottleneck)
 - **Transition delay**: 30s between phases
 - **Total test duration**: ~7 minutes + scaling observation
@@ -244,15 +245,3 @@ The table below shows the performance improvement of SLA planner across differen
 | Inefficient parallelization mapping | 311% | 249% |
 | Best static deployment | 52% | 29% |`
 
-### Prerequisites
-
-**For Unit Tests:**
-- Python dependencies installed
-- PYTHONPATH set to include `components/planner/src` (see unit test examples above)
-
-**For E2E Tests:**
-- Kubernetes cluster with GPU nodes
-- kubectl configured and accessible
-- genai-perf available in PATH
-- Python dependencies installed
-- PYTHONPATH properly configured for planner imports

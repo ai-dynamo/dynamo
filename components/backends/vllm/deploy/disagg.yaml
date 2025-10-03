@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
     VllmDecodeWorker:
       dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
@@ -24,13 +24,15 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/vllm
           command:
-            - /bin/sh
-            - -c
+          - python3
+          - -m
+          - dynamo.vllm
           args:
-            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B"
+            - --model
+            - Qwen/Qwen3-0.6B
     VllmPrefillWorker:
       dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
@@ -41,10 +43,13 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/vllm
           command:
-            - /bin/sh
-            - -c
+          - python3
+          - -m
+          - dynamo.vllm
           args:
-            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-prefill-worker"
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --is-prefill-worker

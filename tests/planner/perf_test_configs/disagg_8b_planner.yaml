@@ -5,8 +5,6 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-disagg-planner
-  annotations:
-    nvidia.com/enable-grove: "false"
 spec:
   envs:
     - name: DYNAMO_SERVICE_CONFIG
@@ -45,7 +43,7 @@ spec:
           memory: "100Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0902-01
+          image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -57,9 +55,6 @@ spec:
       envFromSecret: hf-token-secret
       componentType: planner
       replicas: 1
-      envs:
-        - name: PROMETHEUS_PORT
-          value: "8000"
       livenessProbe:
         exec:
           command:
@@ -81,7 +76,7 @@ spec:
         failureThreshold: 10
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0902-01
+          image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/planner/src/dynamo/planner
           ports:
             - name: metrics
@@ -100,47 +95,11 @@ spec:
               --adjustment-interval=60
               --prometheus-port=9085
               --no-correction
-    Prometheus:
-      dynamoNamespace: vllm-disagg-planner
-      componentType: main
-      replicas: 1
-      envs:
-        - name: PYTHONPATH
-          value: "/workspace/components/planner/src"
-        - name: PROMETHEUS_PORT
-          value: "8000"
-      livenessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        initialDelaySeconds: 30
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0902-01
-          workingDir: /workspace/components/backends/vllm
-          command:
-            - /bin/sh
-            - -c
-          args:
-            - "python3 -m dynamo.planner.prometheus"
     VllmDecodeWorker:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
+      subComponentType: decode
       replicas: 1
       livenessProbe:
         httpGet:
@@ -181,7 +140,7 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0902-01
+          image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/vllm
           command:
             - python3
@@ -197,6 +156,7 @@ spec:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
+      subComponentType: prefill
       replicas: 1
       livenessProbe:
         httpGet:
@@ -237,7 +197,7 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0902-01
+          image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/vllm
           command:
             - python3

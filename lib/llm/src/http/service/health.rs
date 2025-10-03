@@ -52,7 +52,6 @@ async fn live_handler(
 async fn health_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
-    let model_entries = state.manager().get_model_entries();
     let instances = if let Some(etcd_client) = state.etcd_client() {
         match list_all_instances(etcd_client).await {
             Ok(instances) => instances,
@@ -65,27 +64,18 @@ async fn health_handler(
         vec![]
     };
 
-    if model_entries.is_empty() {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "status": "unhealthy",
-                "message": "No endpoints available",
-                "instances": instances
-            })),
-        )
-    } else {
-        let endpoints: Vec<String> = model_entries
-            .iter()
-            .map(|entry| entry.endpoint_id.as_url())
-            .collect();
-        (
-            StatusCode::OK,
-            Json(json!({
-                "status": "healthy",
-                "endpoints": endpoints,
-                "instances": instances
-            })),
-        )
-    }
+    let mut endpoints: Vec<String> = instances
+        .iter()
+        .map(|instance| instance.endpoint_id().as_url())
+        .collect();
+    endpoints.sort();
+    endpoints.dedup();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "healthy",
+            "endpoints": endpoints,
+            "instances": instances
+        })),
+    )
 }

@@ -107,6 +107,13 @@ impl Instance {
     pub fn id(&self) -> i64 {
         self.instance_id
     }
+    pub fn endpoint_id(&self) -> EndpointId {
+        EndpointId {
+            namespace: self.namespace.clone(),
+            component: self.component.clone(),
+            name: self.endpoint.clone(),
+        }
+    }
 }
 
 /// A [Component] a discoverable entity in the distributed runtime.
@@ -218,8 +225,8 @@ impl Component {
         &self.namespace
     }
 
-    pub fn name(&self) -> String {
-        self.name.clone()
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     pub fn labels(&self) -> &[(String, String)] {
@@ -450,7 +457,7 @@ impl Endpoint {
     pub fn etcd_path(&self) -> EtcdPath {
         EtcdPath::new_endpoint(
             &self.component.namespace().name(),
-            &self.component.name(),
+            self.component.name(),
             &self.name,
         )
         .expect("Endpoint name and component name should be valid")
@@ -458,12 +465,15 @@ impl Endpoint {
 
     /// The fully path of an instance in etcd
     pub fn etcd_path_with_lease_id(&self, lease_id: i64) -> String {
-        let endpoint_root = self.etcd_root();
-        if self.is_static {
-            endpoint_root
-        } else {
-            format!("{endpoint_root}:{lease_id:x}")
-        }
+        format!("{INSTANCE_ROOT_PATH}/{}", self.unique_path(lease_id))
+    }
+
+    /// Full path of this endpoint with forward slash separators, including lease id
+    pub fn unique_path(&self, lease_id: i64) -> String {
+        let ns = self.component.namespace().name();
+        let cp = self.component.name();
+        let ep = self.name();
+        format!("{ns}/{cp}/{ep}/{lease_id:x}")
     }
 
     /// The endpoint as an EtcdPath object with lease ID
@@ -473,7 +483,7 @@ impl Endpoint {
         } else {
             EtcdPath::new_endpoint_with_lease(
                 &self.component.namespace().name(),
-                &self.component.name(),
+                self.component.name(),
                 &self.name,
                 lease_id,
             )

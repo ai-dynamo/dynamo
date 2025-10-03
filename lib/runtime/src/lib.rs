@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! Dynamo
 
@@ -21,7 +9,6 @@
 use std::{
     collections::HashMap,
     sync::{Arc, OnceLock, Weak},
-    time::Instant,
 };
 
 pub use anyhow::{
@@ -34,8 +21,10 @@ mod config;
 pub use config::RuntimeConfig;
 
 pub mod component;
+pub mod compute;
 pub mod discovery;
 pub mod engine;
+pub mod health_check;
 pub mod system_status_server;
 pub use system_status_server::SystemStatusServerInfo;
 pub mod instances;
@@ -49,6 +38,7 @@ pub mod runtime;
 pub mod service;
 pub mod slug;
 pub mod storage;
+pub mod system_health;
 pub mod traits;
 pub mod transports;
 pub mod utils;
@@ -57,6 +47,7 @@ pub mod worker;
 pub mod distributed;
 pub use distributed::distributed_test_utils;
 pub use futures::stream;
+pub use system_health::{HealthCheckTarget, SystemHealth};
 pub use tokio_util::sync::CancellationToken;
 pub use worker::Worker;
 
@@ -83,106 +74,8 @@ pub struct Runtime {
     cancellation_token: CancellationToken,
     endpoint_shutdown_token: CancellationToken,
     graceful_shutdown_tracker: Arc<GracefulShutdownTracker>,
-}
-
-/// Current Health Status
-/// If use_endpoint_health_status is set then
-/// initialize the endpoint_health hashmap to the
-/// starting health status
-#[derive(Clone)]
-pub struct SystemHealth {
-    system_health: HealthStatus,
-    endpoint_health: HashMap<String, HealthStatus>,
-    use_endpoint_health_status: Vec<String>,
-    health_path: String,
-    live_path: String,
-    start_time: Instant,
-    uptime_gauge: OnceLock<prometheus::Gauge>,
-}
-
-impl SystemHealth {
-    pub fn new(
-        starting_health_status: HealthStatus,
-        use_endpoint_health_status: Vec<String>,
-        health_path: String,
-        live_path: String,
-    ) -> Self {
-        let mut endpoint_health = HashMap::new();
-        for endpoint in &use_endpoint_health_status {
-            endpoint_health.insert(endpoint.clone(), starting_health_status.clone());
-        }
-        SystemHealth {
-            system_health: starting_health_status,
-            endpoint_health,
-            use_endpoint_health_status,
-            health_path,
-            live_path,
-            start_time: Instant::now(),
-            uptime_gauge: OnceLock::new(),
-        }
-    }
-    pub fn set_health_status(&mut self, status: HealthStatus) {
-        self.system_health = status;
-    }
-
-    pub fn set_endpoint_health_status(&mut self, endpoint: &str, status: HealthStatus) {
-        self.endpoint_health.insert(endpoint.to_string(), status);
-    }
-
-    /// Returns the overall health status and endpoint health statuses
-    pub fn get_health_status(&self) -> (bool, HashMap<String, String>) {
-        let mut endpoints: HashMap<String, String> = HashMap::new();
-        for (endpoint, ready) in &self.endpoint_health {
-            endpoints.insert(
-                endpoint.clone(),
-                if *ready == HealthStatus::Ready {
-                    "ready".to_string()
-                } else {
-                    "notready".to_string()
-                },
-            );
-        }
-
-        let healthy = if !self.use_endpoint_health_status.is_empty() {
-            self.use_endpoint_health_status.iter().all(|endpoint| {
-                self.endpoint_health
-                    .get(endpoint)
-                    .is_some_and(|status| *status == HealthStatus::Ready)
-            })
-        } else {
-            self.system_health == HealthStatus::Ready
-        };
-
-        (healthy, endpoints)
-    }
-
-    /// Initialize the uptime gauge using the provided metrics registry
-    pub fn initialize_uptime_gauge<T: crate::metrics::MetricsRegistry>(
-        &self,
-        registry: &T,
-    ) -> anyhow::Result<()> {
-        let gauge = registry.create_gauge(
-            distributed_runtime::UPTIME_SECONDS,
-            "Total uptime of the DistributedRuntime in seconds",
-            &[],
-        )?;
-        self.uptime_gauge
-            .set(gauge)
-            .map_err(|_| anyhow::anyhow!("uptime_gauge already initialized"))?;
-        Ok(())
-    }
-
-    /// Get the current uptime as a Duration
-    pub fn uptime(&self) -> std::time::Duration {
-        self.start_time.elapsed()
-    }
-
-    /// Update the uptime gauge with the current uptime value
-    pub fn update_uptime_gauge(&self) {
-        if let Some(gauge) = self.uptime_gauge.get() {
-            gauge.set(self.uptime().as_secs_f64());
-        }
-    }
+    compute_pool: Option<Arc<compute::ComputePool>>,
+    block_in_place_permits: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 /// Type alias for runtime callback functions to reduce complexity

@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! KV RadixTree
 //!
@@ -43,16 +31,20 @@
 //!
 //! This module provides a scalable and efficient way to manage and retrieve data blocks for LLM inference, leveraging a global KV cache to optimize performance.
 
-use bytes::Bytes;
-// use prometheus::{IntCounter, IntGauge};
 use async_trait::async_trait;
+use bytes::Bytes;
+use dynamo_runtime::{
+    component::Component,
+    metrics::{MetricsRegistry, prometheus_names::kvrouter},
+};
+use prometheus::{IntCounterVec, Opts};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet, VecDeque},
     iter,
     rc::Rc,
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -76,6 +68,16 @@ pub enum KvRouterError {
 
     #[error("Indexer is dropped request")]
     IndexerDroppedRequest,
+}
+
+/// Errors that can occur during KV Cache Event processing.
+#[derive(Debug, thiserror::Error)]
+pub enum KvCacheEventError {
+    #[error("Failed to find parent block")]
+    ParentBlockNotFound,
+
+    #[error("Failed to find block")]
+    BlockNotFound,
 }
 
 /// Identifier of a LLM worker which emits events to the router.
@@ -275,10 +277,16 @@ impl RadixTree {
         let mut scores = OverlapScores::new();
         let mut current = self.root.clone();
         let now = Instant::now();
-        for block_hash in sequence {
+
+        tracing::trace!(
+            "RadixTree::find_matches: looking for sequence={:?}",
+            sequence.iter().map(|h| h.0).collect::<Vec<_>>()
+        );
+
+        for (idx, block_hash) in sequence.iter().enumerate() {
             let next_block = {
                 let current_borrow = current.borrow();
-                current_borrow.children.get(&block_hash).cloned()
+                current_borrow.children.get(block_hash).cloned()
             };
             if let Some(block) = next_block {
                 scores.update_scores(&block.borrow().workers);
@@ -303,9 +311,16 @@ impl RadixTree {
 
                 current = block;
             } else {
+                tracing::trace!(
+                    "RadixTree::find_matches: block not found at index {} for hash {}",
+                    idx,
+                    block_hash.0
+                );
                 break;
             }
         }
+
+        tracing::trace!("RadixTree::find_matches: final scores={:?}", scores.scores);
 
         scores
     }
@@ -315,10 +330,10 @@ impl RadixTree {
     /// ### Arguments
     ///
     /// * `event` - The `RouterEvent` to apply.
-    pub fn apply_event(&mut self, event: RouterEvent) {
+    pub fn apply_event(&mut self, event: RouterEvent) -> Result<(), KvCacheEventError> {
         let (worker_id, event) = (event.worker_id, event.event);
         let (id, op) = (event.event_id, event.data);
-        tracing::trace!(id, "Store operation: {:?}", op);
+        tracing::trace!(id, "RadixTree::apply_event: Store operation: {:?}", op);
 
         let worker_lookup = self.lookup.entry(worker_id).or_default();
 
@@ -341,7 +356,7 @@ impl RadixTree {
                             parent_hash = ?op.parent_hash,
                             "Failed to find parent block; skipping store operation"
                         );
-                        return;
+                        return Err(KvCacheEventError::ParentBlockNotFound);
                     }
                 };
 
@@ -376,6 +391,7 @@ impl RadixTree {
 
                     current = block;
                 }
+                Ok(())
             }
             KvCacheEventData::Removed(remove) => {
                 // tracing::trace!(id, "KV Remove Operation: {:?}", op);
@@ -394,7 +410,7 @@ impl RadixTree {
                                 id,
                                 "Failed to find block to remove; skipping remove operation"
                             );
-                            continue;
+                            return Err(KvCacheEventError::BlockNotFound);
                         }
                     };
 
@@ -407,9 +423,11 @@ impl RadixTree {
                     // remove the block from the lookup table
                     worker_lookup.remove(&block);
                 }
+                Ok(())
             }
             KvCacheEventData::Cleared => {
                 self.clear_all_blocks(worker_id);
+                Ok(())
             }
         }
     }
@@ -512,6 +530,98 @@ impl RadixTree {
         }
 
         events
+    }
+}
+
+/// Metrics for the KV Indexer.
+#[derive(Clone)]
+pub struct KvIndexerMetrics {
+    /// Counter of events applied.
+    pub kv_cache_events_applied: IntCounterVec,
+}
+
+/// Metric status labels.
+pub const METRIC_STATUS_OK: &str = "ok";
+pub const METRIC_STATUS_PARENT_NOT_FOUND: &str = "parent_block_not_found";
+pub const METRIC_STATUS_BLOCK_NOT_FOUND: &str = "block_not_found";
+
+/// Metric event labels.
+pub const METRIC_EVENT_STORED: &str = "stored";
+pub const METRIC_EVENT_REMOVED: &str = "removed";
+pub const METRIC_EVENT_CLEARED: &str = "cleared";
+
+static KV_INDEXER_METRICS: OnceLock<Arc<KvIndexerMetrics>> = OnceLock::new();
+
+impl KvIndexerMetrics {
+    fn new(kv_cache_events_applied: IntCounterVec) -> Self {
+        Self {
+            kv_cache_events_applied,
+        }
+    }
+
+    /// Creates a new KvIndexerMetrics from a Component, memoizing the result in
+    /// KV_INDEXER_METRICS to avoid duplicate registration issues.
+    pub fn from_component(component: &Component) -> Arc<Self> {
+        KV_INDEXER_METRICS.get_or_init(|| {
+            match component.create_intcountervec(
+                kvrouter::KV_CACHE_EVENTS_APPLIED,
+                "Total number of KV cache events applied to index",
+                &["event_type", "status"],
+                &[],
+            ) {
+                Ok(kv_cache_events_applied) => Arc::new(Self::new(kv_cache_events_applied)),
+                Err(e) => {
+                    tracing::warn!("Failed to create kv indexer metrics from component: {}. Using unregistered metrics as fallback.", e);
+                    Arc::new(Self::new_unregistered())
+                }
+            }
+        }).clone()
+    }
+
+    /// Creates a new KvIndexerMetrics which is not registered with a MetricsRegistry.
+    /// This may be used for tests or as a fallback for when a MetricsRegistry is not available / has errored.
+    pub fn new_unregistered() -> Self {
+        Self {
+            kv_cache_events_applied: IntCounterVec::new(
+                Opts::new(
+                    kvrouter::KV_CACHE_EVENTS_APPLIED,
+                    "Total number of KV cache events applied to index",
+                ),
+                &["event_type", "status"],
+            )
+            .unwrap(),
+        }
+    }
+
+    pub fn get_event_type(event_data: &KvCacheEventData) -> &'static str {
+        match event_data {
+            KvCacheEventData::Stored(_) => METRIC_EVENT_STORED,
+            KvCacheEventData::Removed(_) => METRIC_EVENT_REMOVED,
+            KvCacheEventData::Cleared => METRIC_EVENT_CLEARED,
+        }
+    }
+
+    pub fn increment_event_applied(
+        &self,
+        event_type: &'static str,
+        result: Result<(), KvCacheEventError>,
+    ) {
+        match result {
+            Ok(_) => {
+                self.kv_cache_events_applied
+                    .with_label_values(&[event_type, METRIC_STATUS_OK])
+                    .inc_by(1);
+            }
+            Err(e) => {
+                let error_label = match e {
+                    KvCacheEventError::ParentBlockNotFound => METRIC_STATUS_PARENT_NOT_FOUND,
+                    KvCacheEventError::BlockNotFound => METRIC_STATUS_BLOCK_NOT_FOUND,
+                };
+                self.kv_cache_events_applied
+                    .with_label_values(&[event_type, error_label])
+                    .inc_by(1);
+            }
+        }
     }
 }
 
@@ -670,12 +780,14 @@ impl KvIndexer {
         token: CancellationToken,
         expiration_duration: Option<Duration>,
         kv_block_size: u32,
+        metrics: Arc<KvIndexerMetrics>,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel::<RouterEvent>(2048);
         let (match_tx, match_rx) = mpsc::channel::<MatchRequest>(128);
         let (remove_worker_tx, remove_worker_rx) = mpsc::channel::<WorkerId>(16);
         let (dump_tx, dump_rx) = mpsc::channel::<DumpRequest>(16);
         let cancel_clone = token.clone();
+
         let task = std::thread::spawn(move || {
             // create a new tokio runtime which will only perform work on a single thread
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -698,13 +810,19 @@ impl KvIndexer {
                         tokio::select! {
                             biased;
 
+                            _ = cancel.cancelled() => {
+                                tracing::debug!("KvCacheIndexer progress loop shutting down");
+                                return;
+                            }
+
                             Some(worker) = remove_worker_rx.recv() => {
                                 trie.remove_worker(worker);
                             }
 
-                            Some(req) = match_rx.recv() => {
-                                let matches = trie.find_matches(req.sequence, req.early_exit);
-                                let _ = req.resp.send(matches);
+                            Some(event) = event_rx.recv() => {
+                                let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
+                                let result = trie.apply_event(event);
+                                metrics.increment_event_applied(event_type, result);
                             }
 
                             Some(dump_req) = dump_rx.recv() => {
@@ -712,13 +830,9 @@ impl KvIndexer {
                                 let _ = dump_req.resp.send(events);
                             }
 
-                            _ = cancel.cancelled() => {
-                                tracing::debug!("KvCacheIndexer progress loop shutting down");
-                                return;
-                            }
-
-                            Some(event) = event_rx.recv() => {
-                                trie.apply_event(event);
+                            Some(req) = match_rx.recv() => {
+                                let matches = trie.find_matches(req.sequence, req.early_exit);
+                                let _ = req.resp.send(matches);
                             }
                         }
                     }
@@ -748,8 +862,12 @@ impl KvIndexer {
         self.kv_block_size
     }
 
-    pub fn new(token: CancellationToken, kv_block_size: u32) -> Self {
-        Self::new_with_frequency(token, None, kv_block_size)
+    pub fn new(
+        token: CancellationToken,
+        kv_block_size: u32,
+        metrics: Arc<KvIndexerMetrics>,
+    ) -> Self {
+        Self::new_with_frequency(token, None, kv_block_size, metrics)
     }
 
     /// Get a sender for `RouterEvent`s.
@@ -768,6 +886,15 @@ impl KvIndexer {
     /// A `mpsc::Sender` for `DumpRequest`s.
     pub fn snapshot_event_sender(&self) -> mpsc::Sender<DumpRequest> {
         self.dump_tx.clone()
+    }
+
+    /// Get a sender for worker removal requests.
+    ///
+    /// ### Returns
+    ///
+    /// A `mpsc::Sender` for `WorkerId`s.
+    pub fn remove_worker_sender(&self) -> mpsc::Sender<WorkerId> {
+        self.remove_worker_tx.clone()
     }
 }
 
@@ -894,6 +1021,7 @@ impl KvIndexerSharded {
         num_shards: usize,
         expiration_duration: Option<Duration>,
         kv_block_size: u32,
+        metrics: Arc<KvIndexerMetrics>,
     ) -> Self {
         let worker_assignments: HashMap<WorkerId, usize> = HashMap::new();
         let worker_counts: Vec<usize> = vec![0; num_shards];
@@ -912,6 +1040,7 @@ impl KvIndexerSharded {
             let (shard_dump_tx, mut shard_dump_rx) = mpsc::channel::<DumpRequest>(16); // Add dump channel
             let mut shard_broadcast_rx = request_broadcast_tx.subscribe();
             let cancel = token.clone();
+            let metrics = metrics.clone();
 
             event_tx.push(shard_event_tx);
             remove_worker_tx.push(shard_remove_worker_tx);
@@ -933,15 +1062,19 @@ impl KvIndexerSharded {
                             tokio::select! {
                                 biased;
 
+                                _ = cancel.cancelled() => {
+                                    tracing::trace!("KvCacheIndexer progress loop shutting down");
+                                    return;
+                                }
+
                                 Some(worker) = shard_remove_worker_rx.recv() => {
                                     trie.remove_worker(worker);
                                 }
 
-                                Ok(req) = shard_broadcast_rx.recv() => {
-                                    let matches = trie.find_matches(req.sequence, req.early_exit);
-                                    if let Err(e) = req.resp.send(matches).await {
-                                        tracing::trace!("Failed to send match response: {:?}", e);
-                                    }
+                                Some(event) = shard_event_rx.recv() => {
+                                    let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
+                                    let result = trie.apply_event(event);
+                                    metrics.increment_event_applied(event_type, result);
                                 }
 
                                 Some(dump_req) = shard_dump_rx.recv() => {
@@ -949,13 +1082,11 @@ impl KvIndexerSharded {
                                     let _ = dump_req.resp.send(events);
                                 }
 
-                                _ = cancel.cancelled() => {
-                                    tracing::trace!("KvCacheIndexer progress loop shutting down");
-                                    return;
-                                }
-
-                                Some(event) = shard_event_rx.recv() => {
-                                    trie.apply_event(event);
+                                Ok(req) = shard_broadcast_rx.recv() => {
+                                    let matches = trie.find_matches(req.sequence, req.early_exit);
+                                    if let Err(e) = req.resp.send(matches).await {
+                                        tracing::trace!("Failed to send match response: {:?}", e);
+                                    }
                                 }
                             }
                         }
@@ -985,8 +1116,13 @@ impl KvIndexerSharded {
         self.kv_block_size
     }
 
-    pub fn new(token: CancellationToken, num_shards: usize, kv_block_size: u32) -> Self {
-        Self::new_with_frequency(token, num_shards, None, kv_block_size)
+    pub fn new(
+        token: CancellationToken,
+        num_shards: usize,
+        kv_block_size: u32,
+        metrics: Arc<KvIndexerMetrics>,
+    ) -> Self {
+        Self::new_with_frequency(token, num_shards, None, kv_block_size, metrics)
     }
 }
 
@@ -1187,7 +1323,8 @@ mod tests {
         let worker_1 = 0;
         let worker_2 = 1;
 
-        trie.apply_event(create_store_event(worker_1, 1, vec![1, 2, 3], None));
+        trie.apply_event(create_store_event(worker_1, 1, vec![1, 2, 3], None))
+            .unwrap();
 
         let scores = trie.find_matches(
             vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
@@ -1222,7 +1359,8 @@ mod tests {
             1
         );
 
-        trie.apply_event(create_store_event(worker_2, 1, vec![1, 4, 5], None));
+        trie.apply_event(create_store_event(worker_2, 1, vec![1, 4, 5], None))
+            .unwrap();
 
         let scores = trie.find_matches(
             vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
@@ -1259,7 +1397,8 @@ mod tests {
             2
         );
 
-        trie.apply_event(create_remove_event(worker_2, 2, vec![5]));
+        trie.apply_event(create_remove_event(worker_2, 2, vec![5]))
+            .unwrap();
         assert_eq!(trie.lookup.len(), 2);
         assert_eq!(trie.lookup.get(&worker_1).unwrap().len(), 3);
         assert_eq!(trie.lookup.get(&worker_2).unwrap().len(), 2);
@@ -1288,7 +1427,8 @@ mod tests {
             2
         );
 
-        trie.apply_event(create_remove_event(worker_2, 3, vec![4]));
+        trie.apply_event(create_remove_event(worker_2, 3, vec![4]))
+            .unwrap();
 
         assert_eq!(trie.lookup.len(), 2);
         assert_eq!(trie.lookup.get(&worker_1).unwrap().len(), 3);
@@ -1323,7 +1463,8 @@ mod tests {
             4,
             vec![2, 6, 7],
             Some(ExternalSequenceBlockHash(100)),
-        ));
+        ))
+        .unwrap();
 
         let scores = trie.find_matches(
             vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
@@ -1384,6 +1525,33 @@ mod tests {
     }
 
     #[test]
+    fn test_radix_tree_apply_event_errors() {
+        let mut trie = RadixTree::new();
+        let worker_0 = 0;
+
+        // Parent block not found
+        let result = trie.apply_event(create_store_event(
+            worker_0,
+            0,
+            vec![1, 2, 3],
+            Some(ExternalSequenceBlockHash(12345)),
+        ));
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            KvCacheEventError::ParentBlockNotFound
+        ));
+
+        // Block not found for remove event.
+        let result = trie.apply_event(create_remove_event(worker_0, 0, vec![1, 2, 3]));
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            KvCacheEventError::BlockNotFound
+        ));
+    }
+
+    #[test]
     fn test_remove_worker() {
         setup();
         let mut trie = RadixTree::new();
@@ -1397,8 +1565,10 @@ mod tests {
                 .is_empty()
         );
 
-        trie.apply_event(create_store_event(worker_0, 0, vec![0], None));
-        trie.apply_event(create_store_event(worker_1, 0, vec![0], None));
+        trie.apply_event(create_store_event(worker_0, 0, vec![0], None))
+            .unwrap();
+        trie.apply_event(create_store_event(worker_1, 0, vec![0], None))
+            .unwrap();
 
         let result = trie.find_matches(vec![LocalBlockHash(0)], false).scores;
         assert!(result.len() == 2 && result[&worker_0] == 1 && result[&worker_1] == 1);
@@ -1427,8 +1597,10 @@ mod tests {
         assert!(!trie.lookup.contains_key(&worker_0));
 
         // Test clearing a worker with shared blocks
-        trie.apply_event(create_store_event(worker_0, 0, vec![0, 1, 3], None));
-        trie.apply_event(create_store_event(worker_1, 0, vec![0, 2, 3], None));
+        trie.apply_event(create_store_event(worker_0, 0, vec![0, 1, 3], None))
+            .unwrap();
+        trie.apply_event(create_store_event(worker_1, 0, vec![0, 2, 3], None))
+            .unwrap();
 
         let result = trie.find_matches(vec![LocalBlockHash(0)], false).scores;
         assert!(result.len() == 2 && result[&worker_0] == 1 && result[&worker_1] == 1);
@@ -1452,7 +1624,8 @@ mod tests {
         assert_eq!(result[&worker_1], 1);
 
         // Test re-adding blocks after clearing worker
-        trie.apply_event(create_store_event(worker_0, 0, vec![4, 5], None));
+        trie.apply_event(create_store_event(worker_0, 0, vec![4, 5], None))
+            .unwrap();
         let result = trie
             .find_matches(vec![LocalBlockHash(4), LocalBlockHash(5)], false)
             .scores;
@@ -1472,8 +1645,10 @@ mod tests {
         assert!(trie.lookup.get(&worker_1).unwrap().is_empty());
 
         // Test clearing a worker that has been removed
-        trie.apply_event(create_store_event(worker_0, 0, vec![6], None));
-        trie.apply_event(create_store_event(worker_1, 0, vec![6], None));
+        trie.apply_event(create_store_event(worker_0, 0, vec![6], None))
+            .unwrap();
+        trie.apply_event(create_store_event(worker_1, 0, vec![6], None))
+            .unwrap();
         trie.remove_worker(worker_0);
         trie.clear_all_blocks(worker_0);
         assert!(!trie.lookup.contains_key(&worker_0));
@@ -1500,8 +1675,10 @@ mod tests {
         let worker_0 = 0;
         let worker_1 = 1;
 
-        trie.apply_event(create_store_event(worker_0, 0, vec![0, 1, 2], None));
-        trie.apply_event(create_store_event(worker_1, 0, vec![0], None));
+        trie.apply_event(create_store_event(worker_0, 0, vec![0, 1, 2], None))
+            .unwrap();
+        trie.apply_event(create_store_event(worker_1, 0, vec![0], None))
+            .unwrap();
 
         let result = trie
             .find_matches(
@@ -1545,13 +1722,15 @@ mod tests {
         num_shards: usize,
         kv_block_size: u32,
     ) -> Box<dyn KvIndexerInterface> {
+        let metrics = KvIndexerMetrics::new_unregistered();
         if num_shards == 1 {
-            Box::new(KvIndexer::new(token.clone(), kv_block_size))
+            Box::new(KvIndexer::new(token.clone(), kv_block_size, metrics.into()))
         } else {
             Box::new(KvIndexerSharded::new(
                 token.clone(),
                 num_shards,
                 kv_block_size,
+                metrics.into(),
             ))
         }
     }
@@ -1632,12 +1811,14 @@ mod tests {
         let mut kv_indexer: Box<dyn KvIndexerInterface>;
         let token = CancellationToken::new();
         let expiration = Duration::from_millis(50);
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
 
         if num_shards == 1 {
             kv_indexer = Box::new(KvIndexer::new_with_frequency(
                 token,
                 Some(expiration),
                 kv_block_size,
+                metrics,
             ));
         } else {
             kv_indexer = Box::new(KvIndexerSharded::new_with_frequency(
@@ -1645,6 +1826,7 @@ mod tests {
                 num_shards,
                 Some(expiration),
                 kv_block_size,
+                metrics,
             ));
         }
 
@@ -1777,10 +1959,12 @@ mod tests {
         // Configuration
         let kv_block_size = 32;
         let num_shards = 2;
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
 
         // Build a non-trivial indexer with events
         let token1 = CancellationToken::new();
-        let mut original_indexer = KvIndexerSharded::new(token1.clone(), num_shards, kv_block_size);
+        let mut original_indexer =
+            KvIndexerSharded::new(token1.clone(), num_shards, kv_block_size, metrics.clone());
 
         let worker_0 = 0;
         let worker_1 = 1;
@@ -1826,7 +2010,7 @@ mod tests {
         // Create a new indexer and apply all dumped events
         let token2 = CancellationToken::new();
         let mut reconstructed_indexer =
-            KvIndexerSharded::new(token2.clone(), num_shards, kv_block_size);
+            KvIndexerSharded::new(token2.clone(), num_shards, kv_block_size, metrics);
 
         for event in &dump1 {
             reconstructed_indexer.apply_event(event.clone()).await;
@@ -1941,5 +2125,50 @@ mod tests {
         // Clean up
         original_indexer.shutdown();
         reconstructed_indexer.shutdown();
+    }
+
+    #[test]
+    fn test_increment_event_applied() {
+        let metrics = KvIndexerMetrics::new_unregistered();
+
+        metrics.increment_event_applied(METRIC_EVENT_STORED, Ok(()));
+        assert_eq!(
+            metrics
+                .kv_cache_events_applied
+                .get_metric_with_label_values(&[METRIC_EVENT_STORED, METRIC_STATUS_OK])
+                .unwrap()
+                .get(),
+            1
+        );
+
+        metrics.increment_event_applied(
+            METRIC_EVENT_STORED,
+            Err(KvCacheEventError::ParentBlockNotFound),
+        );
+        assert_eq!(
+            metrics
+                .kv_cache_events_applied
+                .get_metric_with_label_values(&[
+                    METRIC_EVENT_STORED,
+                    METRIC_STATUS_PARENT_NOT_FOUND
+                ])
+                .unwrap()
+                .get(),
+            1
+        );
+
+        metrics
+            .increment_event_applied(METRIC_EVENT_REMOVED, Err(KvCacheEventError::BlockNotFound));
+        assert_eq!(
+            metrics
+                .kv_cache_events_applied
+                .get_metric_with_label_values(&[
+                    METRIC_EVENT_REMOVED,
+                    METRIC_STATUS_BLOCK_NOT_FOUND
+                ])
+                .unwrap()
+                .get(),
+            1
+        );
     }
 }
