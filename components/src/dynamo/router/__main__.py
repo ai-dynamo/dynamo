@@ -88,6 +88,25 @@ class StandaloneRouterHandler:
         async for output in await self.kv_push_router.generate_from_request(request):
             yield output
 
+    async def best_worker_id(self, token_ids, router_config_override=None):
+        """
+        Get the best worker ID for a given set of tokens without actually routing.
+
+        This method returns the worker ID that would be selected based on KV cache
+        overlap, but does NOT actually route the request or update router states.
+
+        NOTE: This is an example method only and is not hooked up to any endpoint.
+        It demonstrates how to query the router for routing decisions without
+        actually performing the routing.
+        """
+        if self.kv_push_router is None:
+            logger.error("KvPushRouter not initialized - cannot get best worker")
+            raise RuntimeError("Router not initialized")
+
+        return await self.kv_push_router.best_worker_id(
+            token_ids, router_config_override
+        )
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
