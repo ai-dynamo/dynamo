@@ -727,6 +727,11 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								ExtraPodSpec: &dynamoCommon.ExtraPodSpec{
 									PodSpec: &corev1.PodSpec{
 										TerminationGracePeriodSeconds: ptr.To(int64(10)),
+										Containers: []corev1.Container{
+											{
+												Image: "another-image:latest",
+											},
+										},
 									},
 									MainContainer: &corev1.Container{
 										Image: "test-image:latest",
@@ -809,7 +814,10 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								RestartPolicy: corev1.RestartPolicyAlways,
 								Containers: []corev1.Container{
 									{
-										Name:    "main",
+										Image: "another-image:latest",
+									},
+									{
+										Name:    commonconsts.MainContainerName,
 										Image:   "test-image:latest",
 										Command: []string{"sh", "-c"},
 										Args:    []string{"ray start --head --port=6379 && some dynamo command"},
@@ -920,7 +928,10 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								RestartPolicy: corev1.RestartPolicyAlways,
 								Containers: []corev1.Container{
 									{
-										Name:    "main",
+										Image: "another-image:latest",
+									},
+									{
+										Name:    commonconsts.MainContainerName,
 										Image:   "test-image:latest",
 										Command: []string{"sh", "-c"},
 										Args:    []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},

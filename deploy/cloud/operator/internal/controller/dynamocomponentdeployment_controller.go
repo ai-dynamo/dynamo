@@ -479,15 +479,44 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx 
 
 	leaderPodTemplateSpec.Spec.SchedulerName = "volcano"
 
-	if leaderPodTemplateSpec.Spec.Containers[0].Command == nil {
-		return nil, errors.New("generateLeaderPodTemplateSpec: container Command cannot be nil for LWS leader pod")
-	}
+	err = checkMainContainer(&leaderPodTemplateSpec.Spec)
 
-	if len(leaderPodTemplateSpec.Spec.Containers[0].Args) == 0 {
-		return nil, errors.New("generateLeaderPodTemplateSpec: container Args cannot be empty for LWS leader pod")
+	if err != nil {
+		return nil, errors.Wrap(err, "generateLeaderPodTemplateSpec: failed to check main container")
 	}
 
 	return leaderPodTemplateSpec, nil
+}
+
+func checkMainContainer(spec *corev1.PodSpec) error {
+
+	if len(spec.Containers) == 0 {
+		return errors.New("No containers found in pod spec")
+	}
+
+	mainContainerFound := false
+	for _, container := range spec.Containers {
+		if container.Name != commonconsts.MainContainerName {
+			continue
+		}
+
+		if len(container.Command) == 0 {
+			return errors.New("container Command cannot be nil for LWS pod")
+		}
+
+		if len(container.Args) == 0 {
+			return errors.New("container Args cannot be empty for LWS pod")
+		}
+
+		mainContainerFound = true
+		break
+	}
+
+	if !mainContainerFound {
+		return errors.New("main container not found in pod spec")
+	}
+
+	return nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx context.Context, opt generateResourceOption, kubeName string, labels map[string]string, instanceID int) (*corev1.PodTemplateSpec, error) {
@@ -508,12 +537,10 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 	}
 	workerPodTemplateSpec.ObjectMeta.Annotations["scheduling.k8s.io/group-name"] = kubeName
 
-	if workerPodTemplateSpec.Spec.Containers[0].Command == nil {
-		return nil, errors.New("generateWorkerPodTemplateSpec: container Command cannot be nil for LWS worker pod")
-	}
+	err = checkMainContainer(&workerPodTemplateSpec.Spec)
 
-	if len(workerPodTemplateSpec.Spec.Containers[0].Args) == 0 {
-		return nil, errors.New("generateWorkerPodTemplateSpec: container Args cannot be empty for LWS worker pod")
+	if err != nil {
+		return nil, errors.Wrap(err, "generateWorkerPodTemplateSpec: failed to check LWS worker main container")
 	}
 
 	if opt.dynamoComponentDeployment.Spec.Resources == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits.GPU == "" {
@@ -1127,23 +1154,16 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	isDebugModeEnabled := checkIfIsDebugModeEnabled(resourceAnnotations)
 
-	basePodSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, consts.MultinodeDeploymentTypeLWS)
+	podSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, consts.MultinodeDeploymentTypeLWS)
 	if err != nil {
 		err = errors.Wrap(err, "failed to generate base pod spec")
 		return nil, err
 	}
 
 	// Ensure we have at least one container (the main container should be there from GenerateBasePodSpec)
-	if len(basePodSpec.Containers) == 0 {
+	if len(podSpec.Containers) == 0 {
 		return nil, errors.New("no containers found in base pod spec")
 	}
-
-	// Get the main container from the base spec
-	container := basePodSpec.Containers[0]
-
-	containers := make([]corev1.Container, 0, 2)
-
-	containers = append(containers, container)
 
 	debuggerImage := "python:3.12-slim"
 	debuggerImage_ := os.Getenv("INTERNAL_IMAGES_DEBUGGER")
@@ -1152,7 +1172,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	}
 
 	if opt.isStealingTrafficDebugModeEnabled || isDebugModeEnabled {
-		containers = append(containers, corev1.Container{
+		podSpec.Containers = append(podSpec.Containers, corev1.Container{
 			Name:  "debugger",
 			Image: debuggerImage,
 			Command: []string{
@@ -1180,9 +1200,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	}
 
 	podLabels[commonconsts.KubeLabelDynamoSelector] = kubeName
-
-	podSpec := basePodSpec
-	podSpec.Containers = containers
 
 	extraPodMetadata := opt.dynamoComponentDeployment.Spec.ExtraPodMetadata
 

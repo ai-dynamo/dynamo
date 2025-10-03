@@ -1298,7 +1298,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "frontend-image",
 												Command: []string{
 													"/bin/sh",
@@ -1449,7 +1449,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "planner-image",
 												Command: []string{
 													"/bin/sh",
@@ -1828,7 +1828,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										},
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "worker-image",
 												Command: []string{
 													"/bin/sh",
@@ -1981,7 +1981,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										},
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "worker-image",
 												Command: []string{
 													"/bin/sh",
@@ -2096,7 +2096,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "frontend-image",
 												Command: []string{
 													"/bin/sh",
@@ -2238,7 +2238,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										},
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "planner-image",
 												Command: []string{
 													"/bin/sh",
@@ -2631,7 +2631,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "worker-image",
 												Command: []string{
 													"/bin/sh",
@@ -2771,7 +2771,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "worker-image",
 												Command: []string{
 													"/bin/sh",
@@ -2886,7 +2886,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "frontend-image",
 												Command: []string{
 													"/bin/sh",
@@ -3028,7 +3028,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "planner-image",
 												Command: []string{
 													"/bin/sh",
@@ -3343,7 +3343,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 			}
 
 			// Check that container name is set
-			if container.Name != "main" {
+			if container.Name != commonconsts.MainContainerName {
 				t.Errorf("GeneratePodSpecForComponent() container name = %s, want main", container.Name)
 			}
 		})
@@ -4671,7 +4671,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 			expectedPodSpec: &corev1.PodSpec{
 				Containers: []corev1.Container{
 					{
-						Name:    "main",
+						Name:    commonconsts.MainContainerName,
 						Command: []string{"python3"},
 						Args:    []string{"-m", "dynamo.worker"},
 						Env: []corev1.EnvVar{
