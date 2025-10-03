@@ -37,9 +37,7 @@ def get_json_paths(search_paths):
         for root, _, files in os.walk(search_path):
             for file in files:
                 if file == "profile_export_aiperf.json":
-                    aiperf_profile_export_json_paths.append(
-                        os.path.join(root, file)
-                    )
+                    aiperf_profile_export_json_paths.append(os.path.join(root, file))
                     deployment_config_json_paths.append(deployment_config_json_path)
 
     return aiperf_profile_export_json_paths, deployment_config_json_paths
