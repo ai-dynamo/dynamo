@@ -1202,7 +1202,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									},
 									VolumeMounts: []v1alpha1.VolumeMount{
 										{
-											Name:       "planner-pvc",
+											Name:       "dynamo-pvc",
 											MountPoint: "/planner",
 										},
 									},
@@ -1426,10 +1426,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									PodSpec: corev1.PodSpec{
 										Volumes: []corev1.Volume{
 											{
-												Name: "planner-pvc",
+												Name: "dynamo-pvc",
 												VolumeSource: corev1.VolumeSource{
 													PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-														ClaimName: "planner-pvc",
+														ClaimName: "dynamo-pvc",
 													},
 												},
 											},
@@ -1540,7 +1540,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												VolumeMounts: []corev1.VolumeMount{
 													{
-														Name:      "planner-pvc",
+														Name:      "dynamo-pvc",
 														MountPath: "/planner",
 													},
 													{
@@ -1725,7 +1725,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									},
 									VolumeMounts: []v1alpha1.VolumeMount{
 										{
-											Name:       "planner-pvc",
+											Name:       "dynamo-pvc",
 											MountPoint: "/planner",
 										},
 									},
@@ -2219,10 +2219,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Volumes: []corev1.Volume{
 											{
-												Name: "planner-pvc",
+												Name: "dynamo-pvc",
 												VolumeSource: corev1.VolumeSource{
 													PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-														ClaimName: "planner-pvc",
+														ClaimName: "dynamo-pvc",
 													},
 												},
 											},
@@ -2321,7 +2321,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												VolumeMounts: []corev1.VolumeMount{
 													{
-														Name:      "planner-pvc",
+														Name:      "dynamo-pvc",
 														MountPath: "/planner",
 													},
 													{
@@ -2529,7 +2529,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									},
 									VolumeMounts: []v1alpha1.VolumeMount{
 										{
-											Name:       "planner-pvc",
+											Name:       "dynamo-pvc",
 											MountPoint: "/planner",
 										},
 									},
@@ -3008,10 +3008,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										ServiceAccountName:            commonconsts.PlannerServiceAccountName,
 										Volumes: []corev1.Volume{
 											{
-												Name: "planner-pvc",
+												Name: "dynamo-pvc",
 												VolumeSource: corev1.VolumeSource{
 													PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-														ClaimName: "planner-pvc",
+														ClaimName: "dynamo-pvc",
 													},
 												},
 											},
@@ -3118,7 +3118,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												VolumeMounts: []corev1.VolumeMount{
 													{
-														Name:      "planner-pvc",
+														Name:      "dynamo-pvc",
 														MountPath: "/planner",
 													},
 													{

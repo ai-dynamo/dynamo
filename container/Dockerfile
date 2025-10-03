@@ -205,7 +205,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 
 # UCX environment variables
 ENV CPATH=/usr/include:$CPATH \
-    PATH=/usr/bin:$PATH \
+    PATH=/usr/bin:/usr/local/ucx/bin:$PATH \
     PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
 
 ##################################

@@ -9,15 +9,6 @@ Complete workflow to deploy SLA-based autoscaling for Dynamo deployments. This g
 
 The SLA Planner automatically scales prefill and decode workers to meet your TTFT (Time To First Token) and ITL (Inter-Token Latency) targets.
 
-### Architecture
-```mermaid
-flowchart LR
-  Frontend --"/metrics"--> Prometheus
-  Planner --"query API"--> Prometheus
-  Planner --"scaling decisions"--> Workers["prefill<br/>backend"]
-  Frontend -.->|"requests"| Workers
-```
-
 The deployment process consists of two mandatory phases:
 
 1. **Pre-Deployment Profiling** (2-4 hours) - Generates performance data
@@ -117,6 +108,9 @@ envsubst < benchmarks/profiler/deploy/profile_sla_job.yaml | kubectl apply -f -
 
 # for MoE models
 envsubst < benchmarks/profiler/deploy/profile_sla_moe_job.yaml | kubectl apply -f -
+
+# using aiconfigurator instead of real sweeping (see below for more details)
+envsubst < benchmarks/profiler/deploy/profile_sla_aic_job.yaml | kubectl apply -f -
 ```
 
 ### Step 1.5: Monitor Profiling Progress
@@ -154,9 +148,9 @@ Before deploying the SLA planner, ensure:
 
 - **Pre-deployment profiling completed successfully** (from Phase 1)
 - **Profiling results saved to `dynamo-pvc` PVC**
-- **[kube-prometheus-stack](/docs/kubernetes/metrics.md) installed and running**
+- **[kube-prometheus-stack](/docs/kubernetes/metrics.md) installed and running.** By default, the prometheus server is not deployed in the `monitoring` namespace. If it is deployed to a different namespace, set `dynamo-operator.dynamo.metrics.prometheusEndpoint="http://prometheus-kube-prometheus-prometheus.<namespace>.svc.cluster.local:9090"`.
 - **Dynamo platform installed** (see [Installation Guide](/docs/kubernetes/installation_guide.md))
-- **Prefill and decode worker uses the best parallelization mapping from profiling**
+- **Prefill and decode workers use the best parallelization mapping from profiling**
 
 ### Step 2.2: Deploy the System
 
@@ -165,8 +159,10 @@ We use vllm as the backend engine in this guide. SLA planner also supports SGLan
 ```bash
 # Apply the disaggregated planner deployment
 kubectl apply -f components/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE # for vllm
-# kubectl apply -f components/backends/sglang/deploy/disagg_planner.yaml -n $NAMESPACE # for sglang
-# kubectl apply -f components/backends/trtllm/deploy/disagg_planner.yaml -n $NAMESPACE # for trtllm
+
+kubectl apply -f components/backends/sglang/deploy/disagg_planner.yaml -n $NAMESPACE # for sglang
+
+kubectl apply -f components/backends/trtllm/deploy/disagg_planner.yaml -n $NAMESPACE # for trtllm
 
 # Check deployment status
 kubectl get pods -n $NAMESPACE
@@ -182,13 +178,11 @@ vllm-disagg-planner-prefill-*             1/1 Running
 
 ### Step 2.3: Test the System
 
-**Important:** Streaming requests (`"stream": true`) are required for the planner to collect latency metrics and make scaling decisions.
-
 ```bash
 # Port forward to frontend
 kubectl port-forward -n $NAMESPACE deployment/vllm-disagg-planner-frontend 8000:8000
 
-# Send a streaming request (required for full metrics)
+# Send a request
 curl -N http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
@@ -224,8 +218,8 @@ Number of prefill workers: 1, number of decode workers: 1
 ### Monitoring Metrics
 
 - **Basic metrics** (request count): Available with any request type
-- **Latency metrics** (TTFT/ITL): Only available with `"stream": true` requests
-- **Scaling decisions**: Require sufficient request volume and streaming requests
+- **Latency metrics** (TTFT/ITL): Available for both streaming and non-streaming requests
+- **Scaling decisions**: Require sufficient request volume
 
 ### Troubleshooting
 

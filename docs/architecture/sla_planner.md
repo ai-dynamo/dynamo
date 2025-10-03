@@ -13,6 +13,24 @@ The SLA (Service Level Agreement)-based planner is an intelligent autoscaling sy
 > [!WARNING]
 > Bare metal deployment with local connector is deprecated. Please deploy the SLA planner in k8s.
 
+## Architecture Overview
+
+**Components:**
+- **Frontend**: Serves requests and exposes `/metrics`
+- **Prometheus**: Scrapes frontend metrics every 5s (by default, can be updated in the podmonitor manifest)
+- **Planner**: Queries Prometheus and adjusts worker scaling every adjustment interval
+- **Workers**: prefill and backend workers handle inference
+
+The adjustment interval can be defined in the planner manifest as an argument. The default interval value can be found in this [file](/components/planner/src/dynamo/planner/defaults.py).
+
+```mermaid
+flowchart LR
+  Frontend --"/metrics"--> Prometheus
+  Planner --"query API"--> Prometheus
+  Planner --"scaling decisions"--> Workers
+  Frontend -.->|"requests"| Workers
+```
+
 ## Features
 
 * **SLA-driven scaling**: Automatically scales prefill/decode workers to meet TTFT and ITL targets
