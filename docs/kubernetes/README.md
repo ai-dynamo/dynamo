@@ -53,6 +53,12 @@ Each backend has deployment examples and configuration options:
 export NAMESPACE=dynamo-cloud
 kubectl create namespace ${NAMESPACE}
 
+# to pull model from HF
+export HF_TOKEN=<Token-Here>
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="$HF_TOKEN" \
+  -n ${NAMESPACE};
+
 # Deploy any example (this uses vLLM with Qwen model using aggregated serving)
 kubectl apply -f components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
 
