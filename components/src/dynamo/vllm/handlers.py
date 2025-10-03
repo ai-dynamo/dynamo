@@ -139,8 +139,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """Background task that checks prefill router/worker availability every 5 seconds."""
         while True:
             try:
-                router_count = len(self.prefill_router_client.instance_ids())
-                worker_count = len(self.prefill_worker_client.instance_ids())
+                router_count = (
+                    len(self.prefill_router_client.instance_ids())
+                    if self.prefill_router_client is not None
+                    else 0
+                )
+                worker_count = (
+                    len(self.prefill_worker_client.instance_ids())
+                    if self.prefill_worker_client is not None
+                    else 0
+                )
                 self.can_prefill = max(router_count, worker_count)
                 logger.debug(
                     f"Prefill availability - Routers: {router_count}, Workers: {worker_count}"
@@ -235,9 +243,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if kv_transfer_params:
                     if sampling_params.extra_args is None:
                         sampling_params.extra_args = {}
-                    sampling_params.extra_args[
-                        "kv_transfer_params"
-                    ] = kv_transfer_params
+                    sampling_params.extra_args["kv_transfer_params"] = (
+                        kv_transfer_params
+                    )
 
             except Exception as e:
                 if context.is_stopped() or context.is_killed():
