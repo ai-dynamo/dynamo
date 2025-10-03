@@ -199,6 +199,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             try:
                 # Send request with sampling_params and request_id in extra_args
                 prefill_request = request.copy()
+                # TODO (PeaBrane): this smells a bit bad as not we have two nestings
+                # of extra_args (an inner one again in sampling_params)
                 prefill_request["extra_args"] = {
                     "sampling_params": msgspec.to_builtins(prefill_sampling_params),
                     "request_id": request_id,
