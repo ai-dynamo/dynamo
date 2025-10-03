@@ -16,8 +16,6 @@ from vllm.inputs import TokensPrompt
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
-from dynamo.runtime.logging import configure_dynamo_logging
-
 from .engine_monitor import VllmEngineMonitor
 
 configure_dynamo_logging()
@@ -190,9 +188,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             prefill_sampling_params.min_tokens = 1
 
             try:
-                # Build PreprocessedRequest with sampling_params and request_id in extra_args
+                # Build PreprocessedRequest with all required fields
                 prefill_request = {
+                    "model": request.get("model", "unknown"),  # Required field
                     "token_ids": request["token_ids"],
+                    "stop_conditions": request.get("stop_conditions", {}),
+                    "sampling_options": request.get("sampling_options", {}),
+                    "output_options": request.get("output_options", {}),
                     "extra_args": {
                         "sampling_params": msgspec.to_builtins(prefill_sampling_params),
                         "request_id": request_id,
@@ -230,9 +232,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if kv_transfer_params:
                     if sampling_params.extra_args is None:
                         sampling_params.extra_args = {}
-                    sampling_params.extra_args["kv_transfer_params"] = (
-                        kv_transfer_params
-                    )
+                    sampling_params.extra_args[
+                        "kv_transfer_params"
+                    ] = kv_transfer_params
 
             except Exception as e:
                 if context.is_stopped() or context.is_killed():
