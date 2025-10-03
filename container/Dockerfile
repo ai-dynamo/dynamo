@@ -382,8 +382,10 @@ RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*cp312*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-    /opt/dynamo/benchmarks && \
-    rm -rf /opt/dynamo/benchmarks
+    && cd /opt/dynamo/benchmarks \
+    && uv pip install . \
+    && cd - \
+    && rm -rf /opt/dynamo/benchmarks
 
 # Setup launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \

@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 accelerate==1.6.0
-aiconfigurator==0.2.0
 aiofiles
 av==15.0.0
 fastapi==0.115.12
