@@ -300,9 +300,6 @@ sampling_params.logits_processor = create_trtllm_adapters(processors)
 - Processors must modify logits in-place and not return a new tensor.
 - If your processor needs tokenization, ensure the tokenizer is initialized (do not skip tokenizer init).
 
-## Performance Sweep
-
-For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](./performance_sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
 
 ## Dynamo KV Block Manager Integration
 
