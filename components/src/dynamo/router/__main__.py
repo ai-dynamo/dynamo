@@ -13,6 +13,7 @@ routing decisions.
 """
 
 import argparse
+import asyncio
 import logging
 from typing import Optional
 
@@ -94,10 +95,7 @@ class StandaloneRouterHandler:
 
         This method returns the worker ID that would be selected based on KV cache
         overlap, but does NOT actually route the request or update router states.
-
-        NOTE: This is an example method only and is not hooked up to any endpoint.
-        It demonstrates how to query the router for routing decisions without
-        actually performing the routing.
+        It's useful for debugging, monitoring, or implementing custom routing logic.
         """
         if self.kv_push_router is None:
             logger.error("KvPushRouter not initialized - cannot get best worker")
@@ -233,16 +231,25 @@ async def worker(runtime: DistributedRuntime):
     )
     await handler.initialize()
 
-    # Expose endpoint
+    # Expose endpoints
     generate_endpoint = component.endpoint("generate")
+    best_worker_endpoint = component.endpoint("best_worker_id")
 
-    logger.debug("Starting to serve generate endpoint...")
+    logger.debug("Starting to serve endpoints...")
 
+    # Serve both endpoints concurrently
     try:
-        await generate_endpoint.serve_endpoint(
-            handler.generate,
-            graceful_shutdown=True,
-            metrics_labels=[("service", "router")],
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=[("service", "router")],
+            ),
+            best_worker_endpoint.serve_endpoint(
+                handler.best_worker_id,
+                graceful_shutdown=True,
+                metrics_labels=[("service", "router")],
+            ),
         )
     except Exception as e:
         logger.error(f"Failed to serve endpoint: {e}")
