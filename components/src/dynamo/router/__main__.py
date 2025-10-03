@@ -13,6 +13,7 @@ routing decisions.
 """
 
 import argparse
+import json
 import logging
 from typing import Optional
 
@@ -82,26 +83,11 @@ class StandaloneRouterHandler:
         This endpoint routes the request to the best worker and streams back results.
         """
         if self.kv_push_router is None:
-            logger.warning("KvPushRouter not initialized")
-            yield {
-                "status": "error",
-                "message": "Router not initialized",
-            }
-            return
+            logger.error("KvPushRouter not initialized - cannot process request")
+            raise RuntimeError("Router not initialized")
 
-        try:
-            # Route using KvPushRouter.generate_from_request
-            async for output in await self.kv_push_router.generate_from_request(
-                request
-            ):
-                yield output
-
-        except Exception as e:
-            logger.error(f"Error in generate: {e}")
-            yield {
-                "status": "error",
-                "message": str(e),
-            }
+        async for output in await self.kv_push_router.generate_from_request(request):
+            yield json.dumps(output)
 
 
 def parse_args():
