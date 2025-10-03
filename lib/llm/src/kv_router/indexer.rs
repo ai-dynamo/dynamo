@@ -477,9 +477,8 @@ impl RadixTree {
     /// Uses BFS traversal to ensure that the tree reconstruction is unique,
     /// though the exact event ordering will be lost.
     pub fn dump_tree_as_events(&self) -> Vec<RouterEvent> {
-        tracing::info!("Dumping radix tree as events...");
-        tracing::info!(
-            "Radix tree contains information about {:?} workers",
+        tracing::debug!(
+            "Dumping radix tree as events (contains information about {:?} workers)",
             self.lookup.len()
         );
 
@@ -550,7 +549,6 @@ impl RadixTree {
             }
         }
 
-        tracing::info!("Finished dumping radix tree as events");
         events
     }
 }
