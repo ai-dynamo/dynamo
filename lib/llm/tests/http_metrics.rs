@@ -514,7 +514,10 @@ mod integration_tests {
             );
 
             // Get all model entries for our test model
-            let model_entries = watcher.entries_for_model("test-mdc-model").await.unwrap();
+            let model_entries = watcher
+                .entries_for_model("test-mdc-model", None, true)
+                .await
+                .unwrap();
 
             if !model_entries.is_empty() {
                 // For each model entry, we need to find its etcd key and remove it
