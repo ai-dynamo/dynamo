@@ -150,9 +150,6 @@ impl KvConnectorLeader {
 
                 let _ = slot_manager_cell.set(sm);
 
-                // another barrier sync to make sure worker init won't return before leader is ready
-                let _ = leader.run_leader_readiness_barrier_blocking(drt);
-
                 if leader_ready_tx.send("finished".to_string()).is_err() {
                     tracing::error!("main routine receiver dropped before result was sent");
                 }

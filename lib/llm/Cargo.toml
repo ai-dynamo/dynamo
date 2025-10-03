@@ -85,6 +85,7 @@ offset-allocator = "0.2"
 regex = "1"
 rayon = "1"
 dashmap = { version = "5.5.3" }
+bincode = "1"
 
 # input/text
 dialoguer = { version = "0.11", default-features = false, features = [

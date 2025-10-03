@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::block_manager::{
-    block::BlockId, connector::protocol::WorkerTransferRequest, distributed::BlockTransferRequest,
-    pool::BlockPoolError,
+    block::BlockId, connector::protocol::WorkerTransferRequest, pool::BlockPoolError,
 };
 
 pub mod leader;
@@ -162,12 +161,4 @@ impl ConnectorMetadata {
     pub fn add_operations(&mut self, xfer_reqs: Vec<WorkerTransferRequest>) {
         self.operations.extend(xfer_reqs);
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectorOperation {
-    pub req_id: String,
-    pub iteration: u64,
-    pub uuid: uuid::Uuid,
-    pub xfer_req: BlockTransferRequest,
 }
