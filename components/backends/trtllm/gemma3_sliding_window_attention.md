@@ -24,22 +24,6 @@ VSWA is a mechanism in which a model’s layers alternate between multiple slidi
 > - Ensure that required services such as `nats` and `etcd` are running before starting.
 > - Request access to `google/gemma-3-1b-it` on Hugging Face and set your `HF_TOKEN` environment variable for authentication.
 > - It’s recommended to continue using the VSWA feature with the Dynamo 0.5.0 release and the TensorRT-LLM dynamo runtime image nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.0. The 0.5.1 release bundles TensorRT-LLM v1.1.0rc5, which has a regression that breaks VSWA.
->
->   To try the latest TensorRT-LLM v1.2.0rc0 with VSWA, apply this patch to main or the latest release branch.
->   ```bash
->   # go to the dynamo repo
->   cd dynamo
->
->   # apply the patch from the "vswa-patch-0.5.1" branch
->   git fetch
->   git cherry-pick -n 27dbaa19b2f4574bbfb55122661d58437d01de8e
->
->   # build the container with tensorrt-llm==1.2.0rc0
->   ./container/build.sh --framework trtllm --tensorrtllm-pip-wheel tensorrt-llm==1.2.0rc0
->
->   # run the container after build
->   ./container/run.sh --framework trtllm -it
->   ```
 
 ### Aggregated Serving
 ```bash
