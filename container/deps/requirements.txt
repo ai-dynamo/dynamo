@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 accelerate==1.6.0
+aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@2d8f310615c951c51f8a2d7f079e16ccbfc94920
 aiofiles
 aiperf==0.1.1
 av==15.0.0
@@ -16,7 +17,6 @@ kubernetes_asyncio
 matplotlib
 msgspec
 mypy
-numpy==1.26.4 # pmdarima is not compatible with numpy 2
 nvidia-ml-py==13.580.65
 opentelemetry-api
 opentelemetry-sdk
