@@ -187,6 +187,7 @@ RUN apt-get update && \
         build-essential \
         # jq and curl for polling various endpoints and health checks
         jq \
+        git \
         curl \
         # Libraries required by UCX to find RDMA devices
         libibverbs1 rdma-core ibverbs-utils libibumad3 \
