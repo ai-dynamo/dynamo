@@ -79,6 +79,7 @@ runs:
         echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
         ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \
+          --vllm-max-jobs 10 \
           --framework ${{ inputs.framework }} \
           --platform ${{ inputs.platform }} \
           --use-sccache \
