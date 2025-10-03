@@ -81,13 +81,44 @@ class StandaloneRouterHandler:
         Generate tokens using the KV-aware router.
 
         This endpoint routes the request to the best worker and streams back results.
+        Wraps the request into PreprocessedRequest format and wraps worker responses
+        into LLMEngineOutput format.
         """
         if self.kv_push_router is None:
             logger.error("KvPushRouter not initialized - cannot process request")
             raise RuntimeError("Router not initialized")
 
-        async for output in await self.kv_push_router.generate_from_request(request):
-            yield output
+        # Wrap incoming request into PreprocessedRequest format for KvPushRouter
+        # The request should already have most fields, but we ensure it has the structure
+        preprocessed_request = {
+            "model": request.get("model", "unknown"),
+            "token_ids": request["token_ids"],
+            "stop_conditions": request.get("stop_conditions", {}),
+            "sampling_options": request.get("sampling_options", {}),
+            "output_options": request.get("output_options", {}),
+            "eos_token_ids": request.get("eos_token_ids", []),
+            "annotations": request.get("annotations", []),
+            "extra_args": request.get("extra_args", {}),
+        }
+
+        # Route and process through KvPushRouter
+        async for worker_output in await self.kv_push_router.generate_from_request(
+            preprocessed_request
+        ):
+            # Wrap worker output into LLMEngineOutput format
+            # Worker should return dict with at minimum kv_transfer_params in extra_args
+            llm_engine_output = {
+                "token_ids": worker_output.get("token_ids", []),
+                "tokens": worker_output.get("tokens"),
+                "text": worker_output.get("text"),
+                "cum_log_probs": worker_output.get("cum_log_probs"),
+                "log_probs": worker_output.get("log_probs"),
+                "top_logprobs": worker_output.get("top_logprobs"),
+                "finish_reason": worker_output.get("finish_reason"),
+                "index": worker_output.get("index"),
+                "extra_args": worker_output.get("extra_args"),
+            }
+            yield llm_engine_output
 
     async def best_worker_id(self, token_ids, router_config_override=None):
         """

@@ -197,19 +197,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             prefill_sampling_params.min_tokens = 1
 
             try:
-                # Build PreprocessedRequest with all required fields
-                prefill_request = {
-                    "model": request.get("model", "unknown"),  # Required field
-                    "token_ids": request["token_ids"],
-                    "stop_conditions": request.get("stop_conditions", {}),
-                    "sampling_options": request.get("sampling_options", {}),
-                    "output_options": request.get("output_options", {}),
-                    "eos_token_ids": request.get("eos_token_ids", []),  # Required field
-                    "annotations": request.get("annotations", []),  # Required field
-                    "extra_args": {
-                        "sampling_params": msgspec.to_builtins(prefill_sampling_params),
-                        "request_id": request_id,
-                    },
+                # Send request with sampling_params and request_id in extra_args
+                prefill_request = request.copy()
+                prefill_request["extra_args"] = {
+                    "sampling_params": msgspec.to_builtins(prefill_sampling_params),
+                    "request_id": request_id,
                 }
 
                 # Try router first if available, fallback to worker
@@ -233,7 +225,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 else:
                     raise ValueError("No prefill router or worker available")
 
-                # Get LLMEngineOutput response (already a dict, not JSON string)
                 prefill_output = prefill_response.data()
 
                 # Extract kv_transfer_params from response
@@ -243,9 +234,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if kv_transfer_params:
                     if sampling_params.extra_args is None:
                         sampling_params.extra_args = {}
-                    sampling_params.extra_args[
-                        "kv_transfer_params"
-                    ] = kv_transfer_params
+                    sampling_params.extra_args["kv_transfer_params"] = (
+                        kv_transfer_params
+                    )
 
             except Exception as e:
                 if context.is_stopped() or context.is_killed():
@@ -292,25 +283,18 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 self.runtime.shutdown()
                 os._exit(1)
 
-            # Generate only 1 token in prefill and return as LLMEngineOutput
             try:
                 async for res in gen:
                     logger.debug(f"kv transfer params: {res.kv_transfer_params}")
 
-                    # Only kv_transfer_params here matters
+                    token_ids = res.outputs[0].token_ids if res.outputs else []
+
                     output: Dict[str, Any] = {
-                        "token_ids": [],
-                        "tokens": None,
-                        "text": None,
-                        "cum_log_probs": None,
-                        "log_probs": None,
-                        "top_logprobs": None,
-                        "finish_reason": None,
-                        "index": None,
+                        "token_ids": list(token_ids),
                         "extra_args": (
                             {"kv_transfer_params": res.kv_transfer_params}
                             if res.kv_transfer_params
-                            else None
+                            else {}
                         ),
                     }
 
