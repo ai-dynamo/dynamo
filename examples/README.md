@@ -36,6 +36,7 @@ Platform-specific deployment guides for production environments:
 
 - **[Amazon EKS](deployments/EKS/)** - Deploy Dynamo on Amazon Elastic Kubernetes Service
 - **[Azure AKS](deployments/AKS/)** - Deploy Dynamo on Azure Kubernetes Service
+- **[LLM Router](deployments/LLM%20Router/)** - Intelligent LLM request routing with NVIDIA Dynamo integration
 - **[Router Standalone](deployments/router_standalone/)** - Standalone router deployment patterns
 - **Amazon ECS** - _Coming soon_
 - **Google GKE** - _Coming soon_
