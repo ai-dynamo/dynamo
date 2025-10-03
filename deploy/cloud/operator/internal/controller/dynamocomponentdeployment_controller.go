@@ -500,7 +500,7 @@ func checkMainContainer(spec *corev1.PodSpec) error {
 			continue
 		}
 
-		if container.Command == nil {
+		if len(container.Command) == 0 {
 			return errors.New("container Command cannot be nil for LWS pod")
 		}
 
@@ -509,6 +509,7 @@ func checkMainContainer(spec *corev1.PodSpec) error {
 		}
 
 		mainContainerFound = true
+		break
 	}
 
 	if !mainContainerFound {
@@ -1153,18 +1154,16 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	isDebugModeEnabled := checkIfIsDebugModeEnabled(resourceAnnotations)
 
-	basePodSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, consts.MultinodeDeploymentTypeLWS)
+	podSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, consts.MultinodeDeploymentTypeLWS)
 	if err != nil {
 		err = errors.Wrap(err, "failed to generate base pod spec")
 		return nil, err
 	}
 
 	// Ensure we have at least one container (the main container should be there from GenerateBasePodSpec)
-	if len(basePodSpec.Containers) == 0 {
+	if len(podSpec.Containers) == 0 {
 		return nil, errors.New("no containers found in base pod spec")
 	}
-
-	podSpec := basePodSpec
 
 	debuggerImage := "python:3.12-slim"
 	debuggerImage_ := os.Getenv("INTERNAL_IMAGES_DEBUGGER")
