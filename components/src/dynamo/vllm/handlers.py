@@ -19,7 +19,6 @@ from vllm.v1.engine.exceptions import EngineDeadError
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
-from .protocol import MyRequestOutput
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
