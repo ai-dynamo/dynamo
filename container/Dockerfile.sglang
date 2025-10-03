@@ -64,6 +64,7 @@ RUN apt-get update -y \
         # Python runtime - CRITICAL for virtual environment to work
         python${PYTHON_VERSION}-dev \
         build-essential \
+        git \
         # SGLang build dependencies
         cmake \
         ibverbs-providers \
