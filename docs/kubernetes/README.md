@@ -41,11 +41,16 @@ For more details or customization options (including multinode deployments), see
 
 Each backend has deployment examples and configuration options:
 
-| Backend | Available Configurations |
-|---------|--------------------------|
-| **[vLLM](/components/backends/vllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router, Disaggregated + Planner, Disaggregated Multi-node |
-| **[SGLang](/components/backends/sglang/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Planner, Disaggregated Multi-node |
-| **[TensorRT-LLM](/components/backends/trtllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router, Disaggregated Multi-node |
+## Backend Configuration Matrix
+
+| Configuration | [vLLM](/components/backends/vllm/deploy/README.md) | [SGLang](/components/backends/sglang/deploy/README.md) | [TensorRT-LLM](/components/backends/trtllm/deploy/README.md) |
+|---------------|:---:|:-------:|:------------:|
+| **Aggregated** | [✅](/components/backends/vllm/deploy/agg.yaml) | [✅](/components/backends/sglang/deploy/agg.yaml) | [✅](/components/backends/trtllm/deploy/agg.yaml) |
+| **Aggregated + Router** | [✅](/components/backends/vllm/deploy/agg_router.yaml) | [✅](/components/backends/sglang/deploy/agg_router.yaml) | [✅](/components/backends/trtllm/deploy/agg_router.yaml) |
+| **Disaggregated** | [✅](/components/backends/vllm/deploy/disagg.yaml) | [✅](/components/backends/sglang/deploy/disagg.yaml) | [✅](/components/backends/trtllm/deploy/disagg.yaml) |
+| **Disaggregated + Router** | [✅](/components/backends/vllm/deploy/disagg_router.yaml) | ❌ | [✅](/components/backends/trtllm/deploy/disagg_router.yaml) |
+| **Disaggregated + Planner** | [✅](/components/backends/vllm/deploy/disagg_planner.yaml) | [✅](/components/backends/sglang/deploy/disagg_planner.yaml) | [✅](/components/backends/trtllm/deploy/disagg_planner.yaml) |
+| **Disaggregated Multi-node** | [✅](/components/backends/vllm/deploy/disagg-multinode.yaml) | [✅](/components/backends/sglang/deploy/disagg-multinode.yaml) | [✅](/components/backends/trtllm/deploy/disagg-multinode.yaml) |
 
 ## 3. Deploy Your First Model
 
