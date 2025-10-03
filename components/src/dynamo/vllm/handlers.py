@@ -197,6 +197,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "stop_conditions": request.get("stop_conditions", {}),
                     "sampling_options": request.get("sampling_options", {}),
                     "output_options": request.get("output_options", {}),
+                    "eos_token_ids": request.get("eos_token_ids", []),  # Required field
+                    "annotations": request.get("annotations", []),  # Required field
                     "extra_args": {
                         "sampling_params": msgspec.to_builtins(prefill_sampling_params),
                         "request_id": request_id,
