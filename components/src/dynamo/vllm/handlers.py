@@ -16,6 +16,8 @@ from vllm.inputs import TokensPrompt
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
+from dynamo.runtime.logging import configure_dynamo_logging
+
 from .engine_monitor import VllmEngineMonitor
 
 configure_dynamo_logging()
