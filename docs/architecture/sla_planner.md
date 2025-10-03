@@ -1,6 +1,9 @@
 # SLA-based Planner
 
-This document covers SLA-based planner in `examples/common/utils/planner_core.py`.
+> [!TIP]
+> **New to SLA Planner?** For a complete workflow including profiling and deployment, see the [SLA Planner Quick Start Guide](/docs/kubernetes/sla_planner_quickstart.md).
+
+This document covers information regarding the SLA-based planner in `examples/common/utils/planner_core.py`.
 
 The SLA (Service Level Agreement)-based planner is an intelligent autoscaling system that monitors system performance and adjusts the number of prefill and decode workers to meet specified TTFT and ITL targets. Unlike the load-based planner that scales based on resource utilization thresholds, the SLA planner uses predictive modeling and performance interpolation to proactively scale the workers.
 
@@ -9,6 +12,24 @@ The SLA (Service Level Agreement)-based planner is an intelligent autoscaling sy
 
 > [!WARNING]
 > Bare metal deployment with local connector is deprecated. Please deploy the SLA planner in k8s.
+
+## Architecture Overview
+
+**Components:**
+- **Frontend**: Serves requests and exposes `/metrics`
+- **Prometheus**: Scrapes frontend metrics every 5s (by default, can be updated in the podmonitor manifest)
+- **Planner**: Queries Prometheus and adjusts worker scaling every adjustment interval
+- **Workers**: prefill and backend workers handle inference
+
+The adjustment interval can be defined in the planner manifest as an argument. The default interval value can be found in this [file](/components/planner/src/dynamo/planner/defaults.py).
+
+```mermaid
+flowchart LR
+  Frontend --"/metrics"--> Prometheus
+  Planner --"query API"--> Prometheus
+  Planner --"scaling decisions"--> Workers
+  Frontend -.->|"requests"| Workers
+```
 
 ## Features
 
@@ -108,15 +129,7 @@ Finally, SLA planner applies the change by scaling up/down the number of prefill
 
 ## Deploying
 
-### K8s Deployment
-
-For detailed deployment instructions including setup, configuration, troubleshooting, and architecture overview, see the [SLA Planner Deployment Guide](../kubernetes/sla_planner_deployment.md).
-
-**To deploy SLA Planner:**
-```bash
-cd components/backends/vllm/deploy
-kubectl apply -f disagg_planner.yaml -n {$NAMESPACE}
-```
+For complete deployment instructions, see the [SLA Planner Quick Start Guide](/docs/kubernetes/sla_planner_quickstart.md).
 
 > [!NOTE]
 > The SLA planner requires a frontend that reports metrics at the `/metrics` HTTP endpoint with the number of requests, ISL, OSL, TTFT, and ITL in the correct format. The dynamo frontend provides these metrics automatically.

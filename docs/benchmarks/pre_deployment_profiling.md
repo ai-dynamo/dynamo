@@ -1,5 +1,8 @@
 # Pre-Deployment Profiling
 
+> [!TIP]
+> **New to SLA Planner?** For a complete workflow including profiling and deployment, see the [SLA Planner Quick Start Guide](/docs/kubernetes/sla_planner_quickstart.md).
+
 ## Profiling Script
 
 To ensure Dynamo deployments comply with the SLA, we provide a pre-deployment script to profile the model performance with different parallelization mappings and recommend the parallelization mapping for prefill and decode workers and planner configurations. To use this script, the user needs to provide the target ISL, OSL, TTFT SLA, and ITL SLA.
@@ -93,40 +96,16 @@ After suggesting the optimal TP configuration, two `.npz` files that describe th
 SLA planner can work with any interpolation data that follows the above format. For best results, use fine-grained and high coverage interpolation data for the prefill and decode engines.
 
 
-## Running the Profiling Script in Kubernetes
+## Detailed Kubernetes Profiling Instructions
 
-Set up your Kubernetes namespace for profiling (one-time per namespace). First ensure Dynamo Cloud platform is installed by following the [main installation guide](/docs/kubernetes/installation_guide.md), then set up profiling resources using [deploy/utils/README](/deploy/utils/README.md). If your namespace is already set up, skip this step.
+> [!TIP]
+> For a complete step-by-step workflow, see the [SLA Planner Quick Start Guide](/docs/kubernetes/sla_planner_quickstart.md).
 
-**Prerequisites**: Ensure all dependencies are installed. If you ran the setup script above, dependencies are already installed. Otherwise, install them manually:
-```bash
-pip install -r deploy/utils/requirements.txt
-```
+This section provides detailed technical information for advanced users who need to customize the profiling process.
 
-**Step 1: Inject your DGD configuration**
+### Configuration Options
 
-Use the injector utility to place your DGD manifest into the PVC. The profiling job will read the path you specify.
-
-   ```bash
-   # Use default disagg.yaml config
-   python3 -m deploy.utils.inject_manifest --namespace $NAMESPACE --src components/backends/vllm/deploy/disagg.yaml --dest /data/configs/disagg.yaml
-
-   # Or use a custom disagg config file
-   python3 -m deploy.utils.inject_manifest --namespace $NAMESPACE --src my-custom-disagg.yaml --dest /data/configs/disagg.yaml
-
-   # Or specify a custom target path in the PVC
-   python3 -m deploy.utils.inject_manifest --namespace $NAMESPACE --src my-custom-disagg.yaml --dest /data/profiling_results/my-disagg.yaml
-   ```
-
-   > **Note**: All paths must start with `/data/` for security reasons. If you forget this prefix, the script will show a helpful error message with the correct path.
-
-**Step 2: Set SLA target**
-
-For dense models, edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_job.yaml` to set the target ISL, OSL, TTFT, and ITL. Also, set the backend type to match the dynamo deployment in the `DGD_CONFIG_FILE`.
-
-For MoE models, edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_moe_job.yaml` to set the target TEP, DEP, TTFT, and ITL.
-
-> [!NOTE]
-> If the model is too large to be downloaded every time, you can create a multi-attach PVC to cache the model. Refer to [recipes](../../recipes/README.md) for more details.
+**For dense models**, configure `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_job.yaml`:
 
 ```yaml
 spec:
@@ -147,36 +126,13 @@ spec:
             - <vllm/sglang>
 ```
 
-**Step 3: Define the container image and config path**
+**For MoE models**, use `profile_sla_moe_job.yaml` with TEP/DEP configuration instead.
 
-1. **Set the container image:**
-   ```bash
-   export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-   ```
+### Advanced Configuration
 
-2. **Set the config path for the profiling job:**
-   ```bash
-   export DGD_CONFIG_FILE=/data/configs/disagg.yaml # should be the same path you set for --dest in Step 1
-   ```
-
-**Step 4: Run profiling (required)**
-
-```bash
-# for dense models
-envsubst < benchmarks/profiler/deploy/profile_sla_job.yaml | kubectl apply -f -
-
-# for MoE models
-envsubst < benchmarks/profiler/deploy/profile_sla_moe_job.yaml | kubectl apply -f -
-
-# using aiconfigurator instead of real sweeping (see below for more details)
-envsubst < benchmarks/profiler/deploy/profile_sla_aic_job.yaml | kubectl apply -f -
-```
-
-**Step 5: Wait for profiling to complete**
-```bash
-kubectl get jobs -n $NAMESPACE
-kubectl logs job/profile-sla -n $NAMESPACE
-```
+- **Model caching**: For large models, create a multi-attach PVC to cache the model. See [recipes](../../recipes/README.md) for details.
+- **Custom configurations**: Use the manifest injector to place custom DGD configurations in the PVC.
+- **Resource allocation**: Modify the job YAML to adjust GPU and memory requirements.
 
 ### Viewing Profiling Results
 
@@ -265,53 +221,54 @@ If you see `ErrImagePull` or `ImagePullBackOff` errors with 401 unauthorized mes
 3. The service account should show `imagePullSecrets` containing `nvcr-imagepullsecret`.
 
 
-## Running the Profiling Script with `aiconfigurator`
-The profiling script can be run much quicker by using `aiconfigurator` to estimate perf numbers instead of running and benchmarking real dynamo deployments. To enable estimation using `aiconfigurator`, pass the `--use-ai-configurator` flag to the profiling script.
+## Running the Profiling Script with AI Configurator
+
+> [!NOTE]
+> **TensorRT-LLM Only**: AI Configurator currently supports TensorRT-LLM only. Support for vLLM and SGLang is coming soon.
+
+The profiling script can be run much faster using AI Configurator to estimate performance numbers instead of running real Dynamo deployments. This completes profiling in 20-30 seconds using performance simulation.
 
 **Advantages** of `--use-ai-configurator`:
-* Script will finish in seconds rather than hours.
-* No k8s or GPU access is required.
+* Script completes in seconds rather than hours
+* No Kubernetes or GPU access required
+* Ideal for rapid prototyping and testing
 
 **Disadvantages**:
-* Estimated perf could contain some error, especially when the input dimensions out-of-distribution compared to the sampled values in aiconfigurator.
-* `aiconfigurator` has a limited list of supported models.
-* `aiconfigurator`'s database has a limited list of systems and backends.
+* Estimated performance may contain errors, especially for out-of-distribution input dimensions
+* Limited list of supported models, systems, and backends
+* Less accurate than real deployment profiling
 
 ### Prerequisites
-You will need a virtual environment with `dynamo` installed. Either use the local dev environment or the docker images. If using local environment, install the required dependencies:
-```bash
-pip install -r deploy/utils/requirements.txt
-```
 
-Additionally, install `aiconfigurator`:
+Install AI Configurator:
 ```bash
 pip install aiconfigurator
 ```
 
-### Available Models, Systems, and Backends
-`aiconfigurator` supports a limited list of models, systems, and backends.
-You can use the `aiconfigurator` CLI to see the support matrix:
+If using local environment, also install:
+```bash
+pip install -r deploy/utils/requirements.txt
+```
+
+### Check Support Matrix
+
+View supported models, systems, and backends:
 ```bash
 aiconfigurator cli --help
 ```
-This will display:
+
+**Supported configurations:**
 ```
-...options...
-  --model {GPT_7B,GPT_13B,GPT_30B,GPT_66B,GPT_175B,LLAMA2_7B,LLAMA2_13B,LLAMA2_70B,LLAMA3.1_8B,LLAMA3.1_70B,LLAMA3.1_405B,MOE_Mixtral8x7B,MOE_Mixtral8x22B,DEEPSEEK_V3,KIMI_K2,QWEN2.5_1.5B,QWEN2.5_7B,QWEN2.5_32B,QWEN2.5_72B,QWEN3_32B,QWEN3_235B,QWEN3_480B,Nemotron_super_v1.1}
-                        Model name
-  --system {h100_sxm,h200_sxm}
-                        System name
-  --backend {trtllm,sglang,vllm}
-                        Backend name, suport trtllm for now
-  --version VERSION     Version, 0.20.0,1.0.0rc3 for trtllm
-...more options...
+Models: GPT_7B, GPT_13B, GPT_30B, GPT_66B, GPT_175B, LLAMA2_7B, LLAMA2_13B, LLAMA2_70B, LLAMA3.1_8B, LLAMA3.1_70B, LLAMA3.1_405B, MOE_Mixtral8x7B, MOE_Mixtral8x22B, DEEPSEEK_V3, KIMI_K2, QWEN2.5_1.5B, QWEN2.5_7B, QWEN2.5_32B, QWEN2.5_72B, QWEN3_32B, QWEN3_235B, QWEN3_480B, Nemotron_super_v1.1
+
+Systems: h100_sxm, h200_sxm
+
+Backends: trtllm (vllm and sglang support coming soon)
 ```
 
-### Running the Script
+### Running Fast Profiling
 
-In addition to passing the `--use-ai-configurator` flag, you must also provide the `--aic-system`, `--aic-model-name`, and `--backend-version` arguments.
-
-Example command:
+Example command for TensorRT-LLM:
 ```bash
 python3 -m benchmarks.profiler.profile_sla \
    --config ./components/backends/trtllm/deploy/disagg.yaml \
@@ -319,6 +276,11 @@ python3 -m benchmarks.profiler.profile_sla \
    --aic-system h200_sxm \
    --aic-model-name QWEN3_32B \
    --backend trtllm \
-   --backend-version 0.20.0
+   --backend-version 0.20.0 \
+   --isl 3000 \
+   --osl 150 \
+   --ttft 0.2 \
+   --itl 0.02
 ```
-The output will be written to `./profiling_results/`.
+
+The output will be written to `./profiling_results/` and can be used directly with SLA planner deployment.

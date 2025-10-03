@@ -33,7 +33,6 @@
    kubernetes/model_caching_with_fluid.md
    kubernetes/README.md
    guides/dynamo_run.md
-   kubernetes/sla_planner_deployment.md
    guides/metrics.md
    guides/run_kvbm_in_vllm.md
    guides/run_kvbm_in_trtllm.md

@@ -188,7 +188,7 @@ kubectl get pods -n ${NAMESPACE}
 
 3. **Optional:**
    - [Set up Prometheus & Grafana](metrics.md)
-   - [SLA Planner Deployment Guide](sla_planner_deployment.md) (for advanced SLA-aware scheduling and autoscaling)
+   - [SLA Planner Quickstart Guide](sla_planner_quickstart.md) (for SLA-aware scheduling and autoscaling)
 
 ## Troubleshooting
 
