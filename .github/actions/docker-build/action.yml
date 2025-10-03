@@ -9,6 +9,10 @@ inputs:
     description: 'Target to build'
     required: false
     default: 'runtime'
+  platform:
+    description: 'Docker platform to build on, ie. linux/amd64'
+    required: false
+    default: 'linux/amd64'
   image_tag:
     description: 'Custom image tag (optional, defaults to framework:latest)'
     required: false
@@ -63,6 +67,7 @@ runs:
         SCCACHE_S3_BUCKET:  ${{ inputs.sccache_s3_bucket }}
         AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
+        PLATFORM: ${{ inputs.platform }}
       run: |
         # Determine image tag
         if [ -n "${{ inputs.image_tag }}" ]; then
@@ -70,11 +75,13 @@ runs:
         else
           IMAGE_TAG="${{ inputs.framework }}:latest"
         fi
-        echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
 
+        echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
         ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \
+          --vllm-max-jobs 10 \
           --framework ${{ inputs.framework }} \
+          --platform ${{ inputs.platform }} \
           --use-sccache \
           --sccache-bucket "$SCCACHE_S3_BUCKET" \
           --sccache-region "$AWS_DEFAULT_REGION"
