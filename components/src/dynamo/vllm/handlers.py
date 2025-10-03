@@ -243,9 +243,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if kv_transfer_params:
                     if sampling_params.extra_args is None:
                         sampling_params.extra_args = {}
-                    sampling_params.extra_args["kv_transfer_params"] = (
-                        kv_transfer_params
-                    )
+                    sampling_params.extra_args[
+                        "kv_transfer_params"
+                    ] = kv_transfer_params
 
             except Exception as e:
                 if context.is_stopped() or context.is_killed():
