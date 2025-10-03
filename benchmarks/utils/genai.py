@@ -113,6 +113,4 @@ def run_concurrency_sweep(
 
     for c in concurrency_levels:
         print(f"Starting concurrency level {c}", flush=True)
-        run_aiperf(
-            service_url, model_name, isl, osl, stddev, c, output_dir / f"c{c}"
-        )
+        run_aiperf(service_url, model_name, isl, osl, stddev, c, output_dir / f"c{c}")
