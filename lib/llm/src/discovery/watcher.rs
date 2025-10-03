@@ -161,7 +161,10 @@ impl ModelWatcher {
                         }
                     }
                 }
-                WatchEvent::Delete(kv) => match self.handle_delete(&kv, target_namespace, global_namespace).await {
+                WatchEvent::Delete(kv) => match self
+                    .handle_delete(&kv, target_namespace, global_namespace)
+                    .await
+                {
                     Ok(Some(model_name)) => {
                         tracing::info!(model_name, "removed model");
                     }
