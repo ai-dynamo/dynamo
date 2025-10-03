@@ -108,6 +108,15 @@ class ImageContent(BaseModel):
     image_url: ImageURLDetail
 
 
+class AudioURLDetail(BaseModel):
+    url: str
+
+
+class AudioContent(BaseModel):
+    type: Literal["audio_url"]
+    audio_url: AudioURLDetail
+
+
 class VideoURLDetail(BaseModel):
     url: str
 
@@ -117,7 +126,7 @@ class VideoContent(BaseModel):
     video_url: VideoURLDetail
 
 
-MessageContent = Union[TextContent, ImageContent, VideoContent]
+MessageContent = Union[TextContent, ImageContent, AudioContent, VideoContent]
 
 
 class ChatMessage(BaseModel):
@@ -137,6 +146,7 @@ class MultiModalRequest(BaseModel):
 class MultiModalInput(BaseModel):
     image_url: Optional[str] = None
     video_url: Optional[str] = None
+    audio_url: Optional[str] = None
 
 
 class vLLMMultimodalRequest(vLLMGenerateRequest):
@@ -144,7 +154,7 @@ class vLLMMultimodalRequest(vLLMGenerateRequest):
     multimodal_input: Optional[MultiModalInput] = Field(default_factory=MultiModalInput)
     image_grid_thw: Optional[List[Any]] = None
     embeddings_shape: Optional[
-        Union[Tuple[int, int, int], Tuple[int, int, int, int]]
+        Union[Tuple[int, int, int], Tuple[int, int, int, int], Tuple[int, int]]
     ] = None
     serialized_request: Optional[connect.RdmaMetadata] = None
 

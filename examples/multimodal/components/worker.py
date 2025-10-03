@@ -280,6 +280,7 @@ class VllmPDWorker(VllmBaseWorker):
         if (
             request.multimodal_input.image_url is None
             and request.multimodal_input.video_url is None
+            and request.multimodal_input.audio_url is None
         ):
             if descriptor is None:
                 raise RuntimeError(
@@ -296,6 +297,12 @@ class VllmPDWorker(VllmBaseWorker):
                     self.engine_args.model,
                     self.EMBEDDINGS_DTYPE,
                     video_numpy=video_numpy,
+                )
+            elif "audio" in self.engine_args.model.lower():
+                multi_modal_data = construct_mm_data(
+                    self.engine_args.model,
+                    self.EMBEDDINGS_DTYPE,
+                    audio_embeds=embeddings,
                 )
             else:
                 multi_modal_data = construct_mm_data(
@@ -315,6 +322,7 @@ class VllmPDWorker(VllmBaseWorker):
         # Remove the image features from the request as they are not required
         request.multimodal_input.image_url = None
         request.multimodal_input.video_url = None
+        request.multimodal_input.audio_url = None
         request.serialized_request = None
 
         pd_request = copy.deepcopy(request)
