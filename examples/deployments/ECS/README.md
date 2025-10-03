@@ -22,6 +22,19 @@
 
 ## 3. ETCD/NATS Task Definitions Setup
 Add a task for ETCD and NATS services to run on Fargate. A sample task definition JSON is attached.
+
+### 3.1 Create the ecsTaskExecutionRole (Required)
+Before creating the task definitions, you need to create the `ecsTaskExecutionRole` IAM role. This role allows ECS to pull container images from registries and write logs to CloudWatch on your behalf.
+
+> [!IMPORTANT]
+> If you create task definitions through the AWS Console's step-by-step wizard, this role is created automatically. However, when importing task definitions from JSON (as recommended in this guide), you must create this role manually.
+
+Follow the [AWS documentation on creating the task execution IAM role](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_execution_IAM_role.html#create-task-execution-role) to create a role named `ecsTaskExecutionRole` with the `AmazonECSTaskExecutionRolePolicy` policy attached.
+
+> [!NOTE]
+> The role ARN will be `arn:aws:iam::<your-account-id>:role/ecsTaskExecutionRole`. Make sure to update `<your-account-id>` in any task definition JSON files with your actual AWS account ID.
+
+### 3.2 Task Definition Configuration
 1. ETCD container
 - Container name use `etcd`
 - Image URL is `bitnami/etcd` and **Yes** for Essential container
@@ -45,6 +58,9 @@ Add a task for ETCD and NATS services to run on Fargate. A sample task definitio
 - Docker configuration, add `-js, --trace` in **Command**
 
 ## 4. vLLM Task Definitions Setup
+> [!Note]
+> Ensure you have created the `ecsTaskExecutionRole` as described in section 3.1 before creating these task definitions.
+
 1. Dynamo vLLM Frontend Task
 This task will create vLLM frontend, processors, routers and a decode worker.
 Please follow steps below to create this task
