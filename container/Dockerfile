@@ -378,7 +378,7 @@ RUN uv pip install \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
     && cd /opt/dynamo/benchmarks \
     && uv pip install . \
-    && cd / \
+    && cd - \
     && rm -rf /opt/dynamo/benchmarks
 
 # Setup launch banner
