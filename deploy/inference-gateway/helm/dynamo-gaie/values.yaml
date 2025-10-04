@@ -66,32 +66,7 @@ epp:
 eppAware:
   enabled: false
   # Optional: override EPP image when epp-aware=true
-  eppImage: docker.io/lambda108/epp-inference-extension-dynamo:v0.5.1-1
-
-  # Sidecar (frontend-router)
-  sidecar:
-    # Container name for the sidecar
-    name: frontend-router
-    # Sidecar image
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-    # Image pull policy for the sidecar
-    imagePullPolicy: IfNotPresent
-    # Command and args for running the frontend in router mode.
-    command: ["/bin/sh", "-c"]
-    args: ["python3 -m dynamo.frontend --http-port 8000 --router-mode kv"]
-    # Environment variables for the sidecar.
-    env:
-      - name: DYNAMO_NAMESPACE
-        valueFromDynamoNamespace: true
-      - name: ETCD_ENDPOINTS
-        value: "http://dynamo-platform-etcd:2379"
-      - name: NATS_SERVER
-        value: "nats://dynamo-platform-nats:4222"
-    # Resource requests/limits for the sidecar container.
-    resources:
-      requests:
-        cpu: "1"
-        memory: "2Gi"
-    # Ports exposed by the sidecar container.
-    ports:
-      - containerPort: 8000
+  eppImage: nvcr.io/nvstaging/ai-dynamo/gaie-epp-dynamo:v0.6.0-1
+  dynamoNamespace: ""
+  dynamoComponent: ""
+  dynamoKvBlockSize: ""

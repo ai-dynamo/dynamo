@@ -15,10 +15,16 @@
 
 eppAware:
   enabled: true
-  eppImage: docker.io/lambda108/epp-inference-extension-dynamo:v0.5.1-1
+  eppImage: nvcr.io/nvstaging/ai-dynamo/gaie-epp-dynamo:v0.6.0-1
+  dynamoNamespace: vllm-agg
+  dynamoComponent: backend
+  dynamoKvBlockSize: "16"
 
 imagePullSecrets:
   - docker-imagepullsecret
+
+platformReleaseName: dynamo-platform
+platformNamespace: "my-model"
 
 epp:
   extraEnv:

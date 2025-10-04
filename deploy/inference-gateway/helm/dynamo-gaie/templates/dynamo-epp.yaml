@@ -71,6 +71,25 @@ spec:
               readOnly: true
         {{- end }}
         env:
+        {{- if .Values.eppAware.enabled }}
+          {{- $platformNs := default .Release.Namespace .Values.platformNamespace -}}
+          {{- $platformName := default "dynamo-platform" .Values.platformReleaseName -}}
+          - name: ETCD_ENDPOINTS
+            value: "{{$platformName}}-etcd.{{$platformNs}}:2379" # match the dynamo platform's release name by default
+          - name: NATS_SERVER
+            value: "nats://{{$platformName}}-nats.{{$platformNs}}:4222" # match the dynamo platform's release name by default
+
+            {{- $ns := required "set eppAware.dynamoNamespace via values" .Values.eppAware.dynamoNamespace }}
+            {{- $comp := default "backend" .Values.eppAware.dynamoComponent }}
+            {{- $kv := default "16" .Values.eppAware.dynamoKvBlockSize }}
+            - name: DYNAMO_NAMESPACE
+              value: "{{$ns}}"
+            - name: DYNAMO_COMPONENT
+              value: "{{$comp}}"
+            - name: DYNAMO_KV_BLOCK_SIZE
+              value: "{{$kv}}"
+
+        {{- end }}
         {{- range .Values.epp.extraEnv }}
           - name: {{ .name }}
             value: {{ .value | quote }}
@@ -93,27 +112,6 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 10
 
-      {{- if .Values.eppAware.enabled }}
-      - name: {{ .Values.eppAware.sidecar.name }}
-        image: {{ .Values.eppAware.sidecar.image }}
-        imagePullPolicy: {{ .Values.eppAware.sidecar.imagePullPolicy | default "IfNotPresent" }}
-        command: {{- toYaml .Values.eppAware.sidecar.command | nindent 8 }}
-        args: {{- toYaml .Values.eppAware.sidecar.args | nindent 8 }}
-        env:
-        {{- range .Values.eppAware.sidecar.env }}
-          {{- if .valueFromDynamoNamespace }}
-          - name: {{ .name }}
-            value: "{{ $.Values.dynamoNamespace }}"
-          {{- else }}
-          - name: {{ .name }}
-            value: {{ .value | quote }}
-          {{- end }}
-        {{- end }}
-        ports:
-        {{- toYaml .Values.eppAware.sidecar.ports | nindent 8 }}
-        resources:
-        {{- toYaml .Values.eppAware.sidecar.resources | nindent 10 }}
-      {{- end }}
       {{- if .Values.eppAware.enabled }}
       volumes:
         - name: epp-config
