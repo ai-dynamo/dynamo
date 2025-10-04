@@ -56,7 +56,6 @@ mod llm;
 mod parsers;
 mod planner;
 mod prometheus_metrics;
-mod prometheus_names;
 
 type JsonServerStreamingIngress =
     Ingress<SingleIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
@@ -185,7 +184,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     engine::add_to_module(m)?;
     parsers::add_to_module(m)?;
-    prometheus_names::add_to_module(m)?;
 
     m.add_class::<prometheus_metrics::PyRuntimeMetrics>()?;
     let prometheus_metrics = PyModule::new(m.py(), "prometheus_metrics")?;
