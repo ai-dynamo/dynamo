@@ -74,6 +74,25 @@ impl ModelType {
         result
     }
 
+    /// Decompose the bitflag into it's component units:
+    /// Chat | Completion -> [Chat, Completion]
+    pub fn units(&self) -> Vec<ModelType> {
+        let mut result = Vec::new();
+        if self.supports_chat() {
+            result.push(ModelType::Chat);
+        }
+        if self.supports_completions() {
+            result.push(ModelType::Completions);
+        }
+        if self.supports_embedding() {
+            result.push(ModelType::Embedding);
+        }
+        if self.supports_tensor() {
+            result.push(ModelType::TensorBased);
+        }
+        result
+    }
+
     /// Returns all endpoint types supported by this model type.
     /// This properly handles combinations like Chat | Completions.
     pub fn as_endpoint_types(&self) -> Vec<crate::endpoint_type::EndpointType> {

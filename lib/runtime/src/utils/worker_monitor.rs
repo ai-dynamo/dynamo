@@ -16,7 +16,6 @@ use tokio_stream::StreamExt;
 
 // Constants for monitoring configuration
 const KV_METRICS_SUBJECT: &str = "kv_metrics";
-const MODEL_ROOT_PATH: &str = "models";
 
 // Internal structs for deserializing metrics events
 #[derive(serde::Deserialize)]
@@ -33,11 +32,6 @@ struct ForwardPassMetrics {
 #[derive(serde::Deserialize)]
 struct KvStats {
     kv_active_blocks: u64,
-}
-
-#[derive(serde::Deserialize)]
-struct ModelEntry {
-    runtime_config: Option<RuntimeConfig>,
 }
 
 #[derive(serde::Deserialize)]
@@ -95,11 +89,18 @@ impl WorkerMonitor {
             return Ok(());
         };
 
+        // WorkerMonitor is in the wrong crate. It deals with LLM things (KV) so it should be in
+        // dynamo-llm not dynamo-runtime.
+        // That means we cannot use ModelDeploymentCard, so use serde_json::Value for now .
         let runtime_configs_watcher = watch_prefix_with_extraction(
             etcd_client,
-            MODEL_ROOT_PATH,
+            "mdc/", // should be model_card::ROOT_PREFIX but wrong crate
             key_extractors::lease_id,
-            |entry: ModelEntry| entry.runtime_config.and_then(|rc| rc.total_kv_blocks),
+            |card: serde_json::Value| {
+                card.get("runtime_config")
+                    .and_then(|rc| rc.get("total_kv_blocks"))
+                    .and_then(|t_kv| t_kv.as_u64())
+            },
             component.drt().child_token(),
         )
         .await?;

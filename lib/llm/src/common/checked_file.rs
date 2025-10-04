@@ -33,7 +33,7 @@ pub struct Checksum {
     algorithm: CryptographicHashMethods,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Eq, PartialEq)]
 pub enum CryptographicHashMethods {
     #[serde(rename = "blake3")]
     BLAKE3,
@@ -256,6 +256,15 @@ impl TryFrom<&str> for Checksum {
         };
 
         Ok(Checksum::new(parts[1], algo))
+    }
+}
+
+impl Default for Checksum {
+    fn default() -> Self {
+        Self {
+            hash: "".to_string(),
+            algorithm: CryptographicHashMethods::BLAKE3,
+        }
     }
 }
 
