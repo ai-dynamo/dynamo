@@ -9,8 +9,8 @@ import sys
 import sglang as sgl
 import uvloop
 
-from dynamo.llm import ModelInput, ModelType
 from dynamo.common.config_dump import dump_config
+from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, DisaggregationMode, parse_args
