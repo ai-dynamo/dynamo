@@ -1,16 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from abc import ABC, abstractmethod
+from typing import Union
 
 import sglang as sgl
 
 from dynamo._core import Client, Component
 from dynamo.llm import WorkerMetricsPublisher, ZmqKvEventPublisher
 from dynamo.sglang.args import Config
+from dynamo.sglang.utils.bootstrap_mixin import BootstrapMixin
 
 
-class BaseWorkerHandler(ABC):
+class BaseWorkerHandler(BootstrapMixin, ABC):
     def __init__(
         self,
         component: Component,
@@ -29,12 +32,23 @@ class BaseWorkerHandler(ABC):
         self.serving_mode = config.serving_mode
         self.skip_tokenizer_init = config.server_args.skip_tokenizer_init
 
+        # Initialize BootstrapMixin only if engine is available
+        # (Some handlers like multimodal_encode/processor don't have an engine)
+        if self.engine is not None:
+            super().__init__()
+
     @abstractmethod
-    async def generate(self, request: str):
+    async def generate(self, request: Union[str, dict]):
         pass
 
     def cleanup(self):
         pass
+
+    def _parse_request(self, request) -> dict:
+        """Parse request if it's a JSON string, otherwise return as-is"""
+        if isinstance(request, str):
+            return json.loads(request)
+        return request
 
     def _get_input_param(self, request: dict) -> dict:
         """Get the appropriate input parameter for SGLang"""

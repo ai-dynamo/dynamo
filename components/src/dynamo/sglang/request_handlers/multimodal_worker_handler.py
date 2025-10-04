@@ -4,13 +4,10 @@
 import asyncio
 import json
 import logging
-import random
-import socket
 from typing import AsyncIterator
 
 import sglang as sgl
 import torch
-from sglang.srt.utils import get_ip
 
 import dynamo.nixl_connect as connect
 from dynamo._core import Client, Component
@@ -206,41 +203,6 @@ class StreamProcessor:
             yield json.dumps(error_output)
 
 
-class BootstrapManager:
-    """Handles bootstrap coordination for disaggregated mode"""
-
-    @staticmethod
-    def generate_bootstrap_room() -> int:
-        """Generate a unique bootstrap room ID"""
-        return random.randint(0, 2**63 - 1)
-
-    @staticmethod
-    def get_bootstrap_info(engine: sgl.Engine) -> tuple[str, int]:
-        """Extract bootstrap info from SGLang engine"""
-        inner_tm = engine.tokenizer_manager
-        bootstrap_port = inner_tm.server_args.disaggregation_bootstrap_port
-
-        if inner_tm.server_args.dist_init_addr:
-            bootstrap_host = socket.gethostbyname(
-                inner_tm.server_args.dist_init_addr.split(":")[0]
-            )
-        else:
-            bootstrap_host = get_ip()
-
-        return bootstrap_host, bootstrap_port
-
-    @staticmethod
-    def create_bootstrap_info(
-        bootstrap_host: str, bootstrap_port: int, bootstrap_room: int
-    ) -> dict:
-        """Create bootstrap info dictionary"""
-        return {
-            "bootstrap_host": bootstrap_host,
-            "bootstrap_port": bootstrap_port,
-            "bootstrap_room": bootstrap_room,
-        }
-
-
 class ErrorResponseBuilder:
     """Standardized error response builder"""
 
@@ -337,20 +299,26 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
 
         sampling_params = SglangUtils.build_sampling_params(request)
 
-        # Request bootstrap info from prefill worker
+        # Use mixin method to get bootstrap info from prefill worker
+        # Explicitly pass multimodal request wrapper
         bootstrap_info = await self._get_bootstrap_from_prefill(
-            request, sampling_params
+            request, sampling_params, request_wrapper=DisaggSglangMultimodalRequest
+        )
+
+        # Prepare generation kwargs
+        generation_kwargs = {
+            "input_ids": input_ids,
+            "sampling_params": sampling_params,
+            "stream": True,
+        }
+
+        # Add bootstrap info using mixin method
+        generation_kwargs = self._add_bootstrap_to_generation(
+            generation_kwargs, bootstrap_info
         )
 
         # Start decode generation with bootstrap info (no image data needed)
-        decode_stream = await self.engine.async_generate(
-            input_ids=input_ids,
-            sampling_params=sampling_params,
-            stream=True,
-            bootstrap_host=bootstrap_info["bootstrap_host"],
-            bootstrap_port=bootstrap_info["bootstrap_port"],
-            bootstrap_room=bootstrap_info["bootstrap_room"],
-        )
+        decode_stream = await self.engine.async_generate(**generation_kwargs)
 
         async for output in StreamProcessor.process_sglang_stream(decode_stream):
             yield output
@@ -406,31 +374,6 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
             else:
                 yield ErrorResponseBuilder.build_error_response(e)
 
-    async def _get_bootstrap_from_prefill(
-        self, request: SglangMultimodalRequest, sampling_params: dict
-    ) -> dict:
-        """Get bootstrap info from prefill worker"""
-        prefill_stream = await self.prefill_client.generate(
-            DisaggSglangMultimodalRequest(
-                request=request,
-                sampling_params=sampling_params,
-            ).model_dump_json()
-        )
-
-        bootstrap_info = None
-        async for info in prefill_stream:
-            bootstrap_data = info.data() if hasattr(info, "data") else info
-            if isinstance(bootstrap_data, str):
-                bootstrap_info = json.loads(bootstrap_data)
-            else:
-                bootstrap_info = bootstrap_data
-            break
-
-        if not bootstrap_info:
-            raise RuntimeError("No bootstrap info received from prefill worker")
-
-        return bootstrap_info
-
     def cleanup(self):
         self.engine.shutdown()
         logger.info("Multimodal worker engine shutdown")
@@ -449,14 +392,14 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
         # Initialize processors
         self.embeddings_processor = EmbeddingsProcessor()
 
-        # Get bootstrap info using BootstrapManager
-        self.bootstrap_host, self.bootstrap_port = BootstrapManager.get_bootstrap_info(
-            engine
-        )
-
         logger.info(
             f"Multimodal prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
         )
+
+    def cleanup(self):
+        self.engine.shutdown()
+        logger.info("Multimodal prefill engine shutdown")
+        super().cleanup()
 
     async def async_init(self):
         """Initialize async components like connector"""
@@ -468,28 +411,19 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
         """
         Handle prefill phase: process multimodal input and provide bootstrap info
         """
-        bootstrap_room = None
         try:
             # Validate and parse request
             disagg_request = self._validate_and_parse_disagg_request(disagg_request)
 
-            # Generate and return bootstrap info first (like regular SGLang)
-            bootstrap_room = BootstrapManager.generate_bootstrap_room()
-            bootstrap_info = BootstrapManager.create_bootstrap_info(
-                self.bootstrap_host, self.bootstrap_port, bootstrap_room
-            )
-
-            yield json.dumps(bootstrap_info)
-
-            # Process prefill generation
-            await self._process_prefill_generation(disagg_request, bootstrap_room)
+            # Use mixin method to yield bootstrap and process
+            async for result in self._yield_bootstrap_and_process(
+                self._process_prefill_generation, disagg_request
+            ):
+                yield result
 
         except Exception as e:
             logger.error(f"Error in prefill generation: {e}", exc_info=True)
-            extra_fields = (
-                {"bootstrap_room": bootstrap_room} if bootstrap_room is not None else {}
-            )
-            yield ErrorResponseBuilder.build_error_response(e, extra_fields)
+            yield ErrorResponseBuilder.build_error_response(e)
 
     def _validate_and_parse_disagg_request(
         self, disagg_request
@@ -523,26 +457,26 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
         # Create multimodal item for prefill generation
         mm_item = self.embeddings_processor.create_multimodal_item(embeddings, request)
 
-        # Start SGLang prefill generation (like regular SGLang)
-        results = await self.engine.async_generate(
-            input_ids=input_ids,
-            image_data=[mm_item],
-            sampling_params=sampling_params,
-            stream=True,
-            bootstrap_host=self.bootstrap_host,
-            bootstrap_port=self.bootstrap_port,
-            bootstrap_room=bootstrap_room,
+        # Prepare generation kwargs
+        generation_kwargs = {
+            "input_ids": input_ids,
+            "image_data": [mm_item],
+            "sampling_params": sampling_params,
+            "stream": True,
+        }
+
+        # Add bootstrap info using mixin method
+        bootstrap_info = self._build_bootstrap_info(bootstrap_room)
+        generation_kwargs = self._add_bootstrap_to_generation(
+            generation_kwargs, bootstrap_info
         )
+
+        # Start SGLang prefill generation (like regular SGLang)
+        results = await self.engine.async_generate(**generation_kwargs)
 
         # Consume results without yielding (prefill doesn't return text, just coordinates)
         asyncio.create_task(self._consume_results(results))
 
     async def _consume_results(self, results):
-        """Consume prefill results without returning them (like regular SGLang)"""
         async for _ in results:
             pass
-
-    def cleanup(self):
-        self.engine.shutdown()
-        logger.info("Multimodal prefill engine shutdown")
-        super().cleanup()

@@ -9,7 +9,6 @@ import sglang as sgl
 from dynamo._core import Client, Component
 from dynamo.llm import WorkerMetricsPublisher, ZmqKvEventPublisher
 from dynamo.sglang.args import Config, DisaggregationMode
-from dynamo.sglang.protocol import DisaggPreprocessedRequest
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 
@@ -66,35 +65,31 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         return {k: v for k, v in param_mapping.items() if v is not None}
 
-    async def generate(self, request: dict):
+    async def generate(self, request):
+        # Use base handler method to parse request
+        request = self._parse_request(request)
+
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
 
         if self.serving_mode == DisaggregationMode.DECODE:
-            # request the bootstrap info from the target prefill worker
-            prefill_stream = await self.prefill_client.generate(
-                DisaggPreprocessedRequest(
-                    request=request,
-                    sampling_params=sampling_params,
-                ).model_dump()
+            # Use mixin method to get bootstrap info from prefill worker
+            # (uses DisaggPreprocessedRequest by default)
+            bootstrap_info = await self._get_bootstrap_from_prefill(
+                request, sampling_params
             )
 
-            bootstrap_info = None
-            async for info in prefill_stream:
-                bootstrap_info = info.data()
-                break
-
-            if not bootstrap_info:
-                raise RuntimeError("No bootstrap info received from prefill worker")
-
-            decode = await self.engine.async_generate(
+            # Add bootstrap info to generation kwargs using mixin method
+            generation_kwargs = {
                 **input_param,
-                sampling_params=sampling_params,
-                stream=True,
-                bootstrap_host=bootstrap_info["bootstrap_host"],
-                bootstrap_port=bootstrap_info["bootstrap_port"],
-                bootstrap_room=bootstrap_info["bootstrap_room"],
+                "sampling_params": sampling_params,
+                "stream": True,
+            }
+            generation_kwargs = self._add_bootstrap_to_generation(
+                generation_kwargs, bootstrap_info
             )
+
+            decode = await self.engine.async_generate(**generation_kwargs)
 
             if self.skip_tokenizer_init:
                 async for out in self._process_token_stream(decode):
