@@ -11,11 +11,11 @@ TEXT_PROMPT = "Tell me a short joke about AI."
 
 
 def chat_payload_default(
-    repeat_count: int = 3,
+    repeat_count: int = 2,
     expected_response: Optional[List[str]] = None,
     expected_log: Optional[List[str]] = None,
-    max_tokens: int = 150,
-    temperature: float = 0.1,
+    max_tokens: int = 300,
+    temperature: float = 0,
     stream: bool = False,
 ) -> ChatPayload:
     return ChatPayload(
@@ -37,11 +37,11 @@ def chat_payload_default(
 
 
 def completion_payload_default(
-    repeat_count: int = 3,
+    repeat_count: int = 2,
     expected_response: Optional[List[str]] = None,
     expected_log: Optional[List[str]] = None,
-    max_tokens: int = 150,
-    temperature: float = 0.1,
+    max_tokens: int = 300,
+    temperature: float = 0,
     stream: bool = False,
 ) -> CompletionPayload:
     return CompletionPayload(
