@@ -210,6 +210,7 @@ mod tests {
             top_logprobs: None,
             finish_reason: None,
             index: None,
+            extra_args: None,
         })
     }
 

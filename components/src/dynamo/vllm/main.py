@@ -227,14 +227,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     prefill_router_client = (
         await runtime.namespace(config.namespace)
         .component("router")  # Standalone router for prefill workers
-        .endpoint("find_best_worker")
-        .client()
-    )
-
-    prefill_router_free_client = (
-        await runtime.namespace(config.namespace)
-        .component("router")  # Standalone router for prefill workers
-        .endpoint("free")
+        .endpoint("generate")
         .client()
     )
 
@@ -268,7 +261,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         default_sampling_params,
         prefill_worker_client,
         prefill_router_client,
-        prefill_router_free_client,
     )
 
     # Set up KV event publisher for prefix caching if enabled
