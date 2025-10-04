@@ -2100,6 +2100,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-codegen"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.106",
+]
+
+[[package]]
 name = "dynamo-engine-llamacpp"
 version = "0.5.1"
 dependencies = [
