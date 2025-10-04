@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.metadata
 import logging
 import platform
 import sys
@@ -137,3 +138,18 @@ def get_gpu_info() -> Optional[Dict[str, Any]]:
         logger.debug(f"Failed to get GPU info: {e}")
 
     return None
+
+
+def get_package_info() -> Optional[Dict[str, Any]]:
+    """
+    Get package information.
+
+    Returns:
+        Dictionary containing installed packages and their versions.
+    """
+
+    packages = {}
+    for package in importlib.metadata.distributions():
+        packages[package.name] = package.version
+
+    return packages

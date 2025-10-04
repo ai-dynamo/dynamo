@@ -13,7 +13,12 @@ from typing import Any, Dict, Optional
 from dynamo.common._version import __version__
 
 from .environment import get_environment_vars
-from .system_info import get_gpu_info, get_runtime_info, get_system_info
+from .system_info import (
+    get_gpu_info,
+    get_package_info,
+    get_runtime_info,
+    get_system_info,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,35 +90,35 @@ def dump_config(dump_config_to: Optional[str], config: Any) -> None:
     Raises:
         Logs errors but does not raise exceptions to ensure graceful degradation.
     """
-    debug_config_payload = get_config_dump(config)
+    config_dump_payload = get_config_dump(config)
 
     if dump_config_to:
         try:
             dump_path = pathlib.Path(dump_config_to)
             dump_path.parent.mkdir(parents=True, exist_ok=True)
             with open(dump_path.resolve(), "w", encoding="utf-8") as f:
-                f.write(debug_config_payload)
-            logger.info(f"Dumped debug config to {dump_path.resolve()}")
+                f.write(config_dump_payload)
+            logger.info(f"Dumped config to {dump_path.resolve()}")
         except (OSError, IOError) as e:
-            logger.exception(f"Failed to dump debug config to {dump_config_to}: {e}")
-            logger.info(f"DEBUG_CONFIG: {debug_config_payload}")
+            logger.exception(f"Failed to dump config to {dump_config_to}: {e}")
+            logger.info(f"CONFIG_DUMP: {config_dump_payload}")
         except Exception as e:
-            logger.exception(f"Unexpected error dumping debug config: {e}")
-            logger.info(f"DEBUG_CONFIG: {debug_config_payload}")
+            logger.exception(f"Unexpected error dumping config: {e}")
+            logger.info(f"CONFIG_DUMP: {config_dump_payload}")
     else:
-        logger.info(f"DEBUG_CONFIG: {debug_config_payload}")
+        logger.info(f"CONFIG_DUMP: {config_dump_payload}")
 
 
 def get_config_dump(config: Any, extra_info: Optional[Dict[str, Any]] = None) -> str:
     """
-    Collect comprehensive debug information about a backend instance.
+    Collect comprehensive config information about a backend instance.
 
     Args:
         config: Any JSON-serializable object containing the backend configuration.
         extra_info: Optional dict of additional information to include in the dump.
 
     Returns:
-        JSON string containing comprehensive debug information.
+        JSON string containing comprehensive information.
 
     Note:
         Returns error information if collection fails, ensuring some diagnostic data is always available.
@@ -121,35 +126,35 @@ def get_config_dump(config: Any, extra_info: Optional[Dict[str, Any]] = None) ->
     if extra_info is None:
         extra_info = {}
     try:
-        debug_info = {
+        config_dump = {
             "system_info": get_system_info(),
             "environment": get_environment_vars(),
             "config": config,
             "runtime_info": get_runtime_info(),
             "dynamo_version": __version__,
             "gpu_info": get_gpu_info(),
+            "installed_packages": get_package_info(),
         }
 
         # Add common versions
         if ver := _get_sglang_version():
-            debug_info["sglang_version"] = ver
+            config_dump["sglang_version"] = ver
         if ver := _get_trtllm_version():
-            debug_info["trtllm_version"] = ver
+            config_dump["trtllm_version"] = ver
         if ver := _get_vllm_version():
-            debug_info["vllm_version"] = ver
+            config_dump["vllm_version"] = ver
 
         # Add any extra information provided by the caller
         if extra_info:
-            debug_info.update(extra_info)
+            config_dump.update(extra_info)
 
-        logger.info("Debug info collected successfully")
-        return canonical_json_encoder.encode(debug_info)
+        return canonical_json_encoder.encode(config_dump)
 
     except Exception as e:
-        logger.error(f"Error collecting debug info: {e}")
+        logger.error(f"Error collecting config dump: {e}")
         # Return a basic error response with at least system info
         error_info = {
-            "error": f"Failed to collect debug info: {str(e)}",
+            "error": f"Failed to collect config dump: {str(e)}",
             "system_info": get_system_info(),  # Always try to include basic system info
         }
         return canonical_json_encoder.encode(error_info)
@@ -166,7 +171,7 @@ def add_config_dump_args(parser: argparse.ArgumentParser):
         "--dump-config-to",
         type=str,
         default=None,
-        help="Dump debug config to the specified file path. If not specified, the config will be dumped to stdout at INFO level.",
+        help="Dump config to the specified file path. If not specified, the config will be dumped to stdout at INFO level.",
     )
 
 
@@ -195,7 +200,7 @@ def register_encoder(type_class):
         def encode_my_class(obj: MyClass):
             return {"field": obj.field}
     """
-    logger.info(f"Registering encoder for {type_class}")
+    logger.verbose(f"Registering encoder for {type_class}")
     return _preprocess_for_encode.register(type_class)
 
 
