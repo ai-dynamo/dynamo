@@ -66,6 +66,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         return {k: v for k, v in param_mapping.items() if v is not None}
 
+    async def test(self, request: dict):
+        yield {"message": "Hello, world!"}
+
     async def generate(self, request: dict):
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)

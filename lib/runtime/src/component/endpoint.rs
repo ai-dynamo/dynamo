@@ -44,6 +44,10 @@ pub struct EndpointConfig {
     #[educe(Debug(ignore))]
     #[builder(default, setter(into, strip_option))]
     health_check_payload: Option<serde_json::Value>,
+
+    /// Expose this endpoint over HTTP at this path
+    #[builder(default, setter(into, strip_option))]
+    http_endpoint_path: Option<String>,
 }
 
 impl EndpointConfigBuilder {
@@ -67,6 +71,7 @@ impl EndpointConfigBuilder {
             metrics_labels,
             graceful_shutdown,
             health_check_payload,
+            http_endpoint_path,
         ) = self.build_internal()?.dissolve();
         let lease = lease.or(endpoint.drt().primary_lease());
         let lease_id = lease.as_ref().map(|l| l.id()).unwrap_or(0);
@@ -128,6 +133,7 @@ impl EndpointConfigBuilder {
         let subject = endpoint.subject_to(lease_id);
         let etcd_path = endpoint.etcd_path_with_lease_id(lease_id);
         let etcd_client = endpoint.component.drt.etcd_client.clone();
+        let http_endpoint_path = http_endpoint_path.clone();
 
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
@@ -137,6 +143,7 @@ impl EndpointConfigBuilder {
                 namespace: namespace_name.clone(),
                 instance_id: lease_id,
                 transport: TransportType::NatsTcp(subject.clone()),
+                http_endpoint_path: http_endpoint_path.clone(),
             };
             tracing::debug!(subject = %subject, "Registering endpoint health check target");
             let guard = system_health.lock().unwrap();
@@ -230,6 +237,7 @@ impl EndpointConfigBuilder {
             namespace: namespace_name,
             instance_id: lease_id,
             transport: TransportType::NatsTcp(subject),
+            http_endpoint_path: http_endpoint_path,
         };
 
         let info = serde_json::to_vec_pretty(&info)?;

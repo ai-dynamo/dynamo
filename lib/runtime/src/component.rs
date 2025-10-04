@@ -101,6 +101,8 @@ pub struct Instance {
     pub namespace: String,
     pub instance_id: i64,
     pub transport: TransportType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_endpoint_path: Option<String>,
 }
 
 impl Instance {
@@ -463,7 +465,7 @@ impl Endpoint {
         .expect("Endpoint name and component name should be valid")
     }
 
-    /// The fully path of an instance in etcd
+    /// The full path of an instance in etcd
     pub fn etcd_path_with_lease_id(&self, lease_id: i64) -> String {
         format!("{INSTANCE_ROOT_PATH}/{}", self.unique_path(lease_id))
     }
