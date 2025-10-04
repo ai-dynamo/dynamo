@@ -113,8 +113,8 @@ pub async fn start_kv_router_background(
         if let Err(e) = nats_client.object_store_delete_bucket(&bucket_name).await {
             tracing::warn!("Failed to delete bucket (may not exist): {e:?}");
         }
-    } else {
-        // Try to download initial state from object store
+    } else if router_snapshot_threshold.is_some() {
+        // Only try to download initial state from object store if snapshotting is enabled
         let url = url::Url::parse(&format!(
             "nats://{}/{bucket_name}/{RADIX_STATE_FILE}",
             nats_client.addr()
@@ -143,6 +143,8 @@ pub async fn start_kv_router_background(
                 );
             }
         }
+    } else {
+        tracing::info!("Did not initialize radix state (router_snapshot_threshold is None)");
     }
 
     // Get etcd client (needed for both snapshots and router watching)
@@ -363,6 +365,8 @@ async fn purge_then_snapshot(
     // Purge before snapshot ensures new/warm-restarted routers won't replay already-acknowledged messages.
     // Since KV events are idempotent, this ordering reduces unnecessary reprocessing while maintaining
     // at-least-once delivery guarantees. The snapshot will capture the clean state after purge.
+    tracing::info!("Purging acknowledged messages and performing snapshot of radix tree");
+    let start_time = std::time::Instant::now();
 
     // First, purge acknowledged messages from the stream
     nats_queue.purge_acknowledged().await?;
@@ -395,9 +399,10 @@ async fn purge_then_snapshot(
         .map_err(|e| anyhow::anyhow!("Failed to upload snapshot: {e:?}"))?;
 
     tracing::info!(
-        "Successfully uploaded radix tree snapshot with {} events to bucket {}",
+        "Successfully performed snapshot of radix tree with {} events to bucket {} in {}ms",
         events.len(),
-        resources.bucket_name
+        resources.bucket_name,
+        start_time.elapsed().as_millis()
     );
 
     Ok(())
