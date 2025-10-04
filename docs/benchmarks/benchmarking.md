@@ -61,7 +61,7 @@ Just quick testing/comparison? Client-side.
 
 ## What This Tool Does
 
-The framework is a Python-based wrapper around `genai-perf` that:
+The framework is a Python-based wrapper around `aiperf` that:
 - Benchmarks any HTTP endpoints
 - Runs concurrency sweeps across configurable load levels
 - Generates comparison plots with your custom labels
@@ -70,7 +70,7 @@ The framework is a Python-based wrapper around `genai-perf` that:
 
 **Default sequence lengths**: Input: 2000 tokens, Output: 256 tokens (configurable with `--isl` and `--osl`)
 
-**Important**: The `--model` parameter configures GenAI-Perf for benchmarking and provides logging context. The default `--model` value in the benchmarking script is `Qwen/Qwen3-0.6B`, but it must match the model deployed at the endpoint(s).
+**Important**: The `--model` parameter configures AIPerf for benchmarking and provides logging context. The default `--model` value in the benchmarking script is `Qwen/Qwen3-0.6B`, but it must match the model deployed at the endpoint(s).
 
 ---
 
@@ -165,7 +165,7 @@ REQUIRED:
 
 OPTIONS:
   -h, --help                    Show help message and examples
-  -m, --model MODEL             Model name for GenAI-Perf configuration and logging (default: Qwen/Qwen3-0.6B)
+  -m, --model MODEL             Model name for AIPerf configuration and logging (default: Qwen/Qwen3-0.6B)
                                 NOTE: This must match the model deployed at the endpoint
   -i, --isl LENGTH              Input sequence length (default: 2000)
   -s, --std STDDEV              Input sequence standard deviation (default: 10)
@@ -179,14 +179,14 @@ OPTIONS:
 - **Benchmark Name**: The benchmark name becomes the label in plots and results
 - **Name Restrictions**: Names can only contain letters, numbers, hyphens, and underscores. The name `plots` is reserved.
 - **Port-Forwarding**: You must have an exposed endpoint before benchmarking
-- **Model Parameter**: The `--model` parameter configures GenAI-Perf for testing and logging, and must match the model deployed at the endpoint
+- **Model Parameter**: The `--model` parameter configures AIPerf for testing and logging, and must match the model deployed at the endpoint
 - **Sequential Benchmarking**: For comparative benchmarks, deploy and benchmark each configuration separately
 
 ### What Happens During Benchmarking
 
 The Python benchmarking module:
 1. **Connects** to your port-forwarded endpoint
-2. **Benchmarks** using GenAI-Perf at various concurrency levels (default: 1, 2, 5, 10, 50, 100, 250)
+2. **Benchmarks** using AIPerf at various concurrency levels (default: 1, 2, 5, 10, 50, 100, 250)
 3. **Measures** key metrics: latency, throughput, time-to-first-token
 4. **Saves** results to an output directory organized by benchmark name
 
@@ -301,9 +301,9 @@ results/
 ```
 
 Each concurrency directory contains:
-- **`profile_export_genai_perf.json`** - Structured metrics from GenAI-Perf
-- **`profile_export_genai_perf.csv`** - CSV format metrics from GenAI-Perf
-- **`profile_export.json`** - Raw GenAI-Perf results
+- **`profile_export_aiperf.json`** - Structured metrics from AIPerf
+- **`profile_export_aiperf.csv`** - CSV format metrics from AIPerf
+- **`profile_export.json`** - Raw AIPerf results
 - **`inputs.json`** - Generated test inputs
 
 ---
@@ -516,7 +516,7 @@ kubectl get endpoints "$SVC_NAME" -n "$NAMESPACE"
 
 ## Customize Benchmarking Behavior
 
-The built-in Python workflow connects to endpoints, benchmarks with genai-perf, and generates plots. If you want to modify the behavior:
+The built-in Python workflow connects to endpoints, benchmarks with aiperf, and generates plots. If you want to modify the behavior:
 
 1. **Extend the workflow**: Modify `benchmarks/utils/workflow.py` to add custom deployment types or metrics collection
 

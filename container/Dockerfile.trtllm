@@ -76,6 +76,7 @@ RUN apt-get update && \
         build-essential \
         g++ \
         ninja-build \
+        git \
         # Python runtime - CRITICAL for virtual environment to work
         python${PYTHON_VERSION}-dev \
         python3-pip \

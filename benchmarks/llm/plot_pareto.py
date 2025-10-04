@@ -26,7 +26,7 @@ from matplotlib.ticker import MultipleLocator
 
 
 def get_json_paths(search_paths):
-    genai_perf_profile_export_json_paths = []
+    aiperf_profile_export_json_paths = []
     deployment_config_json_paths = []
     for search_path in search_paths:
         deployment_config_json_path = os.path.join(
@@ -34,15 +34,13 @@ def get_json_paths(search_paths):
         )
         if not os.path.exists(deployment_config_json_path):
             raise Exception(f"deployment_config.json not found in {search_path}")
-        for root, dirs, files in os.walk(search_path):
+        for root, _, files in os.walk(search_path):
             for file in files:
-                if file == "profile_export_genai_perf.json":
-                    genai_perf_profile_export_json_paths.append(
-                        os.path.join(root, file)
-                    )
+                if file == "profile_export_aiperf.json":
+                    aiperf_profile_export_json_paths.append(os.path.join(root, file))
                     deployment_config_json_paths.append(deployment_config_json_path)
 
-    return genai_perf_profile_export_json_paths, deployment_config_json_paths
+    return aiperf_profile_export_json_paths, deployment_config_json_paths
 
 
 # search for -concurrency<number> in the name
@@ -81,13 +79,13 @@ def parse_kind_and_mode(deployment_config_json_path):
 
 
 def extract_val_and_concurrency(
-    genai_perf_profile_export_json_paths, deployment_config_json_paths, stat_value="avg"
+    aiperf_profile_export_json_paths, deployment_config_json_paths, stat_value="avg"
 ):
     results = []
-    for genai_perf_profile_export_json_path, deployment_config_json_path in zip(
-        genai_perf_profile_export_json_paths, deployment_config_json_paths
+    for aiperf_profile_export_json_path, deployment_config_json_path in zip(
+        aiperf_profile_export_json_paths, deployment_config_json_paths
     ):
-        with open(genai_perf_profile_export_json_path, "r") as f:
+        with open(aiperf_profile_export_json_path, "r") as f:
             data = json.load(f)
             # output_token_throughput contains only avg
             output_token_throughput = data.get("output_token_throughput", {}).get("avg")
@@ -99,7 +97,7 @@ def extract_val_and_concurrency(
             # request_throughput contains only avg
             request_throughput = data.get("request_throughput", {}).get("avg")
 
-        concurrency = parse_concurrency(genai_perf_profile_export_json_path)
+        concurrency = parse_concurrency(aiperf_profile_export_json_path)
         num_gpus = parse_gpus(deployment_config_json_path)
         kind, mode = parse_kind_and_mode(deployment_config_json_path)
 
@@ -116,7 +114,7 @@ def extract_val_and_concurrency(
 
         results.append(
             {
-                "configuration": genai_perf_profile_export_json_path,
+                "configuration": aiperf_profile_export_json_path,
                 "kind": kind,
                 "mode": mode,
                 "num_gpus": num_gpus,
@@ -241,12 +239,12 @@ if __name__ == "__main__":
     import os
 
     parser = argparse.ArgumentParser(
-        description="Plot Pareto graph from GenAI-Perf artifacts"
+        description="Plot Pareto graph from AIPerf artifacts"
     )
     parser.add_argument(
         "--artifacts-root-dir",
         required=True,
-        help="Root directory containing artifact directories to search for profile_export_genai_perf.json files",
+        help="Root directory containing artifact directories to search for profile_export_aiperf.json files",
     )
     parser.add_argument(
         "--title",
@@ -260,16 +258,16 @@ if __name__ == "__main__":
     if not artifacts_dirs:
         raise ValueError(f"No artifacts directories found in {args.artifacts_root_dir}")
 
-    genai_perf_profile_export_json_paths, deployment_config_json_paths = get_json_paths(
+    aiperf_profile_export_json_paths, deployment_config_json_paths = get_json_paths(
         artifacts_dirs
     )
 
-    if len(genai_perf_profile_export_json_paths) != len(deployment_config_json_paths):
+    if len(aiperf_profile_export_json_paths) != len(deployment_config_json_paths):
         raise ValueError(
-            f"Number of genai_perf_profile_export_json_paths ({len(genai_perf_profile_export_json_paths)}) does not match number of deployment_config_json_paths ({len(deployment_config_json_paths)})"
+            f"Number of aiperf_profile_export_json_paths ({len(aiperf_profile_export_json_paths)}) does not match number of deployment_config_json_paths ({len(deployment_config_json_paths)})"
         )
 
     extracted_values = extract_val_and_concurrency(
-        genai_perf_profile_export_json_paths, deployment_config_json_paths
+        aiperf_profile_export_json_paths, deployment_config_json_paths
     )
     create_pareto_graph(extracted_values, title=args.title)
