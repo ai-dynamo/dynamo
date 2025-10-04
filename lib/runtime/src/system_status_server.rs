@@ -193,14 +193,22 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
         .unwrap()
         .update_uptime_gauge();
 
-    // Execute all the callbacks starting at the DistributedRuntime level
-    assert!(state.drt().basename() == "");
-    let callback_results = state
-        .drt()
-        .execute_metrics_callbacks(&state.drt().hierarchy());
-    for result in callback_results {
-        if let Err(e) = result {
-            tracing::error!("Error executing metrics callback: {}", e);
+    // Execute all the callbacks for all registered hierarchies
+    let all_hierarchies: Vec<String> = {
+        let registries = state.drt().hierarchy_to_metricsregistry.read().unwrap();
+        registries.keys().cloned().collect()
+    };
+
+    for hierarchy in &all_hierarchies {
+        let callback_results = state.drt().execute_metrics_callbacks(hierarchy);
+        for result in callback_results {
+            if let Err(e) = result {
+                tracing::error!(
+                    "Error executing metrics callback for hierarchy '{}': {}",
+                    hierarchy,
+                    e
+                );
+            }
         }
     }
 

@@ -12,7 +12,8 @@ from typing import (
     Tuple,
 )
 
-# Prometheus metric names are defined in a separate module
+# Import from specialized modules
+from ._prometheus_metrics import RuntimeMetrics
 from ._prometheus_names import prometheus_names
 
 def log_message(level: str, message: str, module: str, file: str, line: int) -> None:
@@ -89,6 +90,16 @@ class Namespace:
         """
         ...
 
+    @property
+    def metrics(self) -> RuntimeMetrics:
+        """
+        Get a RuntimeMetrics helper for creating Prometheus metrics.
+
+        Returns:
+            A RuntimeMetrics object that provides create_* methods for different metric types
+        """
+        ...
+
 class Component:
     """
     A component is a collection of endpoints
@@ -96,7 +107,7 @@ class Component:
 
     ...
 
-    def create_service(self) -> None:
+    async def create_service(self) -> None:
         """
         Create a service
         """
@@ -105,6 +116,16 @@ class Component:
     def endpoint(self, name: str) -> Endpoint:
         """
         Create an endpoint
+        """
+        ...
+
+    @property
+    def metrics(self) -> RuntimeMetrics:
+        """
+        Get a RuntimeMetrics helper for creating Prometheus metrics.
+
+        Returns:
+            A RuntimeMetrics object that provides create_* methods for different metric types
         """
         ...
 
@@ -140,6 +161,17 @@ class Endpoint:
         Return primary lease id. Currently, cannot set a different lease id.
         """
         ...
+
+    @property
+    def metrics(self) -> RuntimeMetrics:
+        """
+        Get a RuntimeMetrics helper for creating Prometheus metrics.
+
+        Returns:
+            A RuntimeMetrics object that provides create_* methods for different metric types
+        """
+        ...
+
 
 class Client:
     """
@@ -1283,6 +1315,11 @@ class VirtualConnectorClient:
         ...
 
 __all__ = [
-    # ... existing exports ...
-    "prometheus_names"
+    "Backend",
+    "Client",
+    "Component",
+    "Context",
+    "ModelDeploymentCard",
+    "OAIChatPreprocessor",
+    "prometheus_names",
 ]
