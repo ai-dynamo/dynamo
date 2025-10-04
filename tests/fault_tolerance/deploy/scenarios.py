@@ -100,6 +100,8 @@ class Load:
     output_token_length: int = 100
     max_retries: int = 3  # Increased for fault tolerance
     sla: Optional[float] = None
+    client_type: str = "aiperf"  # "aiperf" or "legacy"
+    max_request_rate: float = 1.0  # Rate limiting for legacy client (requests/sec)
 
 
 @dataclass
@@ -297,6 +299,83 @@ def _create_backend_failures(backend, deploy_type="disagg"):
     return failures
 
 
+def create_aiperf_load(
+    clients: int = 10,
+    requests_per_client: int = 150,
+    input_token_length: int = 100,
+    output_token_length: int = 100,
+    max_retries: int = 3,
+    sla: Optional[float] = None,
+    max_request_rate: float = 1.0,
+) -> Load:
+    """Create a Load configuration for AI-Perf client.
+
+    Args:
+        clients: Number of concurrent clients (default: 10)
+        requests_per_client: Number of requests per client (default: 150)
+        input_token_length: Input token count (default: 100)
+        output_token_length: Output token count (default: 100)
+        max_retries: Maximum retry attempts - AI-Perf retries entire test (default: 3)
+        sla: Optional SLA threshold for latency (default: None)
+        max_request_rate: Rate limiting for requests/sec (default: 1.0)
+
+    Returns:
+        Load instance configured for AI-Perf client
+
+    Example:
+        >>> load = create_aiperf_load(clients=20, requests_per_client=200)
+    """
+    return Load(
+        clients=clients,
+        requests_per_client=requests_per_client,
+        input_token_length=input_token_length,
+        output_token_length=output_token_length,
+        max_retries=max_retries,
+        sla=sla,
+        client_type="aiperf",
+        max_request_rate=max_request_rate,
+    )
+
+
+def create_legacy_load(
+    clients: int = 10,
+    requests_per_client: int = 100,
+    input_token_length: int = 100,
+    output_token_length: int = 100,
+    max_retries: int = 1,
+    sla: Optional[float] = None,
+    max_request_rate: float = 1.0,
+) -> Load:
+    """Create a Load configuration for legacy custom client.
+
+    Args:
+        clients: Number of concurrent clients (default: 10)
+        requests_per_client: Number of requests per client (default: 100, fewer than AI-Perf)
+        input_token_length: Input token count (default: 100)
+        output_token_length: Output token count (default: 100)
+        max_retries: Maximum retry attempts - legacy retries per request (default: 1)
+        sla: Optional SLA threshold for latency (default: None)
+        max_request_rate: Rate limiting for requests/sec (default: 1.0)
+
+    Returns:
+        Load instance configured for legacy client
+
+    Example:
+        >>> load = create_legacy_load(clients=10, max_request_rate=2.0)
+    """
+    return Load(
+        clients=clients,
+        requests_per_client=requests_per_client,
+        input_token_length=input_token_length,
+        output_token_length=output_token_length,
+        max_retries=max_retries,
+        sla=sla,
+        client_type="legacy",
+        max_request_rate=max_request_rate,
+    )
+
+
+# Default load configuration (using AI-Perf)
 load = Load()
 
 # model = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
