@@ -114,6 +114,16 @@ uv pip install "ai-dynamo[sglang]"  #replace with [vllm], [trtllm], etc.
 
 ## 3. Run Dynamo
 
+### Sanity check (optional)
+
+Before trying out Dynamo, you can verify your system configuration and dependencies:
+
+```bash
+./deploy/sanity_check.py
+```
+
+This is a quick check for system resources, development tools, LLM frameworks, and Dynamo components.
+
 ### Running an LLM API server
 
 Dynamo provides a simple way to spin up a local set of inference components including:
