@@ -92,7 +92,20 @@ impl SystemHealth {
 
     pub fn set_endpoint_health_status(&self, endpoint: &str, status: HealthStatus) {
         let mut endpoint_health = self.endpoint_health.write().unwrap();
-        endpoint_health.insert(endpoint.to_string(), status);
+        endpoint_health.insert(endpoint.to_string(), status.clone());
+
+        // Parse endpoint name to extract base endpoint name
+        // Format: namespace.component.endpoint-instance_id
+        // Example: sglang-agg_backend.generate-5e7b99a870acae05
+        // We want to extract "generate" and set its status too
+        if let Some(dot_pos) = endpoint.rfind('.') {
+            let endpoint_part = &endpoint[dot_pos + 1..];
+            // Remove instance ID suffix (everything after the last hyphen)
+            if let Some(dash_pos) = endpoint_part.rfind('-') {
+                let base_endpoint = &endpoint_part[..dash_pos];
+                endpoint_health.insert(base_endpoint.to_string(), status.clone());
+            }
+        }
     }
 
     /// Returns the overall health status and endpoint health statuses
