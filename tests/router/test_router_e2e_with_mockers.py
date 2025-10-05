@@ -420,10 +420,11 @@ async def initialize_mockers_and_get_ids(
         event_worker_ids = sorted({e["worker_id"] for e in events})
         logger.info(f"Discovered worker IDs: {event_worker_ids}")
         retries_count += 1
-        if retries_count > retries:
-            raise AssertionError(
-                f"Discovered {len(event_worker_ids)} worker ids {event_worker_ids}, expected {NUM_MOCKERS}"
-            )
+
+    if len(event_worker_ids) < NUM_MOCKERS:
+        raise AssertionError(
+            f"Discovered {len(event_worker_ids)} worker ids {event_worker_ids}, expected {NUM_MOCKERS}"
+        )
 
     return event_worker_ids
 
@@ -440,8 +441,8 @@ def get_worker_status_from_events_by_ids(
     Returns:
         A list of dictionaries, each containing:
             - worker_id: The worker ID
-            - kv_block_count: Sorted list of block hashes present for that worker
-            - kv_event_count: Sorted list of event IDs for that worker
+            - kv_block_hashes: Sorted list of block hashes present for that worker
+            - kv_event_ids: Sorted list of event IDs for that worker
     """
     events = json.loads(dumped_events)
     worker_statuses: list[Dict[str, Any]] = []
