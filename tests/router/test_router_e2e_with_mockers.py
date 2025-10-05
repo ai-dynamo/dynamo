@@ -368,6 +368,125 @@ async def send_request_via_python_kv_router(
     return False
 
 
+async def initialize_mockers_and_get_ids(
+    router, timeout: int = 60, retries: int = 10
+) -> list[int]:
+    """Warm up mocker workers and collect their worker IDs.
+
+    Why this is needed:
+      For tests that rely on KV state, we require confirmation that each worker has actually
+      been initialized and produced at least one event the router indexed.
+
+    Returns:
+        Sorted list of unique worker IDs (ints) discovered via KV events.
+
+    Raises:
+        AssertionError: If the maximum number of retries is exceeded before all NUM_MOCKERS workers are observed.
+    """
+
+    logger.info("Initializing mockers and getting worker ids")
+    retries_count: int = 0
+    event_worker_ids: list[int] = []
+    # Loop until we have all expected worker IDs or we hit timeout
+    # To do: by the routing logic, the second request shouldn't go to the same worker as the first,
+    #        so we shouldn't need more than NUM_MOCKERS requests to discover all workers.
+    while len(event_worker_ids) < NUM_MOCKERS and retries_count < retries:
+        # Generate small test token IDs
+        test_token_ids = [random.randint(1, 10000) for _ in range(10)]
+
+        # Send request without specifying worker_id to allow routing to uninitialized workers
+        logger.info(
+            f"Sending warm-up request {retries_count + 1} with token_ids: {test_token_ids}"
+        )
+        await send_request_via_python_kv_router(
+            kv_python_router=router,
+            token_ids=test_token_ids,
+            initial_wait=1.0,
+            max_retries=8,
+            stop_conditions={
+                "ignore_eos": True,  # Don't stop on EOS token
+                "max_tokens": 10,  # Generate exactly 10 token (To be verified: There seems to be a mimimum of # tokens required to trigger the kv event generation)
+            },
+        )
+
+        # Small delay to allow events to be processed
+        await asyncio.sleep(0.5)
+
+        # Dump KV events from the router
+        events_json = await router.dump_events()
+
+        # Parse the JSON events and extract worker IDs
+        events = json.loads(events_json)
+        event_worker_ids = sorted({e["worker_id"] for e in events})
+        logger.info(f"Discovered worker IDs: {event_worker_ids}")
+        retries_count += 1
+        if retries_count > retries:
+            raise AssertionError(
+                f"Discovered {len(event_worker_ids)} worker ids {event_worker_ids}, expected {NUM_MOCKERS}"
+            )
+
+    return event_worker_ids
+
+
+def get_worker_status_from_events_by_ids(
+    dumped_events: str, worker_ids: list[int]
+) -> list[Dict[str, Any]]:
+    """Extract per-worker KV event summary for the specified worker IDs.
+
+    Args:
+        dumped_events: JSON string returned by KvPushRouter.dump_events().
+        worker_ids: List of worker IDs to summarize.
+
+    Returns:
+        A list of dictionaries, each containing:
+            - worker_id: The worker ID
+            - kv_block_count: Sorted list of block hashes present for that worker
+            - kv_event_count: Sorted list of event IDs for that worker
+    """
+    events = json.loads(dumped_events)
+    worker_statuses: list[Dict[str, Any]] = []
+    for worker_id in worker_ids:
+        logger.info(f"Extracting status for worker_id={worker_id} from events")
+        # Extract block_hash and event_id info.
+        block_hashes: set[int] = set()
+        event_ids: set[int] = set()
+        for e in events:
+            if e.get("worker_id") != worker_id:
+                continue
+            # Collect event_id if present
+            event_id = (
+                e.get("event").get("event_id")
+                if "event" in e and isinstance(e["event"], dict)
+                else None
+            )
+            if event_id is not None:
+                event_ids.add(event_id)
+            # Prefer a direct block_hash if available
+            if "block_hash" in e:
+                bh = e.get("block_hash")
+                if isinstance(bh, int):
+                    block_hashes.add(bh)
+            else:
+                # Attempt to traverse nested structure: event -> data -> stored -> blocks -> tokens_hash / block_hash
+                stored = e.get("event", {}).get("data", {}).get("stored", {})
+                blocks = stored.get("blocks", []) if isinstance(stored, dict) else []
+                for b in blocks:
+                    if not isinstance(b, dict):
+                        continue
+                    # Use tokens_hash as a surrogate if block_hash absent
+                    bh = b.get("block_hash", b.get("tokens_hash"))
+                    if isinstance(bh, int):
+                        block_hashes.add(bh)
+        worker_statuses.append(
+            {
+                "worker_id": worker_id,
+                "kv_block_hashes": sorted(block_hashes),
+                "kv_event_ids": sorted(event_ids),
+            }
+        )
+    return worker_statuses
+
+
 @pytest.mark.pre_merge
 @pytest.mark.model(MODEL_NAME)
 def test_mocker_kv_router(request, runtime_services, predownload_tokenizers):
@@ -1190,5 +1309,157 @@ def test_query_instance_id_returns_worker_and_tokens(
     finally:
         if "kv_router" in locals():
             kv_router.__exit__(None, None, None)
+        if "mockers" in locals():
+            mockers.__exit__(None, None, None)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.model(MODEL_NAME)
+def test_router_by_workerid_and_check_kvevents_sync(
+    request, runtime_services, predownload_tokenizers
+):
+    """Validate per-worker routing and KV event synchronization when explicitly targeting workers.
+
+    Flow:
+      - Start two mocker workers sharing a namespace.
+      - Initialize all workers and ensure they are ready for serving by checking their kv events synchronization to the router.
+      - Snapshot initial per-worker block hashes.
+      - For each worker, send a request pinned to it with incrementing block spans (2, 3, ...).
+      - Check the post-test events to ensure each request was routed to the expected worker
+        and processed correctly by comparing block hashes dumped from the route events.
+      - Ensure the number of new blocks per worker matches the expected count based on the requests sent.
+    """
+
+    # runtime_services starts etcd and nats
+    logger.info("Starting test router by worker id and check KV events synchronization")
+
+    # Create mocker args dicti: FixtureRequestonary: tuple[NatsServer, EtcdServer]: NoneType
+    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
+
+    try:
+        # Start mocker instances with the new CLI interface
+        logger.info(f"Starting {NUM_MOCKERS} mocker instances")
+        mockers = MockerProcess(
+            request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
+        )
+        logger.info(f"All mockers using endpoint: {mockers.endpoint}")
+        # Initialize mockers
+        mockers.__enter__()
+
+        # Get runtime and create endpoint
+        runtime = get_runtime()
+        # Use the namespace from the mockers
+        namespace = runtime.namespace(mockers.namespace)
+        component = namespace.component("mocker")
+        endpoint = component.endpoint("generate")
+
+        # Create KvRouterConfig with lower snapshot threshold for testing
+        kv_router_config = KvRouterConfig(router_snapshot_threshold=20)
+        kv_push_router = KvPushRouter(
+            endpoint=endpoint,
+            block_size=BLOCK_SIZE,
+            kv_router_config=kv_router_config,
+        )
+
+        # Use async to manage the test flow
+        async def test_sync():
+            # Initialize workers via small warmup requests and derive worker IDs from router events
+            mocker_worker_ids = await initialize_mockers_and_get_ids(kv_push_router)
+
+            # Get the initial worker statuses from the events (await dump_events!)
+            initial_events_json = await kv_push_router.dump_events()
+            initial_worker_statuses = get_worker_status_from_events_by_ids(
+                initial_events_json, mocker_worker_ids
+            )
+            logger.info(f"Initial worker statuses: {initial_worker_statuses}")
+            assert (
+                len(initial_worker_statuses) == NUM_MOCKERS
+            ), "Not all workers have been initialized successfully with registered kv events"
+
+            # Test each worker with specific number of blocks
+            block_count = 2
+            expected_added_blocks: dict[int, int] = {}
+            for worker_id in mocker_worker_ids:
+                # Generate random test tokens
+                test_token_ids = [
+                    random.randint(1, 10000) for _ in range(block_count * BLOCK_SIZE)
+                ]
+                logger.info(
+                    f"Sending request to worker {worker_id} with {block_count} blocks ({len(test_token_ids)} tokens)"
+                )
+                expected_added_blocks[worker_id] = block_count
+                # Send request to worker with the specific worker_id
+                await send_request_via_python_kv_router(
+                    kv_python_router=kv_push_router,
+                    token_ids=test_token_ids,
+                    initial_wait=1.0,
+                    max_retries=8,
+                    stop_conditions={
+                        "ignore_eos": True,  # Don't stop on EOS token
+                        "max_tokens": 10,  # Generate exactly 10 tokens
+                    },
+                    worker_id=worker_id,
+                )
+                block_count += 1
+
+            # Wait for all requests to complete and for internal synchronization
+            await asyncio.sleep(1)
+
+            # Extract states from the router (await dump_events!)
+            final_events_json = await kv_push_router.dump_events()
+            final_worker_statuses = get_worker_status_from_events_by_ids(
+                final_events_json, mocker_worker_ids
+            )
+            logger.info(
+                f"Worker statuses after the first test: {final_worker_statuses}"
+            )
+
+            return (
+                mocker_worker_ids,
+                initial_worker_statuses,
+                final_worker_statuses,
+                expected_added_blocks,
+            )
+
+        # Run the async test
+        (
+            worker_ids,
+            initial_worker_statuses,
+            final_worker_statuses,
+            expected_added_blocks,
+        ) = asyncio.run(test_sync())
+
+        # Compare initial vs final block hashes per worker to ensure growth matches expectations
+        initial_by_worker = {
+            s["worker_id"]: set(s["kv_block_hashes"]) for s in initial_worker_statuses
+        }
+        final_by_worker = {
+            s["worker_id"]: set(s["kv_block_hashes"]) for s in final_worker_statuses
+        }
+
+        for wid in worker_ids:
+            init_blocks = initial_by_worker.get(wid, set())
+            final_blocks = final_by_worker.get(wid, set())
+            new_blocks = final_blocks - init_blocks
+            expected = expected_added_blocks.get(wid, 0)
+
+            if len(new_blocks) == expected:
+                logger.info(
+                    f"The request with {len(new_blocks)} blocks of tokens was routed to {wid} as expected with events synchronized successfully."
+                    f"Worker {wid}: initial_blocks={len(init_blocks)} final_blocks={len(final_blocks)} new_blocks={len(new_blocks)} expected_added={expected}"
+                    f"Initial hashes: {sorted(init_blocks)} Final hashes: {sorted(final_blocks)} New hashes: {sorted(new_blocks)}"
+                )
+            else:
+                raise AssertionError(
+                    f"Worker {wid} expected exactly {expected} new blocks but saw {len(new_blocks)}. "
+                    f"Initial hashes: {sorted(init_blocks)} Final hashes: {sorted(final_blocks)} New hashes: {sorted(new_blocks)}"
+                )
+
+        logger.info(
+            "Test router by worker id and check KV events synchronization completed successfully"
+        )
+
+    finally:
+        # Clean up mockers
         if "mockers" in locals():
             mockers.__exit__(None, None, None)
