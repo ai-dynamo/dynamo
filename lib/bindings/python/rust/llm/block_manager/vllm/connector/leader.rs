@@ -5,7 +5,7 @@ pub mod recorder;
 pub mod slot;
 
 use super::*;
-use dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics;
+use dynamo_llm::block_manager::metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry};
 use dynamo_runtime::DistributedRuntime;
 use slot::{ConnectorSlotManager, SlotError, SlotManager, SlotState};
 
@@ -93,6 +93,7 @@ impl KvConnectorLeader {
         drt: PyDistributedRuntime,
         page_size: usize,
         leader_py: PyKvbmLeader,
+        metrics_standalone: bool,
     ) -> Self {
         tracing::info!(
             "KvConnectorLeader initialized with worker_id: {}",
@@ -103,11 +104,15 @@ impl KvConnectorLeader {
         let drt = drt.inner().clone();
         let handle: Handle = drt.runtime().primary();
 
-        let ns = drt
-            .namespace(kvbm_connector::KVBM_CONNECTOR_LEADER)
-            .unwrap();
-
-        let kvbm_metrics = KvbmMetrics::new(&ns);
+        let kvbm_metrics = if metrics_standalone {
+            let port = parse_dyn_kvbm_metrics_port();
+            KvbmMetrics::new_with_standalone(&KvbmMetricsRegistry::default(), port)
+        } else {
+            let ns = drt
+                .namespace(kvbm_connector::KVBM_CONNECTOR_LEADER)
+                .expect("failed to create metrics namespace");
+            KvbmMetrics::new(&ns)
+        };
         let kvbm_metrics_clone = kvbm_metrics.clone();
 
         let slot_manager_cell = Arc::new(OnceLock::new());
@@ -560,13 +565,26 @@ impl PyKvConnectorLeader {
         let enable_kvbm_record = std::env::var("ENABLE_KVBM_RECORD")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        let metrics_standalone = std::env::var("DYN_KVBM_METRICS_STANDALONE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
         let connector_leader: Box<dyn Leader> = if enable_kvbm_record {
             Box::new(recorder::KvConnectorLeaderRecorder::new(
-                worker_id, drt, page_size, leader,
+                worker_id,
+                drt,
+                page_size,
+                leader,
+                metrics_standalone,
             ))
         } else {
-            Box::new(KvConnectorLeader::new(worker_id, drt, page_size, leader))
+            Box::new(KvConnectorLeader::new(
+                worker_id,
+                drt,
+                page_size,
+                leader,
+                metrics_standalone,
+            ))
         };
         Self { connector_leader }
     }
@@ -613,5 +631,21 @@ impl PyKvConnectorLeader {
         self.connector_leader
             .create_slot(request, tokens)
             .map_err(to_pyerr)
+    }
+}
+
+pub fn parse_dyn_kvbm_metrics_port() -> u16 {
+    match std::env::var("DYN_KVBM_METRICS_PORT") {
+        Ok(val) => match val.trim().parse::<u16>() {
+            Ok(port) => port,
+            Err(_) => {
+                eprintln!(
+                    "[kvbm] Invalid DYN_KVBM_METRICS_PORT='{}', falling back to 6881",
+                    val
+                );
+                6881
+            }
+        },
+        Err(_) => 6881,
     }
 }

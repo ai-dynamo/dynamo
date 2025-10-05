@@ -5,12 +5,13 @@ use super::*;
 
 use crate::DistributedRuntime as PyDistributedRuntime;
 use crate::llm::block_manager::BlockManagerBuilder;
+use crate::llm::block_manager::vllm::connector::leader::parse_dyn_kvbm_metrics_port;
 use crate::llm::block_manager::vllm::connector::leader::slot::{
     ConnectorSlotManager, SlotManager, SlotState,
 };
 use crate::llm::block_manager::{distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest};
 use anyhow;
-use dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics;
+use dynamo_llm::block_manager::metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry};
 use dynamo_runtime::metrics::prometheus_names::kvbm_connector;
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
@@ -66,6 +67,7 @@ impl KvConnectorLeader {
         drt: PyDistributedRuntime,
         page_size: usize,
         leader_py: PyKvbmLeader,
+        metrics_standalone: bool,
     ) -> Self {
         tracing::info!(
             "KvConnectorLeader initialized with worker_id: {}",
@@ -76,11 +78,16 @@ impl KvConnectorLeader {
         let drt = drt.inner().clone();
         let handle: Handle = drt.runtime().primary();
 
-        let ns = drt
-            .namespace(kvbm_connector::KVBM_CONNECTOR_LEADER)
-            .unwrap();
+        let kvbm_metrics = if metrics_standalone {
+            let port = parse_dyn_kvbm_metrics_port();
+            KvbmMetrics::new_with_standalone(&KvbmMetricsRegistry::default(), port)
+        } else {
+            let ns = drt
+                .namespace(kvbm_connector::KVBM_CONNECTOR_LEADER)
+                .expect("failed to create metrics namespace");
+            KvbmMetrics::new(&ns)
+        };
 
-        let kvbm_metrics = KvbmMetrics::new(&ns);
         let kvbm_metrics_clone = kvbm_metrics.clone();
 
         let slot_manager_cell = Arc::new(OnceLock::new());
@@ -451,8 +458,17 @@ impl PyTrtllmKvConnectorLeader {
         page_size: usize,
         leader: PyKvbmLeader,
     ) -> Self {
-        let connector_leader: Box<dyn Leader> =
-            Box::new(KvConnectorLeader::new(worker_id, drt, page_size, leader));
+        let metrics_standalone = std::env::var("DYN_KVBM_METRICS_STANDALONE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        let connector_leader: Box<dyn Leader> = Box::new(KvConnectorLeader::new(
+            worker_id,
+            drt,
+            page_size,
+            leader,
+            metrics_standalone,
+        ));
         Self { connector_leader }
     }
 

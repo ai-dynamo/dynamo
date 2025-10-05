@@ -77,8 +77,8 @@ Follow below steps to enable metrics collection and view via Grafana dashboard:
 # Start the basic services (etcd & natsd), along with Prometheus and Grafana
 docker compose -f deploy/docker-compose.yml --profile metrics up -d
 
-# set env var DYN_SYSTEM_ENABLED to true, DYN_SYSTEM_PORT to 6880, DYN_KVBM_SLEEP to 5, when launch via dynamo
-# NOTE: Make sure port 6881 (for KVBM worker metrics) and port 6882 (for KVBM leader metrics) are available.
+# set env var DYN_SYSTEM_ENABLED to true, DYN_SYSTEM_PORT to 6880, when launch via dynamo
+# NOTE: Make sure port 6881 (for KVBM leader metrics) is available.
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=6880 \
 python -m dynamo.vllm \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
@@ -86,10 +86,17 @@ python -m dynamo.vllm \
 
 # optional if firewall blocks KVBM metrics ports to send prometheus metrics
 sudo ufw allow 6881/tcp
-sudo ufw allow 6882/tcp
 ```
 
 View grafana metrics via http://localhost:3001 (default login: dynamo/dynamo) and look for KVBM Dashboard
+
+When running `vllm serve` with KVBM, enable the standalone KVBM metrics to prevent interference with Dynamo metrics.
+```bash
+# Enable standalone KVBM metrics by setting DYN_KVBM_METRICS_STANDALONE=true.
+# Optionally set DYN_KVBM_METRICS_PORT to choose the /metrics port (default: 6881).
+DYN_KVBM_METRICS_STANDALONE=true \
+vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "dynamo.llm.vllm_integration.connector"}' deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+```
 
 ## Benchmark KVBM
 

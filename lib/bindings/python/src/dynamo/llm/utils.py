@@ -3,17 +3,6 @@
 
 import os
 import socket
-import time
-
-
-def maybe_sleep():
-    """
-    Maybe sleep for the duration specified in the environment variable if it is set.
-    """
-    sleep_duration = int(os.environ.get("DYN_KVBM_SLEEP", "0"))
-    if sleep_duration > 0:
-        print(f"Sleeping {sleep_duration} seconds to avoid metrics port conflict")
-        time.sleep(sleep_duration)
 
 
 # TODO(keiven|ziqi): Auto port selection to be done in Rust
@@ -40,3 +29,16 @@ def find_and_set_available_port_from_env(env_var="DYN_SYSTEM_PORT"):
             s.close()
         except Exception as e:
             raise RuntimeError(f"Error finding available port: {e}")
+
+
+# TODO(rihuo): Auto setup standalone metrics based on if Distributed Runtime is provided or not.
+# remove this when ETCD can be removed from the leader-worker sync
+def is_standslone_kvbm_metrics_enabled() -> bool:
+    """
+    Return True if DYN_KVBM_METRICS_STANDALONE is set to '1' or any case-variant of 'true'.
+    """
+    val = os.environ.get("DYN_KVBM_METRICS_STANDALONE")
+    if val is None:
+        return False
+    v = val.strip().lower()
+    return v == "1" or v == "true"
