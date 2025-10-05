@@ -369,7 +369,7 @@ async def send_request_via_python_kv_router(
 
 
 async def initialize_mockers_and_get_ids(
-    router, timeout: int = 60, retries: int = 10
+    router: KvPushRouter, retries: int = 10
 ) -> list[int]:
     """Warm up mocker workers and collect their worker IDs.
 
