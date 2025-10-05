@@ -1202,7 +1202,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									},
 									VolumeMounts: []v1alpha1.VolumeMount{
 										{
-											Name:       "planner-pvc",
+											Name:       "dynamo-pvc",
 											MountPoint: "/planner",
 										},
 									},
@@ -1265,6 +1265,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeFrontend,
 									commonconsts.KubeLabelDynamoSubComponentType:    "test-sub-component",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoNamespace:           "dynamo-test-dynamo-graph-deployment",
 									"nvidia.com/label1":                             "label1",
 									"nvidia.com/label2":                             "label2",
 								},
@@ -1297,7 +1298,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "frontend-image",
 												Command: []string{
 													"/bin/sh",
@@ -1415,6 +1416,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-planner",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypePlanner,
+									commonconsts.KubeLabelDynamoNamespace:           "dynamo-test-dynamo-graph-deployment",
 								},
 								Annotations: map[string]string{},
 								Spec: grovev1alpha1.PodCliqueSpec{
@@ -1424,10 +1426,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									PodSpec: corev1.PodSpec{
 										Volumes: []corev1.Volume{
 											{
-												Name: "planner-pvc",
+												Name: "dynamo-pvc",
 												VolumeSource: corev1.VolumeSource{
 													PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-														ClaimName: "planner-pvc",
+														ClaimName: "dynamo-pvc",
 													},
 												},
 											},
@@ -1447,7 +1449,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "planner-image",
 												Command: []string{
 													"/bin/sh",
@@ -1538,7 +1540,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												VolumeMounts: []corev1.VolumeMount{
 													{
-														Name:      "planner-pvc",
+														Name:      "dynamo-pvc",
 														MountPath: "/planner",
 													},
 													{
@@ -1723,7 +1725,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									},
 									VolumeMounts: []v1alpha1.VolumeMount{
 										{
-											Name:       "planner-pvc",
+											Name:       "dynamo-pvc",
 											MountPoint: "/planner",
 										},
 									},
@@ -1798,6 +1800,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker-ldr",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoNamespace:           "dynamo-test-dynamo-graph-deployment",
 									"nvidia.com/label1":                             "label1",
 									"nvidia.com/label2":                             "label2",
 								},
@@ -1825,7 +1828,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										},
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "worker-image",
 												Command: []string{
 													"/bin/sh",
@@ -1949,6 +1952,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker-wkr",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoNamespace:           "dynamo-test-dynamo-graph-deployment",
 									"nvidia.com/label1":                             "label1",
 									"nvidia.com/label2":                             "label2",
 								},
@@ -1977,7 +1981,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										},
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "worker-image",
 												Command: []string{
 													"/bin/sh",
@@ -2064,6 +2068,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-frontend",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeFrontend,
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoNamespace:           "dynamo-test-dynamo-graph-deployment",
 								},
 								Annotations: map[string]string{},
 								Spec: grovev1alpha1.PodCliqueSpec{
@@ -2091,7 +2096,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "frontend-image",
 												Command: []string{
 													"/bin/sh",
@@ -2201,6 +2206,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypePlanner,
+									commonconsts.KubeLabelDynamoNamespace:           "dynamo-test-dynamo-graph-deployment",
 								},
 								Annotations: map[string]string{},
 								Spec: grovev1alpha1.PodCliqueSpec{
@@ -2213,10 +2219,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Volumes: []corev1.Volume{
 											{
-												Name: "planner-pvc",
+												Name: "dynamo-pvc",
 												VolumeSource: corev1.VolumeSource{
 													PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-														ClaimName: "planner-pvc",
+														ClaimName: "dynamo-pvc",
 													},
 												},
 											},
@@ -2232,7 +2238,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										},
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "planner-image",
 												Command: []string{
 													"/bin/sh",
@@ -2315,7 +2321,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												VolumeMounts: []corev1.VolumeMount{
 													{
-														Name:      "planner-pvc",
+														Name:      "dynamo-pvc",
 														MountPath: "/planner",
 													},
 													{
@@ -2523,7 +2529,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									},
 									VolumeMounts: []v1alpha1.VolumeMount{
 										{
-											Name:       "planner-pvc",
+											Name:       "dynamo-pvc",
 											MountPoint: "/planner",
 										},
 									},
@@ -2597,6 +2603,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoNamespace:           "dynamo-test-dynamo-graph-deployment",
 									"nvidia.com/label1":                             "label1",
 									"nvidia.com/label2":                             "label2",
 								},
@@ -2624,7 +2631,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "worker-image",
 												Command: []string{
 													"/bin/sh",
@@ -2735,6 +2742,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker-wkr",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoNamespace:           "dynamo-test-dynamo-graph-deployment",
 									"nvidia.com/label1":                             "label1",
 									"nvidia.com/label2":                             "label2",
 								},
@@ -2763,7 +2771,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "worker-image",
 												Command: []string{
 													"/bin/sh",
@@ -2850,6 +2858,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-frontend",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoNamespace:           "dynamo-test-dynamo-graph-deployment",
 								},
 								Annotations: map[string]string{},
 								Spec: grovev1alpha1.PodCliqueSpec{
@@ -2877,7 +2886,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "frontend-image",
 												Command: []string{
 													"/bin/sh",
@@ -2987,6 +2996,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-planner",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypePlanner,
+									commonconsts.KubeLabelDynamoNamespace:           "dynamo-test-dynamo-graph-deployment",
 								},
 								Annotations: map[string]string{},
 								Spec: grovev1alpha1.PodCliqueSpec{
@@ -2998,10 +3008,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										ServiceAccountName:            commonconsts.PlannerServiceAccountName,
 										Volumes: []corev1.Volume{
 											{
-												Name: "planner-pvc",
+												Name: "dynamo-pvc",
 												VolumeSource: corev1.VolumeSource{
 													PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-														ClaimName: "planner-pvc",
+														ClaimName: "dynamo-pvc",
 													},
 												},
 											},
@@ -3018,7 +3028,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "planner-image",
 												Command: []string{
 													"/bin/sh",
@@ -3108,7 +3118,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												VolumeMounts: []corev1.VolumeMount{
 													{
-														Name:      "planner-pvc",
+														Name:      "dynamo-pvc",
 														MountPath: "/planner",
 													},
 													{
@@ -3333,7 +3343,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 			}
 
 			// Check that container name is set
-			if container.Name != "main" {
+			if container.Name != commonconsts.MainContainerName {
 				t.Errorf("GeneratePodSpecForComponent() container name = %s, want main", container.Name)
 			}
 		})
@@ -4661,7 +4671,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 			expectedPodSpec: &corev1.PodSpec{
 				Containers: []corev1.Container{
 					{
-						Name:    "main",
+						Name:    commonconsts.MainContainerName,
 						Command: []string{"python3"},
 						Args:    []string{"-m", "dynamo.worker"},
 						Env: []corev1.EnvVar{

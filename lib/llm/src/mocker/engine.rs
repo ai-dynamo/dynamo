@@ -392,6 +392,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             top_logprobs: None,
                             finish_reason: None,
                             index: None,
+                            extra_args: None,
                         };
 
                         if signal.completed && token_count < max_tokens {

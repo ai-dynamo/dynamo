@@ -25,7 +25,7 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 CODEOWNERS @ai-dynamo/Devops
 
 # Planner
-/components/planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
+/components/src/dynamo/planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 /benchmarks/profiler/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 /tests/planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 

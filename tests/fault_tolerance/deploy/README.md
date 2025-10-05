@@ -425,9 +425,7 @@ graph LR
 
 ### Install Dynamo Platform
 
-Follow the instructions to install `Dynamo` in your Kubernetes cluster.
-
-[https://github.com/ai-dynamo/dynamo/blob/main/docs/guides/dynamo_deploy/installation_guide.md]
+Follow the [instructions](../../../docs/kubernetes/installation_guide.md) to install `Dynamo` in your Kubernetes cluster.
 
 ### Mount Workspace and Kube Config
 
