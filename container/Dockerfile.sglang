@@ -240,13 +240,7 @@ COPY tests /workspace/tests
 COPY benchmarks /workspace/benchmarks
 COPY examples /workspace/examples
 COPY deploy /workspace/deploy
-RUN uv pip install /workspace/benchmarks
 
-# Copy benchmarks, backends and tests for CI
-COPY tests /workspace/tests
-COPY benchmarks /workspace/benchmarks
-COPY deploy /workspace/deploy
-COPY components/backends/sglang /workspace/components/backends/sglang
 # Copy attribution files
 COPY ATTRIBUTION* LICENSE /workspace/
 
