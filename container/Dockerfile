@@ -122,19 +122,25 @@ RUN apt-get update -y \
         net-tools \
         ninja-build \
         pybind11-dev \
-        # These headers are missing with the hpcx installer, required
-        # by UCX to find RDMA devices
-        ibverbs-providers \
-        ibverbs-utils \
-        libibumad-dev \
-        libibverbs-dev \
-        librdmacm-dev \
-        libnuma-dev \
-        rdma-core \
         # Rust build dependencies
         clang \
         libclang-dev \
         protobuf-compiler \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# These headers are missing with the hpcx installer, required
+# by UCX to build and use RDMA devices. Reinstall to make sure to recreate
+# symlink .so to .so.1 in case some packages are already found.
+RUN apt-get update -y \
+    && DEBIAN_FRONTEND=noninteractive apt-get -y install --reinstall --no-install-recommends \
+        libibverbs-dev \
+        rdma-core \
+        ibverbs-utils \
+        libibumad-dev \
+        libnuma-dev \
+        librdmacm-dev \
+        ibverbs-providers \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -199,7 +205,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 
 # UCX environment variables
 ENV CPATH=/usr/include:$CPATH \
-    PATH=/usr/bin:$PATH \
+    PATH=/usr/bin:/usr/local/ucx/bin:$PATH \
     PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
 
 ##################################
@@ -376,8 +382,10 @@ RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*cp312*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-    /opt/dynamo/benchmarks && \
-    rm -rf /opt/dynamo/benchmarks
+    && cd /opt/dynamo/benchmarks \
+    && uv pip install . \
+    && cd - \
+    && rm -rf /opt/dynamo/benchmarks
 
 # Setup launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \

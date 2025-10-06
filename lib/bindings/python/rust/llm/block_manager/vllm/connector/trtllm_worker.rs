@@ -19,6 +19,7 @@ use crate::{
 
 use anyhow;
 use dynamo_llm::block_manager::distributed::{KvbmWorker, KvbmWorkerConfig};
+use dynamo_llm::block_manager::layout::LayoutType;
 use dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics;
 use dynamo_llm::block_manager::storage::torch::TorchTensor;
 use dynamo_runtime::DistributedRuntime;
@@ -144,7 +145,9 @@ impl Worker for KvConnectorWorker {
             .tensors(kv_cache_tensors)
             .device_id(device_id)
             .dtype_width_bytes(dtype_width_bytes)
-            .is_fully_contiguous_layout(true)
+            .device_layout_type(LayoutType::FullyContiguous)
+            .host_layout_type(LayoutType::FullyContiguous)
+            .disk_layout_type(LayoutType::FullyContiguous)
             .barrier_id_prefix(get_barrier_id_prefix())
             .scheduler_client(Some(self.transfer_client.clone()))
             .build()?;
