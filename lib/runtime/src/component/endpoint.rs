@@ -140,7 +140,11 @@ impl EndpointConfigBuilder {
             };
             tracing::debug!(endpoint_name = %endpoint_name, "Registering endpoint health check target");
             let guard = system_health.lock().unwrap();
-            guard.register_health_check_target(&endpoint_name, instance, health_check_payload.clone());
+            guard.register_health_check_target(
+                &endpoint_name,
+                instance,
+                health_check_payload.clone(),
+            );
             if let Some(notifier) = guard.get_endpoint_health_check_notifier(&endpoint_name) {
                 handler.set_endpoint_health_check_notifier(notifier)?;
             }
