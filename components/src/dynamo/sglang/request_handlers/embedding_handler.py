@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+from typing import Optional
 
 import sglang as sgl
 
 from dynamo._core import Component
-from dynamo.llm import WorkerMetricsPublisher, ZmqKvEventPublisher
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import EmbeddingRequest
+from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 
@@ -18,12 +19,9 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         component: Component,
         engine: sgl.Engine,
         config: Config,
-        metrics_publisher: WorkerMetricsPublisher,
-        kv_publisher: ZmqKvEventPublisher = None,
+        publisher: Optional[DynamoSglangPublisher] = None,
     ):
-        super().__init__(
-            component, engine, config, metrics_publisher, kv_publisher, None
-        )
+        super().__init__(component, engine, config, publisher)
         logging.info("Embedding worker handler initialized")
 
     def cleanup(self):

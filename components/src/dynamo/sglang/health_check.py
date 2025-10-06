@@ -8,21 +8,23 @@ This module defines the default health check payload for sglang backends.
 """
 
 import logging
+from typing import Optional
+
+import sglang as sgl
 
 from dynamo.health_check import HealthCheckPayload
 
 logger = logging.getLogger(__name__)
 
 
-def _get_bos_token_id_from_engine(engine) -> int:
-    """
-    Extract BOS token ID from the SGLang engine's tokenizer if available.
+def _get_bos_token_id_from_engine(engine: Optional[sgl.Engine]) -> int:
+    """Extract BOS token ID from the SGLang engine's tokenizer.
 
     Args:
-        engine: SGLang Engine instance
+        engine: SGLang Engine instance.
 
     Returns:
-        BOS token ID from the model's tokenizer, or 1 as fallback
+        BOS token ID from the model's tokenizer, or 1 as fallback.
     """
     if engine is None:
         return 1
@@ -46,21 +48,16 @@ def _get_bos_token_id_from_engine(engine) -> int:
 
 
 class SglangHealthCheckPayload(HealthCheckPayload):
-    """
-    sglang-specific health check payload.
+    """SGLang-specific health check payload for decode workers.
 
-    Provides sglang defaults and inherits environment override support from base class.
+    Provides SGLang defaults and inherits environment override support from base class.
     """
 
-    def __init__(self, engine=None):
-        """
-        Initialize sglang health check payload with sglang-specific defaults.
+    def __init__(self, engine: Optional[sgl.Engine] = None) -> None:
+        """Initialize SGLang health check payload with model-specific BOS token.
 
         Args:
             engine: Optional SGLang Engine instance to extract BOS token from.
-                    If provided, will attempt to use the model's actual BOS token.
-
-        The format matches what DecodeWorkerHandler expects from the frontend.
         """
         bos_token_id = _get_bos_token_id_from_engine(engine)
 
@@ -82,19 +79,16 @@ class SglangHealthCheckPayload(HealthCheckPayload):
 
 
 class SglangPrefillHealthCheckPayload(HealthCheckPayload):
-    """
-    SGLang-specific health check payload for prefill workers in disaggregated mode.
+    """SGLang-specific health check payload for prefill workers in disaggregated mode.
 
     The prefill handler expects a wrapped structure with 'request' and 'sampling_params'.
     """
 
-    def __init__(self, engine=None):
-        """
-        Initialize SGLang prefill health check payload with proper wrapped structure.
+    def __init__(self, engine: Optional[sgl.Engine] = None) -> None:
+        """Initialize SGLang prefill health check payload with proper wrapped structure.
 
         Args:
             engine: Optional SGLang Engine instance to extract BOS token from.
-                    If provided, will attempt to use the model's actual BOS token.
         """
         bos_token_id = _get_bos_token_id_from_engine(engine)
 
