@@ -28,9 +28,7 @@ if TYPE_CHECKING:
 #     KvConnectorWorker as RustKvConnectorWorker,
 # )
 
-from dynamo.llm.vllm_integration.kv_cache_utils import (
-    find_and_set_available_port_from_env,
-)
+from dynamo.llm.utils import find_and_set_available_port_from_env
 from dynamo.llm.vllm_integration.rust import KvConnectorWorker as RustKvConnectorWorker
 from dynamo.runtime import DistributedRuntime
 

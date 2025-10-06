@@ -331,7 +331,7 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_model(&self.inner.model)?;
         // none for store
         validate::validate_reasoning_effort(&self.inner.reasoning_effort)?;
-        validate::validate_metadata(&self.inner.metadata)?;
+        // none for metadata
         validate::validate_frequency_penalty(self.inner.frequency_penalty)?;
         validate::validate_logit_bias(&self.inner.logit_bias)?;
         // none for logprobs

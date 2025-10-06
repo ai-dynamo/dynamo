@@ -729,7 +729,7 @@ func GenerateBasePodSpec(
 			}
 		}
 	}
-	container.Env = MergeEnvs(component.Envs, container.Env)
+	container.Env = MergeEnvs(container.Env, component.Envs)
 
 	// Merge probes entirely if they are passed (no partial merge)
 	if component.LivenessProbe != nil {
@@ -780,19 +780,38 @@ func GenerateBasePodSpec(
 
 	addStandardEnvVars(&container, controllerConfig)
 
-	var volumes []corev1.Volume
-	if component.PVC != nil {
+	volumes := make([]corev1.Volume, 0, len(component.VolumeMounts)+1) // +1 for shared memory volume
+
+	for _, volumeMount := range component.VolumeMounts {
+		if volumeMount.Name == "" {
+			return nil, fmt.Errorf("volumeMount.name is required when volumeMounts is set")
+		}
+
+		// Determine mount point
+		mountPoint := volumeMount.MountPoint
+		if volumeMount.UseAsCompilationCache && mountPoint == "" {
+			// Use backend-specific default for compilation cache
+			defaultMountPoint := getDefaultCompilationCacheMountPoint(backendFramework)
+			if defaultMountPoint == "" {
+				return nil, fmt.Errorf("volumeMount with useAsCompilationCache=true requires an explicit mountPoint for backend framework %s (no default available)", backendFramework)
+			}
+			mountPoint = defaultMountPoint
+		} else if !volumeMount.UseAsCompilationCache && mountPoint == "" {
+			return nil, fmt.Errorf("volumeMount.mountPoint is required when useAsCompilationCache is false")
+		}
+
 		volumes = append(volumes, corev1.Volume{
-			Name: *component.PVC.Name,
+			Name: volumeMount.Name,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: *component.PVC.Name,
+					ClaimName: volumeMount.Name,
 				},
 			},
 		})
+
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-			Name:      *component.PVC.Name,
-			MountPath: *component.PVC.MountPoint,
+			Name:      volumeMount.Name,
+			MountPath: mountPoint,
 		})
 	}
 	if shmVol, shmMount := generateSharedMemoryVolumeAndMount(component.SharedMemory); shmVol != nil && shmMount != nil {
@@ -989,8 +1008,14 @@ func generateLabels(component *v1alpha1.DynamoComponentDeploymentOverridesSpec, 
 	labels := make(map[string]string)
 	labels[commonconsts.KubeLabelDynamoSelector] = GetDynamoComponentName(dynamoDeployment, componentName)
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
+	if component.DynamoNamespace != nil {
+		labels[commonconsts.KubeLabelDynamoNamespace] = *component.DynamoNamespace
+	}
 	if component.ComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoComponentType] = component.ComponentType
+	}
+	if component.SubComponentType != "" {
+		labels[commonconsts.KubeLabelDynamoSubComponentType] = component.SubComponentType
 	}
 	setMetricsLabels(labels, dynamoDeployment)
 	if component.Labels != nil {
@@ -1151,8 +1176,8 @@ func ConvertDynamoComponentDeploymentToSpec(dynComponent *v1alpha1.DynamoCompone
 	}
 }
 
-// getBackendFrameworkFromDynamoComponent determines backend framework for a DynamoComponentDeployment
-func getBackendFrameworkFromDynamoComponent(dynComponent *v1alpha1.DynamoComponentDeployment) (BackendFramework, error) {
+// GetBackendFrameworkFromDynamoComponent determines backend framework for a DynamoComponentDeployment
+func GetBackendFrameworkFromDynamoComponent(dynComponent *v1alpha1.DynamoComponentDeployment) (BackendFramework, error) {
 	// Extract command/args from component
 	var command, args []string
 	if dynComponent.Spec.ExtraPodSpec != nil && dynComponent.Spec.ExtraPodSpec.MainContainer != nil {
@@ -1186,7 +1211,7 @@ func GenerateBasePodSpecForController(
 	numberOfNodes := componentSpec.GetNumberOfNodes()
 
 	// Determine backend framework using hybrid approach
-	backendFramework, err := getBackendFrameworkFromDynamoComponent(dynComponent)
+	backendFramework, err := GetBackendFrameworkFromDynamoComponent(dynComponent)
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine backend framework: %w", err)
 	}
@@ -1211,6 +1236,21 @@ func GenerateBasePodSpecForController(
 	}
 
 	return podSpec, nil
+}
+
+// getDefaultCompilationCacheMountPoint returns the default mount point for compilation cache based on backend framework
+func getDefaultCompilationCacheMountPoint(backendFramework BackendFramework) string {
+	switch backendFramework {
+	case BackendFrameworkVLLM:
+		return commonconsts.DefaultVLLMCacheMountPoint
+	case BackendFrameworkSGLang, BackendFrameworkTRTLLM:
+		// SGLang and TensorRT-LLM don't currently support compilation caches
+		// Return empty string as these should not be used
+		return ""
+	default:
+		// For unknown backends, don't assume compilation cache support
+		return ""
+	}
 }
 
 func generateSharedMemoryVolumeAndMount(spec *v1alpha1.SharedMemorySpec) (*corev1.Volume, *corev1.VolumeMount) {

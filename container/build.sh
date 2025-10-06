@@ -332,6 +332,15 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
+
+        --vllm-max-jobs)
+            if [ "$2" ]; then
+                MAX_JOBS=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
          -?*)
             error 'ERROR: Unknown option: ' "$1"
             ;;
@@ -635,6 +644,7 @@ check_wheel_file() {
 }
 
 if [[ $FRAMEWORK == "TRTLLM" ]]; then
+    BUILD_ARGS+=" --build-arg GITHUB_TRTLLM_COMMIT=${TRTLLM_COMMIT}"
     if [ "$USE_DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT" = true ]; then
         if [ -n "$TRTLLM_COMMIT" ] || [ -n "$TENSORRTLLM_PIP_WHEEL" ]; then
             echo "ERROR: When using --use-default-experimental-trtllm-commit, do not set --tensorrtllm-commit or --tensorrtllm-pip-wheel."
@@ -705,6 +715,10 @@ fi
 
 if [ -n "${NIXL_UCX_REF}" ]; then
     BUILD_ARGS+=" --build-arg NIXL_UCX_REF=${NIXL_UCX_REF} "
+fi
+
+if [ -n "${MAX_JOBS}" ]; then
+    BUILD_ARGS+=" --build-arg MAX_JOBS=${MAX_JOBS} "
 fi
 
 # Add sccache build arguments

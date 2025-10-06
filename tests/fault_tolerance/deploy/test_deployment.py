@@ -31,7 +31,7 @@ def _clients(
     input_token_length,
     output_token_length,
     max_retries,
-    max_request_rate,
+    retry_delay=5,  # Default 5 seconds between retries
 ):
     procs = []
     ctx = multiprocessing.get_context("spawn")
@@ -49,7 +49,7 @@ def _clients(
                     input_token_length,
                     output_token_length,
                     max_retries,
-                    max_request_rate,
+                    retry_delay,
                 ),
             )
         )
@@ -153,6 +153,15 @@ async def test_fault_scenario(
                 model = scenario.deployment["VllmDecodeWorker"].model
             elif scenario.backend == "sglang":
                 model = scenario.deployment["decode"].model
+            elif scenario.backend == "trtllm":
+                # Determine deployment type from scenario deployment name
+                if (
+                    "agg" in scenario.deployment.name
+                    and "disagg" not in scenario.deployment.name
+                ):
+                    model = scenario.deployment["TRTLLMWorker"].model
+                else:
+                    model = scenario.deployment["TRTLLMDecodeWorker"].model
             else:
                 model = None
         except (KeyError, AttributeError):
@@ -178,6 +187,5 @@ async def test_fault_scenario(
             scenario.load.input_token_length,
             scenario.load.output_token_length,
             scenario.load.max_retries,
-            scenario.load.max_request_rate,
         ):
             _inject_failures(scenario.failures, logger, deployment)

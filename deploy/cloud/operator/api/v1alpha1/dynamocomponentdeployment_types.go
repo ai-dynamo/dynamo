@@ -73,6 +73,9 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// ComponentType indicates the role of this component (for example, "main").
 	ComponentType string `json:"componentType,omitempty"`
 
+	// SubComponentType indicates the sub-role of this component (for example, "prefill").
+	SubComponentType string `json:"subComponentType,omitempty"`
+
 	// Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive)
 	DynamoNamespace *string `json:"dynamoNamespace,omitempty"`
 
@@ -86,8 +89,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// EnvFromSecret references a Secret whose key/value pairs will be exposed as
 	// environment variables in the component containers.
 	EnvFromSecret *string `json:"envFromSecret,omitempty"`
-	// PVC config describing volumes to be mounted by the component.
-	PVC *PVC `json:"pvc,omitempty"`
+	// VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component.
+	VolumeMounts []VolumeMount `json:"volumeMounts,omitempty"`
 
 	// Ingress config to expose the component outside the cluster (or through a service mesh).
 	Ingress *IngressSpec `json:"ingress,omitempty"`

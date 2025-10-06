@@ -30,6 +30,9 @@ kind: DynamoGraphDeployment
 metadata:
   name: llm-agg
 spec:
+  pvcs:
+    - name: vllm-model-storage
+      size: 100Gi
   services:
     Frontend:
       replicas: 1
@@ -47,10 +50,9 @@ spec:
       - name: SPECIFIC_ENV_VAR
         value: some_specific_value
       # Add PVC for model storage
-      pvc:
-        name: vllm-model-storage
-        mountPath: /models
-        size: 100Gi
+      volumeMounts:
+        - name: vllm-model-storage
+          mountPoint: /models
 ```
 
 Commit and push this file to your Git repository. FluxCD will detect the new CR and create the initial Dynamo deployment in your cluster.

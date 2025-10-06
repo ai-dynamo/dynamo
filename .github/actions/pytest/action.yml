@@ -8,6 +8,10 @@ inputs:
   image_tag:
     description: 'Image Tag to run tests on'
     required: true
+  cpu_limit:
+    description: 'Maximum number of cores available to docker'
+    required: false
+    default: '10'
 
 
 runs:
@@ -16,11 +20,13 @@ runs:
     - name: Run tests
       shell: bash
       env:
+        NUM_CPUS: ${{ inputs.cpu_limit }}
         CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
         PYTEST_XML_FILE: pytest_test_report.xml
         HF_HOME: /runner/_work/_temp
       run: |
         docker run --runtime=nvidia --rm --gpus all -w /workspace \
+          --cpus=${NUM_CPUS} \
           --network host \
           --name ${{ env.CONTAINER_ID }}_pytest \
           ${{ inputs.image_tag }} \

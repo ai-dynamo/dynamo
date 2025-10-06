@@ -55,6 +55,7 @@ mod http;
 mod llm;
 mod parsers;
 mod planner;
+mod prometheus_names;
 
 type JsonServerStreamingIngress =
     Ingress<SingleIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
@@ -165,7 +166,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::ZmqKvEventPublisherConfig>()?;
     m.add_class::<llm::kv::KvRecorder>()?;
     m.add_class::<http::HttpService>()?;
-    m.add_class::<http::HttpError>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
     m.add_class::<context::Context>()?;
     m.add_class::<ModelType>()?;
@@ -174,16 +174,17 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::WorkerStats>()?;
     m.add_class::<llm::kv::KvStats>()?;
     m.add_class::<llm::kv::SpecDecodeStats>()?;
-    m.add_class::<llm::kv::KvRouter>()?;
     m.add_class::<llm::kv::KvPushRouter>()?;
     m.add_class::<llm::kv::KvPushRouterStream>()?;
     m.add_class::<RouterMode>()?;
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<planner::VirtualConnectorCoordinator>()?;
     m.add_class::<planner::VirtualConnectorClient>()?;
     m.add_class::<planner::PlannerDecision>()?;
 
     engine::add_to_module(m)?;
     parsers::add_to_module(m)?;
+    prometheus_names::add_to_module(m)?;
 
     #[cfg(feature = "block-manager")]
     llm::block_manager::add_to_module(m)?;
@@ -571,6 +572,11 @@ impl DistributedRuntime {
 
     fn event_loop(&self) -> PyObject {
         self.event_loop.clone()
+    }
+
+    fn child_token(&self) -> CancellationToken {
+        let inner = self.inner.runtime().child_token();
+        CancellationToken { inner }
     }
 }
 
