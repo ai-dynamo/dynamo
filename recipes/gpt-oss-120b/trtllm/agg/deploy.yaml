@@ -3,16 +3,42 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: gpt-oss-agg-shm
+  name: gpt-oss-agg
 spec:
   backendFramework: trtllm
   pvcs:
     - name: model-cache-oss-gpt120b
       create: false
   services:
+    Frontend:
+      componentType: frontend
+      dynamoNamespace: gpt-oss-agg
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - gpt-oss-agg-frontend
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          args:
+          - python3 -m dynamo.frontend --router-mode round-robin --http-port 8000
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.1-rc0.pre3
+      pvc:
+        create: false
+        mountPoint: /model-store
+        name: model-cache
+      replicas: 18
     TrtllmWorker:
       componentType: main
-      dynamoNamespace: gpt-oss-agg-shm
+      dynamoNamespace: gpt-oss-agg
       envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache-oss-gpt120b
@@ -20,47 +46,55 @@ spec:
       sharedMemory:
         size: 80Gi
       extraPodSpec:
-        tolerations:
-          - key: "dedicated"
-            operator: "Equal"
-            value: "user-workload"
-            effect: "NoSchedule"
-          - key: "dedicated"
-            operator: "Equal"
-            value: "user-workload"
-            effect: "NoExecute"
         affinity:
           nodeAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
               nodeSelectorTerms:
-                - matchExpressions:
-                    - key: nvidia.com/gpu.present
-                      operator: In
-                      values:
-                        - "true"
+              - matchExpressions:
+                - key: nvidia.com/gpu.present
+                  operator: In
+                  values:
+                  - "true"
         mainContainer:
           args:
           - |
-            export TRTLLM_ENABLE_PDL=1
-            export TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL=True
-            export ENGINE_ARGS=${AGG_ENGINE_ARGS:-"/root/.cache/huggingface/gpt-oss-120b/config.yaml"}
-            export MODEL_PATH=${MODEL_PATH:-"/root/.cache/huggingface/models--openai--gpt-oss-120b/snapshots/b5c939de8f754692c1647ca79fbf85e8c1e70f8a"}
-            export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"openai/gpt-oss-120b"}
-            trap 'echo Cleaning up...; kill 0' EXIT
-            python3 -m dynamo.frontend --router-mode round-robin --http-port 8000 &
             python3 -m dynamo.trtllm \
-              --model-path "$MODEL_PATH" \
-              --served-model-name "$SERVED_MODEL_NAME" \
-              --extra-engine-args "$ENGINE_ARGS" \
-              --max-num-tokens 20000 \
-              --max-batch-size 640 \
+              --model-path "${MODEL_PATH}" \
+              --served-model-name "openai/gpt-oss-120b" \
+              --extra-engine-args "${ENGINE_ARGS}" \
+              --tensor-parallel-size 4 \
+              --expert-parallel-size 4 \
+              --max-batch-size 800 \
               --free-gpu-memory-fraction 0.9
           command:
           - /bin/sh
           - -c
-          image: my-registry/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.1-rc0.pre3
+          env:
+          - name: TRTLLM_ENABLE_PDL
+            value: "1"
+          - name: TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL
+            value: "True"
+          - name: SERVED_MODEL_NAME
+            value: "openai/gpt-oss-120b"
+          - name: ENGINE_ARGS
+            value: "/opt/dynamo/configs/config.yaml"
+          - name: MODEL_PATH
+            value: "/model-store/models--openai--gpt-oss-120b/snapshots/b5c939de8f754692c1647ca79fbf85e8c1e70f8a"
+          volumeMounts:
+          - mountPath: /opt/dynamo/configs
+            name: llm-config
+            readOnly: true
           workingDir: /workspace/components/backends/trtllm
-      replicas: 1
+        volumes:
+        - configMap:
+            name: llm-config
+          name: llm-config
+      pvc:
+        create: false
+        mountPoint: /model-store
+        name: model-cache
+      replicas: 18
       resources:
         limits:
           gpu: "4"
