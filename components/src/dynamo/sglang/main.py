@@ -268,9 +268,7 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
             .endpoint("generate")
             .client()
         )
-        handler = MultimodalWorkerHandler(
-            component, engine, config, None, None, prefill_client
-        )
+        handler = MultimodalWorkerHandler(component, engine, config, prefill_client)
     else:
         handler = MultimodalWorkerHandler(component, engine, config)
 

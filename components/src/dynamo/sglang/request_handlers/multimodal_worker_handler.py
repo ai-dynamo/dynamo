@@ -11,7 +11,6 @@ import torch
 
 import dynamo.nixl_connect as connect
 from dynamo._core import Client, Component
-from dynamo.llm import WorkerMetricsPublisher, ZmqKvEventPublisher
 from dynamo.sglang.args import Config, DisaggregationMode
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.utils.multimodal_protocol import (
@@ -242,13 +241,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
         component: Component,
         engine: sgl.Engine,
         config: Config,
-        metrics_publisher: WorkerMetricsPublisher = None,
-        kv_publisher: ZmqKvEventPublisher = None,
         prefill_client: Client = None,
     ):
-        super().__init__(
-            component, engine, config, metrics_publisher, kv_publisher, prefill_client
-        )
+        super().__init__(component, engine, config, None, prefill_client)
 
         # Initialize processors
         self.embeddings_processor = EmbeddingsProcessor()
