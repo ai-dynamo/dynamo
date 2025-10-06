@@ -13,7 +13,6 @@ from typing import Any, Dict, Optional, Tuple
 import pytest
 import requests
 
-from tests.fault_tolerance.test_request_migration import DynamoFrontendProcess
 from tests.utils.constants import GPT_OSS
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
@@ -21,6 +20,29 @@ from tests.utils.payloads import check_models_api
 logger = logging.getLogger(__name__)
 
 REASONING_TEST_MODEL = GPT_OSS
+
+class DynamoFrontendProcess(ManagedProcess):
+    """Process manager for Dynamo frontend"""
+
+    def __init__(self, request):
+        command = ["python", "-m", "dynamo.frontend", "--router-mode", "round-robin"]
+
+        log_dir = f"{request.node.name}_frontend"
+
+        # Clean up any existing log directory from previous runs
+        try:
+            shutil.rmtree(log_dir)
+            logger.info(f"Cleaned up existing log directory: {log_dir}")
+        except FileNotFoundError:
+            # Directory doesn't exist, which is fine
+            pass
+
+        super().__init__(
+            command=command,
+            display_output=True,
+            terminate_existing=True,
+            log_dir=log_dir,
+        )
 
 
 class GPTOSSWorkerProcess(ManagedProcess):
