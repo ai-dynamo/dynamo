@@ -29,18 +29,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":1,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -57,18 +47,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":2,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -85,18 +65,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":3,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -113,18 +83,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":4,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -141,18 +101,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":5,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -169,18 +119,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":6,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -197,18 +137,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":7,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -225,18 +155,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":8,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -253,18 +173,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":9,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -281,18 +191,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":10,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -309,18 +209,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":11,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -337,18 +227,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":12,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -365,18 +245,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":13,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -393,18 +263,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":14,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -421,18 +281,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":15,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -449,18 +299,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":16,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -477,18 +317,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":17,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -505,18 +335,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":18,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -533,18 +353,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":19,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -561,18 +371,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":20,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -589,18 +389,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":21,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -617,18 +407,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":22,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -645,18 +425,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":23,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -673,18 +443,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":24,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -701,18 +461,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":25,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -729,18 +479,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":26,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -757,18 +497,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":27,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -785,18 +515,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":28,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -813,18 +533,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":29,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -841,18 +551,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":30,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -869,18 +569,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":31,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -897,18 +587,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":32,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -925,18 +605,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":33,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -953,18 +623,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":34,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -981,18 +641,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":35,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1009,18 +659,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":36,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1037,18 +677,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":37,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1065,18 +695,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":38,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1093,18 +713,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":39,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1121,18 +731,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":40,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1149,18 +749,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":41,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1177,18 +767,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":42,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1205,18 +785,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":43,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1233,18 +803,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":44,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1262,18 +822,8 @@
             },
             "finish_reason": "stop"
           }
-        ],
-        "created": 1759523954,
-        "model": "openai/gpt-oss-20b",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":155,\"output_tokens\":45,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     }
   ]
 }

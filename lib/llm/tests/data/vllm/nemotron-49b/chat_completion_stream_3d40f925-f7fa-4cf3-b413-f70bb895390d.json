@@ -29,18 +29,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":1,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -57,18 +47,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":2,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -85,18 +65,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":3,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -113,18 +83,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":4,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -141,18 +101,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":5,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -169,18 +119,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":6,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -197,18 +137,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":7,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -225,18 +155,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":8,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -253,18 +173,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":9,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -281,18 +191,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":10,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -309,18 +209,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":11,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -337,18 +227,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":12,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -365,18 +245,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":13,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -393,18 +263,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":14,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -421,18 +281,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":15,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -449,18 +299,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":16,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -477,18 +317,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":17,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -505,18 +335,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":18,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -533,18 +353,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":19,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -561,18 +371,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":20,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -589,18 +389,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":21,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -617,18 +407,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":22,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -645,18 +425,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":23,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -673,18 +443,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":24,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -701,18 +461,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":25,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -729,18 +479,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":26,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -757,18 +497,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":27,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -785,18 +515,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":28,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -813,18 +533,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":29,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -841,18 +551,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":30,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -869,18 +569,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":31,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -897,18 +587,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":32,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -925,18 +605,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":33,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -953,18 +623,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":34,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -981,18 +641,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":35,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1009,18 +659,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":36,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1037,18 +677,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":37,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1065,18 +695,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":38,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1093,18 +713,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":39,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1121,18 +731,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":40,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1149,18 +749,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":41,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1177,18 +767,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":42,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1205,18 +785,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":43,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1233,18 +803,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":44,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1261,18 +821,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":45,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1289,18 +839,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":46,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1317,18 +857,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":47,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1345,18 +875,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":48,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1373,18 +893,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":49,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1401,18 +911,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":50,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1429,18 +929,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":51,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1457,18 +947,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":52,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1485,18 +965,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":53,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1513,18 +983,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":54,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1541,18 +1001,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":55,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1569,18 +1019,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":56,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1597,18 +1037,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":57,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1625,18 +1055,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":58,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1653,18 +1073,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":59,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1681,18 +1091,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":60,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1709,18 +1109,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":61,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1737,18 +1127,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":62,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1765,18 +1145,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":63,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1793,18 +1163,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":64,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1821,18 +1181,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":65,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1849,18 +1199,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":66,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1877,18 +1217,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":67,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1905,18 +1235,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":68,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1933,18 +1253,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":69,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1961,18 +1271,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":70,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -1989,18 +1289,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":71,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2017,18 +1307,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":72,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2045,18 +1325,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":73,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2073,18 +1343,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":74,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2101,18 +1361,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":75,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2129,18 +1379,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":76,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2157,18 +1397,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":77,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2185,18 +1415,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":78,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2213,18 +1433,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":79,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2241,18 +1451,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":80,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2269,18 +1469,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":81,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2297,18 +1487,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":82,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2325,18 +1505,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":83,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2353,18 +1523,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":84,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2381,18 +1541,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":85,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2409,18 +1559,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":86,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2437,18 +1577,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":87,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2465,18 +1595,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":88,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2493,18 +1613,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":89,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2521,18 +1631,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":90,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2549,18 +1649,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":91,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2577,18 +1667,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":92,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2605,18 +1685,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":93,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2633,18 +1703,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":94,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2661,18 +1721,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":95,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2689,18 +1739,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":96,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2717,18 +1757,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":97,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2745,18 +1775,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":98,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2773,18 +1793,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":99,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2801,18 +1811,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":100,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2829,18 +1829,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":101,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2857,18 +1847,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":102,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2885,18 +1865,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":103,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2913,18 +1883,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":104,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2941,18 +1901,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":105,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2969,18 +1919,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":106,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -2997,18 +1937,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":107,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3025,18 +1955,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":108,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3053,18 +1973,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":109,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3081,18 +1991,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":110,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3109,18 +2009,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":111,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3137,18 +2027,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":112,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3165,18 +2045,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":113,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3193,18 +2063,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":114,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3221,18 +2081,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":115,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3249,18 +2099,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":116,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3277,18 +2117,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":117,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3305,18 +2135,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":118,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3333,18 +2153,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":119,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3361,18 +2171,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":120,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3389,18 +2189,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":121,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3417,18 +2207,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":122,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3445,18 +2225,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":123,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3473,18 +2243,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":124,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3501,18 +2261,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":125,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3529,18 +2279,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":126,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3557,18 +2297,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":127,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3585,18 +2315,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":128,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3613,18 +2333,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":129,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3641,18 +2351,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":130,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3669,18 +2369,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":131,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3697,18 +2387,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":132,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3725,18 +2405,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":133,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3753,18 +2423,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":134,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3781,18 +2441,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":135,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3809,18 +2459,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":136,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3837,18 +2477,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":137,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3865,18 +2495,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":138,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3893,18 +2513,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":139,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3921,18 +2531,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":140,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3949,18 +2549,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":141,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -3977,18 +2567,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":142,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4005,18 +2585,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":143,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4033,18 +2603,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":144,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4061,18 +2621,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":145,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4089,18 +2639,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":146,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4117,18 +2657,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":147,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4145,18 +2675,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":148,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4173,18 +2693,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":149,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4201,18 +2711,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":150,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4229,18 +2729,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":151,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4257,18 +2747,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":152,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4285,18 +2765,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":153,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4313,18 +2783,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":154,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4341,18 +2801,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":155,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4369,18 +2819,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":156,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4397,18 +2837,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":157,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4425,18 +2855,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":158,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4453,18 +2873,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":159,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4481,18 +2891,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":160,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4509,18 +2909,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":161,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4537,18 +2927,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":162,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4565,18 +2945,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":163,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4593,18 +2963,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":164,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4621,18 +2981,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":165,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4649,18 +2999,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":166,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4677,18 +3017,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":167,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4705,18 +3035,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":168,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4733,18 +3053,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":169,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4761,18 +3071,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":170,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4789,18 +3089,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":171,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4817,18 +3107,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":172,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4845,18 +3125,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":173,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4873,18 +3143,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":174,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4901,18 +3161,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":175,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4929,18 +3179,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":176,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4957,18 +3197,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":177,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -4985,18 +3215,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":178,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5013,18 +3233,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":179,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5041,18 +3251,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":180,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5069,18 +3269,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":181,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5097,18 +3287,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":182,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5125,18 +3305,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":183,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5153,18 +3323,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":184,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5181,18 +3341,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":185,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5209,18 +3359,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":186,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5237,18 +3377,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":187,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5265,18 +3395,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":188,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5293,18 +3413,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":189,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5321,18 +3431,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":190,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5349,18 +3449,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":191,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5377,18 +3467,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":192,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5405,18 +3485,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":193,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5433,18 +3503,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":194,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5461,18 +3521,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":195,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5489,18 +3539,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":196,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5517,18 +3557,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":197,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5545,18 +3575,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":198,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5573,18 +3593,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":199,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5601,18 +3611,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":200,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5629,18 +3629,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":201,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5657,18 +3647,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":202,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5685,18 +3665,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":203,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5713,18 +3683,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":204,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5741,18 +3701,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":205,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5769,18 +3719,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":206,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5797,18 +3737,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":207,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5825,18 +3755,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":208,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5853,18 +3773,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":209,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5881,18 +3791,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":210,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5909,18 +3809,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":211,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5937,18 +3827,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":212,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5965,18 +3845,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":213,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -5993,18 +3863,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":214,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6021,18 +3881,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":215,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6049,18 +3899,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":216,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6077,18 +3917,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":217,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6105,18 +3935,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":218,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6133,18 +3953,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":219,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6161,18 +3971,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":220,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6189,18 +3989,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":221,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6217,18 +4007,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":222,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6245,18 +4025,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":223,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6273,18 +4043,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":224,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6301,18 +4061,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":225,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6329,18 +4079,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":226,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6357,18 +4097,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":227,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6385,18 +4115,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":228,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6413,18 +4133,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":229,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6441,18 +4151,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":230,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6469,18 +4169,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":231,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6497,18 +4187,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":232,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6525,18 +4205,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":233,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6553,18 +4223,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":234,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6581,18 +4241,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":235,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6609,18 +4259,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":236,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6637,18 +4277,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":237,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6665,18 +4295,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":238,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6693,18 +4313,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":239,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6721,18 +4331,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":240,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6749,18 +4349,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":241,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6777,18 +4367,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":242,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6805,18 +4385,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":243,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6833,18 +4403,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":244,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6861,18 +4421,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":245,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6889,18 +4439,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":246,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6917,18 +4457,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":247,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6945,18 +4475,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":248,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -6973,18 +4493,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":249,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7001,18 +4511,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":250,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7029,18 +4529,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":251,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7057,18 +4547,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":252,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7085,18 +4565,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":253,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7113,18 +4583,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":254,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7141,18 +4601,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":255,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7169,18 +4619,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":256,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7197,18 +4637,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":257,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7225,18 +4655,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":258,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7253,18 +4673,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":259,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7281,18 +4691,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":260,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7309,18 +4709,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":261,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7337,18 +4727,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":262,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7365,18 +4745,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":263,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7393,18 +4763,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":264,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7421,18 +4781,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":265,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7449,18 +4799,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":266,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7477,18 +4817,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":267,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7505,18 +4835,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":268,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7533,18 +4853,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":269,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7561,18 +4871,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":270,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7589,18 +4889,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":271,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7617,18 +4907,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":272,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7645,18 +4925,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":273,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7673,18 +4943,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":274,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7701,18 +4961,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":275,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7729,18 +4979,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":276,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7757,18 +4997,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":277,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7785,18 +5015,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":278,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7813,18 +5033,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":279,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7841,18 +5051,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":280,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7869,18 +5069,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":281,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7897,18 +5087,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":282,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7925,18 +5105,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":283,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7953,18 +5123,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":284,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -7981,18 +5141,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":285,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -8009,18 +5159,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":286,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -8037,18 +5177,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":287,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -8065,18 +5195,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":288,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -8093,18 +5213,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":289,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -8121,18 +5231,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":290,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -8149,18 +5249,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":291,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -8177,18 +5267,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":292,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -8205,18 +5285,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":293,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -8233,18 +5303,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":294,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -8261,18 +5321,8 @@
               "reasoning_content": null
             }
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":295,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     },
     {
       "data": {
@@ -8290,18 +5340,8 @@
             },
             "finish_reason": "stop"
           }
-        ],
-        "created": 1759528399,
-        "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
-        "service_tier": null,
-        "system_fingerprint": null,
-        "object": "chat.completion.chunk",
-        "usage": null
-      },
-      "event": "llm_metrics",
-      "comment": [
-        "{\"input_tokens\":258,\"output_tokens\":296,\"chunk_tokens\":1}"
-      ]
+        ]
+      }
     }
   ]
 }
