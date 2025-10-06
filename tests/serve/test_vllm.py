@@ -169,6 +169,7 @@ vllm_configs = {
                 ],
                 repeat_count=1,
                 expected_response=["rabbit"],
+                temperature=0.7,
             )
         ],
     ),
