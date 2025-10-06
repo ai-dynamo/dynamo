@@ -43,7 +43,7 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         elif isinstance(embedding_request.input, list):
             prompt = embedding_request.input
         else:
-            raise ValueError(f"Invalid input type: {type(embedding_request.input)}")
+            raise TypeError(f"Invalid input type: {type(embedding_request.input)}")
 
         result = await self.engine.async_encode(prompt=prompt)
 
@@ -67,7 +67,7 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
                     "index": idx,
                 }
             )
-            prompt_tokens += ret_item["meta_info"]["prompt_tokens"]
+            prompt_tokens += ret_item.get("meta_info", {}).get("prompt_tokens", 0)
 
         return {
             "object": "list",

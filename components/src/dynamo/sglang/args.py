@@ -210,7 +210,7 @@ def parse_args(args: list[str]) -> Config:
     # If --embedding-worker is set, also set SGLang's --is-embedding flag
     if parsed_args.embedding_worker:
         parsed_args.is_embedding = True
-    
+
     endpoint = parsed_args.endpoint
     if endpoint is None:
         if parsed_args.embedding_worker:
