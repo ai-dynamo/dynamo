@@ -106,7 +106,7 @@ class DynamoSglangPublisher:
         logging.info("Sending dummy metrics to initialize")
         self.metrics_publisher.publish(metrics)
 
-    async def init_kv_event_publish(self) -> Optional[ZmqKvEventPublisher]:
+    def init_kv_event_publish(self) -> Optional[ZmqKvEventPublisher]:
         """Initialize KV event publisher if configured.
 
         Returns:
@@ -118,7 +118,7 @@ class DynamoSglangPublisher:
             ep = kv_events.get("endpoint")
             zmq_ep = ep.replace("*", get_ip()) if ep else None
 
-            lease_id = await self.generate_endpoint.lease_id()
+            lease_id = self.generate_endpoint.lease_id()
 
             zmq_config = ZmqKvEventPublisherConfig(
                 worker_id=lease_id,
@@ -215,7 +215,7 @@ async def setup_sgl_metrics(
         engine, config, component, generate_endpoint, metrics_labels
     )
     publisher.init_engine_metrics_publish()
-    await publisher.init_kv_event_publish()
+    publisher.init_kv_event_publish()
 
     task = asyncio.create_task(publisher.run())
     logging.info("SGLang metrics loop started")

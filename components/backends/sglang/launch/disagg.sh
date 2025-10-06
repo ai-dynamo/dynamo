@@ -24,7 +24,7 @@ python3 -m dynamo.sglang \
   --served-model-name Qwen/Qwen3-0.6B \
   --page-size 16 \
   --tp 1 \
-  --trust-remote-code \
+  --trust-remote-code --use-sglang-tokenizer \
   --disaggregation-mode prefill \
   --disaggregation-bootstrap-port 12345 \
   --host 0.0.0.0 \
@@ -37,7 +37,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --served-model-name Qwen/Qwen3-0.6B \
   --page-size 16 \
   --tp 1 \
-  --trust-remote-code \
+  --trust-remote-code --use-sglang-tokenizer \
   --disaggregation-mode decode \
   --disaggregation-bootstrap-port 12345 \
   --host 0.0.0.0 \
