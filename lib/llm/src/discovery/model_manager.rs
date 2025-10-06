@@ -392,6 +392,8 @@ impl<E> ModelEngines<E> {
         self.engines.keys().map(|k| k.to_owned()).collect()
     }
 
+    /// Returns a newly allocated String for called convenience. All the places I use
+    /// this I need a String.
     pub fn checksum(&self, model: &str) -> Option<String> {
         self.checksums.get(model).map(|s| s.to_string())
     }

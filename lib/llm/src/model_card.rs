@@ -280,9 +280,7 @@ impl ModelDeploymentCard {
 
                 // TODO: Do we want any of user_data or runtime_config?
 
-                let hash = blake3::hash(&bytes_to_hash).to_string();
-                tracing::debug!("mdcsum: {hash} of {} bytes", bytes_to_hash.len()); // TEMP
-                hash
+                blake3::hash(&bytes_to_hash).to_string()
             })
             .as_ref()
     }

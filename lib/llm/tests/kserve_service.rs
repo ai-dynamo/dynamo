@@ -288,16 +288,15 @@ pub mod kserve_test {
             .unwrap();
         let _ = manager.save_model_card("split", card.clone());
 
+        let mut card = ModelDeploymentCard::with_name_only("failure");
+        card.model_type = ModelType::Completions | ModelType::Chat;
+        card.model_input = ModelInput::Text;
         manager
             .add_chat_completions_model("failure", card.mdcsum(), failure.clone())
             .unwrap();
         manager
             .add_completions_model("failure", card.mdcsum(), failure.clone())
             .unwrap();
-
-        let mut card = ModelDeploymentCard::with_name_only("failure");
-        card.model_type = ModelType::Completions | ModelType::Chat;
-        card.model_input = ModelInput::Text;
         let _ = manager.save_model_card("failure", card);
 
         let mut card = ModelDeploymentCard::with_name_only("long_running");
