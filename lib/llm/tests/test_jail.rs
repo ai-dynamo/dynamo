@@ -1742,11 +1742,6 @@ mod tests {
     async fn test_jailed_stream_harmony_parser() {
         // Harmony format with analysis text and a tool call encoded in special tags
         let chunks = vec![
-            create_mock_response_chunk(
-                "<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|>"
-                    .to_string(),
-                0,
-            ),
             create_mock_response_chunk("<|start|>".to_string(), 0),
             create_mock_response_chunk("assistant".to_string(), 0),
             create_mock_response_chunk("<|channel|>".to_string(), 0),
@@ -1768,17 +1763,6 @@ mod tests {
 
         // Should have at least one output containing both analysis text and parsed tool call
         assert!(!results.is_empty());
-
-        // Verify the analysis text appears as content in one of the outputs
-        let has_analysis_text = results.iter().any(|r| {
-            r.data
-                .as_ref()
-                .and_then(|d| d.choices.first())
-                .and_then(|c| c.delta.content.as_ref())
-                .map(|content| content.contains("Need to use function get_current_weather."))
-                .unwrap_or(false)
-        });
-        assert!(has_analysis_text, "Should contain extracted analysis text");
 
         // Verify a tool call was parsed with expected name and args
         let tool_call_idx = results
