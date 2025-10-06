@@ -3,6 +3,9 @@
 
 from .decode_handler import DecodeWorkerHandler
 
+# Embedding handlers
+from .embedding_handler import EmbeddingWorkerHandler
+
 # Base handlers
 from .handler_base import BaseWorkerHandler
 
@@ -18,6 +21,7 @@ from .prefill_handler import PrefillWorkerHandler
 __all__ = [
     "BaseWorkerHandler",
     "DecodeWorkerHandler",
+    "EmbeddingWorkerHandler",
     "PrefillWorkerHandler",
     "MultimodalProcessorHandler",
     "MultimodalEncodeWorkerHandler",

@@ -18,21 +18,40 @@ async def register_llm_with_runtime_config(
     server_args: ServerArgs,
     dynamo_args: DynamoArgs,
     input_type: Optional[ModelInput] = ModelInput.Tokens,
+    output_type: Optional[ModelType] = None,
 ) -> bool:
     """Register LLM with runtime config
+
+    Args:
+        engine: SGLang engine instance
+        endpoint: Dynamo endpoint
+        server_args: SGLang server arguments
+        dynamo_args: Dynamo-specific arguments
+        input_type: Model input type (defaults to ModelInput.Tokens)
+        output_type: Model output type (defaults to Chat | Completions for LLMs)
 
     Returns:
         bool: True if registration succeeded, False if it failed
     """
     runtime_config = await _get_runtime_config(engine, server_args, dynamo_args)
     input_type = input_type
-    output_type = ModelType.Chat | ModelType.Completions
+
+    # Set default output type if not provided
+    if output_type is None:
+        output_type = ModelType.Chat | ModelType.Completions
+
     if not server_args.skip_tokenizer_init:
         logging.warning(
             "The skip-tokenizer-init flag was not set. Using the sglang tokenizer/detokenizer instead. The dynamo tokenizer/detokenizer will not be used and only v1/chat/completions will be available"
         )
         input_type = ModelInput.Text
-        output_type = ModelType.Chat
+        # Only override output_type for chat models, not for embeddings
+        if output_type != ModelType.Embedding:
+            output_type = ModelType.Chat
+
+    logging.info(
+        f"Registering model with input_type={input_type}, output_type={output_type}, skip_tokenizer_init={server_args.skip_tokenizer_init}"
+    )
     try:
         await register_llm(
             input_type,

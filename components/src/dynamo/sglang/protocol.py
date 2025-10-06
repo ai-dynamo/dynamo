@@ -43,6 +43,18 @@ class PreprocessedRequest(BaseModel):
     annotations: List[str] = Field(default_factory=list)
 
 
+EmbeddingInput = Union[str, List[str], List[int], List[List[int]]]
+
+
+class EmbeddingRequest(BaseModel):
+    model: str
+    input: EmbeddingInput
+    user: Optional[str] = None
+    dimensions: Optional[
+        int
+    ] = None  # only supported in text-embedding-3 and later models from OpenAI
+
+
 class DisaggPreprocessedRequest(BaseModel):
     request: Union[PreprocessedRequest, ChatCompletionRequest]
     sampling_params: dict

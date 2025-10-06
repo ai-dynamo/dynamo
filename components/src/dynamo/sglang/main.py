@@ -11,7 +11,12 @@ import sglang as sgl
 import uvloop
 from sglang.srt.utils import get_ip
 
-from dynamo.llm import ModelInput, ZmqKvEventPublisher, ZmqKvEventPublisherConfig
+from dynamo.llm import (
+    ModelInput,
+    ModelType,
+    ZmqKvEventPublisher,
+    ZmqKvEventPublisherConfig,
+)
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, DisaggregationMode, parse_args, parse_endpoint
@@ -23,6 +28,7 @@ from dynamo.sglang.publisher import setup_sgl_metrics
 from dynamo.sglang.register import register_llm_with_runtime_config
 from dynamo.sglang.request_handlers import (
     DecodeWorkerHandler,
+    EmbeddingWorkerHandler,
     MultimodalEncodeWorkerHandler,
     MultimodalPrefillWorkerHandler,
     MultimodalProcessorHandler,
@@ -46,7 +52,9 @@ async def worker(runtime: DistributedRuntime):
     logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
 
     config = parse_args(sys.argv[1:])
-    if config.dynamo_args.multimodal_processor:
+    if config.dynamo_args.embedding_worker:
+        await init_embedding(runtime, config)
+    elif config.dynamo_args.multimodal_processor:
         await init_multimodal_processor(runtime, config)
     elif config.dynamo_args.multimodal_encode_worker:
         await init_multimodal_encode_worker(runtime, config)
@@ -182,6 +190,68 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         await asyncio.gather(*tasks)
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
+async def init_embedding(runtime: DistributedRuntime, config: Config):
+    """Initialize embedding worker component"""
+    server_args, dynamo_args = config.server_args, config.dynamo_args
+
+    engine = sgl.Engine(server_args=server_args)
+
+    component = runtime.namespace(dynamo_args.namespace).component(
+        dynamo_args.component
+    )
+    await component.create_service()
+
+    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+
+    handler = EmbeddingWorkerHandler(component, engine, config)
+
+    health_check_payload = SglangHealthCheckPayload(engine).to_dict()
+
+    # Readiness gate: requests wait until model is registered
+    ready_event = asyncio.Event()
+
+    async def register_model():
+        """Register the embedding model and signal readiness"""
+
+        registration_success = await register_llm_with_runtime_config(
+            engine,
+            generate_endpoint,
+            server_args,
+            dynamo_args,
+            input_type=ModelInput.Text,
+            output_type=ModelType.Embedding,
+        )
+
+        if not registration_success:
+            logging.error("Embedding model registration failed; shutting down")
+            runtime.shutdown()
+            raise RuntimeError("Embedding model registration failed")
+
+        # Model is ready - allow queued requests to proceed
+        ready_event.set()
+        logging.info(
+            "Embedding model registration succeeded; processing queued requests"
+        )
+
+    try:
+        # Start endpoint immediately and register model concurrently
+        # Requests queue until ready_event is set
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=[("model", server_args.served_model_name)],
+                health_check_payload=health_check_payload,
+            ),
+            register_model(),
+        )
+    except Exception as e:
+        logging.error(f"Failed to serve embedding endpoints: {e}")
         raise
     finally:
         handler.cleanup()
