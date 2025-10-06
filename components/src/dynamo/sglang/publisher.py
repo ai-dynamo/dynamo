@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import logging
 from typing import List, Optional, Tuple
 
 import sglang as sgl
 import zmq
 import zmq.asyncio
-from sglang.srt.utils import get_zmq_socket
+from sglang.srt.utils import get_ip, get_zmq_socket
 
 from dynamo.llm import (
     ForwardPassMetrics,
@@ -16,24 +17,41 @@ from dynamo.llm import (
     SpecDecodeStats,
     WorkerMetricsPublisher,
     WorkerStats,
+    ZmqKvEventPublisher,
+    ZmqKvEventPublisherConfig,
 )
-from dynamo.runtime import Component
+from dynamo.runtime import Component, Endpoint
+from dynamo.sglang.args import Config
 
 
-class DynamoSglangStatPublisher:
+class DynamoSglangPublisher:
     """
-    Handles SGLang metrics reception and publishing.
+    Handles SGLang kv events and metrics reception and publishing.
     """
 
     def __init__(
         self,
         engine: sgl.Engine,
+        config: Config,
         component: Component,
+        generate_endpoint: Endpoint,
         metrics_labels: Optional[List[Tuple[str, str]]] = None,
     ) -> None:
+        """Initialize the SGLang publisher for metrics and KV events.
+
+        Args:
+            engine: The SGLang engine instance.
+            config: SGLang configuration including server args.
+            component: The Dynamo runtime component.
+            generate_endpoint: The Dynamo endpoint for generation requests.
+            metrics_labels: Optional list of label key-value pairs for metrics.
+        """
         self.engine = engine
-        self.inner = WorkerMetricsPublisher()
-        self.inner.create_endpoint(component, metrics_labels)
+        self.server_args = config.server_args
+        self.generate_endpoint = generate_endpoint
+        self.component = component
+        self.metrics_publisher = WorkerMetricsPublisher()
+        self.metrics_publisher.create_endpoint(component, metrics_labels)
 
         # Set default values (can be overridden later if needed)
         self.request_total_slots = 1024
@@ -47,11 +65,11 @@ class DynamoSglangStatPublisher:
         )
 
     async def run(self) -> None:
-        """Main loop to receive scheduler metrics and publish them"""
+        """Continuously receive scheduler metrics from ZMQ socket and publish them."""
         while True:
             try:
                 kv_metrics = await self._sock.recv_pyobj()  # type: ignore
-                self.record_values(
+                self._record_values(
                     request_active_slots=kv_metrics.request_active_slots,
                     request_total_slots=kv_metrics.request_total_slots,
                     kv_active_blocks=kv_metrics.kv_active_blocks,
@@ -66,7 +84,8 @@ class DynamoSglangStatPublisher:
                     "Failed to receive or publish SGLang scheduler metrics"
                 )
 
-    def init_publish(self) -> None:
+    def init_engine_metrics_publish(self) -> None:
+        """Publish initial dummy metrics to bootstrap the metrics endpoint."""
         worker_stats = WorkerStats(
             request_active_slots=0,
             request_total_slots=self.request_total_slots,
@@ -85,22 +104,54 @@ class DynamoSglangStatPublisher:
             spec_decode_stats=None,
         )
         logging.info("Sending dummy metrics to initialize")
-        self.inner.publish(metrics)
+        self.metrics_publisher.publish(metrics)
 
-    def record(
+    def init_kv_event_publish(self) -> Optional[ZmqKvEventPublisher]:
+        """Initialize KV event publisher if configured.
+
+        Returns:
+            ZmqKvEventPublisher instance if kv_events_config is set, None otherwise.
+        """
+        self.kv_publisher = None
+        if self.server_args.kv_events_config:
+            kv_events = json.loads(self.server_args.kv_events_config)
+            ep = kv_events.get("endpoint")
+            zmq_ep = ep.replace("*", get_ip()) if ep else None
+
+            lease_id = self.generate_endpoint.lease_id()
+
+            zmq_config = ZmqKvEventPublisherConfig(
+                worker_id=lease_id,
+                kv_block_size=self.server_args.page_size,
+                zmq_endpoint=zmq_ep,
+            )
+            logging.info(f"Setting up ZMQ kv event publisher at {zmq_ep}")
+            self.kv_publisher = ZmqKvEventPublisher(
+                component=self.component, config=zmq_config
+            )
+        return self.kv_publisher
+
+    def _record(
         self,
         worker_stats: WorkerStats,
         kv_stats: KvStats,
         spec_decode_stats: Optional[SpecDecodeStats] = None,
     ) -> None:
+        """Package and publish metrics.
+
+        Args:
+            worker_stats: Worker-level statistics.
+            kv_stats: KV cache statistics.
+            spec_decode_stats: Optional speculative decoding statistics.
+        """
         metrics = ForwardPassMetrics(
             worker_stats=worker_stats,
             kv_stats=kv_stats,
             spec_decode_stats=spec_decode_stats,
         )
-        self.inner.publish(metrics)
+        self.metrics_publisher.publish(metrics)
 
-    def record_values(
+    def _record_values(
         self,
         request_active_slots: int,
         request_total_slots: int,
@@ -112,6 +163,19 @@ class DynamoSglangStatPublisher:
         data_parallel_rank: Optional[int] = None,
         spec_decode_stats: Optional[SpecDecodeStats] = None,
     ) -> None:
+        """Create stats objects from raw values and publish.
+
+        Args:
+            request_active_slots: Number of active request slots.
+            request_total_slots: Total number of request slots.
+            kv_active_blocks: Number of active KV cache blocks.
+            kv_total_blocks: Total number of KV cache blocks.
+            num_requests_waiting: Number of queued requests.
+            gpu_cache_usage_perc: GPU cache utilization percentage.
+            gpu_prefix_cache_hit_rate: Prefix cache hit rate.
+            data_parallel_rank: Optional data parallel rank.
+            spec_decode_stats: Optional speculative decoding statistics.
+        """
         worker_stats = WorkerStats(
             request_active_slots=request_active_slots,
             request_total_slots=request_total_slots,
@@ -126,19 +190,32 @@ class DynamoSglangStatPublisher:
             gpu_cache_usage_perc=gpu_cache_usage_perc,
             gpu_prefix_cache_hit_rate=gpu_prefix_cache_hit_rate,
         )
-        self.record(worker_stats, kv_stats, spec_decode_stats)
+        self._record(worker_stats, kv_stats, spec_decode_stats)
 
 
 async def setup_sgl_metrics(
     engine: sgl.Engine,
+    config: Config,
     component: Component,
-) -> tuple[DynamoSglangStatPublisher, asyncio.Task, list[tuple[str, str]]]:
-    """
-    Convenience bootstrap: create endpoint, publish an initial update, and start the metrics loop.
+    generate_endpoint: Endpoint,
+) -> tuple[DynamoSglangPublisher, asyncio.Task, list[tuple[str, str]]]:
+    """Create publisher, initialize metrics, and start the metrics publishing loop.
+
+    Args:
+        engine: The SGLang engine instance.
+        config: SGLang configuration including server args.
+        component: The Dynamo runtime component.
+        generate_endpoint: The Dynamo endpoint for generation requests.
+
+    Returns:
+        Tuple of (publisher instance, running asyncio task, metrics labels).
     """
     metrics_labels = [("model", engine.server_args.served_model_name)]
-    publisher = DynamoSglangStatPublisher(engine, component, metrics_labels)
-    publisher.init_publish()
+    publisher = DynamoSglangPublisher(
+        engine, config, component, generate_endpoint, metrics_labels
+    )
+    publisher.init_engine_metrics_publish()
+    publisher.init_kv_event_publish()
 
     task = asyncio.create_task(publisher.run())
     logging.info("SGLang metrics loop started")

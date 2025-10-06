@@ -4,17 +4,13 @@
 import asyncio
 import json
 import logging
-import random
-import socket
 from typing import AsyncIterator
 
 import sglang as sgl
 import torch
-from sglang.srt.utils import get_ip
 
 import dynamo.nixl_connect as connect
 from dynamo._core import Client, Component
-from dynamo.llm import WorkerMetricsPublisher, ZmqKvEventPublisher
 from dynamo.sglang.args import Config, DisaggregationMode
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.utils.multimodal_protocol import (
@@ -205,30 +201,6 @@ class StreamProcessor:
             }
             yield json.dumps(error_output)
 
-
-class BootstrapManager:
-    """Handles bootstrap coordination for disaggregated mode"""
-
-    @staticmethod
-    def generate_bootstrap_room() -> int:
-        """Generate a unique bootstrap room ID"""
-        return random.randint(0, 2**63 - 1)
-
-    @staticmethod
-    def get_bootstrap_info(engine: sgl.Engine) -> tuple[str, int]:
-        """Extract bootstrap info from SGLang engine"""
-        inner_tm = engine.tokenizer_manager
-        bootstrap_port = inner_tm.server_args.disaggregation_bootstrap_port
-
-        if inner_tm.server_args.dist_init_addr:
-            bootstrap_host = socket.gethostbyname(
-                inner_tm.server_args.dist_init_addr.split(":")[0]
-            )
-        else:
-            bootstrap_host = get_ip()
-
-        return bootstrap_host, bootstrap_port
-
     @staticmethod
     def create_bootstrap_info(
         bootstrap_host: str, bootstrap_port: int, bootstrap_room: int
@@ -269,13 +241,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
         component: Component,
         engine: sgl.Engine,
         config: Config,
-        metrics_publisher: WorkerMetricsPublisher = None,
-        kv_publisher: ZmqKvEventPublisher = None,
         prefill_client: Client = None,
     ):
-        super().__init__(
-            component, engine, config, metrics_publisher, kv_publisher, prefill_client
-        )
+        super().__init__(component, engine, config, None, prefill_client)
 
         # Initialize processors
         self.embeddings_processor = EmbeddingsProcessor()
@@ -444,15 +412,13 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
     """
 
     def __init__(self, component: Component, engine: sgl.Engine, config: Config):
-        super().__init__(component, engine, config, None, None, None)
+        super().__init__(component, engine, config)
 
         # Initialize processors
         self.embeddings_processor = EmbeddingsProcessor()
 
         # Get bootstrap info using BootstrapManager
-        self.bootstrap_host, self.bootstrap_port = BootstrapManager.get_bootstrap_info(
-            engine
-        )
+        self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info(engine)
 
         logger.info(
             f"Multimodal prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
@@ -474,12 +440,14 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
             disagg_request = self._validate_and_parse_disagg_request(disagg_request)
 
             # Generate and return bootstrap info first (like regular SGLang)
-            bootstrap_room = BootstrapManager.generate_bootstrap_room()
-            bootstrap_info = BootstrapManager.create_bootstrap_info(
-                self.bootstrap_host, self.bootstrap_port, bootstrap_room
-            )
+            bootstrap_room = self._generate_bootstrap_room()
+            bootstrap_info = {
+                "bootstrap_host": self.bootstrap_host,
+                "bootstrap_port": self.bootstrap_port,
+                "bootstrap_room": bootstrap_room,
+            }
 
-            yield json.dumps(bootstrap_info)
+            yield bootstrap_info
 
             # Process prefill generation
             await self._process_prefill_generation(disagg_request, bootstrap_room)

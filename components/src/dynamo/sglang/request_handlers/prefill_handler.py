@@ -3,11 +3,9 @@
 
 import asyncio
 import logging
-import random
-import socket
+from typing import Any, AsyncGenerator, Dict
 
 import sglang as sgl
-from sglang.srt.utils import get_ip
 
 from dynamo._core import Component
 from dynamo.sglang.args import Config
@@ -15,37 +13,42 @@ from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 
 class PrefillWorkerHandler(BaseWorkerHandler):
-    def __init__(self, component: Component, engine: sgl.Engine, config: Config):
+    """Handler for prefill workers in disaggregated serving mode."""
+
+    def __init__(
+        self, component: Component, engine: sgl.Engine, config: Config
+    ) -> None:
+        """Initialize prefill worker handler.
+
+        Args:
+            component: The Dynamo runtime component.
+            engine: The SGLang engine instance.
+            config: SGLang and Dynamo configuration.
+        """
         self.engine = engine
-        self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info()
-        super().__init__(component, engine, config, None, None, None)
+        self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info(self.engine)
+        super().__init__(component, engine, config)
         logging.info(
             f"Prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
         )
 
-    def _generate_bootstrap_room(self):
-        return random.randint(0, 2**63 - 1)
-
-    def cleanup(self):
+    def cleanup(self) -> None:
+        """Shutdown the prefill engine and cleanup resources."""
         self.engine.shutdown()
         logging.info("Prefill engine shutdown")
         super().cleanup()
 
-    def _get_bootstrap_info(self):
-        """Bootstrap info from tokenizer manager"""
-        inner_tm = self.engine.tokenizer_manager
-        bootstrap_port = inner_tm.server_args.disaggregation_bootstrap_port
+    async def generate(
+        self, request: Dict[str, Any]
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Generate prefill output and provide bootstrap info for decode worker.
 
-        if inner_tm.server_args.dist_init_addr:
-            bootstrap_host = socket.gethostbyname(
-                inner_tm.server_args.dist_init_addr.split(":")[0]
-            )
-        else:
-            bootstrap_host = get_ip()
+        Args:
+            request: Request dict with 'request' and 'sampling_params' keys.
 
-        return bootstrap_host, bootstrap_port
-
-    async def generate(self, request: dict):
+        Yields:
+            Bootstrap info dict with host, port, and room for decode worker connection.
+        """
         bootstrap_room = self._generate_bootstrap_room()
 
         bootstrap_info = {
@@ -69,6 +72,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         asyncio.create_task(self._consume_results(results))
 
-    async def _consume_results(self, results):
+    async def _consume_results(self, results: AsyncGenerator[Any, None]) -> None:
+        """Consume async generator results without processing.
+
+        Args:
+            results: Async generator from engine.async_generate.
+        """
         async for _ in results:
             pass
