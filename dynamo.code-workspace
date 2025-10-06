@@ -38,7 +38,7 @@
                 "cwd": "${workspaceFolder}",
                 "env": {
                     "RUST_BACKTRACE": "1",
-                    "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}/components/frontend/src:${workspaceFolder}/components/planner/src:${workspaceFolder}/components/backends/llama_cpp/src:${workspaceFolder}/components/backends/mocker/src:${workspaceFolder}/components/backends/trtllm/src:${workspaceFolder}/components/backends/sglang/src:${workspaceFolder}/components/backends/vllm/src"
+                    "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}/components/src"
                 },
                 "sourceLanguages": [
                     "rust"
@@ -63,7 +63,7 @@
                 "cwd": "${workspaceFolder}",
                 "env": {
                     "RUST_BACKTRACE": "1",
-                    "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}/components/frontend/src:${workspaceFolder}/components/planner/src:${workspaceFolder}/components/backends/llama_cpp/src:${workspaceFolder}/components/backends/mocker/src:${workspaceFolder}/components/backends/trtllm/src:${workspaceFolder}/components/backends/sglang/src:${workspaceFolder}/components/backends/vllm/src"
+                    "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}/components/src"
                 },
                 "sourceLanguages": [
                     "rust"

@@ -12,6 +12,9 @@ from typing import (
     Tuple,
 )
 
+# Prometheus metric names are defined in a separate module
+from ._prometheus_names import prometheus_names
+
 def log_message(level: str, message: str, module: str, file: str, line: int) -> None:
     """
     Log a message from Python with file and line info
@@ -52,6 +55,26 @@ class DistributedRuntime:
         Shutdown the runtime by triggering the cancellation token
         """
         ...
+
+    def child_token(self) -> CancellationToken:
+        """
+        Get a child cancellation token that can be passed to async tasks
+        """
+        ...
+
+class CancellationToken:
+    def cancel(self) -> None:
+        """
+        Cancel the token and all its children
+        """
+        ...
+
+    async def cancelled(self) -> None:
+        """
+        Await until the token is cancelled
+        """
+        ...
+
 
 class Namespace:
     """
@@ -227,6 +250,93 @@ def compute_block_hash_for_seq_py(tokens: List[int], kv_block_size: int) -> List
     """
 
     ...
+
+class Context:
+    """
+    Context wrapper around AsyncEngineContext for Python bindings.
+    Provides tracing and cancellation capabilities for request handling.
+    """
+
+    def __init__(self, id: Optional[str] = None) -> None:
+        """
+        Create a new Context instance.
+
+        Args:
+            id: Optional request ID. If None, a default ID will be generated.
+        """
+        ...
+
+    def is_stopped(self) -> bool:
+        """
+        Check if the context has been stopped (synchronous).
+
+        Returns:
+            True if the context is stopped, False otherwise.
+        """
+        ...
+
+    def is_killed(self) -> bool:
+        """
+        Check if the context has been killed (synchronous).
+
+        Returns:
+            True if the context is killed, False otherwise.
+        """
+        ...
+
+    def stop_generating(self) -> None:
+        """
+        Issue a stop generating signal to the context.
+        """
+        ...
+
+    def id(self) -> Optional[str]:
+        """
+        Get the context ID.
+
+        Returns:
+            The context identifier string, or None if not set.
+        """
+        ...
+
+    async def async_killed_or_stopped(self) -> bool:
+        """
+        Asynchronously wait until the context is killed or stopped.
+
+        Returns:
+            True when the context is killed or stopped.
+        """
+        ...
+
+    @property
+    def trace_id(self) -> Optional[str]:
+        """
+        Get the distributed trace ID if available.
+
+        Returns:
+            The trace ID string, or None if no trace context.
+        """
+        ...
+
+    @property
+    def span_id(self) -> Optional[str]:
+        """
+        Get the distributed span ID if available.
+
+        Returns:
+            The span ID string, or None if no trace context.
+        """
+        ...
+
+    @property
+    def parent_span_id(self) -> Optional[str]:
+        """
+        Get the parent span ID if available.
+
+        Returns:
+            The parent span ID string, or None if no trace context.
+        """
+        ...
 
 class WorkerStats:
     """
@@ -704,13 +814,6 @@ class HttpService:
 
     ...
 
-class HttpError:
-    """
-    An error that occurred in the HTTP service
-    """
-
-    ...
-
 class HttpAsyncEngine:
     """
     An async engine for a distributed Dynamo http service. This is an extension of the
@@ -1026,103 +1129,6 @@ class ZmqKvEventListener:
         """
         ...
 
-class KvRouter:
-    """
-    A KV Router that decides which worker to use based on KV cache overlap.
-    This router tracks request states and manages KV cache distribution across workers.
-    """
-
-    def __init__(
-        self,
-        endpoint: Endpoint,
-        block_size: int,
-        kv_router_config: Optional[KvRouterConfig] = None,
-        consumer_uuid: Optional[str] = None,
-    ) -> None:
-        """
-        Create a new KvRouter instance.
-
-        Args:
-            endpoint: The endpoint to associate with this router
-            block_size: The KV cache block size
-            kv_router_config: Optional configuration for the KV router
-            consumer_uuid: Optional unique identifier for this router instance.
-                          If not provided, a UUID will be generated.
-        """
-        ...
-
-    async def find_best_match(
-        self,
-        request_id: str,
-        tokens: List[int],
-        *,
-        update_states: bool = False,
-        router_config_override: Optional[JsonLike] = None,
-    ) -> Tuple[int, int]:
-        """
-        Find the best matching worker for the given tokens.
-
-        Args:
-            request_id: Unique identifier for the request used for tracking
-            tokens: List of token IDs to find matches for
-            update_states: Whether to update router states for this request (default: False)
-            router_config_override: Optional router configuration override with fields:
-                - overlap_score_weight: Optional weight for overlap score
-                - router_temperature: Optional temperature for worker selection
-
-        Returns:
-            A tuple of (worker_id, overlap_blocks) where:
-                - worker_id: The ID of the best matching worker
-                - overlap_blocks: The number of overlapping blocks found
-        """
-        ...
-
-    async def add_request(
-        self,
-        request_id: str,
-        tokens: List[int],
-        overlap_blocks: int,
-        worker_id: int,
-    ) -> None:
-        """
-        Add a request to the router's tracking system.
-
-        Args:
-            request_id: Unique identifier for the request
-            tokens: List of token IDs for the request
-            overlap_blocks: Number of overlapping blocks found
-            worker_id: ID of the worker handling this request
-        """
-        ...
-
-    async def mark_prefill_completed(self, request_id: str) -> None:
-        """
-        Mark that prefill has been completed for a request.
-
-        Args:
-            request_id: The request ID to mark as prefill completed
-        """
-        ...
-
-    async def free(self, request_id: str) -> None:
-        """
-        Free resources associated with a request.
-
-        Args:
-            request_id: The request ID to free
-        """
-        ...
-
-    @property
-    def block_size(self) -> int:
-        """
-        Get the KV cache block size.
-
-        Returns:
-            The block size in tokens
-        """
-        ...
-
 class KvPushRouter:
     """
     A KV-aware push router that performs intelligent routing based on KV cache overlap.
@@ -1276,3 +1282,7 @@ class VirtualConnectorClient:
         """Blocks until there is a new decision to fetch using 'get'"""
         ...
 
+__all__ = [
+    # ... existing exports ...
+    "prometheus_names"
+]

@@ -32,7 +32,7 @@ func (p *PlannerDefaults) GetBaseContainer(context ComponentContext) (corev1.Con
 	}
 	container.Env = append(container.Env, []corev1.EnvVar{
 		{
-			Name:  "PROMETHEUS_PORT",
+			Name:  "PLANNER_PROMETHEUS_PORT",
 			Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort),
 		},
 	}...)

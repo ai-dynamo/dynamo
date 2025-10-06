@@ -39,6 +39,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**Conditional Disaggregation**](../../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
 | [**KV-Aware Routing**](../../../docs/architecture/kv_cache_routing.md) | ✅ |  |
 | [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | ✅ |  |
+| [**Multimodal EPD Disaggregation**](docs/multimodal_epd.md) | ✅ |  |
 | [**Load Based Planner**](../../../docs/architecture/load_planner.md) | ❌ | Planned |
 | [**KVBM**](../../../docs/architecture/kvbm_architecture.md) | ❌ | Planned |
 
@@ -68,6 +69,7 @@ Dynamo SGLang uses SGLang's native argument parser, so **most SGLang engine argu
 | `--dyn-tool-call-parser` | Tool call parser for structured outputs (takes precedence over `--tool-call-parser`) | `None` | `--tool-call-parser` |
 | `--dyn-reasoning-parser` | Reasoning parser for CoT models (takes precedence over `--reasoning-parser`) | `None` | `--reasoning-parser` |
 | `--use-sglang-tokenizer` | Use SGLang's tokenizer instead of Dynamo's | `False` | N/A |
+| `--custom-jinja-template` | Use custom chat template for that model (takes precedence over default chat template in model repo) | `None` | `--chat-template` |
 
 #### Tokenizer Behavior
 
@@ -115,11 +117,9 @@ uv pip install maturin
 cd $DYNAMO_HOME/lib/bindings/python
 maturin develop --uv
 cd $DYNAMO_HOME
-uv pip install .
-export PYTHONPATH="${PYTHONPATH}:$(pwd)/components/backends/sglang/src"
-# install target sglang version (you can choose any version)
-# we include the prerelease flag in order to install flashinfer rc versions
-uv pip install --prerelease=allow sglang[all]==0.4.9.post6
+# installs sglang supported version along with dynamo
+# include the prerelease flag to install flashinfer rc versions
+uv pip install --prerelease=allow -e .[sglang]
 ```
 
 </details>
@@ -254,6 +254,9 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 
 ### Hierarchical Cache (HiCache)
 - **[Enable SGLang Hierarchical Cache (HiCache)](docs/sgl-hicache-example.md)**
+
+### Multimodal Encode-Prefill-Decode (EPD) Disaggregation with NIXL
+- **[Run a multimodal model with EPD Disaggregation](docs/multimodal_epd.md)**
 
 ## Deployment
 

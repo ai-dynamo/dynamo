@@ -13,14 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""AI-Perf client implementation for fault tolerance testing."""
+
 import json
 import logging
 import os
-import random
+import subprocess
 import time
-from copy import deepcopy
-from datetime import datetime
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -29,194 +30,499 @@ from tests.utils.managed_deployment import ManagedDeployment
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
-
-payload = {
-    "model": "",
-    "messages": [
-        {
-            "role": "user",
-            "content": "",
-        }
-    ],
-    "max_tokens": 0,
-    "temperature": 0.1,
-    #        "seed": 10,
-    "ignore_eos": True,
-    "min_tokens": 0,
-    "stream": False,
-}
-
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format=LOG_FORMAT,
-    datefmt=DATE_FORMAT,  # ISO 8601 UTC format
+    datefmt=DATE_FORMAT,
 )
 
 
-def _get_random_prompt(length):
-    word_list = [f"{i}" for i in range(10)]
-    return " ".join(random.choices(word_list, k=length))
+def get_frontend_port(
+    managed_deployment: ManagedDeployment,
+    client_index: int,
+    deployment_spec: Any,
+    pod_ports: Dict[str, Any],
+    logger: logging.Logger,
+) -> Tuple[Optional[str], Optional[int], Optional[str]]:
+    """
+    Select a frontend pod using round-robin and setup port forwarding.
+
+    Args:
+        managed_deployment: ManagedDeployment instance
+        client_index: Client index for round-robin selection
+        deployment_spec: Deployment specification with port info
+        pod_ports: Dictionary to track existing port forwards
+                  - Key: pod name (str)
+                  - Value: port forward object from managed_deployment.port_forward()
+        logger: Logger instance
+
+    Returns:
+        Tuple of (pod_name, local_port, pod_instance) or (None, None, None) if failed
+    """
+    pods = managed_deployment.get_pods(managed_deployment.frontend_service_name)
+
+    port = 0
+    pod_name = None
+    selected_pod = None
+
+    # Filter ready pods and cleanup stale port forwards
+    pods_ready = []
+
+    for pod in pods[managed_deployment.frontend_service_name]:
+        if pod.ready():
+            pods_ready.append(pod)
+        else:
+            # Cleanup port forwards for non-ready pods
+            if pod.name in pod_ports:
+                try:
+                    pod_ports[pod.name].stop()
+                except Exception as e:
+                    logger.debug(f"Error stopping port forward for {pod.name}: {e}")
+                del pod_ports[pod.name]
+
+    if not pods_ready:
+        logger.error("No ready frontend pods found")
+        return None, None, None
+
+    # Round-robin selection based on client index
+    selected_pod = pods_ready[client_index % len(pods_ready)]
+    pod_name = selected_pod.name
+
+    # Setup or reuse port forward
+    if pod_name not in pod_ports:
+        # Get port from deployment_spec (default: 8000)
+        port_value = getattr(deployment_spec, "_port", 8000)
+        port_forward = managed_deployment.port_forward(selected_pod, port_value)
+        if port_forward:
+            pod_ports[pod_name] = port_forward
+            port = port_forward.local_port
+        else:
+            logger.error(f"Failed to create port forward for pod {pod_name}")
+            return None, None, None
+    else:
+        # Reuse existing port forward
+        port = pod_ports[pod_name].local_port
+
+    logger.debug(f"Selected pod {pod_name} with local port {port}")
+    return pod_name, port, selected_pod
 
 
-def _single_request(
-    url,
-    pod,
-    payload,
-    model,
-    logger,
-    retry_attempts=1,
-    input_token_length=100,
-    output_token_length=100,
-    timeout=30,
-    retry_delay=1,
-):
-    prompt = _get_random_prompt(input_token_length)
-    payload_copy = deepcopy(payload)
-    payload_copy["messages"][0]["content"] = prompt
-    payload_copy["max_tokens"] = output_token_length
-    payload_copy["min_tokens"] = output_token_length
-    payload_copy["model"] = model
-    response = None
-    end_time = None
-    start_time = time.time()
-    results = []
+def wait_for_model_availability(
+    url: str,
+    endpoint: str,
+    model: str,
+    logger: logging.Logger,
+    max_attempts: int = 15,
+    attempt_timeouts: Optional[List[float]] = None,
+) -> bool:
+    """
+    Wait for model to be available before running AI-Perf.
 
-    while retry_attempts:
-        start_request_time = time.time()
-        response = None
+    Args:
+        url: Base URL for the service
+        endpoint: API endpoint path
+        model: Model name to test
+        logger: Logger instance
+        max_attempts: Maximum number of attempts to check availability
+        attempt_timeouts: List of timeout values for each attempt
+
+    Returns:
+        True if model is available, False otherwise
+    """
+    if attempt_timeouts is None:
+        # Default: Start with 60s timeout, then gradually decrease
+        attempt_timeouts = [60, 60, 45, 30, 30, 20, 20, 15, 15, 15, 10, 10, 10, 10, 10]
+
+    test_url = f"{url}{endpoint}"
+
+    for attempt in range(max_attempts):
         try:
-            response = requests.post(
-                url,
-                json=payload_copy,
-                timeout=timeout,
+            test_payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": "test"}],
+                "max_tokens": 1,
+                "stream": False,
+            }
+
+            timeout_val = attempt_timeouts[min(attempt, len(attempt_timeouts) - 1)]
+            logger.info(
+                f"Testing model availability at {test_url} (attempt {attempt+1}/{max_attempts}, timeout={timeout_val}s)"
             )
-            end_time = time.time()
+            response = requests.post(test_url, json=test_payload, timeout=timeout_val)
 
-            content = None
+            if response.status_code == 200:
+                logger.info(f"Model '{model}' is available and responding")
+                # Give a bit more time for stabilization
+                logger.info("Model ready, waiting 5s for stabilization...")
+                time.sleep(5)
+                return True
+            elif response.status_code == 404:
+                logger.warning(
+                    f"Model '{model}' not found (404). Response: {response.text[:200]}"
+                )
+            elif response.status_code == 400:
+                logger.warning(f"Bad request (400). Response: {response.text[:200]}")
+            else:
+                logger.warning(
+                    f"Unexpected status code {response.status_code}: {response.text[:200]}"
+                )
 
-            try:
-                content = response.json()
-            except ValueError:
-                pass
+        except requests.Timeout as e:
+            logger.warning(
+                f"Model availability test timed out (attempt {attempt+1}): {e}"
+            )
+        except Exception as e:
+            logger.warning(f"Model availability test failed (attempt {attempt+1}): {e}")
 
-            results.append(
+        if attempt < max_attempts - 1:
+            wait_time = 10 if attempt < 5 else 5
+            logger.info(f"Waiting {wait_time}s before retry...")
+            time.sleep(wait_time)
+
+    logger.warning(
+        "Could not confirm model availability after all attempts, proceeding anyway..."
+    )
+    return False
+
+
+def run_aiperf(
+    url: str,
+    endpoint: str,
+    model: str,
+    pod_name: str,
+    port: int,
+    requests_per_client: int,
+    input_token_length: int,
+    output_token_length: int,
+    output_dir: Path,
+    logger: logging.Logger,
+    max_retries: int = 1,
+    retry_delay: float = 1,
+) -> bool:
+    """
+    Execute AI-Perf with specified parameters.
+
+    Args:
+        url: Base URL (http://localhost:port)
+        endpoint: API endpoint path (e.g., "v1/chat/completions")
+        model: Model name
+        pod_name: Selected pod name for logging
+        port: Local port number
+        requests_per_client: Number of requests to send
+        input_token_length: Input token count
+        output_token_length: Output token count
+        output_dir: Directory for AI-Perf artifacts
+        logger: Logger instance
+        max_retries: Maximum number of retry attempts (default: 1)
+        retry_delay: Delay in seconds between retries (default: 1)
+
+    Returns:
+        True if successful, False otherwise
+    """
+    # Validate required parameters
+    if not model or not url or not endpoint:
+        logger.error(
+            f"Missing required parameter: model={model!r}, url={url!r}, endpoint={endpoint!r}"
+        )
+        return False
+
+    # Build AI-Perf command
+    cmd = [
+        "aiperf",
+        "profile",
+        # Model configuration (required)
+        "--model",
+        model,
+        # Endpoint configuration
+        "--url",
+        url,
+        "--endpoint",
+        endpoint if endpoint.startswith("/") else f"/{endpoint}",
+        "--endpoint-type",
+        "chat",  # Required: tells AI-Perf the API type
+        # Enable streaming for TTFT and ITL metrics
+        "--streaming",
+        # Request parameters
+        "--request-count",
+        str(requests_per_client),  # Required: how many requests
+        "--concurrency",
+        "1",  # Optional: we set to 1 for sequential
+        # Token configuration
+        "--synthetic-input-tokens-mean",
+        str(input_token_length),
+        "--synthetic-input-tokens-stddev",
+        "0",  # Set to 0 for consistent token counts
+        "--output-tokens-mean",
+        str(output_token_length),
+        "--output-tokens-stddev",
+        "0",  # Set to 0 for consistent token counts
+        # Skip warmup to avoid initial failures
+        "--warmup-request-count",
+        "0",
+        # Output configuration
+        "--artifact-dir",
+        str(output_dir),
+        "--random-seed",
+        "100",  # For reproducible results
+    ]
+
+    # Calculate timeout (same as legacy would for all requests)
+    timeout = max(requests_per_client * 2 + 60, 300)  # At least 5 minutes
+
+    # Log execution
+    logger.info(f"Starting AI-Perf for Pod {pod_name} Local Port {port}")
+    logger.info(f"Using model name: {model}")
+
+    # Wait for model to be available
+    wait_for_model_availability(url, endpoint, model, logger)
+
+    logger.info(f"Command: {' '.join(cmd)}")
+
+    # Retry logic for fault tolerance - retry FULL request count until success
+
+    max_attempts = max_retries if max_retries > 0 else 1
+    success = False
+    all_results = []
+
+    for attempt in range(max_attempts):
+        logger.info(
+            f"AI-Perf attempt {attempt + 1}/{max_attempts} with {requests_per_client} requests"
+        )
+
+        # Update output directory for this attempt
+        attempt_dir = output_dir / f"attempt_{attempt}"
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+
+        # Use the original command but update artifact directory
+        cmd_attempt = cmd.copy()
+        artifact_dir_idx = cmd_attempt.index("--artifact-dir") + 1
+        cmd_attempt[artifact_dir_idx] = str(attempt_dir)
+
+        try:
+            result = subprocess.run(
+                cmd_attempt,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                stdin=subprocess.DEVNULL,  # Prevent stdin reading which can cause process suspension
+            )
+
+            # Save logs for this attempt
+            with open(attempt_dir / "genai_perf.log", "w") as f:
+                f.write("=== STDOUT ===\n")
+                f.write(result.stdout)
+                f.write("\n\n=== STDERR ===\n")
+                f.write(result.stderr)
+
+            all_results.append(
                 {
-                    "status": response.status_code,
-                    "result": content,
-                    "request_elapsed_time": end_time - start_request_time,
-                    "url": url,
-                    "pod": pod,
+                    "attempt": attempt + 1,
+                    "returncode": result.returncode,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
                 }
             )
 
-            if response.status_code != 200:
-                time.sleep(retry_delay)
-                retry_attempts -= 1
-                continue
+            if result.returncode == 0:
+                logger.info(
+                    f"Attempt {attempt + 1} succeeded with all {requests_per_client} requests"
+                )
+                log_summary_metrics(attempt_dir, logger, pod_name, port)
+                success = True
+                break  # Success - we're done!
             else:
+                logger.warning(
+                    f"Attempt {attempt + 1} failed with return code {result.returncode}"
+                )
+                logger.debug(
+                    f"Stderr: {result.stderr[:500] if result.stderr else 'No stderr'}"
+                )
+        except Exception as e:
+            logger.error(f"Error in attempt {attempt + 1}: {str(e)}")
+            all_results.append({"attempt": attempt + 1, "error": str(e)})
+
+        # Sleep before next attempt (if not the last attempt)
+        if not success and attempt < max_attempts - 1:
+            time.sleep(retry_delay)
+
+    if success:
+        logger.info(
+            f"AI-Perf successfully completed all {requests_per_client} requests for {pod_name}"
+        )
+    else:
+        logger.error(f"AI-Perf failed all {max_attempts} attempts for {pod_name}")
+
+    return success
+
+
+def log_summary_metrics(
+    output_dir: Path, logger: logging.Logger, pod_name: str, port: int
+) -> None:
+    """
+    Log summary metrics from AI-Perf results.
+
+    Args:
+        output_dir: Directory containing AI-Perf artifacts
+        logger: Logger instance
+        pod_name: Pod name for logging
+        port: Port number for logging
+    """
+    # Look for AI-Perf output file
+    profile_json = output_dir / "profile_export_aiperf.json"
+    if not profile_json.exists():
+        # Try alternative names
+        for name in ["profile_export.json", "profile_results.json"]:
+            alt_path = output_dir / name
+            if alt_path.exists():
+                profile_json = alt_path
                 break
 
-        except (requests.RequestException, requests.Timeout) as e:
-            results.append(
-                {
-                    "status": str(e),
-                    "result": None,
-                    "request_elapsed_time": time.time() - start_request_time,
-                    "url": url,
-                    "pod": pod,
-                }
-            )
-            time.sleep(retry_delay)
-            retry_attempts -= 1
-            continue
+    if profile_json.exists():
+        try:
+            with open(profile_json) as f:
+                metrics = json.load(f)
 
-    return {
-        "time": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-        "results": results,
-        "total_time": time.time() - start_time,
-        "url": url,
-        "pod": pod,
-    }
+            # Extract key metrics from AI-Perf format
+            records = metrics.get("records", {})
+
+            # Request count from request_count record
+            request_count_record = records.get("request_count", {})
+            request_count = (
+                int(request_count_record.get("avg", 0)) if request_count_record else 0
+            )
+
+            # Check for errors
+            error_summary = metrics.get("error_summary", [])
+            error_count = len(error_summary)
+
+            # Latency metrics (in milliseconds)
+            request_latency = records.get("request_latency", {})
+            avg_latency = request_latency.get("avg", 0) / 1000.0  # Convert to seconds
+            p99_latency = request_latency.get("p99", 0) / 1000.0  # Convert to seconds
+
+            # Throughput metrics
+            request_throughput = records.get("request_throughput", {})
+            throughput = request_throughput.get("avg", 0)
+
+            # Log summary
+            logger.info(
+                f"Summary: Pod {pod_name} Port {port} "
+                f"Requests: {request_count} "
+                f"Errors: {error_count} "
+                f"Throughput: {throughput:.1f} req/s "
+                f"Avg Latency: {avg_latency:.3f}s "
+                f"P99 Latency: {p99_latency:.3f}s"
+            )
+
+            # Log success rate
+            if request_count > 0:
+                success_rate = (request_count - error_count) / request_count * 100
+                logger.info(f"Success rate: {success_rate:.1f}%")
+
+            # Also write summary to CSV file for aggregation
+            csv_path = output_dir / "profile_export_aiperf.csv"
+            if csv_path.exists():
+                logger.info(f"AI-Perf results saved to {csv_path}")
+
+        except Exception as e:
+            logger.warning(f"Failed to parse AI-Perf metrics: {e}")
 
 
 def client(
     deployment_spec,
-    namespace,
-    model,
-    log_dir,
-    index,
-    requests_per_client,
-    input_token_length,
-    output_token_length,
-    max_retries,
-    max_request_rate,
-    retry_delay=1,
+    namespace: str,
+    model: str,
+    log_dir: str,
+    index: int,
+    requests_per_client: int,
+    input_token_length: int,
+    output_token_length: int,
+    max_retries: int,
+    retry_delay: float = 1,
 ):
+    """
+    Generate load using AI-Perf for fault tolerance testing.
+
+    This function sets up port forwarding to a frontend pod and uses AI-Perf
+    to generate synthetic requests for performance testing and fault tolerance
+    evaluation.
+
+    Args:
+        deployment_spec: Deployment specification object
+        namespace: Kubernetes namespace
+        model: Model name
+        log_dir: Directory for output logs and AI-Perf artifacts
+        index: Client index used for round-robin pod selection
+        requests_per_client: Number of requests to generate
+        input_token_length: Number of input tokens per request
+        output_token_length: Number of output tokens per request
+        max_retries: Maximum retry attempts for AI-Perf execution
+        retry_delay: Delay in seconds between retry attempts
+    """
     logger = logging.getLogger(f"CLIENT: {index}")
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
     managed_deployment = ManagedDeployment(log_dir, deployment_spec, namespace)
     pod_ports: Dict[str, Any] = {}
 
-    min_elapsed_time = (1 / max_request_rate) if max_request_rate > 0 else 0.0
-
     try:
         os.makedirs(log_dir, exist_ok=True)
-        log_path = os.path.join(log_dir, f"client_{index}.log.txt")
-        with open(log_path, "w") as log:
-            for i in range(requests_per_client):
-                pods = managed_deployment.get_pods(
-                    managed_deployment.frontend_service_name
-                )
-                port = 0
-                pod_name = None
+        client_output_dir = Path(log_dir) / f"client_{index}"
+        client_output_dir.mkdir(parents=True, exist_ok=True)
 
-                pods_ready = []
+        # Add a startup delay for early clients to give model time to load
+        if index < 5:
+            wait_time = 30 - (index * 5)  # 30, 25, 20, 15, 10 seconds
+            logger.info(
+                f"Client {index} waiting {wait_time}s for model registration..."
+            )
+            time.sleep(wait_time)
 
-                for pod in pods[managed_deployment.frontend_service_name]:
-                    if pod.ready():
-                        pods_ready.append(pod)
-                    else:
-                        if pod.name in pod_ports:
-                            pod_ports[pod.name].stop()
-                            del pod_ports[pod.name]
+        # Select frontend pod and setup port forwarding
+        pod_name, port, selected_pod = get_frontend_port(
+            managed_deployment=managed_deployment,
+            client_index=index,
+            deployment_spec=deployment_spec,
+            pod_ports=pod_ports,
+            logger=logger,
+        )
 
-                if pods_ready:
-                    pod = pods_ready[i % len(pods_ready)]
-                    if pod.name not in pod_ports:
-                        port_forward = managed_deployment.port_forward(
-                            pod, deployment_spec.port
-                        )
-                        if port_forward:
-                            pod_ports[pod.name] = port_forward
-                    if pod.name in pod_ports:
-                        port = pod_ports[pod.name].local_port
-                        pod_name = pod.name
+        if not pod_name or not port:
+            logger.error("Failed to select pod or setup port forwarding")
+            return
 
-                url = f"http://localhost:{port}/{deployment_spec.endpoint}"
+        url = f"http://localhost:{port}"
 
-                result = _single_request(
-                    url,
-                    pod_name,
-                    payload,
-                    model,
-                    logger,
-                    max_retries,
-                    input_token_length=input_token_length,
-                    output_token_length=output_token_length,
-                    retry_delay=retry_delay,
-                )
-                logger.info(
-                    f"Request: {i} Pod {pod_name} Local Port {port} Status: {result['results'][-1]['status']} Latency: {result['results'][-1]['request_elapsed_time']}"
-                )
+        # Get endpoint from deployment_spec (default: /v1/chat/completions)
+        endpoint = getattr(deployment_spec, "_endpoint", "/v1/chat/completions")
 
-                log.write(json.dumps(result) + "\n")
-                log.flush()
-                if result["total_time"] < min_elapsed_time:
-                    time.sleep(min_elapsed_time - result["total_time"])
+        success = run_aiperf(
+            url=url,
+            endpoint=endpoint,
+            model=model,
+            pod_name=pod_name,
+            port=port,
+            requests_per_client=requests_per_client,
+            input_token_length=input_token_length,
+            output_token_length=output_token_length,
+            output_dir=client_output_dir,
+            logger=logger,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
+        )
+
+        if not success:
+            logger.error("AI-Perf execution failed")
 
     except Exception as e:
-        logger.error(str(e))
+        logger.error(f"Client error: {str(e)}")
+    finally:
+        for pf_name, port_forward in pod_ports.items():
+            try:
+                port_forward.stop()
+                logger.debug(f"Stopped port forward for {pf_name}")
+            except Exception as e:
+                logger.debug(f"Error stopping port forward for {pf_name}: {e}")
+
     logger.info("Exiting")

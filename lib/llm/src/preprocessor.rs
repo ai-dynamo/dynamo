@@ -28,6 +28,7 @@ use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::PreprocessedRequestBuilder;
 use crate::tokenizers::Encoding;
 
+use dynamo_parsers::{ReasoningParser, ReasoningParserType};
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, Error, ManyOut, Operator, SingleIn, async_trait,
@@ -91,6 +92,12 @@ impl LLMMetricAnnotation {
         let metrics: LLMMetricAnnotation = serde_json::from_str(&comments[0])?;
         Ok(Some(metrics))
     }
+}
+
+// Reasoning State for reasoning parsing transformation step
+struct ReasoningState {
+    stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
+    reasoning_parser: Option<Box<dyn ReasoningParser>>,
 }
 
 pub struct OpenAIPreprocessor {
@@ -543,11 +550,14 @@ impl OpenAIPreprocessor {
 
                     Some((response, inner))
                 } else {
-                    // Stream has ended - check if we need to send a usage chunk
+                    // Stream has ended - must set finished to true to prevent unfold from polling
+                    // again. The stream is exhausted and will panic if polled after None.
+                    inner.finished = true;
+
+                    // Check if we need to send a usage chunk
                     if inner.response_generator.is_usage_enabled()
                         && inner.finish_reason_sent
                         && !inner.usage_chunk_sent
-                        && !inner.finished
                     {
                         inner.usage_chunk_sent = true;
 
@@ -568,7 +578,6 @@ impl OpenAIPreprocessor {
                         Some((annotated_usage, inner))
                     } else {
                         // stream closed
-                        inner.finished = true; // Mark as finished
                         None
                     }
                 }
@@ -668,6 +677,56 @@ impl OpenAIPreprocessor {
             .build();
         jail.apply(stream)
     }
+
+    // Motivation: Each transformation on the stream should be a separate step to allow for more flexibility
+    // Earlier reasoning parser logic was nested under delta generation logic in choice_from_postprocessor
+    // Since we have tool calling parsing as separate step, it makes sense to have reasoning parser as separate step as well
+    pub fn parse_reasoning_content_from_stream<S>(
+        stream: S,
+        parser_name: String,
+    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        // Initialize reasoning parser from parser_name
+        let reasoning_parser = Box::new(ReasoningParserType::get_reasoning_parser_from_name(
+            parser_name.as_ref(),
+        )) as Box<dyn ReasoningParser>;
+
+        let state = ReasoningState {
+            stream: Box::pin(stream),
+            reasoning_parser: Some(reasoning_parser),
+        };
+
+        stream::unfold(state, |mut state| async move {
+            if let Some(response) = state.stream.next().await {
+                // Process the response through reasoning parser if available
+                let processed_response = if let Some(ref mut parser) = state.reasoning_parser {
+                    response.map_data(|mut data| {
+                        // Process all choices, not just the first one
+                        for choice in data.choices.iter_mut() {
+                            if let Some(text) = choice.delta.content.as_ref() {
+                                let parser_result =
+                                    parser.parse_reasoning_streaming_incremental(text, &[]);
+
+                                // Update this specific choice with parsed content
+                                choice.delta.content = parser_result.get_some_normal_text();
+                                choice.delta.reasoning_content = parser_result.get_some_reasoning();
+                            }
+                        }
+                        Ok(data)
+                    })
+                } else {
+                    // No reasoning parser configured, pass through unchanged
+                    response
+                };
+
+                Some((processed_response, state))
+            } else {
+                None
+            }
+        })
+    }
 }
 
 // for pals, we do not want to add the generation prompt to the formatted prompt
@@ -692,7 +751,20 @@ impl
         >,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         // unpack the request
-        let (request, context) = request.into_parts();
+        let (mut request, context) = request.into_parts();
+
+        // Preserve original inbound streaming flag before any internal overrides
+        let request_id = context.id().to_string();
+
+        // Build audit handle (None if DYN_AUDIT_ENABLED=0)
+        let mut audit_handle = crate::audit::handle::create_handle(&request, &request_id);
+
+        if let Some(ref mut h) = audit_handle {
+            h.set_request(std::sync::Arc::new(request.clone()));
+        }
+
+        // Set stream=true for internal processing (after audit capture)
+        request.inner.stream = Some(true);
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
@@ -701,9 +773,6 @@ impl
         let (common_request, annotations) = self.preprocess_request(&request)?;
 
         let mut response_generator = Box::new(response_generator);
-
-        // set the runtime configuration
-        response_generator.set_reasoning_parser(self.runtime_config.clone());
 
         // update isl
         response_generator.update_isl(common_request.token_ids.len() as u32);
@@ -731,11 +800,28 @@ impl
             context.clone(),
         );
 
+        // Try to parse reasoning content only if parser is configured
+        let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some();
+
+        // Reasoning Content Parsing Transformation Step
+        // Current Solution:
+        // This step operates on Deltas created by the transform_postprocessor_stream function
+        // Only access to text and not token_ids - so can not support parsing based on token_ids for now
+        // Future Solution:
+        // To address the limitation if needed in future: move this step before transform_postprocessor_stream and add new field of reasoning_content to the backend output
+        // Use backend_output.reasoning_content field to fill out the deltas.
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
+            Box::pin(Self::parse_reasoning_content_from_stream(
+                stream,
+                self.runtime_config.reasoning_parser.clone().unwrap(), // Safety: We already checked that parser is some, so gtg
+            ))
+        } else {
+            Box::pin(stream)
+        };
+
         // Check if tools are present and if we should apply jail
         let has_tools =
             request.inner.tools.is_some() && !request.inner.tools.as_ref().unwrap().is_empty();
-
-        // Context was already extracted above from response_stream
 
         // Determine if we should apply jail (do this before moving request)
         let should_jail = Self::should_apply_tool_jail(
@@ -745,7 +831,7 @@ impl
         )?;
 
         // Apply jail conditionally
-        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
+        let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
             if let Some(parser) = self.tool_call_parser.clone() {
                 Box::pin(Self::apply_tool_calling_jail(parser, stream))
             } else {
@@ -754,8 +840,31 @@ impl
         } else {
             Box::pin(stream)
         };
+
+        // Step 4: Apply audit aggregation strategy
+        let final_stream = if let Some(mut audit) = audit_handle {
+            let (stream, agg_fut) = if audit.streaming() {
+                // Streaming: apply scan (pass-through + parallel aggregation)
+                crate::audit::stream::scan_aggregate_with_future(transformed_stream)
+            } else {
+                // Non-streaming: apply fold (collect all, then emit single chunk)
+                crate::audit::stream::fold_aggregate_with_future(transformed_stream)
+            };
+
+            // Spawn audit task
+            tokio::spawn(async move {
+                let final_resp = agg_fut.await;
+                audit.set_response(Arc::new(final_resp));
+                audit.emit();
+            });
+
+            Box::pin(stream)
+        } else {
+            transformed_stream
+        };
+
         // prepend the annotations to the response stream
-        let stream = annotations_stream.chain(stream);
+        let stream = annotations_stream.chain(final_stream);
 
         // return the response stream - single boxing at the end
         Ok(ResponseStream::new(Box::pin(stream), context))
@@ -779,7 +888,9 @@ impl
         >,
     ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         // unpack the request
-        let (request, context) = request.into_parts();
+        let (mut request, context) = request.into_parts();
+
+        request.inner.stream = Some(true);
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());

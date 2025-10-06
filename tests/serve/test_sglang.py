@@ -13,7 +13,11 @@ from tests.serve.common import (
     run_serve_deployment,
 )
 from tests.utils.engine_process import EngineConfig
-from tests.utils.payload_builder import chat_payload_default, completion_payload_default
+from tests.utils.payload_builder import (
+    chat_payload,
+    chat_payload_default,
+    completion_payload_default,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +69,50 @@ sglang_configs = {
                     r"Event processor for worker_id \d+ processing event: Stored\(",
                     r"Selected worker: \d+, logit: ",
                 ]
+            )
+        ],
+    ),
+    "template_verification": SGLangConfig(
+        # Tests custom jinja template preprocessing by verifying the template
+        # marker 'CUSTOM_TEMPLATE_ACTIVE|' is applied to user messages.
+        # The backend (launch/template_verifier.*) checks for this marker
+        # and returns "Successfully Applied Chat Template" if found.
+        name="template_verification",
+        directory=SERVE_TEST_DIR,
+        script_name="template_verifier.sh",
+        marks=[pytest.mark.gpu_1],
+        model="Qwen/Qwen3-0.6B",
+        env={},
+        models_port=8000,
+        request_payloads=[
+            chat_payload_default(
+                expected_response=["Successfully Applied Chat Template"]
+            )
+        ],
+    ),
+    "multimodal_agg_qwen": SGLangConfig(
+        name="multimodal_agg_qwen",
+        directory=sglang_dir,
+        script_name="multimodal_agg.sh",
+        marks=[pytest.mark.gpu_2],
+        model="Qwen/Qwen2.5-VL-7B-Instruct",
+        delayed_start=0,
+        timeout=360,
+        models_port=8000,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["bus"],
+                temperature=0.0,
             )
         ],
     ),

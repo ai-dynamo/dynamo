@@ -111,7 +111,7 @@ export MOUNTS="${PWD}/../:/mnt"
 
 # NOTE: In general, Deepseek R1 is very large, so it is recommended to
 # pre-download the model weights and save them in some shared location,
-# NFS storage, HF_CACHE, etc. and modify the `--model-path` below
+# NFS storage, HF_HOME, etc. and modify the `--model-path` below
 # to reuse the pre-downloaded weights instead.
 #
 # On Blackwell systems (ex: GB200), it is recommended to use the FP4 weights:

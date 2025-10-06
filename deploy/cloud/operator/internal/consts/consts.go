@@ -37,6 +37,7 @@ const (
 	KubeLabelDynamoNamespace            = "nvidia.com/dynamo-namespace"
 	KubeLabelDynamoDeploymentTargetType = "nvidia.com/dynamo-deployment-target-type"
 	KubeLabelDynamoComponentType        = "nvidia.com/dynamo-component-type"
+	KubeLabelDynamoSubComponentType     = "nvidia.com/dynamo-sub-component-type"
 
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
@@ -64,6 +65,9 @@ const (
 	DefaultSharedMemoryMountPath = "/dev/shm"
 	DefaultSharedMemorySize      = "8Gi"
 
+	// Compilation cache default mount points
+	DefaultVLLMCacheMountPoint = "/root/.cache/vllm"
+
 	// Kai-scheduler related constants
 	KubeAnnotationKaiSchedulerQueue = "nvidia.com/kai-scheduler-queue" // User-provided annotation to specify queue name
 	KubeLabelKaiSchedulerQueue      = "kai.scheduler/queue"            // Label injected into pods for kai-scheduler
@@ -73,6 +77,8 @@ const (
 	// Grove multinode role suffixes
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
+
+	MainContainerName = "main"
 )
 
 type MultinodeDeploymentType string

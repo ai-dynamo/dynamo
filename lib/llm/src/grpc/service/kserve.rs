@@ -397,15 +397,14 @@ impl GrpcInferenceService for KserveService {
         &self,
         request: Request<ModelMetadataRequest>,
     ) -> Result<Response<ModelMetadataResponse>, Status> {
-        let entries = self.state.manager().get_model_entries();
+        let cards = self.state.manager().get_model_cards();
         let request_model_name = &request.into_inner().name;
-        if let Some(entry) = entries
+        if let Some(card) = cards
             .into_iter()
-            .find(|entry| request_model_name == &entry.name)
+            .find(|card| request_model_name == &card.display_name)
         {
-            if entry.model_type.supports_tensor() {
-                if let Some(config) = entry.runtime_config.as_ref()
-                    && let Some(tensor_model_config) = config.tensor_model_config.as_ref()
+            if card.model_type.supports_tensor() {
+                if let Some(tensor_model_config) = card.runtime_config.tensor_model_config.as_ref()
                 {
                     return Ok(Response::new(ModelMetadataResponse {
                         name: tensor_model_config.name.clone(),
@@ -437,9 +436,9 @@ impl GrpcInferenceService for KserveService {
                     "Model '{}' has type Tensor but no model config is provided",
                     request_model_name
                 )))?
-            } else if entry.model_type.supports_completions() {
+            } else if card.model_type.supports_completions() {
                 return Ok(Response::new(ModelMetadataResponse {
-                    name: entry.name,
+                    name: card.display_name,
                     versions: vec!["1".to_string()],
                     platform: "dynamo".to_string(),
                     inputs: vec![
@@ -479,15 +478,14 @@ impl GrpcInferenceService for KserveService {
         &self,
         request: Request<ModelConfigRequest>,
     ) -> Result<Response<ModelConfigResponse>, Status> {
-        let entries = self.state.manager().get_model_entries();
+        let cards = self.state.manager().get_model_cards();
         let request_model_name = &request.into_inner().name;
-        if let Some(entry) = entries
+        if let Some(card) = cards
             .into_iter()
-            .find(|entry| request_model_name == &entry.name)
+            .find(|card| request_model_name == &card.display_name)
         {
-            if entry.model_type.supports_tensor() {
-                if let Some(config) = entry.runtime_config.as_ref()
-                    && let Some(tensor_model_config) = config.tensor_model_config.as_ref()
+            if card.model_type.supports_tensor() {
+                if let Some(tensor_model_config) = card.runtime_config.tensor_model_config.as_ref()
                 {
                     let model_config = ModelConfig {
                         name: tensor_model_config.name.clone(),
@@ -523,9 +521,9 @@ impl GrpcInferenceService for KserveService {
                     "Model '{}' has type Tensor but no model config is provided",
                     request_model_name
                 )))?
-            } else if entry.model_type.supports_completions() {
+            } else if card.model_type.supports_completions() {
                 let config = ModelConfig {
-                    name: entry.name,
+                    name: card.display_name,
                     platform: "dynamo".to_string(),
                     backend: "dynamo".to_string(),
                     input: vec![

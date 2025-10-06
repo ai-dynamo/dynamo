@@ -33,7 +33,6 @@
    kubernetes/model_caching_with_fluid.md
    kubernetes/README.md
    guides/dynamo_run.md
-   kubernetes/sla_planner_deployment.md
    guides/metrics.md
    guides/run_kvbm_in_vllm.md
    guides/run_kvbm_in_trtllm.md
@@ -47,7 +46,7 @@
    components/backends/sglang/docs/multinode-examples.md
 
    examples/README.md
-   examples/custom_backend/hello_world/README.md
+   examples/runtime/hello_world/README.md
 
    architecture/distributed_runtime.md
    architecture/dynamo_flow.md

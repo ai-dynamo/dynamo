@@ -52,7 +52,7 @@ impl
 
             // Generate 5 response chunks
             for i in 0..5 {
-                let output = generator.create_choice(i, Some(format!("Mock response {i}")), None, None, None);
+                let output = generator.create_choice(i, Some(format!("Mock response {i}")), None, None);
                 yield Annotated::from_data(output);
             }
         };
@@ -90,9 +90,9 @@ async fn test_metrics_prefix_default() {
 
         // Assert metrics that are actually present in the default configuration
         assert!(body.contains("dynamo_frontend_requests_total"));
-        assert!(body.contains("dynamo_frontend_inflight_requests_total"));
+        assert!(body.contains("dynamo_frontend_inflight_requests"));
         assert!(body.contains("dynamo_frontend_request_duration_seconds"));
-        assert!(body.contains("dynamo_frontend_client_disconnects"));
+        assert!(body.contains("dynamo_frontend_disconnected_clients"));
 
         token.cancel();
         let _ = handle.await;
@@ -271,10 +271,10 @@ async fn test_metrics_with_mock_model() {
         // Assert that key metrics are present with the mockmodel
         assert!(metrics_body.contains("dynamo_frontend_requests_total"));
         assert!(metrics_body.contains("model=\"mockmodel\""));
-        assert!(metrics_body.contains("dynamo_frontend_inflight_requests_total"));
+        assert!(metrics_body.contains("dynamo_frontend_inflight_requests"));
         assert!(metrics_body.contains("dynamo_frontend_request_duration_seconds"));
         assert!(metrics_body.contains("dynamo_frontend_output_sequence_tokens"));
-        assert!(metrics_body.contains("dynamo_frontend_queued_requests_total"));
+        assert!(metrics_body.contains("dynamo_frontend_queued_requests"));
 
         // Verify specific request counter incremented
         assert!(metrics_body.contains("endpoint=\"chat_completions\""));
@@ -293,12 +293,13 @@ async fn test_metrics_with_mock_model() {
 mod integration_tests {
     use super::*;
     use dynamo_llm::{
-        discovery::{ModelEntry, ModelWatcher},
+        discovery::{MODEL_ROOT_PATH, ModelEntry, ModelWatcher},
         engines::make_echo_engine,
         entrypoint::EngineConfig,
         local_model::LocalModelBuilder,
     };
     use dynamo_runtime::DistributedRuntime;
+    use dynamo_runtime::pipeline::RouterMode;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -335,8 +336,6 @@ mod integration_tests {
 
         // Set up model watcher to discover models from etcd (like production)
         // This is crucial for the polling task to find model entries
-        use dynamo_llm::discovery::{MODEL_ROOT_PATH, ModelWatcher};
-        use dynamo_runtime::pipeline::RouterMode;
 
         let model_watcher = ModelWatcher::new(
             distributed_runtime.clone(),
@@ -386,6 +385,23 @@ mod integration_tests {
             )
             .await
             .unwrap();
+
+        // Manually save the model card and update metrics
+        // This simulates what the ModelWatcher polling task would do in production
+        let card = local_model.card().clone();
+        manager.save_model_card("test-mdc-key", card.clone());
+
+        if let Err(e) = service
+            .state()
+            .metrics_clone()
+            .update_metrics_from_mdc(&card)
+        {
+            tracing::debug!(
+                model = %card.display_name,
+                error = %e,
+                "Failed to update MDC metrics in test"
+            );
+        }
 
         // Start the HTTP service
         let token = CancellationToken::new();
@@ -457,10 +473,10 @@ mod integration_tests {
         let model_name = model.service_name();
         assert!(metrics_body.contains("dynamo_frontend_requests_total"));
         assert!(metrics_body.contains(&format!("model=\"{}\"", model_name)));
-        assert!(metrics_body.contains("dynamo_frontend_inflight_requests_total"));
+        assert!(metrics_body.contains("dynamo_frontend_inflight_requests"));
         assert!(metrics_body.contains("dynamo_frontend_request_duration_seconds"));
         assert!(metrics_body.contains("dynamo_frontend_output_sequence_tokens"));
-        assert!(metrics_body.contains("dynamo_frontend_queued_requests_total"));
+        assert!(metrics_body.contains("dynamo_frontend_queued_requests"));
 
         // Assert MDC-based model configuration metrics are present
         // These MUST be present for the test to pass
@@ -498,7 +514,10 @@ mod integration_tests {
             );
 
             // Get all model entries for our test model
-            let model_entries = watcher.entries_for_model("test-mdc-model").await.unwrap();
+            let model_entries = watcher
+                .entries_for_model("test-mdc-model", None, true)
+                .await
+                .unwrap();
 
             if !model_entries.is_empty() {
                 // For each model entry, we need to find its etcd key and remove it
@@ -531,7 +550,7 @@ mod integration_tests {
 
                     if let Some(key) = key {
                         // Remove from ModelManager first (this returns the ModelEntry)
-                        if let Some(_removed_entry) = manager.remove_model_entry(&key) {
+                        if let Some(_removed_card) = manager.remove_model_card(&key) {
                             // Remove engines (following ModelWatcher::handle_delete pattern)
                             manager
                                 .remove_chat_completions_model(&model_entry.name)

@@ -32,7 +32,7 @@ data:
     kv_cache_config:
       free_gpu_memory_fraction: 0.80
     cache_transceiver_config:
-      backend: default
+      backend: DEFAULT
 
   decode.yaml: |
     # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
@@ -60,7 +60,7 @@ data:
     kv_cache_config:
       free_gpu_memory_fraction: 0.80
     cache_transceiver_config:
-      backend: default
+      backend: DEFAULT
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -79,6 +79,8 @@ metadata:
   name: trtllm-disagg-tp8
 spec:
   backendFramework: trtllm
+  pvcs:
+    - name: models
   envs:
     - name: OMPI_ALLOW_RUN_AS_ROOT
       value: "1"
@@ -96,14 +98,16 @@ spec:
           image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/components/backends/trtllm
           command:
-            - /bin/sh
-            - -c
+          - python3
+          - -m
+          - dynamo.frontend
           args:
-            - "python3 -m dynamo.frontend --http-port 8000"
+            - --http-port
+            - "8000"
     prefill:
-      pvc:
-        name: models
-        mountPoint: /models
+      volumeMounts:
+        - name: models
+          mountPoint: /models
       dynamoNamespace: trtllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
@@ -126,14 +130,24 @@ spec:
           image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/components/backends/trtllm
           command:
-            - /bin/sh
-            - -c
+          - python3
+          - -m
+          - dynamo.trtllm
           args:
-            - "python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B --extra-engine-args engine_configs/prefill.yaml --disaggregation-mode prefill --disaggregation-strategy decode_first"
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --extra-engine-args
+            - engine_configs/prefill.yaml
+            - --disaggregation-mode
+            - prefill
+            - --disaggregation-strategy
+            - decode_first
     decode:
-      pvc:
-        name: models
-        mountPoint: /models
+      volumeMounts:
+        - name: models
+          mountPoint: /models
       dynamoNamespace: trtllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
@@ -156,7 +170,17 @@ spec:
           image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/components/backends/trtllm
           command:
-            - /bin/sh
-            - -c
+          - python3
+          - -m
+          - dynamo.trtllm
           args:
-            - "python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B --extra-engine-args engine_configs/decode.yaml --disaggregation-mode decode --disaggregation-strategy decode_first"
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --extra-engine-args
+            - engine_configs/decode.yaml
+            - --disaggregation-mode
+            - decode
+            - --disaggregation-strategy
+            - decode_first

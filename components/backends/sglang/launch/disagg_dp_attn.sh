@@ -28,6 +28,7 @@ python3 -m dynamo.sglang \
   --served-model-name silence09/DeepSeek-R1-Small-2layers \
   --tp 2 \
   --dp-size 2 \
+  --page-size 16 \
   --enable-dp-attention \
   --trust-remote-code \
   --disaggregation-mode prefill \
@@ -42,6 +43,7 @@ CUDA_VISIBLE_DEVICES=2,3 python3 -m dynamo.sglang \
   --served-model-name silence09/DeepSeek-R1-Small-2layers \
   --tp 2 \
   --dp-size 2 \
+  --page-size 16 \
   --enable-dp-attention \
   --trust-remote-code \
   --disaggregation-mode decode \
