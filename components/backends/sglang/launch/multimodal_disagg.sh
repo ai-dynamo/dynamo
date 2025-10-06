@@ -63,6 +63,8 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --trust-remote-code \
   --skip-tokenizer-init \
   --disaggregation-mode prefill \
+  --disaggregation-bootstrap-port 12345 \
+  --host 0.0.0.0 \
   --disaggregation-transfer-backend nixl &
 
 # run SGLang multimodal decode worker
@@ -74,6 +76,8 @@ CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
   --trust-remote-code \
   --skip-tokenizer-init \
   --disaggregation-mode decode \
+  --disaggregation-bootstrap-port 12345 \
+  --host 0.0.0.0 \
   --disaggregation-transfer-backend nixl &
 
 # Wait for all background processes to complete
