@@ -271,6 +271,7 @@ fn run_request(
             top_logprobs: None,
             finish_reason: None,
             index: None,
+            extra_args: None,
         };
         work_request
             .response_channel
