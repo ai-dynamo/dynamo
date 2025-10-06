@@ -41,8 +41,8 @@ spec:
 
       containers:
       - name: epp
-        image: {{ if .Values.eppAware.enabled }}{{ default .Values.extension.image .Values.eppAware.eppImage }}{{ else }}{{ .Values.extension.image }}{{ end }}
-        imagePullPolicy: {{ .Values.epp.imagePullPolicy | default "IfNotPresent" }}
+        image: "{{ if .Values.eppAware.enabled }}{{ default .Values.extension.image .Values.eppAware.eppImage }}{{ else }}{{ .Values.extension.image }}{{ end }}"
+        imagePullPolicy: {{ default "IfNotPresent" .Values.epp.imagePullPolicy }}
         args:
         {{- if .Values.epp.argsOverride }}
         {{- toYaml .Values.epp.argsOverride | nindent 8 }}
@@ -64,41 +64,43 @@ spec:
           - "/etc/epp/epp-config-dynamo.yaml"
         {{- end }}
         {{- end }}
+
+        {{- $platformNs := default .Release.Namespace .Values.platformNamespace -}}
+        {{- $platformName := default "dynamo-platform" .Values.platformReleaseName -}}
+        {{- $ns := required "set eppAware.dynamoNamespace via values" .Values.eppAware.dynamoNamespace -}}
+        {{- $comp := default "backend" .Values.eppAware.dynamoComponent -}}
+        {{- $kv := default "16" .Values.eppAware.dynamoKvBlockSize -}}
+
         {{- if .Values.eppAware.enabled }}
         volumeMounts:
-            - name: epp-config
-              mountPath: /etc/epp
-              readOnly: true
+          - name: epp-config
+            mountPath: /etc/epp
+            readOnly: true
         {{- end }}
+
         env:
         {{- if .Values.eppAware.enabled }}
-          {{- $platformNs := default .Release.Namespace .Values.platformNamespace -}}
-          {{- $platformName := default "dynamo-platform" .Values.platformReleaseName -}}
           - name: ETCD_ENDPOINTS
-            value: "{{$platformName}}-etcd.{{$platformNs}}:2379" # match the dynamo platform's release name by default
+            value: "{{ $platformName }}-etcd.{{ $platformNs }}:2379"
           - name: NATS_SERVER
-            value: "nats://{{$platformName}}-nats.{{$platformNs}}:4222" # match the dynamo platform's release name by default
-
-            {{- $ns := required "set eppAware.dynamoNamespace via values" .Values.eppAware.dynamoNamespace }}
-            {{- $comp := default "backend" .Values.eppAware.dynamoComponent }}
-            {{- $kv := default "16" .Values.eppAware.dynamoKvBlockSize }}
-            - name: DYNAMO_NAMESPACE
-              value: "{{$ns}}"
-            - name: DYNAMO_COMPONENT
-              value: "{{$comp}}"
-            - name: DYNAMO_KV_BLOCK_SIZE
-              value: "{{$kv}}"
-
+            value: "nats://{{ $platformName }}-nats.{{ $platformNs }}:4222"
+          - name: DYNAMO_NAMESPACE
+            value: "{{ $ns }}"
+          - name: DYNAMO_COMPONENT
+            value: "{{ $comp }}"
+          - name: DYNAMO_KV_BLOCK_SIZE
+            value: "{{ $kv }}"
         {{- end }}
         {{- range .Values.epp.extraEnv }}
           - name: {{ .name }}
             value: {{ .value | quote }}
         {{- end }}
+
         ports:
-        - containerPort: 9002
-        - containerPort: 9003
-        - name: metrics
-          containerPort: 9090
+          - containerPort: 9002
+          - containerPort: 9003
+          - name: metrics
+            containerPort: 9090
         livenessProbe:
           grpc:
             port: 9003
