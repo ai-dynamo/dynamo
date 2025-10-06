@@ -128,12 +128,13 @@ spec:
 
 **For MoE models**, use `profile_sla_moe_job.yaml` with TEP/DEP configuration instead.
 
-If you want to automatically deploy the optimized DGD with planner after profiling, add `--deploy-after-profile` to the profiling job. It will deploy the DGD with the engine of the optimized parallelization mapping found for the SLA targets.
+If you want to automatically deploy the optimized DGD with planner after profiling, add `--deploy-after-profile` to the profiling job. It will deploy the DGD with the engine of the optimized parallelization mapping found for the SLA targets. 
 
 ### Advanced Configuration
 
 - **Model caching**: For large models, create a multi-attach PVC to cache the model. See [recipes](../../recipes/README.md) for details.
-- **Custom configurations**: Use the manifest injector to place custom DGD configurations in the PVC.
+- **Custom disaggregated configurations**: Use the manifest injector to place custom DGD configurations in the PVC.
+- **Planner Config Passthrough**: To specify custom planner configurations (e.g., `adjustment-interval` or `load-predictor`) in the generated or deployed DGD config, add a `planner-` prefix to the argument. For example, to specify `--adjustment-interval=60` in SLA planner, add `--planner-adjustment-interval=60` arg to the profiling job.
 - **Resource allocation**: Modify the job YAML to adjust GPU and memory requirements.
 
 ### Viewing Profiling Results
