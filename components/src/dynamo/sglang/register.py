@@ -20,10 +20,17 @@ async def _register_llm_with_runtime_config(
     dynamo_args: DynamoArgs,
     input_type: Optional[ModelInput] = ModelInput.Tokens,
 ) -> bool:
-    """Register LLM with runtime config
+    """Register LLM with the Dynamo runtime.
+
+    Args:
+        engine: The SGLang engine instance.
+        endpoint: The Dynamo endpoint for communication.
+        server_args: SGLang server configuration.
+        dynamo_args: Dynamo-specific configuration.
+        input_type: Expected model input type. Defaults to ModelInput.Tokens.
 
     Returns:
-        bool: True if registration succeeded, False if it failed
+        True if registration succeeded, False otherwise.
     """
     runtime_config = await _get_runtime_config(engine, server_args, dynamo_args)
     input_type = input_type
@@ -56,7 +63,16 @@ async def _register_llm_with_runtime_config(
 async def _get_runtime_config(
     engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoArgs
 ) -> Optional[ModelRuntimeConfig]:
-    """Get runtime config from SGLang engine"""
+    """Extract runtime configuration from SGLang engine and args.
+
+    Args:
+        engine: The SGLang engine instance.
+        server_args: SGLang server configuration.
+        dynamo_args: Dynamo-specific configuration.
+
+    Returns:
+        ModelRuntimeConfig with extracted values, or None if extraction fails.
+    """
     runtime_config = ModelRuntimeConfig()
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.reasoning_parser
@@ -120,10 +136,18 @@ async def register_llm_with_readiness_gate(
     input_type: Optional[ModelInput] = ModelInput.Tokens,
     readiness_gate: Optional[asyncio.Event] = None,
 ) -> None:
-    """Register LLM with readiness gate
+    """Wrapper function to register LLM with the Dynamo runtime and use optional readiness gate to signal success.
 
-    Returns:
-        bool: True if registration succeeded, False if it failed
+    Args:
+        engine: The SGLang engine instance.
+        generate_endpoint: The Dynamo endpoint for generation requests.
+        server_args: SGLang server configuration.
+        dynamo_args: Dynamo-specific configuration.
+        input_type: Expected model input type. Defaults to ModelInput.Tokens.
+        readiness_gate: Optional event to signal when registration completes.
+
+    Raises:
+        RuntimeError: If model registration fails.
     """
     registration_success = await _register_llm_with_runtime_config(
         engine,
