@@ -139,20 +139,15 @@ def extract_timestamp_from_log(
     """
     try:
         with open(log_path, "r") as f:
+            lines = list(f.readlines())
             if from_end:
-                # Read last few lines for last timestamp
-                lines = f.readlines()
-                # Convert reversed to list to fix mypy type issues
-                lines_to_check = list(
-                    reversed(lines[-max_lines:] if len(lines) > max_lines else lines)
-                )
+                # Read from the end of the file
+                lines_to_check = list(reversed(lines))
             else:
-                # Read first few lines for first timestamp
-                lines_to_check = []
-                for i, line in enumerate(f):
-                    if i >= max_lines:
-                        break
-                    lines_to_check.append(line)
+                # Read from the beginning of the file
+                lines_to_check = lines
+            # Limit to max_lines
+            lines_to_check = lines_to_check[:max_lines]
 
             for line in lines_to_check:
                 if '"time":"' in line:
