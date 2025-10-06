@@ -1,18 +1,22 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use axum::{
-    Router,
-    body::Body,
-    extract::State,
-    http::{HeaderValue, StatusCode, header},
-    response::Response,
-    routing::get,
+use axum::Router;
+use dynamo_runtime::metrics::{
+    MetricsRegistry,
+    prometheus_names::{
+        kvbm::{
+            MATCHED_TOKENS, OFFLOAD_BLOCKS_D2H, OFFLOAD_REQUESTS, ONBOARD_BLOCKS_D2D,
+            ONBOARD_BLOCKS_H2D, ONBOARD_REQUESTS,
+        },
+        sanitize_prometheus_name,
+    },
 };
-use dynamo_runtime::metrics::{MetricsRegistry, prometheus_names::sanitize_prometheus_name};
-use prometheus::{Encoder, IntCounter, Opts, Registry, TextEncoder};
+use prometheus::{IntCounter, Opts, Registry};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, thread};
 use tokio::{net::TcpListener, sync::Notify};
+
+use crate::http::service::{RouteDoc, metrics::router};
 
 #[derive(Clone, Debug)]
 pub struct KvbmMetrics {
@@ -40,34 +44,34 @@ pub struct KvbmMetrics {
 impl KvbmMetrics {
     pub fn new(mr: &dyn MetricsRegistry) -> Self {
         let offload_requests = mr
-            .create_intcounter("offload_requests", "The number of offload requests", &[])
+            .create_intcounter(OFFLOAD_REQUESTS, "The number of offload requests", &[])
             .unwrap();
         let offload_blocks_d2h = mr
             .create_intcounter(
-                "offload_blocks_d2h",
+                OFFLOAD_BLOCKS_D2H,
                 "The number of offload blocks from device to host",
                 &[],
             )
             .unwrap();
         let onboard_requests = mr
-            .create_intcounter("onboard_requests", "The number of onboard requests", &[])
+            .create_intcounter(ONBOARD_REQUESTS, "The number of onboard requests", &[])
             .unwrap();
         let onboard_blocks_h2d = mr
             .create_intcounter(
-                "onboard_blocks_h2d",
+                ONBOARD_BLOCKS_H2D,
                 "The number of onboard blocks from host to device",
                 &[],
             )
             .unwrap();
         let onboard_blocks_d2d = mr
             .create_intcounter(
-                "onboard_blocks_d2d",
+                ONBOARD_BLOCKS_D2D,
                 "The number of onboard blocks from disk to device",
                 &[],
             )
             .unwrap();
         let matched_tokens = mr
-            .create_intcounter("matched_tokens", "The number of matched tokens", &[])
+            .create_intcounter(MATCHED_TOKENS, "The number of matched tokens", &[])
             .unwrap();
         Self {
             offload_requests,
@@ -84,34 +88,34 @@ impl KvbmMetrics {
     /// Non-blocking: the HTTP server runs on a background task.
     pub fn new_with_standalone(mr: &KvbmMetricsRegistry, metrics_port: u16) -> Self {
         let offload_requests = mr
-            .create_intcounter("offload_requests", "The number of offload requests", &[])
+            .create_intcounter(OFFLOAD_REQUESTS, "The number of offload requests", &[])
             .unwrap();
         let offload_blocks_d2h = mr
             .create_intcounter(
-                "offload_blocks_d2h",
+                OFFLOAD_BLOCKS_D2H,
                 "The number of offload blocks from device to host",
                 &[],
             )
             .unwrap();
         let onboard_requests = mr
-            .create_intcounter("onboard_requests", "The number of onboard requests", &[])
+            .create_intcounter(ONBOARD_REQUESTS, "The number of onboard requests", &[])
             .unwrap();
         let onboard_blocks_h2d = mr
             .create_intcounter(
-                "onboard_blocks_h2d",
+                ONBOARD_BLOCKS_H2D,
                 "The number of onboard blocks from host to device",
                 &[],
             )
             .unwrap();
         let onboard_blocks_d2d = mr
             .create_intcounter(
-                "onboard_blocks_d2d",
+                ONBOARD_BLOCKS_D2D,
                 "The number of onboard blocks from disk to device",
                 &[],
             )
             .unwrap();
         let matched_tokens = mr
-            .create_intcounter("matched_tokens", "The number of matched tokens", &[])
+            .create_intcounter(MATCHED_TOKENS, "The number of matched tokens", &[])
             .unwrap();
 
         // 2) start HTTP server in background with graceful shutdown via Notify
@@ -120,9 +124,10 @@ impl KvbmMetrics {
         let notify_for_task = notify.clone();
 
         let addr = SocketAddr::from(([0, 0, 0, 0], metrics_port));
-        let app = Router::new()
-            .route("/metrics", get(metrics_handler))
-            .with_state(registry);
+        let (_route_docs, app): (Vec<RouteDoc>, Router) = router(
+            (*registry).clone(), // take owned Registry (Clone) for router to wrap in Arc
+            None,                // or Some("/metrics".to_string()) to override the path
+        );
 
         let run_server = async move {
             let listener = TcpListener::bind(addr).await.expect("bind metrics addr");
@@ -173,31 +178,6 @@ impl Drop for KvbmMetrics {
             }
         }
     }
-}
-
-/// GET /metrics
-async fn metrics_handler(State(registry): State<Arc<Registry>>) -> Response {
-    let metric_families = registry.gather();
-    let encoder = TextEncoder::new();
-
-    let mut buf = Vec::new();
-    if let Err(e) = encoder.encode(&metric_families, &mut buf) {
-        let mut resp = Response::new(Body::from(format!("encode error: {e}")));
-        *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-        resp.headers_mut().insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/plain; charset=utf-8"),
-        );
-        return resp;
-    }
-
-    let mut resp = Response::new(Body::from(buf));
-    *resp.status_mut() = StatusCode::OK;
-    resp.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
-    );
-    resp
 }
 
 /// A raw, standalone Prometheus metrics registry implementation using the fixed prefix: `kvbm_`
