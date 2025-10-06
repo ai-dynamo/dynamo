@@ -90,6 +90,85 @@ def parse_test_log(
     return startup_time, failure_info
 
 
+def parse_timestamp(timestamp_str: str) -> Optional[datetime]:
+    """
+    Robustly parse timestamp with multiple format attempts.
+
+    Args:
+        timestamp_str: Timestamp string to parse
+
+    Returns:
+        datetime object or None if parsing fails
+    """
+    # List of common timestamp formats to try
+    timestamp_formats = [
+        "%Y-%m-%dT%H:%M:%S.%fZ",  # Full format with microseconds and Z
+        "%Y-%m-%dT%H:%M:%SZ",  # Without microseconds, with Z
+        "%Y-%m-%dT%H:%M:%S.%f",  # With microseconds, no timezone
+        "%Y-%m-%dT%H:%M:%S",  # Basic ISO format
+        "%Y-%m-%d %H:%M:%S.%f",  # Space separator with microseconds
+        "%Y-%m-%d %H:%M:%S",  # Space separator without microseconds
+    ]
+
+    for fmt in timestamp_formats:
+        try:
+            return datetime.strptime(timestamp_str, fmt)
+        except ValueError:
+            continue
+
+    # If no format matches, log the issue
+    logging.debug(f"Could not parse timestamp: {timestamp_str}")
+    return None
+
+
+def extract_timestamp_from_log(
+    log_path: str, from_end: bool = False, max_lines: int = 10, debug_message: str = ""
+) -> Optional[datetime]:
+    """
+    Extract a timestamp from a log file by parsing JSON lines.
+
+    Args:
+        log_path: Path to the log file
+        from_end: If True, search from the end of file (for last timestamp)
+                  If False, search from beginning (for first timestamp)
+        max_lines: Maximum number of lines to check
+        debug_message: Debug message to log when timestamp is found
+
+    Returns:
+        datetime object or None if no valid timestamp found
+    """
+    try:
+        with open(log_path, "r") as f:
+            lines = list(f.readlines())
+            if from_end:
+                # Read from the end of the file
+                lines_to_check = list(reversed(lines))
+            else:
+                # Read from the beginning of the file
+                lines_to_check = lines
+            # Limit to max_lines
+            lines_to_check = lines_to_check[:max_lines]
+
+            for line in lines_to_check:
+                if '"time":"' in line:
+                    try:
+                        log_entry = json.loads(line)
+                        timestamp_str = log_entry.get("time", "")
+                        if timestamp_str:
+                            parsed_time = parse_timestamp(timestamp_str)
+                            if parsed_time:
+                                if debug_message:
+                                    logging.debug(f"{debug_message}: {timestamp_str}")
+                                return parsed_time
+                    except (json.JSONDecodeError, ValueError) as e:
+                        logging.debug(f"Failed to parse JSON line: {e}")
+                        continue
+    except IOError as e:
+        logging.debug(f"Could not read {log_path}: {e}")
+
+    return None
+
+
 def calculate_recovery_time(
     failure_info: Optional[List[str]],
     process_logs_dir: str,
@@ -111,8 +190,10 @@ def calculate_recovery_time(
     # Determine component type from failure info (strip any quotes)
     component_type = failure_info[0].strip("'\"")  # e.g., "Frontend" or "decode"
     component_dir = os.path.join(process_logs_dir, component_type)
+    logging.info(f"Component directory: {component_dir}")
 
     if not os.path.exists(component_dir):
+        logging.warning(f"Component directory {component_dir} does not exist")
         return None
 
     last_timestamp_before = None
@@ -122,23 +203,15 @@ def calculate_recovery_time(
     for log_file in os.listdir(component_dir):
         if log_file.endswith(".previous.log"):
             log_path = os.path.join(component_dir, log_file)
-            try:
-                with open(log_path, "r") as f:
-                    # Read last few lines to find last valid timestamp
-                    lines = f.readlines()
-                    for line in reversed(lines[-10:]):  # Check last 10 lines
-                        if '"time":"' in line:
-                            try:
-                                log_entry = json.loads(line)
-                                timestamp_str = log_entry.get("time", "")[:19]
-                                last_timestamp_before = datetime.strptime(
-                                    timestamp_str, "%Y-%m-%dT%H:%M:%S"
-                                )
-                                break
-                            except (json.JSONDecodeError, ValueError):
-                                continue
-            except IOError as e:
-                logging.debug(f"Could not read {log_file}: {e}")
+            logging.info(f"Previous pod log path: {log_path}")
+            last_timestamp_before = extract_timestamp_from_log(
+                log_path,
+                from_end=True,
+                max_lines=50,  # Check more lines for better chance of finding timestamp
+                debug_message="Last timestamp before failure",
+            )
+            if last_timestamp_before:
+                break
 
     # Find the first timestamp from current container log
     for log_file in os.listdir(component_dir):
@@ -146,17 +219,15 @@ def calculate_recovery_time(
             (".previous.log", ".metrics.log")
         ):
             log_path = os.path.join(component_dir, log_file)
-            try:
-                with open(log_path, "r") as f:
-                    first_line = f.readline()
-                    if first_line and '"time":"' in first_line:
-                        log_entry = json.loads(first_line)
-                        timestamp_str = log_entry.get("time", "")[:19]
-                        first_timestamp_after = datetime.strptime(
-                            timestamp_str, "%Y-%m-%dT%H:%M:%S"
-                        )
-            except (json.JSONDecodeError, ValueError, IOError) as e:
-                logging.debug(f"Could not parse timestamp from {log_file}: {e}")
+            logging.info(f"Pod log path: {log_path}")
+            first_timestamp_after = extract_timestamp_from_log(
+                log_path,
+                from_end=False,
+                max_lines=100,  # May need to skip initial non-JSON output
+                debug_message="First timestamp after recovery",
+            )
+            if first_timestamp_after:
+                break
 
     # Calculate recovery time from container timestamps (both in UTC)
     if last_timestamp_before and first_timestamp_after:
