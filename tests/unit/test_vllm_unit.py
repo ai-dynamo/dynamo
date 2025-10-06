@@ -16,10 +16,14 @@ TEST_DIR = Path(__file__).parent.parent
 JINJA_TEMPLATE_PATH = str(TEST_DIR / "serve" / "fixtures" / "custom_template.jinja")
 
 
-@pytest.mark.unit
-@pytest.mark.vllm
-@pytest.mark.gpu_1
-@pytest.mark.pre_merge
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.vllm,
+    pytest.mark.gpu_1,
+    pytest.mark.pre_merge,
+]
+
+
 def test_custom_jinja_template_invalid_path(monkeypatch):
     """Test that invalid file path raises FileNotFoundError."""
     invalid_path = "/nonexistent/path/to/template.jinja"
@@ -42,10 +46,6 @@ def test_custom_jinja_template_invalid_path(monkeypatch):
         parse_args()
 
 
-@pytest.mark.unit
-@pytest.mark.vllm
-@pytest.mark.gpu_1
-@pytest.mark.pre_merge
 def test_custom_jinja_template_valid_path(monkeypatch):
     """Test that valid absolute path is stored correctly."""
     monkeypatch.setattr(
@@ -63,15 +63,11 @@ def test_custom_jinja_template_valid_path(monkeypatch):
     config = parse_args()
 
     assert config.custom_jinja_template == JINJA_TEMPLATE_PATH, (
-        f"Expected custom_jinja_template to be {JINJA_TEMPLATE_PATH}, "
+        f"Expected custom_jinja_template value to be {JINJA_TEMPLATE_PATH}, "
         f"got {config.custom_jinja_template}"
-    )```
+    )
 
 
-@pytest.mark.unit
-@pytest.mark.vllm
-@pytest.mark.gpu_1
-@pytest.mark.pre_merge
 def test_custom_jinja_template_env_var_expansion(monkeypatch):
     """Test that environment variables in paths are expanded by Python code."""
     jinja_dir = str(TEST_DIR / "serve" / "fixtures")
@@ -93,4 +89,7 @@ def test_custom_jinja_template_env_var_expansion(monkeypatch):
     config = parse_args()
 
     assert "$JINJA_DIR" not in config.custom_jinja_template
-    assert config.custom_jinja_template == JINJA_TEMPLATE_PATH
+    assert config.custom_jinja_template == JINJA_TEMPLATE_PATH, (
+        f"Expected custom_jinja_template value to be {JINJA_TEMPLATE_PATH}, "
+        f"got {config.custom_jinja_template}"
+    )
