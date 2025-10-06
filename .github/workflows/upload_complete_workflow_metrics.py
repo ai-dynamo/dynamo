@@ -9,6 +9,7 @@ the entire workflow including all previous jobs.
 import json
 import os
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
@@ -283,9 +284,6 @@ class WorkflowMetricsUploader:
         print(
             f"Uploading complete metrics for workflow '{self.workflow_name}' (run {self.run_id})"
         )
-
-        # Wait for workflow to complete before uploading metrics
-        import time
 
         max_retries = 1
         retry_delay = 15  # seconds
