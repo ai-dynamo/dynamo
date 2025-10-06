@@ -22,14 +22,6 @@ async def register_llm_with_runtime_config(
 ) -> bool:
     """Register LLM with runtime config
 
-    Args:
-        engine: SGLang engine instance
-        endpoint: Dynamo endpoint
-        server_args: SGLang server arguments
-        dynamo_args: Dynamo-specific arguments
-        input_type: Model input type (defaults to ModelInput.Tokens)
-        output_type: Model output type (defaults to Chat | Completions for LLMs)
-
     Returns:
         bool: True if registration succeeded, False if it failed
     """
@@ -49,9 +41,6 @@ async def register_llm_with_runtime_config(
         if output_type != ModelType.Embedding:
             output_type = ModelType.Chat
 
-    logging.info(
-        f"Registering model with input_type={input_type}, output_type={output_type}, skip_tokenizer_init={server_args.skip_tokenizer_init}"
-    )
     try:
         await register_llm(
             input_type,

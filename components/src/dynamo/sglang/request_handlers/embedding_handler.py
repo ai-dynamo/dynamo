@@ -6,6 +6,7 @@ import logging
 import sglang as sgl
 
 from dynamo._core import Component
+from dynamo.llm import WorkerMetricsPublisher, ZmqKvEventPublisher
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import EmbeddingRequest
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -17,9 +18,12 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         component: Component,
         engine: sgl.Engine,
         config: Config,
+        metrics_publisher: WorkerMetricsPublisher,
+        kv_publisher: ZmqKvEventPublisher = None,
     ):
-        # Embedding workers don't need metrics publisher, kv publisher, or prefill client
-        super().__init__(component, engine, config, None, None, None)
+        super().__init__(
+            component, engine, config, metrics_publisher, kv_publisher, None
+        )
         logging.info("Embedding worker handler initialized")
 
     def cleanup(self):

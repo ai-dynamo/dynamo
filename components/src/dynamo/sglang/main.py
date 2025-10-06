@@ -39,6 +39,100 @@ from dynamo.sglang.request_handlers import (
 configure_dynamo_logging()
 
 
+async def setup_kv_publisher(server_args, generate_endpoint, component):
+    """Setup KV publisher if configured"""
+    if not server_args.kv_events_config:
+        return None
+
+    kv_events = json.loads(server_args.kv_events_config)
+    ep = kv_events.get("endpoint")
+    zmq_ep = ep.replace("*", get_ip()) if ep else None
+
+    zmq_config = ZmqKvEventPublisherConfig(
+        worker_id=generate_endpoint.lease_id(),
+        kv_block_size=server_args.page_size,
+        zmq_endpoint=zmq_ep,
+    )
+    logging.info(f"Setting up ZMQ kv event publisher at {zmq_ep}")
+    return ZmqKvEventPublisher(component=component, config=zmq_config)
+
+
+async def register_model_with_readiness(
+    engine,
+    generate_endpoint,
+    server_args,
+    dynamo_args,
+    runtime,
+    ready_event,
+    input_type=None,
+    output_type=None,
+    model_type_name="Model",
+):
+    """Register model and signal readiness"""
+    # Call register_llm_with_runtime_config with appropriate parameters
+    if input_type is not None and output_type is not None:
+        registration_success = await register_llm_with_runtime_config(
+            engine,
+            generate_endpoint,
+            server_args,
+            dynamo_args,
+            input_type=input_type,
+            output_type=output_type,
+        )
+    else:
+        # Default registration without explicit input/output types
+        registration_success = await register_llm_with_runtime_config(
+            engine,
+            generate_endpoint,
+            server_args,
+            dynamo_args,
+        )
+
+    if not registration_success:
+        logging.error(f"{model_type_name} registration failed; shutting down")
+        runtime.shutdown()
+        raise RuntimeError(f"{model_type_name} registration failed")
+
+    # Model is ready - allow queued requests to proceed
+    ready_event.set()
+    logging.info(
+        f"{model_type_name} registration succeeded; processing queued requests"
+    )
+
+
+async def serve_endpoint_with_cleanup(
+    generate_endpoint,
+    handler,
+    health_check_payload,
+    metrics_labels,
+    metrics_task,
+    register_task,
+    error_message="Failed to serve endpoints",
+):
+    """Serve endpoint with proper cleanup and error handling"""
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=metrics_labels,
+                health_check_payload=health_check_payload,
+            ),
+            register_task,
+        )
+    except Exception as e:
+        logging.error(f"{error_message}: {e}")
+        raise
+    finally:
+        metrics_task.cancel()
+        try:
+            await metrics_task
+        except asyncio.CancelledError:
+            logging.info("Metrics task successfully cancelled")
+            pass
+        handler.cleanup()
+
+
 @dynamo_worker(static=False)
 async def worker(runtime: DistributedRuntime):
     loop = asyncio.get_running_loop()
@@ -94,20 +188,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         )
 
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(engine, component)
-
-    kv_publisher = None
-    if server_args.kv_events_config:
-        kv_events = json.loads(server_args.kv_events_config)
-        ep = kv_events.get("endpoint")
-        zmq_ep = ep.replace("*", get_ip()) if ep else None
-
-        zmq_config = ZmqKvEventPublisherConfig(
-            worker_id=generate_endpoint.lease_id(),
-            kv_block_size=server_args.page_size,
-            zmq_endpoint=zmq_ep,
-        )
-        logging.info(f"Setting up ZMQ kv event publisher at {zmq_ep}")
-        kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
+    kv_publisher = await setup_kv_publisher(server_args, generate_endpoint, component)
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
@@ -116,49 +197,27 @@ async def init(runtime: DistributedRuntime, config: Config):
         component, engine, config, publisher, kv_publisher, prefill_client
     )
 
-    async def register_model():
-        """Register the model and signal readiness"""
-        registration_success = await register_llm_with_runtime_config(
-            engine,
-            generate_endpoint,
-            server_args,
-            dynamo_args,
-        )
-
-        if not registration_success:
-            logging.error("Model registration failed; shutting down")
-            runtime.shutdown()
-            raise RuntimeError("Model registration failed")
-
-        # Model is ready - allow queued requests to proceed
-        ready_event.set()
-        logging.info("Model registration succeeded; processing queued requests")
-
     health_check_payload = SglangHealthCheckPayload(engine).to_dict()
 
-    try:
-        # Start endpoint immediately and register model concurrently
-        # Requests queue until ready_event is set
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate,
-                graceful_shutdown=True,
-                metrics_labels=metrics_labels,
-                health_check_payload=health_check_payload,
-            ),
-            register_model(),
-        )
-    except Exception as e:
-        logging.error(f"Failed to serve endpoints: {e}")
-        raise
-    finally:
-        metrics_task.cancel()
-        try:
-            await metrics_task
-        except asyncio.CancelledError:
-            logging.info("Metrics task succesfully cancelled")
-            pass
-        handler.cleanup()
+    # Create registration task
+    register_task = register_model_with_readiness(
+        engine,
+        generate_endpoint,
+        server_args,
+        dynamo_args,
+        runtime,
+        ready_event,
+        model_type_name="Model",
+    )
+
+    await serve_endpoint_with_cleanup(
+        generate_endpoint,
+        handler,
+        health_check_payload,
+        metrics_labels,
+        metrics_task,
+        register_task,
+    )
 
 
 async def init_prefill(runtime: DistributedRuntime, config: Config):
@@ -208,53 +267,37 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
-    handler = EmbeddingWorkerHandler(component, engine, config)
+    kv_publisher = await setup_kv_publisher(server_args, generate_endpoint, component)
+    publisher, metrics_task, metrics_labels = await setup_sgl_metrics(engine, component)
 
+    handler = EmbeddingWorkerHandler(component, engine, config, publisher, kv_publisher)
     health_check_payload = SglangHealthCheckPayload(engine).to_dict()
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
-    async def register_model():
-        """Register the embedding model and signal readiness"""
+    # Create registration task
+    register_task = register_model_with_readiness(
+        engine,
+        generate_endpoint,
+        server_args,
+        dynamo_args,
+        runtime,
+        ready_event,
+        input_type=ModelInput.Text,
+        output_type=ModelType.Embedding,
+        model_type_name="Embedding model",
+    )
 
-        registration_success = await register_llm_with_runtime_config(
-            engine,
-            generate_endpoint,
-            server_args,
-            dynamo_args,
-            input_type=ModelInput.Text,
-            output_type=ModelType.Embedding,
-        )
-
-        if not registration_success:
-            logging.error("Embedding model registration failed; shutting down")
-            runtime.shutdown()
-            raise RuntimeError("Embedding model registration failed")
-
-        # Model is ready - allow queued requests to proceed
-        ready_event.set()
-        logging.info(
-            "Embedding model registration succeeded; processing queued requests"
-        )
-
-    try:
-        # Start endpoint immediately and register model concurrently
-        # Requests queue until ready_event is set
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate,
-                graceful_shutdown=True,
-                metrics_labels=[("model", server_args.served_model_name)],
-                health_check_payload=health_check_payload,
-            ),
-            register_model(),
-        )
-    except Exception as e:
-        logging.error(f"Failed to serve embedding endpoints: {e}")
-        raise
-    finally:
-        handler.cleanup()
+    await serve_endpoint_with_cleanup(
+        generate_endpoint,
+        handler,
+        health_check_payload,
+        metrics_labels,
+        metrics_task,
+        register_task,
+        error_message="Failed to serve embedding endpoints",
+    )
 
 
 async def init_multimodal_processor(runtime: DistributedRuntime, config: Config):
@@ -286,8 +329,9 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
     logging.info("Waiting for Encoder Worker Instances ...")
     await encode_worker_client.wait_for_instances()
 
-    async def register_model():
-        """Register the model and signal readiness"""
+    # Create a simple registration function for multimodal processor
+    async def register_multimodal_model():
+        """Register the multimodal model"""
         registration_success = await register_llm_with_runtime_config(
             None,  # engine,
             generate_endpoint,
@@ -297,25 +341,26 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
         )
 
         if not registration_success:
-            logging.error("Model registration failed; shutting down")
+            logging.error("Multimodal model registration failed; shutting down")
             runtime.shutdown()
-            raise RuntimeError("Model registration failed")
+            raise RuntimeError("Multimodal model registration failed")
 
-        logging.info("Model registration succeeded; processing queued requests")
+        logging.info(
+            "Multimodal model registration succeeded; processing queued requests"
+        )
 
     try:
         # Start endpoint immediately and register model concurrently
-        # Requests queue until ready_event is set
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
                 metrics_labels=[("model", server_args.served_model_name)],
             ),
-            register_model(),
+            register_multimodal_model(),
         )
     except Exception as e:
-        logging.error(f"Failed to serve endpoints: {e}")
+        logging.error(f"Failed to serve multimodal endpoints: {e}")
         raise
     finally:
         handler.cleanup()
