@@ -273,7 +273,7 @@ impl ModelWatcher {
             .component(&endpoint_id.component)?;
         let client = component.endpoint(&endpoint_id.name).client().await?;
         let model_slug = model_entry.slug();
-        let mut card = match ModelDeploymentCard::load_from_store(
+        let card = match ModelDeploymentCard::load_from_store(
             &Key::from_raw(model_slug.to_string()),
             &self.drt,
         )
@@ -311,14 +311,6 @@ impl ModelWatcher {
 
         if let Some(tx) = &self.model_update_tx {
             tx.send(ModelUpdate::Added(card.clone())).await.ok();
-        }
-
-        // FIXME: Still getting ModelInput::Tokens for embedding models even though
-        // the model input type is set to ModelInput::Text in register_llm
-        // Force embedding models to have ModelInput::Text here as a temporary workaround.
-        if card.model_type.supports_embedding() && card.model_input == ModelInput::Tokens {
-            // Set the model input to ModelInput::Text
-            card.model_input = ModelInput::Text;
         }
 
         if card.model_input == ModelInput::Tokens

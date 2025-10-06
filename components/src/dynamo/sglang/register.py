@@ -41,10 +41,6 @@ async def register_llm_with_runtime_config(
         if output_type != ModelType.Embedding:
             output_type = ModelType.Chat
 
-    logging.debug(
-        f"Registering model with input_type={input_type}, output_type={output_type}"
-    )
-
     try:
         await register_llm(
             input_type,
