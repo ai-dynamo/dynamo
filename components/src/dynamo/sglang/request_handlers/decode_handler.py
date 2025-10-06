@@ -7,9 +7,9 @@ import time
 import sglang as sgl
 
 from dynamo._core import Client, Component
-from dynamo.llm import WorkerMetricsPublisher, ZmqKvEventPublisher
 from dynamo.sglang.args import Config, DisaggregationMode
 from dynamo.sglang.protocol import DisaggPreprocessedRequest
+from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 
@@ -19,12 +19,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         component: Component,
         engine: sgl.Engine,
         config: Config,
-        metrics_publisher: WorkerMetricsPublisher,
-        kv_publisher: ZmqKvEventPublisher = None,
+        publisher: DynamoSglangPublisher,
         prefill_client: Client = None,
     ):
         super().__init__(
-            component, engine, config, metrics_publisher, kv_publisher, prefill_client
+            component,
+            engine,
+            config,
+            publisher,
+            prefill_client,
         )
         if self.serving_mode == DisaggregationMode.DECODE:
             if self.prefill_client is None:

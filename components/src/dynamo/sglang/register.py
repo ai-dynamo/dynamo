@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -12,7 +13,7 @@ from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.sglang.args import DynamoArgs
 
 
-async def register_llm_with_runtime_config(
+async def _register_llm_with_runtime_config(
     engine: sgl.Engine,
     endpoint: Endpoint,
     server_args: ServerArgs,
@@ -109,3 +110,34 @@ async def _get_runtime_config(
     except Exception as e:
         logging.warning(f"Failed to get runtime config: {e}. Proceeding without it.")
         return runtime_config
+
+
+async def register_llm_with_readiness_gate(
+    engine: sgl.Engine,
+    generate_endpoint: Endpoint,
+    server_args: ServerArgs,
+    dynamo_args: DynamoArgs,
+    input_type: Optional[ModelInput] = ModelInput.Tokens,
+    readiness_gate: Optional[asyncio.Event] = None,
+) -> None:
+    """Register LLM with readiness gate
+
+    Returns:
+        bool: True if registration succeeded, False if it failed
+    """
+    registration_success = await _register_llm_with_runtime_config(
+        engine,
+        generate_endpoint,
+        server_args,
+        dynamo_args,
+        input_type,
+    )
+    if not registration_success:
+        logging.error("Model registration failed; shutting down")
+        engine.shutdown()
+        raise RuntimeError("Model registration failed")
+
+    if readiness_gate:
+        readiness_gate.set()
+
+    logging.info("Model registration succeeded; processing queued requests")
