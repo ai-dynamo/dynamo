@@ -20,14 +20,6 @@ from typing import Dict, List, Optional, Tuple
 import pytest
 import requests
 
-# Test markers to align with repository conventions
-# Todo: enable the rest when kvbm is built in the ci
-KVBM_PYTEST_MARKS = [
-    pytest.mark.kvbm,
-    pytest.mark.e2e,
-    pytest.mark.slow,
-]
-
 
 class ServerType(str, Enum):
     vllm = "vllm"

@@ -28,12 +28,17 @@ from typing import Optional, TextIO
 import pytest
 import requests
 
-from .common import KVBM_PYTEST_MARKS, DeterminismTester, ServerType
+from .common import DeterminismTester, ServerType
 from .common import TestDeterminism as BaseTestDeterminism
 
 # Test markers to align with repository conventions
 # Todo: enable the rest when kvbm is built in the ci
-pytestmark = KVBM_PYTEST_MARKS + [pytest.mark.gpu_2]
+pytestmark = [
+    pytest.mark.kvbm,
+    pytest.mark.e2e,
+    pytest.mark.slow,
+    pytest.mark.gpu_2,
+]
 
 
 SUCCESS_RATE_THRESHOLD = 0.95
