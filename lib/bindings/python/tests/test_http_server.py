@@ -85,7 +85,7 @@ async def http_server(runtime: DistributedRuntime):
     model_name = "test_model"
     start_done = asyncio.Event()
     child_token = runtime.child_token()
-    checksum = "abc123" # Checksum of ModelDeplomentCard for that model
+    checksum = "abc123"  # Checksum of ModelDeplomentCard for that model
 
     async def worker():
         """The server worker task."""
