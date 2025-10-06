@@ -29,10 +29,6 @@ if TYPE_CHECKING:
 # from dynamo.llm.vllm_integration.rust import SchedulerOutput as RustSchedulerOutput
 
 from dynamo.llm import KvbmLeader
-from dynamo.llm.utils import (
-    find_and_set_available_port_from_env,
-    is_standslone_kvbm_metrics_enabled,
-)
 from dynamo.llm.vllm_integration.rust import KvbmRequest
 from dynamo.llm.vllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
 from dynamo.llm.vllm_integration.rust import SchedulerOutput as RustSchedulerOutput
@@ -57,8 +53,6 @@ class KvConnectorLeader:
     def __init__(self, vllm_config: "VllmConfig", engine_id: str, **kwargs):
         drt = kwargs.get("drt", None)
         if drt is None:
-            if not is_standslone_kvbm_metrics_enabled():
-                find_and_set_available_port_from_env("DYN_SYSTEM_PORT")
             self.drt = DistributedRuntime.detached()
         else:
             self.drt = drt

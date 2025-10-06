@@ -130,7 +130,12 @@ impl KvbmMetrics {
         );
 
         let run_server = async move {
-            let listener = TcpListener::bind(addr).await.expect("bind metrics addr");
+            let listener = match TcpListener::bind(addr).await {
+                Ok(listener) => listener,
+                Err(err) => {
+                    panic!("failed to bind metrics server to {addr}: {err}");
+                }
+            };
 
             if let Err(err) = axum::serve(listener, app)
                 .with_graceful_shutdown(async move {

@@ -92,9 +92,9 @@ View grafana metrics via http://localhost:3001 (default login: dynamo/dynamo) an
 
 When running `vllm serve` with KVBM, enable the standalone KVBM metrics to prevent interference with Dynamo metrics.
 ```bash
-# Enable standalone KVBM metrics by setting DYN_KVBM_METRICS_STANDALONE=true.
+# Enable KVBM metrics by setting DYN_KVBM_METRICS=true.
 # Optionally set DYN_KVBM_METRICS_PORT to choose the /metrics port (default: 6881).
-DYN_KVBM_METRICS_STANDALONE=true \
+DYN_KVBM_METRICS=true \
 vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "dynamo.llm.vllm_integration.connector"}' deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 ```
 

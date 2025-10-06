@@ -90,7 +90,6 @@ impl KvConnectorLeaderRecorder {
         drt: PyDistributedRuntime,
         page_size: usize,
         leader_py: PyKvbmLeader,
-        metrics_standalone: bool,
     ) -> Self {
         tracing::info!(
             "KvConnectorLeaderRecorder initialized with worker_id: {}",
@@ -101,7 +100,7 @@ impl KvConnectorLeaderRecorder {
         let drt = drt.inner().clone();
         let handle: Handle = drt.runtime().primary();
 
-        let kvbm_metrics = if metrics_standalone {
+        let kvbm_metrics = if use_standalone_metrics() {
             let port = parse_dyn_kvbm_metrics_port();
             KvbmMetrics::new_with_standalone(&KvbmMetricsRegistry::default(), port)
         } else {

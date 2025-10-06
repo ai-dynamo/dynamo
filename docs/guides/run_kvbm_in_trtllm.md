@@ -125,8 +125,8 @@ View grafana metrics via http://localhost:3001 (default login: dynamo/dynamo) an
 
 When running `trtllm-serve` with KVBM, enable the standalone KVBM metrics to prevent interference with Dynamo metrics.
 ```bash
-# Enable standalone KVBM metrics by setting DYN_KVBM_METRICS_STANDALONE=true.
+# Enable KVBM metrics by setting DYN_KVBM_METRICS=true.
 # Optionally set DYN_KVBM_METRICS_PORT to choose the /metrics port (default: 6881).
-DYN_KVBM_METRICS_STANDALONE=true \
+DYN_KVBM_METRICS=true \
 trtllm-serve deepseek-ai/DeepSeek-R1-Distill-Llama-8B --host localhost --port 8000 --backend pytorch --extra_llm_api_options /tmp/kvbm_llm_api_config.yaml
 ```

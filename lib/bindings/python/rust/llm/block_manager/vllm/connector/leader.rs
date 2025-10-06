@@ -93,7 +93,6 @@ impl KvConnectorLeader {
         drt: PyDistributedRuntime,
         page_size: usize,
         leader_py: PyKvbmLeader,
-        metrics_standalone: bool,
     ) -> Self {
         tracing::info!(
             "KvConnectorLeader initialized with worker_id: {}",
@@ -104,7 +103,7 @@ impl KvConnectorLeader {
         let drt = drt.inner().clone();
         let handle: Handle = drt.runtime().primary();
 
-        let kvbm_metrics = if metrics_standalone {
+        let kvbm_metrics = if use_standalone_metrics() {
             let port = parse_dyn_kvbm_metrics_port();
             KvbmMetrics::new_with_standalone(&KvbmMetricsRegistry::default(), port)
         } else {
@@ -565,9 +564,6 @@ impl PyKvConnectorLeader {
         let enable_kvbm_record = std::env::var("ENABLE_KVBM_RECORD")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        let metrics_standalone = std::env::var("DYN_KVBM_METRICS_STANDALONE")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
 
         let connector_leader: Box<dyn Leader> = if enable_kvbm_record {
             Box::new(recorder::KvConnectorLeaderRecorder::new(
@@ -575,7 +571,6 @@ impl PyKvConnectorLeader {
                 drt,
                 page_size,
                 leader,
-                metrics_standalone,
             ))
         } else {
             Box::new(KvConnectorLeader::new(
@@ -583,7 +578,6 @@ impl PyKvConnectorLeader {
                 drt,
                 page_size,
                 leader,
-                metrics_standalone,
             ))
         };
         Self { connector_leader }
@@ -632,6 +626,12 @@ impl PyKvConnectorLeader {
             .create_slot(request, tokens)
             .map_err(to_pyerr)
     }
+}
+
+pub fn use_standalone_metrics() -> bool {
+    std::env::var("DYN_KVBM_METRICS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 pub fn parse_dyn_kvbm_metrics_port() -> u16 {

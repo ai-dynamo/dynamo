@@ -5,7 +5,7 @@ use super::*;
 
 use crate::DistributedRuntime as PyDistributedRuntime;
 use crate::llm::block_manager::BlockManagerBuilder;
-use crate::llm::block_manager::vllm::connector::leader::parse_dyn_kvbm_metrics_port;
+use crate::llm::block_manager::vllm::connector::leader::{parse_dyn_kvbm_metrics_port, use_standalone_metrics};
 use crate::llm::block_manager::vllm::connector::leader::slot::{
     ConnectorSlotManager, SlotManager, SlotState,
 };
@@ -67,7 +67,6 @@ impl KvConnectorLeader {
         drt: PyDistributedRuntime,
         page_size: usize,
         leader_py: PyKvbmLeader,
-        metrics_standalone: bool,
     ) -> Self {
         tracing::info!(
             "KvConnectorLeader initialized with worker_id: {}",
@@ -78,7 +77,7 @@ impl KvConnectorLeader {
         let drt = drt.inner().clone();
         let handle: Handle = drt.runtime().primary();
 
-        let kvbm_metrics = if metrics_standalone {
+        let kvbm_metrics = if use_standalone_metrics() {
             let port = parse_dyn_kvbm_metrics_port();
             KvbmMetrics::new_with_standalone(&KvbmMetricsRegistry::default(), port)
         } else {
@@ -458,16 +457,11 @@ impl PyTrtllmKvConnectorLeader {
         page_size: usize,
         leader: PyKvbmLeader,
     ) -> Self {
-        let metrics_standalone = std::env::var("DYN_KVBM_METRICS_STANDALONE")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-
         let connector_leader: Box<dyn Leader> = Box::new(KvConnectorLeader::new(
             worker_id,
             drt,
             page_size,
             leader,
-            metrics_standalone,
         ));
         Self { connector_leader }
     }
