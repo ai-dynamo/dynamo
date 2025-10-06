@@ -19,14 +19,18 @@ class BaseWorkerHandler(ABC):
         component: Component,
         engine: sgl.Engine,
         config: Config,
-        publisher: DynamoSglangPublisher,
+        publisher: DynamoSglangPublisher = None,
         prefill_client: Client = None,
     ):
         self.component = component
         self.engine = engine
         self.config = config
-        self.metrics_publisher = publisher.metrics_publisher
-        self.kv_publisher = publisher.kv_publisher
+        if publisher is not None:
+            self.metrics_publisher = publisher.metrics_publisher
+            self.kv_publisher = publisher.kv_publisher
+        else:
+            self.metrics_publisher = None
+            self.kv_publisher = None
         self.prefill_client = prefill_client
         self.serving_mode = config.serving_mode
         self.skip_tokenizer_init = config.server_args.skip_tokenizer_init

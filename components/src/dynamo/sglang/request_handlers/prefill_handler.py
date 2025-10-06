@@ -15,7 +15,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
     def __init__(self, component: Component, engine: sgl.Engine, config: Config):
         self.engine = engine
         self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info(self.engine)
-        super().__init__(component, engine, config, None, None)
+        super().__init__(component, engine, config)
         logging.info(
             f"Prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
         )
