@@ -24,7 +24,7 @@ python3 -m dynamo.sglang \
   --served-model-name Qwen/Qwen3-0.6B \
   --page-size 16 \
   --tp 1 \
-  --trust-remote-code --use-sglang-tokenizer \
+  --trust-remote-code \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' &
 WORKER_PID=$!
 
@@ -33,5 +33,5 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --served-model-name Qwen/Qwen3-0.6B \
   --page-size 16 \
   --tp 1 \
-  --trust-remote-code --use-sglang-tokenizer \
+  --trust-remote-code \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5558"}'
