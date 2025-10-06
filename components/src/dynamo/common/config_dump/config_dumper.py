@@ -99,11 +99,11 @@ def dump_config(dump_config_to: Optional[str], config: Any) -> None:
             with open(dump_path.resolve(), "w", encoding="utf-8") as f:
                 f.write(config_dump_payload)
             logger.info(f"Dumped config to {dump_path.resolve()}")
-        except (OSError, IOError) as e:
-            logger.exception(f"Failed to dump config to {dump_config_to}: {e}")
+        except (OSError, IOError):
+            logger.exception(f"Failed to dump config to {dump_config_to}")
             logger.info(f"CONFIG_DUMP: {config_dump_payload}")
-        except Exception as e:
-            logger.exception(f"Unexpected error dumping config: {e}")
+        except Exception:
+            logger.exception("Unexpected error dumping config")
             logger.info(f"CONFIG_DUMP: {config_dump_payload}")
     else:
         logger.info(f"CONFIG_DUMP: {config_dump_payload}")
@@ -200,7 +200,7 @@ def register_encoder(type_class):
         def encode_my_class(obj: MyClass):
             return {"field": obj.field}
     """
-    logger.verbose(f"Registering encoder for {type_class}")
+    logger.debug(f"Registering encoder for {type_class}")
     return _preprocess_for_encode.register(type_class)
 
 

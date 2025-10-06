@@ -6,14 +6,13 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
-from components.common.src.dynamo.common.utils import register_encoder
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
-from dynamo.common.config_dump import add_config_dump_args
+from dynamo.common.config_dump import add_config_dump_args, register_encoder
 from dynamo.runtime import DistributedRuntime
 
 from . import __version__
