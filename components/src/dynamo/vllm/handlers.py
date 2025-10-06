@@ -8,7 +8,7 @@ import uuid
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from copy import deepcopy
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator, Dict
 
 import msgspec
 from vllm.inputs import TokensPrompt
@@ -18,7 +18,6 @@ from vllm.v1.engine.exceptions import EngineDeadError
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
-from .protocol import MyRequestOutput
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -126,27 +125,34 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         default_sampling_params,
         prefill_worker_client=None,
         prefill_router_client=None,
-        prefill_router_free_client=None,
     ):
         super().__init__(runtime, component, engine, default_sampling_params)
         self.prefill_worker_client = prefill_worker_client
         self.prefill_router_client = prefill_router_client
-        self.prefill_router_free_client = prefill_router_free_client
         self.can_prefill = 0
         self._prefill_check_task = None
 
-        if self.prefill_worker_client is not None:
+        if self.prefill_worker_client or self.prefill_router_client:
             self._prefill_check_task = asyncio.create_task(self._prefill_check_loop())
 
     async def _prefill_check_loop(self):
-        """Background task that checks prefill worker availability every 5 seconds."""
+        """Background task that checks prefill router/worker availability every 5 seconds."""
         while True:
             try:
-                if self.prefill_worker_client is not None:
-                    self.can_prefill = len(self.prefill_worker_client.instance_ids())
-                    logger.debug(f"Current Prefill Workers: {self.can_prefill}")
-                else:
-                    self.can_prefill = 0
+                router_count = (
+                    len(self.prefill_router_client.instance_ids())
+                    if self.prefill_router_client is not None
+                    else 0
+                )
+                worker_count = (
+                    len(self.prefill_worker_client.instance_ids())
+                    if self.prefill_worker_client is not None
+                    else 0
+                )
+                self.can_prefill = max(router_count, worker_count)
+                logger.debug(
+                    f"Prefill availability - Routers: {router_count}, Workers: {worker_count}"
+                )
             except asyncio.CancelledError:
                 logger.warning("Prefill check loop cancelled.")
                 raise
@@ -178,15 +184,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             if value is not None and hasattr(sampling_params, key):
                 setattr(sampling_params, key, value)
 
-        # TODO: Change to prefill queue
-        # TODO: (PeaBrane) eventually, do not use a router_client and a free_client directly.
-        # This is least intrusive for now, but quite error prone. Should consider (major) refactoring
-        # TODO: (PeaBrane) longer term, decode workers should not handle prefill routing at all.
-        # Prefill routing logic should be integrated directly into the frontend service potentially.
+        # Use prefill router or worker if available
         if self.can_prefill:
-            # Create a copy for prefill with specific modifications
+            # Create prefill sampling params with modifications
             prefill_sampling_params = deepcopy(sampling_params)
-
             if prefill_sampling_params.extra_args is None:
                 prefill_sampling_params.extra_args = {}
             prefill_sampling_params.extra_args["kv_transfer_params"] = {
@@ -195,68 +196,55 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             prefill_sampling_params.max_tokens = 1
             prefill_sampling_params.min_tokens = 1
 
-            prefill_request = {
-                "token_ids": request["token_ids"],
-                "sampling_params": msgspec.to_builtins(prefill_sampling_params),
-                "request_id": request_id,
-            }
-
-            used_prefill_router = False
             try:
-                prefill_worker_id = None
+                # Send request with sampling_params and request_id in extra_args
+                prefill_request = request.copy()
+                # TODO (PeaBrane): this smells a bit bad as not we have two nestings
+                # of extra_args (an inner one again in sampling_params)
+                prefill_request["extra_args"] = {
+                    "sampling_params": msgspec.to_builtins(prefill_sampling_params),
+                    "request_id": request_id,
+                }
+
+                # Try router first if available, fallback to worker
                 if (
                     self.prefill_router_client is not None
                     and self.prefill_router_client.instance_ids()
                 ):
-                    used_prefill_router = True
-                    best_worker_response = await anext(
-                        await self.prefill_router_client.generate(
-                            {
-                                "token_ids": request["token_ids"],
-                                "request_id": request_id,
-                            }
-                        )
-                    )
-                    prefill_worker_id = best_worker_response.data().get("worker_id")
-
-                if prefill_worker_id is not None:
+                    # Call router's generate endpoint which returns LLMEngineOutput
                     prefill_response = await anext(
-                        await self.prefill_worker_client.direct(
-                            prefill_request, prefill_worker_id, context=context
+                        await self.prefill_router_client.generate(
+                            prefill_request, context=context
                         )
                     )
-                else:
+                elif self.prefill_worker_client is not None:
+                    # Fallback to direct worker with same format
                     prefill_response = await anext(
                         await self.prefill_worker_client.round_robin(
                             prefill_request, context=context
                         )
                     )
+                else:
+                    raise ValueError("No prefill router or worker available")
+
+                prefill_output = prefill_response.data()
+
+                # Extract kv_transfer_params from response
+                kv_transfer_params = prefill_output.get("extra_args", {}).get(
+                    "kv_transfer_params"
+                )
+                if kv_transfer_params:
+                    if sampling_params.extra_args is None:
+                        sampling_params.extra_args = {}
+                    sampling_params.extra_args[
+                        "kv_transfer_params"
+                    ] = kv_transfer_params
 
             except Exception as e:
                 if context.is_stopped() or context.is_killed():
                     logger.debug(f"Aborted Remote Prefill Request ID: {request_id}")
                     return
-                raise e
-
-            finally:
-                if used_prefill_router:
-                    await anext(
-                        await self.prefill_router_free_client.generate(
-                            {"request_id": request_id}
-                        )
-                    )
-                    logger.debug(f"Freed router state for request {request_id}")
-
-            prefill_response = MyRequestOutput.model_validate_json(
-                prefill_response.data()
-            )
-
-            # Modify original sampling_params for decode
-            if sampling_params.extra_args is None:
-                sampling_params.extra_args = {}
-            sampling_params.extra_args[
-                "kv_transfer_params"
-            ] = prefill_response.kv_transfer_params
+                logger.warning(f"Prefill error: {e}, falling back to local prefill")
 
         async with self._abort_monitor(context, request_id):
             try:
@@ -276,11 +264,17 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         super().__init__(runtime, component, engine, default_sampling_params)
 
     async def generate(self, request, context):
-        request_id = request["request_id"]
+        # Extract from PreprocessedRequest format - request_id and sampling_params from extra_args
+        extra_args = request.get("extra_args", {})
+        request_id = extra_args.get("request_id", str(uuid.uuid4().hex))
         logger.debug(f"New Prefill Request ID: {request_id}")
 
-        prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
-        sampling_params = msgspec.convert(request["sampling_params"], SamplingParams)
+        token_ids = request["token_ids"]
+        prompt = TokensPrompt(prompt_token_ids=token_ids)
+
+        # Get sampling_params from extra_args
+        sampling_params_dict = extra_args.get("sampling_params", {})
+        sampling_params = msgspec.convert(sampling_params_dict, SamplingParams)
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
@@ -291,20 +285,22 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 self.runtime.shutdown()
                 os._exit(1)
 
-            # Generate only 1 token in prefill
             try:
                 async for res in gen:
                     logger.debug(f"kv transfer params: {res.kv_transfer_params}")
-                    yield MyRequestOutput(
-                        request_id=res.request_id,
-                        prompt=res.prompt,
-                        prompt_token_ids=res.prompt_token_ids,
-                        prompt_logprobs=res.prompt_logprobs,
-                        outputs=res.outputs,
-                        finished=res.finished,
-                        metrics=res.metrics,
-                        kv_transfer_params=res.kv_transfer_params,
-                    ).model_dump_json()
+
+                    token_ids = res.outputs[0].token_ids if res.outputs else []
+
+                    output: Dict[str, Any] = {
+                        "token_ids": list(token_ids),
+                        "extra_args": (
+                            {"kv_transfer_params": res.kv_transfer_params}
+                            if res.kv_transfer_params
+                            else {}
+                        ),
+                    }
+
+                    yield output
             except asyncio.CancelledError:
                 # raise the error because we cannot migrate prefill requests
                 raise GeneratorExit(
