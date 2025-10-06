@@ -75,6 +75,10 @@ async def run_profile(args):
     # List to track all created deployment clients for cleanup in case of failure
     deployment_clients = []
 
+    # Inherit aic_backend from backend if not explicitly set
+    if not args.aic_backend:
+        args.aic_backend = args.backend
+
     try:
         # Log MoE model support
         if args.is_moe_model:
@@ -750,12 +754,12 @@ async def run_profile(args):
 
         # add the planner service
         planner_config = DgdPlannerServiceConfig()
-        planner_config.dynamoNamespace = config.spec.services[
-            "Frontend"
-        ].dynamoNamespace
-        planner_config.extraPodSpec.mainContainer.image = config.spec.services[
-            "Frontend"
-        ].extraPodSpec.mainContainer.image
+        frontend_service = config.spec.services["Frontend"]
+        planner_config.dynamoNamespace = getattr(frontend_service, "dynamoNamespace", "dynamo")  # type: ignore[attr-defined]
+        if frontend_service.extraPodSpec and frontend_service.extraPodSpec.mainContainer:
+            frontend_image = frontend_service.extraPodSpec.mainContainer.image
+            if frontend_image and planner_config.extraPodSpec.mainContainer:
+                planner_config.extraPodSpec.mainContainer.image = frontend_image
 
         # Build planner args dynamically from parsed arguments
         # This includes shared args (ttft, itl, backend, namespace) from profile_sla
@@ -779,18 +783,23 @@ async def run_profile(args):
         ]
 
         # Add arguments determined by profiling results
+        frontend_namespace = getattr(config.spec.services['Frontend'], "dynamoNamespace", "dynamo")  # type: ignore[attr-defined]
         planner_args.extend(
             [
-                f"--namespace={config.spec.services['Frontend'].dynamoNamespace}",
+                f"--namespace={frontend_namespace}",
                 f"--prefill-engine-num-gpu={best_prefill_gpus}",
                 f"--decode-engine-num-gpu={best_decode_gpus}",
                 f"--profile-results-dir={args.output_dir}",
             ]
         )
 
-        planner_config.extraPodSpec.mainContainer.args.extend(planner_args)
-        config.spec.services["Planner"] = planner_config.model_dump(exclude_unset=False)
-        config = config.model_dump(exclude_unset=False)
+        if planner_config.extraPodSpec.mainContainer and planner_config.extraPodSpec.mainContainer.args is not None:
+            planner_config.extraPodSpec.mainContainer.args.extend(planner_args)
+        # Convert planner config to dict first, then the entire config to dict
+        planner_dict = planner_config.model_dump(exclude_unset=False)
+        config_dict = config.model_dump(exclude_unset=False)
+        config_dict["spec"]["services"]["Planner"] = planner_dict
+        config = config_dict  # type: ignore[assignment]
         logger.info(f"Final DGD config with planner: {config}")
 
         # save DGD config with planner
@@ -964,8 +973,5 @@ if __name__ == "__main__":
         help="Specify backend version when using aiconfigurator to estimate perf.",
     )
     args = parser.parse_args()
-
-    if not args.aic_backend:
-        args.aic_backend = args.backend
 
     asyncio.run(run_profile(args))

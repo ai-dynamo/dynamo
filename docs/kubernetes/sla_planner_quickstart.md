@@ -206,7 +206,7 @@ Observed ttft: X.XXXs itl: X.XXXs
 Number of prefill workers: 1, number of decode workers: 1
 ```
 
-## Phase 3: Production Readiness
+## Production Readiness
 
 ### Monitoring Metrics
 

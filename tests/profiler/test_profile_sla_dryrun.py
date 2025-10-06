@@ -50,8 +50,10 @@ class TestProfileSLADryRun:
                 self.use_ai_configurator = False
                 self.aic_system = None
                 self.aic_model_name = None
-                self.backend_version = None
+                self.aic_backend = ""
+                self.aic_backend_version = None
                 self.num_gpus_per_node = 8
+                self.deploy_after_profile = False
 
         return Args()
 
@@ -82,8 +84,10 @@ class TestProfileSLADryRun:
                 self.use_ai_configurator = False
                 self.aic_system = None
                 self.aic_model_name = None
-                self.backend_version = None
+                self.aic_backend = ""
+                self.aic_backend_version = None
                 self.num_gpus_per_node = 8
+                self.deploy_after_profile = False
 
         return Args()
 
@@ -128,8 +132,10 @@ class TestProfileSLADryRun:
                 self.use_ai_configurator = False
                 self.aic_system = None
                 self.aic_model_name = None
-                self.backend_version = None
+                self.aic_backend = ""
+                self.aic_backend_version = None
                 self.num_gpus_per_node = 8
+                self.deploy_after_profile = False
 
         return Args()
 
@@ -169,8 +175,10 @@ class TestProfileSLADryRun:
                 self.use_ai_configurator = False
                 self.aic_system = None
                 self.aic_model_name = None
-                self.backend_version = None
+                self.aic_backend = ""
+                self.aic_backend_version = None
                 self.num_gpus_per_node = 8
+                self.deploy_after_profile = False
 
         return Args()
 

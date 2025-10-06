@@ -45,6 +45,9 @@ class VolumeMount(BaseModel):
 
 
 class Container(BaseModel):
+    image: Optional[str] = None
+    workingDir: Optional[str] = None
+    command: Optional[list[str]] = None
     args: Optional[list[str]] = None
     model_config = {"extra": "allow"}
 
@@ -106,12 +109,10 @@ class DgdPlannerServiceConfig(BaseModel):
     volumeMounts: list[VolumeMount] = [VolumeMount()]
     extraPodSpec: PodSpec = PodSpec(
         mainContainer=Container(
-            **{
-                "image": "my-registry/dynamo-runtime:my-tag",  # placeholder
-                "workingDir": "/workspace/components/src/dynamo/planner",
-                "command": ["python3", "-m", "planner_sla"],
-                "args": [],
-            }
+            image="my-registry/dynamo-runtime:my-tag",  # placeholder
+            workingDir="/workspace/components/src/dynamo/planner",
+            command=["python3", "-m", "planner_sla"],
+            args=[],
         )
     )
     model_config = {"extra": "allow"}
@@ -374,18 +375,31 @@ class ConfigModifierProtocol(Protocol):
         ...
 
     @classmethod
-    def set_config_tp_size(cls, config: dict, tp_size: int) -> dict:
+    def set_config_tp_size(
+        cls,
+        config: dict,
+        tp_size: int,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
         ...
 
     @classmethod
     def set_config_tep_size(
-        cls, config: dict, tep_size: int, num_gpus_per_node: int
+        cls,
+        config: dict,
+        tep_size: int,
+        num_gpus_per_node: int,
+        component_type: SubComponentType = SubComponentType.DECODE,
     ) -> dict:
         ...
 
     @classmethod
     def set_config_dep_size(
-        cls, config: dict, dep_size: int, num_gpus_per_node: int
+        cls,
+        config: dict,
+        dep_size: int,
+        num_gpus_per_node: int,
+        component_type: SubComponentType = SubComponentType.DECODE,
     ) -> dict:
         ...
 
