@@ -25,26 +25,26 @@ fn load_test_data(file_path: &str) -> TestData {
 
     // Parse the file as JSON
     let parsed_json: serde_json::Value = serde_json::from_str(&data).unwrap();
-    
+
     // Extract expected values
     let expected_normal_content = parsed_json
         .get("normal_content")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    
+
     let expected_reasoning_content = parsed_json
         .get("reasoning_content")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    
+
     let expected_tool_calls = parsed_json
         .get("tool_calls")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    
+
     // Extract the data chunks with choices
     let data_chunks = parsed_json
         .get("data")
@@ -55,16 +55,20 @@ fn load_test_data(file_path: &str) -> TestData {
         .iter()
         .map(|chunk| {
             let inner_data = chunk.get("data").expect("No 'data' field in chunk");
-            
+
             let id = inner_data
                 .get("id")
                 .and_then(|v| v.as_str())
                 .expect("No 'id' field")
                 .to_string();
-            
+
             let choices: Vec<ChatChoiceStream> = serde_json::from_value(
-                inner_data.get("choices").cloned().expect("No 'choices' field")
-            ).expect("Failed to parse choices");
+                inner_data
+                    .get("choices")
+                    .cloned()
+                    .expect("No 'choices' field"),
+            )
+            .expect("Failed to parse choices");
 
             let response = NvCreateChatCompletionStreamResponse {
                 id: id.clone(),
@@ -85,7 +89,7 @@ fn load_test_data(file_path: &str) -> TestData {
             }
         })
         .collect();
-    
+
     TestData {
         expected_normal_content,
         expected_reasoning_content,
@@ -103,34 +107,36 @@ async fn parse_response_stream(
     reasoning_parser_str: Option<String>,
 ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
     // Apply reasoning parser if enabled
-    let stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>> = 
-        if reasoning_enable {
-            if let Some(reasoning_parser) = reasoning_parser_str {
-                Box::pin(OpenAIPreprocessor::parse_reasoning_content_from_stream(
-                    stream,
-                    reasoning_parser,
-                ))
-            } else {
-                Box::pin(stream)
-            }
+    let stream: Pin<
+        Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
+    > = if reasoning_enable {
+        if let Some(reasoning_parser) = reasoning_parser_str {
+            Box::pin(OpenAIPreprocessor::parse_reasoning_content_from_stream(
+                stream,
+                reasoning_parser,
+            ))
         } else {
             Box::pin(stream)
-        };
+        }
+    } else {
+        Box::pin(stream)
+    };
 
     // Apply tool calling parser if enabled
-    let stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>> = 
-        if tool_parse_enable {
-            if let Some(tool_parser) = tool_parser_str {
-                Box::pin(OpenAIPreprocessor::apply_tool_calling_jail(
-                    tool_parser,
-                    stream,
-                ))
-            } else {
-                Box::pin(stream)
-            }
+    let stream: Pin<
+        Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
+    > = if tool_parse_enable {
+        if let Some(tool_parser) = tool_parser_str {
+            Box::pin(OpenAIPreprocessor::apply_tool_calling_jail(
+                tool_parser,
+                stream,
+            ))
         } else {
             Box::pin(stream)
-        };
+        }
+    } else {
+        Box::pin(stream)
+    };
 
     // Collect all output chunks
     let mut stream = std::pin::pin!(stream);
@@ -138,8 +144,82 @@ async fn parse_response_stream(
     while let Some(chunk) = stream.next().await {
         output_chunks.push(chunk);
     }
-    
+
     output_chunks
+}
+
+/// Structure to hold aggregated results from chunks
+struct AggregatedContent {
+    reasoning_content: String,
+    normal_content: String,
+    has_tool_calls: bool,
+    tool_calls: Vec<serde_json::Value>,
+}
+
+/// Helper function to assert tool calls match expected (ignoring random IDs)
+fn assert_tool_calls(
+    actual_tool_calls: &[serde_json::Value],
+    expected_tool_calls: &[serde_json::Value],
+) {
+    assert_eq!(actual_tool_calls.len(), expected_tool_calls.len());
+
+    if !expected_tool_calls.is_empty() {
+        let actual_fn = &actual_tool_calls[0]["function"];
+        let expected_fn = &expected_tool_calls[0]["function"];
+
+        let actual_name = actual_fn["name"].as_str().unwrap();
+        let expected_name = expected_fn["name"].as_str().unwrap();
+        assert_eq!(actual_name, expected_name);
+
+        let actual_args: serde_json::Value =
+            serde_json::from_str(actual_fn["arguments"].as_str().unwrap()).unwrap();
+        let expected_args: serde_json::Value =
+            serde_json::from_str(expected_fn["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(actual_args, expected_args);
+    }
+}
+
+/// Helper function to aggregate all content types from chunks
+fn aggregate_content_from_chunks(
+    chunks: &[Annotated<NvCreateChatCompletionStreamResponse>],
+) -> AggregatedContent {
+    let mut reasoning_content = String::new();
+    let mut normal_content = String::new();
+    let mut has_tool_calls = false;
+    let mut tool_calls = Vec::new();
+
+    for chunk in chunks.iter() {
+        if let Some(ref response_data) = chunk.data {
+            for choice in &response_data.choices {
+                // Collect reasoning content
+                if let Some(ref reasoning) = choice.delta.reasoning_content {
+                    reasoning_content.push_str(reasoning);
+                }
+
+                // Collect normal content
+                if let Some(ref content) = choice.delta.content {
+                    normal_content.push_str(content);
+                }
+
+                // Collect tool calls
+                if let Some(ref chunk_tool_calls) = choice.delta.tool_calls {
+                    has_tool_calls = true;
+                    if let Ok(json_array) = serde_json::to_value(chunk_tool_calls)
+                        && let Some(array) = json_array.as_array()
+                    {
+                        tool_calls.extend(array.iter().cloned());
+                    }
+                }
+            }
+        }
+    }
+
+    AggregatedContent {
+        reasoning_content,
+        normal_content,
+        has_tool_calls,
+        tool_calls,
+    }
 }
 
 #[cfg(test)]
@@ -148,12 +228,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_gpt_oss_e2e_with_no_tool_calls_vllm() {
-        // E2E Parsing test for GPT-OSS. The input stream does not contain tool calls. 
-        // Just content and reasoning content.    
+        // E2E Parsing test for GPT-OSS. The input stream does not contain tool calls.
+        // Just content and reasoning content.
         // Test will call both reasoning parsing logic and tool calling parsing logic and verify the output
-        
+
         // Load test data from file
-        let file_path = format!("{}/vllm/gpt-oss-20b/chat_completion_stream_49f581c1-no-tool.json", DATA_ROOT_PATH);
+        let file_path = format!(
+            "{}/vllm/gpt-oss-20b/chat_completion_stream_49f581c1-no-tool.json",
+            DATA_ROOT_PATH
+        );
         let test_data = load_test_data(&file_path);
 
         // Create a stream from the mock chunks
@@ -162,87 +245,48 @@ mod tests {
         // Parse the response stream with reasoning and tool parsing enabled
         let output_chunks = parse_response_stream(
             input_stream,
-            true, 
-            true, 
-            Some("harmony".to_string()),  
+            true,
+            true,
+            Some("harmony".to_string()),
             Some("gpt_oss".to_string()),
-        ).await;
+        )
+        .await;
 
         // Verify we got output chunks
         assert!(!output_chunks.is_empty(), "Should have output chunks");
 
         // Aggregate content from all chunks
-        let mut all_reasoning = String::new();
-        let mut all_normal_content = String::new();
-        let mut found_tool_calls = false;
-
-        for chunk in output_chunks.iter() {
-            if let Some(ref response_data) = chunk.data {
-                for choice in &response_data.choices {
-                    // Collect reasoning content
-                    if let Some(ref reasoning) = choice.delta.reasoning_content {
-                        all_reasoning.push_str(reasoning);
-                    }
-
-                    // Collect normal content
-                    if let Some(ref content) = choice.delta.content {
-                        all_normal_content.push_str(content);
-                    }
-
-                    // Check for tool calls
-                    if let Some(ref tool_calls) = choice.delta.tool_calls
-                        && !tool_calls.is_empty()
-                    {
-                        found_tool_calls = true;
-                    }
-                }
-            }
-        }
-
-        // Assert reasoning content was parsed (GPT-OSS has reasoning in analysis channel)
-        assert!(
-            !all_reasoning.is_empty(),
-            "Should have extracted reasoning content from analysis channel. Got: '{}'",
-            all_reasoning
-        );
-
-        // Assert normal content was parsed (from final channel)
-        assert!(
-            !all_normal_content.is_empty(),
-            "Should have extracted normal content from final channel. Got: '{}'",
-            all_normal_content
-        );
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
 
         // Verify against expected content from test file
         assert_eq!(
-            all_reasoning.trim(),
-            test_data.expected_reasoning_content.trim(),
+            aggregated.reasoning_content, test_data.expected_reasoning_content,
             "Reasoning content should match expected value"
         );
 
         assert_eq!(
-            all_normal_content.trim(),
-            test_data.expected_normal_content.trim(),
+            aggregated.normal_content, test_data.expected_normal_content,
             "Normal content should match expected value"
         );
 
         // Verify tool calls match expectations
         let expected_has_tool_calls = !test_data.expected_tool_calls.is_empty();
         assert_eq!(
-            found_tool_calls,
-            expected_has_tool_calls,
+            aggregated.has_tool_calls, expected_has_tool_calls,
             "Tool calls presence should match expected value"
         );
     }
 
     #[tokio::test]
     async fn test_gpt_oss_e2e_with_tool_calls_vllm() {
-        // E2E Parsing test for GPT-OSS. The input stream contains tool calls. 
-        // Just content and reasoning content.    
+        // E2E Parsing test for GPT-OSS. The input stream contains tool calls.
         // Test will call both reasoning parsing logic and tool calling parsing logic and verify the output
-        
+
         // Load test data from file
-        let file_path = format!("{}/vllm/gpt-oss-20b/chat_completion_stream_f0c86d72-tool.json", DATA_ROOT_PATH);
+        let file_path = format!(
+            "{}/vllm/gpt-oss-20b/chat_completion_stream_f0c86d72-tool.json",
+            DATA_ROOT_PATH
+        );
         let test_data = load_test_data(&file_path);
 
         // Create a stream from the mock chunks
@@ -251,85 +295,53 @@ mod tests {
         // Parse the response stream with reasoning and tool parsing enabled
         let output_chunks = parse_response_stream(
             input_stream,
-            true,  // tool_parse_enable
-            true,  // reasoning_enable
-            Some("harmony".to_string()),  // tool_parser_str
-            Some("gpt_oss".to_string()),  // reasoning_parser_str
-        ).await;
+            true,
+            true,
+            Some("harmony".to_string()),
+            Some("gpt_oss".to_string()),
+        )
+        .await;
 
         // Verify we got output chunks
         assert!(!output_chunks.is_empty(), "Should have output chunks");
 
         // Aggregate content from all chunks
-        let mut all_reasoning = String::new();
-        let mut all_normal_content = String::new();
-        let mut found_tool_calls = false;
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
 
-        for chunk in output_chunks.iter() {
-            if let Some(ref response_data) = chunk.data {
-                for choice in &response_data.choices {
-                    // Collect reasoning content
-                    if let Some(ref reasoning) = choice.delta.reasoning_content {
-                        all_reasoning.push_str(reasoning);
-                    }
-        
-                    // Collect normal content
-                    if let Some(ref content) = choice.delta.content {
-                        all_normal_content.push_str(content);
-                    }
-
-                    // Check for tool calls
-                    if let Some(ref tool_calls) = choice.delta.tool_calls
-                        && !tool_calls.is_empty()
-                    {
-                        found_tool_calls = true;
-                    }
-                }
-            }
-        }
-        
-        // Assert reasoning content was parsed (GPT-OSS has reasoning in analysis channel)
+        // Assert reasoning content was parsed
         assert!(
-            !all_reasoning.is_empty(),
+            !aggregated.reasoning_content.is_empty(),
             "Should have extracted reasoning content from analysis channel. Got: '{}'",
-            all_reasoning
+            aggregated.reasoning_content
         );
 
-        // Assert normal content was parsed (from final channel)
+        // Assert normal content was parsed
         assert!(
-            all_normal_content.is_empty(),
+            aggregated.normal_content.is_empty(),
             "Normal content should be empty. Got: '{}'",
-            all_normal_content
+            aggregated.normal_content
         );
 
         // Verify tool calls match expectations
         let expected_has_tool_calls = !test_data.expected_tool_calls.is_empty();
         assert_eq!(
-            found_tool_calls,
-            expected_has_tool_calls,
+            aggregated.has_tool_calls, expected_has_tool_calls,
             "Tool calls presence should match expected value"
         );
+
+        // Verify tool calls
+        assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
     }
 
     #[tokio::test]
-    async fn test_gpt_oss_e2e_with_no_parsing_vllm(){
-        // E2E Parsing test for GPT-OSS with no parsing enabled.
-        // When parsing is disabled, output should match input exactly.
+    async fn test_qwen_e2e_with_no_tools_vllm() {
+        // E2E Parsing test for Qwen with no tools.
 
-        let file_path = format!("{}/vllm/gpt-oss-20b/chat_completion_stream_49f581c1-no-tool.json", DATA_ROOT_PATH);
+        let file_path = format!(
+            "{}/vllm/qwen3-0.6B/chat_completion_stream_5627a4c6-no-tool.json",
+            DATA_ROOT_PATH
+        );
         let test_data = load_test_data(&file_path);
-
-        // First, accumulate content from input chunks to get expected raw content
-        let mut expected_raw_content = String::new();
-        for chunk in test_data.stream_chunks.iter() {
-            if let Some(ref response_data) = chunk.data {
-                for choice in &response_data.choices {
-                    if let Some(ref content) = choice.delta.content {
-                        expected_raw_content.push_str(content);
-                    }
-                }
-            }
-        }
 
         // Create a stream from the mock chunks
         let input_stream = stream::iter(test_data.stream_chunks);
@@ -337,50 +349,134 @@ mod tests {
         // Parse the response stream with reasoning and tool parsing disabled
         let output_chunks = parse_response_stream(
             input_stream,
-            false, 
-            false, 
-            None,
-            None,  
-        ).await;    
+            true,
+            true,
+            Some("hermes".to_string()),
+            Some("qwen".to_string()),
+        )
+        .await;
 
         // Verify we got output chunks
         assert!(!output_chunks.is_empty(), "Should have output chunks");
 
         // Aggregate content from output chunks
-        let mut actual_output_content = String::new();
-        let mut found_tool_calls = false;
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
 
-        for chunk in output_chunks.iter() {
-            if let Some(ref response_data) = chunk.data {
-                for choice in &response_data.choices {
-                    if let Some(ref content) = choice.delta.content {
-                        actual_output_content.push_str(content);
-                    }
-
-                    // Check for tool calls
-                    if let Some(ref tool_calls) = choice.delta.tool_calls
-                        && !tool_calls.is_empty()
-                    {
-                        found_tool_calls = true;
-                    }
-                }
-            }
-        }
-        
         // Assert that output content matches input content exactly (no parsing applied)
         assert_eq!(
-            actual_output_content,
-            expected_raw_content,
+            aggregated.normal_content, test_data.expected_normal_content,
             "When parsing is disabled, output should match input exactly"
         );
-        
+
         // Verify tool calls match expectations
         let expected_has_tool_calls = !test_data.expected_tool_calls.is_empty();
         assert_eq!(
-            found_tool_calls,
-            expected_has_tool_calls,
+            aggregated.has_tool_calls, expected_has_tool_calls,
             "Tool calls presence should match expected value"
         );
     }
 
+    #[tokio::test]
+    async fn test_qwen_e2e_with_tools_vllm() {
+        // E2E Parsing test for Qwen with tools.
+        // Test will call both reasoning parsing logic and tool calling parsing logic and verify the output
+
+        let file_path = format!(
+            "{}/vllm/qwen3-0.6B/chat_completion_stream_8f33c28b-tool.json",
+            DATA_ROOT_PATH
+        );
+        let test_data = load_test_data(&file_path);
+
+        // Create a stream from the mock chunks
+        let input_stream = stream::iter(test_data.stream_chunks);
+
+        // Parse the response stream with reasoning and tool parsing enabled
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            true,
+            Some("hermes".to_string()),
+            Some("qwen".to_string()),
+        )
+        .await;
+
+        // Verify we got output chunks
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        // Aggregate content from output chunks
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        // Assert reasoning content was parsed
+        assert_eq!(
+            aggregated.reasoning_content, test_data.expected_reasoning_content,
+            "Should have extracted reasoning content.",
+        );
+
+        assert_eq!(
+            aggregated.normal_content, test_data.expected_normal_content,
+            "Normal content should match expected value.",
+        );
+
+        // Verify tool calls match expectations
+        let expected_has_tool_calls = !test_data.expected_tool_calls.is_empty();
+        assert_eq!(
+            aggregated.has_tool_calls, expected_has_tool_calls,
+            "Tool calls presence should match expected value"
+        );
+
+        // Verify tool calls
+        assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+    }
+
+    #[tokio::test]
+    async fn test_nemotron_e2e_with_tools_vllm() {
+        // E2E Parsing test for Nemotron with tools.
+        // Test will call both reasoning parsing logic and tool calling parsing logic and verify the output
+
+        let file_path = format!(
+            "{}/vllm/nemotron-49b/chat_completion_stream_3d40f925-tool.json",
+            DATA_ROOT_PATH
+        );
+        let test_data = load_test_data(&file_path);
+
+        // Create a stream from the mock chunks
+        let input_stream = stream::iter(test_data.stream_chunks);
+
+        // Parse the response stream with reasoning and tool parsing enabled
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            true,
+            Some("nemotron_deci".to_string()),
+            Some("nemotron_deci".to_string()),
+        )
+        .await;
+
+        // Verify we got output chunks
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        // Aggregate content from output chunks
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        // Assert reasoning content was parsed
+        assert_eq!(
+            aggregated.reasoning_content, test_data.expected_reasoning_content,
+            "Should have extracted reasoning content.",
+        );
+
+        assert_eq!(
+            aggregated.normal_content, test_data.expected_normal_content,
+            "Normal content should match expected value.",
+        );
+
+        // Verify tool calls match expectations
+        let expected_has_tool_calls = !test_data.expected_tool_calls.is_empty();
+        assert_eq!(
+            aggregated.has_tool_calls, expected_has_tool_calls,
+            "Tool calls presence should match expected value"
+        );
+
+        // Verify tool calls
+        assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+    }
 }
