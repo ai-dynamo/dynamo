@@ -756,7 +756,10 @@ async def run_profile(args):
         planner_config = DgdPlannerServiceConfig()
         frontend_service = config.spec.services["Frontend"]
         planner_config.dynamoNamespace = getattr(frontend_service, "dynamoNamespace", "dynamo")  # type: ignore[attr-defined]
-        if frontend_service.extraPodSpec and frontend_service.extraPodSpec.mainContainer:
+        if (
+            frontend_service.extraPodSpec
+            and frontend_service.extraPodSpec.mainContainer
+        ):
             frontend_image = frontend_service.extraPodSpec.mainContainer.image
             if frontend_image and planner_config.extraPodSpec.mainContainer:
                 planner_config.extraPodSpec.mainContainer.image = frontend_image
@@ -783,7 +786,7 @@ async def run_profile(args):
         ]
 
         # Add arguments determined by profiling results
-        frontend_namespace = getattr(config.spec.services['Frontend'], "dynamoNamespace", "dynamo")  # type: ignore[attr-defined]
+        frontend_namespace = getattr(config.spec.services["Frontend"], "dynamoNamespace", "dynamo")  # type: ignore[attr-defined]
         planner_args.extend(
             [
                 f"--namespace={frontend_namespace}",
@@ -793,7 +796,10 @@ async def run_profile(args):
             ]
         )
 
-        if planner_config.extraPodSpec.mainContainer and planner_config.extraPodSpec.mainContainer.args is not None:
+        if (
+            planner_config.extraPodSpec.mainContainer
+            and planner_config.extraPodSpec.mainContainer.args is not None
+        ):
             planner_config.extraPodSpec.mainContainer.args.extend(planner_args)
         # Convert planner config to dict first, then the entire config to dict
         planner_dict = planner_config.model_dump(exclude_unset=False)
