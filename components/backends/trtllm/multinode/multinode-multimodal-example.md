@@ -15,7 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Example: Multi-node TRTLLM Workers with Dynamo on Slurm for multimodal models
+# Example: Multi-node TRTLLM Workers with Dynamo for multimodal models
 
 This guide demonstrates how to deploy large multimodal models that require a multi-node setup. It builds on the general multi-node deployment process described in the main [multinode-examples.md](./multinode-examples.md) guide.
 
@@ -25,9 +25,9 @@ The following sections provide specific instructions for deploying `meta-llama/L
 
 ### Environment Variable Setup
 
-Assuming you have already allocated your nodes via `salloc`, and are
+Assuming you have already allocated your nodes and are
 inside an interactive shell on one of the allocated nodes, set the
-following environment variables based:
+following environment variables:
 ```bash
 # NOTE: IMAGE must be set manually for now
 # To build an iamge, see the steps here:
@@ -43,7 +43,7 @@ export IMAGE="<dynamo_trtllm_image>"
 #
 # NOTE: Currently, this example assumes that the local bash scripts and configs
 # referenced are mounted into into /mnt inside the container. If you want to
-# customize the location of the scripts, make sure to modify `srun_aggregated.sh`
+# customize the location of the scripts, make sure to modify the launch scripts
 # accordingly for the new locations of `start_frontend_services.sh` and
 # `start_trtllm_worker.sh`.
 #
@@ -97,12 +97,12 @@ deployment across 4 nodes:
 # - frontend + etcd/nats on current (head) node.
 # - one large prefill trtllm worker across multiple nodes via MPI tasks
 # - one large decode trtllm worker across multiple nodes via MPI tasks
-./srun_disaggregated.sh
+# Note: You will need to create your own launch script using mpirun or similar
 ```
 
 ## Understanding the Output
 
-1. The `srun_disaggregated.sh` launches three srun jobs instead of two. One for frontend, one for prefill   worker, and one for decode worker.
+1. The launch script should launch three jobs instead of two. One for frontend, one for prefill worker, and one for decode worker.
 
 2. The OpenAI frontend will listen for and dynamically discover workers as
    they register themselves with Dynamo's distributed runtime:
@@ -155,10 +155,10 @@ curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '
 
 ## Cleanup
 
-To cleanup background `srun` processes launched by `srun_aggregated.sh` or
-`srun_disaggregated.sh`, you can run:
+To cleanup background processes launched by your launch scripts, you can run:
 ```bash
-pkill srun
+pkill -f dynamo
+pkill -f trtllm
 ```
 
 ## Known Issues
