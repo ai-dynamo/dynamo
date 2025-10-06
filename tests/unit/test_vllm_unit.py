@@ -62,7 +62,10 @@ def test_custom_jinja_template_valid_path(monkeypatch):
 
     config = parse_args()
 
-    assert config.custom_jinja_template == JINJA_TEMPLATE_PATH
+    assert config.custom_jinja_template == JINJA_TEMPLATE_PATH, (
+        f"Expected custom_jinja_template to be {JINJA_TEMPLATE_PATH}, "
+        f"got {config.custom_jinja_template}"
+    )```
 
 
 @pytest.mark.unit
