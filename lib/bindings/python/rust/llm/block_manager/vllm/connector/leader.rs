@@ -567,18 +567,10 @@ impl PyKvConnectorLeader {
 
         let connector_leader: Box<dyn Leader> = if enable_kvbm_record {
             Box::new(recorder::KvConnectorLeaderRecorder::new(
-                worker_id,
-                drt,
-                page_size,
-                leader,
+                worker_id, drt, page_size, leader,
             ))
         } else {
-            Box::new(KvConnectorLeader::new(
-                worker_id,
-                drt,
-                page_size,
-                leader,
-            ))
+            Box::new(KvConnectorLeader::new(worker_id, drt, page_size, leader))
         };
         Self { connector_leader }
     }

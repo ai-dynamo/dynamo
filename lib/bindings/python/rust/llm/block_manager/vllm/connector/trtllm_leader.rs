@@ -5,9 +5,11 @@ use super::*;
 
 use crate::DistributedRuntime as PyDistributedRuntime;
 use crate::llm::block_manager::BlockManagerBuilder;
-use crate::llm::block_manager::vllm::connector::leader::{parse_dyn_kvbm_metrics_port, use_standalone_metrics};
 use crate::llm::block_manager::vllm::connector::leader::slot::{
     ConnectorSlotManager, SlotManager, SlotState,
+};
+use crate::llm::block_manager::vllm::connector::leader::{
+    parse_dyn_kvbm_metrics_port, use_standalone_metrics,
 };
 use crate::llm::block_manager::{distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest};
 use anyhow;
@@ -457,12 +459,8 @@ impl PyTrtllmKvConnectorLeader {
         page_size: usize,
         leader: PyKvbmLeader,
     ) -> Self {
-        let connector_leader: Box<dyn Leader> = Box::new(KvConnectorLeader::new(
-            worker_id,
-            drt,
-            page_size,
-            leader,
-        ));
+        let connector_leader: Box<dyn Leader> =
+            Box::new(KvConnectorLeader::new(worker_id, drt, page_size, leader));
         Self { connector_leader }
     }
 
