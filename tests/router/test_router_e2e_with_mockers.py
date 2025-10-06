@@ -1307,9 +1307,7 @@ def test_query_instance_id_returns_worker_and_tokens(
 
 @pytest.mark.pre_merge
 @pytest.mark.model(MODEL_NAME)
-def test_router_by_workerid_and_check_kvevents_sync(
-    request, runtime_services, predownload_tokenizers
-):
+def test_router_decisions(request, runtime_services, predownload_tokenizers):
     """Validate KV cache prefix reuse by sending progressive requests with overlapping prefixes.
 
     Flow:
