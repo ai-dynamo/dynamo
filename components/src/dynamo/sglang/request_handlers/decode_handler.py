@@ -3,28 +3,46 @@
 
 import logging
 import time
+from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
 
 from dynamo._core import Client, Component
-from dynamo.llm import WorkerMetricsPublisher, ZmqKvEventPublisher
 from dynamo.sglang.args import Config, DisaggregationMode
 from dynamo.sglang.protocol import DisaggPreprocessedRequest
+from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
+    """Handler for decode workers in both aggregated and disaggregated serving modes."""
+
     def __init__(
         self,
         component: Component,
         engine: sgl.Engine,
         config: Config,
-        metrics_publisher: WorkerMetricsPublisher,
-        kv_publisher: ZmqKvEventPublisher = None,
-        prefill_client: Client = None,
-    ):
+        publisher: DynamoSglangPublisher,
+        prefill_client: Optional[Client] = None,
+    ) -> None:
+        """Initialize decode worker handler.
+
+        Args:
+            component: The Dynamo runtime component.
+            engine: The SGLang engine instance.
+            config: SGLang and Dynamo configuration.
+            publisher: Metrics publisher for the worker.
+            prefill_client: Optional client for prefill worker in disaggregated mode.
+
+        Raises:
+            ValueError: If prefill_client is not provided in decode serving mode.
+        """
         super().__init__(
-            component, engine, config, metrics_publisher, kv_publisher, prefill_client
+            component,
+            engine,
+            config,
+            publisher,
+            prefill_client,
         )
         if self.serving_mode == DisaggregationMode.DECODE:
             if self.prefill_client is None:
@@ -36,13 +54,21 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         logging.info("Worker handler initialized")
 
-    def cleanup(self):
+    def cleanup(self) -> None:
+        """Shutdown the engine and cleanup resources."""
         self.engine.shutdown()
         logging.info("Engine shutdown")
         super().cleanup()
 
-    def _build_sampling_params(self, request: dict) -> dict:
-        """Build sampling params depending on request from frontend"""
+    def _build_sampling_params(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Build sampling params from request format.
+
+        Args:
+            request: Request dict in either token-based or OpenAI format.
+
+        Returns:
+            Dict of sampling parameters for SGLang engine.
+        """
         if self.skip_tokenizer_init:
             # Token-based request format
             sampling_opts = request.get("sampling_options", {})
@@ -66,7 +92,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         return {k: v for k, v in param_mapping.items() if v is not None}
 
-    async def generate(self, request: dict):
+    async def generate(
+        self, request: Dict[str, Any]
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Generate response in aggregated or disaggregated mode.
+
+        Args:
+            request: Request dict with input and sampling parameters.
+
+        Yields:
+            Response dicts with token_ids or OpenAI-formatted chunks.
+
+        Raises:
+            RuntimeError: If no bootstrap info received from prefill worker.
+        """
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
 
@@ -115,7 +154,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for out in self._process_text_stream(agg):
                     yield out
 
-    async def _process_token_stream(self, stream_source):
+    async def _process_token_stream(
+        self, stream_source: AsyncGenerator[Dict[str, Any], None]
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Process token-based stream output.
+
+        Args:
+            stream_source: Async generator from engine.async_generate.
+
+        Yields:
+            Dict with token_ids and optional finish_reason.
+
+        Raises:
+            ValueError: If response missing output_ids.
+        """
         num_output_tokens_so_far = 0
 
         async for res in stream_source:
@@ -134,8 +186,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
             yield out
 
-    async def _process_text_stream(self, stream_source):
-        """Process stream for text input mode"""
+    async def _process_text_stream(
+        self, stream_source: AsyncGenerator[Dict[str, Any], None]
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Process text-based stream output in OpenAI format.
+
+        Args:
+            stream_source: Async generator from engine.async_generate.
+
+        Yields:
+            OpenAI-formatted chat completion chunk dicts.
+        """
         count = 0
 
         async for res in stream_source:

@@ -19,7 +19,7 @@ from typing import Optional
 
 import uvloop
 
-from dynamo.llm import KvRouter, KvRouterConfig
+from dynamo.llm import KvPushRouter, KvRouterConfig
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -41,7 +41,7 @@ class StandaloneRouterHandler:
         self.worker_endpoint_path = worker_endpoint_path
         self.block_size = block_size
         self.kv_router_config = kv_router_config
-        self.kv_router: Optional[KvRouter] = None
+        self.kv_push_router: Optional[KvPushRouter] = None
         self.worker_client: Optional[Client] = None
 
     async def initialize(self):
@@ -65,121 +65,76 @@ class StandaloneRouterHandler:
 
             self.worker_client = await worker_endpoint.client()
 
-            # Create KvRouter with specified configuration
-            self.kv_router = KvRouter(
+            # Create KvPushRouter with specified configuration
+            self.kv_push_router = KvPushRouter(
                 endpoint=worker_endpoint,
                 block_size=self.block_size,
                 kv_router_config=self.kv_router_config,
             )
 
         except Exception as e:
-            logger.error(f"Failed to initialize KvRouter: {e}")
+            logger.error(f"Failed to initialize KvPushRouter: {e}")
             raise
 
-    async def find_best_worker(self, request):
+    async def generate(self, request):
         """
-        Find the best worker based on KV cache state.
+        Generate tokens using the KV-aware router.
 
-        This endpoint is called by clients to determine which worker
-        should handle a request.
+        This endpoint routes the request to the best worker and streams back results.
+        Wraps the request into PreprocessedRequest format and wraps worker responses
+        into LLMEngineOutput format.
         """
-        if self.kv_router is None:
-            # Fallback to round-robin if router not initialized
-            logger.warning("KvRouter not initialized, falling back to round-robin")
-            yield {
-                "status": "fallback",
-                "message": "Router not initialized",
+        if self.kv_push_router is None:
+            logger.error("KvPushRouter not initialized - cannot process request")
+            raise RuntimeError("Router not initialized")
+
+        # Wrap incoming request into PreprocessedRequest format for KvPushRouter
+        # The request should already have most fields, but we ensure it has the structure
+        preprocessed_request = {
+            "model": request.get("model", "unknown"),
+            "token_ids": request["token_ids"],
+            "stop_conditions": request.get("stop_conditions", {}),
+            "sampling_options": request.get("sampling_options", {}),
+            "output_options": request.get("output_options", {}),
+            "eos_token_ids": request.get("eos_token_ids", []),
+            "annotations": request.get("annotations", []),
+            "extra_args": request.get("extra_args", {}),
+        }
+
+        # Route and process through KvPushRouter
+        async for worker_output in await self.kv_push_router.generate_from_request(
+            preprocessed_request
+        ):
+            # Wrap worker output into LLMEngineOutput format
+            # Worker should return dict with at minimum kv_transfer_params in extra_args
+            llm_engine_output = {
+                "token_ids": worker_output.get("token_ids", []),
+                "tokens": worker_output.get("tokens"),
+                "text": worker_output.get("text"),
+                "cum_log_probs": worker_output.get("cum_log_probs"),
+                "log_probs": worker_output.get("log_probs"),
+                "top_logprobs": worker_output.get("top_logprobs"),
+                "finish_reason": worker_output.get("finish_reason"),
+                "index": worker_output.get("index"),
+                "extra_args": worker_output.get("extra_args"),
             }
-            return
+            yield llm_engine_output
 
-        try:
-            # Get current workers
-            if self.worker_client is None:
-                yield {
-                    "status": "error",
-                    "message": "Worker client not initialized",
-                }
-                return
-
-            instance_ids = self.worker_client.instance_ids()
-            if not instance_ids:
-                yield {
-                    "status": "error",
-                    "message": "No workers available",
-                }
-                return
-
-            logger.debug(f"Routing request with {len(instance_ids)} available workers")
-
-            # Validate required fields
-            if "token_ids" not in request:
-                raise ValueError("Missing required field 'token_ids' in request")
-            if "request_id" not in request:
-                raise ValueError("Missing required field 'request_id' in request")
-
-            token_ids = request["token_ids"]
-            request_id = request["request_id"]
-
-            # Use KvRouter to find the best worker with state updates
-            best_worker_id, overlap_blocks = await self.kv_router.find_best_match(
-                request_id=request_id,
-                tokens=token_ids,
-                update_states=True,  # Always update states for routing
-            )
-
-            logger.debug(
-                f"Selected worker {best_worker_id} with {overlap_blocks} overlap blocks for request {request_id}"
-            )
-
-            yield {
-                "worker_id": best_worker_id,
-                "overlap_blocks": overlap_blocks,
-            }
-
-        except Exception as e:
-            logger.error(f"Error finding best worker: {e}")
-            yield {
-                "status": "error",
-                "message": str(e),
-            }
-
-    async def free(self, request):
+    async def best_worker_id(self, token_ids, router_config_override=None):
         """
-        Free resources associated with a request.
+        Get the best worker ID for a given set of tokens without actually routing.
 
-        This endpoint is called when a request is completed to clean up
-        router state.
+        This method returns the worker ID that would be selected based on KV cache
+        overlap, but does NOT actually route the request or update router states.
+        It's useful for debugging, monitoring, or implementing custom routing logic.
         """
-        if self.kv_router is None:
-            logger.warning("KvRouter not initialized")
-            yield {
-                "status": "error",
-                "message": "Router not initialized",
-            }
-            return
+        if self.kv_push_router is None:
+            logger.error("KvPushRouter not initialized - cannot get best worker")
+            raise RuntimeError("Router not initialized")
 
-        try:
-            if "request_id" not in request:
-                raise ValueError("Missing required field 'request_id' in request")
-
-            request_id = request["request_id"]
-
-            # Free the request from the router
-            await self.kv_router.free(request_id=request_id)
-
-            logger.debug(f"Freed resources for request {request_id}")
-
-            yield {
-                "status": "success",
-                "message": f"Request {request_id} freed successfully",
-            }
-
-        except Exception as e:
-            logger.error(f"Error freeing request: {e}")
-            yield {
-                "status": "error",
-                "message": str(e),
-            }
+        return await self.kv_push_router.best_worker_id(
+            token_ids, router_config_override
+        )
 
 
 def parse_args():
@@ -308,20 +263,21 @@ async def worker(runtime: DistributedRuntime):
     await handler.initialize()
 
     # Expose endpoints
-    find_best_worker_endpoint = component.endpoint("find_best_worker")
-    free_endpoint = component.endpoint("free")
+    generate_endpoint = component.endpoint("generate")
+    best_worker_endpoint = component.endpoint("best_worker_id")
 
-    logger.debug("Starting to serve find_best_worker and free endpoints...")
+    logger.debug("Starting to serve endpoints...")
 
+    # Serve both endpoints concurrently
     try:
         await asyncio.gather(
-            find_best_worker_endpoint.serve_endpoint(
-                handler.find_best_worker,
+            generate_endpoint.serve_endpoint(
+                handler.generate,
                 graceful_shutdown=True,
                 metrics_labels=[("service", "router")],
             ),
-            free_endpoint.serve_endpoint(
-                handler.free,
+            best_worker_endpoint.serve_endpoint(
+                handler.best_worker_id,
                 graceful_shutdown=True,
                 metrics_labels=[("service", "router")],
             ),
