@@ -396,7 +396,7 @@ impl ModelWatcher {
                     .context("add_completions_model")?;
                 tracing::info!("Completions is ready");
             }
-        }  else if card.model_input == ModelInput::Text && card.model_type.supports_embedding() {
+        } else if card.model_input == ModelInput::Text && card.model_type.supports_embedding() {
             // Case: Text + Embeddings
             let push_router = PushRouter::<
                 NvCreateEmbeddingRequest,
