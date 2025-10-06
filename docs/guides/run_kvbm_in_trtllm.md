@@ -109,9 +109,9 @@ Follow below steps to enable metrics collection and view via Grafana dashboard:
 # Start the basic services (etcd & natsd), along with Prometheus and Grafana
 docker compose -f deploy/docker-compose.yml --profile metrics up -d
 
-# set env var DYN_SYSTEM_ENABLED to true, DYN_SYSTEM_PORT to 6880, when launch via dynamo
-# NOTE: Make sure port 6881 (for KVBM leader metrics) is available.
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=6880 DYN_KVBM_SLEEP=5 \
+# set env var DYN_SYSTEM_KVBM_METRICS to true, when launch via dynamo
+# Optionally set DYN_KVBM_METRICS_PORT to choose the /metrics port (default: 6881).
+DYN_SYSTEM_KVBM_METRICS=true \
 python3 -m dynamo.trtllm \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
