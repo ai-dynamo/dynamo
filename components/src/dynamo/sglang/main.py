@@ -260,7 +260,7 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
             ),
         )
     except Exception as e:
-        logging.error(f"Failed to serve multimodal endpoints: {e}")
+        logging.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
         handler.cleanup()

@@ -49,7 +49,7 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         response = self._transform_response(result, embedding_request.model)
         yield response
 
-    def _transform_response(self, ret, model_name=None):
+    def _transform_response(self, ret, model_name):
         """Transform SGLang response to OpenAI embedding format"""
         if not isinstance(ret, list):
             ret = [ret]
@@ -70,7 +70,7 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         return {
             "object": "list",
             "data": embedding_objects,
-            "model": model_name or "Qwen/Qwen3-Embedding-4B",
+            "model": model_name,
             "usage": {
                 "prompt_tokens": prompt_tokens,
                 "total_tokens": prompt_tokens,
