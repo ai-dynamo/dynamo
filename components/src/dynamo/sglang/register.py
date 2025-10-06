@@ -134,7 +134,8 @@ async def register_llm_with_readiness_gate(
     )
     if not registration_success:
         logging.error("Model registration failed; shutting down")
-        engine.shutdown()
+        if engine is not None:
+            engine.shutdown()
         raise RuntimeError("Model registration failed")
 
     if readiness_gate:
