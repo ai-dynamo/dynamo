@@ -1,9 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import random
+import socket
 from abc import ABC, abstractmethod
 
 import sglang as sgl
+from sglang.srt.utils import get_ip
 
 from dynamo._core import Client, Component
 from dynamo.sglang.args import Config
@@ -46,3 +49,23 @@ class BaseWorkerHandler(ABC):
                 request["messages"], tokenize=False, add_generation_prompt=True
             )
             return {"prompt": prompt}
+
+    @staticmethod
+    def _generate_bootstrap_room() -> int:
+        """Generate a unique bootstrap room ID"""
+        return random.randint(0, 2**63 - 1)
+
+    @staticmethod
+    def _get_bootstrap_info(engine: sgl.Engine) -> tuple[str, int]:
+        """Extract bootstrap info from SGLang engine"""
+        inner_tm = engine.tokenizer_manager
+        bootstrap_port = inner_tm.server_args.disaggregation_bootstrap_port
+
+        if inner_tm.server_args.dist_init_addr:
+            bootstrap_host = socket.gethostbyname(
+                inner_tm.server_args.dist_init_addr.split(":")[0]
+            )
+        else:
+            bootstrap_host = get_ip()
+
+        return bootstrap_host, bootstrap_port
