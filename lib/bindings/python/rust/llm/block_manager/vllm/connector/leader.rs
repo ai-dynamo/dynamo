@@ -626,7 +626,7 @@ pub fn parse_kvbm_metrics_port() -> u16 {
         Ok(val) => match val.trim().parse::<u16>() {
             Ok(port) => port,
             Err(_) => {
-                tracing::error!(
+                tracing::warn!(
                     "[kvbm] Invalid DYN_KVBM_METRICS_PORT='{}', falling back to 6880",
                     val
                 );
@@ -634,7 +634,7 @@ pub fn parse_kvbm_metrics_port() -> u16 {
             }
         },
         Err(_) => {
-            tracing::error!("DYN_KVBM_METRICS_PORT not present or couldn’t be interpreted.");
+            tracing::warn!("DYN_KVBM_METRICS_PORT not present or couldn’t be interpreted, falling back to 6880");
             6880
         }
     }
