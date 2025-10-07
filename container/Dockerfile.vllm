@@ -221,6 +221,7 @@ ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 # Copy dynamo wheels for gitlab artifacts
 COPY --from=dynamo_base /usr/local/ucx /usr/local/ucx
 COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
+ENV PATH=/usr/local/ucx/bin:$PATH
 
 # Copies vllm, DeepEP, DeepGEMM, PPLX repos (all editable installs) and nvshmem binaries
 COPY --from=framework /opt/vllm /opt/vllm
@@ -250,8 +251,10 @@ RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*cp312*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-    /opt/dynamo/benchmarks && \
-    rm -rf /opt/dynamo/benchmarks
+    && cd /opt/dynamo/benchmarks \
+    && uv pip install . \
+    && cd - \
+    && rm -rf /opt/dynamo/benchmarks
 
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \

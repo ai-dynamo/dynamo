@@ -15,9 +15,9 @@
 use std::fmt;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use crate::common::checked_file::CheckedFile;
+use crate::common::checked_file::{CheckedFile, Checksum};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_type::{ModelInput, ModelType};
 use anyhow::{Context, Result};
@@ -43,11 +43,29 @@ pub enum ModelInfoType {
     GGUF(PathBuf),
 }
 
+impl ModelInfoType {
+    pub fn checksum(&self) -> String {
+        match self {
+            ModelInfoType::HfConfigJson(c) => c.checksum().to_string(),
+            ModelInfoType::GGUF(_) => Checksum::default().to_string(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum TokenizerKind {
     HfTokenizerJson(CheckedFile),
     GGUF(Box<HfTokenizer>),
+}
+
+impl TokenizerKind {
+    pub fn checksum(&self) -> String {
+        match self {
+            TokenizerKind::HfTokenizerJson(c) => c.checksum().to_string(),
+            TokenizerKind::GGUF(_) => Checksum::default().to_string(),
+        }
+    }
 }
 
 /// Supported types of prompt formatters.
@@ -70,6 +88,16 @@ pub enum PromptFormatterArtifact {
     GGUF(PathBuf),
 }
 
+impl PromptFormatterArtifact {
+    pub fn checksum(&self) -> String {
+        match self {
+            PromptFormatterArtifact::HfTokenizerConfigJson(c) => c.checksum().to_string(),
+            PromptFormatterArtifact::HfChatTemplate(c) => c.checksum().to_string(),
+            PromptFormatterArtifact::GGUF(_) => Checksum::default().to_string(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptContextMixin {
@@ -85,6 +113,15 @@ pub enum PromptContextMixin {
 pub enum GenerationConfig {
     HfGenerationConfigJson(CheckedFile),
     GGUF(PathBuf),
+}
+
+impl GenerationConfig {
+    pub fn checksum(&self) -> String {
+        match self {
+            GenerationConfig::HfGenerationConfigJson(c) => c.checksum().to_string(),
+            GenerationConfig::GGUF(_) => Checksum::default().to_string(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Builder, Default)]
@@ -145,6 +182,9 @@ pub struct ModelDeploymentCard {
 
     #[serde(skip)]
     cache_dir: Option<Arc<tempfile::TempDir>>,
+
+    #[serde(skip, default)]
+    checksum: OnceLock<String>,
 }
 
 impl ModelDeploymentCard {
@@ -189,6 +229,12 @@ impl ModelDeploymentCard {
         Ok(())
     }
 
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.display_name
+    }
+
+    #[inline]
     pub fn slug(&self) -> &Slug {
         &self.slug
     }
@@ -198,9 +244,45 @@ impl ModelDeploymentCard {
         Ok(serde_json::to_string(self)?)
     }
 
-    pub fn mdcsum(&self) -> String {
-        let json = self.to_json().unwrap();
-        format!("{}", blake3::hash(json.as_bytes()))
+    pub fn mdcsum(&self) -> &str {
+        self.checksum
+            .get_or_init(|| {
+                // Only include the important fields
+                let mut bytes_to_hash: Vec<u8> = Vec::with_capacity(512);
+                bytes_to_hash.extend(self.display_name.as_bytes());
+
+                // The files can be either a URL or a local path, so we ignore that and hash their
+                // checksum instead, which won't change wherever they are.
+
+                if let Some(model_info) = self.model_info.as_ref() {
+                    bytes_to_hash.extend(model_info.checksum().as_bytes());
+                }
+                if let Some(tokenizer) = self.tokenizer.as_ref() {
+                    bytes_to_hash.extend(tokenizer.checksum().as_bytes());
+                }
+                if let Some(prompt_formatter) = self.prompt_formatter.as_ref() {
+                    bytes_to_hash.extend(prompt_formatter.checksum().as_bytes());
+                }
+                if let Some(chat_template) = self.chat_template_file.as_ref() {
+                    bytes_to_hash.extend(chat_template.checksum().as_bytes());
+                }
+                if let Some(gen_config) = self.gen_config.as_ref() {
+                    bytes_to_hash.extend(gen_config.checksum().as_bytes());
+                }
+
+                if let Some(prompt_context_vec) = self.prompt_context.as_ref() {
+                    // Paste it as the bytes of the debug format. It's a Vec of enum, so this should be
+                    // fine. If the debug representation changes that only happens in a new release.
+                    bytes_to_hash.extend(format!("{prompt_context_vec:?}").as_bytes());
+                }
+                bytes_to_hash.extend(self.context_length.to_be_bytes());
+                bytes_to_hash.extend(self.kv_cache_block_size.to_be_bytes());
+
+                // TODO: Do we want any of user_data or runtime_config?
+
+                blake3::hash(&bytes_to_hash).to_string()
+            })
+            .as_ref()
     }
 
     /// Is this a full model card with tokenizer?
@@ -291,9 +373,7 @@ impl ModelDeploymentCard {
 
     /// Move the files this MDC uses from the NATS object store to local disk.
     /// Updates the URI's to point to the created files.
-    ///
-    /// The returned TempDir must be kept alive, it cleans up on drop.
-    async fn move_from_nats(&mut self, nats_client: nats::Client) -> Result<tempfile::TempDir> {
+    pub async fn move_from_nats(&mut self, nats_client: nats::Client) -> Result<()> {
         let nats_addr = nats_client.addr();
         let bucket_name = self.slug();
         let target_dir = tempfile::TempDir::with_prefix(bucket_name.to_string())?;
@@ -345,7 +425,9 @@ impl ModelDeploymentCard {
             "tokenizer.json"
         );
 
-        Ok(target_dir)
+        // This cache_dir is a tempfile::TempDir will be deleted on drop, so keep it alive.
+        self.cache_dir = Some(Arc::new(target_dir));
+        Ok(())
     }
 
     /// Delete this card from the key-value store and it's URLs from the object store
@@ -411,8 +493,7 @@ impl ModelDeploymentCard {
         else {
             return Ok(None);
         };
-        // This cache_dir is a tempfile::TempDir will be deleted on drop, so keep it alive.
-        card.cache_dir = Some(Arc::new(card.move_from_nats(drt.nats_client()).await?));
+        card.move_from_nats(drt.nats_client()).await?;
         Ok(Some(card))
     }
 
@@ -487,6 +568,7 @@ impl ModelDeploymentCard {
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
             cache_dir: None,
+            checksum: OnceLock::new(),
         })
     }
 
@@ -551,6 +633,7 @@ impl ModelDeploymentCard {
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
             cache_dir: None,
+            checksum: OnceLock::new(),
         })
     }
 }

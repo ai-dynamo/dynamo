@@ -29,6 +29,11 @@ WORKER_MAP = {
         "decode": "decode",
         "prefill": "prefill",
     },
+    "trtllm": {
+        "decode": "TRTLLMDecodeWorker",
+        "decode_agg": "TRTLLMWorker",  # Aggregated uses different name
+        "prefill": "TRTLLMPrefillWorker",
+    },
 }
 
 # Process ready patterns for recovery detection
@@ -48,6 +53,16 @@ WORKER_READY_PATTERNS: Dict[str, Pattern] = {
     ),
     "prefill": re.compile(
         r"Model registration succeeded|Prefill worker handler initialized|Worker handler initialized"
+    ),
+    # TensorRT-LLM workers
+    "TRTLLMWorker": re.compile(
+        r"TrtllmWorker for (?P<model_name>.*?) has been initialized|Model registration succeeded"
+    ),
+    "TRTLLMDecodeWorker": re.compile(
+        r"TrtllmWorker for (?P<model_name>.*?) has been initialized|Model registration succeeded"
+    ),
+    "TRTLLMPrefillWorker": re.compile(
+        r"TrtllmWorker for (?P<model_name>.*?) has been initialized|Model registration succeeded"
     ),
 }
 
@@ -85,6 +100,8 @@ class Load:
     output_token_length: int = 100
     max_retries: int = 3  # Increased for fault tolerance
     sla: Optional[float] = None
+    client_type: str = "aiperf"  # "aiperf" or "legacy"
+    max_request_rate: float = 1.0  # Rate limiting for legacy client (requests/sec)
 
 
 @dataclass
@@ -119,8 +136,14 @@ def _set_replicas(deployment_spec, backend, deploy_type, replicas):
     spec["Frontend"].replicas = replicas
 
     if backend in WORKER_MAP:
+        # For trtllm agg deployments, use different worker name
+        if backend == "trtllm" and deploy_type == "agg":
+            decode_worker = WORKER_MAP[backend]["decode_agg"]
+        else:
+            decode_worker = WORKER_MAP[backend]["decode"]
+
         # always scale decode
-        spec[WORKER_MAP[backend]["decode"]].replicas = replicas
+        spec[decode_worker].replicas = replicas
         # scale prefill only for disagg
         if deploy_type == "disagg":
             spec[WORKER_MAP[backend]["prefill"]].replicas = replicas
@@ -131,7 +154,11 @@ def _set_tensor_parallel(deployment_spec, backend, deploy_type, tp_size):
     spec = deployment_spec["spec"]
 
     if backend in WORKER_MAP:
-        decode_worker = WORKER_MAP[backend]["decode"]
+        # For trtllm agg deployments, use different worker name
+        if backend == "trtllm" and deploy_type == "agg":
+            decode_worker = WORKER_MAP[backend]["decode_agg"]
+        else:
+            decode_worker = WORKER_MAP[backend]["decode"]
         prefill_worker = WORKER_MAP[backend]["prefill"]
 
         if deploy_type == "agg":
@@ -200,6 +227,7 @@ def _create_deployments_for_backend(backend):
 deployment_specs = {}
 deployment_specs.update(_create_deployments_for_backend("vllm"))
 deployment_specs.update(_create_deployments_for_backend("sglang"))
+deployment_specs.update(_create_deployments_for_backend("trtllm"))
 
 
 # Each failure scenaro contains a list of failure injections
@@ -212,10 +240,21 @@ deployment_specs.update(_create_deployments_for_backend("sglang"))
 #   "prefill_worker": [Failure(30, "VllmPrefillWorker", "dynamo.vllm", "SIGKILL")],
 #
 # terminates 1 prefill worker after 30 seconds
-def _create_backend_failures(backend):
-    """Generate backend-specific failure scenarios."""
+def _create_backend_failures(backend, deploy_type="disagg"):
+    """Generate backend-specific failure scenarios.
+
+    Args:
+        backend: Backend type (vllm, sglang, trtllm)
+        deploy_type: Deployment type (agg or disagg)
+    """
     workers = WORKER_MAP[backend]
-    decode_worker = workers["decode"]
+
+    # Use correct worker name based on deployment type
+    if backend == "trtllm" and deploy_type == "agg":
+        decode_worker = workers["decode_agg"]
+    else:
+        decode_worker = workers["decode"]
+
     prefill_worker = workers["prefill"]
     process_name = f"dynamo.{backend}"
 
@@ -249,10 +288,94 @@ def _create_backend_failures(backend):
         failures["sglang_prefill_detokenizer"] = [
             Failure(30, prefill_worker, "sglang::detokenizer", "SIGKILL")
         ]
+    elif backend == "trtllm":
+        failures["trtllm_decode_engine_core"] = [
+            Failure(30, decode_worker, "TRTLLM::EngineCore", "SIGKILL")
+        ]
+        failures["trtllm_prefill_engine_core"] = [
+            Failure(30, prefill_worker, "TRTLLM::EngineCore", "SIGKILL")
+        ]
 
     return failures
 
 
+def create_aiperf_load(
+    clients: int = 10,
+    requests_per_client: int = 150,
+    input_token_length: int = 100,
+    output_token_length: int = 100,
+    max_retries: int = 3,
+    sla: Optional[float] = None,
+    max_request_rate: float = 1.0,
+) -> Load:
+    """Create a Load configuration for AI-Perf client.
+
+    Args:
+        clients: Number of concurrent clients (default: 10)
+        requests_per_client: Number of requests per client (default: 150)
+        input_token_length: Input token count (default: 100)
+        output_token_length: Output token count (default: 100)
+        max_retries: Maximum retry attempts - AI-Perf retries entire test (default: 3)
+        sla: Optional SLA threshold for latency (default: None)
+        max_request_rate: Rate limiting for requests/sec (default: 1.0)
+
+    Returns:
+        Load instance configured for AI-Perf client
+
+    Example:
+        >>> load = create_aiperf_load(clients=20, requests_per_client=200)
+    """
+    return Load(
+        clients=clients,
+        requests_per_client=requests_per_client,
+        input_token_length=input_token_length,
+        output_token_length=output_token_length,
+        max_retries=max_retries,
+        sla=sla,
+        client_type="aiperf",
+        max_request_rate=max_request_rate,
+    )
+
+
+def create_legacy_load(
+    clients: int = 10,
+    requests_per_client: int = 100,
+    input_token_length: int = 100,
+    output_token_length: int = 100,
+    max_retries: int = 1,
+    sla: Optional[float] = None,
+    max_request_rate: float = 1.0,
+) -> Load:
+    """Create a Load configuration for legacy custom client.
+
+    Args:
+        clients: Number of concurrent clients (default: 10)
+        requests_per_client: Number of requests per client (default: 100, fewer than AI-Perf)
+        input_token_length: Input token count (default: 100)
+        output_token_length: Output token count (default: 100)
+        max_retries: Maximum retry attempts - legacy retries per request (default: 1)
+        sla: Optional SLA threshold for latency (default: None)
+        max_request_rate: Rate limiting for requests/sec (default: 1.0)
+
+    Returns:
+        Load instance configured for legacy client
+
+    Example:
+        >>> load = create_legacy_load(clients=10, max_request_rate=2.0)
+    """
+    return Load(
+        clients=clients,
+        requests_per_client=requests_per_client,
+        input_token_length=input_token_length,
+        output_token_length=output_token_length,
+        max_retries=max_retries,
+        sla=sla,
+        client_type="legacy",
+        max_request_rate=max_request_rate,
+    )
+
+
+# Default load configuration (using AI-Perf)
 load = Load()
 
 # model = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
@@ -263,27 +386,36 @@ model = None
 
 scenarios = {}
 
-# Map of backend to failure definitions
-backend_failure_map = {
-    "vllm": _create_backend_failures("vllm"),
-    "sglang": _create_backend_failures("sglang"),
-}
+# Map of backend+deploy_type to failure definitions
+backend_failure_map = {}
+for backend in ["vllm", "sglang", "trtllm"]:
+    backend_failure_map[f"{backend}_agg"] = _create_backend_failures(backend, "agg")
+    backend_failure_map[f"{backend}_disagg"] = _create_backend_failures(
+        backend, "disagg"
+    )
 
 for deployment_name, deployment_info in deployment_specs.items():
     backend = deployment_info["backend"]
 
-    # Validate backend
-    if backend not in backend_failure_map:
+    # Determine deployment type from deployment name
+    deploy_type = (
+        "agg"
+        if ("agg" in deployment_name and "disagg" not in deployment_name)
+        else "disagg"
+    )
+
+    # Get the appropriate failure set for this backend+deploy_type
+    failure_map_key = f"{backend}_{deploy_type}"
+    if failure_map_key not in backend_failure_map:
         raise ValueError(
-            f"Unsupported backend: {backend}. Supported backends are: {list(backend_failure_map.keys())}"
+            f"Unsupported backend+deploy_type: {failure_map_key}. Available: {list(backend_failure_map.keys())}"
         )
 
-    # Get the appropriate failure set for this backend
-    failure_set = backend_failure_map[backend]
+    failure_set = backend_failure_map[failure_map_key]
 
     for failure_name, failure in failure_set.items():
         # Skip prefill failures for aggregated deployments
-        if "prefill" in failure_name and "disagg" not in deployment_name:
+        if "prefill" in failure_name and deploy_type == "agg":
             continue
 
         scenario_name = f"{deployment_name}-{failure_name}"

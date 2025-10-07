@@ -780,7 +780,7 @@ func GenerateBasePodSpec(
 
 	addStandardEnvVars(&container, controllerConfig)
 
-	var volumes []corev1.Volume
+	volumes := make([]corev1.Volume, 0, len(component.VolumeMounts)+1) // +1 for shared memory volume
 
 	for _, volumeMount := range component.VolumeMounts {
 		if volumeMount.Name == "" {
@@ -1008,6 +1008,9 @@ func generateLabels(component *v1alpha1.DynamoComponentDeploymentOverridesSpec, 
 	labels := make(map[string]string)
 	labels[commonconsts.KubeLabelDynamoSelector] = GetDynamoComponentName(dynamoDeployment, componentName)
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
+	if component.DynamoNamespace != nil {
+		labels[commonconsts.KubeLabelDynamoNamespace] = *component.DynamoNamespace
+	}
 	if component.ComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoComponentType] = component.ComponentType
 	}

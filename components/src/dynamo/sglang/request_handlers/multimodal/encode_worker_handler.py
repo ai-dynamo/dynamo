@@ -5,17 +5,16 @@ import logging
 from typing import AsyncIterator
 
 import torch
-from sglang.srt.conversation import chat_templates
+from sglang.srt.parser.conversation import chat_templates
 from transformers import AutoImageProcessor, AutoModel, AutoTokenizer
 
 import dynamo.nixl_connect as connect
 from dynamo._core import Client, Component
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
+from dynamo.sglang.multimodal_utils import ImageLoader, encode_image_embeddings
+from dynamo.sglang.protocol import SglangMultimodalRequest
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
-from dynamo.sglang.utils.multimodal_encode_utils import encode_image_embeddings
-from dynamo.sglang.utils.multimodal_image_loader import ImageLoader
-from dynamo.sglang.utils.multimodal_protocol import SglangMultimodalRequest
 
 logger = logging.getLogger(__name__)
 
