@@ -743,7 +743,6 @@ impl Endpoint {
     }
 }
 
-
 #[pymethods]
 impl Namespace {
     fn component(&self, name: String) -> PyResult<Component> {

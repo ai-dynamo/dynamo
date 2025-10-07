@@ -11,8 +11,8 @@
 // 2. Update the Python type stub in _metrics.pyi
 // 3. Follow standard Prometheus API conventions (e.g., Counter.inc(), Gauge.set(), etc.)
 
-use pyo3::prelude::*;
 use prometheus::core::Collector;
+use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -643,10 +643,7 @@ impl PyRuntimeMetrics {
 
     /// Generic helper to register metrics callbacks for any type implementing MetricsRegistry
     /// This allows Endpoint, Component, and Namespace to share the same callback registration logic
-    pub fn register_callback_for<T>(
-        registry_item: &T,
-        callback: PyObject,
-    ) -> PyResult<()>
+    pub fn register_callback_for<T>(registry_item: &T, callback: PyObject) -> PyResult<()>
     where
         T: rs::metrics::MetricsRegistry + rs::traits::DistributedRuntimeProvider + ?Sized,
     {
