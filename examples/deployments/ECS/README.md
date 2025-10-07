@@ -37,7 +37,7 @@ Follow the [AWS documentation on creating the task execution IAM role](https://d
 ### 3.2 Task Definition Configuration
 1. ETCD container
 - Container name use `etcd`
-- Image URL is `bitnami/etcd` and **Yes** for Essential container
+- Image URL is `bitnamilegacy/etcd` and **Yes** for Essential container
 - Container port
 
 |Container port|Protocol|Port name| App protocol|
