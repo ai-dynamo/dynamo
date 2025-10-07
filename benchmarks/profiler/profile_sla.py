@@ -748,7 +748,7 @@ async def run_profile(args):
     if args.deploy_after_profile and not args.dry_run:
         logger.info("Deploying the optimized DGD with planner...")
         # TODO: check conflicts for dynamo namespace and DGD name
-        # TODO: handle deployment errors
+        # TODO: handle deployment errors and propagate proper error messages to users
         client = DynamoDeploymentClient(
             namespace=args.namespace,
             base_log_dir=f"{args.output_dir}/final_deployment",
