@@ -41,11 +41,11 @@ jobs:
     needs: changed-files
     if: needs.changed-files.outputs.has_code_changes == 'true'
     outputs:
-      build-duration-sec: ${{ steps.capture-metrics.outputs.build-duration-sec }}
+      build-duration-sec: ${{ steps.build-end.outputs.build-duration-sec }}
       image-size-bytes: ${{ steps.capture-metrics.outputs.image-size-bytes }}
       image-size-mb: ${{ steps.capture-metrics.outputs.image-size-mb }}
-      build-start-time: ${{ steps.capture-metrics.outputs.build-start-time }}
-      build-end-time: ${{ steps.capture-metrics.outputs.build-end-time }}
+      build-start-time: ${{ steps.build-start.outputs.build-start-time }}
+      build-end-time: ${{ steps.build-end.outputs.build-end-time }}
       cache-hit-rate: ${{ steps.capture-metrics.outputs.cache-hit-rate }}
       sccache-working: ${{ steps.capture-metrics.outputs.sccache-working }}
       sccache-requests: ${{ steps.capture-metrics.outputs.sccache-requests }}
@@ -62,6 +62,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Capture Build Start Time
+        id: build-start
+        run: |
+          BUILD_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "build-start-time=${BUILD_START_TIME}" >> $GITHUB_OUTPUT
+          echo "🕐 Build started at: ${BUILD_START_TIME}"
+
       - name: Build Container
         id: build-image
         uses: ./.github/actions/docker-build
@@ -75,6 +82,22 @@ jobs:
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Capture Build End Time
+        id: build-end
+        run: |
+          BUILD_END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          BUILD_START_TIME="${{ steps.build-start.outputs.build-start-time }}"
+          
+          # Calculate duration
+          START_EPOCH=$(date -d "$BUILD_START_TIME" +%s)
+          END_EPOCH=$(date -d "$BUILD_END_TIME" +%s)
+          BUILD_DURATION_SEC=$((END_EPOCH - START_EPOCH))
+          
+          echo "build-end-time=${BUILD_END_TIME}" >> $GITHUB_OUTPUT
+          echo "build-duration-sec=${BUILD_DURATION_SEC}" >> $GITHUB_OUTPUT
+          echo "🕐 Build ended at: ${BUILD_END_TIME}"
+          echo "⏱️  Build duration: ${BUILD_DURATION_SEC} seconds"
       - name: Docker Tag and Push
         uses: ./.github/actions/docker-tag-push
         with:
@@ -99,27 +122,77 @@ jobs:
           # Create metrics directory
           mkdir -p build-metrics
           
+          # Get accurate build timing from the timing steps
+          BUILD_START_TIME="${{ steps.build-start.outputs.build-start-time }}"
+          BUILD_END_TIME="${{ steps.build-end.outputs.build-end-time }}"
+          BUILD_DURATION_SEC="${{ steps.build-end.outputs.build-duration-sec }}"
+          
+          echo "🕐 Build timing (from capture steps):"
+          echo "  Start: ${BUILD_START_TIME}"
+          echo "  End: ${BUILD_END_TIME}"
+          echo "  Duration: ${BUILD_DURATION_SEC} seconds"
+          
           # Get image size using docker inspect
           IMAGE_TAG="${{ steps.build-image.outputs.image_tag }}"
           if [ -n "$IMAGE_TAG" ]; then
             IMAGE_SIZE_BYTES=$(docker image inspect "$IMAGE_TAG" --format='{{.Size}}' 2>/dev/null || echo "0")
             IMAGE_SIZE_MB=$((IMAGE_SIZE_BYTES / 1024 / 1024))
-            echo "Image size: ${IMAGE_SIZE_MB} MB (${IMAGE_SIZE_BYTES} bytes)"
+            echo "📦 Image size: ${IMAGE_SIZE_MB} MB (${IMAGE_SIZE_BYTES} bytes)"
           else
             IMAGE_SIZE_BYTES=0
             IMAGE_SIZE_MB=0
             echo "⚠️  No image tag available"
           fi
           
-          # Get build timing from outputs (these should be set by the docker-build action)
-          BUILD_START_TIME="${{ steps.build-image.outputs.build-start-time }}"
-          BUILD_END_TIME="${{ steps.build-image.outputs.build-end-time }}"
-          BUILD_DURATION_SEC="${{ steps.build-image.outputs.build-duration-sec }}"
+          # Check what outputs are actually available from docker-build action
+          echo "🔍 Available docker-build outputs:"
+          echo "  image_tag: '${{ steps.build-image.outputs.image_tag }}'"
+          echo "  cache-hit-rate: '${{ steps.build-image.outputs.cache-hit-rate }}'"
+          echo "  sccache-working: '${{ steps.build-image.outputs.sccache-working }}'"
+          echo "  sccache-requests: '${{ steps.build-image.outputs.sccache-requests }}'"
           
-          # Get cache metrics (these should be set by the docker-build action)
+          # Get cache metrics from outputs (with fallbacks)
           CACHE_HIT_RATE="${{ steps.build-image.outputs.cache-hit-rate }}"
           SCCACHE_WORKING="${{ steps.build-image.outputs.sccache-working }}"
           SCCACHE_REQUESTS="${{ steps.build-image.outputs.sccache-requests }}"
+          
+          # Try to get sccache stats if the action didn't provide them
+          if [ -z "$CACHE_HIT_RATE" ] || [ "$CACHE_HIT_RATE" = "0" ]; then
+            echo "🔍 Attempting to get sccache stats..."
+            if command -v sccache >/dev/null 2>&1; then
+              SCCACHE_STATS=$(sccache --show-stats 2>/dev/null || echo "")
+              if [ -n "$SCCACHE_STATS" ]; then
+                echo "📊 sccache stats:"
+                echo "$SCCACHE_STATS"
+                
+                # Parse sccache stats (this is a basic parser, may need adjustment)
+                CACHE_HITS=$(echo "$SCCACHE_STATS" | grep -i "cache hits" | grep -o '[0-9]\+' | head -1 || echo "0")
+                CACHE_MISSES=$(echo "$SCCACHE_STATS" | grep -i "cache misses" | grep -o '[0-9]\+' | head -1 || echo "0")
+                TOTAL_REQUESTS=$((CACHE_HITS + CACHE_MISSES))
+                
+                if [ "$TOTAL_REQUESTS" -gt 0 ]; then
+                  CACHE_HIT_RATE=$((CACHE_HITS * 100 / TOTAL_REQUESTS))
+                  SCCACHE_WORKING="true"
+                  SCCACHE_REQUESTS="$TOTAL_REQUESTS"
+                fi
+              fi
+            else
+              echo "⚠️  sccache not available in PATH"
+            fi
+          fi
+          
+          # Set defaults for missing values
+          CACHE_HIT_RATE="${CACHE_HIT_RATE:-0}"
+          SCCACHE_WORKING="${SCCACHE_WORKING:-false}"
+          SCCACHE_REQUESTS="${SCCACHE_REQUESTS:-0}"
+          
+          echo "📊 Final metrics:"
+          echo "  Build start: ${BUILD_START_TIME}"
+          echo "  Build end: ${BUILD_END_TIME}"
+          echo "  Duration: ${BUILD_DURATION_SEC} seconds"
+          echo "  Cache hit rate: ${CACHE_HIT_RATE}%"
+          echo "  sccache working: ${SCCACHE_WORKING}"
+          echo "  sccache requests: ${SCCACHE_REQUESTS}"
           
           # Create metrics JSON file
           cat > build-metrics/metrics.json << EOF
@@ -131,10 +204,10 @@ jobs:
             "image_size_mb": ${IMAGE_SIZE_MB},
             "build_start_time": "${BUILD_START_TIME}",
             "build_end_time": "${BUILD_END_TIME}",
-            "build_duration_sec": ${BUILD_DURATION_SEC:-0},
-            "cache_hit_rate": ${CACHE_HIT_RATE:-0},
-            "sccache_working": "${SCCACHE_WORKING:-false}",
-            "sccache_requests": ${SCCACHE_REQUESTS:-0}
+            "build_duration_sec": ${BUILD_DURATION_SEC},
+            "cache_hit_rate": ${CACHE_HIT_RATE},
+            "sccache_working": "${SCCACHE_WORKING}",
+            "sccache_requests": ${SCCACHE_REQUESTS}
           }
           EOF
           
@@ -142,14 +215,14 @@ jobs:
           cat build-metrics/metrics.json
           
           # Set outputs for job-level access
-          echo "build-duration-sec=${BUILD_DURATION_SEC:-0}" >> $GITHUB_OUTPUT
+          echo "build-duration-sec=${BUILD_DURATION_SEC}" >> $GITHUB_OUTPUT
           echo "image-size-bytes=${IMAGE_SIZE_BYTES}" >> $GITHUB_OUTPUT
           echo "image-size-mb=${IMAGE_SIZE_MB}" >> $GITHUB_OUTPUT
           echo "build-start-time=${BUILD_START_TIME}" >> $GITHUB_OUTPUT
           echo "build-end-time=${BUILD_END_TIME}" >> $GITHUB_OUTPUT
-          echo "cache-hit-rate=${CACHE_HIT_RATE:-0}" >> $GITHUB_OUTPUT
-          echo "sccache-working=${SCCACHE_WORKING:-false}" >> $GITHUB_OUTPUT
-          echo "sccache-requests=${SCCACHE_REQUESTS:-0}" >> $GITHUB_OUTPUT
+          echo "cache-hit-rate=${CACHE_HIT_RATE}" >> $GITHUB_OUTPUT
+          echo "sccache-working=${SCCACHE_WORKING}" >> $GITHUB_OUTPUT
+          echo "sccache-requests=${SCCACHE_REQUESTS}" >> $GITHUB_OUTPUT
           echo "framework=vllm" >> $GITHUB_OUTPUT
           echo "target=runtime" >> $GITHUB_OUTPUT
 
@@ -283,14 +356,14 @@ jobs:
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
           pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow"
-
+  
   # Upload metrics for this workflow and all its jobs
   upload-workflow-metrics:
     name: Upload Workflow Metrics
     runs-on: gitlab
     if: always()  # Always run, even if other jobs fail
     needs: [backend-status-check]  # Wait for the status check which waits for all build jobs
-
+    
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
