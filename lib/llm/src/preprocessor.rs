@@ -575,6 +575,7 @@ impl OpenAIPreprocessor {
                             "Sending final usage chunk for OpenAI compliance"
                         );
 
+                        inner.finished = true;
                         Some((annotated_usage, inner))
                     } else {
                         // stream closed
