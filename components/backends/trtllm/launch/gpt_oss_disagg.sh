@@ -24,6 +24,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$PREFILL_ENGINE_ARGS" \
+  --dyn-reasoning-parser gpt_oss \
+  --dyn-tool-call-parser harmony \
   --disaggregation-mode prefill \
   --disaggregation-strategy "$DISAGGREGATION_STRATEGY" \
   --max-num-tokens 20000 \
@@ -37,6 +39,8 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$DECODE_ENGINE_ARGS" \
+  --dyn-reasoning-parser gpt_oss \
+  --dyn-tool-call-parser harmony \
   --disaggregation-mode decode \
   --disaggregation-strategy "$DISAGGREGATION_STRATEGY" \
   --max-num-tokens 16384 \
