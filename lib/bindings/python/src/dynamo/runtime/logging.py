@@ -210,13 +210,13 @@ def map_dyn_log_to_tllm_level(dyn_log_value: str) -> str:
 
     # Map DYN_LOG levels to TLLM_LOG_LEVEL
     level_mapping = {
-        "debug": "VERBOSE",
+        "debug": "DEBUG",
         "info": "INFO",
         "warn": "WARNING",
         "warning": "WARNING",
         "error": "ERROR",
         "critical": "ERROR",
-        "trace": "INFO",
+        "trace": "TRACE",
     }
 
     return level_mapping.get(base_level, "INFO")
