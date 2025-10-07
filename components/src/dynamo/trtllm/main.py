@@ -8,6 +8,17 @@ import os
 import signal
 import sys
 
+# Configure TLLM_LOG_LEVEL before importing tensorrt_llm
+# This must happen before any tensorrt_llm imports
+if "TLLM_LOG_LEVEL" not in os.environ and os.getenv(
+    "DYN_SKIP_TRTLLM_LOG_FORMATTING"
+) not in ("1", "true", "TRUE"):
+    # This import is safe because it doesn't trigger tensorrt_llm imports
+    from dynamo.runtime.logging import map_dyn_log_to_tllm_level
+
+    dyn_log = os.environ.get("DYN_LOG", "info")
+    tllm_level = map_dyn_log_to_tllm_level(dyn_log)
+    os.environ["TLLM_LOG_LEVEL"] = tllm_level
 import uvloop
 from tensorrt_llm.llmapi import (
     BuildConfig,
