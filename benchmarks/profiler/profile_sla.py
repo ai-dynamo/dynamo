@@ -26,15 +26,13 @@ from benchmarks.profiler.utils.config import (
     CONFIG_MODIFIERS,
     WORKER_COMPONENT_NAMES,
     Config,
-    DgdPlannerServiceConfig,
-    PVCConfig,
     SubComponentType,
+    generate_dgd_config_with_planner,
 )
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from benchmarks.profiler.utils.genai_perf import benchmark_decode, benchmark_prefill
 from benchmarks.profiler.utils.planner_utils import (
     add_planner_arguments_to_parser,
-    build_planner_args_from_namespace,
 )
 from benchmarks.profiler.utils.plot import (
     plot_decode_performance,
@@ -721,91 +719,16 @@ async def run_profile(args):
             logger.info("Deployment deleted")
 
         # generate DGD with planner based on profiling results
-        with open(args.config, "r") as f:
-            config = yaml.safe_load(f)
-
-        if not args.is_moe_model:
-            # dense model, use TP for both prefill and decode
-            config = config_modifier.set_config_tp_size(
-                config, best_prefill_gpus, SubComponentType.PREFILL
-            )
-            config = config_modifier.set_config_tp_size(
-                config, best_decode_gpus, SubComponentType.DECODE
-            )
-        else:
-            # MoE model, use TEP for prefill and DEP for decode
-            config = config_modifier.set_config_tep_size(
-                config,
-                best_prefill_gpus,
-                args.num_gpus_per_node,
-                SubComponentType.PREFILL,
-            )
-            config = config_modifier.set_config_dep_size(
-                config,
-                best_decode_gpus,
-                args.num_gpus_per_node,
-                SubComponentType.DECODE,
-            )
-        config = Config.model_validate(config)
-
-        # add PVC config if not present
-        if not config.spec.pvcs:
-            config.spec.pvcs = [PVCConfig()]
-
-        # add the planner service
-        planner_config = DgdPlannerServiceConfig()
-        frontend_service = config.spec.services["Frontend"]
-        planner_config.dynamoNamespace = getattr(frontend_service, "dynamoNamespace", "dynamo")  # type: ignore[attr-defined]
-        if (
-            frontend_service.extraPodSpec
-            and frontend_service.extraPodSpec.mainContainer
-        ):
-            frontend_image = frontend_service.extraPodSpec.mainContainer.image
-            if frontend_image and planner_config.extraPodSpec.mainContainer:
-                planner_config.extraPodSpec.mainContainer.image = frontend_image
-
-        # Build planner args dynamically from parsed arguments
-        # This includes shared args (ttft, itl, backend, namespace) from profile_sla
-        # and planner-specific args (with planner_ prefix)
-        planner_args = build_planner_args_from_namespace(args, prefix="planner_")
-
-        # Override profiling-specific arguments with results from profiling
-        # Remove and re-add to ensure correct values from profiling context
-        planner_args = [
-            arg
-            for arg in planner_args
-            if not any(
-                arg.startswith(f"--{key}=")
-                for key in [
-                    "namespace",
-                    "prefill-engine-num-gpu",
-                    "decode-engine-num-gpu",
-                    "profile-results-dir",
-                ]
-            )
-        ]
-
-        # Add arguments determined by profiling results
-        frontend_namespace = getattr(config.spec.services["Frontend"], "dynamoNamespace", "dynamo")  # type: ignore[attr-defined]
-        planner_args.extend(
-            [
-                f"--namespace={frontend_namespace}",
-                f"--prefill-engine-num-gpu={best_prefill_gpus}",
-                f"--decode-engine-num-gpu={best_decode_gpus}",
-                f"--profile-results-dir={args.output_dir}",
-            ]
+        config = generate_dgd_config_with_planner(
+            config_path=args.config,
+            config_modifier=config_modifier,
+            best_prefill_gpus=best_prefill_gpus,
+            best_decode_gpus=best_decode_gpus,
+            output_dir=args.output_dir,
+            args=args,
+            is_moe_model=args.is_moe_model,
+            num_gpus_per_node=args.num_gpus_per_node,
         )
-
-        if (
-            planner_config.extraPodSpec.mainContainer
-            and planner_config.extraPodSpec.mainContainer.args is not None
-        ):
-            planner_config.extraPodSpec.mainContainer.args.extend(planner_args)
-        # Convert planner config to dict first, then the entire config to dict
-        planner_dict = planner_config.model_dump(exclude_unset=False)
-        config_dict = config.model_dump(exclude_unset=False)
-        config_dict["spec"]["services"]["Planner"] = planner_dict
-        config = config_dict  # type: ignore[assignment]
         logger.info(f"Final DGD config with planner: {config}")
 
         # save DGD config with planner
