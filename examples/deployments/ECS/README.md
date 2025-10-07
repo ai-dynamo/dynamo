@@ -15,7 +15,7 @@
 Add a task for ETCD and NATS services. A sample task definition JSON is attached.
 1. ETCD container
 - Container name use `etcd`
-- Image URL is `bitnami/etcd` and **Yes** for Essential container
+- Image URL is `bitnamilegacy/etcd` and **Yes** for Essential container
 - Container port
 
 |Container port|Protocol|Port name| App protocol|
