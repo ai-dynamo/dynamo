@@ -515,13 +515,10 @@ impl KvCache {
     /// Create a new KV cache for the given prefix
     pub async fn new(
         client: Client,
-        version: &str,
         prefix: String,
         initial_values: HashMap<String, Vec<u8>>,
     ) -> Result<Self> {
         let mut cache = HashMap::new();
-
-        let prefix = format!("{version}/{prefix}");
 
         // First get all existing keys with this prefix
         let existing_kvs = client.kv_get_prefix(&prefix).await?;
@@ -712,7 +709,7 @@ mod tests {
 
         // Create a unique test prefix to avoid conflicts with other tests
         let test_id = uuid::Uuid::new_v4().to_string();
-        let prefix = format!("test_kv_cache_{}/", test_id);
+        let prefix = format!("v1/test_kv_cache_{}/", test_id);
 
         // Initial values
         let mut initial_values = HashMap::new();
@@ -720,7 +717,7 @@ mod tests {
         initial_values.insert("key2".to_string(), b"value2".to_vec());
 
         // Create the KV cache
-        let kv_cache = KvCache::new(client.clone(), "v1", prefix.clone(), initial_values).await?;
+        let kv_cache = KvCache::new(client.clone(), prefix.clone(), initial_values).await?;
 
         // Test get
         let value1 = kv_cache.get("key1").await;
