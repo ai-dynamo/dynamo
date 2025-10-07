@@ -40,6 +40,17 @@ jobs:
   vllm:
     needs: changed-files
     if: needs.changed-files.outputs.has_code_changes == 'true'
+    outputs:
+      build-duration-sec: ${{ steps.capture-metrics.outputs.build-duration-sec }}
+      image-size-bytes: ${{ steps.capture-metrics.outputs.image-size-bytes }}
+      image-size-mb: ${{ steps.capture-metrics.outputs.image-size-mb }}
+      build-start-time: ${{ steps.capture-metrics.outputs.build-start-time }}
+      build-end-time: ${{ steps.capture-metrics.outputs.build-end-time }}
+      cache-hit-rate: ${{ steps.capture-metrics.outputs.cache-hit-rate }}
+      sccache-working: ${{ steps.capture-metrics.outputs.sccache-working }}
+      sccache-requests: ${{ steps.capture-metrics.outputs.sccache-requests }}
+      framework: ${{ steps.capture-metrics.outputs.framework }}
+      target: ${{ steps.capture-metrics.outputs.target }}
     strategy:
       fail-fast: false
       matrix:
@@ -77,13 +88,81 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Run unit tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
+      
+      # Capture build metrics for the "Build and Test - vllm" job
+      - name: Capture Build Metrics
+        id: capture-metrics
+        if: ${{ matrix.platform.arch == 'amd64' }}  # Only capture metrics for amd64 build
+        run: |
+          echo "📊 Capturing build metrics for vllm..."
+          
+          # Create metrics directory
+          mkdir -p build-metrics
+          
+          # Get image size using docker inspect
+          IMAGE_TAG="${{ steps.build-image.outputs.image_tag }}"
+          if [ -n "$IMAGE_TAG" ]; then
+            IMAGE_SIZE_BYTES=$(docker image inspect "$IMAGE_TAG" --format='{{.Size}}' 2>/dev/null || echo "0")
+            IMAGE_SIZE_MB=$((IMAGE_SIZE_BYTES / 1024 / 1024))
+            echo "Image size: ${IMAGE_SIZE_MB} MB (${IMAGE_SIZE_BYTES} bytes)"
+          else
+            IMAGE_SIZE_BYTES=0
+            IMAGE_SIZE_MB=0
+            echo "⚠️  No image tag available"
+          fi
+          
+          # Get build timing from outputs (these should be set by the docker-build action)
+          BUILD_START_TIME="${{ steps.build-image.outputs.build-start-time }}"
+          BUILD_END_TIME="${{ steps.build-image.outputs.build-end-time }}"
+          BUILD_DURATION_SEC="${{ steps.build-image.outputs.build-duration-sec }}"
+          
+          # Get cache metrics (these should be set by the docker-build action)
+          CACHE_HIT_RATE="${{ steps.build-image.outputs.cache-hit-rate }}"
+          SCCACHE_WORKING="${{ steps.build-image.outputs.sccache-working }}"
+          SCCACHE_REQUESTS="${{ steps.build-image.outputs.sccache-requests }}"
+          
+          # Create metrics JSON file
+          cat > build-metrics/metrics.json << EOF
+          {
+            "framework": "vllm",
+            "target": "runtime",
+            "platform": "linux/${{ matrix.platform.arch }}",
+            "image_size_bytes": ${IMAGE_SIZE_BYTES},
+            "image_size_mb": ${IMAGE_SIZE_MB},
+            "build_start_time": "${BUILD_START_TIME}",
+            "build_end_time": "${BUILD_END_TIME}",
+            "build_duration_sec": ${BUILD_DURATION_SEC:-0},
+            "cache_hit_rate": ${CACHE_HIT_RATE:-0},
+            "sccache_working": "${SCCACHE_WORKING:-false}",
+            "sccache_requests": ${SCCACHE_REQUESTS:-0}
+          }
+          EOF
+          
+          echo "📁 Build metrics saved:"
+          cat build-metrics/metrics.json
+          
+          # Set outputs for job-level access
+          echo "build-duration-sec=${BUILD_DURATION_SEC:-0}" >> $GITHUB_OUTPUT
+          echo "image-size-bytes=${IMAGE_SIZE_BYTES}" >> $GITHUB_OUTPUT
+          echo "image-size-mb=${IMAGE_SIZE_MB}" >> $GITHUB_OUTPUT
+          echo "build-start-time=${BUILD_START_TIME}" >> $GITHUB_OUTPUT
+          echo "build-end-time=${BUILD_END_TIME}" >> $GITHUB_OUTPUT
+          echo "cache-hit-rate=${CACHE_HIT_RATE:-0}" >> $GITHUB_OUTPUT
+          echo "sccache-working=${SCCACHE_WORKING:-false}" >> $GITHUB_OUTPUT
+          echo "sccache-requests=${SCCACHE_REQUESTS:-0}" >> $GITHUB_OUTPUT
+          echo "framework=vllm" >> $GITHUB_OUTPUT
+          echo "target=runtime" >> $GITHUB_OUTPUT
+
+      # Upload build metrics as artifact
+      - name: Upload Build Metrics
+        if: ${{ matrix.platform.arch == 'amd64' }}  # Only upload metrics for amd64 build
+        uses: actions/upload-artifact@v4
         with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "unit and vllm and gpu_1"
-      - name: Run e2e tests
+          name: build-metrics-vllm
+          path: build-metrics/metrics.json
+          retention-days: 7
+
+      - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
@@ -225,12 +304,52 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install requests
+
+      - name: Download build metrics
+        uses: actions/download-artifact@v4
+        with:
+          name: build-metrics-vllm
+          path: build-metrics/
+        continue-on-error: true  # Don't fail if artifact doesn't exist
+
       - name: Upload Complete Workflow Metrics
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WORKFLOW_INDEX: ${{ secrets.WORKFLOW_INDEX }}
           JOB_INDEX: ${{ secrets.JOB_INDEX }}
           STEPS_INDEX: ${{ secrets.STEPS_INDEX }}
+          # Pass build metrics as environment variables
+          BUILD_DURATION_SEC: ${{ needs.vllm.outputs.build-duration-sec }}
+          IMAGE_SIZE_BYTES: ${{ needs.vllm.outputs.image-size-bytes }}
+          IMAGE_SIZE_MB: ${{ needs.vllm.outputs.image-size-mb }}
+          BUILD_START_TIME: ${{ needs.vllm.outputs.build-start-time }}
+          BUILD_END_TIME: ${{ needs.vllm.outputs.build-end-time }}
+          CACHE_HIT_RATE: ${{ needs.vllm.outputs.cache-hit-rate }}
+          SCCACHE_WORKING: ${{ needs.vllm.outputs.sccache-working }}
+          SCCACHE_REQUESTS: ${{ needs.vllm.outputs.sccache-requests }}
+          BUILD_FRAMEWORK: ${{ needs.vllm.outputs.framework }}
+          BUILD_TARGET: ${{ needs.vllm.outputs.target }}
+          # Build and container index configuration
+          BUILD_INDEX: ${{ secrets.BUILD_INDEX }}
+          CONTAINER_INDEX: ${{ secrets.CONTAINER_INDEX }}
         run: |
+          # Show build metrics for debugging
+          echo "📊 Build Metrics Available:"
+          echo "  Duration: ${BUILD_DURATION_SEC} seconds"
+          echo "  Image Size: ${IMAGE_SIZE_MB} MB (${IMAGE_SIZE_BYTES} bytes)"
+          echo "  Cache Hit Rate: ${CACHE_HIT_RATE}%"
+          echo "  Framework: ${BUILD_FRAMEWORK}"
+          echo "  Target: ${BUILD_TARGET}"
+          echo "  sccache Working: ${SCCACHE_WORKING}"
+          echo "  sccache Requests: ${SCCACHE_REQUESTS}"
+          
+          # Check if build metrics file exists
+          if [ -f "build-metrics/metrics.json" ]; then
+            echo "📁 Build metrics file found:"
+            cat build-metrics/metrics.json
+          else
+            echo "⚠️  Build metrics file not found, using job outputs only"
+          fi
+          
           # Run the enhanced metrics upload script
           python3 .github/workflows/upload_complete_workflow_metrics.py
