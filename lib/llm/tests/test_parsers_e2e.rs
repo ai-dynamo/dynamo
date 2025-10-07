@@ -226,12 +226,16 @@ fn aggregate_content_from_chunks(
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_gpt_oss_e2e_with_no_tool_calls_vllm() {
+    #[test]
+    fn test_gpt_oss_e2e_with_no_tool_calls_vllm() {
+        // Pre-load harmony encoding before entering async runtime to avoid blocking client creation
+        let _ = dynamo_parsers::GptOssReasoningParser::new();
+
         // E2E Parsing test for GPT-OSS. The input stream does not contain tool calls.
         // Just content and reasoning content.
         // Test will call both reasoning parsing logic and tool calling parsing logic and verify the output
 
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
         // Load test data from file
         let file_path = format!(
             "{}/vllm/gpt-oss-20b/chat_completion_stream_49f581c1-no-tool.json",
@@ -275,6 +279,7 @@ mod tests {
             aggregated.has_tool_calls, expected_has_tool_calls,
             "Tool calls presence should match expected value"
         );
+        });
     }
 
     #[tokio::test]
