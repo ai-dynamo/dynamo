@@ -27,11 +27,11 @@ While this guide does not use Prometheus, it assumes Grafana is pre-installed wi
 
 The following env variables are set:
 - `MONITORING_NAMESPACE`: The namespace where Loki is installed
-- `DYNAMO_NAMESPACE`: The namespace where Dynamo Cloud Operator is installed
+- `DYN_NAMESPACE`: The namespace where Dynamo Cloud Operator is installed
 
 ```bash
 export MONITORING_NAMESPACE=monitoring
-export DYNAMO_NAMESPACE=dynamo-system
+export DYN_NAMESPACE=dynamo-system
 ```
 
 ## Installation Steps
@@ -99,7 +99,7 @@ podLogs:
   - "nvidia_com_dynamo_component_type" # extract this label from the dynamo graph deployment
   - "nvidia_com_dynamo_graph_deployment_name" # extract this label from the dynamo graph deployment
   namespaces:
-  - $DYNAMO_NAMESPACE
+  - $DYN_NAMESPACE
 ```
 
 ### 3. Configure Grafana with the Loki datasource and Dynamo Logs dashboard
@@ -126,7 +126,7 @@ At this point, we should have everything in place to collect and view logs in ou
 To enable structured logs in a DynamoGraphDeployment, we need to set the `DYN_LOGGING_JSONL` environment variable to `1`. This is done for us in the `agg_logging.yaml` setup for the Sglang backend. We can now deploy the DynamoGraphDeployment with:
 
 ```bash
-kubectl apply -n $DYNAMO_NAMESPACE -f components/backends/sglang/deploy/agg_logging.yaml
+kubectl apply -n $DYN_NAMESPACE -f components/backends/sglang/deploy/agg_logging.yaml
 ```
 
 Send a few chat completions requests to generate structured logs across the frontend and worker pods across the DynamoGraphDeployment. We are now all set to view the logs in Grafana.
