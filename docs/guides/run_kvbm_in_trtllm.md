@@ -122,3 +122,38 @@ sudo ufw allow 6880/tcp
 ```
 
 View grafana metrics via http://localhost:3001 (default login: dynamo/dynamo) and look for KVBM Dashboard
+
+## Benchmark KVBM
+
+Once the model is loaded ready, follow below steps to use LMBenchmark to benchmark KVBM performance:
+```bash
+git clone https://github.com/LMCache/LMBenchmark.git
+
+# show case of running the synthetic multi-turn chat dataset.
+# we are passing model, endpoint, output file prefix and qps to the sh script.
+cd LMBenchmark/synthetic-multi-round-qa
+./long_input_short_output_run.sh \
+    "deepseek-ai/DeepSeek-R1-Distill-Llama-8B" \
+    "http://localhost:8000" \
+    "benchmark_kvbm" \
+    1
+
+# Average TTFT and other perf numbers would be in the output from above cmd
+```
+More details about how to use LMBenchmark could be found [here](https://github.com/LMCache/LMBenchmark).
+
+`NOTE`: if metrics are enabled as mentioned in the above section, you can observe KV offloading, and KV onboarding in the grafana dashboard.
+
+To compare, you can remove the `kv_connector_config` section from the LLM API config and run `trtllm-serve` with the updated config as the baseline.
+```bash
+cat > "/tmp/llm_api_config.yaml" <<EOF
+backend: pytorch
+cuda_graph_config: null
+kv_cache_config:
+  enable_partial_reuse: false
+  free_gpu_memory_fraction: 0.80
+EOF
+
+# run trtllm-serve for the baseline for comparison
+trtllm-serve deepseek-ai/DeepSeek-R1-Distill-Llama-8B --host localhost --port 8000 --backend pytorch --extra_llm_api_options /tmp/llm_api_config.yaml &
+```

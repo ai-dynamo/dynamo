@@ -92,7 +92,7 @@ View grafana metrics via http://localhost:3001 (default login: dynamo/dynamo) an
 
 ## Benchmark KVBM
 
-Once vllm serve is ready, follow below steps to use LMBenchmark to benchmark KVBM performance:
+Once the model is loaded ready, follow below steps to use LMBenchmark to benchmark KVBM performance:
 ```bash
 git clone https://github.com/LMCache/LMBenchmark.git
 
