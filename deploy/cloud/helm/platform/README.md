@@ -113,7 +113,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.controllerManager.manager.args[0] | string | `"--health-probe-bind-address=:8081"` | Health probe endpoint for Kubernetes health checks |
 | dynamo-operator.controllerManager.manager.args[1] | string | `"--metrics-bind-address=127.0.0.1:8080"` | Metrics endpoint for Prometheus scraping (localhost only for security) |
 | dynamo-operator.imagePullSecrets | list | `[]` | Secrets for pulling private container images |
-| dynamo-operator.dynamo.groveTerminationDelay | string | `"15m"` | How long to wait before forcefully terminating Grove instances |
+| dynamo-operator.dynamo.groveTerminationDelay | string | `"4h"` | How long to wait before forcefully terminating Grove instances |
 | dynamo-operator.dynamo.internalImages.debugger | string | `"python:3.12-slim"` | Debugger image for troubleshooting deployments |
 | dynamo-operator.dynamo.enableRestrictedSecurityContext | bool | `false` | Whether to enable restricted security contexts for enhanced security |
 | dynamo-operator.dynamo.dockerRegistry.useKubernetesSecret | bool | `false` | Whether to use Kubernetes secrets for registry authentication |
@@ -134,9 +134,9 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.dynamo.mpiRun.sshKeygen.enabled | bool | `true` | Whether to enable SSH key generation for MPI Run |
 | grove.enabled | bool | `false` | Whether to enable Grove for multi-node inference coordination, if enabled, the Grove operator will be deployed cluster-wide |
 | kai-scheduler.enabled | bool | `false` | Whether to enable Kai Scheduler for intelligent resource allocation, if enabled, the Kai Scheduler operator will be deployed cluster-wide |
-| etcd.enabled | bool | `true` | Whether to enable etcd deployment, disable if you want to use an external etcd instance |
+| etcd.enabled | bool | `true` | Whether to enable etcd deployment, disable if you want to use an external etcd instance. For complete configuration options, see: https://github.com/bitnami/charts/tree/main/bitnami/etcd , all etcd settings should be prefixed with "etcd." |
 | etcd.image.repository | string | `"bitnamilegacy/etcd"` | following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository |
-| nats.enabled | bool | `true` | Whether to enable NATS deployment, disable if you want to use an external NATS instance |
+| nats.enabled | bool | `true` | Whether to enable NATS deployment, disable if you want to use an external NATS instance. For complete configuration options, see: https://github.com/nats-io/k8s/tree/main/helm/charts/nats , all nats settings should be prefixed with "nats." |
 
 ### NATS Configuration
 

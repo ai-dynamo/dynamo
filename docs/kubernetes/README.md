@@ -70,7 +70,7 @@ kubectl port-forward svc/vllm-agg-frontend 8000:8000 -n ${NAMESPACE}
 curl http://localhost:8000/v1/models
 ```
 
-## What's a DynamoGraphDeployment?
+## What's a DynamoGraphDeployment (DGD)?
 
 It's a Kubernetes Custom Resource that defines your inference pipeline:
 - Model configuration
