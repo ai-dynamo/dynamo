@@ -2,84 +2,84 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "dynamo-runtime"
-readme = "README.md"
-version.workspace = true
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
-homepage.workspace = true
+authors.workspace    = true
+description          = "Dynamo Runtime Library"
+edition.workspace    = true
+homepage.workspace   = true
+license.workspace    = true
+name                 = "dynamo-runtime"
+readme               = "README.md"
 repository.workspace = true
-description = "Dynamo Runtime Library"
+version.workspace    = true
 
 [features]
-default = []
-integration = []
-testing-etcd = [] # Tests that require an active ETCD server
-tokio-console = ["dep:console-subscriber", "tokio/tracing"]
-compute-validation = [] # Enable validation and timing for compute macros
+compute-validation = [  ]                                          # Enable validation and timing for compute macros
+default            = [  ]
+integration        = [  ]
+testing-etcd       = [  ]                                          # Tests that require an active ETCD server
+tokio-console      = [ "dep:console-subscriber", "tokio/tracing" ]
 
 [dependencies]
 # Use workspace dependencies where available
-anyhow = { workspace = true }
-async-nats = { workspace = true }
-async-stream = { workspace = true }
-async-trait = { workspace = true }
-async_zmq = { workspace = true }
-axum = { workspace = true }
-blake3 = { workspace = true }
-bytes = { workspace = true }
-chrono = { workspace = true }
-derive_builder = { workspace = true }
-derive-getters = { workspace = true }
-either = { workspace = true }
-etcd-client = { workspace = true }
-futures = { workspace = true }
-humantime = { workspace = true }
-prometheus = { workspace = true }
-rand = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tokio = { workspace = true }
-tokio-stream = { workspace = true }
-tokio-util = { workspace = true }
-tower-http = { workspace = true }
-tracing = { workspace = true }
+anyhow             = { workspace = true }
+async-nats         = { workspace = true }
+async-stream       = { workspace = true }
+async-trait        = { workspace = true }
+async_zmq          = { workspace = true }
+axum               = { workspace = true }
+blake3             = { workspace = true }
+bytes              = { workspace = true }
+chrono             = { workspace = true }
+derive-getters     = { workspace = true }
+derive_builder     = { workspace = true }
+either             = { workspace = true }
+etcd-client        = { workspace = true }
+futures            = { workspace = true }
+humantime          = { workspace = true }
+prometheus         = { workspace = true }
+rand               = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+thiserror          = { workspace = true }
+tokio              = { workspace = true }
+tokio-stream       = { workspace = true }
+tokio-util         = { workspace = true }
+tower-http         = { workspace = true }
+tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
-thiserror = { workspace = true }
-uuid = { workspace = true }
-url = { workspace = true }
-validator = { workspace = true }
-xxhash-rust = { workspace = true }
+url                = { workspace = true }
+uuid               = { workspace = true }
+validator          = { workspace = true }
+xxhash-rust        = { workspace = true }
 
-arc-swap = { version = "1" }
-async-once-cell = { version = "0.5.4" }
-bincode = { version = "1" }
+arc-swap           = { version = "1" }
+async-once-cell    = { version = "0.5.4" }
+bincode            = { version = "1" }
 console-subscriber = { version = "0.4", optional = true }
-educe = { version = "0.6.0" }
-figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }
-local-ip-address = { version = "0.6.3" }
-log = { version = "0.4" }
-nid = { version = "3.0.0", features = ["serde"] }
-nix = { version = "0.29", features = ["signal"] }
-nuid = { version = "0.5" }
-once_cell = { version = "1" }
-rayon = { version = "1.10" }
-regex = { version = "1" }
-socket2 = { version = "0.5.8" }
-tokio-rayon = { version = "2.1" }
+educe              = { version = "0.6.0" }
+figment            = { version = "0.10.19", features = [ "env", "json", "test", "toml" ] }
+local-ip-address   = { version = "0.6.3" }
+log                = { version = "0.4" }
+nid                = { version = "3.0.0", features = [ "serde" ] }
+nix                = { version = "0.29", features = [ "signal" ] }
+nuid               = { version = "0.5" }
+once_cell          = { version = "1" }
+rayon              = { version = "1.10" }
+regex              = { version = "1" }
+socket2            = { version = "0.5.8" }
+tokio-rayon        = { version = "2.1" }
 
 [dev-dependencies]
 assert_matches = { version = "1.5.0" }
-criterion = { version = "0.5", features = ["async_tokio"] }
-env_logger = { version = "0.11" }
-reqwest = { workspace = true }
-rstest = { version = "0.23.0" }
-temp-env = { version = "0.3.6" , features=["async_closure"] }
-stdio-override = {version= "0.2.0"}
-jsonschema = {version = "0.17"}
-tempfile = { workspace = true }
+criterion      = { version = "0.5", features = [ "async_tokio" ] }
+env_logger     = { version = "0.11" }
+jsonschema     = { version = "0.17" }
+reqwest        = { workspace = true }
+rstest         = { version = "0.23.0" }
+stdio-override = { version = "0.2.0" }
+temp-env       = { version = "0.3.6", features = [ "async_closure" ] }
+tempfile       = { workspace = true }
 
 [[bench]]
-name = "compute_pool_overhead"
 harness = false
+name    = "compute_pool_overhead"

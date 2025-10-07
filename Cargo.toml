@@ -5,13 +5,13 @@
 members = [
     "components/metrics",
     "launch/dynamo-run",
-    "lib/llm",
-    "lib/runtime",
-    "lib/tokens",
     "lib/async-openai",
-    "lib/parsers",
     "lib/bindings/c",
     "lib/engines/*",
+    "lib/llm",
+    "lib/parsers",
+    "lib/runtime",
+    "lib/tokens",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
 # features from default build, but keep them in workspace for convenience.
@@ -19,40 +19,40 @@ members = [
 # - lib/engines/*
 default-members = [
     "components/metrics",
+    "lib/async-openai",
+    "lib/bindings/c",
     "lib/llm",
+    "lib/parsers",
     "lib/runtime",
     "lib/tokens",
-    "lib/async-openai",
-    "lib/parsers",
-    "lib/bindings/c",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "0.5.1"
-edition = "2024"
+authors     = [ "NVIDIA Inc. <sw-dl-dynamo@nvidia.com>" ]
 description = "Dynamo Inference Framework"
-authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
-license = "Apache-2.0"
-homepage = "https://github.com/ai-dynamo/dynamo"
-repository = "https://github.com/ai-dynamo/dynamo.git"
-keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
+edition     = "2024"
+homepage    = "https://github.com/ai-dynamo/dynamo"
+keywords    = [ "distributed", "genai", "inference", "llm", "nvidia" ]
+license     = "Apache-2.0"
+repository  = "https://github.com/ai-dynamo/dynamo.git"
+version     = "0.5.1"
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime", version = "0.5.1" }
-dynamo-llm = { path = "lib/llm", version = "0.5.1" }
-dynamo-tokens = { path = "lib/tokens", version = "0.5.1" }
 dynamo-async-openai = { path = "lib/async-openai", version = "0.5.1", features = [
     "byot",
     "rustls",
 ] }
+dynamo-llm = { path = "lib/llm", version = "0.5.1" }
 dynamo-parsers = { path = "lib/parsers", version = "0.5.1" }
+dynamo-runtime = { path = "lib/runtime", version = "0.5.1" }
+dynamo-tokens = { path = "lib/tokens", version = "0.5.1" }
 
 
 # External dependencies
 anyhow = { version = "1" }
-async-nats = { version = "0.40", features = ["service"] }
+async-nats = { version = "0.40", features = [ "service" ] }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
 async_zmq = { version = "0.4.0" }
@@ -60,19 +60,19 @@ blake3 = { version = "1" }
 bytes = { version = "1" }
 chrono = { version = "0.4", default-features = false, features = [
     "alloc",
-    "std",
     "clock",
     "now",
     "serde",
+    "std",
 ] }
-derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
-either = { version = "1.13", features = ["serde"] }
-etcd-client = { version = "0.16", features = ["tls"] }
+derive_builder = { version = "0.20" }
+either = { version = "1.13", features = [ "serde" ] }
+etcd-client = { version = "0.16", features = [ "tls" ] }
 futures = { version = "0.3" }
 hf-hub = { version = "0.4.2", default-features = false, features = [
-    "tokio",
     "rustls-tls",
+    "tokio",
     "ureq",
 ] }
 
@@ -80,36 +80,32 @@ hf-hub = { version = "0.4.2", default-features = false, features = [
 modelexpress-client = { git = "https://github.com/ai-dynamo/modelexpress.git", rev = "a232220bf268a475d293914d407f4ae186f443e3", package = "modelexpress-client" }
 modelexpress-common = { git = "https://github.com/ai-dynamo/modelexpress.git", rev = "a232220bf268a475d293914d407f4ae186f443e3", package = "modelexpress-common" }
 
+axum = { version = "0.8", features = [ "macros" ] }
 humantime = { version = "2.2.0" }
 libc = { version = "0.2" }
-oneshot = { version = "0.1.11", features = ["std", "async"] }
+oneshot = { version = "0.1.11", features = [ "async", "std" ] }
 prometheus = { version = "0.14" }
 rand = { version = "0.9.0" }
 reqwest = { version = "0.12.22", default-features = false, features = [
     "json",
-    "stream",
     "rustls-tls",
+    "stream",
 ] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = [ "derive" ] }
 serde_json = { version = "1" }
-strum = { version = "0.27", features = ["derive"] }
+strum = { version = "0.27", features = [ "derive" ] }
 tempfile = "3"
 thiserror = { version = "2.0.11" }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = [ "full" ] }
 tokio-stream = { version = "0.1" }
-tokio-util = { version = "0.7", features = ["codec", "net", "rt"] }
-tower-http = { version = "0.6", features = ["trace"] }
-axum = { version = "0.8", features = ["macros"] }
+tokio-util = { version = "0.7", features = [ "codec", "net", "rt" ] }
+tower-http = { version = "0.6", features = [ "trace" ] }
 tracing = { version = "0.1" }
-tracing-subscriber = { version = "0.3", features = [
-    "env-filter",
-    "local-time",
-    "json",
-] }
-validator = { version = "0.20.0", features = ["derive"] }
-uuid = { version = "1.17", features = ["v4", "serde"] }
-url = { version = "2.5", features = ["serde"] }
-xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
+tracing-subscriber = { version = "0.3", features = [ "env-filter", "json", "local-time" ] }
+url = { version = "2.5", features = [ "serde" ] }
+uuid = { version = "1.17", features = [ "serde", "v4" ] }
+validator = { version = "0.20.0", features = [ "derive" ] }
+xxhash-rust = { version = "0.8", features = [ "const_xxh3", "xxh3" ] }
 
 [profile.dev.package]
 insta.opt-level = 3
@@ -121,4 +117,4 @@ opt-level = 3
 [profile.release]
 # These make the build much slower but shrink the binary, and could help performance
 codegen-units = 1
-lto = "thin"
+lto           = "thin"

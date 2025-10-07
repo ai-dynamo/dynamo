@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "hello_world"
-version.workspace = true
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
+authors.workspace  = true
+edition.workspace  = true
 homepage.workspace = true
+license.workspace  = true
+name               = "hello_world"
+version.workspace  = true
 
 [dependencies]
 dynamo-runtime = { workspace = true }

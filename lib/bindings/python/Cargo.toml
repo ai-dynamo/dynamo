@@ -6,74 +6,74 @@
 # excluded due to pyo3 extension module build issues
 
 [package]
-name = "dynamo-py3"
-version = "0.5.1"
-edition = "2024"
-authors = ["NVIDIA"]
-license = "Apache-2.0"
-homepage = "https://github.com/ai-dynamo/dynamo"
+authors    = [ "NVIDIA" ]
+edition    = "2024"
+homepage   = "https://github.com/ai-dynamo/dynamo"
+license    = "Apache-2.0"
+name       = "dynamo-py3"
 repository = "https://github.com/ai-dynamo/dynamo.git"
+version    = "0.5.1"
 
 [lib]
-path = "rust/lib.rs"
 name = "_core"
+path = "rust/lib.rs"
 # "cdylib" is necessary to produce a shared library for Python to import from.
 # "rlib" is necessary to support doctests.
-crate-type = ["cdylib", "rlib"]
+crate-type = [ "cdylib", "rlib" ]
 
 [features]
-default = []
-block-manager = ["dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc"]
+block-manager = [ "dep:cudarc", "dep:dlpark", "dynamo-llm/block-manager" ]
+default       = [  ]
 
 [dependencies]
-dynamo-llm = { path = "../../llm" }
-dynamo-runtime = { path = "../../runtime" }
+dynamo-llm     = { path = "../../llm" }
 dynamo-parsers = { path = "../../parsers" }
+dynamo-runtime = { path = "../../runtime" }
 
-anyhow = { version = "1" }
+anyhow              = { version = "1" }
+async-stream        = { version = "0.3" }
+async-trait         = { version = "0.1" }
+derive-getters      = "0.5"
 dynamo-async-openai = { path = "../../async-openai" }
-async-stream = { version = "0.3" }
-async-trait = { version = "0.1" }
-derive-getters = "0.5"
-either = { version = "1.13", features = ["serde"] }
-futures = { version = "0.3" }
-local-ip-address = { version = "0.6" }
-once_cell = { version = "1.20.3" }
-parking_lot = { version = "0.12.4" }
-rand = { version = "0.9" }
-socket2 = { version = "0.6" }
-serde = { version = "1" }
-serde_json = { version = "1.0.138" }
-thiserror = { version = "2.0" }
-tokio = { version = "1.46.0", features = ["full"] }
-tokio-stream = { version = "0" }
-tokio-util = { version = "0.7", features = ["rt"] }
-tracing = { version = "0"  }
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-uuid = { version = "1.17", features = ["v4", "serde"] }
+either              = { version = "1.13", features = [ "serde" ] }
+futures             = { version = "0.3" }
+local-ip-address    = { version = "0.6" }
+once_cell           = { version = "1.20.3" }
+parking_lot         = { version = "0.12.4" }
+rand                = { version = "0.9" }
+serde               = { version = "1" }
+serde_json          = { version = "1.0.138" }
+socket2             = { version = "0.6" }
+thiserror           = { version = "2.0" }
+tokio               = { version = "1.46.0", features = [ "full" ] }
+tokio-stream        = { version = "0" }
+tokio-util          = { version = "0.7", features = [ "rt" ] }
+tracing             = { version = "0" }
+tracing-subscriber  = { version = "0.3", features = [ "env-filter", "fmt" ] }
+uuid                = { version = "1.17", features = [ "serde", "v4" ] }
 
 # "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
 # "abi3-py310" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.10, which is the minimum version in pyproject.toml
 pyo3 = { version = "0.23.4", default-features = false, features = [
-  "macros",
-  "experimental-async",
-  "experimental-inspect",
-  "extension-module",
-  "py-clone",
-  # "abi3-py310" # TODO: Add abi feature in follow-up, since docker build can be simplified.
+    "experimental-async",
+    "experimental-inspect",
+    "extension-module",
+    "macros",
+    "py-clone",
+    # "abi3-py310" # TODO: Add abi feature in follow-up, since docker build can be simplified.
 ] }
 
 pyo3-async-runtimes = { version = "0.23.0", default-features = false, features = [
-  "attributes",
-  "testing",
-  "tokio-runtime",
-  "unstable-streams",
+    "attributes",
+    "testing",
+    "tokio-runtime",
+    "unstable-streams",
 ] }
 
 pythonize = "0.23"
 
-dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
-cudarc = { version = "0.16.2", features = ["cuda-12020"], optional = true }
+cudarc     = { version = "0.16.2", features = [ "cuda-12020" ], optional = true }
+dlpark     = { version = "0.5", features = [ "half", "pyo3" ], optional = true }
 prometheus = "0.14.0"
 
 

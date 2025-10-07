@@ -14,32 +14,32 @@
 # limitations under the License.
 
 [package]
-name = "dynamo-engine-mistralrs"
-version.workspace = true
-edition.workspace = true
+authors.workspace     = true
 description.workspace = true
-authors.workspace = true
-license.workspace = true
-homepage.workspace = true
-repository.workspace = true
-keywords.workspace = true
+edition.workspace     = true
+homepage.workspace    = true
+keywords.workspace    = true
+license.workspace     = true
+name                  = "dynamo-engine-mistralrs"
+repository.workspace  = true
+version.workspace     = true
 
 [features]
-default = []
-cuda = ["mistralrs/cuda"]
-metal = ["mistralrs/metal"]
+cuda    = [ "mistralrs/cuda" ]
+default = [  ]
+metal   = [ "mistralrs/metal" ]
 
 [dependencies]
+dynamo-llm     = { workspace = true }
 dynamo-runtime = { workspace = true }
-dynamo-llm = { workspace = true }
 
-anyhow = { workspace = true }
+anyhow              = { workspace = true }
+async-stream        = { workspace = true }
+async-trait         = { workspace = true }
 dynamo-async-openai = { workspace = true }
-async-stream = { workspace = true }
-async-trait = { workspace = true }
-either = { workspace = true }
-indexmap = { version = "2.9.0", features = ["serde"] }
-mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs.git", version = "0.6.0", rev = "53ebc74" }
-serde_json = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
+either              = { workspace = true }
+indexmap            = { version = "2.9.0", features = [ "serde" ] }
+mistralrs           = { git = "https://github.com/EricLBuehler/mistral.rs.git", version = "0.6.0", rev = "53ebc74" }
+serde_json          = { workspace = true }
+tokio               = { workspace = true }
+tracing             = { workspace = true }

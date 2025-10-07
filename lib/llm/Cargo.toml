@@ -2,110 +2,107 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "dynamo-llm"
-version.workspace = true
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
-homepage.workspace = true
+authors.workspace    = true
+description          = "Dynamo LLM Library"
+edition.workspace    = true
+homepage.workspace   = true
+license.workspace    = true
+name                 = "dynamo-llm"
+readme.workspace     = true
 repository.workspace = true
-readme.workspace = true
-description = "Dynamo LLM Library"
+version.workspace    = true
 
 [features]
-default = []
+default = [  ]
 # todo(ops): get this working in CI as a default.
 # default = ["block-manager", "testing-full"]
 
-testing-full = ["testing-cuda", "testing-nixl"]
-testing-cuda = ["dep:cudarc"]
-testing-nixl = ["dep:nixl-sys"]
-testing-etcd = []
-block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
-cuda = ["dep:cudarc"]
-integration = ["dynamo-runtime/integration"]
+block-manager = [ "dep:cudarc", "dep:ndarray", "dep:nix", "dep:nixl-sys" ]
+cuda          = [ "dep:cudarc" ]
+integration   = [ "dynamo-runtime/integration" ]
+testing-cuda  = [ "dep:cudarc" ]
+testing-etcd  = [  ]
+testing-full  = [ "testing-cuda", "testing-nixl" ]
+testing-nixl  = [ "dep:nixl-sys" ]
 
 [[bench]]
-name = "tokenizer"
 harness = false
+name    = "tokenizer"
 
 [[bench]]
-name = "transfer_context_v2"
-harness = false
-required-features = ["block-manager", "testing-cuda"]
+harness           = false
+name              = "transfer_context_v2"
+required-features = [ "block-manager", "testing-cuda" ]
 [dependencies]
 # repo
 dynamo-runtime = { workspace = true }
 
 # workspace
-aho-corasick = "1.1"
-anyhow = { workspace = true }
+aho-corasick        = "1.1"
+akin                = "0.4.0"
+anyhow              = { workspace = true }
+async-nats          = { workspace = true }
+async-stream        = { workspace = true }
+async-trait         = { workspace = true }
+async_zmq           = { workspace = true }
+bitflags            = { version = "2.4", features = [ "serde" ] }
+blake3              = { version = "1.8", features = [ "mmap", "rayon" ] }
+bytemuck            = "1.22"
+bytes               = { workspace = true }
+candle-core         = { version = "0.9.1" }
+chrono              = { workspace = true }
+dashmap             = { version = "5.5.3" }
+derive-getters      = "0.5"
+derive_builder      = { workspace = true }
 dynamo-async-openai = { workspace = true }
-dynamo-parsers = { workspace = true }
-async-stream = { workspace = true }
-async-trait = { workspace = true }
-async-nats = { workspace = true }
-async_zmq = { workspace = true }
-bytes = { workspace = true }
-chrono = { workspace = true }
-derive_builder = { workspace = true }
-either = { workspace = true }
-etcd-client = { workspace = true }
-futures = { workspace = true }
-futures-util = "0.3.31"
-hf-hub = { workspace = true }
-humantime = { workspace = true }                           # input/batch
-rand = { workspace = true }
-oneshot = { workspace = true }
-parking_lot = "0.12.4"
-prometheus = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-strum = { workspace = true }
-tempfile = { workspace = true }
-thiserror = { workspace = true }
-tmq = "0.5.0"
-tokio = { workspace = true }
-tokio-stream = { workspace = true }
-tokio-util = { workspace = true }
-tracing = { workspace = true }
-validator = { workspace = true }
-url = { workspace = true }
-uuid = { workspace = true }
-xxhash-rust = { workspace = true }
+dynamo-parsers      = { workspace = true }
+either              = { workspace = true }
+etcd-client         = { workspace = true }
+futures             = { workspace = true }
+futures-util        = "0.3.31"
+hf-hub              = { workspace = true }
+humantime           = { workspace = true }                                # input/batch
 modelexpress-client = { workspace = true }
 modelexpress-common = { workspace = true }
-akin = "0.4.0"
-bitflags = { version = "2.4", features = ["serde"] }
-blake3 = { version = "1.8", features = ["mmap", "rayon"] }
-bytemuck = "1.22"
-candle-core = { version = "0.9.1" }
-derive-getters = "0.5"
-offset-allocator = "0.2"
-regex = "1"
-rayon = "1"
-dashmap = { version = "5.5.3" }
+offset-allocator    = "0.2"
+oneshot             = { workspace = true }
+parking_lot         = "0.12.4"
+prometheus          = { workspace = true }
+rand                = { workspace = true }
+rayon               = "1"
+regex               = "1"
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+strum               = { workspace = true }
+tempfile            = { workspace = true }
+thiserror           = { workspace = true }
+tmq                 = "0.5.0"
+tokio               = { workspace = true }
+tokio-stream        = { workspace = true }
+tokio-util          = { workspace = true }
+tracing             = { workspace = true }
+url                 = { workspace = true }
+uuid                = { workspace = true }
+validator           = { workspace = true }
+xxhash-rust         = { workspace = true }
 
 # input/text
-dialoguer = { version = "0.11", default-features = false, features = [
-  "editor",
-  "history",
-] }
+dialoguer = { version = "0.11", default-features = false, features = [ "editor", "history" ] }
 
 # block_manager
+cudarc   = { version = "0.17.1", features = [ "cuda-12020" ], optional = true }
+ndarray  = { version = "0.16", optional = true }
+nix      = { version = "0.26", optional = true }
 nixl-sys = { version = "0.4.1", optional = true }
-cudarc = { version = "0.17.1", features = ["cuda-12020"], optional = true }
-ndarray = { version = "0.16", optional = true }
-nix = { version = "0.26", optional = true }
 
 # protocols
 unicode-segmentation = "1.12"
 
 # http-service
-axum = { workspace = true }
-axum-server = { version = "0.7", features = ["tls-rustls"] }
-tower-http = { workspace = true }
-rustls = { version = "0.23" }
+axum        = { workspace = true }
+axum-server = { version = "0.7", features = [ "tls-rustls" ] }
+rustls      = { version = "0.23" }
+tower-http  = { workspace = true }
 
 
 # grpc-service
@@ -117,55 +114,50 @@ prost = { version = "0.13.5" }
 
 # tokenizers
 tokenizers = { version = "0.21.4", default-features = false, features = [
-  "onig",
-  "esaxx_fast",
-  "rustls-tls",
+    "esaxx_fast",
+    "onig",
+    "rustls-tls",
 ] }
 
 # backend
-galil-seiferas = { version = "0.1" }
-toktrie = { version = "1.1" }
+galil-seiferas        = { version = "0.1" }
+toktrie               = { version = "1.1" }
 toktrie_hf_tokenizers = { version = "1.1" }
 
 # preprocessor
-bs62 = { version = "0.1" }
-erased-serde = { version = "0.4" }
-itertools = { version = "0.14.0" }
-minijinja = { version = "2.10.2", features = ["loader"] }
-minijinja-contrib = { version = "2.10.2", features = ["pycompat"] }
-json-five = { version = "0.3" }
+bs62              = { version = "0.1" }
+erased-serde      = { version = "0.4" }
+itertools         = { version = "0.14.0" }
+json-five         = { version = "0.3" }
+minijinja         = { version = "2.10.2", features = [ "loader" ] }
+minijinja-contrib = { version = "2.10.2", features = [ "pycompat" ] }
 
 # GGUF
-ggus = "0.4.0"
+ggus    = "0.4.0"
 memmap2 = "0.9.5"
 
 # Publishers
-zeromq = "0.4.1"
+ahash     = "0.8.12"
 rmp-serde = "1.3"
-ahash = "0.8.12"
+zeromq    = "0.4.1"
 
 [dev-dependencies]
-approx = "0.5"
-assert_matches = "1.5"
-criterion = { version = "0.3", features = ["html_reports"] }
-hf-hub = { workspace = true }
+aligned-vec         = "0.6.4"
+approx              = "0.5"
+assert_matches      = "1.5"
+criterion           = { version = "0.3", features = [ "html_reports" ] }
+hf-hub              = { workspace = true }
+insta               = { version = "1.41", features = [ "filters", "glob", "json", "redactions" ] }
+lazy_static         = "1.4"
 modelexpress-client = { workspace = true }
 modelexpress-common = { workspace = true }
-proptest = "1.5.0"
-reqwest = { workspace = true }
-rstest = "0.18.2"
-rstest_reuse = "0.7.0"
-serial_test = "3"
-temp-env = { version = "0.3.6", features = ["async_closure"] }
-tempfile = "3.17.1"
-insta = { version = "1.41", features = [
-  "glob",
-  "json",
-  "redactions",
-  "filters",
-] }
-aligned-vec = "0.6.4"
-lazy_static = "1.4"
+proptest            = "1.5.0"
+reqwest             = { workspace = true }
+rstest              = "0.18.2"
+rstest_reuse        = "0.7.0"
+serial_test         = "3"
+temp-env            = { version = "0.3.6", features = [ "async_closure" ] }
+tempfile            = "3.17.1"
 
 [build-dependencies]
 tonic-build = { version = "0.13.1" }

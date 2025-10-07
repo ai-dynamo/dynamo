@@ -14,27 +14,27 @@
 # limitations under the License.
 
 [package]
-name = "metrics"
-version.workspace = true
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
-homepage.workspace = true
+authors.workspace    = true
+edition.workspace    = true
+homepage.workspace   = true
+license.workspace    = true
+name                 = "metrics"
 repository.workspace = true
+version.workspace    = true
 
 [dependencies]
-dynamo-llm = { workspace = true }
+dynamo-llm     = { workspace = true }
 dynamo-runtime = { workspace = true }
 
-futures = { workspace = true }
+futures    = { workspace = true }
 prometheus = { workspace = true }
-rand = { workspace = true }
-serde = { workspace = true }
+rand       = { workspace = true }
+serde      = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
+thiserror  = { workspace = true }
+tokio      = { workspace = true }
+tracing    = { workspace = true }
 
-axum = { version = "0.8" }
-clap = { version = "4.5", features = ["derive", "env"] }
-reqwest = { version = "0.12.22", default-features = false, features = ["json", "rustls-tls"] }
+axum    = { version = "0.8" }
+clap    = { version = "4.5", features = [ "derive", "env" ] }
+reqwest = { version = "0.12.22", default-features = false, features = [ "json", "rustls-tls" ] }

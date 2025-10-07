@@ -17,27 +17,27 @@
 # https://github.com/EmbarkStudios/cargo-deny/blob/main/deny.template.toml
 
 [licenses]
-confidence-threshold = 0.93
 allow = [
-    "MIT-0",
-    "MIT",
-    "Apache-2.0",
-    "Apache-2.0 WITH LLVM-exception",
-    "ISC",
     "0BSD",
+    "Apache-2.0 WITH LLVM-exception",
+    "Apache-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "LGPL-3.0",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "NCSA",
     "OpenSSL",
     "Unicode-3.0",
-    "BSL-1.0",
-    "MPL-2.0",
-    "CDLA-Permissive-2.0",
+    "Unicode-DFS-2016",
     "Zlib",
-    "NCSA",
-    "LGPL-3.0",
-    "CC0-1.0",
-    "Unicode-DFS-2016"
 ]
+confidence-threshold = 0.93
 
 # TODO exceptions
 # MIT: https://github.com/guidance-ai/llguidance
@@ -49,16 +49,13 @@ allow = [
 
 [[licenses.clarify]]
 
-name = "ring"
-expression = "MIT AND ISC AND OpenSSL"
-license-files = [
-    { path = "LICENSE", hash = 0xbd0eed23 }
-]
+expression    = "MIT AND ISC AND OpenSSL"
+license-files = [ { path = "LICENSE", hash = 0xbd0eed23 } ]
+name          = "ring"
 
 [bans]
 deny = [
-	# Ensure we don't depend on openssl
+    # Ensure we don't depend on openssl
     { name = "native-tls" },
     { name = "openssl-sys" },
 ]
-

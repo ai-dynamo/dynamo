@@ -3,4 +3,4 @@
 
 [build]
 # tokio-console needs this
-rustflags = ["--cfg", "tokio_unstable"]
+rustflags = [ "--cfg", "tokio_unstable" ]

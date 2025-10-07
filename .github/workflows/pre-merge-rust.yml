@@ -68,6 +68,16 @@ jobs:
     - name: Verify Code Formatting
       working-directory: ${{ matrix.dir }}
       run: cargo fmt -- --check
+    - name: Install Taplo
+      env:
+        version: "0.9.3"
+      run: |
+        curl -Ls "https://github.com/tamasfe/taplo/releases/download/${{ env.version }}/taplo-full-linux-x86_64.gz" | \
+        gzip -d > taplo && \
+        chmod +x taplo && \
+        sudo mv taplo /usr/local/bin/taplo
+    - name: Verify TOML Formatting
+      run: taplo fmt --check
     - name: Install and Run cargo-deny
       working-directory: ${{ matrix.dir }}
       run: |
@@ -116,4 +126,3 @@ jobs:
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
-

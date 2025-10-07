@@ -2,83 +2,65 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [project]
-name = "ai-dynamo"
-version = "0.5.1"
-description = "Distributed Inference Framework"
-readme = "README.md"
-authors = [
-    { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
-]
-license = { text = "Apache-2.0" }
-license-files = ["LICENSE"]
-requires-python = ">=3.10"
+authors = [ { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" } ]
 dependencies = [
     "ai-dynamo-runtime==0.5.1",
+    "distro",
+    "fastapi>=0.115.0",
+    "kubernetes>=32.0.1,<33.0.0",
     "pytest>=8.3.4",
     "types-psutil>=7.0.0.20250218",
-    "kubernetes>=32.0.1,<33.0.0",
-    "fastapi>=0.115.0",
-    "distro",
     # filelock: required by planner
-    "filelock",
-    "typer",
     "click<8.2.0",
+    "filelock",
     "setuptools",
+    "typer",
 ]
+description = "Distributed Inference Framework"
+license = { text = "Apache-2.0" }
+license-files = [ "LICENSE" ]
+name = "ai-dynamo"
+readme = "README.md"
+requires-python = ">=3.10"
+version = "0.5.1"
 
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "Intended Audience :: Science/Research",
     "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Operating System :: POSIX :: Linux",
+    "Topic :: Scientific/Engineering",
 ]
-keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
+keywords = [ "distributed", "dynamo", "genai", "inference", "llm", "nvidia" ]
 
 [project.urls]
 Repository = "https://github.com/ai-dynamo/dynamo.git"
 
 [project.optional-dependencies]
-trtllm =[
-    "uvloop",
-    "tensorrt-llm==1.1.0rc5",
-]
+trtllm = [ "tensorrt-llm==1.1.0rc5", "uvloop" ]
 
-vllm = [
-    "uvloop",
-    "nixl<=0.4.1",
-    "vllm[flashinfer]==0.10.2",
-]
+vllm = [ "nixl<=0.4.1", "uvloop", "vllm[flashinfer]==0.10.2" ]
 
-sglang = [
-    "uvloop",
-    "nixl<=0.4.1",
-    "sglang[all]==0.5.3rc0",
-]
+sglang = [ "nixl<=0.4.1", "sglang[all]==0.5.3rc0", "uvloop" ]
 
-llama_cpp = [
-    "uvloop",
-    "llama-cpp-python",
-]
+llama_cpp = [ "llama-cpp-python", "uvloop" ]
 
 [build-system]
-requires = ["hatchling"]
 build-backend = "hatchling.build"
+requires      = [ "hatchling" ]
 
 [tool.hatch.build.hooks.custom]
 path = "hatch_build.py"
 
 [tool.hatch.build.targets.wheel]
-packages = [
-    "components/src/dynamo",
-]
+packages = [ "components/src/dynamo" ]
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -101,91 +83,91 @@ dictionary = "./codespell.txt"
 quiet-level = 3
 
 [tool.isort]
-profile = "black"
-use_parentheses = true
-multi_line_output = 3
-include_trailing_comma = true
-force_grid_wrap = 0
+balanced_wrapping              = true
 ensure_newline_before_comments = true
-line_length = 88
-balanced_wrapping = true
-indent = "    "
-skip = ["build"]
-known_first_party = ["dynamo"]
+force_grid_wrap                = 0
+include_trailing_comma         = true
+indent                         = "    "
+known_first_party              = [ "dynamo" ]
+line_length                    = 88
+multi_line_output              = 3
+profile                        = "black"
+skip                           = [ "build" ]
+use_parentheses                = true
 
 [tool.pytest.ini_options]
-minversion = "8.0"
+minversion                = "8.0"
 tmp_path_retention_policy = "failed"
 
 # NOTE
 # We ignore model.py explcitly here to avoid mypy errors with duplicate modules
 # pytest overrides the default mypy exclude configuration and so we exclude here as well
 addopts = [
-    "-ra",
-    "--showlocals",
-    "--strict-markers",
-    "--strict-config",
-    "--mypy",
-    "--ignore-glob=*model.py",
-    "--ignore-glob=*vllm_integration*",
-    "--ignore-glob=*trtllm_integration*",
-    "--ignore-glob=*_inc.py",
     "--ignore-glob=*/llm/tensorrtllm*",
-    "--ignore-glob=docs/*",
-    "--ignore-glob=components/src/dynamo/sglang/request_handlers/*",
-    "--ignore-glob=components/src/dynamo/sglang/multimodal_utils/*",
+    "--ignore-glob=*_inc.py",
+    "--ignore-glob=*model.py",
+    "--ignore-glob=*trtllm_integration*",
+    "--ignore-glob=*vllm_integration*",
     "--ignore-glob=components/backends/sglang/slurm_jobs/*",
+    "--ignore-glob=components/src/dynamo/sglang/multimodal_utils/*",
+    "--ignore-glob=components/src/dynamo/sglang/request_handlers/*",
+    "--ignore-glob=docs/*",
+    "--mypy",
+    "--showlocals",
+    "--strict-config",
+    "--strict-markers",
+    "-ra",
     # FIXME: Get relative/generic blob paths to work here
 ]
-xfail_strict = true
-log_cli_level = "INFO"
 filterwarnings = [
     "error",
-    "ignore:.*cuda*:DeprecationWarning", # Need this to avoid deprecation warnings from CUDA in tensorrt_llm.
+    "ignore:.*Exception ignored in.*:pytest.PytestUnraisableExceptionWarning", # Ignore unraisable exception warnings
+    "ignore:.*PyType_Spec.*custom tp_new.*:DeprecationWarning",                # Ignore protobuf deprecation warning
+    "ignore:.*cuda*:DeprecationWarning",                                       # Need this to avoid deprecation warnings from CUDA in tensorrt_llm.
+    "ignore:.*multipart.*:PendingDeprecationWarning",
     "ignore:.*pkg_resources.*:DeprecationWarning",
     "ignore:.*pkg_resources.*:UserWarning",
-    "ignore:.*multipart.*:PendingDeprecationWarning",
-    "ignore:.*PyType_Spec.*custom tp_new.*:DeprecationWarning", # Ignore protobuf deprecation warning
-    "ignore:.*unclosed.*socket.*:ResourceWarning", # Ignore unclosed socket warnings
-    "ignore:.*unclosed event loop.*:ResourceWarning", # Ignore unclosed event loop warnings
-    "ignore:.*Exception ignored in.*:pytest.PytestUnraisableExceptionWarning", # Ignore unraisable exception warnings
-    "ignore:The pynvml package is deprecated.*:FutureWarning", # Ignore pynvml deprecation warning, temporary until upstream library updates to nvidia-ml-py
+    "ignore:.*unclosed event loop.*:ResourceWarning",                          # Ignore unclosed event loop warnings
+    "ignore:.*unclosed.*socket.*:ResourceWarning",                             # Ignore unclosed socket warnings
+    "ignore:The pynvml package is deprecated.*:FutureWarning",                 # Ignore pynvml deprecation warning, temporary until upstream library updates to nvidia-ml-py
 ]
+log_cli_level = "INFO"
+xfail_strict = true
 
 
 # NOTE: Can also manually mark tests with @pytest.mark.asyncio
 asyncio_mode = "auto"
 markers = [
-    "pre_merge: marks tests to run before merging",
-    "nightly: marks tests to run nightly",
-    "weekly: marks tests to run weekly",
+    "e2e: marks tests as end-to-end tests",
     "gpu_1: marks tests to run on GPU",
     "gpu_2: marks tests to run on 2GPUs",
     "gpu_4: marks tests to run on 4GPUs",
     "gpu_8: marks tests to run on 8GPUs",
-    "e2e: marks tests as end-to-end tests",
+    "h100: marks tests to run on H100",
     "integration: marks tests as integration tests",
-    "unit: marks tests as unit tests",
-    "stress: marks tests as stress tests",
-    "vllm: marks tests as requiring vllm",
-    "trtllm: marks tests as requiring trtllm",
-    "trtllm_marker: marks tests as requiring trtllm",
+    "kvbm: marks tests for KV behavior and model determinism",
+    "model: model id used by a test or parameter",
+    "nightly: marks tests to run nightly",
+    "pre_merge: marks tests to run before merging",
     "sglang: marks tests as requiring sglang",
     "slow: marks tests as known to be slow",
-    "h100: marks tests to run on H100",
-    "kvbm: marks tests for KV behavior and model determinism",
-    "model: model id used by a test or parameter"
+    "stress: marks tests as stress tests",
+    "trtllm: marks tests as requiring trtllm",
+    "trtllm_marker: marks tests as requiring trtllm",
+    "unit: marks tests as unit tests",
+    "vllm: marks tests as requiring vllm",
+    "weekly: marks tests to run weekly",
 ]
 
 # Linting/formatting
 [tool.ruff]
 # Same as Black.
-line-length = 88
 indent-width = 4
+line-length  = 88
 
 [tool.ruff.lint.extend-per-file-ignores]
-"icp/tests/**/test_*.py" = ["F811", "F401"]
-"*_inc.py" = ["F821"]
+"*_inc.py"               = [ "F821" ]
+"icp/tests/**/test_*.py" = [ "F401", "F811" ]
 
 [tool.mypy]
 
@@ -208,23 +190,22 @@ check_untyped_defs = true
 
 [[tool.mypy.overrides]]
 # Skip mypy analysis on internal dependencies of vllm
-module = ["vllm.*"]
-follow_imports = "skip"
+follow_imports         = "skip"
 ignore_missing_imports = true
+module                 = [ "vllm.*" ]
 
 [tool.sphinx]
 
 # extra-content-head
 extra_content_head = [
-   '''
+    '''
    <script src="https://assets.adobedtm.com/5d4962a43b79/c1061d2c5e7b/launch-191c2462b890.min.js" ></script>
    ''',
 ]
 
 #extra-content-footer
 extra_content_footer = [
-   '''
+    '''
    <script type="text/javascript">if (typeof _satellite !== "undefined") {_satellite.pageBottom();}</script>
    ''',
 ]
-

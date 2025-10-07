@@ -2,56 +2,56 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "dynamo-run"
-version.workspace = true
-edition.workspace = true
-authors.workspace = true
-homepage.workspace = true
-license.workspace = true
+authors.workspace    = true
+description          = "Dynamo Run CLI"
+edition.workspace    = true
+homepage.workspace   = true
+license.workspace    = true
+name                 = "dynamo-run"
+readme.workspace     = true
 repository.workspace = true
-readme.workspace = true
-description = "Dynamo Run CLI"
+version.workspace    = true
 
 [features]
 # Build with `--no-default-features` to disable these defaults
-default = ["mistralrs", "llamacpp"]
-mistralrs = ["dep:dynamo-engine-mistralrs"]
-llamacpp = ["dep:dynamo-engine-llamacpp"]
+default   = [ "llamacpp", "mistralrs" ]
+llamacpp  = [ "dep:dynamo-engine-llamacpp" ]
+mistralrs = [ "dep:dynamo-engine-mistralrs" ]
 
-cuda = ["dynamo-engine-llamacpp/cuda", "dynamo-engine-mistralrs/cuda"]
-metal = ["dynamo-engine-llamacpp/metal", "dynamo-engine-mistralrs/metal"]
-vulkan = ["dynamo-engine-llamacpp/vulkan"]
-openmp = ["dynamo-engine-llamacpp/openmp"]
+cuda   = [ "dynamo-engine-llamacpp/cuda", "dynamo-engine-mistralrs/cuda" ]
+metal  = [ "dynamo-engine-llamacpp/metal", "dynamo-engine-mistralrs/metal" ]
+openmp = [ "dynamo-engine-llamacpp/openmp" ]
+vulkan = [ "dynamo-engine-llamacpp/vulkan" ]
 
-tokio-console = ["dynamo-runtime/tokio-console"]
+tokio-console = [ "dynamo-runtime/tokio-console" ]
 
 [dependencies]
-dynamo-llm = { workspace = true }
+dynamo-llm     = { workspace = true }
 dynamo-runtime = { workspace = true }
 
-dynamo-engine-llamacpp = { path = "../../lib/engines/llamacpp", optional = true }
+dynamo-engine-llamacpp  = { path = "../../lib/engines/llamacpp", optional = true }
 dynamo-engine-mistralrs = { path = "../../lib/engines/mistralrs", optional = true }
 
-anyhow = { workspace = true }
+anyhow              = { workspace = true }
+async-stream        = { workspace = true }
+async-trait         = { workspace = true }
 dynamo-async-openai = { workspace = true }
-async-stream = { workspace = true }
-async-trait = { workspace = true }
-either = { workspace = true }
-futures = { workspace = true }
-libc = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tempfile = { workspace = true }
-tokio = { workspace = true }
-tokio-util = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-uuid = { workspace = true }
+either              = { workspace = true }
+futures             = { workspace = true }
+libc                = { workspace = true }
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+tempfile            = { workspace = true }
+tokio               = { workspace = true }
+tokio-util          = { workspace = true }
+tracing             = { workspace = true }
+tracing-subscriber  = { workspace = true }
+uuid                = { workspace = true }
 
-clap = { version = "4.5", features = ["derive", "env"] }
+clap         = { version = "4.5", features = [ "derive", "env" ] }
 futures-util = { version = "0.3" }
-regex = "1"
+regex        = "1"
 
 [build-dependencies]
+anyhow       = { workspace = true }
 vergen-gitcl = "1.0"
-anyhow = { workspace = true }

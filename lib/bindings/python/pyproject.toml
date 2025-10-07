@@ -15,45 +15,40 @@
 
 
 [project]
-name = "ai-dynamo-runtime"
-version = "0.5.1"
-description = "Dynamo Inference Framework Runtime"
-readme = "README.md"
-authors = [
-    { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
-]
-license = { text = "Apache-2.0" }
-license-files = ["LICENSE"]
-requires-python = ">=3.10"
-dependencies = [
-    "pydantic>=2.10.6,<=2.11.7",
-    "uvloop>=0.21.0",
-]
+authors = [ { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" } ]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "Intended Audience :: Science/Research",
     "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Operating System :: POSIX :: Linux",
+    "Topic :: Scientific/Engineering",
 ]
-keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
+dependencies = [ "pydantic>=2.10.6,<=2.11.7", "uvloop>=0.21.0" ]
+description = "Dynamo Inference Framework Runtime"
+keywords = [ "distributed", "dynamo", "genai", "inference", "llm", "nvidia" ]
+license = { text = "Apache-2.0" }
+license-files = [ "LICENSE" ]
+name = "ai-dynamo-runtime"
+readme = "README.md"
+requires-python = ">=3.10"
+version = "0.5.1"
 
 [tool.maturin]
-module-name = "dynamo._core"
-manifest-path = "Cargo.toml"
-python-packages = ["dynamo"]
-python-source = "src"
+manifest-path   = "Cargo.toml"
+module-name     = "dynamo._core"
+python-packages = [ "dynamo" ]
+python-source   = "src"
 
 [build-system]
-requires = ["maturin>=1.0,<2.0", "patchelf"]
 build-backend = "maturin"
+requires      = [ "maturin>=1.0,<2.0", "patchelf" ]
 
 [tool.uv]
 config-settings = { build-args = '--auditwheel repair --manylinux' }

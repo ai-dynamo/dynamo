@@ -14,29 +14,27 @@
 # limitations under the License.
 
 [project]
-name = "data-generator"
-version = "0.1.0"
-description = "Data generator library for LLM benchmarks"
-readme = "README.md"
-authors = [
-    {name = "NVIDIA CORPORATION & AFFILIATES"}
-]
-license = {text = "Apache-2.0"}
+authors         = [ { name = "NVIDIA CORPORATION & AFFILIATES" } ]
+description     = "Data generator library for LLM benchmarks"
+license         = { text = "Apache-2.0" }
+name            = "data-generator"
+readme          = "README.md"
 requires-python = ">=3.10"
+version         = "0.1.0"
 
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "Intended Audience :: Science/Research",
     "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Operating System :: POSIX :: Linux",
+    "Topic :: Scientific/Engineering",
 ]
 
 dependencies = [
@@ -44,10 +42,10 @@ dependencies = [
     "networkx",
     "pandas",
     "pydantic>=2",
-    "tabulate",
-    "types-tabulate",
-    "transformers",
     "pytest-mypy",
+    "tabulate",
+    "transformers",
+    "types-tabulate",
 ]
 
 [project.scripts]
@@ -57,33 +55,31 @@ datagen = "prefix_data_generator.cli:main"
 Repository = "https://github.com/ai-dynamo/dynamo.git"
 
 [build-system]
-requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
+requires      = [ "setuptools>=42", "wheel" ]
 
 [tool.uv]
-override-dependencies = [
-    "gradio==5.47.1"
-]
+override-dependencies = [ "gradio==5.47.1" ]
 
 [tool.setuptools]
-packages = ["prefix_data_generator"]
+packages = [ "prefix_data_generator" ]
 
 [tool.setuptools.package-data]
-prefix_data_generator = ["**/*.py"]
+prefix_data_generator = [ "**/*.py" ]
 
 [tool.mypy]
+check_untyped_defs     = true
 explicit_package_bases = true
 ignore_missing_imports = true
-check_untyped_defs = true
 
 [tool.pytest.ini_options]
 addopts = [
-    "-ra",
-    "--showlocals",
-    "--strict-markers",
-    "--strict-config",
-    "--mypy",  # This flag enables mypy type checking during pytest runs
-    "--ignore-glob=*model.py",
     "--ignore-glob=*_inc.py",
+    "--ignore-glob=*model.py",
     "--ignore-glob=deploy/cloud/api-store/*",
+    "--mypy",                                 # This flag enables mypy type checking during pytest runs
+    "--showlocals",
+    "--strict-config",
+    "--strict-markers",
+    "-ra",
 ]

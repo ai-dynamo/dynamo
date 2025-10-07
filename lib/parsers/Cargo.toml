@@ -14,30 +14,30 @@
 # limitations under the License.
 
 [package]
-name = "dynamo-parsers"
-version.workspace = true
-edition.workspace = true
-description = "Dynamo Parser Library for Tool Calling and Reasoning"
-authors.workspace = true
-license.workspace = true
-homepage.workspace = true
+authors.workspace    = true
+description          = "Dynamo Parser Library for Tool Calling and Reasoning"
+edition.workspace    = true
+homepage.workspace   = true
+keywords.workspace   = true
+license.workspace    = true
+name                 = "dynamo-parsers"
 repository.workspace = true
-keywords.workspace = true
+version.workspace    = true
 
 [dependencies]
-anyhow = { workspace = true }
+anyhow              = { workspace = true }
 dynamo-async-openai = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
-uuid = { workspace = true }
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+tokio               = { workspace = true }
+tracing             = { workspace = true }
+uuid                = { workspace = true }
 
-regex = "1"
-openai-harmony = "0.0.3"
-lazy_static = "1.5.0"
+lazy_static       = "1.5.0"
+num-traits        = "0.2"
+openai-harmony    = "0.0.3"
+regex             = "1"
 rustpython-parser = "0.4.0"
-num-traits = "0.2"
 
 [dev-dependencies]
 dynamo-llm = { workspace = true }

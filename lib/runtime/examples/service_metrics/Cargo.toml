@@ -2,19 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "service_metrics"
-version.workspace = true
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
-homepage.workspace = true
+authors.workspace    = true
+edition.workspace    = true
+homepage.workspace   = true
+license.workspace    = true
+name                 = "service_metrics"
 repository.workspace = true
+version.workspace    = true
 
 [dependencies]
 dynamo-runtime = { workspace = true }
 
 # third-party
-futures = "0.3"
-serde = { version = "1", features = ["derive"] }
+futures    = "0.3"
+serde      = { version = "1", features = [ "derive" ] }
 serde_json = { version = "1" }
-tokio = { version = "1", features = ["full"] }
+tokio      = { version = "1", features = [ "full" ] }

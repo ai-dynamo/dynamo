@@ -2,23 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [workspace]
-members = [
-    "hello_world",
-    "service_metrics",
-    "system_metrics",
-]
+members  = [ "hello_world", "service_metrics", "system_metrics" ]
 resolver = "3"
 
 [workspace.package]
-version = "0.5.1"
-edition = "2024"
-authors = ["NVIDIA"]
-license = "Apache-2.0"
-homepage = "https://github.com/ai-dynamo/dynamo"
+authors    = [ "NVIDIA" ]
+edition    = "2024"
+homepage   = "https://github.com/ai-dynamo/dynamo"
+license    = "Apache-2.0"
 repository = "https://github.com/ai-dynamo/dynamo.git"
+version    = "0.5.1"
 
 
 [workspace.dependencies]
 # local or crates.io
 dynamo-runtime = { path = "../" }
-prometheus = { version = "0.14" }
+prometheus     = { version = "0.14" }

@@ -13,30 +13,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-language = "C++"
-cpp_compat = true
+cpp_compat    = true
 include_guard = "__NVIDIA_DYNAMO_LLM_API__"
+language      = "C++"
 
 
 [enum]
-rename_variants = "none"
+enum_class       = false
 prefix_with_name = false
-enum_class = false
+rename_variants  = "none"
 
 
 [export]
 include = [
     "DynamoLlmResult",
-    "dynamo_llm_init",
-    "dynamo_llm_shutdown",
-    "dynamo_llm_load_publisher_create",
-    "dynamo_kv_event_publish_stored",
-    "dynamo_kv_event_publish_removed",
     "WorkerSelectionPipeline",
     "dynamo_create_worker_selection_pipeline",
     "dynamo_destroy_worker_selection_pipeline",
-    "dynamo_query_worker_selection_and_annotate",
     "dynamo_free_worker_selection_result",
+    "dynamo_kv_event_publish_removed",
+    "dynamo_kv_event_publish_stored",
+    "dynamo_llm_init",
+    "dynamo_llm_load_publisher_create",
+    "dynamo_llm_shutdown",
+    "dynamo_query_worker_selection_and_annotate",
 ]
 
 

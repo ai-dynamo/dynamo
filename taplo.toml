@@ -1,0 +1,27 @@
+exclude = [ ".git/**" ]
+
+[formatting]
+align_comments        = true
+align_entries         = true
+array_auto_expand     = true
+array_trailing_comma  = true
+column_width          = 100
+compact_arrays        = false
+compact_inline_tables = false
+crlf                  = false
+indent_string         = "    "
+reorder_arrays        = true
+reorder_dependencies  = true
+reorder_keys          = true
+
+[formatting.tables]
+compact = false
+inline  = false
+reorder = true
+
+[formatting.arrays]
+auto_expand    = true
+trailing_comma = true
+
+[formatting.keys]
+reorder = true
