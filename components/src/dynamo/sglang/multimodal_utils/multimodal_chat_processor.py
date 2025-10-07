@@ -8,32 +8,6 @@ from sglang.srt.parser.conversation import chat_templates
 logger = logging.getLogger(__name__)
 
 
-def clean_addcriterion(text: str) -> str:
-    """
-    Removes the addCriterion prefix from the text output.
-
-    To prevent addCriterion from appearing in outputs, an assistant placeholder must be added to the conversation.
-    However, adding the assistant placeholder causes subsequent requests to fail with shape mismatch errors on the engine side.
-    The root cause is still under investigation, so this temporary workaround is in place to maintain functionality.
-    """
-
-    if text.startswith(" addCriterion"):
-        cleaned_text = text[13:].lstrip()  # 12 = len(" addCriterion")
-        logger.debug(
-            f"🛠️ HACK: Removed ' addCriterion' prefix: '{text[:20]}...' -> '{cleaned_text[:20]}...'"
-        )
-        return cleaned_text
-
-    if text.startswith("addCriterion"):
-        cleaned_text = text[12:].lstrip()  # 11 = len("addCriterion")
-        logger.debug(
-            f"🛠️ HACK: Removed 'addCriterion' prefix: '{text[:20]}...' -> '{cleaned_text[:20]}...'"
-        )
-        return cleaned_text
-
-    return text
-
-
 def multimodal_request_to_sglang(raw_request, tokenizer, chat_template):
     conv = chat_templates[chat_template].copy()
     conv.messages = []
@@ -53,6 +27,7 @@ def multimodal_request_to_sglang(raw_request, tokenizer, chat_template):
         elif msg.role == "assistant":
             conv.append_message(conv.roles[1], msg.content)
 
+    conv.append_message(conv.roles[1], "")
     logger.debug(f"conv: {conv}")
 
     # Tokenize and prepare input_ids
@@ -109,11 +84,11 @@ def detokenize_sglang_response(response_data, tokenizer):
 
         # Ensure response_data is a dictionary
         if not isinstance(response_data, dict):
-            return clean_addcriterion(str(response_data))
+            return str(response_data)
 
         # Get text content - detokenize if needed
         if "text" in response_data and response_data["text"]:
-            return clean_addcriterion(response_data["text"])
+            return response_data["text"]
         elif "token_ids" in response_data and response_data["token_ids"]:
             token_ids = response_data["token_ids"]
             if isinstance(token_ids, list) and token_ids:
@@ -122,7 +97,7 @@ def detokenize_sglang_response(response_data, tokenizer):
                 logger.debug(
                     f"Detokenized {len(token_ids)} tokens to: '{text_content}'"
                 )
-                return clean_addcriterion(text_content)
+                return text_content
 
         # Return empty string if no content to detokenize
         return ""

@@ -28,8 +28,6 @@ pub use path::*;
 
 use super::utils::build_in_runtime;
 
-//pub use etcd::ConnectOptions as EtcdConnectOptions;
-
 /// ETCD Client
 #[derive(Clone)]
 pub struct Client {
@@ -517,10 +515,13 @@ impl KvCache {
     /// Create a new KV cache for the given prefix
     pub async fn new(
         client: Client,
+        version: &str,
         prefix: String,
         initial_values: HashMap<String, Vec<u8>>,
     ) -> Result<Self> {
         let mut cache = HashMap::new();
+
+        let prefix = format!("{version}/{prefix}");
 
         // First get all existing keys with this prefix
         let existing_kvs = client.kv_get_prefix(&prefix).await?;
@@ -575,21 +576,21 @@ impl KvCache {
                             let key = String::from_utf8_lossy(kv.key()).to_string();
                             let value = kv.value().to_vec();
 
-                            tracing::debug!("KvCache update: {} = {:?}", key, value);
+                            tracing::trace!("KvCache update: {} = {:?}", key, value);
                             let mut cache_write = cache.write().await;
                             cache_write.insert(key, value);
                         }
                         WatchEvent::Delete(kv) => {
                             let key = String::from_utf8_lossy(kv.key()).to_string();
 
-                            tracing::debug!("KvCache delete: {}", key);
+                            tracing::trace!("KvCache delete: {}", key);
                             let mut cache_write = cache.write().await;
                             cache_write.remove(&key);
                         }
                     }
                 }
 
-                tracing::info!("KvCache watcher for prefix '{}' stopped", prefix);
+                tracing::debug!("KvCache watcher for prefix '{}' stopped", prefix);
             });
         }
 
@@ -719,7 +720,7 @@ mod tests {
         initial_values.insert("key2".to_string(), b"value2".to_vec());
 
         // Create the KV cache
-        let kv_cache = KvCache::new(client.clone(), prefix.clone(), initial_values).await?;
+        let kv_cache = KvCache::new(client.clone(), "v1", prefix.clone(), initial_values).await?;
 
         // Test get
         let value1 = kv_cache.get("key1").await;

@@ -10,7 +10,7 @@ import sys
 from argparse import Namespace
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 from sglang.srt.server_args import ServerArgs
 
@@ -79,6 +79,12 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": False,
         "help": "Run as multimodal worker component for LLM inference with multimodal data",
     },
+    "embedding-worker": {
+        "flags": ["--embedding-worker"],
+        "action": "store_true",
+        "default": False,
+        "help": "Run as embedding worker component (Dynamo flag, also sets SGLang's --is-embedding)",
+    },
 }
 
 
@@ -102,6 +108,9 @@ class DynamoArgs:
     multimodal_encode_worker: bool = False
     multimodal_worker: bool = False
 
+    # embedding options
+    embedding_worker: bool = False
+
 
 class DisaggregationMode(Enum):
     AGGREGATED = "agg"
@@ -110,6 +119,8 @@ class DisaggregationMode(Enum):
 
 
 class Config:
+    """Combined configuration container for SGLang server and Dynamo args."""
+
     def __init__(self, server_args: ServerArgs, dynamo_args: DynamoArgs) -> None:
         self.server_args = server_args
         self.dynamo_args = dynamo_args
@@ -131,6 +142,19 @@ def _set_parser(
     dynamo_str: Optional[str],
     arg_name: str = "tool-call-parser",
 ) -> Optional[str]:
+    """Resolve parser name from SGLang and Dynamo arguments.
+
+    Args:
+        sglang_str: Parser value from SGLang argument.
+        dynamo_str: Parser value from Dynamo argument.
+        arg_name: Name of the parser argument for logging.
+
+    Returns:
+        Resolved parser name, preferring Dynamo's value if both set.
+
+    Raises:
+        ValueError: If parser name is not valid.
+    """
     # If both are present, give preference to dynamo_str
     if sglang_str is not None and dynamo_str is not None:
         logging.warning(
@@ -157,8 +181,16 @@ def _set_parser(
 
 
 def parse_args(args: list[str]) -> Config:
-    """
-    Parse all arguments and return Config with server_args and dynamo_args
+    """Parse CLI arguments and return combined configuration.
+
+    Args:
+        args: Command-line argument strings.
+
+    Returns:
+        Config object with server_args and dynamo_args.
+
+    Raises:
+        SystemExit: If arguments are invalid or incompatible.
     """
     parser = argparse.ArgumentParser()
 
@@ -198,9 +230,15 @@ def parse_args(args: list[str]) -> Config:
     # otherwise fall back to default endpoints
     namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
 
+    # If --embedding-worker is set, also set SGLang's --is-embedding flag
+    if parsed_args.embedding_worker:
+        parsed_args.is_embedding = True
+
     endpoint = parsed_args.endpoint
     if endpoint is None:
-        if (
+        if parsed_args.embedding_worker:
+            endpoint = f"dyn://{namespace}.backend.generate"
+        elif (
             hasattr(parsed_args, "disaggregation_mode")
             and parsed_args.disaggregation_mode == "prefill"
         ):
@@ -268,6 +306,7 @@ def parse_args(args: list[str]) -> Config:
         multimodal_processor=parsed_args.multimodal_processor,
         multimodal_encode_worker=parsed_args.multimodal_encode_worker,
         multimodal_worker=parsed_args.multimodal_worker,
+        embedding_worker=parsed_args.embedding_worker,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
 
@@ -288,9 +327,14 @@ def parse_args(args: list[str]) -> Config:
 
 
 @contextlib.contextmanager
-def reserve_free_port(host: str = "localhost"):
-    """
-    Find and reserve a free port until context exits.
+def reserve_free_port(host: str = "localhost") -> Generator[int, None, None]:
+    """Find and reserve a free port until context exits.
+
+    Args:
+        host: Host address to bind to.
+
+    Yields:
+        Available port number.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -302,7 +346,17 @@ def reserve_free_port(host: str = "localhost"):
 
 
 def parse_endpoint(endpoint: str) -> List[str]:
-    """Parse endpoint string into namespace, component, and endpoint parts."""
+    """Parse endpoint string into namespace, component, and endpoint parts.
+
+    Args:
+        endpoint: Endpoint string in 'dyn://namespace.component.endpoint' format.
+
+    Returns:
+        List of [namespace, component, endpoint] strings.
+
+    Raises:
+        ValueError: If endpoint format is invalid.
+    """
     endpoint_str = endpoint.replace("dyn://", "", 1)
     endpoint_parts = endpoint_str.split(".")
     if len(endpoint_parts) != 3:
@@ -316,11 +370,11 @@ def parse_endpoint(endpoint: str) -> List[str]:
     return endpoint_parts
 
 
-def _reserve_disaggregation_bootstrap_port():
-    """
-    Each worker requires a unique port for disaggregation_bootstrap_port.
-    We use an existing utility function that reserves a free port on your
-    machine to avoid collisions.
+def _reserve_disaggregation_bootstrap_port() -> int:
+    """Reserve a unique port for disaggregation bootstrap.
+
+    Returns:
+        Available port number.
     """
     with reserve_free_port() as port:
         return port

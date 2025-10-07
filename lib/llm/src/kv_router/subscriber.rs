@@ -205,12 +205,14 @@ pub async fn start_kv_router_background(
 
                     let key = String::from_utf8_lossy(kv.key());
 
-                    let Some(worker_id_str) = key.split('/').next_back() else {
+                    // Extract the hex worker ID after the colon (e.g., "generate:694d99badb9f7c07" -> "694d99badb9f7c07")
+                    let Some(worker_id_str) = key.split(':').next_back() else {
                         tracing::warn!("Could not extract worker ID from instance key: {}", key);
                         continue;
                     };
 
-                    let Ok(worker_id) = worker_id_str.parse::<i64>() else {
+                    // Parse as hexadecimal (base 16)
+                    let Ok(worker_id) = i64::from_str_radix(worker_id_str, 16) else {
                         tracing::warn!("Could not parse worker ID from instance key: {}", key);
                         continue;
                     };

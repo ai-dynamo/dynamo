@@ -46,7 +46,10 @@ def _single_request(
     start_time = time.time()
     results = []
 
-    while retry_attempts:
+    # Convert retries to total attempts (1 initial attempt + N retries)
+    attempts_remaining = 1 + max(0, retry_attempts)
+
+    while attempts_remaining:
         start_request_time = time.time()
 
         try:
@@ -72,12 +75,15 @@ def _single_request(
                 }
             )
 
-            if response.status_code != 200:
-                time.sleep(retry_delay)
-                retry_attempts -= 1
-                continue
-            else:
+            # Success - exit immediately
+            if response.status_code == 200:
                 break
+
+            # Failure - retry if we have attempts left
+            attempts_remaining -= 1
+            if attempts_remaining == 0:
+                break
+            time.sleep(retry_delay)
 
         except (requests.RequestException, requests.Timeout) as e:
             results.append(
@@ -87,10 +93,13 @@ def _single_request(
                     "request_elapsed_time": time.time() - start_request_time,
                 }
             )
+
+            # Exception - retry if we have attempts left
+            attempts_remaining -= 1
+            if attempts_remaining == 0:
+                break
             logger.warning("Retrying due to Request failed: %s", e)
             time.sleep(retry_delay)
-            retry_attempts -= 1
-            continue
 
     return {
         "time": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
