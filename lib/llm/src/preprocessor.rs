@@ -124,7 +124,7 @@ impl OpenAIPreprocessor {
         formatter: Arc<dyn OAIPromptFormatter>,
         hf_tokenizer: tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
-        let mdcsum = mdc.mdcsum();
+        let mdcsum = mdc.mdcsum().to_string();
         let tokenizer = Arc::new(HuggingFaceTokenizer::from_tokenizer(hf_tokenizer));
         let Some(model_info) = mdc.model_info else {
             anyhow::bail!(
@@ -550,11 +550,14 @@ impl OpenAIPreprocessor {
 
                     Some((response, inner))
                 } else {
-                    // Stream has ended - check if we need to send a usage chunk
+                    // Stream has ended - must set finished to true to prevent unfold from polling
+                    // again. The stream is exhausted and will panic if polled after None.
+                    inner.finished = true;
+
+                    // Check if we need to send a usage chunk
                     if inner.response_generator.is_usage_enabled()
                         && inner.finish_reason_sent
                         && !inner.usage_chunk_sent
-                        && !inner.finished
                     {
                         inner.usage_chunk_sent = true;
 
@@ -575,7 +578,6 @@ impl OpenAIPreprocessor {
                         Some((annotated_usage, inner))
                     } else {
                         // stream closed
-                        inner.finished = true; // Mark as finished
                         None
                     }
                 }

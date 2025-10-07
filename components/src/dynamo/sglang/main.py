@@ -2,16 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import json
 import logging
 import signal
 import sys
 
 import sglang as sgl
 import uvloop
-from sglang.srt.utils import get_ip
 
-from dynamo.llm import ZmqKvEventPublisher, ZmqKvEventPublisherConfig
+from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, DisaggregationMode, parse_args
@@ -20,8 +18,16 @@ from dynamo.sglang.health_check import (
     SglangPrefillHealthCheckPayload,
 )
 from dynamo.sglang.publisher import setup_sgl_metrics
-from dynamo.sglang.register import register_llm_with_runtime_config
-from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
+from dynamo.sglang.register import register_llm_with_readiness_gate
+from dynamo.sglang.request_handlers import (
+    DecodeWorkerHandler,
+    EmbeddingWorkerHandler,
+    MultimodalEncodeWorkerHandler,
+    MultimodalPrefillWorkerHandler,
+    MultimodalProcessorHandler,
+    MultimodalWorkerHandler,
+    PrefillWorkerHandler,
+)
 
 configure_dynamo_logging()
 
@@ -39,7 +45,18 @@ async def worker(runtime: DistributedRuntime):
     logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
 
     config = parse_args(sys.argv[1:])
-    if config.serving_mode != DisaggregationMode.PREFILL:
+    if config.dynamo_args.embedding_worker:
+        await init_embedding(runtime, config)
+    elif config.dynamo_args.multimodal_processor:
+        await init_multimodal_processor(runtime, config)
+    elif config.dynamo_args.multimodal_encode_worker:
+        await init_multimodal_encode_worker(runtime, config)
+    elif config.dynamo_args.multimodal_worker:
+        if config.serving_mode != DisaggregationMode.PREFILL:
+            await init_multimodal_worker(runtime, config)
+        else:
+            await init_multimodal_prefill_worker(runtime, config)
+    elif config.serving_mode != DisaggregationMode.PREFILL:
         await init(runtime, config)
     else:
         await init_prefill(runtime, config)
@@ -57,8 +74,6 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
-    # TODO: think about implementing DisaggregationStrategy for P->D
-    # TODO: implement a `next` field in the config to dynamically set the next client
     prefill_client = None
     if config.serving_mode == DisaggregationMode.DECODE:
         logging.info("Initializing prefill client")
@@ -69,52 +84,15 @@ async def init(runtime: DistributedRuntime, config: Config):
             .client()
         )
 
-    publisher, metrics_task, metrics_labels = await setup_sgl_metrics(engine, component)
-
-    kv_publisher = None
-    if server_args.kv_events_config:
-        kv_events = json.loads(server_args.kv_events_config)
-        ep = kv_events.get("endpoint")
-        zmq_ep = ep.replace("*", get_ip()) if ep else None
-
-        zmq_config = ZmqKvEventPublisherConfig(
-            worker_id=generate_endpoint.lease_id(),
-            kv_block_size=server_args.page_size,
-            zmq_endpoint=zmq_ep,
-        )
-        logging.info(f"Setting up ZMQ kv event publisher at {zmq_ep}")
-        kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
+    # publisher instantiates the metrics and kv event publishers
+    publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
+        engine, config, component, generate_endpoint
+    )
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
-    async def gated_generate(request):
-        """Queue requests until model registration completes"""
-        await ready_event.wait()  # Block until model is ready
-        async for response in handler.generate(request):
-            yield response
-
-    handler = DecodeWorkerHandler(
-        component, engine, config, publisher, kv_publisher, prefill_client
-    )
-
-    async def register_model():
-        """Register the model and signal readiness"""
-        registration_success = await register_llm_with_runtime_config(
-            engine,
-            generate_endpoint,
-            server_args,
-            dynamo_args,
-        )
-
-        if not registration_success:
-            logging.error("Model registration failed; shutting down")
-            runtime.shutdown()
-            raise RuntimeError("Model registration failed")
-
-        # Model is ready - allow queued requests to proceed
-        ready_event.set()
-        logging.info("Model registration succeeded; processing queued requests")
+    handler = DecodeWorkerHandler(component, engine, config, publisher, prefill_client)
 
     health_check_payload = SglangHealthCheckPayload(engine).to_dict()
 
@@ -128,7 +106,13 @@ async def init(runtime: DistributedRuntime, config: Config):
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
             ),
-            register_model(),
+            register_llm_with_readiness_gate(
+                engine,
+                generate_endpoint,
+                server_args,
+                dynamo_args,
+                readiness_gate=ready_event,
+            ),
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
@@ -170,6 +154,226 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     try:
         await asyncio.gather(*tasks)
+    except Exception as e:
+        logging.error(f"Failed to serve endpoints: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
+async def init_embedding(runtime: DistributedRuntime, config: Config):
+    """Initialize embedding worker component"""
+    server_args, dynamo_args = config.server_args, config.dynamo_args
+
+    engine = sgl.Engine(server_args=server_args)
+
+    component = runtime.namespace(dynamo_args.namespace).component(
+        dynamo_args.component
+    )
+    await component.create_service()
+
+    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+
+    # publisher instantiates the metrics and kv event publishers
+    publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
+        engine, config, component, generate_endpoint
+    )
+
+    # Readiness gate: requests wait until model is registered
+    ready_event = asyncio.Event()
+
+    handler = EmbeddingWorkerHandler(component, engine, config, publisher)
+    health_check_payload = SglangHealthCheckPayload(engine).to_dict()
+
+    try:
+        # Start endpoint immediately and register model concurrently
+        # Requests queue until ready_event is set
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=metrics_labels,
+                health_check_payload=health_check_payload,
+            ),
+            register_llm_with_readiness_gate(
+                engine,
+                generate_endpoint,
+                server_args,
+                dynamo_args,
+                input_type=ModelInput.Text,
+                output_type=ModelType.Embedding,
+                readiness_gate=ready_event,
+            ),
+        )
+    except Exception as e:
+        logging.error(f"Failed to serve embedding endpoints: {e}")
+        raise
+    finally:
+        metrics_task.cancel()
+        try:
+            await metrics_task
+        except asyncio.CancelledError:
+            logging.info("Metrics task successfully cancelled")
+            pass
+        handler.cleanup()
+
+
+async def init_multimodal_processor(runtime: DistributedRuntime, config: Config):
+    """Initialize multimodal processor component"""
+    server_args, dynamo_args = config.server_args, config.dynamo_args
+    component = runtime.namespace(dynamo_args.namespace).component(
+        dynamo_args.component
+    )
+    await component.create_service()
+
+    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+
+    # For processor, we need to connect to the encode worker
+    encode_worker_client = (
+        await runtime.namespace(dynamo_args.namespace)
+        .component("encoder")
+        .endpoint("generate")
+        .client()
+    )
+
+    ready_event = asyncio.Event()
+
+    handler = MultimodalProcessorHandler(component, config, encode_worker_client)
+
+    logging.info("Waiting for Encoder Worker Instances ...")
+    await encode_worker_client.wait_for_instances()
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=[("model", server_args.served_model_name)],
+            ),
+            register_llm_with_readiness_gate(
+                None,  # engine
+                generate_endpoint,
+                server_args,
+                dynamo_args,
+                input_type=ModelInput.Text,
+                readiness_gate=ready_event,
+            ),
+        )
+    except Exception as e:
+        logging.error(f"Failed to serve endpoints: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
+async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Config):
+    """Initialize multimodal encode worker component"""
+    server_args, dynamo_args = config.server_args, config.dynamo_args
+
+    component = runtime.namespace(dynamo_args.namespace).component(
+        dynamo_args.component
+    )
+    await component.create_service()
+
+    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+
+    # For encode worker, we need to connect to the downstream LLM worker
+    pd_worker_client = (
+        await runtime.namespace(dynamo_args.namespace)
+        .component("backend")
+        .endpoint("generate")
+        .client()
+    )
+
+    handler = MultimodalEncodeWorkerHandler(component, config, pd_worker_client)
+    await handler.async_init(runtime)
+
+    await pd_worker_client.wait_for_instances()
+
+    tasks = [
+        generate_endpoint.serve_endpoint(
+            handler.generate,
+            graceful_shutdown=True,
+            metrics_labels=[("model", server_args.served_model_name)],
+        )
+    ]
+
+    try:
+        await asyncio.gather(*tasks)
+    except Exception as e:
+        logging.error(f"Failed to serve endpoints: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
+async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
+    """Initialize multimodal worker component for aggregated or decode mode"""
+    server_args, dynamo_args = config.server_args, config.dynamo_args
+
+    component = runtime.namespace(dynamo_args.namespace).component(
+        dynamo_args.component
+    )
+    await component.create_service()
+
+    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+
+    engine = sgl.Engine(server_args=server_args)
+
+    if config.serving_mode == DisaggregationMode.DECODE:
+        logging.info("Initializing prefill client for multimodal decode worker")
+        prefill_client = (
+            await runtime.namespace(dynamo_args.namespace)
+            .component("prefill")
+            .endpoint("generate")
+            .client()
+        )
+        handler = MultimodalWorkerHandler(component, engine, config, prefill_client)
+    else:
+        handler = MultimodalWorkerHandler(component, engine, config)
+
+    await handler.async_init()
+
+    try:
+        await generate_endpoint.serve_endpoint(
+            handler.generate,
+            metrics_labels=[("model", server_args.served_model_name)],
+            graceful_shutdown=True,
+        )
+    except Exception as e:
+        logging.error(f"Failed to serve endpoints: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
+async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Config):
+    """Initialize multimodal prefill worker component"""
+    server_args, dynamo_args = config.server_args, config.dynamo_args
+
+    engine = sgl.Engine(server_args=server_args)
+
+    component = runtime.namespace(dynamo_args.namespace).component(
+        dynamo_args.component
+    )
+    await component.create_service()
+
+    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+
+    handler = MultimodalPrefillWorkerHandler(component, engine, config)
+    await handler.async_init()
+
+    health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=[("model", server_args.served_model_name)],
+                health_check_payload=health_check_payload,
+            )
+        )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise

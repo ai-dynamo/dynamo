@@ -67,7 +67,7 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 		},
 		PeriodSeconds:    10,
 		TimeoutSeconds:   5,
-		FailureThreshold: 60,
+		FailureThreshold: 720, // 10s * 720 = 7200s = 2h
 	}
 
 	container.Env = append(container.Env, []corev1.EnvVar{

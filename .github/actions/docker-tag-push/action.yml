@@ -1,0 +1,88 @@
+description: 'Tag and Push Docker Images'
+
+inputs:
+  local_image:
+    description: 'Local Image Name:Tag'
+    required: true
+  push_tag:
+    description: 'Target Name:Tag'
+    required: true
+  aws_push:
+    description: 'Push to AWS Boolean'
+    required: false
+    default: 'false'
+  azure_push:
+    description: 'Push to Azure Container Registry (ACR) Boolean'
+    required: false
+    default: 'false'
+  aws_account_id:
+    description: 'AWS Account ID'
+    required: false
+  aws_default_region:
+    description: 'AWS Default Region'
+    required: false
+  aws_access_key_id:
+    description: 'AWS Access Key ID'
+    required: false
+  aws_secret_access_key:
+    description: 'AWS Secret Access Key'
+    required: false
+  azure_acr_hostname:
+    description: 'Azure ACR hostname'
+    required: false
+  azure_acr_user:
+    description: 'Azure ACR user'
+    required: false
+  azure_acr_password:
+    description: 'Azure ACR password'
+    required: false
+
+outputs:
+  image_tag:
+    description: 'Image Tag'
+    value: ${{ inputs.push_tag }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    - name: Install awscli
+      if: ${{ inputs.aws_push == 'true' }}
+      shell: bash
+      run: |
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "awscliv2.zip"
+        unzip awscliv2.zip
+        sudo ./aws/install
+    - name: ECR Login
+      if: ${{ inputs.aws_push == 'true' }}
+      shell: bash
+      env:
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+      run: |
+        aws ecr get-login-password --region ${{ inputs.aws_default_region }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
+    - name: ACR Login
+      shell: bash
+      if: ${{ inputs.azure_push == 'true' }}
+      run: |
+        echo "${{ inputs.azure_acr_password }}" | docker login ${{ inputs.azure_acr_hostname }} --username ${{ inputs.azure_acr_user }} --password-stdin
+    - name: ECR Tag and Push
+      shell: bash
+      if: ${{ inputs.aws_push == 'true' }}
+      env:
+        LOCAL_IMAGE: ${{ inputs.local_image }}
+        PUSH_TAG: ${{ inputs.push_tag }}
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+      run: |
+        docker tag ${LOCAL_IMAGE} ${ECR_HOSTNAME}/${PUSH_TAG}
+        docker push ${ECR_HOSTNAME}/${PUSH_TAG}
+    - name: ACR Tag and Push
+      shell: bash
+      if: ${{ inputs.azure_push == 'true' }}
+      env:
+        LOCAL_IMAGE: ${{ inputs.local_image }}
+        PUSH_TAG: ${{ inputs.push_tag }}
+        AZURE_ACR_HOSTNAME: ${{ inputs.azure_acr_hostname }}
+      run: |
+        docker tag ${LOCAL_IMAGE} ${AZURE_ACR_HOSTNAME}/${PUSH_TAG}
+        docker push ${AZURE_ACR_HOSTNAME}/${PUSH_TAG}

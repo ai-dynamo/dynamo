@@ -77,6 +77,8 @@ const (
 	// Grove multinode role suffixes
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
+
+	MainContainerName = "main"
 )
 
 type MultinodeDeploymentType string

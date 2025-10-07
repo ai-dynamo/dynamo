@@ -174,7 +174,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::WorkerStats>()?;
     m.add_class::<llm::kv::KvStats>()?;
     m.add_class::<llm::kv::SpecDecodeStats>()?;
-    m.add_class::<llm::kv::KvRouter>()?;
     m.add_class::<llm::kv::KvPushRouter>()?;
     m.add_class::<llm::kv::KvPushRouterStream>()?;
     m.add_class::<RouterMode>()?;
@@ -595,7 +594,7 @@ fn bind_tcp_port(port: u16) -> std::io::Result<socket2::Socket> {
 }
 
 fn make_port_key(namespace: &str, node_ip: IpAddr, port: u16) -> anyhow::Result<String> {
-    Ok(format!("dyn://{namespace}/ports/{node_ip}/{port}"))
+    Ok(format!("v1/{namespace}/ports/{node_ip}/{port}"))
 }
 
 fn local_ip() -> Result<IpAddr, local_ip_address::Error> {

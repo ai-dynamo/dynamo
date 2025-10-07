@@ -39,6 +39,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**Conditional Disaggregation**](../../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
 | [**KV-Aware Routing**](../../../docs/architecture/kv_cache_routing.md) | ✅ |  |
 | [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | ✅ |  |
+| [**Multimodal EPD Disaggregation**](docs/multimodal_epd.md) | ✅ |  |
 | [**Load Based Planner**](../../../docs/architecture/load_planner.md) | ❌ | Planned |
 | [**KVBM**](../../../docs/architecture/kvbm_architecture.md) | ❌ | Planned |
 
@@ -174,6 +175,26 @@ cd $DYNAMO_HOME/components/backends/sglang
 ./launch/agg_router.sh
 ```
 
+### Aggregated Serving with Embeddings
+
+Here's an example that uses the [Qwen/Qwen3-Embedding-4B](https://huggingface.co/Qwen/Qwen3-Embedding-4B) model.
+
+```bash
+cd $DYNAMO_HOME/components/backends/sglang
+./launch/agg_embed.sh
+```
+
+Send the following request to verify your deployment:
+
+```bash
+curl localhost:8000/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-Embedding-4B",
+    "input": "Hello, world!"
+  }'
+```
+
 ### Disaggregated serving
 
 <details>
@@ -253,6 +274,9 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 
 ### Hierarchical Cache (HiCache)
 - **[Enable SGLang Hierarchical Cache (HiCache)](docs/sgl-hicache-example.md)**
+
+### Multimodal Encode-Prefill-Decode (EPD) Disaggregation with NIXL
+- **[Run a multimodal model with EPD Disaggregation](docs/multimodal_epd.md)**
 
 ## Deployment
 
