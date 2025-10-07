@@ -79,6 +79,12 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": False,
         "help": "Run as multimodal worker component for LLM inference with multimodal data",
     },
+    "embedding-worker": {
+        "flags": ["--embedding-worker"],
+        "action": "store_true",
+        "default": False,
+        "help": "Run as embedding worker component (Dynamo flag, also sets SGLang's --is-embedding)",
+    },
 }
 
 
@@ -101,6 +107,9 @@ class DynamoArgs:
     multimodal_processor: bool = False
     multimodal_encode_worker: bool = False
     multimodal_worker: bool = False
+
+    # embedding options
+    embedding_worker: bool = False
 
 
 class DisaggregationMode(Enum):
@@ -221,9 +230,15 @@ def parse_args(args: list[str]) -> Config:
     # otherwise fall back to default endpoints
     namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
 
+    # If --embedding-worker is set, also set SGLang's --is-embedding flag
+    if parsed_args.embedding_worker:
+        parsed_args.is_embedding = True
+
     endpoint = parsed_args.endpoint
     if endpoint is None:
-        if (
+        if parsed_args.embedding_worker:
+            endpoint = f"dyn://{namespace}.backend.generate"
+        elif (
             hasattr(parsed_args, "disaggregation_mode")
             and parsed_args.disaggregation_mode == "prefill"
         ):
@@ -291,6 +306,7 @@ def parse_args(args: list[str]) -> Config:
         multimodal_processor=parsed_args.multimodal_processor,
         multimodal_encode_worker=parsed_args.multimodal_encode_worker,
         multimodal_worker=parsed_args.multimodal_worker,
+        embedding_worker=parsed_args.embedding_worker,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
 

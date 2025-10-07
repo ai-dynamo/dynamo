@@ -19,6 +19,7 @@ async def _register_llm_with_runtime_config(
     server_args: ServerArgs,
     dynamo_args: DynamoArgs,
     input_type: Optional[ModelInput] = ModelInput.Tokens,
+    output_type: Optional[ModelType] = ModelType.Chat | ModelType.Completions,
 ) -> bool:
     """Register LLM with the Dynamo runtime.
 
@@ -28,19 +29,23 @@ async def _register_llm_with_runtime_config(
         server_args: SGLang server configuration.
         dynamo_args: Dynamo-specific configuration.
         input_type: Expected model input type. Defaults to ModelInput.Tokens.
+        output_type: Expected model output type. Defaults to ModelType.Chat | ModelType.Completions.
 
     Returns:
         True if registration succeeded, False otherwise.
     """
     runtime_config = await _get_runtime_config(engine, server_args, dynamo_args)
     input_type = input_type
-    output_type = ModelType.Chat | ModelType.Completions
+
     if not server_args.skip_tokenizer_init:
         logging.warning(
             "The skip-tokenizer-init flag was not set. Using the sglang tokenizer/detokenizer instead. The dynamo tokenizer/detokenizer will not be used and only v1/chat/completions will be available"
         )
         input_type = ModelInput.Text
-        output_type = ModelType.Chat
+        # Only override output_type for chat models, not for embeddings
+        if output_type != ModelType.Embedding:
+            output_type = ModelType.Chat
+
     try:
         await register_llm(
             input_type,
@@ -134,6 +139,7 @@ async def register_llm_with_readiness_gate(
     server_args: ServerArgs,
     dynamo_args: DynamoArgs,
     input_type: Optional[ModelInput] = ModelInput.Tokens,
+    output_type: Optional[ModelType] = ModelType.Chat | ModelType.Completions,
     readiness_gate: Optional[asyncio.Event] = None,
 ) -> None:
     """Wrapper function to register LLM with the Dynamo runtime and use optional readiness gate to signal success.
@@ -144,6 +150,7 @@ async def register_llm_with_readiness_gate(
         server_args: SGLang server configuration.
         dynamo_args: Dynamo-specific configuration.
         input_type: Expected model input type. Defaults to ModelInput.Tokens.
+        output_type: Expected model output type. Defaults to ModelType.Chat | ModelType.Completions.
         readiness_gate: Optional event to signal when registration completes.
 
     Raises:
@@ -155,6 +162,7 @@ async def register_llm_with_readiness_gate(
         server_args,
         dynamo_args,
         input_type,
+        output_type,
     )
     if not registration_success:
         logging.error("Model registration failed; shutting down")

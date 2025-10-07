@@ -388,6 +388,18 @@ impl ModelWatcher {
                     .context("add_completions_model")?;
                 tracing::info!("Completions is ready");
             }
+        } else if card.model_input == ModelInput::Text && card.model_type.supports_embedding() {
+            // Case: Text + Embeddings
+            let push_router = PushRouter::<
+                NvCreateEmbeddingRequest,
+                Annotated<NvCreateEmbeddingResponse>,
+            >::from_client_with_threshold(
+                client, self.router_mode, self.busy_threshold
+            )
+            .await?;
+            let engine = Arc::new(push_router);
+            self.manager
+                .add_embeddings_model(&model_entry.name, engine)?;
         } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
             // Case 3: Text + Chat
             let push_router = PushRouter::<
