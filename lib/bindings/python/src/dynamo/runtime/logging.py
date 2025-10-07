@@ -198,16 +198,16 @@ def configure_vllm_logging(dyn_level: int):
 def map_dyn_log_to_tllm_level(dyn_log_value: str) -> str:
     """
     Map DYN_LOG string value to TensorRT-LLM log level.
-    
+
     Args:
         dyn_log_value: The DYN_LOG environment variable value (e.g., "debug", "info,module::path=trace")
-    
+
     Returns:
         The corresponding TLLM_LOG_LEVEL value (e.g., "VERBOSE", "INFO")
     """
     # Extract the base level (handle cases like "debug,module::path=trace")
     base_level = dyn_log_value.lower().split(",")[0].strip()
-    
+
     # Map DYN_LOG levels to TLLM_LOG_LEVEL
     level_mapping = {
         "debug": "VERBOSE",
@@ -218,7 +218,7 @@ def map_dyn_log_to_tllm_level(dyn_log_value: str) -> str:
         "critical": "ERROR",
         "trace": "INFO",
     }
-    
+
     return level_mapping.get(base_level, "INFO")
 
 
@@ -226,7 +226,7 @@ def configure_trtllm_logging(dyn_level: int):
     """
     TensorRT-LLM uses the TLLM_LOG_LEVEL environment variable to control logging.
     This function maps the DYN_LOG level to the appropriate TLLM_LOG_LEVEL value.
-    
+
     Note: This function sets the environment variable, but TensorRT-LLM reads it
     during import. The TensorRT-LLM backend main.py sets TLLM_LOG_LEVEL before
     importing tensorrt_llm to ensure it takes effect. This function is kept for
