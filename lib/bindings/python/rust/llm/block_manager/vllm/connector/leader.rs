@@ -634,7 +634,9 @@ pub fn parse_kvbm_metrics_port() -> u16 {
             }
         },
         Err(_) => {
-            tracing::warn!("DYN_KVBM_METRICS_PORT not present or couldn’t be interpreted, falling back to 6880");
+            tracing::warn!(
+                "DYN_KVBM_METRICS_PORT not present or couldn’t be interpreted, falling back to 6880"
+            );
             6880
         }
     }
