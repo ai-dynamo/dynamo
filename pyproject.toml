@@ -87,9 +87,6 @@ docs = [
     "myst-parser>=4.0",
     "myst-nb>=1.2",
     "nbsphinx>=0.9",
-    # C++ documentation (if needed)
-    "breathe>=4.36",
-    "exhale>=0.3",
 ]
 
 [build-system]

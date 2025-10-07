@@ -6,7 +6,6 @@ This directory contains the documentation source files for NVIDIA Dynamo.
 
 - Python 3.11 or later
 - [uv](https://docs.astral.sh/uv/) package manager
-- System dependencies: `doxygen`, `pandoc` (for certain doc features)
 
 ## Build Instructions
 
