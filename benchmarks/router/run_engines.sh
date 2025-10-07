@@ -8,6 +8,7 @@ NUM_WORKERS=8
 MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 TENSOR_PARALLEL_SIZE=1
 USE_MOCKERS=false
+USE_TRTLLM=false
 USE_PREFILLS=false
 BASE_GPU_OFFSET=0
 EXTRA_ARGS=()
@@ -31,6 +32,10 @@ while [[ $# -gt 0 ]]; do
             USE_MOCKERS=true
             shift
             ;;
+        --trtllm)
+            USE_TRTLLM=true
+            shift
+            ;;
         --prefills)
             USE_PREFILLS=true
             shift
@@ -45,12 +50,21 @@ while [[ $# -gt 0 ]]; do
             break
             ;;
         *)
-            # Collect all other arguments as vLLM/mocker arguments
+            # Collect all other arguments as vLLM/mocker/trtllm arguments
             EXTRA_ARGS+=("$1")
             shift
             ;;
     esac
 done
+
+# Validate that only one engine type is selected
+ENGINE_COUNT=0
+[ "$USE_MOCKERS" = true ] && ((ENGINE_COUNT++))
+[ "$USE_TRTLLM" = true ] && ((ENGINE_COUNT++))
+if [ "$ENGINE_COUNT" -gt 1 ]; then
+    echo "Error: Only one engine type (--mockers, --trtllm, or default vLLM) can be specified"
+    exit 1
+fi
 
 # If no extra args provided, use defaults
 if [ ${#EXTRA_ARGS[@]} -eq 0 ]; then
@@ -58,6 +72,13 @@ if [ ${#EXTRA_ARGS[@]} -eq 0 ]; then
         # Default args for mocker engine (only block-size needed as others are defaults)
         EXTRA_ARGS=(
             "--block-size" "64"
+        )
+    elif [ "$USE_TRTLLM" = true ]; then
+        # Default args for TensorRT-LLM engine
+        EXTRA_ARGS=(
+            "--max-num-tokens" "16384"
+            "--max-seq-len" "32768"
+            "--kv-block-size" "64"
         )
     else
         # Default args for vLLM engine (explicitly include block-size)
@@ -90,7 +111,14 @@ fi
 TOTAL_GPUS_NEEDED=$((NUM_WORKERS * TENSOR_PARALLEL_SIZE))
 LAST_GPU=$((BASE_GPU_OFFSET + TOTAL_GPUS_NEEDED - 1))
 echo "Configuration:"
-echo "  Engine Type: $([ "$USE_MOCKERS" = true ] && echo "Mocker" || echo "vLLM")"
+if [ "$USE_MOCKERS" = true ]; then
+    ENGINE_TYPE="Mocker"
+elif [ "$USE_TRTLLM" = true ]; then
+    ENGINE_TYPE="TensorRT-LLM"
+else
+    ENGINE_TYPE="vLLM"
+fi
+echo "  Engine Type: $ENGINE_TYPE"
 echo "  Worker Type: $([ "$USE_PREFILLS" = true ] && echo "Prefill" || echo "Decode")"
 echo "  Workers: $NUM_WORKERS"
 echo "  Model: $MODEL_PATH"
@@ -142,6 +170,21 @@ for i in $(seq 1 $NUM_WORKERS); do
                 --model-path "$MODEL_PATH" \
                 --endpoint dyn://test.mocker.generate \
                 "${EXTRA_ARGS[@]}"
+        elif [ "$USE_TRTLLM" = true ]; then
+            echo "[${WORKER_TYPE^} Worker-$i] Using GPUs: $GPU_DEVICES"
+            # Run TensorRT-LLM engine
+            TRTLLM_ARGS=()
+            TRTLLM_ARGS+=("--model-path" "$MODEL_PATH")
+            TRTLLM_ARGS+=("--tensor-parallel-size" "$TENSOR_PARALLEL_SIZE")
+            if [ "$USE_PREFILLS" = true ]; then
+                TRTLLM_ARGS+=("--disaggregation-mode" "prefill")
+            else
+                TRTLLM_ARGS+=("--disaggregation-mode" "decode")
+            fi
+            TRTLLM_ARGS+=("${EXTRA_ARGS[@]}")
+
+            exec env CUDA_VISIBLE_DEVICES=$GPU_DEVICES python -m dynamo.trtllm \
+                "${TRTLLM_ARGS[@]}"
         else
             echo "[${WORKER_TYPE^} Worker-$i] Using GPUs: $GPU_DEVICES"
             # Run vLLM engine with PYTHONHASHSEED=0 for deterministic event IDs in KV-aware routing
