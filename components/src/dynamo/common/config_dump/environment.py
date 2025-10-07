@@ -14,7 +14,7 @@ DEFAULT_ENV_PREFIXES = [
     "TRANSFORMERS_",  # Transformers library
     "SGLANG_",  # SGLang
     "SGL_",  # SGLang (short prefix)
-    "MC_",  # Model Cache or other MC-related
+    "MC_",  # Mooncake
     "VLLM_",  # vLLM
     "TENSORRT_",  # TensorRT
     "TORCH_",  # PyTorch
