@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # Building Documentation
 
 This directory contains the documentation source files for NVIDIA Dynamo.
