@@ -238,9 +238,10 @@ jobs:
       - name: Download build metrics
         uses: actions/download-artifact@v4
         with:
-          name: build-metrics-vllm
+          pattern: build-metrics-*
           path: build-metrics/
-        continue-on-error: true  # Don't fail if artifact doesn't exist
+          merge-multiple: true
+        continue-on-error: true  # Don't fail if artifacts don't exist
 
       - name: Upload Complete Workflow Metrics
         env:

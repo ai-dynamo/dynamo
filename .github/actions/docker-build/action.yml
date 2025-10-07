@@ -53,15 +53,15 @@ outputs:
   image-size-bytes:
     description: 'Image size in bytes'
     value: ${{ steps.metrics.outputs.image-size-bytes }}
-  image-size-mb:
-    description: 'Image size in MB'
-    value: ${{ steps.metrics.outputs.image-size-mb }}
   framework:
     description: 'Framework name'
     value: ${{ steps.metrics.outputs.framework }}
   target:
     description: 'Build target'
     value: ${{ steps.metrics.outputs.target }}
+  platform-arch:
+    description: 'Platform architecture (amd64/arm64)'
+    value: ${{ steps.metrics.outputs.platform-arch }}
 
 runs:
   using: "composite"
@@ -156,48 +156,43 @@ runs:
         IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
         if [ -n "$IMAGE_TAG" ]; then
           IMAGE_SIZE_BYTES=$(docker image inspect "$IMAGE_TAG" --format='{{.Size}}' 2>/dev/null || echo "0")
-          IMAGE_SIZE_MB=$((IMAGE_SIZE_BYTES / 1024 / 1024))
-          echo "📦 Image size: ${IMAGE_SIZE_MB} MB (${IMAGE_SIZE_BYTES} bytes)"
+          echo "📦 Image size: ${IMAGE_SIZE_BYTES} bytes"
         else
           IMAGE_SIZE_BYTES=0
-          IMAGE_SIZE_MB=0
           echo "⚠️  No image tag available"
         fi
         
         echo "📊 Final metrics captured"
         
-        # Create metrics JSON file (only for amd64 to avoid duplicates)
-        if [[ "${{ inputs.platform }}" == *"amd64"* ]]; then
-          cat > build-metrics/metrics.json << EOF
+        # Create metrics JSON file for all platforms
+        PLATFORM_ARCH=$(echo "${{ inputs.platform }}" | sed 's/linux\///')
+        cat > build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}.json << EOF
         {
           "framework": "${{ inputs.framework }}",
           "target": "${{ inputs.target }}",
           "platform": "${{ inputs.platform }}",
           "image_size_bytes": ${IMAGE_SIZE_BYTES},
-          "image_size_mb": ${IMAGE_SIZE_MB},
           "build_start_time": "${BUILD_START_TIME}",
           "build_end_time": "${BUILD_END_TIME}",
           "build_duration_sec": ${BUILD_DURATION_SEC}
         }
         EOF
-          
-          echo "📁 Build metrics saved:"
-          cat build-metrics/metrics.json
-        fi
+        
+        echo "📁 Build metrics saved:"
+        cat build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}.json
         
         # Set outputs
         echo "build-end-time=${BUILD_END_TIME}" >> $GITHUB_OUTPUT
         echo "build-duration-sec=${BUILD_DURATION_SEC}" >> $GITHUB_OUTPUT
         echo "image-size-bytes=${IMAGE_SIZE_BYTES}" >> $GITHUB_OUTPUT
-        echo "image-size-mb=${IMAGE_SIZE_MB}" >> $GITHUB_OUTPUT
         echo "framework=${{ inputs.framework }}" >> $GITHUB_OUTPUT
         echo "target=${{ inputs.target }}" >> $GITHUB_OUTPUT
+        echo "platform-arch=${PLATFORM_ARCH}" >> $GITHUB_OUTPUT
 
-    # Upload build metrics as artifact (only for amd64)
+    # Upload build metrics as artifact for all platforms
     - name: Upload Build Metrics
-      if: contains(inputs.platform, 'amd64')
       uses: actions/upload-artifact@v4
       with:
-        name: build-metrics-${{ inputs.framework }}
-        path: build-metrics/metrics.json
+        name: build-metrics-${{ inputs.framework }}-${{ steps.metrics.outputs.platform-arch }}
+        path: build-metrics/metrics-${{ inputs.framework }}-*.json
         retention-days: 7
