@@ -223,16 +223,6 @@ def map_dyn_log_to_tllm_level(dyn_log_value: str) -> str:
 
 
 def configure_trtllm_logging(dyn_level: int):
-    """
-    TensorRT-LLM uses the TLLM_LOG_LEVEL environment variable to control logging.
-    This function maps the DYN_LOG level to the appropriate TLLM_LOG_LEVEL value.
-
-    Note: This function sets the environment variable, but TensorRT-LLM reads it
-    during import. The TensorRT-LLM backend main.py sets TLLM_LOG_LEVEL before
-    importing tensorrt_llm to ensure it takes effect. This function is kept for
-    consistency with other backend logging configuration.
-    """
-def configure_trtllm_logging(dyn_level: int):
     # Only set TLLM_LOG_LEVEL if it's not already set
     # This allows users to override it explicitly if needed
     if "TLLM_LOG_LEVEL" not in os.environ:
