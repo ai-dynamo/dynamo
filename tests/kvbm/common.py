@@ -455,7 +455,7 @@ def tester(llm_server):
 class TestDeterminism:
     """Test class for determinism validation."""
 
-    def test_determinism_with_cache_reset(
+    def base_test_determinism_with_cache_reset(
         self, tester, llm_server, runtime_services, success_rate_threshold=1.0
     ):
         """Test determinism across cache reset: run test with warmup, reset cache, run again without warmup."""
