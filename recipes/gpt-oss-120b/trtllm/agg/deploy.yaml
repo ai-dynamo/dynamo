@@ -27,12 +27,12 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.1-rc0.pre3
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.1
       pvc:
         create: false
         mountPoint: /model-store
         name: model-cache
-      replicas: 18
+      replicas: 1
     TrtllmWorker:
       componentType: main
       dynamoNamespace: gpt-oss-agg
@@ -73,7 +73,7 @@ spec:
           - name: ENGINE_ARGS
             value: "/opt/dynamo/configs/config.yaml"
           - name: MODEL_PATH
-            value: "/model-store/models--openai--gpt-oss-120b/snapshots/b5c939de8f754692c1647ca79fbf85e8c1e70f8a"
+            value: "/model-store/hub/models--openai--gpt-oss-120b/snapshots/b5c939de8f754692c1647ca79fbf85e8c1e70f8a"
           volumeMounts:
           - mountPath: /opt/dynamo/configs
             name: llm-config
@@ -88,7 +88,7 @@ spec:
         create: false
         mountPoint: /model-store
         name: model-cache
-      replicas: 18
+      replicas: 1
       resources:
         limits:
           gpu: "4"
