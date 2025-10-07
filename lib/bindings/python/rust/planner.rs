@@ -102,7 +102,7 @@ impl VirtualConnectorCoordinator {
         let prefix = root_key(&self.0.namespace);
         let inner = self.0.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let kv_cache = KvCache::new(inner.etcd_client.clone(), prefix, HashMap::new())
+            let kv_cache = KvCache::new(inner.etcd_client.clone(), "v1", prefix, HashMap::new())
                 .await
                 .map_err(to_pyerr)?;
             *inner.kv_cache.lock() = Some(Arc::new(kv_cache));
@@ -497,5 +497,5 @@ fn load(a: &AtomicUsize) -> usize {
 }
 
 fn root_key(namespace: &str) -> String {
-    format!("/{namespace}/planner/")
+    format!("{namespace}/planner/")
 }

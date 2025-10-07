@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::time::Duration;
 
-use crate::{slug::Slug, storage::key_value_store::Key, transports::etcd::Client};
+use crate::{storage::key_value_store::Key, transports::etcd::Client};
 use async_stream::stream;
 use async_trait::async_trait;
 use etcd_client::{Compare, CompareOp, EventType, PutOptions, Txn, TxnOp, WatchOptions};
@@ -149,7 +149,7 @@ impl EtcdBucket {
         tracing::trace!("etcd create: {k}");
 
         // Use atomic transaction to check and create in one operation
-        let put_options = PutOptions::new();
+        let put_options = PutOptions::new().with_lease(self.client.primary_lease().id());
 
         // Build transaction that creates key only if it doesn't exist
         let txn = Txn::new()
@@ -217,9 +217,12 @@ impl EtcdBucket {
             // So we do too in etcd.
         }
 
+        let put_options = PutOptions::new()
+            .with_lease(self.client.primary_lease().id())
+            .with_prev_key();
         let mut put_resp = self
             .client
-            .kv_put_with_options(k, value, Some(PutOptions::new().with_prev_key()))
+            .kv_put_with_options(k, value, Some(put_options))
             .await
             .map_err(|e| StorageError::EtcdError(e.to_string()))?;
         Ok(match put_resp.take_prev_key() {
@@ -237,7 +240,7 @@ impl EtcdBucket {
 }
 
 fn make_key(bucket_name: &str, key: &Key) -> String {
-    [Slug::slugify(bucket_name).to_string(), key.to_string()].join("/")
+    [bucket_name.to_string(), key.to_string()].join("/")
 }
 
 #[cfg(feature = "integration")]
