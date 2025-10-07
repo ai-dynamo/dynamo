@@ -709,14 +709,10 @@ class WorkflowMetricsUploader:
         # Create container metrics payload
         container_data = {}
 
-        # Identity & Context - using common field names
+        # Identity & Context - container-specific fields only
         job_id = str(job_data['id'])
         container_data[FIELD_ID] = f"github-container-{job_id}-{build_metrics.get('framework', 'unknown')}"
         container_data[FIELD_JOB_ID] = job_id
-        container_data[FIELD_WORKFLOW_ID] = str(self.run_id)
-        container_data[FIELD_REPO] = self.repo
-        container_data[FIELD_WORKFLOW_NAME] = self.workflow_name
-        container_data[FIELD_BRANCH] = self.branch
 
         # Find the "Build Container" step ID
         build_step_id = None
@@ -728,9 +724,8 @@ class WorkflowMetricsUploader:
 
         container_data[FIELD_STEP_ID] = build_step_id or f"{job_id}_build"
 
-        # Status & Events - using common field names
+        # Status - container-specific
         container_data[FIELD_STATUS] = str(job_data.get('conclusion') or job_data.get('status', 'unknown'))
-        container_data[FIELD_GITHUB_EVENT] = self.event_name
 
         # Container Info (only truly container-specific fields)
         container_data[FIELD_FRAMEWORK] = build_metrics.get('framework', 'unknown')
