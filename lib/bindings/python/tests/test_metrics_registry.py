@@ -13,12 +13,19 @@ pytestmark = pytest.mark.pre_merge
 
 
 @pytest.fixture
-async def metrics_runtime(runtime):
-    """Fixture providing a MetricsRegistry from a runtime hierarchy."""
+async def metrics_runtime(runtime, request):
+    """Fixture providing a MetricsRegistry from a runtime hierarchy.
+
+    Uses request.node.name to generate a unique endpoint name for each test.
+    """
+    # Generate unique endpoint name from test name
+    test_name = request.node.name.replace("test_", "ep_")
+    endpoint_name = f"test_metrics_{test_name}"
+
     namespace = runtime.namespace("test_metrics_ns")
     component = namespace.component("test_metrics_comp")
     await component.create_service()
-    endpoint = component.endpoint("test_metrics_ep")
+    endpoint = component.endpoint(endpoint_name)
     return endpoint.metrics
 
 
@@ -258,4 +265,5 @@ async def test_multiple_metrics_same_runtime(metrics_runtime):
         labels = metric.const_labels()
         assert labels["dynamo_namespace"] == "test_metrics_ns"
         assert labels["dynamo_component"] == "test_metrics_comp"
-        assert labels["dynamo_endpoint"] == "test_metrics_ep"
+        # Endpoint name is dynamically generated from test name
+        assert labels["dynamo_endpoint"].startswith("test_metrics_ep_")
