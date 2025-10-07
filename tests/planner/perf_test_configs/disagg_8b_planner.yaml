@@ -77,7 +77,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/vllm-runtime:my-tag
-          workingDir: /workspace/components/planner/src/dynamo/planner
+          workingDir: /workspace/components/src/dynamo/planner
           ports:
             - name: metrics
               containerPort: 9085

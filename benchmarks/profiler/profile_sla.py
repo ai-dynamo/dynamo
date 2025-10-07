@@ -22,9 +22,14 @@ import os
 import numpy as np
 import yaml
 
-from benchmarks.profiler.utils.config import CONFIG_MODIFIERS, WORKER_COMPONENT_NAMES
+from benchmarks.profiler.utils.config import (
+    CONFIG_MODIFIERS,
+    WORKER_COMPONENT_NAMES,
+    generate_dgd_config_with_planner,
+)
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from benchmarks.profiler.utils.genai_perf import benchmark_decode, benchmark_prefill
+from benchmarks.profiler.utils.planner_utils import add_planner_arguments_to_parser
 from benchmarks.profiler.utils.plot import (
     plot_decode_performance,
     plot_prefill_performance,
@@ -63,6 +68,10 @@ logger.addHandler(console_handler)
 async def run_profile(args):
     # List to track all created deployment clients for cleanup in case of failure
     deployment_clients = []
+
+    # Inherit aic_backend from backend if not explicitly set
+    if not args.aic_backend:
+        args.aic_backend = args.backend
 
     try:
         # Log MoE model support
@@ -132,20 +141,20 @@ async def run_profile(args):
                 raise ValueError(
                     "Must provide --aic-model-name when using --use-ai-configurator."
                 )
-            if not args.backend_version:
+            if not args.aic_backend_version:
                 raise ValueError(
-                    "Must provide --backend-version when using --use-ai-configurator."
+                    "Must provide --aic-backend-version when using --use-ai-configurator."
                 )
 
             logger.info("Will use aiconfigurator to estimate perf.")
             ai_configurator_perf_estimator = AIConfiguratorPerfEstimator(
                 args.aic_model_name,
                 args.aic_system.lower(),
-                args.backend,
-                args.backend_version,
+                args.aic_backend,
+                args.aic_backend_version,
             )
         else:
-            if args.aic_system or args.aic_model_name or args.backend_version:
+            if args.aic_system or args.aic_model_name or args.aic_backend_version:
                 logger.warning(
                     "Will ignore --aic-system, --aic-model-name, and/or --backend-version "
                     "when not using --use-ai-configurator."
@@ -705,6 +714,23 @@ async def run_profile(args):
             deployment_clients.remove(client)
             logger.info("Deployment deleted")
 
+        # generate DGD with planner based on profiling results
+        config = generate_dgd_config_with_planner(
+            config_path=args.config,
+            config_modifier=config_modifier,
+            best_prefill_gpus=best_prefill_gpus,
+            best_decode_gpus=best_decode_gpus,
+            output_dir=args.output_dir,
+            args=args,
+            is_moe_model=args.is_moe_model,
+            num_gpus_per_node=args.num_gpus_per_node,
+        )
+        logger.info(f"Final DGD config with planner: {config}")
+
+        # save DGD config with planner
+        with open(f"{args.output_dir}/config_with_planner.yaml", "w") as f:
+            yaml.dump(config, f)
+
     except Exception as e:
         logger.error(f"Profile job failed with error: {e}")
         raise
@@ -713,6 +739,21 @@ async def run_profile(args):
         logger.info("Performing final cleanup of any remaining deployments...")
         await cleanup_remaining_deployments(deployment_clients, args.namespace)
         logger.info("Final cleanup completed.")
+
+    # deploy the optimized DGD with planner
+    if args.deploy_after_profile and not args.dry_run:
+        logger.info("Deploying the optimized DGD with planner...")
+        # TODO: check conflicts for dynamo namespace and DGD name
+        # TODO: handle deployment errors and propagate proper error messages to users
+        client = DynamoDeploymentClient(
+            namespace=args.namespace,
+            base_log_dir=f"{args.output_dir}/final_deployment",
+            model_name=model_name,
+            service_name=args.service_name,
+            frontend_port=frontend_port,
+            deployment_name=config["metadata"]["name"],
+        )
+        await client.create_deployment(f"{args.output_dir}/config_with_planner.yaml")
 
 
 if __name__ == "__main__":
@@ -778,7 +819,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--itl", type=int, default=10, help="target Inter Token Latency in ms"
     )
-    # below are arguments used for interpolating TTFT and ITL under different ISL/OSL
+
+    # arguments used for interpolating TTFT and ITL under different ISL/OSL
     parser.add_argument(
         "--max-context-length",
         type=int,
@@ -820,6 +862,17 @@ if __name__ == "__main__":
         default=8,
         help="Number of GPUs per node for MoE models - this will be the granularity when searching for the best TEP/DEP size",
     )
+
+    # arguments for dgd config generation and deployment
+    parser.add_argument(
+        "--deploy-after-profile",
+        action="store_true",
+        help="deploy the optimized DGD with planner",
+    )
+    # Dynamically add all planner arguments from planner_argparse.py
+    add_planner_arguments_to_parser(parser, prefix="planner-")
+
+    # arguments if using aiconfigurator
     parser.add_argument(
         "--use-ai-configurator",
         action="store_true",
@@ -836,7 +889,13 @@ if __name__ == "__main__":
         help="aiconfigurator name of the target model (e.g. QWEN3_32B, DEEPSEEK_V3)",
     )
     parser.add_argument(
-        "--backend-version",
+        "--aic-backend",
+        type=str,
+        default="",
+        help="aiconfigurator backend of the target model, if not provided, will use args.backend",
+    )
+    parser.add_argument(
+        "--aic-backend-version",
         type=str,
         help="Specify backend version when using aiconfigurator to estimate perf.",
     )

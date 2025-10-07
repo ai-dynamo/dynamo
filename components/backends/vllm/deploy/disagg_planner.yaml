@@ -30,7 +30,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/components/planner/src/dynamo/planner
+          workingDir: /workspace/components/src/dynamo/planner
           command:
           - python3
           - -m
