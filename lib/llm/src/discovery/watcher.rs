@@ -13,16 +13,15 @@ use dynamo_runtime::{
         ManyOut, Operator, RouterMode, SegmentSource, ServiceBackend, SingleIn, Source,
         network::egress::push_router::PushRouter,
     },
-    protocols::annotated::Annotated,
-    storage::key_value_store::Key,
-    transports::etcd::{KeyValue, WatchEvent},
+    protocols::{EndpointId, annotated::Annotated},
+    transports::etcd::WatchEvent,
 };
 
 use crate::{
     backend::Backend,
     entrypoint,
     kv_router::KvRouterConfig,
-    model_card::ModelDeploymentCard,
+    model_card::{self, ModelDeploymentCard},
     model_type::{ModelInput, ModelType},
     preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::PromptFormatter},
     protocols::{
@@ -38,7 +37,7 @@ use crate::{
     },
 };
 
-use super::{MODEL_ROOT_PATH, ModelEntry, ModelManager};
+use super::ModelManager;
 use crate::namespace::is_global_namespace;
 
 #[derive(Debug, Clone)]
@@ -105,17 +104,31 @@ impl ModelWatcher {
         while let Some(event) = events_rx.recv().await {
             match event {
                 WatchEvent::Put(kv) => {
-                    let model_entry = match serde_json::from_slice::<ModelEntry>(kv.value()) {
-                        Ok(model_entry) => model_entry,
+                    let mut card = match serde_json::from_slice::<ModelDeploymentCard>(kv.value()) {
+                        Ok(card) => card,
                         Err(err) => {
                             match kv.value_str() {
                                 Ok(value) => {
-                                    tracing::error!(%err, value, "Invalid JSON in model entry")
+                                    tracing::error!(%err, value, "Invalid JSON in model card")
                                 }
                                 Err(value_str_err) => {
-                                    tracing::error!(original_error = %err, %value_str_err, "Invalid UTF-8 string in model entry, expected JSON")
+                                    tracing::error!(original_error = %err, %value_str_err, "Invalid UTF-8 string in model card, expected JSON")
                                 }
                             }
+                            continue;
+                        }
+                    };
+                    let key = match kv.key_str() {
+                        Ok(k) => k,
+                        Err(err) => {
+                            tracing::error!(%err, ?kv, "Invalid UTF-8 string in model card key, skipping");
+                            continue;
+                        }
+                    };
+                    let endpoint_id = match etcd_key_extract(key) {
+                        Ok((eid, _)) => eid,
+                        Err(err) => {
+                            tracing::error!(%key, model_name = card.name(), %err, "Failed extracting EndpointId from key. Ignoring instance.");
                             continue;
                         }
                     };
@@ -123,58 +136,78 @@ impl ModelWatcher {
                     // Filter by namespace if target_namespace is specified
                     if !global_namespace
                         && let Some(target_ns) = target_namespace
-                        && model_entry.endpoint_id.namespace != target_ns
+                        && endpoint_id.namespace != target_ns
                     {
                         tracing::debug!(
-                            model_namespace = model_entry.endpoint_id.namespace,
+                            model_namespace = endpoint_id.namespace,
                             target_namespace = target_ns,
-                            model_name = model_entry.name,
+                            model_name = card.name(),
                             "Skipping model from different namespace"
                         );
                         continue;
                     }
 
-                    let key = match kv.key_str() {
-                        Ok(k) => k,
-                        Err(err) => {
-                            tracing::error!(%err, ?kv, "Invalid UTF-8 string in model entry key, skipping");
-                            continue;
-                        }
-                    };
+                    // If we already have a worker for this model, and the ModelDeploymentCard
+                    // cards don't match, alert, and don't add the new instance
+                    let can_add =
+                        self.manager
+                            .is_valid_checksum(card.model_type, card.name(), card.mdcsum());
+                    if can_add.is_some_and(|is_valid| !is_valid) {
+                        tracing::error!(
+                            model_name = card.name(),
+                            "Checksum for new model does not match existing model."
+                        );
 
-                    match self.handle_put(key, &model_entry).await {
+                        // TODO: mark that instance down in clients
+                        // Not obvious how to do that given the current design
+                        // Instances come from an `InstanceSource` in a `Client` in a `PushRouter`.
+                        // Calling `report_instance_down` on the Client should do it (although
+                        // needs more testing).
+                        // The `PushRouter` is in `ModelMananger` (`self.manager` here), but inside
+                        // interface `AsyncEngine` which only has a `generate` method.
+
+                        continue;
+                    }
+
+                    match self.handle_put(key, &endpoint_id, &mut card).await {
                         Ok(()) => {
                             tracing::info!(
-                                model_name = model_entry.name,
-                                namespace = model_entry.endpoint_id.namespace,
+                                model_name = card.name(),
+                                namespace = endpoint_id.namespace,
                                 "added model"
                             );
                             self.notify_on_model.notify_waiters();
                         }
                         Err(err) => {
                             tracing::error!(
+                                model_name = card.name(),
+                                namespace = endpoint_id.namespace,
                                 error = format!("{err:#}"),
-                                "error adding model {} from namespace {}",
-                                model_entry.name,
-                                model_entry.endpoint_id.namespace,
+                                "Error adding model from discovery",
                             );
                         }
                     }
                 }
-                WatchEvent::Delete(kv) => match self
-                    .handle_delete(&kv, target_namespace, global_namespace)
-                    .await
-                {
-                    Ok(Some(model_name)) => {
-                        tracing::info!(model_name, "removed model");
+                WatchEvent::Delete(kv) => {
+                    let Ok(deleted_key) = kv.key_str() else {
+                        tracing::warn!("Invalid UTF-8 in etcd delete notification key: {kv:?}");
+                        continue;
+                    };
+                    match self
+                        .handle_delete(deleted_key, target_namespace, global_namespace)
+                        .await
+                    {
+                        Ok(Some(model_name)) => {
+                            tracing::info!(model_name, "removed model");
+                        }
+                        Ok(None) => {
+                            // There are other instances running this model, nothing to do
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "error removing model");
+                        }
                     }
-                    Ok(None) => {
-                        // There are other instances running this model, nothing to do
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "error removing model");
-                    }
-                },
+                }
             }
         }
     }
@@ -183,20 +216,19 @@ impl ModelWatcher {
     /// Returns the name of the model we just deleted, if any.
     async fn handle_delete(
         &self,
-        kv: &KeyValue,
+        key: &str,
         target_namespace: Option<&str>,
         is_global_namespace: bool,
     ) -> anyhow::Result<Option<String>> {
-        let key = kv.key_str()?;
         let card = match self.manager.remove_model_card(key) {
             Some(card) => card,
             None => {
                 anyhow::bail!("Missing ModelDeploymentCard for {key}");
             }
         };
-        let model_name = card.display_name.clone();
+        let model_name = card.name().to_string();
         let active_instances = self
-            .entries_for_model(&model_name, target_namespace, is_global_namespace)
+            .cards_for_model(&model_name, target_namespace, is_global_namespace)
             .await
             .with_context(|| model_name.clone())?;
         if !active_instances.is_empty() {
@@ -265,53 +297,35 @@ impl ModelWatcher {
 
     // Handles a PUT event from etcd, this usually means adding a new model to the list of served
     // models.
-    async fn handle_put(&self, key: &str, model_entry: &ModelEntry) -> anyhow::Result<()> {
-        let endpoint_id = &model_entry.endpoint_id;
+    async fn handle_put(
+        &self,
+        key: &str,
+        endpoint_id: &EndpointId,
+        card: &mut ModelDeploymentCard,
+    ) -> anyhow::Result<()> {
+        card.move_from_nats(self.drt.nats_client()).await?;
         let component = self
             .drt
             .namespace(&endpoint_id.namespace)?
             .component(&endpoint_id.component)?;
         let client = component.endpoint(&endpoint_id.name).client().await?;
-        let model_slug = model_entry.slug();
-        let card = match ModelDeploymentCard::load_from_store(
-            &Key::from_raw(model_slug.to_string()),
-            &self.drt,
-        )
-        .await
-        {
-            Ok(Some(mut card)) => {
-                tracing::debug!(card.display_name, "adding model");
-                // Ensure runtime_config is populated
-                if let Some(rc) = model_entry.runtime_config.clone() {
-                    card.runtime_config = rc;
-                }
-                card
-            }
-            Ok(None) => {
-                anyhow::bail!("Missing ModelDeploymentCard in storage under key {model_slug}");
-            }
-            Err(err) => {
-                anyhow::bail!(
-                    "Error fetching ModelDeploymentCard from storage under key {model_slug}. {err}"
-                );
-            }
-        };
+        tracing::debug!(model_name = card.name(), "adding model");
+        self.manager.save_model_card(key, card.clone())?;
 
-        self.manager.save_model_card(key, card.clone());
-
-        if self.manager.has_model_any(&model_entry.name) {
-            tracing::trace!(
-                name = model_entry.name,
-                namespace = model_entry.endpoint_id.namespace,
+        if self.manager.has_model_any(card.name()) {
+            tracing::debug!(
+                model_name = card.name(),
+                namespace = endpoint_id.namespace,
                 "New endpoint for existing model"
             );
-            self.notify_on_model.notify_waiters();
+            //self.notify_on_model.notify_waiters();
             return Ok(());
         }
 
         if let Some(tx) = &self.model_update_tx {
             tx.send(ModelUpdate::Added(card.clone())).await.ok();
         }
+        let checksum = card.mdcsum();
 
         if card.model_input == ModelInput::Tokens
             && (card.model_type.supports_chat() || card.model_type.supports_completions())
@@ -324,7 +338,7 @@ impl ModelWatcher {
                 Some(
                     self.manager
                         .kv_chooser_for(
-                            &model_entry.name,
+                            card.name(),
                             &component,
                             card.kv_cache_block_size,
                             self.kv_router_config,
@@ -344,7 +358,7 @@ impl ModelWatcher {
                     NvCreateChatCompletionRequest,
                     NvCreateChatCompletionStreamResponse,
                 >(
-                    &card,
+                    card,
                     &client,
                     self.router_mode,
                     self.busy_threshold,
@@ -354,7 +368,7 @@ impl ModelWatcher {
                 .await
                 .context("build_routed_pipeline")?;
                 self.manager
-                    .add_chat_completions_model(&model_entry.name, chat_engine)
+                    .add_chat_completions_model(card.name(), checksum, chat_engine)
                     .context("add_chat_completions_model")?;
                 tracing::info!("Chat completions is ready");
             }
@@ -373,7 +387,7 @@ impl ModelWatcher {
                     NvCreateCompletionRequest,
                     NvCreateCompletionResponse,
                 >(
-                    &card,
+                    card,
                     &client,
                     self.router_mode,
                     self.busy_threshold,
@@ -384,7 +398,7 @@ impl ModelWatcher {
                 .await
                 .context("build_routed_pipeline_with_preprocessor")?;
                 self.manager
-                    .add_completions_model(&model_entry.name, completions_engine)
+                    .add_completions_model(card.name(), checksum, completions_engine)
                     .context("add_completions_model")?;
                 tracing::info!("Completions is ready");
             }
@@ -411,7 +425,7 @@ impl ModelWatcher {
             .await?;
             let engine = Arc::new(push_router);
             self.manager
-                .add_chat_completions_model(&model_entry.name, engine)?;
+                .add_chat_completions_model(card.name(), checksum, engine)?;
         } else if card.model_input == ModelInput::Text && card.model_type.supports_completions() {
             // Case 2: Text + Completions
             let push_router = PushRouter::<
@@ -423,7 +437,7 @@ impl ModelWatcher {
             .await?;
             let engine = Arc::new(push_router);
             self.manager
-                .add_completions_model(&model_entry.name, engine)?;
+                .add_completions_model(card.name(), checksum, engine)?;
         } else if card.model_input == ModelInput::Tokens && card.model_type.supports_embedding() {
             // Case 4: Tokens + Embeddings
 
@@ -434,7 +448,7 @@ impl ModelWatcher {
             >::new();
 
             let preprocessor = OpenAIPreprocessor::new(card.clone())?.into_operator();
-            let backend = Backend::from_mdc(&card).into_operator();
+            let backend = Backend::from_mdc(card).into_operator();
 
             let router = PushRouter::<
                 PreprocessedEmbeddingRequest,
@@ -457,7 +471,7 @@ impl ModelWatcher {
                 .link(frontend)?;
 
             self.manager
-                .add_embeddings_model(&model_entry.name, embedding_engine)?;
+                .add_embeddings_model(card.name(), checksum, embedding_engine)?;
         } else if card.model_input == ModelInput::Tensor && card.model_type.supports_tensor() {
             // Case 5: Tensor + Tensor (non-LLM)
             let push_router = PushRouter::<
@@ -468,7 +482,8 @@ impl ModelWatcher {
             )
             .await?;
             let engine = Arc::new(push_router);
-            self.manager.add_tensor_model(&model_entry.name, engine)?;
+            self.manager
+                .add_tensor_model(card.name(), checksum, engine)?;
         } else {
             // Reject unsupported combinations
             anyhow::bail!(
@@ -482,49 +497,116 @@ impl ModelWatcher {
         Ok(())
     }
 
-    /// All the registered ModelEntry, one per instance
-    pub async fn all_entries(&self) -> anyhow::Result<Vec<ModelEntry>> {
+    /// All the registered ModelDeploymentCard with the EndpointId they are attached to, one per instance
+    pub async fn all_cards(&self) -> anyhow::Result<Vec<(EndpointId, ModelDeploymentCard)>> {
         let Some(etcd_client) = self.drt.etcd_client() else {
-            anyhow::bail!("all_entries: Missing etcd client");
+            anyhow::bail!("all_cards: Missing etcd client");
         };
-        let kvs = etcd_client.kv_get_prefix(MODEL_ROOT_PATH).await?;
-        let mut entries = Vec::with_capacity(kvs.len());
+        let kvs = etcd_client.kv_get_prefix(model_card::ROOT_PATH).await?;
+        let mut results = Vec::with_capacity(kvs.len());
         for kv in kvs {
-            let model_entry = match serde_json::from_slice::<ModelEntry>(kv.value()) {
-                Ok(model_entry) => model_entry,
+            let maybe_convert = serde_json::from_slice::<ModelDeploymentCard>(kv.value());
+            let r = match maybe_convert {
+                Ok(card) => {
+                    let maybe_endpoint_id = kv.key_str().map_err(|err| err.into()).and_then(|k| {
+                        etcd_key_extract(k).map(|(endpoint_id, _instance_id)| endpoint_id)
+                    });
+                    let endpoint_id = match maybe_endpoint_id {
+                        Ok(eid) => eid,
+                        Err(err) => {
+                            tracing::error!(%err, "Skipping invalid etcd key, not string or not EndpointId");
+                            continue;
+                        }
+                    };
+                    (endpoint_id, card)
+                }
                 Err(err) => {
                     match kv.value_str() {
                         Ok(value) => {
-                            tracing::error!(%err, value, "Invalid JSON in model entry")
+                            tracing::error!(%err, value, "Invalid JSON in model card");
                         }
                         Err(value_str_err) => {
-                            tracing::error!(original_error = %err, %value_str_err, "Invalid UTF-8 string in model entry, expected JSON")
+                            tracing::error!(original_error=%err, %value_str_err, "Invalid UTF-8 string in model card, expected JSON");
                         }
                     }
                     continue;
                 }
             };
-            entries.push(model_entry);
+            results.push(r);
         }
-        Ok(entries)
+        Ok(results)
     }
 
-    pub async fn entries_for_model(
+    pub async fn cards_for_model(
         &self,
         model_name: &str,
         target_namespace: Option<&str>,
         is_global_namespace: bool,
-    ) -> anyhow::Result<Vec<ModelEntry>> {
-        let mut all = self.all_entries().await?;
-        all.retain(|entry| {
-            let matches_name = entry.name == model_name;
+    ) -> anyhow::Result<Vec<ModelDeploymentCard>> {
+        let mut all = self.all_cards().await?;
+        all.retain(|(endpoint_id, card)| {
+            let matches_name = card.name() == model_name;
             let matches_namespace = match (is_global_namespace, target_namespace) {
                 (true, _) => true,
                 (false, None) => true,
-                (false, Some(target_ns)) => entry.endpoint_id.namespace == target_ns,
+                (false, Some(target_ns)) => endpoint_id.namespace == target_ns,
             };
             matches_name && matches_namespace
         });
-        Ok(all)
+        Ok(all.into_iter().map(|(_eid, card)| card).collect())
+    }
+}
+
+/// The ModelDeploymentCard is published in etcd with a key like "v1/mdc/dynamo/backend/generate/694d9981145a61ad".
+/// Extract the EndpointId and instance_id from that.
+fn etcd_key_extract(s: &str) -> anyhow::Result<(EndpointId, String)> {
+    let parts: Vec<&str> = s.split('/').collect();
+    let start_idx = if !parts.is_empty() && parts[0] == "v1" {
+        1
+    } else {
+        0
+    };
+
+    // Need at least prefix model_card::ROOT_PATH + 3 parts: namespace, component, name
+    if parts.len() <= start_idx + 3 {
+        anyhow::bail!("Invalid format: not enough path segments in {s}");
+    }
+
+    if parts.get(start_idx) != Some(&model_card::ROOT_PATH) {
+        anyhow::bail!("Invalid format: expected model card ROOT_PATH segment in {s}");
+    }
+
+    let endpoint_id = EndpointId {
+        namespace: parts[start_idx + 1].to_string(),
+        component: parts[start_idx + 2].to_string(),
+        name: parts[start_idx + 3].to_string(),
+    };
+    Ok((endpoint_id, parts[parts.len() - 1].to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_etcd_key_extract() {
+        let input = format!(
+            "v1/{}/dynamo/backend/generate/694d9981145a61ad",
+            model_card::ROOT_PATH
+        );
+        let (endpoint_id, instance_id) = etcd_key_extract(&input).unwrap();
+        assert_eq!(endpoint_id.namespace, "dynamo");
+        assert_eq!(endpoint_id.component, "backend");
+        assert_eq!(endpoint_id.name, "generate");
+        assert_eq!(instance_id, "694d9981145a61ad");
+
+        let input = format!(
+            "{}/dynamo/backend/generate/694d9981145a61ad",
+            model_card::ROOT_PATH
+        );
+        let (endpoint_id, _) = etcd_key_extract(&input).unwrap();
+        assert_eq!(endpoint_id.namespace, "dynamo");
+        assert_eq!(endpoint_id.component, "backend");
+        assert_eq!(endpoint_id.name, "generate");
     }
 }

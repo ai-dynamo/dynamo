@@ -124,7 +124,7 @@ impl OpenAIPreprocessor {
         formatter: Arc<dyn OAIPromptFormatter>,
         hf_tokenizer: tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
-        let mdcsum = mdc.mdcsum();
+        let mdcsum = mdc.mdcsum().to_string();
         let tokenizer = Arc::new(HuggingFaceTokenizer::from_tokenizer(hf_tokenizer));
         let Some(model_info) = mdc.model_info else {
             anyhow::bail!(

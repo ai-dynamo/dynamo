@@ -32,7 +32,6 @@ pub mod sequence;
 pub mod subscriber;
 
 use crate::{
-    discovery::{MODEL_ROOT_PATH, ModelEntry},
     kv_router::{
         approx::ApproxKvIndexer,
         indexer::{
@@ -45,6 +44,7 @@ use crate::{
         subscriber::start_kv_router_background,
     },
     local_model::runtime_config::ModelRuntimeConfig,
+    model_card::{self, ModelDeploymentCard},
     preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
 };
@@ -247,9 +247,9 @@ impl KvRouter {
 
         let runtime_configs_watcher = watch_prefix_with_extraction(
             etcd_client,
-            MODEL_ROOT_PATH,
+            model_card::ROOT_PATH,
             key_extractors::lease_id,
-            |model_entry: ModelEntry| model_entry.runtime_config,
+            |card: ModelDeploymentCard| Some(card.runtime_config),
             cancellation_token.clone(),
         )
         .await?;
