@@ -2,19 +2,23 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import json
 import logging
 import os
 import socket
-import sys
-import time
 from typing import Callable, List, Optional, Tuple
 
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 
+from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.runtime import DistributedRuntime
+from dynamo.vllm.ports import (
+    DynamoPortRange,
+    PortAllocationRequest,
+    PortMetadata,
+    allocate_and_reserve_port_block,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +35,8 @@ class Config:
     endpoint: str
     kv_port: Optional[int] = None
     side_channel_port: Optional[int] = None
+    port_range: DynamoPortRange = DynamoPortRange(min=20000, max=30000)
+    custom_jinja_template: Optional[str] = None
 
     # mirror vLLM
     model: str
@@ -38,6 +44,10 @@ class Config:
 
     # rest vLLM args
     engine_args: AsyncEngineArgs
+
+    # tool and reasoning parser info
+    tool_call_parser: Optional[str] = None
+    reasoning_parser: Optional[str] = None
 
 
 def parse_endpoint(endpoint: str) -> List[str]:
@@ -77,6 +87,39 @@ def base_parse_args(
             default=DEFAULT_ENDPOINT,
             help=f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Default: {DEFAULT_ENDPOINT}",
         )
+    parser.add_argument(
+        "--dynamo-port-min",
+        type=int,
+        default=20000,
+        help="Minimum port number for Dynamo services (default: 20000). Must be in registered ports range (1024-49151).",
+    )
+    parser.add_argument(
+        "--dynamo-port-max",
+        type=int,
+        default=30000,
+        help="Maximum port number for Dynamo services (default: 30000). Must be in registered ports range (1024-49151).",
+    )
+    # To avoid name conflicts with different backends, adopted prefix "dyn-" for dynamo specific args
+    parser.add_argument(
+        "--dyn-tool-call-parser",
+        type=str,
+        default=None,
+        choices=get_tool_parser_names(),
+        help="Tool call parser name for the model.",
+    )
+    parser.add_argument(
+        "--dyn-reasoning-parser",
+        type=str,
+        default=None,
+        choices=get_reasoning_parser_names(),
+        help="Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
+    )
+    parser.add_argument(
+        "--custom-jinja-template",
+        type=str,
+        default=None,
+        help="Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
+    )
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     engine_args = AsyncEngineArgs.from_cli_args(args)
@@ -105,6 +148,23 @@ def base_parse_args(
     config.component = parsed_component_name
     config.endpoint = parsed_endpoint_name
     config.engine_args = engine_args
+    config.port_range = DynamoPortRange(min=args.dynamo_port_min, max=args.dynamo_port_max)
+    config.tool_call_parser = args.dyn_tool_call_parser
+    config.reasoning_parser = args.dyn_reasoning_parser
+    config.custom_jinja_template = args.custom_jinja_template
+
+    # Validate custom Jinja template file exists if provided
+    if config.custom_jinja_template is not None:
+        # Expand environment variables and user home (~) before validation
+        expanded_template_path = os.path.expanduser(
+            os.path.expandvars(config.custom_jinja_template)
+        )
+        config.custom_jinja_template = expanded_template_path
+        if not os.path.isfile(expanded_template_path):
+            raise FileNotFoundError(
+                f"Custom Jinja template file not found: {expanded_template_path}. "
+                f"Please ensure the file exists and the path is correct."
+            )
 
     if config.engine_args.block_size is None:
         config.engine_args.block_size = 16
@@ -120,30 +180,18 @@ async def allocate_and_reserve_port(
     namespace: str,
     worker_id: str,
     reason: str,
+    port_range: DynamoPortRange,
 ) -> int:
     """
     Get an OS-assigned port and atomically reserve it.
-    Retries until successful or internal max attempts reached.
     """
-
-    context_json = {
-        "worker_id": worker_id,
-        "reason": reason,
-        "reserved_at": time.time(),
-        "pid": os.getpid(),
-        "block_size": 1,
-    }
-
-    # Any ephemeral port, equivalent to binding port 0
-    port_range_min = 32_768
-    port_range_max = 60_999
-    allocated_ports = await runtime.allocate_port_block(
-        namespace,
-        port_range_min,
-        port_range_max,
-        1,  # how many ports to allocate
-        json.dumps(context_json),
+    metadata = PortMetadata(worker_id=worker_id, reason=reason)
+    request = PortAllocationRequest(
+        metadata=metadata,
+        port_range=port_range,
+        block_size=1,
     )
+    allocated_ports = await allocate_and_reserve_port_block(runtime, namespace, request)
     if not allocated_ports:
         raise RuntimeError("allocate_port_block returned no ports")
     port = allocated_ports[0]
@@ -164,6 +212,7 @@ async def configure_ports(runtime: DistributedRuntime, config: Config):
         namespace=config.namespace,
         worker_id=f"{worker_id}",
         reason="zmq_kv_event_port",
+        port_range=config.port_range,
     )
 
     # Allocate side channel port
@@ -172,6 +221,7 @@ async def configure_ports(runtime: DistributedRuntime, config: Config):
         namespace=config.namespace,
         worker_id=f"{worker_id}",
         reason="nixl_side_channel_port",
+        port_range=config.port_range,
     )
 
     # Update config with allocated ports

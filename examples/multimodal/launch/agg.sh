@@ -8,6 +8,8 @@ trap 'echo Cleaning up...; kill 0' EXIT
 MODEL_NAME="llava-hf/llava-1.5-7b-hf"
 PROMPT_TEMPLATE="USER: <image>\n<prompt> ASSISTANT:"
 PROVIDED_PROMPT_TEMPLATE=""
+TOOL_CALL_PARSER=""
+CUSTOM_TEMPLATE=""
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -20,12 +22,30 @@ while [[ $# -gt 0 ]]; do
             PROVIDED_PROMPT_TEMPLATE=$2
             shift 2
             ;;
+        --dyn-tool-call-parser)
+            TOOL_CALL_PARSER=$2
+            shift 2
+            ;;
+        --custom-jinja-template)
+            CUSTOM_TEMPLATE=$2
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
-            echo "  --model <model_name> Specify the model to use (default: $MODEL_NAME)"
-            echo "  --prompt-template <template> Specify the multi-modal prompt template to use. LLaVA 1.5 7B, Qwen2.5-VL, and Phi3V models have predefined templates."
-            echo "  -h, --help           Show this help message"
+            echo "  --model <model_name>                Specify the model to use (default: $MODEL_NAME)"
+            echo "  --prompt-template <template>        Specify the multi-modal prompt template to use. LLaVA 1.5 7B, Qwen2.5-VL, and Phi3V models have predefined templates."
+            echo "  --dyn-tool-call-parser <parser>     Tool call parser name (e.g., hermes, llama3_json, etc.)"
+            echo "  --custom-jinja-template <path>      Path to custom Jinja chat template file"
+            echo "  -h, --help                          Show this help message"
+            echo ""
+            echo "Description:"
+            echo "  Simplified launch script that passes image URLs directly to the worker,"
+            echo "  skipping the separate encode worker to save GPU resources."
+            echo "  The worker uses its built-in vision encoder."
+            echo ""
+            echo "Tool Calling Example:"
+            echo "  $0 --model Qwen/Qwen2.5-VL-7B-Instruct --dyn-tool-call-parser hermes --custom-jinja-template tool_chat_template_hermes.jinja"
             exit 0
             ;;
         *)
@@ -52,15 +72,35 @@ else
     exit 1
 fi
 
-# run ingress
+# run frontend
 python -m dynamo.frontend --http-port=8000 &
 
 # run processor
-python3 components/processor.py --model $MODEL_NAME --prompt-template "$PROMPT_TEMPLATE" &
+PROCESSOR_ARGS=(
+    --model "$MODEL_NAME"
+    --prompt-template "$PROMPT_TEMPLATE"
+    --downstream-endpoint "dyn://dynamo.llm.generate"
+)
 
-# run E/P/D workers
-CUDA_VISIBLE_DEVICES=0 python3 components/encode_worker.py --model $MODEL_NAME &
-CUDA_VISIBLE_DEVICES=1 python3 components/worker.py --model $MODEL_NAME --worker-type prefill &
+# Add optional tool call parser if specified
+if [[ -n "$TOOL_CALL_PARSER" ]]; then
+    PROCESSOR_ARGS+=(--dyn-tool-call-parser "$TOOL_CALL_PARSER")
+fi
+
+# Add optional custom template if specified
+if [[ -n "$CUSTOM_TEMPLATE" ]]; then
+    PROCESSOR_ARGS+=(--custom-jinja-template "$CUSTOM_TEMPLATE")
+fi
+
+python3 components/processor.py "${PROCESSOR_ARGS[@]}" &
+
+# run worker
+CUDA_VISIBLE_DEVICES=0 python3 components/worker.py \
+    --model $MODEL_NAME \
+    --max-model-len 12000 \
+    --worker-type prefill &
+
+# chat template /workspace/tool_chat_template_hermes.jinja
 
 # Wait for all background processes to complete
 wait

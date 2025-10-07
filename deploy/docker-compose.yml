@@ -15,10 +15,8 @@
 
 # IMPORT NOTE: Make sure this is in sync with lib/runtime/docker-compose.yml
 networks:
-  server:
-    driver: bridge
-  monitoring:
-    driver: bridge
+  dynamo:
+     driver: bridge
 
 # Note that the images are pinned to specific versions to avoid breaking changes.
 services:
@@ -30,8 +28,7 @@ services:
       - 6222:6222
       - 8222:8222  # the endpoints include /varz, /healthz, ...
     networks:
-      - server
-      - monitoring
+      - dynamo
 
   etcd-server:
     image: bitnamilegacy/etcd:3.6.1
@@ -41,9 +38,7 @@ services:
       - 2379:2379  # this port exposes the /metrics endpoint
       - 2380:2380
     networks:
-      - server
-      - monitoring
-
+      - dynamo
   # All the services below are part of the metrics profile and monitoring network.
 
   # The exporter translates from /varz and other stats to Prometheus metrics
@@ -53,7 +48,7 @@ services:
     ports:
       - 7777:7777
     networks:
-      - monitoring
+      - dynamo
     profiles: [metrics]
     depends_on:
       - nats-server
@@ -84,7 +79,7 @@ services:
       - DCGM_EXPORTER_LISTEN=:9401
     runtime: nvidia  # Specify the NVIDIA runtime
     networks:
-      - monitoring
+      - dynamo
 
   # To access Prometheus from another machine, you may need to disable te firewall on your host. On Ubuntu:
   # sudo ufw allow 9090/tcp
@@ -104,7 +99,7 @@ services:
     # Example to pull from the /query endpoint:
     # {__name__=~"DCGM.*", job="dcgm-exporter"}
     networks:
-      - monitoring
+      - dynamo
     ports:
       - "9090:9090"
     profiles: [metrics]
@@ -143,7 +138,7 @@ services:
     ports:
       - "3001:3001"
     networks:
-      - monitoring
+      - dynamo
     profiles: [metrics]
     depends_on:
       - prometheus

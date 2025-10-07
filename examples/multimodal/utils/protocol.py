@@ -23,12 +23,14 @@ from pydantic_core import core_schema
 from typing_extensions import NotRequired
 from vllm.inputs.data import TokensPrompt
 from vllm.multimodal.inputs import MultiModalUUIDDict  # noqa: F401
+from vllm.multimodal.inputs import MultiModalDataDict  # noqa: F401
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import PromptLogprobs, RequestMetrics
 
 import dynamo.nixl_connect as connect
 
+from vllm.multimodal.inputs import MultiModalUUIDDict  # noqa: F401
 
 class Request(BaseModel):
     prompt: str
@@ -123,6 +125,15 @@ MessageContent = Union[TextContent, ImageContent, VideoContent]
 class ChatMessage(BaseModel):
     role: Literal["user", "system", "assistant"]
     content: List[MessageContent]
+    
+    @field_validator("content", mode="before")
+    @classmethod
+    def convert_string_content_to_list(cls, v):
+        """Convert string content to list format for compatibility with OpenAI API"""
+        if isinstance(v, str):
+            # Convert plain string to TextContent in a list
+            return [{"type": "text", "text": v}]
+        return v
 
 
 class MultiModalRequest(BaseModel):
@@ -132,6 +143,8 @@ class MultiModalRequest(BaseModel):
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
     stream: Optional[bool] = True
+    tools: Optional[List[Any]] = None
+    tool_choice: Optional[Any] = None
 
 
 class MultiModalInput(BaseModel):

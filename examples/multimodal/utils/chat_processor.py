@@ -146,6 +146,11 @@ class ChatProcessor:
         else:
             chat_template = request.chat_template or self.tokenizer.chat_template
 
+        # Convert tools to dict format if present
+        tool_dicts = None
+        if request.tools:
+            tool_dicts = [tool.model_dump() if hasattr(tool, 'model_dump') else tool for tool in request.tools]
+
         (
             conversation,
             request_prompts,
@@ -158,7 +163,7 @@ class ChatProcessor:
             chat_template_content_format=self.openai_serving.chat_template_content_format,
             add_generation_prompt=request.add_generation_prompt,
             continue_final_message=request.continue_final_message,
-            tool_dicts=None,
+            tool_dicts=tool_dicts,
             documents=request.documents,
             chat_template_kwargs=request.chat_template_kwargs,
             tool_parser=self.openai_serving.tool_parser,
