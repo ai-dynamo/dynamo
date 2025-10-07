@@ -30,6 +30,8 @@ import re
 
 import uvloop
 
+from dynamo.common.config_dump import dump_config
+from dynamo.common.config_dump.config_dumper import add_config_dump_args
 from dynamo.llm import (
     EngineType,
     EntrypointArgs,
@@ -207,6 +209,7 @@ def parse_args():
         default=False,
         help="Start KServe gRPC server.",
     )
+    add_config_dump_args(parser)
 
     flags = parser.parse_args()
 
@@ -220,6 +223,7 @@ def parse_args():
 
 async def async_main():
     flags = parse_args()
+    dump_config(flags.dump_config_to, flags)
     is_static = bool(flags.static_endpoint)  # true if the string has a value
 
     # Configure Dynamo frontend HTTP service metrics prefix

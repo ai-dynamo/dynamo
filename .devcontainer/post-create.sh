@@ -123,7 +123,7 @@ else
     echo "⚠️ SSH agent forwarding not configured - SSH_AUTH_SOCK is not set"
 fi
 
-show_and_run $DYNAMO_HOME/deploy/dynamo_check.py
+show_and_run $DYNAMO_HOME/deploy/sanity_check.py
 
 cat <<EOF
 
