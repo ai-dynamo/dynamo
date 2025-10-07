@@ -69,76 +69,39 @@ FIELD_BUILD_SIZE_BYTES = "l_build_size_bytes"
 
 class BuildMetricsReader:
     """Reader for build metrics from environment variables and artifacts"""
-    
+
     @staticmethod
-    def get_build_metrics() -> Optional[Dict[str, Any]]:
-        """Get build metrics from environment variables and artifacts"""
-        build_metrics = {}
-        
-        # Try to read from environment variables first
-        env_metrics = {
-            'framework': os.getenv('BUILD_FRAMEWORK'),
-            'target': os.getenv('BUILD_TARGET'),
-            'build_duration_sec': os.getenv('BUILD_DURATION_SEC'),
-            'image_size_bytes': os.getenv('IMAGE_SIZE_BYTES'),
-            'build_start_time': os.getenv('BUILD_START_TIME'),
-            'build_end_time': os.getenv('BUILD_END_TIME'),
-        }
-        
-        # Try to read from artifact file
-        artifact_metrics = {}
-        try:
-            if os.path.exists('build-metrics/metrics.json'):
-                with open('build-metrics/metrics.json', 'r') as f:
-                    artifact_metrics = json.load(f)
-                    print(f"📁 Loaded build metrics from artifact: {artifact_metrics}")
-        except Exception as e:
-            print(f"⚠️  Could not read build metrics artifact: {e}")
-        
-        # Merge metrics (environment variables take precedence)
-        for key, value in artifact_metrics.items():
-            if value is not None:
-                build_metrics[key] = value
-        
-        for key, value in env_metrics.items():
-            if value is not None and value != '':
-                build_metrics[key] = value
-        
-        # Convert types
-        if 'build_duration_sec' in build_metrics:
+    def _process_artifact_metrics(artifact_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Process and clean up artifact metrics data"""
+        # Convert types (same as in get_build_metrics)
+        if 'build_duration_sec' in artifact_metrics:
             try:
-                build_metrics['build_duration_sec'] = int(build_metrics['build_duration_sec'])
+                artifact_metrics['build_duration_sec'] = int(artifact_metrics['build_duration_sec'])
             except (ValueError, TypeError):
-                build_metrics['build_duration_sec'] = 0
+                artifact_metrics['build_duration_sec'] = 0
         
-        if 'image_size_bytes' in build_metrics:
+        if 'image_size_bytes' in artifact_metrics:
             try:
-                build_metrics['image_size_bytes'] = int(build_metrics['image_size_bytes'])
+                artifact_metrics['image_size_bytes'] = int(artifact_metrics['image_size_bytes'])
             except (ValueError, TypeError):
-                build_metrics['image_size_bytes'] = 0
-        
+                artifact_metrics['image_size_bytes'] = 0
         
         # Convert Unix timestamps to ISO format if needed
         for time_field in ['build_start_time', 'build_end_time']:
-            if time_field in build_metrics and build_metrics[time_field]:
-                time_value = build_metrics[time_field]
-                # If it's a Unix timestamp (all digits), convert to ISO
+            if time_field in artifact_metrics and artifact_metrics[time_field]:
+                time_value = artifact_metrics[time_field]
                 if isinstance(time_value, (int, float)) or (isinstance(time_value, str) and time_value.isdigit()):
                     try:
                         timestamp = float(time_value)
-                        build_metrics[time_field] = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+                        artifact_metrics[time_field] = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
                     except (ValueError, OSError):
                         pass  # Keep original value if conversion fails
         
-        return build_metrics if build_metrics else None
+        return artifact_metrics
 
     @staticmethod
     def get_build_metrics_for_job(job_name: str) -> Optional[Dict[str, Any]]:
         """Get build metrics for a specific job by looking for framework-specific artifacts"""
-        # First try the general method (for backward compatibility)
-        build_metrics = BuildMetricsReader.get_build_metrics()
-        if build_metrics:
-            return build_metrics
         
         # Determine framework from job name
         framework = None
@@ -159,8 +122,39 @@ class BuildMetricsReader:
         if 'arm64' in job_name_lower:
             preferred_arch = 'arm64'
         
-        # Try to read framework-specific artifact
-        # First try the preferred architecture
+        # Try to read consolidated metrics file first
+        consolidated_path = 'build-metrics/consolidated-metrics.json'
+        if os.path.exists(consolidated_path):
+            try:
+                with open(consolidated_path, 'r') as f:
+                    all_metrics = json.load(f)
+                
+                # Look for job-specific metrics
+                # Try preferred architecture first
+                job_key = f"{framework}-{preferred_arch}"
+                if job_key in all_metrics:
+                    print(f"📁 Loaded {framework} ({preferred_arch}) build metrics from consolidated file")
+                    return BuildMetricsReader._process_artifact_metrics(all_metrics[job_key])
+                
+                # Try other architecture
+                other_arch = 'arm64' if preferred_arch == 'amd64' else 'amd64'
+                job_key = f"{framework}-{other_arch}"
+                if job_key in all_metrics:
+                    print(f"📁 Loaded {framework} ({other_arch}) build metrics from consolidated file")
+                    return BuildMetricsReader._process_artifact_metrics(all_metrics[job_key])
+                
+                # Try just framework name (backward compatibility)
+                if framework in all_metrics:
+                    print(f"📁 Loaded {framework} build metrics from consolidated file (legacy key)")
+                    return BuildMetricsReader._process_artifact_metrics(all_metrics[framework])
+                
+                print(f"⚠️  No metrics found for {framework} in consolidated file. Available keys: {list(all_metrics.keys())}")
+                
+            except Exception as e:
+                print(f"❌ Error reading consolidated build metrics: {e}")
+        
+        # Fallback to individual file approach for backward compatibility
+        # Try framework-specific artifact
         artifact_path = f'build-metrics/metrics-{framework}-{preferred_arch}.json'
         if not os.path.exists(artifact_path):
             # Try the other architecture
@@ -177,33 +171,8 @@ class BuildMetricsReader:
             try:
                 with open(artifact_path, 'r') as f:
                     artifact_metrics = json.load(f)
-                    print(f"📁 Loaded {framework} build metrics from {artifact_path}: {artifact_metrics}")
-                    
-                    # Convert types (same as in get_build_metrics)
-                    if 'build_duration_sec' in artifact_metrics:
-                        try:
-                            artifact_metrics['build_duration_sec'] = int(artifact_metrics['build_duration_sec'])
-                        except (ValueError, TypeError):
-                            artifact_metrics['build_duration_sec'] = 0
-                    
-                    if 'image_size_bytes' in artifact_metrics:
-                        try:
-                            artifact_metrics['image_size_bytes'] = int(artifact_metrics['image_size_bytes'])
-                        except (ValueError, TypeError):
-                            artifact_metrics['image_size_bytes'] = 0
-                    
-                    # Convert Unix timestamps to ISO format if needed
-                    for time_field in ['build_start_time', 'build_end_time']:
-                        if time_field in artifact_metrics and artifact_metrics[time_field]:
-                            time_value = artifact_metrics[time_field]
-                            if isinstance(time_value, (int, float)) or (isinstance(time_value, str) and time_value.isdigit()):
-                                try:
-                                    timestamp = float(time_value)
-                                    artifact_metrics[time_field] = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
-                                except (ValueError, OSError):
-                                    pass
-                    
-                    return artifact_metrics
+                    print(f"📁 Loaded {framework} build metrics from individual file {artifact_path}")
+                    return BuildMetricsReader._process_artifact_metrics(artifact_metrics)
             except Exception as e:
                 print(f"⚠️  Could not read {framework} build metrics from {artifact_path}: {e}")
         

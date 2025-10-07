@@ -238,9 +238,8 @@ jobs:
       - name: Download build metrics
         uses: actions/download-artifact@v4
         with:
-          pattern: build-metrics-*
+          name: build-metrics-consolidated
           path: build-metrics/
-          merge-multiple: true
         continue-on-error: true  # Don't fail if artifacts don't exist
 
       - name: Upload Complete Workflow Metrics
