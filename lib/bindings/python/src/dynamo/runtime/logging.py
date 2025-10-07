@@ -232,11 +232,12 @@ def configure_trtllm_logging(dyn_level: int):
     importing tensorrt_llm to ensure it takes effect. This function is kept for
     consistency with other backend logging configuration.
     """
+def configure_trtllm_logging(dyn_level: int):
     # Only set TLLM_LOG_LEVEL if it's not already set
     # This allows users to override it explicitly if needed
     if "TLLM_LOG_LEVEL" not in os.environ:
-        dyn_log = os.environ.get("DYN_LOG", "info")
-        tllm_level = map_dyn_log_to_tllm_level(dyn_log)
+        dyn_level_name = logging.getLevelName(dyn_level)
+        tllm_level = map_dyn_log_to_tllm_level(dyn_level_name)
         os.environ["TLLM_LOG_LEVEL"] = tllm_level
         logging.debug(f"Set TLLM_LOG_LEVEL to {tllm_level} based on DYN_LOG")
 
