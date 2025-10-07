@@ -41,8 +41,8 @@ spec:
 
       containers:
       - name: epp
-        image: {{ if .Values.eppAware.enabled }}{{ default .Values.extension.image .Values.eppAware.eppImage }}{{ else }}{{ .Values.extension.image }}{{ end }}
-        imagePullPolicy: {{ .Values.epp.imagePullPolicy | default "IfNotPresent" }}
+        image: "{{ if .Values.eppAware.enabled }}{{ default .Values.extension.image .Values.eppAware.eppImage }}{{ else }}{{ .Values.extension.image }}{{ end }}"
+        imagePullPolicy: {{ default "IfNotPresent" .Values.epp.imagePullPolicy }}
         args:
         {{- if .Values.epp.argsOverride }}
         {{- toYaml .Values.epp.argsOverride | nindent 8 }}
@@ -64,22 +64,43 @@ spec:
           - "/etc/epp/epp-config-dynamo.yaml"
         {{- end }}
         {{- end }}
+
+        {{- $platformNs := default .Release.Namespace .Values.platformNamespace -}}
+        {{- $platformName := default "dynamo-platform" .Values.platformReleaseName -}}
+        {{- $ns := required "set eppAware.dynamoNamespace via values" .Values.eppAware.dynamoNamespace -}}
+        {{- $comp := default "backend" .Values.eppAware.dynamoComponent -}}
+        {{- $kv := default "16" .Values.eppAware.dynamoKvBlockSize -}}
+
         {{- if .Values.eppAware.enabled }}
         volumeMounts:
-            - name: epp-config
-              mountPath: /etc/epp
-              readOnly: true
+          - name: epp-config
+            mountPath: /etc/epp
+            readOnly: true
         {{- end }}
+
         env:
+        {{- if .Values.eppAware.enabled }}
+          - name: ETCD_ENDPOINTS
+            value: "{{ $platformName }}-etcd.{{ $platformNs }}:2379"
+          - name: NATS_SERVER
+            value: "nats://{{ $platformName }}-nats.{{ $platformNs }}:4222"
+          - name: DYNAMO_NAMESPACE
+            value: "{{ $ns }}"
+          - name: DYNAMO_COMPONENT
+            value: "{{ $comp }}"
+          - name: DYNAMO_KV_BLOCK_SIZE
+            value: "{{ $kv }}"
+        {{- end }}
         {{- range .Values.epp.extraEnv }}
           - name: {{ .name }}
             value: {{ .value | quote }}
         {{- end }}
+
         ports:
-        - containerPort: 9002
-        - containerPort: 9003
-        - name: metrics
-          containerPort: 9090
+          - containerPort: 9002
+          - containerPort: 9003
+          - name: metrics
+            containerPort: 9090
         livenessProbe:
           grpc:
             port: 9003
@@ -93,27 +114,6 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 10
 
-      {{- if .Values.eppAware.enabled }}
-      - name: {{ .Values.eppAware.sidecar.name }}
-        image: {{ .Values.eppAware.sidecar.image }}
-        imagePullPolicy: {{ .Values.eppAware.sidecar.imagePullPolicy | default "IfNotPresent" }}
-        command: {{- toYaml .Values.eppAware.sidecar.command | nindent 8 }}
-        args: {{- toYaml .Values.eppAware.sidecar.args | nindent 8 }}
-        env:
-        {{- range .Values.eppAware.sidecar.env }}
-          {{- if .valueFromDynamoNamespace }}
-          - name: {{ .name }}
-            value: "{{ $.Values.dynamoNamespace }}"
-          {{- else }}
-          - name: {{ .name }}
-            value: {{ .value | quote }}
-          {{- end }}
-        {{- end }}
-        ports:
-        {{- toYaml .Values.eppAware.sidecar.ports | nindent 8 }}
-        resources:
-        {{- toYaml .Values.eppAware.sidecar.resources | nindent 10 }}
-      {{- end }}
       {{- if .Values.eppAware.enabled }}
       volumes:
         - name: epp-config
