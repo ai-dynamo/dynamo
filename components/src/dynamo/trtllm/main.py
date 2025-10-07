@@ -23,6 +23,7 @@ from torch.cuda import device_count
 from transformers import AutoConfig
 
 import dynamo.nixl_connect as nixl_connect
+from dynamo.common.config_dump import dump_config
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -269,6 +270,10 @@ async def init(runtime: DistributedRuntime, config: Config):
     logging.info("Initializing NIXL Connect.")
     connector = nixl_connect.Connector()
     await connector.initialize()
+
+    dump_config(
+        config.dump_config_to, {"engine_args": engine_args, "dynamo_args": config}
+    )
 
     async with get_llm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)

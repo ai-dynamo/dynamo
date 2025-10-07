@@ -101,3 +101,6 @@ TensorRT-LLM
 
 # Benchmarks
 benchmarks/results
+
+# Direnv
+.envrc
