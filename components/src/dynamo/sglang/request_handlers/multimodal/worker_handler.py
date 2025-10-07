@@ -12,11 +12,11 @@ import torch
 import dynamo.nixl_connect as connect
 from dynamo._core import Client, Component
 from dynamo.sglang.args import Config, DisaggregationMode
-from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
-from dynamo.sglang.utils.multimodal_protocol import (
+from dynamo.sglang.protocol import (
     DisaggSglangMultimodalRequest,
     SglangMultimodalRequest,
 )
+from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 logger = logging.getLogger(__name__)
 
