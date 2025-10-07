@@ -236,49 +236,49 @@ mod tests {
         // Test will call both reasoning parsing logic and tool calling parsing logic and verify the output
 
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-        // Load test data from file
-        let file_path = format!(
-            "{}/vllm/gpt-oss-20b/chat_completion_stream_49f581c1-no-tool.json",
-            DATA_ROOT_PATH
-        );
-        let test_data = load_test_data(&file_path);
+            // Load test data from file
+            let file_path = format!(
+                "{}/vllm/gpt-oss-20b/chat_completion_stream_49f581c1-no-tool.json",
+                DATA_ROOT_PATH
+            );
+            let test_data = load_test_data(&file_path);
 
-        // Create a stream from the mock chunks
-        let input_stream = stream::iter(test_data.stream_chunks);
+            // Create a stream from the mock chunks
+            let input_stream = stream::iter(test_data.stream_chunks);
 
-        // Parse the response stream with reasoning and tool parsing enabled
-        let output_chunks = parse_response_stream(
-            input_stream,
-            true,
-            true,
-            Some("harmony".to_string()),
-            Some("gpt_oss".to_string()),
-        )
-        .await;
+            // Parse the response stream with reasoning and tool parsing enabled
+            let output_chunks = parse_response_stream(
+                input_stream,
+                true,
+                true,
+                Some("harmony".to_string()),
+                Some("gpt_oss".to_string()),
+            )
+            .await;
 
-        // Verify we got output chunks
-        assert!(!output_chunks.is_empty(), "Should have output chunks");
+            // Verify we got output chunks
+            assert!(!output_chunks.is_empty(), "Should have output chunks");
 
-        // Aggregate content from all chunks
-        let aggregated = aggregate_content_from_chunks(&output_chunks);
+            // Aggregate content from all chunks
+            let aggregated = aggregate_content_from_chunks(&output_chunks);
 
-        // Verify against expected content from test file
-        assert_eq!(
-            aggregated.reasoning_content, test_data.expected_reasoning_content,
-            "Reasoning content should match expected value"
-        );
+            // Verify against expected content from test file
+            assert_eq!(
+                aggregated.reasoning_content, test_data.expected_reasoning_content,
+                "Reasoning content should match expected value"
+            );
 
-        assert_eq!(
-            aggregated.normal_content, test_data.expected_normal_content,
-            "Normal content should match expected value"
-        );
+            assert_eq!(
+                aggregated.normal_content, test_data.expected_normal_content,
+                "Normal content should match expected value"
+            );
 
-        // Verify tool calls match expectations
-        let expected_has_tool_calls = !test_data.expected_tool_calls.is_empty();
-        assert_eq!(
-            aggregated.has_tool_calls, expected_has_tool_calls,
-            "Tool calls presence should match expected value"
-        );
+            // Verify tool calls match expectations
+            let expected_has_tool_calls = !test_data.expected_tool_calls.is_empty();
+            assert_eq!(
+                aggregated.has_tool_calls, expected_has_tool_calls,
+                "Tool calls presence should match expected value"
+            );
         });
     }
 
