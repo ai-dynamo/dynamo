@@ -27,16 +27,23 @@ RUN apt-get update && \
 
 WORKDIR /workspace/dynamo
 
-ENV VIRTUAL_ENV=/workspace/dynamo/.venv
-RUN uv venv $VIRTUAL_ENV --python 3.12
+# Copy pyproject.toml first for better layer caching
+COPY pyproject.toml .
 
-RUN --mount=type=bind,source=./container/deps/requirements.docs.txt,target=requirements.txt \
-    uv pip install --requirement requirements.txt
+# Create venv and install docs dependencies from dependency group
+# Note: We use `uv pip install --group` instead of `uv run --only-group` because
+# uv run always tries to resolve project dependencies (including ai-dynamo-runtime),
+# even with --only-group flag. Using a dedicated venv lets us build the docs without
+# needing to build the runtime first.
+ENV VIRTUAL_ENV=/workspace/dynamo/.venv-docs
+RUN uv venv $VIRTUAL_ENV --python 3.12 && \
+    uv pip install --python $VIRTUAL_ENV --group docs
 
 # Set visitor script to be included on every HTML page
 ENV VISITS_COUNTING_SCRIPT="//assets.adobedtm.com/b92787824f2e0e9b68dc2e993f9bd995339fe417/satelliteLib-7ba51e58dc61bcb0e9311aadd02a0108ab24cc6c.js"
 
+# Copy the rest of the code
 COPY . /workspace/dynamo
 
-RUN . .venv/bin/activate && \
-    python3 docs/generate_docs.py
+# Run docs generation using uv run with the docs venv
+RUN uv run --python .venv-docs docs/generate_docs.py
