@@ -34,7 +34,7 @@ use crate::{
     discovery::Lease,
     metrics::{MetricsRegistry, prometheus_names},
     service::ServiceSet,
-    transports::etcd::EtcdPath,
+    transports::etcd::{ETCD_ROOT_PATH, EtcdPath},
 };
 
 use super::{
@@ -72,10 +72,7 @@ pub use client::{Client, InstanceSource};
 
 /// The root etcd path where each instance registers itself in etcd.
 /// An instance is namespace+component+endpoint+lease_id and must be unique.
-pub const INSTANCE_ROOT_PATH: &str = "instances";
-
-/// The root etcd path where each namespace is registered in etcd.
-pub const ETCD_ROOT_PATH: &str = "dynamo://";
+pub const INSTANCE_ROOT_PATH: &str = "v1/instances";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -601,7 +598,7 @@ impl Namespace {
     }
 
     pub fn etcd_path(&self) -> String {
-        format!("{}{}", ETCD_ROOT_PATH, self.name())
+        format!("{ETCD_ROOT_PATH}{}", self.name())
     }
 
     pub fn name(&self) -> String {

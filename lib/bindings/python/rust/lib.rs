@@ -594,7 +594,7 @@ fn bind_tcp_port(port: u16) -> std::io::Result<socket2::Socket> {
 }
 
 fn make_port_key(namespace: &str, node_ip: IpAddr, port: u16) -> anyhow::Result<String> {
-    Ok(format!("dyn://{namespace}/ports/{node_ip}/{port}"))
+    Ok(format!("v1/{namespace}/ports/{node_ip}/{port}"))
 }
 
 fn local_ip() -> Result<IpAddr, local_ip_address::Error> {

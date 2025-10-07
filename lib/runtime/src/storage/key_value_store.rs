@@ -252,7 +252,7 @@ mod tests {
     use super::*;
     use futures::{StreamExt, pin_mut};
 
-    const BUCKET_NAME: &str = "mdc";
+    const BUCKET_NAME: &str = "v1/mdc";
 
     /// Convert the value returned by `watch()` into a broadcast stream that multiple
     /// clients can listen to.

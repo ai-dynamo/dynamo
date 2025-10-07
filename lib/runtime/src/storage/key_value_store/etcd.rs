@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::time::Duration;
 
-use crate::{slug::Slug, storage::key_value_store::Key, transports::etcd::Client};
+use crate::{storage::key_value_store::Key, transports::etcd::Client};
 use async_stream::stream;
 use async_trait::async_trait;
 use etcd_client::{Compare, CompareOp, EventType, PutOptions, Txn, TxnOp, WatchOptions};
@@ -240,7 +240,7 @@ impl EtcdBucket {
 }
 
 fn make_key(bucket_name: &str, key: &Key) -> String {
-    [Slug::slugify(bucket_name).to_string(), key.to_string()].join("/")
+    [bucket_name.to_string(), key.to_string()].join("/")
 }
 
 #[cfg(feature = "integration")]

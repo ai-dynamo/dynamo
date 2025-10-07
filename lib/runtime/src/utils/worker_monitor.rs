@@ -94,7 +94,7 @@ impl WorkerMonitor {
         // That means we cannot use ModelDeploymentCard, so use serde_json::Value for now .
         let runtime_configs_watcher = watch_prefix_with_extraction(
             etcd_client,
-            "mdc/", // should be model_card::ROOT_PREFIX but wrong crate
+            "v1/mdc/", // should be model_card::ROOT_PREFIX but wrong crate
             key_extractors::lease_id,
             |card: serde_json::Value| {
                 card.get("runtime_config")
