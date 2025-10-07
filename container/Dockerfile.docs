@@ -44,4 +44,4 @@ ENV VISITS_COUNTING_SCRIPT="//assets.adobedtm.com/b92787824f2e0e9b68dc2e993f9bd9
 COPY . /workspace/dynamo
 
 # Run docs generation using uv run with the docs venv
-RUN uv run --python .venv-docs docs/generate_docs.py
+RUN uv run --python .venv-docs --no-project docs/generate_docs.py

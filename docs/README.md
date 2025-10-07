@@ -19,7 +19,7 @@ uv venv .venv-docs
 uv pip install --python .venv-docs --group docs
 
 # Generate documentation
-uv run --python .venv-docs docs/generate_docs.py
+uv run --python .venv-docs --no-project docs/generate_docs.py
 ```
 
 The generated HTML will be available in `docs/build/html/`.
