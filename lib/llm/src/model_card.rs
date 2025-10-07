@@ -34,7 +34,7 @@ use crate::gguf::{Content, ContentConfig, ModelConfigLike};
 use crate::protocols::TokenIdType;
 
 /// Identify model deployment cards in the key-value store
-pub const ROOT_PATH: &str = "mdc";
+pub const ROOT_PATH: &str = "v1/mdc";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]

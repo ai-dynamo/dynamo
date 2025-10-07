@@ -70,7 +70,7 @@ where
 /// // Watch for ModelDeploymentCard objects and extract runtime_config field
 /// let watcher = watch_prefix_with_extraction(
 ///     etcd_client,
-///     "mdc/",
+///     "v1/mdc/",
 ///     |kv| Some(kv.lease()),  // Use lease_id as key
 ///     |card: ModelDeploymentCard| card.runtime_config,  // Extract runtime_config field
 ///     cancellation_token,

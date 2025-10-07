@@ -318,7 +318,6 @@ impl ModelWatcher {
                 namespace = endpoint_id.namespace,
                 "New endpoint for existing model"
             );
-            //self.notify_on_model.notify_waiters();
             return Ok(());
         }
 
@@ -413,7 +412,7 @@ impl ModelWatcher {
             .await?;
             let engine = Arc::new(push_router);
             self.manager
-                .add_embeddings_model(&model_entry.name, engine)?;
+                .add_embeddings_model(card.name(), checksum, engine)?;
         } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
             // Case 3: Text + Chat
             let push_router = PushRouter::<
@@ -560,26 +559,20 @@ impl ModelWatcher {
 /// The ModelDeploymentCard is published in etcd with a key like "v1/mdc/dynamo/backend/generate/694d9981145a61ad".
 /// Extract the EndpointId and instance_id from that.
 fn etcd_key_extract(s: &str) -> anyhow::Result<(EndpointId, String)> {
+    if !s.starts_with(model_card::ROOT_PATH) {
+        anyhow::bail!("Invalid format: expected model card ROOT_PATH segment in {s}");
+    }
     let parts: Vec<&str> = s.split('/').collect();
-    let start_idx = if !parts.is_empty() && parts[0] == "v1" {
-        1
-    } else {
-        0
-    };
 
-    // Need at least prefix model_card::ROOT_PATH + 3 parts: namespace, component, name
-    if parts.len() <= start_idx + 3 {
+    // Need at least prefix model_card::ROOT_PATH (2 parts) + namespace, component, name (3 parts)
+    if parts.len() <= 5 {
         anyhow::bail!("Invalid format: not enough path segments in {s}");
     }
 
-    if parts.get(start_idx) != Some(&model_card::ROOT_PATH) {
-        anyhow::bail!("Invalid format: expected model card ROOT_PATH segment in {s}");
-    }
-
     let endpoint_id = EndpointId {
-        namespace: parts[start_idx + 1].to_string(),
-        component: parts[start_idx + 2].to_string(),
-        name: parts[start_idx + 3].to_string(),
+        namespace: parts[2].to_string(),
+        component: parts[3].to_string(),
+        name: parts[4].to_string(),
     };
     Ok((endpoint_id, parts[parts.len() - 1].to_string()))
 }
@@ -590,16 +583,6 @@ mod tests {
 
     #[test]
     fn test_etcd_key_extract() {
-        let input = format!(
-            "v1/{}/dynamo/backend/generate/694d9981145a61ad",
-            model_card::ROOT_PATH
-        );
-        let (endpoint_id, instance_id) = etcd_key_extract(&input).unwrap();
-        assert_eq!(endpoint_id.namespace, "dynamo");
-        assert_eq!(endpoint_id.component, "backend");
-        assert_eq!(endpoint_id.name, "generate");
-        assert_eq!(instance_id, "694d9981145a61ad");
-
         let input = format!(
             "{}/dynamo/backend/generate/694d9981145a61ad",
             model_card::ROOT_PATH
