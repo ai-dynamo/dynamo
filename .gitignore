@@ -68,6 +68,7 @@ llm_engine.h
 
 ### Virtual Environment ###
 .venv/
+.venv-docs/
 
 ### Ruff ###
 .ruff_cache/
@@ -101,3 +102,6 @@ TensorRT-LLM
 # Benchmarks
 benchmarks/results
 profiling_results*
+
+# Direnv
+.envrc

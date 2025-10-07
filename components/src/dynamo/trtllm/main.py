@@ -8,6 +8,17 @@ import os
 import signal
 import sys
 
+# Configure TLLM_LOG_LEVEL before importing tensorrt_llm
+# This must happen before any tensorrt_llm imports
+if "TLLM_LOG_LEVEL" not in os.environ and os.getenv(
+    "DYN_SKIP_TRTLLM_LOG_FORMATTING"
+) not in ("1", "true", "TRUE"):
+    # This import is safe because it doesn't trigger tensorrt_llm imports
+    from dynamo.runtime.logging import map_dyn_log_to_tllm_level
+
+    dyn_log = os.environ.get("DYN_LOG", "info")
+    tllm_level = map_dyn_log_to_tllm_level(dyn_log)
+    os.environ["TLLM_LOG_LEVEL"] = tllm_level
 import uvloop
 from tensorrt_llm.llmapi import (
     BuildConfig,
@@ -23,6 +34,7 @@ from torch.cuda import device_count
 from transformers import AutoConfig
 
 import dynamo.nixl_connect as nixl_connect
+from dynamo.common.config_dump import dump_config
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -269,6 +281,10 @@ async def init(runtime: DistributedRuntime, config: Config):
     logging.info("Initializing NIXL Connect.")
     connector = nixl_connect.Connector()
     await connector.initialize()
+
+    dump_config(
+        config.dump_config_to, {"engine_args": engine_args, "dynamo_args": config}
+    )
 
     async with get_llm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)

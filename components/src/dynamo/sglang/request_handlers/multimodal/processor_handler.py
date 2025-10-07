@@ -11,16 +11,16 @@ from transformers import AutoTokenizer
 
 from dynamo._core import Client, Component
 from dynamo.sglang.args import Config
-from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
-from dynamo.sglang.utils.multimodal_chat_processor import (
+from dynamo.sglang.multimodal_utils import (
     multimodal_request_to_sglang,
     process_sglang_stream_response,
 )
-from dynamo.sglang.utils.multimodal_protocol import (
+from dynamo.sglang.protocol import (
     MultiModalInput,
     MultiModalRequest,
     SglangMultimodalRequest,
 )
+from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 logger = logging.getLogger(__name__)
 

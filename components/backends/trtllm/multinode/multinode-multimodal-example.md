@@ -17,6 +17,27 @@ limitations under the License.
 
 # Example: Multi-node TRTLLM Workers with Dynamo on Slurm for multimodal models
 
+> [!IMPORTANT]
+> There are some known issues in tensorrt_llm==1.1.0rc5 version for multinode multimodal support. It is important to rebuild the dynamo container with a specific version of tensorrt_llm commit to use multimodal feature.
+>
+> **Build Container**
+> ```bash
+> ./container/build.sh --framework trtllm --tensorrtllm-commit b4065d8ca64a64eee9fdc64b39cb66d73d4be47c
+> ```
+>
+> **Run Container**
+> ```bash
+> ./container/run.sh --framework trtllm -it
+> ```
+>
+> **Update Engine Configuration Files**
+>
+> Before running the deployment, you must update the engine configuration files to change `backend: DEFAULT` to `backend: default` (lowercase). Run the following command:
+> ```bash
+> sed -i 's/backend: DEFAULT/backend: default/g' /mnt/engine_configs/multimodal/llama4/prefill.yaml /mnt/engine_configs/multimodal/llama4/decode.yaml
+> ```
+
+
 This guide demonstrates how to deploy large multimodal models that require a multi-node setup. It builds on the general multi-node deployment process described in the main [multinode-examples.md](./multinode-examples.md) guide.
 
 Before you begin, ensure you have completed the initial environment configuration by following the **Setup** section in that guide.
