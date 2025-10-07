@@ -68,6 +68,7 @@ class RequestHandlerConfig:
     disaggregation_mode: DisaggregationMode
     disaggregation_strategy: DisaggregationStrategy
     next_client: object
+    next_router_client: Optional[object] = None
     encode_client: Optional[object] = None
     multimodal_processor: Optional[
         MultimodalRequestProcessor
@@ -88,6 +89,7 @@ class HandlerBase:
         self.disaggregation_mode = config.disaggregation_mode
         self.disaggregation_strategy = config.disaggregation_strategy
         self.next_client = config.next_client
+        self.next_router_client = config.next_router_client
         self.encode_client = config.encode_client
         self.multimodal_processor = config.multimodal_processor
         self.first_generation = True

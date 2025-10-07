@@ -127,6 +127,22 @@ async def init(runtime: DistributedRuntime, config: Config):
             .client()
         )
 
+    # Set up prefill router client for decode workers
+    next_router_client = None
+    if config.disaggregation_mode.value == "decode":
+        try:
+            logging.info("Initializing prefill router client")
+            next_router_client = (
+                await runtime.namespace(config.namespace)
+                .component("router")  # Standalone router for prefill workers
+                .endpoint("generate")
+                .client()
+            )
+            logging.info("Prefill router client initialized successfully")
+        except Exception as e:
+            logging.warning(f"Failed to initialize prefill router client: {e}")
+            logging.info("Will use direct prefill worker client only")
+
     encode_client = None
     if config.encode_endpoint:
         logging.info(
@@ -318,6 +334,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             disaggregation_mode=config.disaggregation_mode,
             disaggregation_strategy=config.disaggregation_strategy,
             next_client=next_client,
+            next_router_client=next_router_client,
             encode_client=encode_client,
             multimodal_processor=multimodal_processor,
             connector=connector,

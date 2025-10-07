@@ -85,6 +85,10 @@ pub struct LLMEngineOutput {
     // Index field for batch requests to match OpenAI format
     pub index: Option<u32>,
 
+    /// Disaggregated execution parameters (for prefill/decode separation)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disaggregated_params: Option<serde_json::Value>,
+
     /// Additional arguments for extensibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
@@ -101,6 +105,7 @@ impl LLMEngineOutput {
             top_logprobs: None,
             finish_reason: Some(FinishReason::Cancelled),
             index: None,
+            disaggregated_params: None,
             extra_args: None,
         }
     }
@@ -115,6 +120,7 @@ impl LLMEngineOutput {
             finish_reason: Some(FinishReason::Stop),
             top_logprobs: None,
             index: None,
+            disaggregated_params: None,
             extra_args: None,
         }
     }
@@ -129,6 +135,7 @@ impl LLMEngineOutput {
             top_logprobs: None,
             finish_reason: Some(FinishReason::Length),
             index: None,
+            disaggregated_params: None,
             extra_args: None,
         }
     }
@@ -143,6 +150,7 @@ impl LLMEngineOutput {
             top_logprobs: None,
             finish_reason: Some(FinishReason::Error(err_msg)),
             index: None,
+            disaggregated_params: None,
             extra_args: None,
         }
     }
