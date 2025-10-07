@@ -669,7 +669,7 @@ mod tests {
 
         // Should be fast (< 10ms on most systems)
         // Update(grahamk): Takes 144ms on my box which is much faster than CI, so something
-        // is add about claim above.
+        // is odd about claim above.
         assert!(duration < Duration::from_millis(200));
     }
 }

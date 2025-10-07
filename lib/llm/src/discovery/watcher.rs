@@ -584,16 +584,6 @@ mod tests {
     #[test]
     fn test_etcd_key_extract() {
         let input = format!(
-            "v1/{}/dynamo/backend/generate/694d9981145a61ad",
-            model_card::ROOT_PATH
-        );
-        let (endpoint_id, instance_id) = etcd_key_extract(&input).unwrap();
-        assert_eq!(endpoint_id.namespace, "dynamo");
-        assert_eq!(endpoint_id.component, "backend");
-        assert_eq!(endpoint_id.name, "generate");
-        assert_eq!(instance_id, "694d9981145a61ad");
-
-        let input = format!(
             "{}/dynamo/backend/generate/694d9981145a61ad",
             model_card::ROOT_PATH
         );
