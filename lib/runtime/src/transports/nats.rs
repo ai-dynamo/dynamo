@@ -257,6 +257,7 @@ impl Client {
         tokio::io::copy(&mut obj_reader, &mut buffer)
             .await
             .map_err(|e| anyhow::anyhow!("Failed reading object data: {e}"))?;
+        tracing::debug!("Downloaded {} bytes from {bucket_name}/{key}", buffer.len());
 
         // Deserialize from bincode
         let data = bincode::deserialize(&buffer)
