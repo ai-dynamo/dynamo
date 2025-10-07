@@ -318,16 +318,7 @@ pub mod distributed_runtime {
     pub const UPTIME_SECONDS: &str = "uptime_seconds";
 }
 
-/// KVBM connector
-pub mod kvbm_connector {
-    /// KVBM connector leader
-    pub const KVBM_CONNECTOR_LEADER: &str = "kvbm_connector_leader";
-
-    /// KVBM connector worker
-    pub const KVBM_CONNECTOR_WORKER: &str = "kvbm_connector_worker";
-}
-
-/// KVBM connector
+/// KVBM
 pub mod kvbm {
     /// The number of offload requests
     pub const OFFLOAD_REQUESTS: &str = "offload_requests";

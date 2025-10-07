@@ -119,7 +119,7 @@
         {
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "dynamo_component_matched_tokens{dynamo_namespace=\"kvbm_connector_leader\"} or kvbm_matched_tokens",
+          "expr": "kvbm_matched_tokens",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",
@@ -228,7 +228,7 @@
         {
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "dynamo_component_offload_requests{dynamo_namespace=\"kvbm_connector_leader\"} or kvbm_offload_requests",
+          "expr": "kvbm_offload_requests",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",
@@ -324,7 +324,7 @@
         {
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "dynamo_component_offload_blocks_d2h{dynamo_namespace=\"kvbm_connector_leader\"} or kvbm_offload_blocks_d2h",
+          "expr": "kvbm_offload_blocks_d2h",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",
@@ -433,7 +433,7 @@
         {
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "dynamo_component_onboard_requests{dynamo_namespace=\"kvbm_connector_leader\"} or kvbm_onboard_requests",
+          "expr": "kvbm_onboard_requests",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",
@@ -529,7 +529,7 @@
         {
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "dynamo_component_onboard_blocks_h2d{dynamo_namespace=\"kvbm_connector_leader\"} or kvbm_onboard_blocks_h2d",
+          "expr": "kvbm_onboard_blocks_h2d",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",
@@ -625,7 +625,7 @@
         {
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "dynamo_component_onboard_blocks_d2d{dynamo_namespace=\"kvbm_connector_leader\"} or kvbm_onboard_blocks_d2d",
+          "expr": "kvbm_onboard_blocks_d2d",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",

@@ -100,16 +100,11 @@ impl KvConnectorLeaderRecorder {
         let drt = drt.inner().clone();
         let handle: Handle = drt.runtime().primary();
 
-        let kvbm_metrics = if use_standalone_metrics() {
-            let port = parse_dyn_kvbm_metrics_port();
-            KvbmMetrics::new_with_standalone(&KvbmMetricsRegistry::default(), port)
-        } else {
-            let ns = drt
-                .namespace(kvbm_connector::KVBM_CONNECTOR_LEADER)
-                .expect("failed to create metrics namespace");
-            KvbmMetrics::new(&ns)
-        };
-
+        let kvbm_metrics = KvbmMetrics::new(
+            &KvbmMetricsRegistry::default(),
+            kvbm_metrics_endpoint_enabled(),
+            parse_kvbm_metrics_port(),
+        );
         let kvbm_metrics_clone = kvbm_metrics.clone();
 
         let token = CancellationToken::new();

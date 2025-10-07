@@ -2,15 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use axum::Router;
-use dynamo_runtime::metrics::{
-    MetricsRegistry,
-    prometheus_names::{
-        kvbm::{
-            MATCHED_TOKENS, OFFLOAD_BLOCKS_D2H, OFFLOAD_REQUESTS, ONBOARD_BLOCKS_D2D,
-            ONBOARD_BLOCKS_H2D, ONBOARD_REQUESTS,
-        },
-        sanitize_prometheus_name,
+use dynamo_runtime::metrics::prometheus_names::{
+    kvbm::{
+        MATCHED_TOKENS, OFFLOAD_BLOCKS_D2H, OFFLOAD_REQUESTS, ONBOARD_BLOCKS_D2D,
+        ONBOARD_BLOCKS_H2D, ONBOARD_REQUESTS,
     },
+    sanitize_prometheus_name,
 };
 use prometheus::{IntCounter, Opts, Registry};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, thread};
@@ -42,51 +39,10 @@ pub struct KvbmMetrics {
 }
 
 impl KvbmMetrics {
-    pub fn new(mr: &dyn MetricsRegistry) -> Self {
-        let offload_requests = mr
-            .create_intcounter(OFFLOAD_REQUESTS, "The number of offload requests", &[])
-            .unwrap();
-        let offload_blocks_d2h = mr
-            .create_intcounter(
-                OFFLOAD_BLOCKS_D2H,
-                "The number of offload blocks from device to host",
-                &[],
-            )
-            .unwrap();
-        let onboard_requests = mr
-            .create_intcounter(ONBOARD_REQUESTS, "The number of onboard requests", &[])
-            .unwrap();
-        let onboard_blocks_h2d = mr
-            .create_intcounter(
-                ONBOARD_BLOCKS_H2D,
-                "The number of onboard blocks from host to device",
-                &[],
-            )
-            .unwrap();
-        let onboard_blocks_d2d = mr
-            .create_intcounter(
-                ONBOARD_BLOCKS_D2D,
-                "The number of onboard blocks from disk to device",
-                &[],
-            )
-            .unwrap();
-        let matched_tokens = mr
-            .create_intcounter(MATCHED_TOKENS, "The number of matched tokens", &[])
-            .unwrap();
-        Self {
-            offload_requests,
-            offload_blocks_d2h,
-            onboard_requests,
-            onboard_blocks_h2d,
-            onboard_blocks_d2d,
-            matched_tokens,
-            shutdown_notify: None,
-        }
-    }
-
     /// Create raw metrics and (once per process) spawn an axum server exposing `/metrics` at metrics_port.
     /// Non-blocking: the HTTP server runs on a background task.
-    pub fn new_with_standalone(mr: &KvbmMetricsRegistry, metrics_port: u16) -> Self {
+    pub fn new(mr: &KvbmMetricsRegistry, create_endpoint: bool, metrics_port: u16) -> Self {
+        // 1) register kvbm metrics
         let offload_requests = mr
             .create_intcounter(OFFLOAD_REQUESTS, "The number of offload requests", &[])
             .unwrap();
@@ -117,6 +73,19 @@ impl KvbmMetrics {
         let matched_tokens = mr
             .create_intcounter(MATCHED_TOKENS, "The number of matched tokens", &[])
             .unwrap();
+
+        // early return if no endpoint is needed
+        if !create_endpoint {
+            return Self {
+                offload_requests,
+                offload_blocks_d2h,
+                onboard_requests,
+                onboard_blocks_h2d,
+                onboard_blocks_d2d,
+                matched_tokens,
+                shutdown_notify: None,
+            };
+        }
 
         // 2) start HTTP server in background with graceful shutdown via Notify
         let registry = mr.inner(); // Arc<Registry>

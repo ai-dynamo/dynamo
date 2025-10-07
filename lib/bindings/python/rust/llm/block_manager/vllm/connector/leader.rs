@@ -15,7 +15,6 @@ use crate::llm::block_manager::{
     VllmBlockManager, distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest,
     vllm::connector::leader::slot::VllmConnectorSlot,
 };
-use dynamo_runtime::metrics::prometheus_names::kvbm_connector;
 
 use dynamo_llm::block_manager::{
     BasicMetadata, DiskStorage, ImmutableBlock, PinnedStorage,
@@ -103,15 +102,11 @@ impl KvConnectorLeader {
         let drt = drt.inner().clone();
         let handle: Handle = drt.runtime().primary();
 
-        let kvbm_metrics = if use_standalone_metrics() {
-            let port = parse_dyn_kvbm_metrics_port();
-            KvbmMetrics::new_with_standalone(&KvbmMetricsRegistry::default(), port)
-        } else {
-            let ns = drt
-                .namespace(kvbm_connector::KVBM_CONNECTOR_LEADER)
-                .expect("failed to create metrics namespace");
-            KvbmMetrics::new(&ns)
-        };
+        let kvbm_metrics = KvbmMetrics::new(
+            &KvbmMetricsRegistry::default(),
+            kvbm_metrics_endpoint_enabled(),
+            parse_kvbm_metrics_port(),
+        );
         let kvbm_metrics_clone = kvbm_metrics.clone();
 
         let slot_manager_cell = Arc::new(OnceLock::new());
@@ -620,13 +615,13 @@ impl PyKvConnectorLeader {
     }
 }
 
-pub fn use_standalone_metrics() -> bool {
+pub fn kvbm_metrics_endpoint_enabled() -> bool {
     std::env::var("DYN_KVBM_METRICS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
 
-pub fn parse_dyn_kvbm_metrics_port() -> u16 {
+pub fn parse_kvbm_metrics_port() -> u16 {
     match std::env::var("DYN_KVBM_METRICS_PORT") {
         Ok(val) => match val.trim().parse::<u16>() {
             Ok(port) => port,

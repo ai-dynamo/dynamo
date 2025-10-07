@@ -9,12 +9,11 @@ use crate::llm::block_manager::vllm::connector::leader::slot::{
     ConnectorSlotManager, SlotManager, SlotState,
 };
 use crate::llm::block_manager::vllm::connector::leader::{
-    parse_dyn_kvbm_metrics_port, use_standalone_metrics,
+    kvbm_metrics_endpoint_enabled, parse_kvbm_metrics_port,
 };
 use crate::llm::block_manager::{distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest};
 use anyhow;
 use dynamo_llm::block_manager::metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry};
-use dynamo_runtime::metrics::prometheus_names::kvbm_connector;
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Handle;
@@ -79,15 +78,11 @@ impl KvConnectorLeader {
         let drt = drt.inner().clone();
         let handle: Handle = drt.runtime().primary();
 
-        let kvbm_metrics = if use_standalone_metrics() {
-            let port = parse_dyn_kvbm_metrics_port();
-            KvbmMetrics::new_with_standalone(&KvbmMetricsRegistry::default(), port)
-        } else {
-            let ns = drt
-                .namespace(kvbm_connector::KVBM_CONNECTOR_LEADER)
-                .expect("failed to create metrics namespace");
-            KvbmMetrics::new(&ns)
-        };
+        let kvbm_metrics = KvbmMetrics::new(
+            &KvbmMetricsRegistry::default(),
+            kvbm_metrics_endpoint_enabled(),
+            parse_kvbm_metrics_port(),
+        );
 
         let kvbm_metrics_clone = kvbm_metrics.clone();
 
