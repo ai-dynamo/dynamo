@@ -25,15 +25,11 @@ import yaml
 from benchmarks.profiler.utils.config import (
     CONFIG_MODIFIERS,
     WORKER_COMPONENT_NAMES,
-    Config,
-    SubComponentType,
     generate_dgd_config_with_planner,
 )
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from benchmarks.profiler.utils.genai_perf import benchmark_decode, benchmark_prefill
-from benchmarks.profiler.utils.planner_utils import (
-    add_planner_arguments_to_parser,
-)
+from benchmarks.profiler.utils.planner_utils import add_planner_arguments_to_parser
 from benchmarks.profiler.utils.plot import (
     plot_decode_performance,
     plot_prefill_performance,

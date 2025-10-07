@@ -18,9 +18,9 @@ import logging
 import math
 import re
 import shlex
-import yaml
 from typing import Literal, Optional, Protocol
 
+import yaml
 from pydantic import BaseModel
 
 from benchmarks.profiler.utils.defaults import (
@@ -1192,6 +1192,7 @@ CONFIG_MODIFIERS: dict[str, type[ConfigModifierProtocol]] = {
     "trtllm": TrtllmConfigModifier,
 }
 
+
 def generate_dgd_config_with_planner(
     config_path: str,
     config_modifier,
@@ -1203,7 +1204,7 @@ def generate_dgd_config_with_planner(
     num_gpus_per_node: int = 8,
 ):
     """Generate DGD config with planner based on profiling results.
-    
+
     Args:
         config_path: Path to the YAML config file
         config_modifier: Config modifier instance (e.g., SGLangConfigModifier)
@@ -1213,15 +1214,15 @@ def generate_dgd_config_with_planner(
         args: Parsed arguments namespace from profile_sla
         is_moe_model: Whether this is an MoE model
         num_gpus_per_node: Number of GPUs per node (for MoE models)
-    
+
     Returns:
         dict: Final DGD config with planner service configured
     """
-    
+
     # Load config from file
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
-    
+
     if not is_moe_model:
         # dense model, use TP for both prefill and decode
         config = config_modifier.set_config_tp_size(
@@ -1245,28 +1246,25 @@ def generate_dgd_config_with_planner(
             SubComponentType.DECODE,
         )
     config = Config.model_validate(config)
-    
+
     # add PVC config if not present
     if not config.spec.pvcs:
         config.spec.pvcs = [PVCConfig()]
-    
+
     # add the planner service
     planner_config = DgdPlannerServiceConfig()
     frontend_service = config.spec.services["Frontend"]
     planner_config.dynamoNamespace = getattr(frontend_service, "dynamoNamespace", "dynamo")  # type: ignore[attr-defined]
-    if (
-        frontend_service.extraPodSpec
-        and frontend_service.extraPodSpec.mainContainer
-    ):
+    if frontend_service.extraPodSpec and frontend_service.extraPodSpec.mainContainer:
         frontend_image = frontend_service.extraPodSpec.mainContainer.image
         if frontend_image and planner_config.extraPodSpec.mainContainer:
             planner_config.extraPodSpec.mainContainer.image = frontend_image
-    
+
     # Build planner args dynamically from parsed arguments
     # This includes shared args (ttft, itl, backend, namespace) from profile_sla
     # and planner-specific args (with planner_ prefix)
     planner_args = build_planner_args_from_namespace(args, prefix="planner_")
-    
+
     # Override profiling-specific arguments with results from profiling
     # Remove and re-add to ensure correct values from profiling context
     planner_args = [
@@ -1282,7 +1280,7 @@ def generate_dgd_config_with_planner(
             ]
         )
     ]
-    
+
     # Add arguments determined by profiling results
     frontend_namespace = getattr(config.spec.services["Frontend"], "dynamoNamespace", "dynamo")  # type: ignore[attr-defined]
     planner_args.extend(
@@ -1293,7 +1291,7 @@ def generate_dgd_config_with_planner(
             f"--profile-results-dir={output_dir}",
         ]
     )
-    
+
     if (
         planner_config.extraPodSpec.mainContainer
         and planner_config.extraPodSpec.mainContainer.args is not None
@@ -1303,7 +1301,7 @@ def generate_dgd_config_with_planner(
     planner_dict = planner_config.model_dump(exclude_unset=False)
     config_dict = config.model_dump(exclude_unset=False)
     config_dict["spec"]["services"]["Planner"] = planner_dict
-    
+
     return config_dict
 
 
