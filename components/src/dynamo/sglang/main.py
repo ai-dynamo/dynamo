@@ -8,6 +8,7 @@ import sys
 
 import sglang as sgl
 import uvloop
+from sglang.srt.utils import get_ip, launch_dummy_health_check_server
 
 from dynamo.common.config_dump import dump_config
 from dynamo.llm import ModelInput, ModelType
@@ -68,6 +69,10 @@ async def init(runtime: DistributedRuntime, config: Config):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     engine = sgl.Engine(server_args=server_args)
+    if server_args.enable_metrics:
+        launch_dummy_health_check_server(
+            server_args.host, server_args.port, server_args.enable_metrics
+        )
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
