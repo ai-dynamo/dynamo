@@ -887,7 +887,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											TimeoutSeconds:   5,
 											PeriodSeconds:    10,
 											SuccessThreshold: 0,
-											FailureThreshold: 60,
+											FailureThreshold: 720,
 										},
 									},
 								},
