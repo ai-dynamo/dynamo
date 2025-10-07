@@ -2134,7 +2134,7 @@ class DynamoInfo(NodeInfo):
         # Check DYNAMO_HOME environment variable first
         dynamo_home = os.environ.get("DYNAMO_HOME")
         if dynamo_home:
-            candidates.append(dynamo_home)
+            candidates.append(os.path.expanduser(dynamo_home))
 
         # Then check common locations
         candidates.extend(
