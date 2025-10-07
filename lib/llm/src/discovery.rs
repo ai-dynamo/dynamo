@@ -8,4 +8,4 @@ mod watcher;
 pub use watcher::{ModelUpdate, ModelWatcher};
 
 /// The root etcd path for KV Router registrations
-pub const KV_ROUTERS_ROOT_PATH: &str = "kv_routers";
+pub const KV_ROUTERS_ROOT_PATH: &str = "v1/kv_routers";
