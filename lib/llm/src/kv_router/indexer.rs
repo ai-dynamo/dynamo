@@ -481,32 +481,39 @@ impl RadixTree {
         let mut events = Vec::new();
         let mut event_id = 0u64;
 
-        // BFS queue: (current_block, parent_external_hash, tokens_hash)
-        let mut queue = VecDeque::new();
+        // BFS queue: (current_block, parent_hashes_per_worker, tokens_hash)
+        // parent_hashes_per_worker maps WorkerId -> ExternalSequenceBlockHash
+        let mut queue: VecDeque<(
+            SharedRadixBlock,
+            HashMap<WorkerId, ExternalSequenceBlockHash>,
+            LocalBlockHash,
+        )> = VecDeque::new();
 
         // Process root's children first
         let root_borrow = self.root.borrow();
         for (tokens_hash, child_block) in &root_borrow.children {
-            queue.push_back((child_block.clone(), None, *tokens_hash));
+            queue.push_back((child_block.clone(), HashMap::new(), *tokens_hash));
         }
         drop(root_borrow);
 
-        while let Some((current_block, parent_external_hash, tokens_hash)) = queue.pop_front() {
+        while let Some((current_block, parent_hashes, tokens_hash)) = queue.pop_front() {
             let current_borrow = current_block.borrow();
 
-            // We need to find any external hash for this block to use as parent
-            // when we enqueue the children.
-            let mut any_external_hash: Option<ExternalSequenceBlockHash> = None;
+            // Map of this block's external hashes per worker (for children to use as parent)
+            let mut current_external_hashes = HashMap::new();
 
             // For each worker that has this block
             for (worker_id, external_hash) in &current_borrow.workers {
+                // Get the correct parent hash for this worker
+                let parent_hash = parent_hashes.get(worker_id).copied();
+
                 // Create a store event for this worker
                 let event = RouterEvent {
                     worker_id: *worker_id,
                     event: KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
-                            parent_hash: parent_external_hash,
+                            parent_hash,
                             blocks: vec![KvCacheStoredBlockData {
                                 block_hash: *external_hash,
                                 tokens_hash,
@@ -516,11 +523,18 @@ impl RadixTree {
                 };
                 events.push(event);
                 event_id += 1;
-                any_external_hash = Some(*external_hash);
+
+                // Track this block's external hash for this worker
+                current_external_hashes.insert(*worker_id, *external_hash);
             }
 
+            // Enqueue children with per-worker parent hashes
             for (child_tokens_hash, child_block) in &current_borrow.children {
-                queue.push_back((child_block.clone(), any_external_hash, *child_tokens_hash));
+                queue.push_back((
+                    child_block.clone(),
+                    current_external_hashes.clone(),
+                    *child_tokens_hash,
+                ));
             }
         }
 
