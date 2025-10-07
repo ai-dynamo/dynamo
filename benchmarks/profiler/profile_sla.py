@@ -149,7 +149,7 @@ async def run_profile(args):
                 )
             if not args.aic_backend_version:
                 raise ValueError(
-                    "Must provide --backend-version when using --use-ai-configurator."
+                    "Must provide --aic-backend-version when using --use-ai-configurator."
                 )
 
             logger.info("Will use aiconfigurator to estimate perf.")
