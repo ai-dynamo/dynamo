@@ -9,7 +9,7 @@ import sys
 import sglang as sgl
 import uvloop
 
-from dynamo.llm import ModelInput
+from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, DisaggregationMode, parse_args
@@ -21,6 +21,7 @@ from dynamo.sglang.publisher import setup_sgl_metrics
 from dynamo.sglang.register import register_llm_with_readiness_gate
 from dynamo.sglang.request_handlers import (
     DecodeWorkerHandler,
+    EmbeddingWorkerHandler,
     MultimodalEncodeWorkerHandler,
     MultimodalPrefillWorkerHandler,
     MultimodalProcessorHandler,
@@ -44,7 +45,9 @@ async def worker(runtime: DistributedRuntime):
     logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
 
     config = parse_args(sys.argv[1:])
-    if config.dynamo_args.multimodal_processor:
+    if config.dynamo_args.embedding_worker:
+        await init_embedding(runtime, config)
+    elif config.dynamo_args.multimodal_processor:
         await init_multimodal_processor(runtime, config)
     elif config.dynamo_args.multimodal_encode_worker:
         await init_multimodal_encode_worker(runtime, config)
@@ -155,6 +158,63 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         logging.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
+        handler.cleanup()
+
+
+async def init_embedding(runtime: DistributedRuntime, config: Config):
+    """Initialize embedding worker component"""
+    server_args, dynamo_args = config.server_args, config.dynamo_args
+
+    engine = sgl.Engine(server_args=server_args)
+
+    component = runtime.namespace(dynamo_args.namespace).component(
+        dynamo_args.component
+    )
+    await component.create_service()
+
+    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+
+    # publisher instantiates the metrics and kv event publishers
+    publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
+        engine, config, component, generate_endpoint
+    )
+
+    # Readiness gate: requests wait until model is registered
+    ready_event = asyncio.Event()
+
+    handler = EmbeddingWorkerHandler(component, engine, config, publisher)
+    health_check_payload = SglangHealthCheckPayload(engine).to_dict()
+
+    try:
+        # Start endpoint immediately and register model concurrently
+        # Requests queue until ready_event is set
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=metrics_labels,
+                health_check_payload=health_check_payload,
+            ),
+            register_llm_with_readiness_gate(
+                engine,
+                generate_endpoint,
+                server_args,
+                dynamo_args,
+                input_type=ModelInput.Text,
+                output_type=ModelType.Embedding,
+                readiness_gate=ready_event,
+            ),
+        )
+    except Exception as e:
+        logging.error(f"Failed to serve embedding endpoints: {e}")
+        raise
+    finally:
+        metrics_task.cancel()
+        try:
+            await metrics_task
+        except asyncio.CancelledError:
+            logging.info("Metrics task successfully cancelled")
+            pass
         handler.cleanup()
 
 
