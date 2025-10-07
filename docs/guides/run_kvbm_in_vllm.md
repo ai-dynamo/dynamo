@@ -78,14 +78,14 @@ Follow below steps to enable metrics collection and view via Grafana dashboard:
 docker compose -f deploy/docker-compose.yml --profile metrics up -d
 
 # set env var DYN_KVBM_METRICS to true, when launch via dynamo
-# Optionally set DYN_KVBM_METRICS_PORT to choose the /metrics port (default: 6881).
+# Optionally set DYN_KVBM_METRICS_PORT to choose the /metrics port (default: 6880).
 DYN_KVBM_METRICS=true \
 python -m dynamo.vllm \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --connector kvbm &
 
 # optional if firewall blocks KVBM metrics ports to send prometheus metrics
-sudo ufw allow 6881/tcp
+sudo ufw allow 6880/tcp
 ```
 
 View grafana metrics via http://localhost:3001 (default login: dynamo/dynamo) and look for KVBM Dashboard
