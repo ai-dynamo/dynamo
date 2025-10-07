@@ -31,7 +31,7 @@ limitations under the License.
 > ```
 >
 > **Update Engine Configuration Files**
-> 
+>
 > Before running the deployment, you must update the engine configuration files to change `backend: DEFAULT` to `backend: default` (lowercase). Run the following command:
 > ```bash
 > sed -i 's/backend: DEFAULT/backend: default/g' /mnt/engine_configs/multimodal/llama4/prefill.yaml /mnt/engine_configs/multimodal/llama4/decode.yaml
