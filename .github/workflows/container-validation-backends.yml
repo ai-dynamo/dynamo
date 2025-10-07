@@ -43,12 +43,8 @@ jobs:
     outputs:
       build-duration-sec: ${{ steps.build-image.outputs.build-duration-sec }}
       image-size-bytes: ${{ steps.build-image.outputs.image-size-bytes }}
-      image-size-mb: ${{ steps.build-image.outputs.image-size-mb }}
       build-start-time: ${{ steps.build-image.outputs.build-start-time }}
       build-end-time: ${{ steps.build-image.outputs.build-end-time }}
-      cache-hit-rate: ${{ steps.build-image.outputs.cache-hit-rate }}
-      sccache-working: ${{ steps.build-image.outputs.sccache-working }}
-      sccache-requests: ${{ steps.build-image.outputs.sccache-requests }}
       framework: ${{ steps.build-image.outputs.framework }}
       target: ${{ steps.build-image.outputs.target }}
     strategy:
@@ -102,12 +98,8 @@ jobs:
     outputs:
       build-duration-sec: ${{ steps.build-image.outputs.build-duration-sec }}
       image-size-bytes: ${{ steps.build-image.outputs.image-size-bytes }}
-      image-size-mb: ${{ steps.build-image.outputs.image-size-mb }}
       build-start-time: ${{ steps.build-image.outputs.build-start-time }}
       build-end-time: ${{ steps.build-image.outputs.build-end-time }}
-      cache-hit-rate: ${{ steps.build-image.outputs.cache-hit-rate }}
-      sccache-working: ${{ steps.build-image.outputs.sccache-working }}
-      sccache-requests: ${{ steps.build-image.outputs.sccache-requests }}
       framework: ${{ steps.build-image.outputs.framework }}
       target: ${{ steps.build-image.outputs.target }}
     # OPS-1140: Uncomment this for sglang arm switch to wideep
@@ -171,12 +163,8 @@ jobs:
     outputs:
       build-duration-sec: ${{ steps.build-image.outputs.build-duration-sec }}
       image-size-bytes: ${{ steps.build-image.outputs.image-size-bytes }}
-      image-size-mb: ${{ steps.build-image.outputs.image-size-mb }}
       build-start-time: ${{ steps.build-image.outputs.build-start-time }}
       build-end-time: ${{ steps.build-image.outputs.build-end-time }}
-      cache-hit-rate: ${{ steps.build-image.outputs.cache-hit-rate }}
-      sccache-working: ${{ steps.build-image.outputs.sccache-working }}
-      sccache-requests: ${{ steps.build-image.outputs.sccache-requests }}
       framework: ${{ steps.build-image.outputs.framework }}
       target: ${{ steps.build-image.outputs.target }}
     strategy:
@@ -263,12 +251,8 @@ jobs:
           # Pass build metrics as environment variables
           BUILD_DURATION_SEC: ${{ needs.vllm.outputs.build-duration-sec }}
           IMAGE_SIZE_BYTES: ${{ needs.vllm.outputs.image-size-bytes }}
-          IMAGE_SIZE_MB: ${{ needs.vllm.outputs.image-size-mb }}
           BUILD_START_TIME: ${{ needs.vllm.outputs.build-start-time }}
           BUILD_END_TIME: ${{ needs.vllm.outputs.build-end-time }}
-          CACHE_HIT_RATE: ${{ needs.vllm.outputs.cache-hit-rate }}
-          SCCACHE_WORKING: ${{ needs.vllm.outputs.sccache-working }}
-          SCCACHE_REQUESTS: ${{ needs.vllm.outputs.sccache-requests }}
           BUILD_FRAMEWORK: ${{ needs.vllm.outputs.framework }}
           BUILD_TARGET: ${{ needs.vllm.outputs.target }}
           # Build and container index configuration
@@ -278,12 +262,9 @@ jobs:
           # Show build metrics for debugging
           echo "📊 Build Metrics Available:"
           echo "  Duration: ${BUILD_DURATION_SEC} seconds"
-          echo "  Image Size: ${IMAGE_SIZE_MB} MB (${IMAGE_SIZE_BYTES} bytes)"
-          echo "  Cache Hit Rate: ${CACHE_HIT_RATE}%"
+          echo "  Image Size: ${IMAGE_SIZE_BYTES} bytes"
           echo "  Framework: ${BUILD_FRAMEWORK}"
           echo "  Target: ${BUILD_TARGET}"
-          echo "  sccache Working: ${SCCACHE_WORKING}"
-          echo "  sccache Requests: ${SCCACHE_REQUESTS}"
           
           # Check if build metrics file exists
           if [ -f "build-metrics/metrics.json" ]; then

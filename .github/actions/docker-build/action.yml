@@ -56,15 +56,6 @@ outputs:
   image-size-mb:
     description: 'Image size in MB'
     value: ${{ steps.metrics.outputs.image-size-mb }}
-  cache-hit-rate:
-    description: 'Cache hit rate percentage'
-    value: ${{ steps.metrics.outputs.cache-hit-rate }}
-  sccache-working:
-    description: 'Whether sccache is working'
-    value: ${{ steps.metrics.outputs.sccache-working }}
-  sccache-requests:
-    description: 'Number of sccache requests'
-    value: ${{ steps.metrics.outputs.sccache-requests }}
   framework:
     description: 'Framework name'
     value: ${{ steps.metrics.outputs.framework }}
@@ -173,37 +164,7 @@ runs:
           echo "⚠️  No image tag available"
         fi
         
-        # Try to get sccache stats
-        CACHE_HIT_RATE=0
-        SCCACHE_WORKING="false"
-        SCCACHE_REQUESTS=0
-        
-        echo "🔍 Attempting to get sccache stats..."
-        if command -v sccache >/dev/null 2>&1; then
-          SCCACHE_STATS=$(sccache --show-stats 2>/dev/null || echo "")
-          if [ -n "$SCCACHE_STATS" ]; then
-            echo "📊 sccache stats:"
-            echo "$SCCACHE_STATS"
-            
-            # Parse sccache stats
-            CACHE_HITS=$(echo "$SCCACHE_STATS" | grep -i "cache hits" | grep -o '[0-9]\+' | head -1 || echo "0")
-            CACHE_MISSES=$(echo "$SCCACHE_STATS" | grep -i "cache misses" | grep -o '[0-9]\+' | head -1 || echo "0")
-            TOTAL_REQUESTS=$((CACHE_HITS + CACHE_MISSES))
-            
-            if [ "$TOTAL_REQUESTS" -gt 0 ]; then
-              CACHE_HIT_RATE=$((CACHE_HITS * 100 / TOTAL_REQUESTS))
-              SCCACHE_WORKING="true"
-              SCCACHE_REQUESTS="$TOTAL_REQUESTS"
-            fi
-          fi
-        else
-          echo "⚠️  sccache not available in PATH"
-        fi
-        
-        echo "📊 Final metrics:"
-        echo "  Cache hit rate: ${CACHE_HIT_RATE}%"
-        echo "  sccache working: ${SCCACHE_WORKING}"
-        echo "  sccache requests: ${SCCACHE_REQUESTS}"
+        echo "📊 Final metrics captured"
         
         # Create metrics JSON file (only for amd64 to avoid duplicates)
         if [[ "${{ inputs.platform }}" == *"amd64"* ]]; then
@@ -216,10 +177,7 @@ runs:
           "image_size_mb": ${IMAGE_SIZE_MB},
           "build_start_time": "${BUILD_START_TIME}",
           "build_end_time": "${BUILD_END_TIME}",
-          "build_duration_sec": ${BUILD_DURATION_SEC},
-          "cache_hit_rate": ${CACHE_HIT_RATE},
-          "sccache_working": "${SCCACHE_WORKING}",
-          "sccache_requests": ${SCCACHE_REQUESTS}
+          "build_duration_sec": ${BUILD_DURATION_SEC}
         }
         EOF
           
@@ -232,9 +190,6 @@ runs:
         echo "build-duration-sec=${BUILD_DURATION_SEC}" >> $GITHUB_OUTPUT
         echo "image-size-bytes=${IMAGE_SIZE_BYTES}" >> $GITHUB_OUTPUT
         echo "image-size-mb=${IMAGE_SIZE_MB}" >> $GITHUB_OUTPUT
-        echo "cache-hit-rate=${CACHE_HIT_RATE}" >> $GITHUB_OUTPUT
-        echo "sccache-working=${SCCACHE_WORKING}" >> $GITHUB_OUTPUT
-        echo "sccache-requests=${SCCACHE_REQUESTS}" >> $GITHUB_OUTPUT
         echo "framework=${{ inputs.framework }}" >> $GITHUB_OUTPUT
         echo "target=${{ inputs.target }}" >> $GITHUB_OUTPUT
 
