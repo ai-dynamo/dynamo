@@ -29,8 +29,8 @@
 //! The OpenAPI documentation is automatically integrated into the HTTP service.
 //! Once the service is running, you can:
 //!
-//! 1. View the raw OpenAPI spec: `curl http://localhost:8787/openapi.json`
-//! 2. Access Swagger UI: Open `http://localhost:8787/swagger-ui` in a web browser
+//! 1. View the raw OpenAPI spec: `curl http://localhost:8000/openapi.json`
+//! 2. Access Swagger UI: Open `http://localhost:8000/swagger-ui` in a web browser
 //!
 //! ## Supported Endpoints
 //!
