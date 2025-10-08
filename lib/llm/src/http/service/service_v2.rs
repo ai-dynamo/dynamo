@@ -19,6 +19,9 @@ use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
 use dynamo_runtime::logging::make_request_span;
+use dynamo_runtime::storage::key_value_store::EtcdStorage;
+use dynamo_runtime::storage::key_value_store::KeyValueStore;
+use dynamo_runtime::storage::key_value_store::MemoryStorage;
 use dynamo_runtime::transports::etcd;
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
@@ -26,11 +29,11 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
 /// HTTP service shared state
-#[derive(Default)]
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
     etcd_client: Option<etcd::Client>,
+    storage_client: Arc<dyn KeyValueStore>,
     flags: StateFlags,
 }
 
@@ -76,6 +79,7 @@ impl State {
             manager,
             metrics: Arc::new(Metrics::default()),
             etcd_client: None,
+            storage_client: Arc::new(MemoryStorage::new()),
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
@@ -85,11 +89,12 @@ impl State {
         }
     }
 
-    pub fn new_with_etcd(manager: Arc<ModelManager>, etcd_client: Option<etcd::Client>) -> Self {
+    pub fn new_with_etcd(manager: Arc<ModelManager>, etcd_client: etcd::Client) -> Self {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
-            etcd_client,
+            storage_client: Arc::new(EtcdStorage::new(etcd_client.clone())),
+            etcd_client: Some(etcd_client),
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
@@ -113,6 +118,10 @@ impl State {
 
     pub fn etcd_client(&self) -> Option<&etcd::Client> {
         self.etcd_client.as_ref()
+    }
+
+    pub fn storage_client(&self) -> Arc<dyn KeyValueStore> {
+        self.storage_client.clone()
     }
 
     // TODO
@@ -294,7 +303,9 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let etcd_client = config.etcd_client;
+        let Some(etcd_client) = config.etcd_client else {
+            anyhow::bail!("Missing etcd_client in config, building HttpServiceConfig");
+        };
         let state = Arc::new(State::new_with_etcd(model_manager, etcd_client));
 
         state

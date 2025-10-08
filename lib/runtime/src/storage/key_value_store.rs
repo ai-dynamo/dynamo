@@ -75,6 +75,8 @@ pub trait KeyValueStore: Send + Sync {
         &self,
         bucket_name: &str,
     ) -> Result<Option<Box<dyn KeyValueBucket>>, StorageError>;
+
+    fn connection_id(&self) -> u64;
 }
 
 pub struct KeyValueStoreManager(Box<dyn KeyValueStore>);

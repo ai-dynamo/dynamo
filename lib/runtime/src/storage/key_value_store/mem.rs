@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use rand::Rng as _;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -18,6 +19,7 @@ use super::{KeyValueBucket, KeyValueStore, StorageError, StorageOutcome};
 #[derive(Clone)]
 pub struct MemoryStorage {
     inner: Arc<MemoryStorageInner>,
+    connection_id: u64,
 }
 
 impl Default for MemoryStorage {
@@ -58,6 +60,7 @@ impl MemoryStorage {
                 change_sender: tx,
                 change_receiver: Mutex::new(rx),
             }),
+            connection_id: rand::rng().random(),
         }
     }
 }
@@ -95,6 +98,10 @@ impl KeyValueStore for MemoryStorage {
             }))),
             None => Ok(None),
         }
+    }
+
+    fn connection_id(&self) -> u64 {
+        self.connection_id
     }
 }
 

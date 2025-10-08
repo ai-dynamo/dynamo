@@ -240,27 +240,22 @@ impl Component {
     }
 
     pub async fn list_instances(&self) -> anyhow::Result<Vec<Instance>> {
-        let Some(etcd_client) = self.drt.etcd_client() else {
+        let client = self.drt.storage_client();
+        let Some(bucket) = client.get_bucket(&self.etcd_root()).await? else {
             return Ok(vec![]);
         };
-        let mut out = vec![];
-        // The extra slash is important to only list exact component matches, not substrings.
-        for kv in etcd_client
-            .kv_get_prefix(format!("{}/", self.etcd_root()))
-            .await?
-        {
-            let val = match serde_json::from_slice::<Instance>(kv.value()) {
+        let entries = bucket.entries().await?;
+        let mut instances = Vec::with_capacity(entries.len());
+        for (name, bytes) in entries.into_iter() {
+            let val = match serde_json::from_slice::<Instance>(&bytes) {
                 Ok(val) => val,
                 Err(err) => {
-                    anyhow::bail!(
-                        "Error converting etcd response to Instance: {err}. {}",
-                        kv.value_str()?
-                    );
+                    anyhow::bail!("Error converting storage response to Instance: {err}. {name}",);
                 }
             };
-            out.push(val);
+            instances.push(val);
         }
-        Ok(out)
+        Ok(instances)
     }
 
     /// Scrape ServiceSet, which contains NATS stats as well as user defined stats

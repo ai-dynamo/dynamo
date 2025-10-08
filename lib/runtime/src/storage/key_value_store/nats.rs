@@ -45,6 +45,10 @@ impl KeyValueStore for NATSStorage {
             None => Ok(None),
         }
     }
+
+    fn connection_id(&self) -> u64 {
+        self.client.client().server_info().client_id
+    }
 }
 
 impl NATSStorage {

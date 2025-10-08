@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub use crate::component::Component;
+use crate::storage::key_value_store::{EtcdStorage, KeyValueStore, MemoryStorage};
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
     ErrorContext, RuntimeCallback,
@@ -44,10 +45,15 @@ impl DistributedRuntime {
 
         let runtime_clone = runtime.clone();
 
-        let etcd_client = if is_static {
-            None
+        let (etcd_client, storage_client) = if is_static {
+            let storage_client: Arc<dyn KeyValueStore> = Arc::new(MemoryStorage::new());
+            (None, storage_client)
         } else {
-            Some(etcd::Client::new(etcd_config.clone(), runtime_clone).await?)
+            let etcd_client = etcd::Client::new(etcd_config.clone(), runtime_clone).await?;
+            let storage_client: Arc<dyn KeyValueStore> =
+                Arc::new(EtcdStorage::new(etcd_client.clone()));
+
+            (Some(etcd_client), storage_client)
         };
 
         let nats_client = nats_config.clone().connect().await?;
@@ -77,6 +83,7 @@ impl DistributedRuntime {
         let distributed_runtime = Self {
             runtime,
             etcd_client,
+            storage_client,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
@@ -268,6 +275,11 @@ impl DistributedRuntime {
     // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers
     pub fn etcd_client(&self) -> Option<etcd::Client> {
         self.etcd_client.clone()
+    }
+
+    /// An interface to store things. Will eventually replace `etcd_client`.
+    pub fn storage_client(&self) -> Arc<dyn KeyValueStore> {
+        self.storage_client.clone()
     }
 
     pub fn child_token(&self) -> CancellationToken {
