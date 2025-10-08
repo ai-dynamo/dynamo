@@ -21,6 +21,7 @@ import logging
 import os
 import pathlib
 import re
+import signal
 
 import uvloop
 
@@ -226,7 +227,15 @@ async def async_main():
         if prefix:
             os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
-    runtime = DistributedRuntime(asyncio.get_running_loop(), is_static)
+    loop = asyncio.get_running_loop()
+
+    runtime = DistributedRuntime(loop, is_static)
+
+    def signal_handler():
+        asyncio.create_task(graceful_shutdown(runtime))
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
 
     if flags.router_mode == "kv":
         router_mode = RouterMode.KV
@@ -287,6 +296,10 @@ async def async_main():
             await run_input(runtime, "http", engine)
     except asyncio.exceptions.CancelledError:
         pass
+
+
+async def graceful_shutdown(runtime):
+    runtime.shutdown()
 
 
 def main():
