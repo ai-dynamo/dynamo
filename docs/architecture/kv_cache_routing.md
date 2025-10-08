@@ -84,7 +84,7 @@ graph TD
 
 ### Local Active Block Management with Replica Sync
 
-Second, in addition to cached blocks, each router replica needs to track active blocks (blocks being used for ongoing generation) as load metrics. Since this information is highly time-sensitive, it must be predicted immediately when:
+Second, in addition to cached blocks, each router replica needs to track active blocks (blocks being used for ongoing generation) as load metrics. Since this information is highly time-sensitive, it should be predicted immediately when:
 - The router receives and routes a request
 - The first token is generated (prefill complete)
 - The response ends (request freed)
