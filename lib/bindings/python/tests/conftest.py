@@ -16,24 +16,31 @@
 """
 Test configuration and fixtures for Dynamo Python bindings tests.
 
-To run tests with isolated NATS and ETCD (safer, but may or may not be faster):
-    1. Install pytest-xdist: uv pip install pytest-xdist
-    2. Run: ENABLE_ISOLATED_ETCD_AND_NATS=1 \
-        pytest tests/test_metrics_registry.py -n auto --benchmark-disable
+TWO MODES OF OPERATION:
 
-To run tests sequentially with default ports (original behavior, 4222, 2379), run:
-    ENABLE_ISOLATED_ETCD_AND_NATS=0 pytest tests/test_metrics_registry.py
+1. Isolated Mode (ENABLE_ISOLATED_ETCD_AND_NATS=1):
+   - Each test gets fresh NATS/ETCD on random ports
+   - Requires: pytest-forked (uv pip install pytest-forked)
+   - Tests using 'runtime' fixture MUST have @pytest.mark.forked
+   - Safer, enables parallel execution
+   - Run: ENABLE_ISOLATED_ETCD_AND_NATS=1 pytest tests/test_metrics_registry.py -n auto
+
+2. Default Ports Mode (ENABLE_ISOLATED_ETCD_AND_NATS=0, default):
+   - All tests share NATS/ETCD on default ports (4222, 2379)
+   - No pytest-forked required
+   - No @pytest.mark.forked required
+   - Faster for sequential runs, but NO parallel execution
+   - Run: pytest tests/test_metrics_registry.py
 
 Performance comparison (32-core machine, 13 tests):
-    Default ports (ENABLE_ISOLATED_ETCD_AND_NATS=0):        4.06s
-    Isolated sequential (ENABLE_ISOLATED_ETCD_AND_NATS=1):  8.58s (2.1x slower, safer)
+    Default ports (ENABLE_ISOLATED_ETCD_AND_NATS=0, default): 4.06s (sequential only)
+    Isolated sequential (ENABLE_ISOLATED_ETCD_AND_NATS=1):    8.58s (2.1x slower, but safer)
     Isolated parallel -n 8:   2.82s (1.4x faster than default)
     Isolated parallel -n 16:  2.28s (1.8x faster than default, optimal)
     Isolated parallel -n 32:  2.74s (overhead dominates)
 
-    Recommendation: Use ENABLE_ISOLATED_ETCD_AND_NATS=1 with -n 8 to -n 16 for best
-    performance and test isolation. Default ports mode is faster for sequential runs
-    but unsafe for parallel execution.
+    Recommendation: Default mode for simplicity. Use ENABLE_ISOLATED_ETCD_AND_NATS=1
+    with -n 8 to -n 16 when you need parallel execution and maximum test isolation.
 """
 
 import asyncio
@@ -51,13 +58,33 @@ import pytest
 from dynamo.runtime import DistributedRuntime
 
 # Configuration constants
-# USE_PARALLEL_NATS_AND_ETCD: When True, each test gets isolated NATS/ETCD instances
+# ENABLE_ISOLATED_ETCD_AND_NATS: When True, each test gets isolated NATS/ETCD instances
 # on random ports with unique data directories. This enables parallel test execution.
 # Set to False to use default ports (4222, 2379) for sequential execution.
 # Can be overridden by environment variable: ENABLE_ISOLATED_ETCD_AND_NATS=0 or =1
 ENABLE_ISOLATED_ETCD_AND_NATS = (
-    os.environ.get("ENABLE_ISOLATED_ETCD_AND_NATS", "1") == "1"
+    os.environ.get("ENABLE_ISOLATED_ETCD_AND_NATS", "0") == "1"
 )
+
+# Check if pytest-forked is installed (only when using isolated NATS/ETCD)
+# This is REQUIRED when ENABLE_ISOLATED_ETCD_AND_NATS=1 because each test gets
+# fresh services and the DistributedRuntime singleton needs process isolation
+if ENABLE_ISOLATED_ETCD_AND_NATS:
+    try:
+        import pytest_forked  # noqa: F401
+    except ImportError:
+        pytest.exit(
+            """
+pytest-forked is required when ENABLE_ISOLATED_ETCD_AND_NATS=1.
+Install it with: uv pip install pytest-forked
+
+This is needed because DistributedRuntime is a process-level singleton
+and tests must run in separate processes to avoid 'Worker already initialized' errors.
+
+Alternatively, set ENABLE_ISOLATED_ETCD_AND_NATS=0 to use default ports (slower, sequential only).
+""",
+            returncode=1,
+        )
 
 # Timeout constants
 SERVICE_STARTUP_TIMEOUT = 5
@@ -176,12 +203,12 @@ def start_nats_and_etcd_random_ports():
 
     while time.time() < timeout_at:
         if etcd.poll() is not None:
-            stderr = etcd.stderr.read()
+            stderr = etcd.stderr.read() if etcd.stderr else ""
             shutil.rmtree(nats_data_dir, ignore_errors=True)
             shutil.rmtree(etcd_data_dir, ignore_errors=True)
             raise RuntimeError(f"ETCD failed to start: {stderr}")
 
-        line = etcd.stderr.readline()
+        line = etcd.stderr.readline() if etcd.stderr else ""
         if not line:
             time.sleep(0.01)
             continue
@@ -273,7 +300,9 @@ def nats_and_etcd():
     """
     Start NATS and ETCD for testing.
 
-    Behavior is controlled by USE_PARALLEL_NATS_AND_ETCD constant:
+    Scope is "module" which means each test module shares the same NATS/ETCD instance.
+
+    Behavior is controlled by ENABLE_ISOLATED_ETCD_AND_NATS constant:
     - True (default): Random ports + unique data dirs for parallel execution
     - False: Default ports (4222, 2379) for sequential execution
     """
@@ -305,7 +334,7 @@ def nats_and_etcd():
         ):
             raise RuntimeError(f"ETCD failed to start on port {etcd_client_port}")
 
-        print("Services ready")
+        print(f"NATS ({nats_port}) and ETCD ({etcd_client_port}) services ready")
         yield
     finally:
         # Teardown code - always runs even if setup fails or tests error
@@ -357,12 +386,37 @@ def nats_and_etcd():
 
 
 @pytest.fixture(scope="function", autouse=False)
-async def runtime():
+async def runtime(request):
     """
     Create a DistributedRuntime for testing.
-    DistributedRuntime has singleton requirements, so tests using this fixture should be
+
+    IMPORTANT: DistributedRuntime is a process-level singleton. When using isolated
+    NATS/ETCD (ENABLE_ISOLATED_ETCD_AND_NATS=1), tests using this fixture MUST be
     marked with `@pytest.mark.forked` to run in a separate process for isolation.
+
+    Without @pytest.mark.forked in isolated mode, you will get "Worker already initialized"
+    errors when multiple tests try to create runtimes in the same process.
     """
+    # Check if the test is marked with @pytest.mark.forked (only in isolated mode)
+    if ENABLE_ISOLATED_ETCD_AND_NATS:
+        forked_marker = request.node.get_closest_marker("forked")
+        if forked_marker is None:
+            pytest.fail(
+                f"""
+Test '{request.node.name}' uses the 'runtime' fixture but is not marked with @pytest.mark.forked.
+This is required when ENABLE_ISOLATED_ETCD_AND_NATS=1.
+
+Add @pytest.mark.forked decorator to run this test in a separate process:
+  @pytest.mark.forked
+  async def test_my_test(runtime):
+      ...
+
+Or set ENABLE_ISOLATED_ETCD_AND_NATS=0 to use default ports (no forking needed).
+
+This is required because DistributedRuntime is a process-level singleton.
+"""
+            )
+
     loop = asyncio.get_running_loop()
     runtime = DistributedRuntime(loop, True)
     yield runtime
