@@ -527,7 +527,9 @@ class VllmV1ConfigModifier:
         component_type: SubComponentType = SubComponentType.DECODE,
     ):
         cfg = Config.model_validate(config)
-        worker_service = get_worker_service_from_config(cfg, backend="vllm", sub_component_type=component_type)
+        worker_service = get_worker_service_from_config(
+            cfg, backend="vllm", sub_component_type=component_type
+        )
 
         # Set up resources
         setup_worker_service_resources(worker_service, tp_size)
@@ -764,7 +766,9 @@ class SGLangConfigModifier:
         component_type: SubComponentType = SubComponentType.DECODE,
     ):
         cfg = Config.model_validate(config)
-        worker_service = get_worker_service_from_config(cfg, backend="sglang", sub_component_type=component_type)
+        worker_service = get_worker_service_from_config(
+            cfg, backend="sglang", sub_component_type=component_type
+        )
 
         # Set up resources
         setup_worker_service_resources(worker_service, tp_size)
@@ -787,7 +791,9 @@ class SGLangConfigModifier:
         component_type: SubComponentType = SubComponentType.DECODE,
     ):
         cfg = Config.model_validate(config)
-        worker_service = get_worker_service_from_config(cfg, backend="sglang", sub_component_type=component_type)
+        worker_service = get_worker_service_from_config(
+            cfg, backend="sglang", sub_component_type=component_type
+        )
 
         # Set up resources with multinode configuration
         setup_worker_service_resources(worker_service, tep_size, num_gpus_per_node)
@@ -820,7 +826,9 @@ class SGLangConfigModifier:
         component_type: SubComponentType = SubComponentType.DECODE,
     ):
         cfg = Config.model_validate(config)
-        worker_service = get_worker_service_from_config(cfg, backend="sglang", sub_component_type=component_type)
+        worker_service = get_worker_service_from_config(
+            cfg, backend="sglang", sub_component_type=component_type
+        )
 
         # Set up resources with multinode configuration
         setup_worker_service_resources(worker_service, dep_size, num_gpus_per_node)
@@ -1059,7 +1067,9 @@ class TrtllmConfigModifier:
 
         # Get the worker service using helper function
         # This assumes convert_config has been called, so the service is named decode_worker_k8s_name
-        worker_service = get_worker_service_from_config(cfg, backend="trtllm", sub_component_type=component_type)
+        worker_service = get_worker_service_from_config(
+            cfg, backend="trtllm", sub_component_type=component_type
+        )
 
         # Set up resources
         setup_worker_service_resources(worker_service, tp_size)
