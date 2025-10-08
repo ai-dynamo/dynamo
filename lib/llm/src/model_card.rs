@@ -434,7 +434,7 @@ impl ModelDeploymentCard {
     }
 
     /// Build an in-memory ModelDeploymentCard from a folder containing config.json,
-    /// tokenizer.json and token_config.json (i.e. a huggingface repo checkout).
+    /// tokenizer.json and tokenizer_config.json (i.e. a huggingface repo checkout).
     /// Optional custom template.
     pub fn load_from_disk(
         config_path: impl AsRef<Path>,
