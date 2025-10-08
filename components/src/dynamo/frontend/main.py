@@ -243,7 +243,7 @@ async def async_main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
 
-    logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
+    logging.debug("Signal handlers will trigger a graceful shutdown of the runtime")
 
     if flags.router_mode == "kv":
         router_mode = RouterMode.KV
