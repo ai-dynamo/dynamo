@@ -318,13 +318,25 @@ pub mod distributed_runtime {
     pub const UPTIME_SECONDS: &str = "uptime_seconds";
 }
 
-/// KVBM connector
-pub mod kvbm_connector {
-    /// KVBM connector leader
-    pub const KVBM_CONNECTOR_LEADER: &str = "kvbm_connector_leader";
+/// KVBM
+pub mod kvbm {
+    /// The number of offload requests
+    pub const OFFLOAD_REQUESTS: &str = "offload_requests";
 
-    /// KVBM connector worker
-    pub const KVBM_CONNECTOR_WORKER: &str = "kvbm_connector_worker";
+    /// The number of offload blocks from device to host
+    pub const OFFLOAD_BLOCKS_D2H: &str = "offload_blocks_d2h";
+
+    /// The number of onboard requests
+    pub const ONBOARD_REQUESTS: &str = "onboard_requests";
+
+    /// The number of onboard blocks from host to device
+    pub const ONBOARD_BLOCKS_H2D: &str = "onboard_blocks_h2d";
+
+    /// The number of onboard blocks from disk to device
+    pub const ONBOARD_BLOCKS_D2D: &str = "onboard_blocks_d2d";
+
+    /// The number of matched tokens
+    pub const MATCHED_TOKENS: &str = "matched_tokens";
 }
 
 /// KvStats metrics from LLM workers

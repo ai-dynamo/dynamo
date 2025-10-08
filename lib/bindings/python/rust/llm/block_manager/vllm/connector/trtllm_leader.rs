@@ -8,10 +8,12 @@ use crate::llm::block_manager::BlockManagerBuilder;
 use crate::llm::block_manager::vllm::connector::leader::slot::{
     ConnectorSlotManager, SlotManager, SlotState,
 };
+use crate::llm::block_manager::vllm::connector::leader::{
+    kvbm_metrics_endpoint_enabled, parse_kvbm_metrics_port,
+};
 use crate::llm::block_manager::{distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest};
 use anyhow;
-use dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics;
-use dynamo_runtime::metrics::prometheus_names::kvbm_connector;
+use dynamo_llm::block_manager::metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry};
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Handle;
@@ -76,11 +78,12 @@ impl KvConnectorLeader {
         let drt = drt.inner().clone();
         let handle: Handle = drt.runtime().primary();
 
-        let ns = drt
-            .namespace(kvbm_connector::KVBM_CONNECTOR_LEADER)
-            .unwrap();
+        let kvbm_metrics = KvbmMetrics::new(
+            &KvbmMetricsRegistry::default(),
+            kvbm_metrics_endpoint_enabled(),
+            parse_kvbm_metrics_port(),
+        );
 
-        let kvbm_metrics = KvbmMetrics::new(&ns);
         let kvbm_metrics_clone = kvbm_metrics.clone();
 
         let slot_manager_cell = Arc::new(OnceLock::new());
