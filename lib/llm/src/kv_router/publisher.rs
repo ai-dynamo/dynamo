@@ -28,7 +28,6 @@ use crate::kv_router::{
     protocols::*,
     scoring::LoadEvent,
 };
-use dynamo_runtime::config::environment_names::nats as env_nats;
 
 // -------------------------------------------------------------------------
 // KV Event Publishers -----------------------------------------------------
@@ -125,12 +124,15 @@ impl KvEventPublisher {
         let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
             .to_string()
             .replace("_", "-");
-        let nats_server = std::env::var(env_nats::NATS_SERVER)
-            .unwrap_or_else(|_| "nats://localhost:4222".to_string());
+        let nats_servers = std::env::var("NATS_SERVER")
+            .unwrap_or_else(|_| "nats://localhost:4222".to_string())
+            .split(',')
+            .map(|s| s.to_owned())
+            .collect();
         // Create NatsQueue without consumer since we're only publishing
         let mut nats_queue = NatsQueue::new_without_consumer(
             stream_name,
-            nats_server,
+            nats_servers,
             std::time::Duration::from_secs(60), // 1 minute timeout
         );
 

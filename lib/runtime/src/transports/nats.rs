@@ -276,27 +276,31 @@ impl Client {
 #[derive(Debug, Clone, Builder, Validate)]
 pub struct ClientOptions {
     #[builder(setter(into), default = "default_server()")]
-    #[validate(custom(function = "validate_nats_server"))]
-    server: String,
+    #[validate(length(min = 1), custom(function = "validate_nats_server"))]
+    servers: Vec<String>,
 
     #[builder(default)]
     auth: NatsAuth,
 }
 
-fn default_server() -> String {
-    if let Ok(server) = std::env::var(env_nats::NATS_SERVER) {
-        return server;
+fn default_server() -> Vec<String> {
+    match std::env::var("NATS_SERVER") {
+        Ok(possible_list_of_urls) => possible_list_of_urls
+            .split(',')
+            .map(|s| s.to_string())
+            .collect(),
+        Err(_) => vec!["nats://localhost:4222".to_string()],
     }
-
-    "nats://localhost:4222".to_string()
 }
 
-fn validate_nats_server(server: &str) -> Result<(), ValidationError> {
-    if server.starts_with("nats://") {
-        Ok(())
-    } else {
-        Err(ValidationError::new("server must start with 'nats://'"))
+fn validate_nats_server(servers: &Vec<String>) -> Result<(), ValidationError> {
+    for server in servers {
+        if !server.starts_with("nats://") {
+            return Err(ValidationError::new("server must start with 'nats://'"));
+        }
     }
+
+    Ok(())
 }
 
 // TODO(jthomson04): We really shouldn't be hardcoding this.
@@ -326,7 +330,7 @@ impl ClientOptions {
         let (client, _) = build_in_runtime(
             async move {
                 client
-                    .connect(self.server)
+                    .connect(self.servers)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}. Verify NATS server is running and accessible."))
             },
@@ -349,7 +353,7 @@ impl ClientOptions {
 impl Default for ClientOptions {
     fn default() -> Self {
         ClientOptions {
-            server: default_server(),
+            servers: default_server(),
             auth: NatsAuth::default(),
         }
     }
@@ -424,7 +428,7 @@ pub struct NatsQueue {
     /// The name of the stream to use for the queue
     stream_name: String,
     /// The NATS server URL
-    nats_server: String,
+    nats_servers: Vec<String>,
     /// Timeout for dequeue operations in seconds
     dequeue_timeout: time::Duration,
     /// The NATS client
@@ -441,7 +445,11 @@ pub struct NatsQueue {
 
 impl NatsQueue {
     /// Create a new NatsQueue with the default "worker-group" consumer
-    pub fn new(stream_name: String, nats_server: String, dequeue_timeout: time::Duration) -> Self {
+    pub fn new(
+        stream_name: String,
+        nats_servers: Vec<String>,
+        dequeue_timeout: time::Duration,
+    ) -> Self {
         // Sanitize stream name to remove path separators (like in Python version)
         // rupei: are we sure NATs stream name accepts '_'?
         let sanitized_stream_name = Slug::slugify(&stream_name).to_string();
@@ -449,7 +457,7 @@ impl NatsQueue {
 
         Self {
             stream_name: sanitized_stream_name,
-            nats_server,
+            nats_servers,
             dequeue_timeout,
             client: None,
             subject,
@@ -462,7 +470,7 @@ impl NatsQueue {
     /// Create a new NatsQueue without a consumer (publisher-only mode)
     pub fn new_without_consumer(
         stream_name: String,
-        nats_server: String,
+        nats_servers: Vec<String>,
         dequeue_timeout: time::Duration,
     ) -> Self {
         let sanitized_stream_name = Slug::slugify(&stream_name).to_string();
@@ -470,7 +478,7 @@ impl NatsQueue {
 
         Self {
             stream_name: sanitized_stream_name,
-            nats_server,
+            nats_servers,
             dequeue_timeout,
             client: None,
             subject,
@@ -484,7 +492,7 @@ impl NatsQueue {
     /// Each consumer with a unique name will receive all messages independently
     pub fn new_with_consumer(
         stream_name: String,
-        nats_server: String,
+        nats_servers: Vec<String>,
         dequeue_timeout: time::Duration,
         consumer_name: String,
     ) -> Self {
@@ -493,7 +501,7 @@ impl NatsQueue {
 
         Self {
             stream_name: sanitized_stream_name,
-            nats_server,
+            nats_servers,
             dequeue_timeout,
             client: None,
             subject,
@@ -512,7 +520,9 @@ impl NatsQueue {
     pub async fn connect_with_reset(&mut self, reset_stream: bool) -> Result<()> {
         if self.client.is_none() {
             // Create a new client
-            let client_options = Client::builder().server(self.nats_server.clone()).build()?;
+            let client_options = Client::builder()
+                .servers(self.nats_servers.clone())
+                .build()?;
 
             let client = client_options.connect().await?;
 
@@ -523,10 +533,16 @@ impl NatsQueue {
                 .map(time::Duration::from_secs)
                 .unwrap_or_else(|| time::Duration::from_secs(60 * 60));
 
+            let num_replicas = std::env::var("NATS_JETSTREAM_REPLICAS")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(1);
+
             let stream_config = jetstream::stream::Config {
                 name: self.stream_name.clone(),
                 subjects: vec![self.subject.clone()],
                 max_age,
+                num_replicas,
                 ..Default::default()
             };
 
@@ -1021,7 +1037,7 @@ mod tests {
             assert!(opts.is_ok());
             let opts = opts.unwrap();
 
-            assert_eq!(opts.server, "nats://localhost:5222");
+            assert_eq!(opts.servers, vec!["nats://localhost:5222"]);
             assert_eq!(
                 opts.auth,
                 NatsAuth::UserPass("user".to_string(), "pass".to_string())
@@ -1036,13 +1052,13 @@ mod tests {
             jail.set_env(env_nats::auth::NATS_AUTH_PASSWORD, "pass");
 
             let opts = ClientOptions::builder()
-                .server("nats://localhost:6222")
+                .servers(vec!["nats://localhost:6222".to_string()])
                 .auth(NatsAuth::Token("token".to_string()))
                 .build();
             assert!(opts.is_ok());
             let opts = opts.unwrap();
 
-            assert_eq!(opts.server, "nats://localhost:6222");
+            assert_eq!(opts.servers, vec!["nats://localhost:6222"]);
             assert_eq!(opts.auth, NatsAuth::Token("token".to_string()));
 
             Ok(())
@@ -1062,7 +1078,7 @@ mod tests {
 
         // Set up client
         let client_options = ClientOptions::builder()
-            .server("nats://localhost:4222")
+            .servers(vec!["nats://localhost:4222".to_string()])
             .build()
             .expect("Failed to build client options");
 
@@ -1105,12 +1121,12 @@ mod tests {
 
         // Create unique stream name for this test
         let stream_name = format!("test-broadcast-{}", Uuid::new_v4());
-        let nats_server = "nats://localhost:4222".to_string();
+        let nats_servers = vec!["nats://localhost:4222".to_string()];
         let timeout = time::Duration::from_secs(0);
 
         // Connect to NATS client first to delete stream if it exists
         let client_options = Client::builder()
-            .server(nats_server.clone())
+            .servers(nats_servers.clone())
             .build()
             .expect("Failed to build client options");
 
@@ -1128,7 +1144,7 @@ mod tests {
 
         let mut queue1 = NatsQueue::new_with_consumer(
             stream_name.clone(),
-            nats_server.clone(),
+            nats_servers.clone(),
             timeout,
             consumer1_name,
         );
@@ -1164,14 +1180,14 @@ mod tests {
         // Now create and connect queue2 and queue3 AFTER messages are published (to test persistence)
         let mut queue2 = NatsQueue::new_with_consumer(
             stream_name.clone(),
-            nats_server.clone(),
+            nats_servers.clone(),
             timeout,
             consumer2_name,
         );
 
         // Create a third queue without consumer (publisher-only)
         let mut queue3 =
-            NatsQueue::new_without_consumer(stream_name.clone(), nats_server.clone(), timeout);
+            NatsQueue::new_without_consumer(stream_name.clone(), nats_servers.clone(), timeout);
 
         // Connect queue2 and queue3 after messages are already published
         queue2.connect().await.expect("Failed to connect queue2");
