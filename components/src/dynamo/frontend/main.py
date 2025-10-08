@@ -210,6 +210,11 @@ def parse_args():
         help="Start KServe gRPC server.",
     )
     add_config_dump_args(parser)
+    parser.add_argument(
+        "--extremely-unsafe-do-not-use-in-prod-expose-dump-config",
+        action="store_true",
+        help="DO NOT USE IN PROD! Exposes the `/dump_config` endpoint which will dump config + environment variables + system info + GPU info + installed packages.",
+    )
 
     flags = parser.parse_args()
 
@@ -274,6 +279,10 @@ async def async_main():
         kwargs["tls_key_path"] = flags.tls_key_path
     if flags.namespace:
         kwargs["namespace"] = flags.namespace
+    if flags.extremely_unsafe_do_not_use_in_prod_expose_dump_config:
+        kwargs[
+            "extremely_unsafe_do_not_use_in_prod_expose_dump_config"
+        ] = flags.extremely_unsafe_do_not_use_in_prod_expose_dump_config
 
     if is_static:
         # out=dyn://<static_endpoint>

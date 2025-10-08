@@ -12,6 +12,7 @@ from dynamo.common.config_dump.config_dumper import (
     add_config_dump_args,
     dump_config,
     get_config_dump,
+    get_config_endpoint,
     register_encoder,
 )
 from dynamo.common.config_dump.environment import get_environment_vars
@@ -25,6 +26,7 @@ __all__ = [
     "add_config_dump_args",
     "dump_config",
     "get_config_dump",
+    "get_config_endpoint",
     "get_environment_vars",
     "get_gpu_info",
     "get_runtime_info",

@@ -8,7 +8,7 @@ import json
 import logging
 import pathlib
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 from dynamo.common._version import __version__
 
@@ -77,6 +77,16 @@ def _get_vllm_version() -> Optional[str]:
         return None
 
 
+async def get_config_endpoint(config: Any, request=None):
+    try:
+        # TODO: Putting the dict instead of the string doesn't get sent
+        # through the endpoint correctly...
+        yield {"status": "success", "message": get_config_dump(config)}
+    except Exception as e:
+        logger.exception("Unexpected error dumping config")
+        yield {"status": "error", "message": str(e)}
+
+
 def dump_config(dump_config_to: Optional[str], config: Any) -> None:
     """
     Dump the configuration to a file or stdout.
@@ -101,15 +111,24 @@ def dump_config(dump_config_to: Optional[str], config: Any) -> None:
             logger.info(f"Dumped config to {dump_path.resolve()}")
         except (OSError, IOError):
             logger.exception(f"Failed to dump config to {dump_config_to}")
-            logger.info(f"CONFIG_DUMP: {config_dump_payload}")
+            logger.debug(f"CONFIG_DUMP: {config_dump_payload}")
         except Exception:
             logger.exception("Unexpected error dumping config")
-            logger.info(f"CONFIG_DUMP: {config_dump_payload}")
+            logger.debug(f"CONFIG_DUMP: {config_dump_payload}")
     else:
-        logger.info(f"CONFIG_DUMP: {config_dump_payload}")
+        logger.debug(f"CONFIG_DUMP: {config_dump_payload}")
 
 
 def get_config_dump(config: Any, extra_info: Optional[Dict[str, Any]] = None) -> str:
+    """
+    Collect comprehensive config information about a backend instance.
+    """
+    return canonical_json_encoder.encode(_get_config_dump_data(config, extra_info))
+
+
+def _get_config_dump_data(
+    config: Any, extra_info: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """
     Collect comprehensive config information about a backend instance.
 
@@ -148,7 +167,7 @@ def get_config_dump(config: Any, extra_info: Optional[Dict[str, Any]] = None) ->
         if extra_info:
             config_dump.update(extra_info)
 
-        return canonical_json_encoder.encode(config_dump)
+        return config_dump
 
     except Exception as e:
         logger.error(f"Error collecting config dump: {e}")
@@ -157,7 +176,7 @@ def get_config_dump(config: Any, extra_info: Optional[Dict[str, Any]] = None) ->
             "error": f"Failed to collect config dump: {str(e)}",
             "system_info": get_system_info(),  # Always try to include basic system info
         }
-        return canonical_json_encoder.encode(error_info)
+        return error_info
 
 
 def add_config_dump_args(parser: argparse.ArgumentParser):
@@ -176,13 +195,15 @@ def add_config_dump_args(parser: argparse.ArgumentParser):
 
 
 @functools.singledispatch
-def _preprocess_for_encode(obj: object) -> object:
+def _preprocess_for_encode(obj: object) -> Union[Dict[str, Any], str]:
     """
     Single dispatch function for preprocessing objects before JSON encoding.
 
     This function should be extended using @register_encoder decorator
     for backend-specific types.
     """
+    if isinstance(obj, dict):
+        return obj
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         return dataclasses.asdict(obj)
     logger.warning(f"Unknown type {type(obj)}, using __dict__ or str(obj)")

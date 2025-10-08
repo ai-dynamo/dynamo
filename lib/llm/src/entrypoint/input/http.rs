@@ -51,13 +51,17 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
     }
     http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());
+    http_service_builder = http_service_builder
+        .extremely_unsafe_do_not_use_in_prod_expose_dump_config(
+            local_model.extremely_unsafe_do_not_use_in_prod_expose_dump_config(),
+        );
 
     let http_service = match engine_config {
         EngineConfig::Dynamic(_) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
             let etcd_client = distributed_runtime.etcd_client();
             // This allows the /health endpoint to query etcd for active instances
-            http_service_builder = http_service_builder.with_etcd_client(etcd_client.clone());
+            http_service_builder = http_service_builder.with_drt(Some(distributed_runtime.clone()));
             let http_service = http_service_builder.build()?;
             match etcd_client {
                 Some(ref etcd_client) => {

@@ -59,6 +59,7 @@ pub struct LocalModelBuilder {
     user_data: Option<serde_json::Value>,
     custom_template_path: Option<PathBuf>,
     namespace: Option<String>,
+    extremely_unsafe_do_not_use_in_prod_expose_dump_config: bool,
 }
 
 impl Default for LocalModelBuilder {
@@ -83,6 +84,7 @@ impl Default for LocalModelBuilder {
             user_data: Default::default(),
             custom_template_path: Default::default(),
             namespace: Default::default(),
+            extremely_unsafe_do_not_use_in_prod_expose_dump_config: false,
         }
     }
 }
@@ -146,6 +148,14 @@ impl LocalModelBuilder {
 
     pub fn namespace(&mut self, namespace: Option<String>) -> &mut Self {
         self.namespace = namespace;
+        self
+    }
+    pub fn extremely_unsafe_do_not_use_in_prod_expose_dump_config(
+        &mut self,
+        extremely_unsafe_do_not_use_in_prod_expose_dump_config: bool,
+    ) -> &mut Self {
+        self.extremely_unsafe_do_not_use_in_prod_expose_dump_config =
+            extremely_unsafe_do_not_use_in_prod_expose_dump_config;
         self
     }
 
@@ -229,6 +239,8 @@ impl LocalModelBuilder {
                 router_config: self.router_config.take().unwrap_or_default(),
                 runtime_config: self.runtime_config.clone(),
                 namespace: self.namespace.clone(),
+                extremely_unsafe_do_not_use_in_prod_expose_dump_config: self
+                    .extremely_unsafe_do_not_use_in_prod_expose_dump_config,
             });
         }
 
@@ -308,6 +320,8 @@ impl LocalModelBuilder {
             router_config: self.router_config.take().unwrap_or_default(),
             runtime_config: self.runtime_config.clone(),
             namespace: self.namespace.clone(),
+            extremely_unsafe_do_not_use_in_prod_expose_dump_config: self
+                .extremely_unsafe_do_not_use_in_prod_expose_dump_config,
         })
     }
 }
@@ -325,6 +339,7 @@ pub struct LocalModel {
     router_config: RouterConfig,
     runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
+    extremely_unsafe_do_not_use_in_prod_expose_dump_config: bool,
 }
 
 impl LocalModel {
@@ -377,6 +392,10 @@ impl LocalModel {
 
     pub fn namespace(&self) -> Option<&str> {
         self.namespace.as_deref()
+    }
+
+    pub fn extremely_unsafe_do_not_use_in_prod_expose_dump_config(&self) -> bool {
+        self.extremely_unsafe_do_not_use_in_prod_expose_dump_config
     }
 
     pub fn is_gguf(&self) -> bool {

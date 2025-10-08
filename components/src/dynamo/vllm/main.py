@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import functools
 import logging
 import os
 import signal
@@ -12,7 +13,7 @@ from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
-from dynamo.common.config_dump import dump_config
+from dynamo.common.config_dump import dump_config, get_config_endpoint
 from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
@@ -173,6 +174,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
+    dump_config_endpoint = component.endpoint("dump_config")
 
     engine_client, vllm_config, default_sampling_params = setup_vllm_engine(config)
 
@@ -205,6 +207,10 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks, metrics_labels=[("model", config.model)]
             ),
+            dump_config_endpoint.serve_endpoint(
+                functools.partial(get_config_endpoint, config),
+                metrics_labels=[("model", config.model)],
+            ),
         )
         logger.debug("serve_endpoint completed for prefill worker")
     except Exception as e:
@@ -225,6 +231,7 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
+    dump_config_endpoint = component.endpoint("dump_config")
 
     prefill_router_client = (
         await runtime.namespace(config.namespace)
@@ -313,6 +320,10 @@ async def init(runtime: DistributedRuntime, config: Config):
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks, metrics_labels=[("model", config.model)]
+            ),
+            dump_config_endpoint.serve_endpoint(
+                functools.partial(get_config_endpoint, config),
+                metrics_labels=[("model", config.model)],
             ),
         )
         logger.debug("serve_endpoint completed for decode worker")

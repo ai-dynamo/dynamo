@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import functools
 import logging
 import signal
 import sys
@@ -9,7 +10,7 @@ import sys
 import sglang as sgl
 import uvloop
 
-from dynamo.common.config_dump import dump_config
+from dynamo.common.config_dump import dump_config, get_config_endpoint
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -75,6 +76,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    dump_config_endpoint = component.endpoint("dump_config")
 
     prefill_client = None
     if config.serving_mode == DisaggregationMode.DECODE:
@@ -115,6 +117,10 @@ async def init(runtime: DistributedRuntime, config: Config):
                 dynamo_args,
                 readiness_gate=ready_event,
             ),
+            dump_config_endpoint.serve_endpoint(
+                functools.partial(get_config_endpoint, config),
+                metrics_labels=[("model", server_args.served_model_name)],
+            ),
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
@@ -140,6 +146,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    dump_config_endpoint = component.endpoint("dump_config")
 
     handler = PrefillWorkerHandler(component, engine, config)
 
@@ -151,7 +158,11 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
             graceful_shutdown=True,
             metrics_labels=[("model", server_args.served_model_name)],
             health_check_payload=health_check_payload,
-        )
+        ),
+        dump_config_endpoint.serve_endpoint(
+            functools.partial(get_config_endpoint, config),
+            metrics_labels=[("model", server_args.served_model_name)],
+        ),
     ]
 
     try:
@@ -175,6 +186,7 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
     await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    dump_config_endpoint = component.endpoint("dump_config")
 
     # publisher instantiates the metrics and kv event publishers
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
@@ -206,6 +218,10 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
                 output_type=ModelType.Embedding,
                 readiness_gate=ready_event,
             ),
+            dump_config_endpoint.serve_endpoint(
+                functools.partial(get_config_endpoint, config),
+                metrics_labels=[("model", server_args.served_model_name)],
+            ),
         )
     except Exception as e:
         logging.error(f"Failed to serve embedding endpoints: {e}")
@@ -229,6 +245,7 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
     await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    dump_config_endpoint = component.endpoint("dump_config")
 
     # For processor, we need to connect to the encode worker
     encode_worker_client = (
@@ -260,6 +277,10 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
                 input_type=ModelInput.Text,
                 readiness_gate=ready_event,
             ),
+            dump_config_endpoint.serve_endpoint(
+                functools.partial(get_config_endpoint, config),
+                metrics_labels=[("model", server_args.served_model_name)],
+            ),
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
@@ -278,6 +299,7 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
     await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    dump_config_endpoint = component.endpoint("dump_config")
 
     # For encode worker, we need to connect to the downstream LLM worker
     pd_worker_client = (
@@ -297,7 +319,11 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
             handler.generate,
             graceful_shutdown=True,
             metrics_labels=[("model", server_args.served_model_name)],
-        )
+        ),
+        dump_config_endpoint.serve_endpoint(
+            functools.partial(get_config_endpoint, config),
+            metrics_labels=[("model", server_args.served_model_name)],
+        ),
     ]
 
     try:
@@ -319,6 +345,7 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    dump_config_endpoint = component.endpoint("config")
 
     engine = sgl.Engine(server_args=server_args)
 
@@ -337,10 +364,16 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     await handler.async_init()
 
     try:
-        await generate_endpoint.serve_endpoint(
-            handler.generate,
-            metrics_labels=[("model", server_args.served_model_name)],
-            graceful_shutdown=True,
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                metrics_labels=[("model", server_args.served_model_name)],
+                graceful_shutdown=True,
+            ),
+            dump_config_endpoint.serve_endpoint(
+                functools.partial(get_config_endpoint, config),
+                metrics_labels=[("model", server_args.served_model_name)],
+            ),
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
@@ -361,6 +394,7 @@ async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Co
     await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    dump_config_endpoint = component.endpoint("dump_config")
 
     handler = MultimodalPrefillWorkerHandler(component, engine, config)
     await handler.async_init()
@@ -374,7 +408,11 @@ async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Co
                 graceful_shutdown=True,
                 metrics_labels=[("model", server_args.served_model_name)],
                 health_check_payload=health_check_payload,
-            )
+            ),
+            dump_config_endpoint.serve_endpoint(
+                functools.partial(get_config_endpoint, config),
+                metrics_labels=[("model", server_args.served_model_name)],
+            ),
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")

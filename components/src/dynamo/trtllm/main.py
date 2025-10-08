@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -34,7 +35,7 @@ from torch.cuda import device_count
 from transformers import AutoConfig
 
 import dynamo.nixl_connect as nixl_connect
-from dynamo.common.config_dump import dump_config
+from dynamo.common.config_dump import dump_config, get_config_endpoint
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -282,9 +283,9 @@ async def init(runtime: DistributedRuntime, config: Config):
     connector = nixl_connect.Connector()
     await connector.initialize()
 
-    dump_config(
-        config.dump_config_to, {"engine_args": engine_args, "dynamo_args": config}
-    )
+    # dump config to file/stdout
+    config_to_dump = {"engine_args": engine_args, "dynamo_args": config}
+    dump_config(config.dump_config_to, config_to_dump)
 
     async with get_llm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)
@@ -357,6 +358,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         # Get health check payload (checks env var and falls back to TensorRT-LLM default)
         health_check_payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
 
+        dump_config_endpoint = component.endpoint("dump_config")
         if config.publish_events_and_metrics and is_first_worker(config):
             # Initialize and pass in the publisher to the request handler to
             # publish events and metrics.
@@ -374,15 +376,26 @@ async def init(runtime: DistributedRuntime, config: Config):
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
-                await endpoint.serve_endpoint(
-                    handler.generate,
-                    metrics_labels=metrics_labels,
-                    health_check_payload=health_check_payload,
+                await asyncio.gather(
+                    endpoint.serve_endpoint(
+                        handler.generate,
+                        metrics_labels=metrics_labels,
+                        health_check_payload=health_check_payload,
+                    ),
+                    dump_config_endpoint.serve_endpoint(
+                        functools.partial(get_config_endpoint, config_to_dump),
+                        metrics_labels=metrics_labels,
+                    ),
                 )
         else:
             handler = RequestHandlerFactory().get_request_handler(handler_config)
-            await endpoint.serve_endpoint(
-                handler.generate, health_check_payload=health_check_payload
+            await asyncio.gather(
+                endpoint.serve_endpoint(
+                    handler.generate, health_check_payload=health_check_payload
+                ),
+                dump_config_endpoint.serve_endpoint(
+                    functools.partial(get_config_endpoint, config_to_dump),
+                ),
             )
 
 

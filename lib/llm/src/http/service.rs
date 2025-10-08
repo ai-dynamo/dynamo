@@ -21,6 +21,7 @@
 mod openai;
 
 pub mod disconnect;
+pub mod dump_config;
 pub mod error;
 pub mod health;
 pub mod metrics;
