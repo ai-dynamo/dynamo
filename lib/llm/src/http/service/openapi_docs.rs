@@ -32,17 +32,6 @@
 //!
 //! 1. View the raw OpenAPI spec: `curl http://localhost:8000/openapi.json`
 //! 2. Access Swagger UI: Open `http://localhost:8000/docs` in a web browser
-//!
-//! ## Supported Endpoints
-//!
-//! The generated documentation includes:
-//! - Chat Completions (`POST /v1/chat/completions`)
-//! - Text Completions (`POST /v1/completions`)
-//! - Embeddings (`POST /v1/embeddings`)
-//! - Responses (`POST /v1/responses`)
-//! - Model Listing (`GET /v1/models`)
-//! - Health Checks (`GET /health`, `GET /live`)
-//! - Metrics (`GET /metrics`)
 
 use axum::Router;
 use utoipa::OpenApi;
