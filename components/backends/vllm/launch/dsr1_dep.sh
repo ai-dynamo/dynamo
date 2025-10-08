@@ -11,7 +11,8 @@ GPUS_PER_NODE=""
 MASTER_ADDR="localhost"
 LOG_DIR="./logs"
 MODEL="deepseek-ai/DeepSeek-R1"
-
+SERVED_MODEL_NAME="deepseek-ai/DeepSeek-R1"
+IS_PREFILL_WORKER="false"
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -39,6 +40,14 @@ while [[ $# -gt 0 ]]; do
             MODEL="$2"
             shift 2
             ;;
+        --served-model-name)
+            SERVED_MODEL_NAME="$2"
+            shift 2
+            ;;
+        --is-prefill-worker)
+            IS_PREFILL_WORKER=true
+            shift 1
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
@@ -48,6 +57,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --master-addr ADDR    Master node address (default: localhost)"
             echo "  --log-dir DIR         Directory for log files (default: ./logs)"
             echo "  --model MODEL         Model name to use (default: ${MODEL})"
+            echo "  --served-model-name SERVED_MODEL_NAME         Served model name to use (default: ${SERVED_MODEL_NAME})"
+            echo "  --is-prefill-worker   Mark this worker as a prefill worker (flag)"
             echo "  -h, --help            Show this help message"
             exit 0
             ;;
@@ -78,26 +89,34 @@ echo "  Data parallel size: $DATA_PARALLEL_SIZE"
 echo "  Master address: $MASTER_ADDR"
 echo "  Log directory: $LOG_DIR"
 echo "  Model name: $MODEL"
-
+echo "  Served model name: $SERVED_MODEL_NAME"
+echo "  Is prefill worker: $IS_PREFILL_WORKER"
 trap 'echo Cleaning up...; kill 0' EXIT
 
-# run ingress if it's node 0
-if [ $NODE_RANK -eq 0 ]; then
+# run ingress if it's node 0 and is not a prefill worker
+if [ "$NODE_RANK" -eq 0 ] && [ "$IS_PREFILL_WORKER" = "false" ]; then
     DYN_LOG=debug python -m dynamo.frontend --router-mode kv --http-port=8000 2>&1 | tee $LOG_DIR/dsr1_dep_ingress.log &
 fi
 
 mkdir -p $LOG_DIR
 
+# add is-prefill-worker flag if it's a prefill worker
+IS_PREFILL_WORKER_FLAG=""
+if [ "$IS_PREFILL_WORKER" = "true" ]; then
+    IS_PREFILL_WORKER_FLAG="--is-prefill-worker"
+fi
+
 # Data Parallel Attention / Expert Parallelism
 # Routing to DP workers managed by Dynamo
 for ((i=0; i<GPUS_PER_NODE; i++)); do
     dp_rank=$((i + NODE_RANK * GPUS_PER_NODE))
-    CUDA_VISIBLE_DEVICES=$i \
+    DYN_LOG=debug CUDA_VISIBLE_DEVICES=$i \
         VLLM_ALL2ALL_BACKEND="deepep_low_latency" \
         VLLM_USE_DEEP_GEMM=1 \
         VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1 \
         python3 -m dynamo.vllm \
         --model $MODEL \
+        --served-model-name $SERVED_MODEL_NAME \
         --data_parallel_size $DATA_PARALLEL_SIZE \
         --data-parallel-rank $dp_rank \
         --enable-expert-parallel \
@@ -105,7 +124,7 @@ for ((i=0; i<GPUS_PER_NODE; i++)); do
         --data-parallel-address $MASTER_ADDR \
         --data-parallel-rpc-port 13345 \
         --gpu-memory-utilization 0.95 \
-        --enforce-eager 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_rank}.log &
+        --enforce-eager $IS_PREFILL_WORKER_FLAG 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_rank}.log &
 done
 
 echo "All workers starting. (press Ctrl+C to stop)..."

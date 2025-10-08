@@ -21,6 +21,22 @@ node 1
 ./launch/dsr1_dep.sh --num-nodes 2 --node-rank 1 --gpus-per-node 8 --master-addr <node 0 addr>
 ```
 
+### PD Disaggregation
+
+By default, each worker launched with `dsr1_dep.sh` will act as an **aggregated worker**, handling both prefill and decode requests. If you launch any workers with the `--is-prefill-worker` flag, those workers will act as **prefill workers** only, and the default workers will automatically switch to act as **decode workers**.
+
+To mark a worker as a prefill worker, simply add the `--is-prefill-worker` flag to the launch command. For example:
+
+node 2
+```bash
+./launch/dsr1_dep.sh --num-nodes 2 --node-rank 0 --gpus-per-node 8 --master-addr <node 2 addr> --is-prefill-worker
+```
+
+node 3
+```bash
+./launch/dsr1_dep.sh --num-nodes 2 --node-rank 1 --gpus-per-node 8 --master-addr <node 2 addr> --is-prefill-worker
+```
+
 ### Testing the Deployment
 
 On node 0 (where the frontend was started) send a test request to verify your deployment:
