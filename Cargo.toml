@@ -82,6 +82,7 @@ modelexpress-common = { git = "https://github.com/ai-dynamo/modelexpress.git", r
 
 humantime = { version = "2.2.0" }
 libc = { version = "0.2" }
+once_cell = { version = "1.20" }
 oneshot = { version = "0.1.11", features = ["std", "async"] }
 prometheus = { version = "0.14" }
 rand = { version = "0.9.0" }

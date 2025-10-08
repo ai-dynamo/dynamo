@@ -13,6 +13,7 @@
 
 pub mod prompt;
 pub mod tools;
+pub mod custom;
 
 use anyhow::Result;
 use dynamo_async_openai::types::{ChatCompletionToolChoiceOption, EncodingFormat};
@@ -50,6 +51,7 @@ use crate::protocols::{
 use crate::tokenizers::{HuggingFaceTokenizer, traits::Tokenizer};
 
 use crate::preprocessor::prompt::{PromptFormatter, PromptInput, TextInput, TokenInput};
+use crate::preprocessor::custom::{create_custom_formatter, create_custom_tokenizer};
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
 pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
@@ -112,11 +114,78 @@ pub struct OpenAIPreprocessor {
 
 impl OpenAIPreprocessor {
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
+        // Check for custom preprocessors first
+        if let Some(custom_config) = mdc.custom_preprocessor.clone() {
+            return Self::new_with_custom(mdc, &custom_config);
+        }
+
+        // Fall back to default formatter and tokenizer
         let formatter = PromptFormatter::from_mdc(&mdc)?;
         let tokenizer = mdc.tokenizer_hf()?;
         match formatter {
             PromptFormatter::OAI(formatter) => Self::new_with_parts(mdc, formatter, tokenizer),
         }
+    }
+
+    /// Create OpenAIPreprocessor with custom preprocessors
+    pub fn new_with_custom(
+        mdc: ModelDeploymentCard,
+        custom_config: &crate::preprocessor::custom::CustomPreprocessorConfig,
+    ) -> Result<Arc<Self>> {
+        // Try to get custom formatter
+        let formatter = if let Some(formatter_name) = &custom_config.formatter_name {
+            match create_custom_formatter(formatter_name)? {
+                Some(formatter) => formatter,
+                None => {
+                    // Fall back to default formatter
+                    let default_formatter = PromptFormatter::from_mdc(&mdc)?;
+                    match default_formatter {
+                        PromptFormatter::OAI(formatter) => formatter,
+                    }
+                }
+            }
+        } else {
+            // Use default formatter
+            let default_formatter = PromptFormatter::from_mdc(&mdc)?;
+            match default_formatter {
+                PromptFormatter::OAI(formatter) => formatter,
+            }
+        };
+
+        // Try to get custom tokenizer
+        let tokenizer: Arc<dyn Tokenizer> = if let Some(tokenizer_name) = &custom_config.tokenizer_name {
+            match create_custom_tokenizer(tokenizer_name)? {
+                Some(tokenizer) => tokenizer,
+                None => {
+                    // Fall back to default HF tokenizer
+                    let hf_tokenizer = mdc.tokenizer_hf()?;
+                    Arc::new(HuggingFaceTokenizer::from_tokenizer(hf_tokenizer))
+                }
+            }
+        } else {
+            // Use default HF tokenizer
+            let hf_tokenizer = mdc.tokenizer_hf()?;
+            Arc::new(HuggingFaceTokenizer::from_tokenizer(hf_tokenizer))
+        };
+
+        let mdcsum = mdc.mdcsum();
+        let Some(model_info) = mdc.model_info else {
+            anyhow::bail!(
+                "Blank ModelDeploymentCard cannot be used for pre-processing, no model_info"
+            );
+        };
+        let model_info = model_info.get_model_info()?;
+        let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
+        let runtime_config = mdc.runtime_config.clone();
+
+        Ok(Arc::new(Self {
+            formatter,
+            tokenizer,
+            model_info,
+            mdcsum,
+            runtime_config,
+            tool_call_parser,
+        }))
     }
 
     pub fn new_with_parts(

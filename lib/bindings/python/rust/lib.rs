@@ -129,11 +129,16 @@ fn get_span_for_direct_context(
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     logging::init();
+
+    // Initialize the custom preprocessor factory
+    llm::custom_preprocessor::init_python_preprocessor_factory();
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
+    m.add_function(wrap_pyfunction!(llm::custom_preprocessor::register_custom_formatter, m)?)?;
+    m.add_function(wrap_pyfunction!(llm::custom_preprocessor::register_custom_tokenizer, m)?)?;
 
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<CancellationToken>()?;

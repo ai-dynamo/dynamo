@@ -20,6 +20,7 @@ use std::sync::{Arc, OnceLock};
 use crate::common::checked_file::{CheckedFile, Checksum};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_type::{ModelInput, ModelType};
+use crate::preprocessor::custom::CustomPreprocessorConfig;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_runtime::DistributedRuntime;
@@ -179,6 +180,10 @@ pub struct ModelDeploymentCard {
 
     #[serde(default)]
     pub runtime_config: ModelRuntimeConfig,
+
+    /// Custom preprocessor configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_preprocessor: Option<CustomPreprocessorConfig>,
 
     #[serde(skip)]
     cache_dir: Option<Arc<tempfile::TempDir>>,
@@ -567,6 +572,7 @@ impl ModelDeploymentCard {
             model_input: Default::default(), // set later
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
+            custom_preprocessor: None,
             cache_dir: None,
             checksum: OnceLock::new(),
         })
@@ -632,6 +638,7 @@ impl ModelDeploymentCard {
             model_input: Default::default(), // set later
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
+            custom_preprocessor: None,
             cache_dir: None,
             checksum: OnceLock::new(),
         })
