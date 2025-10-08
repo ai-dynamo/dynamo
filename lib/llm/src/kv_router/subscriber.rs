@@ -302,7 +302,16 @@ pub async fn start_kv_router_background(
                     let key = String::from_utf8_lossy(kv.key());
                     tracing::info!("Router deleted: {}", key);
 
-                    // Extract the router UUID from the key (format: kv_routers/<model>/<uuid>)
+                    // Only process deletions for routers on the same component
+                    if !key.contains(component.path().as_str()) {
+                        tracing::trace!(
+                            "Skipping router deletion from different component (key: {key}, subscriber component: {})",
+                            component.path()
+                        );
+                        continue;
+                    }
+
+                    // Extract the router UUID from the key
                     let Some(router_uuid) = key.split('/').next_back() else {
                         tracing::warn!("Could not extract UUID from router key: {}", key);
                         continue;

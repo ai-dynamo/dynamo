@@ -191,8 +191,37 @@ class DecodeHandler(HandlerBase):
         super().__init__(config)
 
     async def remote_prefill(self, request: dict, context: Context):
-        async for res in await self.next_client.round_robin(request, context=context):
-            yield res
+        """
+        Send request to prefill. Try router first if available, fallback to direct worker.
+        """
+        # Format request in PreprocessedRequest format with extra_args
+        prefill_request = copy.deepcopy(request)
+
+        # Try router first if available, fallback to worker
+        if (
+            self.next_router_client is not None
+            and self.next_router_client.instance_ids()
+        ):
+            try:
+                # Call router's generate endpoint which returns LLMEngineOutput
+                async for res in await self.next_router_client.generate(
+                    prefill_request, context=context
+                ):
+                    yield res
+                return
+            except Exception as e:
+                logging.warning(
+                    f"Prefill router call failed: {e}. Falling back to direct worker."
+                )
+
+        # Fallback to direct worker
+        if self.next_client is not None:
+            async for res in await self.next_client.round_robin(
+                prefill_request, context=context
+            ):
+                yield res
+        else:
+            raise ValueError("No prefill router or worker available")
 
     async def generate(self, request: dict, context: Context):
         logging.debug(f"New Request ID: {context.id()}")
