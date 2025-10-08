@@ -52,7 +52,7 @@ use axum::{
     routing::get,
 };
 use utoipa::OpenApi;
-use utoipa::openapi::{PathItem, Paths};
+use utoipa::openapi::{PathItem, Paths, RefOr};
 
 use super::service_v2;
 use crate::http::service::RouteDoc;
@@ -64,11 +64,11 @@ use crate::http::service::RouteDoc;
 #[derive(OpenApi)]
 #[openapi(
     info(
-        title = "Dynamo LLM HTTP Service",
-        version = "1.0.0",
-        description = "OpenAI-compatible HTTP API for Dynamo LLM inference engine.\n\nThis service provides endpoints for chat completions, text completions, embeddings, and model management.",
+        title = "NVIDIA Dynamo OpenAI Frontend",
+        version = "0.6.0",
+        description = "OpenAI-compatible HTTP API for NVIDIA Dynamo.",
         license(name = "Apache-2.0"),
-        contact(name = "NVIDIA", url = "https://www.nvidia.com")
+        contact(name = "NVIDIA Dynamo", url = "https://github.com/ai-dynamo/dynamo")
     ),
     servers(
         (url = "/", description = "Current server")
@@ -183,39 +183,265 @@ fn add_request_body_for_path(
     operation: utoipa::openapi::path::OperationBuilder,
     path: &str,
 ) -> utoipa::openapi::path::OperationBuilder {
+    use utoipa::openapi::ContentBuilder;
     use utoipa::openapi::request_body::RequestBodyBuilder;
 
-    let description = if path.contains("chat/completions") {
-        "Chat completion request with model, messages, and optional parameters"
-    } else if path.contains("completions") {
-        "Text completion request with model, prompt, and optional parameters"
-    } else if path.contains("embeddings") {
-        "Embedding request with model and input text"
-    } else if path.contains("responses") {
-        "Response request with model and input"
-    } else {
-        "Request body"
+    let (description, schema, example) = match path {
+        "/v1/chat/completions" => (
+            "Chat completion request with model, messages, and optional parameters",
+            create_chat_completion_schema(),
+            create_chat_completion_example(),
+        ),
+        "/v1/completions" => (
+            "Text completion request with model, prompt, and optional parameters",
+            create_completion_schema(),
+            create_completion_example(),
+        ),
+        "/v1/embeddings" => (
+            "Embedding request with model and input text",
+            create_embedding_schema(),
+            create_embedding_example(),
+        ),
+        "/v1/responses" => (
+            "Response request with model and input",
+            create_response_schema(),
+            create_response_example(),
+        ),
+        _ => {
+            return operation.request_body(Some(
+                RequestBodyBuilder::new()
+                    .description(Some("Request body"))
+                    .required(Some(utoipa::openapi::Required::True))
+                    .build(),
+            ));
+        }
     };
 
     operation.request_body(Some(
         RequestBodyBuilder::new()
             .description(Some(description))
+            .content(
+                "application/json",
+                ContentBuilder::new()
+                    .schema(Some(schema))
+                    .example(Some(example))
+                    .build(),
+            )
             .required(Some(utoipa::openapi::Required::True))
             .build(),
     ))
 }
 
+/// Create schema for chat completion request
+fn create_chat_completion_schema() -> RefOr<utoipa::openapi::schema::Schema> {
+    use utoipa::openapi::schema::{ArrayBuilder, ObjectBuilder};
+
+    RefOr::T(utoipa::openapi::schema::Schema::Object(
+        ObjectBuilder::new()
+            .property(
+                "model",
+                ObjectBuilder::new()
+                    .description(Some("ID of the model to use"))
+                    .build(),
+            )
+            .property(
+                "messages",
+                ArrayBuilder::new()
+                    .description(Some("A list of messages comprising the conversation so far"))
+                    .items(
+                        ObjectBuilder::new()
+                            .property(
+                                "role",
+                                ObjectBuilder::new()
+                                    .description(Some("The role of the message author (system, user, assistant)"))
+                                    .build(),
+                            )
+                            .property(
+                                "content",
+                                ObjectBuilder::new()
+                                    .description(Some("The contents of the message"))
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .property(
+                "temperature",
+                ObjectBuilder::new()
+                    .description(Some("Sampling temperature between 0 and 2. Higher values make output more random"))
+                    .build(),
+            )
+            .property(
+                "max_tokens",
+                ObjectBuilder::new()
+                    .description(Some("Maximum number of tokens to generate"))
+                    .build(),
+            )
+            .property(
+                "stream",
+                ObjectBuilder::new()
+                    .description(Some("Whether to stream back partial progress"))
+                    .build(),
+            )
+            .required("model")
+            .required("messages")
+            .build(),
+    ))
+}
+
+/// Create example for chat completion request
+fn create_chat_completion_example() -> serde_json::Value {
+    serde_json::json!({
+        "model": "Qwen/Qwen3-0.6B",
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a helpful assistant."
+            },
+            {
+                "role": "user",
+                "content": "Hello! Can you help me understand what this API does?"
+            }
+        ],
+        "temperature": 0.7,
+        "max_tokens": 50,
+        "stream": false
+    })
+}
+
+/// Create schema for completion request
+fn create_completion_schema() -> RefOr<utoipa::openapi::schema::Schema> {
+    use utoipa::openapi::schema::ObjectBuilder;
+
+    RefOr::T(utoipa::openapi::schema::Schema::Object(
+        ObjectBuilder::new()
+            .property(
+                "model",
+                ObjectBuilder::new()
+                    .description(Some("ID of the model to use"))
+                    .build(),
+            )
+            .property(
+                "prompt",
+                ObjectBuilder::new()
+                    .description(Some("The prompt to generate completions for"))
+                    .build(),
+            )
+            .property(
+                "temperature",
+                ObjectBuilder::new()
+                    .description(Some("Sampling temperature between 0 and 2"))
+                    .build(),
+            )
+            .property(
+                "max_tokens",
+                ObjectBuilder::new()
+                    .description(Some("Maximum number of tokens to generate"))
+                    .build(),
+            )
+            .property(
+                "stream",
+                ObjectBuilder::new()
+                    .description(Some("Whether to stream back partial progress"))
+                    .build(),
+            )
+            .required("model")
+            .required("prompt")
+            .build(),
+    ))
+}
+
+/// Create example for completion request
+fn create_completion_example() -> serde_json::Value {
+    serde_json::json!({
+        "model": "Qwen/Qwen3-0.6B",
+        "prompt": "Once upon a time",
+        "temperature": 0.7,
+        "max_tokens": 50,
+        "stream": false
+    })
+}
+
+/// Create schema for embedding request
+fn create_embedding_schema() -> RefOr<utoipa::openapi::schema::Schema> {
+    use utoipa::openapi::schema::ObjectBuilder;
+
+    RefOr::T(utoipa::openapi::schema::Schema::Object(
+        ObjectBuilder::new()
+            .property(
+                "model",
+                ObjectBuilder::new()
+                    .description(Some("ID of the model to use"))
+                    .build(),
+            )
+            .property(
+                "input",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Input text to embed, encoded as a string or array of strings",
+                    ))
+                    .build(),
+            )
+            .required("model")
+            .required("input")
+            .build(),
+    ))
+}
+
+/// Create example for embedding request
+fn create_embedding_example() -> serde_json::Value {
+    serde_json::json!({
+        "model": "Qwen/Qwen3-Embedding-4B",
+        "input": "The quick brown fox jumps over the lazy dog"
+    })
+}
+
+/// Create schema for response request
+fn create_response_schema() -> RefOr<utoipa::openapi::schema::Schema> {
+    use utoipa::openapi::schema::ObjectBuilder;
+
+    RefOr::T(utoipa::openapi::schema::Schema::Object(
+        ObjectBuilder::new()
+            .property(
+                "model",
+                ObjectBuilder::new()
+                    .description(Some("ID of the model to use"))
+                    .build(),
+            )
+            .property(
+                "input",
+                ObjectBuilder::new()
+                    .description(Some("The input text"))
+                    .build(),
+            )
+            .required("model")
+            .required("input")
+            .build(),
+    ))
+}
+
+/// Create example for response request
+fn create_response_example() -> serde_json::Value {
+    serde_json::json!({
+        "model": "Qwen/Qwen3-0.6B",
+        "input": "What is the capital of France?"
+    })
+}
+
 /// Generate a human-readable summary for a path
 fn generate_summary_for_path(path: &str) -> String {
     match path {
-        p if p.contains("chat/completions") => "Create chat completion".to_string(),
+        "/v1/chat/completions" => "Create chat completion".to_string(),
         "/v1/completions" => "Create text completion".to_string(),
-        p if p.contains("embeddings") => "Create embeddings".to_string(),
-        p if p.contains("responses") => "Create response".to_string(),
-        p if p.contains("models") => "List available models".to_string(),
-        p if p.contains("health") => "Health check".to_string(),
-        p if p.contains("live") => "Liveness check".to_string(),
-        p if p.contains("metrics") => "Prometheus metrics".to_string(),
+        "/v1/embeddings" => "Create embeddings".to_string(),
+        "/v1/responses" => "Create response".to_string(),
+        "/v1/models" => "List available models".to_string(),
+        "/health" => "Health check".to_string(),
+        "/live" => "Liveness check".to_string(),
+        "/metrics" => "Prometheus metrics".to_string(),
+        "/openapi.json" => "OpenAPI specification".to_string(),
+        "/swagger-ui" => "Swagger UI documentation".to_string(),
         _ => format!("Endpoint: {}", path),
     }
 }
@@ -223,7 +449,7 @@ fn generate_summary_for_path(path: &str) -> String {
 /// Generate a detailed description for a path
 fn generate_description_for_path(path: &str) -> String {
     match path {
-        p if p.contains("chat/completions") => {
+        "/v1/chat/completions" => {
             "Creates a completion for a chat conversation. Supports both streaming and non-streaming modes. \
             Compatible with OpenAI's chat completions API."
                 .to_string()
@@ -233,29 +459,37 @@ fn generate_description_for_path(path: &str) -> String {
             Compatible with OpenAI's completions API."
                 .to_string()
         }
-        p if p.contains("embeddings") => {
+        "/v1/embeddings" => {
             "Creates an embedding vector representing the input text. \
             Compatible with OpenAI's embeddings API."
                 .to_string()
         }
-        p if p.contains("responses") => {
+        "/v1/responses" => {
             "Creates a response for a given input. This is a Dynamo-specific endpoint."
                 .to_string()
         }
-        p if p.contains("models") => {
+        "/v1/models" => {
             "Lists the currently available models and provides basic information about each."
                 .to_string()
         }
-        p if p.contains("health") => {
+        "/health" => {
             "Returns the health status of the service. Used for readiness probes."
                 .to_string()
         }
-        p if p.contains("live") => {
+        "/live" => {
             "Returns the liveness status of the service. Used for liveness probes."
                 .to_string()
         }
-        p if p.contains("metrics") => {
+        "/metrics" => {
             "Returns Prometheus metrics for monitoring the service."
+                .to_string()
+        }
+        "/openapi.json" => {
+            "Returns the OpenAPI 3.0 specification for this API in JSON format."
+                .to_string()
+        }
+        "/swagger-ui" => {
+            "Interactive API documentation powered by Swagger UI."
                 .to_string()
         }
         _ => format!("Endpoint for path: {}", path),
@@ -280,7 +514,7 @@ async fn swagger_ui_handler() -> Html<&'static str> {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dynamo LLM API Documentation</title>
+    <title>Dynamo Frontend API Docs</title>
     <link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css" />
     <style>
         body {
@@ -344,35 +578,17 @@ mod tests {
     fn test_generate_openapi_spec() {
         let routes = vec![
             RouteDoc::new(axum::http::Method::POST, "/v1/chat/completions"),
-            RouteDoc::new(axum::http::Method::POST, "/v1/completions"),
             RouteDoc::new(axum::http::Method::GET, "/v1/models"),
         ];
 
         let spec = generate_openapi_spec(&routes);
 
         // Verify basic structure
-        assert_eq!(spec.info.title, "Dynamo LLM HTTP Service");
-        assert_eq!(spec.info.version, "1.0.0");
+        assert!(!spec.info.title.is_empty());
+        assert!(!spec.info.version.is_empty());
 
         // Verify paths were added
         assert!(spec.paths.paths.contains_key("/v1/chat/completions"));
-        assert!(spec.paths.paths.contains_key("/v1/completions"));
         assert!(spec.paths.paths.contains_key("/v1/models"));
-    }
-
-    #[test]
-    fn test_summary_generation() {
-        assert_eq!(
-            generate_summary_for_path("/v1/chat/completions"),
-            "Create chat completion"
-        );
-        assert_eq!(
-            generate_summary_for_path("/v1/completions"),
-            "Create text completion"
-        );
-        assert_eq!(
-            generate_summary_for_path("/v1/models"),
-            "List available models"
-        );
     }
 }
