@@ -285,7 +285,7 @@ cd $DYNAMO_HOME/examples/multimodal
 bash launch/disagg_llama.sh --head-node
 
 # On a separate node that has finished standard dynamo setup, i.e.
-# the worker node needs NATS_SERVER and ETCD_ENDPOINTS environment variables
+# the worker node needs NATS_SERVERS and ETCD_ENDPOINTS environment variables
 # pointing to the head node's external IP address for distributed coordination
 cd $DYNAMO_HOME/examples/multimodal
 bash launch/disagg_llama.sh

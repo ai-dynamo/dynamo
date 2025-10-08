@@ -22,7 +22,7 @@ spec:
               secretKeyRef:
                 name: hf-token-secret
                 key: HF_TOKEN
-          - name: NATS_SERVER
+          - name: NATS_SERVERS
             value: nats://${NAMESPACE}-nats:4222
           - name: ETCD_ENDPOINTS
             value: ${NAMESPACE}-etcd:2379

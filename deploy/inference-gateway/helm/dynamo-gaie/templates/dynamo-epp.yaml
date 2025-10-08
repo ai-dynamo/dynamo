@@ -90,7 +90,7 @@ spec:
         {{- if $useDynamo }}
           - name: ETCD_ENDPOINTS
             value: "{{ $platformName }}-etcd.{{ $platformNs }}:2379"
-          - name: NATS_SERVER
+          - name: NATS_SERVERS
             value: "nats://{{ $platformName }}-nats.{{ $platformNs }}:4222"
           - name: DYN_NAMESPACE
             value: "{{ $ns }}"

@@ -19,7 +19,7 @@ Default Service Relationship Diagram:
 graph TD
     BROWSER[Browser] -->|:3001| GRAFANA[Grafana :3001]
     subgraph DockerComposeNetwork [Network inside Docker Compose]
-        NATS_PROM_EXP[nats-prom-exp :7777 /metrics] -->|:8222/varz| NATS_SERVER[nats-server :4222, :6222, :8222]
+        NATS_PROM_EXP[nats-prom-exp :7777 /metrics] -->|:8222/varz| NATS_SERVERS[nats-server :4222, :6222, :8222]
         PROMETHEUS[Prometheus server :9090] -->|:2379/metrics| ETCD_SERVER[etcd-server :2379, :2380]
         PROMETHEUS -->|:9401/metrics| DCGM_EXPORTER[dcgm-exporter :9401]
         PROMETHEUS -->|:7777/metrics| NATS_PROM_EXP

@@ -82,7 +82,7 @@ Please follow steps below to create this task
 |Key|Value type|Value|
 |-|-|-|
 |ETCD_ENDPOINTS|Value|http://IP_ADDRESS:2379|
-|NATS_SERVER|Value|nats://IP_ADDRESS:4222|
+|NATS_SERVERS|Value|nats://IP_ADDRESS:4222|
 - Docker configuration
 Add `sh,-c` in **Entry point** and `cd components/backends/vllm && python -m dynamo.frontend --router-mode kv & python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager` in **Command**
 
@@ -103,11 +103,11 @@ You can create a service or directly run the task from the task definition
 - Wait for this deployment to finish, and get the **Private IP** of this task.
 2. Dynamo Frontend and Decoding Worker Task
 - Choose the EC2 cluster (`dynamo-GPU`) for **Existing cluster** created in step 1.
-- In the **Container Overrides**, use the IP for ETCD/NATS task for the `ETCD_ENDPOINTS` and `NATS_SERVER` values.
+- In the **Container Overrides**, use the IP for ETCD/NATS task for the `ETCD_ENDPOINTS` and `NATS_SERVERS` values.
 - After the deployment, an aggregated serving endpoint is created and you can test it with scripts in step 6.
 3. Dynamo PrefillWorker Task
 - For disaggregated serving, you can deploy a separate prefill worker on another GPU. Choose the EC2 cluster (`dynamo-GPU`) for **Existing cluster** created in step 1 with at least 2 GPUs ( `g6e.12xlarge` for example)
-- In the **Container Overrides**, use the IP for ETCD/NATS task for the `ETCD_ENDPOINTS` and `NATS_SERVER` values.
+- In the **Container Overrides**, use the IP for ETCD/NATS task for the `ETCD_ENDPOINTS` and `NATS_SERVERS` values.
 
 ## 6. Testing
 Find the public IP of the dynamo frontend task from the task page. Run following commands to query the endpoint.
