@@ -727,7 +727,9 @@ class WorkflowMetricsUploader:
 
         # Identity & Context - container-specific fields only
         job_id = str(job_data['id'])
+        job_name = job_data["name"]
         container_data[FIELD_ID] = f"github-container-{job_id}-{build_metrics.get('framework', 'unknown')}"
+        container_data[FIELD_JOB_NAME] = str(job_name)
         container_data[FIELD_JOB_ID] = job_id
 
         # Find the "Build Container" step ID
