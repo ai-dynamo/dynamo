@@ -219,7 +219,7 @@ jobs:
     name: Upload Workflow Metrics
     runs-on: gitlab
     if: always()  # Always run, even if other jobs fail
-    needs: [vllm]  # Wait for the status check which waits for all build jobs
+    needs: [backend-status-check]  # Wait for the status check which waits for all build jobs
     
     steps:
       - name: Check out repository
