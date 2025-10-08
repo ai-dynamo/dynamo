@@ -172,7 +172,7 @@ for i in $(seq 1 $NUM_WORKERS); do
                 "${EXTRA_ARGS[@]}"
         elif [ "$USE_TRTLLM" = true ]; then
             echo "[${WORKER_TYPE^} Worker-$i] Using GPUs: $GPU_DEVICES"
-            # Run TensorRT-LLM engine
+            # Run TensorRT-LLM engine with trtllm-llmapi-launch for proper initialization
             TRTLLM_ARGS=()
             TRTLLM_ARGS+=("--model-path" "$MODEL_PATH")
             TRTLLM_ARGS+=("--tensor-parallel-size" "$TENSOR_PARALLEL_SIZE")
@@ -183,7 +183,7 @@ for i in $(seq 1 $NUM_WORKERS); do
             fi
             TRTLLM_ARGS+=("${EXTRA_ARGS[@]}")
 
-            exec env CUDA_VISIBLE_DEVICES=$GPU_DEVICES python -m dynamo.trtllm \
+            exec env CUDA_VISIBLE_DEVICES=$GPU_DEVICES trtllm-llmapi-launch python -m dynamo.trtllm \
                 "${TRTLLM_ARGS[@]}"
         else
             echo "[${WORKER_TYPE^} Worker-$i] Using GPUs: $GPU_DEVICES"
