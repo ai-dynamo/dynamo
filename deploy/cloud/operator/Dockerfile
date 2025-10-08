@@ -47,7 +47,7 @@ FROM base AS builder
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o manager ./cmd/main.go
 
 # Runtime stage
-FROM nvcr.io/nvidia/distroless/go:v3.1.12
+FROM nvcr.io/nvidia/distroless/go:v3.1.13
 WORKDIR /
 COPY --from=builder /workspace/manager .
 USER 65532:65532
