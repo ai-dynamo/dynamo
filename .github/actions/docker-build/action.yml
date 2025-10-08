@@ -66,26 +66,6 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Setup Build Environment and Capture Start Time
-      id: setup
-      shell: bash
-      run: |
-        # Capture build start time
-        BUILD_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        echo "🕐 Build started at: ${BUILD_START_TIME}"
-        echo "BUILD_START_TIME=${BUILD_START_TIME}" >> $GITHUB_ENV
-        echo "build-start-time=${BUILD_START_TIME}" >> $GITHUB_OUTPUT
-
-        echo "🔧 Setting up build environment for ${{ inputs.framework }}..."
-
-        # Add setup commands here if needed
-        # Setup sccache
-        # curl -L https://github.com/mozilla/sccache/releases/download/v0.7.4/sccache-v0.7.4-x86_64-unknown-linux-musl.tar.gz | tar xz
-        # sudo mv sccache-*/sccache /usr/local/bin/sccache
-        # sccache --start-server
-
-        echo "✅ Build environment setup complete"
-
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
       with:
@@ -119,6 +99,11 @@ runs:
           IMAGE_TAG="${{ inputs.framework }}:latest"
         fi
 
+        BUILD_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        echo "🕐 Build started at: ${BUILD_START_TIME}"
+        echo "BUILD_START_TIME=${BUILD_START_TIME}" >> $GITHUB_ENV
+        echo "build-start-time=${BUILD_START_TIME}" >> $GITHUB_OUTPUT
+
         echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
         ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \
@@ -128,6 +113,10 @@ runs:
           --use-sccache \
           --sccache-bucket "$SCCACHE_S3_BUCKET" \
           --sccache-region "$AWS_DEFAULT_REGION"
+
+        BUILD_END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        echo "🕐 Build ended at: ${BUILD_END_TIME}"
+        echo "BUILD_END_TIME=${BUILD_END_TIME}" >> $GITHUB_ENV
 
     - name: Capture Build Metrics
       id: metrics
@@ -140,7 +129,7 @@ runs:
 
         # Get accurate build timing
         BUILD_START_TIME="${{ env.BUILD_START_TIME }}"
-        BUILD_END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        BUILD_END_TIME="${{ env.BUILD_END_TIME }}"
 
         # Calculate duration
         START_EPOCH=$(date -d "$BUILD_START_TIME" +%s)

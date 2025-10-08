@@ -40,13 +40,6 @@ jobs:
   vllm:
     needs: changed-files
     if: needs.changed-files.outputs.has_code_changes == 'true'
-    outputs:
-      build-duration-sec: ${{ steps.build-image.outputs.build-duration-sec }}
-      image-size-bytes: ${{ steps.build-image.outputs.image-size-bytes }}
-      build-start-time: ${{ steps.build-image.outputs.build-start-time }}
-      build-end-time: ${{ steps.build-image.outputs.build-end-time }}
-      framework: ${{ steps.build-image.outputs.framework }}
-      target: ${{ steps.build-image.outputs.target }}
     strategy:
       fail-fast: false
       matrix:
@@ -95,13 +88,6 @@ jobs:
   sglang:
     needs: changed-files
     if: needs.changed-files.outputs.has_code_changes == 'true'
-    outputs:
-      build-duration-sec: ${{ steps.build-image.outputs.build-duration-sec }}
-      image-size-bytes: ${{ steps.build-image.outputs.image-size-bytes }}
-      build-start-time: ${{ steps.build-image.outputs.build-start-time }}
-      build-end-time: ${{ steps.build-image.outputs.build-end-time }}
-      framework: ${{ steps.build-image.outputs.framework }}
-      target: ${{ steps.build-image.outputs.target }}
     # OPS-1140: Uncomment this for sglang arm switch to wideep
     # strategy:
     #   fail-fast: false
@@ -160,13 +146,6 @@ jobs:
   trtllm:
     needs: changed-files
     if: needs.changed-files.outputs.has_code_changes == 'true'
-    outputs:
-      build-duration-sec: ${{ steps.build-image.outputs.build-duration-sec }}
-      image-size-bytes: ${{ steps.build-image.outputs.image-size-bytes }}
-      build-start-time: ${{ steps.build-image.outputs.build-start-time }}
-      build-end-time: ${{ steps.build-image.outputs.build-end-time }}
-      framework: ${{ steps.build-image.outputs.framework }}
-      target: ${{ steps.build-image.outputs.target }}
     strategy:
       fail-fast: false
       matrix:
@@ -249,15 +228,7 @@ jobs:
           WORKFLOW_INDEX: ${{ secrets.WORKFLOW_INDEX }}
           JOB_INDEX: ${{ secrets.JOB_INDEX }}
           STEPS_INDEX: ${{ secrets.STEPS_INDEX }}
-          # Pass build metrics as environment variables
-          BUILD_DURATION_SEC: ${{ needs.vllm.outputs.build-duration-sec }}
-          IMAGE_SIZE_BYTES: ${{ needs.vllm.outputs.image-size-bytes }}
-          BUILD_START_TIME: ${{ needs.vllm.outputs.build-start-time }}
-          BUILD_END_TIME: ${{ needs.vllm.outputs.build-end-time }}
-          BUILD_FRAMEWORK: ${{ needs.vllm.outputs.framework }}
-          BUILD_TARGET: ${{ needs.vllm.outputs.target }}
-          # Build and container index configuration
-          BUILD_INDEX: ${{ secrets.BUILD_INDEX }}
+          # Container index configuration
           CONTAINER_INDEX: ${{ secrets.CONTAINER_INDEX }}
         run: |
           # Upload complete workflow metrics including container metrics
