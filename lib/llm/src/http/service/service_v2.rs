@@ -335,6 +335,13 @@ impl HttpServiceConfigBuilder {
             all_docs.extend(route_docs);
         }
 
+        // Add OpenAPI documentation routes (must be after all other routes so it can document them)
+        // Note: The path parameter is currently unused as SwaggerUi requires static paths
+        let (openapi_docs, openapi_route) =
+            super::openapi_docs::openapi_router(all_docs.clone(), None);
+        router = router.merge(openapi_route);
+        all_docs.extend(openapi_docs);
+
         // Add span for tracing
         router = router.layer(TraceLayer::new_for_http().make_span_with(make_request_span));
 
