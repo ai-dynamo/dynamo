@@ -61,7 +61,9 @@ if [ "${gen_enable_attention_dp}" = "false" ]; then
 fi
 
 full_logdir=${sub_dir}
-mkdir -p ${full_logdir}
+artifacts_dir=${full_logdir}/genai_perf_artifacts
+mkdir -p ${artifacts_dir}
+
 
 # Set clock
 #srun ${set_clock_cmd}
@@ -109,8 +111,6 @@ nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
 
 export HEAD_NODE="${nodes[0]}"
 export HEAD_NODE_IP="$(hostname -i)"
-export ETCD_ENDPOINTS="http://${HEAD_NODE}:2379"
-export NATS_SERVER="nats://${HEAD_NODE}:4222"
 
 echo "HEAD_NODE: ${HEAD_NODE}"
 echo "HEAD_NODE_ID: ${HEAD_NODE_ID}"
@@ -137,20 +137,7 @@ cleanup_and_exit() {
     fi
 }
 
-# start the server
-srun -l --container-name=${CONTAINER_NAME} \
-        --container-mounts=${container_mounts} \
-        --mpi=pmix --overlap -N 1 -n 1 \
-        --oversubscribe \
-        --overlap \
-        --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE \
-        -w ${nodes[0]} \
-        bash ${SCRIPTS_DIR}/scripts/start_frontend.sh &> ${full_logdir}/output_server.log &
-SERVER_PID=$!
-echo "$SERVER_PID" >> "$PID_FILE"
-
-# wait for the server to start
-sleep 10
+rm -rf ${full_logdir}/hostnames
 
 PREFILL_COUNT=$(grep 'prefill_count:' "${full_logdir}/instance_config.yaml" | awk '{print $2}')
 if [ -z "$PREFILL_COUNT" ]; then
@@ -172,7 +159,7 @@ for ((i=1; i<=PREFILL_COUNT; i++)); do
         --overlap \
         --ntasks 4 \
         --nodes 1 \
-        bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/prefill_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${served_model_name} ${model_path} 'prefill' &> ${full_logdir}/output_workers.log &
+        bash ${SCRIPTS_DIR}/scripts/start_baseline_worker.sh ${full_logdir}/prefill_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${served_model_name} ${model_path} 'prefill' ${i} ${full_logdir} &> ${full_logdir}/output_workers.log &
   prefill_pids+=($!)
   echo "$!" >> "$PID_FILE"
 done
@@ -203,19 +190,31 @@ for ((i=1; i<=DECODE_COUNT; i++)); do
       --ntasks $gen_tp_size \
       --oversubscribe \
       --overlap \
-      bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/decode_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${served_model_name} ${model_path} 'decode' &> ${full_logdir}/output_workers.log &
+      bash ${SCRIPTS_DIR}/scripts/start_baseline_worker.sh ${full_logdir}/decode_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${served_model_name} ${model_path} 'decode' ${i} ${full_logdir} &> ${full_logdir}/output_workers.log &
   echo "$!" >> "$PID_FILE"
 done
+
+# start the server
+srun -l --container-name=${CONTAINER_NAME} \
+        --container-mounts=${container_mounts} \
+        --mpi=pmix --overlap -N 1 -n 1 \
+        --oversubscribe \
+        --overlap \
+        --container-env HEAD_NODE_IP,HEAD_NODE \
+        -w ${nodes[0]} \
+        bash ${SCRIPTS_DIR}/scripts/start_baseline_frontend.sh ${PREFILL_COUNT} ${DECODE_COUNT} ${full_logdir} ${SCRIPTS_DIR} &> ${full_logdir}/output_server.log &
+SERVER_PID=$!
+echo "$SERVER_PID" >> "$PID_FILE"
 
 total_gpus=$((ctx_gpus + gen_gpus))
 
 # start the loadgen
 srun -l --container-name=${CONTAINER_NAME} \
-        --container-mounts=${container_mounts} \
+        --container-mounts=${container_mounts},${artifacts_dir}:${artifacts_dir} \
         --container-env HEAD_NODE_IP,HEAD_NODE,SCRIPTS_DIR \
         --mpi=pmix --overlap -N 1 -n 1 \
 	    -w ${nodes[0]} \
-        bash ${SCRIPTS_DIR}/scripts/bench.sh ${served_model_name} ${MULTI_ROUND} ${num_gen_servers} "${concurrency_list}" ${STREAMING} ${full_logdir} ${total_gpus} ${model_path} ${isl} ${osl} ${kind} > ${full_logdir}/bench.log 2>&1
+        bash ${SCRIPTS_DIR}/scripts/bench.sh ${served_model_name} ${MULTI_ROUND} ${num_gen_servers} "${concurrency_list}" ${STREAMING} ${full_logdir} ${total_gpus} ${artifacts_dir} ${model_path} ${isl} ${osl} ${kind} > ${full_logdir}/bench.log 2>&1
 
 
 # Cleanup will be handled by the EXIT trap
