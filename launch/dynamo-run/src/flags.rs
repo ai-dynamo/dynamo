@@ -8,7 +8,6 @@ use clap::ValueEnum;
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::kv_router::KvRouterConfig;
-use dynamo_llm::local_model::LocalModel;
 use dynamo_llm::mocker::protocols::MockEngineArgs;
 use dynamo_runtime::pipeline::RouterMode as RuntimeRouterMode;
 
@@ -137,12 +136,7 @@ pub struct Flags {
 impl Flags {
     /// For each Output variant, check if it would be able to run.
     /// This takes validation out of the main engine creation path.
-    pub fn validate(
-        &self,
-        _local_model: &LocalModel,
-        in_opt: &Input,
-        out_opt: &Output,
-    ) -> anyhow::Result<()> {
+    pub fn validate(&self, in_opt: &Input, out_opt: &Output) -> anyhow::Result<()> {
         match in_opt {
             Input::Endpoint(_) => {}
             _ => {

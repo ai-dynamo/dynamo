@@ -5,7 +5,6 @@ use anyhow::Context as _;
 use dynamo_llm::entrypoint::EngineConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
-use dynamo_runtime::CancellationToken;
 use dynamo_runtime::distributed::DistributedConfig;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
@@ -71,20 +70,12 @@ pub async fn run(
     print_cuda(&out_opt);
 
     // Now that we know the output we're targeting, check if we expect it to work
-    flags.validate(&local_model, &in_opt, &out_opt)?;
+    flags.validate(&in_opt, &out_opt)?;
 
     // Make an engine from the local_model, flags and output.
-    let engine_config = engine_for(
-        runtime.primary_token(),
-        out_opt,
-        flags.clone(),
-        local_model,
-        rt.clone(),
-    )
-    .await?;
-    //
-    // Run in from an input
-    //
+    let engine_config = engine_for(out_opt, flags.clone(), local_model, rt.clone()).await?;
+
+    // Run it from an input
     dynamo_llm::entrypoint::input::run_input(rt, in_opt, engine_config).await?;
 
     Ok(())
@@ -93,7 +84,6 @@ pub async fn run(
 /// Create the engine matching `out_opt`
 /// Note validation happens in Flags::validate. In here assume everything is going to work.
 async fn engine_for(
-    _cancel_token: CancellationToken,
     out_opt: Output,
     flags: Flags,
     local_model: LocalModel,
