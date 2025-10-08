@@ -3,7 +3,7 @@
 1. Go to AWS ECS console, **Clusters** tab and click on **Create cluster** with name `dynamo-GPU`
 2. Input the cluster name and choose **AWS EC2 instances** as the infrastructure. This option will create a cluster with EC2 instances to deploy containers.
 3. Choose the ECS-optimized GPU AMI `Amazon Linux 2 (GPU)` (Amazon ECS–optimized), which includes NVIDIA drivers and the Docker GPU runtime out of the box.
-4. Choose `g6e.2xlarge` as the **EC2 instance type** and add an `SSH Key pair` so you can log in the instance for debugging purpose. To test with disaggregated serving, we need at least 2 GPUs, so you can choose `g6e.12xlarge` with 4 GPUs 
+4. Choose `g6e.2xlarge` as the **EC2 instance type** and add an `SSH Key pair` so you can log in the instance for debugging purpose. To test with disaggregated serving, we need at least 2 GPUs, so you can choose `g6e.12xlarge` with 4 GPUs
 5. Set **Root EBS volume size** as `200`
 6. For the networking, use the default settings. Make sure the **security group** has
 - an inbound rule which allows "All traffic" from this security group.
