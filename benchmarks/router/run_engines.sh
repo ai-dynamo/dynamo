@@ -88,7 +88,6 @@ if [ ${#EXTRA_ARGS[@]} -eq 0 ]; then
             "--max-seq-len" "32768"
             "--kv-block-size" "64"
             "--override-engine-args" "$OVERRIDE_ARGS"
-            "--publish-events-and-metrics"
         )
     else
         # Default args for vLLM engine (explicitly include block-size)
