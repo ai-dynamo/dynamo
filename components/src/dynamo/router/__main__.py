@@ -103,24 +103,28 @@ class StandaloneRouterHandler:
         }
 
         # Route and process through KvPushRouter
-        async for worker_output in await self.kv_push_router.generate_from_request(
-            preprocessed_request
-        ):
-            # Wrap worker output into LLMEngineOutput format
-            # Worker should return dict with at minimum kv_transfer_params in extra_args
-            llm_engine_output = {
-                "token_ids": worker_output.get("token_ids", []),
-                "tokens": worker_output.get("tokens"),
-                "text": worker_output.get("text"),
-                "cum_log_probs": worker_output.get("cum_log_probs"),
-                "log_probs": worker_output.get("log_probs"),
-                "top_logprobs": worker_output.get("top_logprobs"),
-                "finish_reason": worker_output.get("finish_reason"),
-                "index": worker_output.get("index"),
-                "disaggregated_params": worker_output.get("disaggregated_params"),
-                "extra_args": worker_output.get("extra_args"),
-            }
-            yield llm_engine_output
+        try:
+            async for worker_output in await self.kv_push_router.generate_from_request(
+                preprocessed_request
+            ):
+                # Wrap worker output into LLMEngineOutput format
+                # Worker should return dict with at minimum kv_transfer_params in extra_args
+                llm_engine_output = {
+                    "token_ids": worker_output.get("token_ids", []),
+                    "tokens": worker_output.get("tokens"),
+                    "text": worker_output.get("text"),
+                    "cum_log_probs": worker_output.get("cum_log_probs"),
+                    "log_probs": worker_output.get("log_probs"),
+                    "top_logprobs": worker_output.get("top_logprobs"),
+                    "finish_reason": worker_output.get("finish_reason"),
+                    "index": worker_output.get("index"),
+                    "disaggregated_params": worker_output.get("disaggregated_params"),
+                    "extra_args": worker_output.get("extra_args"),
+                }
+                yield llm_engine_output
+        except Exception as e:
+            logger.error(f"Error during request routing: {e}", exc_info=True)
+            raise
 
     async def best_worker_id(self, token_ids, router_config_override=None):
         """
