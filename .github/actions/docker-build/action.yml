@@ -39,29 +39,6 @@ outputs:
   image_tag:
     description: 'Image Tag'
     value: ${{ steps.build.outputs.image_tag }}
-  # Timing outputs
-  build-start-time:
-    description: 'Build start time'
-    value: ${{ steps.setup.outputs.build-start-time }}
-  build-end-time:
-    description: 'Build end time'
-    value: ${{ steps.metrics.outputs.build-end-time }}
-  build-duration-sec:
-    description: 'Build duration in seconds'
-    value: ${{ steps.metrics.outputs.build-duration-sec }}
-  # Metrics outputs
-  image-size-bytes:
-    description: 'Image size in bytes'
-    value: ${{ steps.metrics.outputs.image-size-bytes }}
-  framework:
-    description: 'Framework name'
-    value: ${{ steps.metrics.outputs.framework }}
-  target:
-    description: 'Build target'
-    value: ${{ steps.metrics.outputs.target }}
-  platform-arch:
-    description: 'Platform architecture (amd64/arm64)'
-    value: ${{ steps.metrics.outputs.platform-arch }}
 
 runs:
   using: "composite"
@@ -102,7 +79,6 @@ runs:
         BUILD_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         echo "🕐 Build started at: ${BUILD_START_TIME}"
         echo "BUILD_START_TIME=${BUILD_START_TIME}" >> $GITHUB_ENV
-        echo "build-start-time=${BUILD_START_TIME}" >> $GITHUB_OUTPUT
 
         echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
         ./container/build.sh --tag "$IMAGE_TAG" \
@@ -182,18 +158,12 @@ runs:
         echo "📁 Created build metrics file for ${JOB_KEY}:"
         cat "$METRICS_FILE"
 
-        # Set outputs
-        echo "build-end-time=${BUILD_END_TIME}" >> $GITHUB_OUTPUT
-        echo "build-duration-sec=${BUILD_DURATION_SEC}" >> $GITHUB_OUTPUT
-        echo "image-size-bytes=${IMAGE_SIZE_BYTES}" >> $GITHUB_OUTPUT
-        echo "framework=${{ inputs.framework }}" >> $GITHUB_OUTPUT
-        echo "target=${{ inputs.target }}" >> $GITHUB_OUTPUT
-        echo "platform-arch=${PLATFORM_ARCH}" >> $GITHUB_OUTPUT
+        # Metrics captured and saved to JSON file
 
     # Upload job-specific build metrics as artifact
     - name: Upload Build Metrics
       uses: actions/upload-artifact@v4
       with:
-        name: build-metrics-${{ inputs.framework }}-${{ steps.metrics.outputs.platform-arch }}
-        path: build-metrics/metrics-${{ inputs.framework }}-${{ steps.metrics.outputs.platform-arch }}.json
+        name: build-metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}
+        path: build-metrics/metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}.json
         retention-days: 7
