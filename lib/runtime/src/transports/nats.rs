@@ -28,6 +28,7 @@ use futures::{StreamExt, TryStreamExt};
 use prometheus::{Counter, Gauge, Histogram, HistogramOpts, IntCounter, IntGauge, Opts, Registry};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use core::num;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use tokio::fs::File as TokioFile;
@@ -527,10 +528,16 @@ impl NatsQueue {
                 .map(time::Duration::from_secs)
                 .unwrap_or_else(|| time::Duration::from_secs(60 * 60));
 
+            let num_replicas = std::env::var("NATS_JETSTREAM_REPLICAS")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(1);
+
             let stream_config = jetstream::stream::Config {
                 name: self.stream_name.clone(),
                 subjects: vec![self.subject.clone()],
                 max_age,
+                num_replicas,
                 ..Default::default()
             };
 
