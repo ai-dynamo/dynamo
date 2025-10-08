@@ -493,8 +493,8 @@ fn generate_description_for_path(path: &str) -> String {
 }
 
 /// Serve Swagger UI HTML page
-async fn swagger_ui_handler() -> Html<&'static str> {
-    Html(
+async fn swagger_ui_handler(openapi_path: String) -> Html<String> {
+    Html(format!(
         r#"
 <!DOCTYPE html>
 <html lang="en">
@@ -504,10 +504,10 @@ async fn swagger_ui_handler() -> Html<&'static str> {
     <title>Dynamo Frontend API Docs</title>
     <link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css" />
     <style>
-        body {
+        body {{
             margin: 0;
             padding: 0;
-        }
+        }}
     </style>
 </head>
 <body>
@@ -515,9 +515,9 @@ async fn swagger_ui_handler() -> Html<&'static str> {
     <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-standalone-preset.js"></script>
     <script>
-        window.onload = function() {
-            window.ui = SwaggerUIBundle({
-                url: "/openapi.json",
+        window.onload = function() {{
+            window.ui = SwaggerUIBundle({{
+                url: "{}",
                 dom_id: '#swagger-ui',
                 presets: [
                     SwaggerUIBundle.presets.apis,
@@ -525,13 +525,14 @@ async fn swagger_ui_handler() -> Html<&'static str> {
                 ],
                 layout: "BaseLayout",
                 deepLinking: true
-            });
-        };
+            }});
+        }};
     </script>
 </body>
 </html>
     "#,
-    )
+        openapi_path
+    ))
 }
 
 /// Create router for OpenAPI documentation endpoints
@@ -547,7 +548,13 @@ pub fn openapi_router(route_docs: Vec<RouteDoc>, path: Option<String>) -> (Vec<R
             &openapi_path,
             get(move || async move { Json(openapi_spec.clone()).into_response() }),
         )
-        .route("/docs", get(swagger_ui_handler));
+        .route(
+            "/docs",
+            get({
+                let path = openapi_path.clone();
+                move || swagger_ui_handler(path.clone())
+            }),
+        );
 
     let docs = vec![
         RouteDoc::new(axum::http::Method::GET, &openapi_path),
