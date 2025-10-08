@@ -43,18 +43,14 @@
 //! - Health Checks (`GET /health`, `GET /live`)
 //! - Metrics (`GET /metrics`)
 
-use std::sync::Arc;
-
 use axum::{
     Json, Router,
-    extract::State,
-    response::{Html, IntoResponse, Response},
+    response::{Html, IntoResponse},
     routing::get,
 };
 use utoipa::OpenApi;
 use utoipa::openapi::{PathItem, Paths, RefOr};
 
-use super::service_v2;
 use crate::http::service::RouteDoc;
 
 /// OpenAPI documentation structure
@@ -494,15 +490,6 @@ fn generate_description_for_path(path: &str) -> String {
         }
         _ => format!("Endpoint for path: {}", path),
     }
-}
-
-/// Handler for serving the OpenAPI JSON specification
-#[allow(dead_code)]
-async fn openapi_json(State(_state): State<Arc<service_v2::State>>) -> Response {
-    // Get route documentation from somewhere - we'll need to pass this in
-    // For now, create an empty spec
-    let openapi = ApiDoc::openapi();
-    Json(openapi).into_response()
 }
 
 /// Serve Swagger UI HTML page
