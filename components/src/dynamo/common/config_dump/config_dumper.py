@@ -211,6 +211,13 @@ def _preprocess_for_encode_set(
     return sorted(list(obj))
 
 
+@register_encoder(argparse.Namespace)
+def _preprocess_for_encode_namespace(
+    obj: argparse.Namespace,
+) -> dict:  # pyright: ignore[reportUnusedFunction]
+    return obj.__dict__
+
+
 @register_encoder(Enum)
 def _preprocess_for_encode_enum(
     obj: Enum,
