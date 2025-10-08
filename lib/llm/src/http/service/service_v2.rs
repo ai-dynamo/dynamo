@@ -336,9 +336,10 @@ impl HttpServiceConfigBuilder {
         }
 
         // Add OpenAPI documentation routes (must be after all other routes so it can document them)
+        // Note: The path parameter is currently unused as SwaggerUi requires static paths
         let (openapi_docs, openapi_route) = super::openapi_docs::openapi_router(
             all_docs.clone(),
-            std::env::var("DYN_HTTP_SVC_OPENAPI_PATH").ok(),
+            None,
         );
         router = router.merge(openapi_route);
         all_docs.extend(openapi_docs);

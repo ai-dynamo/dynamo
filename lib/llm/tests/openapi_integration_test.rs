@@ -30,15 +30,18 @@ mod tests {
     }
 
     #[test]
-    fn test_openapi_router_custom_path() {
+    fn test_openapi_router_ignores_custom_path() {
         let route_docs = vec![RouteDoc::new(Method::POST, "/v1/chat/completions")];
 
-        // Create the OpenAPI router with custom path
+        // Create the OpenAPI router with custom path parameter
+        // Note: SwaggerUi requires static paths, so custom path is ignored
         let (docs, _router) =
             openapi_docs::openapi_router(route_docs, Some("/api/docs.json".to_string()));
 
-        // Verify custom path is used
+        // Verify that static paths are used (custom path is ignored)
         let paths: Vec<String> = docs.iter().map(|d| d.to_string()).collect();
-        assert!(paths.iter().any(|p| p.contains("/api/docs.json")));
+        assert!(paths.iter().any(|p| p.contains("/openapi.json")));
+        assert!(paths.iter().any(|p| p.contains("/docs")));
+        assert!(!paths.iter().any(|p| p.contains("/api/docs.json")));
     }
 }

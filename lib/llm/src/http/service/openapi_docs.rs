@@ -21,8 +21,9 @@
 //!
 //! ## Configuration
 //!
-//! The OpenAPI endpoint path can be customized using the environment variable:
-//! - `DYN_HTTP_SVC_OPENAPI_PATH` - Override the default `/openapi.json` path
+//! The OpenAPI documentation endpoints use fixed paths:
+//! - `/openapi.json` - The OpenAPI specification
+//! - `/docs` - The Swagger UI documentation interface
 //!
 //! ## Example Usage
 //!
@@ -43,11 +44,7 @@
 //! - Health Checks (`GET /health`, `GET /live`)
 //! - Metrics (`GET /metrics`)
 
-use axum::{
-    Json, Router,
-    response::{Html, IntoResponse},
-    routing::get,
-};
+use axum::Router;
 use utoipa::OpenApi;
 use utoipa::openapi::{PathItem, Paths, RefOr};
 
@@ -492,72 +489,26 @@ fn generate_description_for_path(path: &str) -> String {
     }
 }
 
-/// Serve Swagger UI HTML page
-async fn swagger_ui_handler(openapi_path: String) -> Html<String> {
-    Html(format!(
-        r#"
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dynamo Frontend API Docs</title>
-    <link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css" />
-    <style>
-        body {{
-            margin: 0;
-            padding: 0;
-        }}
-    </style>
-</head>
-<body>
-    <div id="swagger-ui"></div>
-    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-standalone-preset.js"></script>
-    <script>
-        window.onload = function() {{
-            window.ui = SwaggerUIBundle({{
-                url: "{}",
-                dom_id: '#swagger-ui',
-                presets: [
-                    SwaggerUIBundle.presets.apis,
-                    SwaggerUIStandalonePreset
-                ],
-                layout: "BaseLayout",
-                deepLinking: true
-            }});
-        }};
-    </script>
-</body>
-</html>
-    "#,
-        openapi_path
-    ))
-}
-
 /// Create router for OpenAPI documentation endpoints
-pub fn openapi_router(route_docs: Vec<RouteDoc>, path: Option<String>) -> (Vec<RouteDoc>, Router) {
+pub fn openapi_router(route_docs: Vec<RouteDoc>, _path: Option<String>) -> (Vec<RouteDoc>, Router) {
+    use utoipa_swagger_ui::SwaggerUi;
+
     // Generate the OpenAPI spec from route docs
     let openapi_spec = generate_openapi_spec(&route_docs);
 
-    let openapi_path = path.unwrap_or("/openapi.json".to_string());
+    // Note: SwaggerUi requires a static string for the URL path, so we ignore the custom path
+    // parameter and always use "/openapi.json"
+    let openapi_path = "/openapi.json";
 
-    // Create handler for JSON endpoint and Swagger UI
-    let router = Router::new()
-        .route(
-            &openapi_path,
-            get(move || async move { Json(openapi_spec.clone()).into_response() }),
-        )
-        .route(
-            "/docs",
-            get({
-                let path = openapi_path.clone();
-                move || swagger_ui_handler(path.clone())
-            }),
-        );
+    // Create Swagger UI with the OpenAPI spec
+    // SwaggerUi automatically serves both the spec at /openapi.json and the UI at /docs
+    let swagger_ui = SwaggerUi::new("/docs").url(openapi_path, openapi_spec);
+
+    // SwaggerUi handles both routes internally, so we just merge it
+    let router = Router::new().merge(swagger_ui);
 
     let docs = vec![
-        RouteDoc::new(axum::http::Method::GET, &openapi_path),
+        RouteDoc::new(axum::http::Method::GET, openapi_path),
         RouteDoc::new(axum::http::Method::GET, "/docs"),
     ];
 
