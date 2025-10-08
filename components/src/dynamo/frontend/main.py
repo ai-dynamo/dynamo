@@ -243,8 +243,6 @@ async def async_main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
 
-    logging.debug("Signal handlers will trigger a graceful shutdown of the runtime")
-
     if flags.router_mode == "kv":
         router_mode = RouterMode.KV
         kv_router_config = KvRouterConfig(
@@ -307,9 +305,7 @@ async def async_main():
 
 
 async def graceful_shutdown(runtime):
-    logging.info("Received shutdown signal, shutting down DistributedRuntime")
     runtime.shutdown()
-    logging.info("DistributedRuntime shutdown complete")
 
 
 def main():
