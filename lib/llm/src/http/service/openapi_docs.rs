@@ -47,7 +47,7 @@ use crate::http::service::RouteDoc;
 #[openapi(
     info(
         title = "NVIDIA Dynamo OpenAI Frontend",
-        version = "0.6.0",
+        version = env!("CARGO_PKG_VERSION"),
         description = "OpenAI-compatible HTTP API for NVIDIA Dynamo.",
         license(name = "Apache-2.0"),
         contact(name = "NVIDIA Dynamo", url = "https://github.com/ai-dynamo/dynamo")
