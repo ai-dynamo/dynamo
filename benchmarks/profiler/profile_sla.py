@@ -842,4 +842,12 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    log_file_handler = logging.FileHandler(f"{args.output_dir}/profile_sla.log")
+    log_file_handler.setLevel(logging.INFO)
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s", "%Y-%m-%d %H:%M:%S"
+    )
+    log_file_handler.setFormatter(formatter)
+    logger.addHandler(log_file_handler)
+
     asyncio.run(run_profile(args))
