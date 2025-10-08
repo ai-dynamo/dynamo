@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 Enhanced script to upload complete GitHub Actions workflow and job metrics.
-This version runs as the final job in a workflow and captures metrics for 
+This version runs as the final job in a workflow and captures metrics for
 the entire workflow including all previous jobs.
 """
 
@@ -74,119 +74,138 @@ class BuildMetricsReader:
     def _process_artifact_metrics(artifact_metrics: Dict[str, Any]) -> Dict[str, Any]:
         """Process and clean up artifact metrics data"""
         # Convert types (same as in get_build_metrics)
-        if 'build_duration_sec' in artifact_metrics:
+        if "build_duration_sec" in artifact_metrics:
             try:
-                artifact_metrics['build_duration_sec'] = int(artifact_metrics['build_duration_sec'])
+                artifact_metrics["build_duration_sec"] = int(
+                    artifact_metrics["build_duration_sec"]
+                )
             except (ValueError, TypeError):
-                artifact_metrics['build_duration_sec'] = 0
-        
-        if 'image_size_bytes' in artifact_metrics:
+                artifact_metrics["build_duration_sec"] = 0
+
+        if "image_size_bytes" in artifact_metrics:
             try:
-                artifact_metrics['image_size_bytes'] = int(artifact_metrics['image_size_bytes'])
+                artifact_metrics["image_size_bytes"] = int(
+                    artifact_metrics["image_size_bytes"]
+                )
             except (ValueError, TypeError):
-                artifact_metrics['image_size_bytes'] = 0
-        
+                artifact_metrics["image_size_bytes"] = 0
+
         # Convert Unix timestamps to ISO format if needed
-        for time_field in ['build_start_time', 'build_end_time']:
+        for time_field in ["build_start_time", "build_end_time"]:
             if time_field in artifact_metrics and artifact_metrics[time_field]:
                 time_value = artifact_metrics[time_field]
-                if isinstance(time_value, (int, float)) or (isinstance(time_value, str) and time_value.isdigit()):
+                if isinstance(time_value, (int, float)) or (
+                    isinstance(time_value, str) and time_value.isdigit()
+                ):
                     try:
                         timestamp = float(time_value)
-                        artifact_metrics[time_field] = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+                        artifact_metrics[time_field] = datetime.fromtimestamp(
+                            timestamp, tz=timezone.utc
+                        ).isoformat()
                     except (ValueError, OSError):
                         pass  # Keep original value if conversion fails
-        
+
         return artifact_metrics
 
     @staticmethod
     def get_build_metrics_for_job(job_name: str) -> Optional[Dict[str, Any]]:
         """Get build metrics for a specific job by looking for framework-specific artifacts"""
-        
+
         # Determine framework from job name
         framework = None
         job_name_lower = job_name.lower()
-        if 'vllm' in job_name_lower:
-            framework = 'vllm'
-        elif 'sglang' in job_name_lower:
-            framework = 'sglang'
-        elif 'trtllm' in job_name_lower:
-            framework = 'trtllm'
-        
+        if "vllm" in job_name_lower:
+            framework = "vllm"
+        elif "sglang" in job_name_lower:
+            framework = "sglang"
+        elif "trtllm" in job_name_lower:
+            framework = "trtllm"
+
         if not framework:
             print(f"⚠️  Could not determine framework from job name: {job_name}")
             return None
-        
+
         # Determine architecture preference from job name
-        preferred_arch = 'amd64'  # default
-        if 'arm64' in job_name_lower:
-            preferred_arch = 'arm64'
-        
+        preferred_arch = "amd64"  # default
+        if "arm64" in job_name_lower:
+            preferred_arch = "arm64"
+
         # Try to read consolidated metrics file first
-        consolidated_path = 'build-metrics/consolidated-metrics.json'
+        consolidated_path = "build-metrics/consolidated-metrics.json"
         if os.path.exists(consolidated_path):
             try:
-                with open(consolidated_path, 'r') as f:
+                with open(consolidated_path, "r") as f:
                     all_metrics = json.load(f)
-                
+
                 # Look for job-specific metrics
                 # Try preferred architecture first
                 job_key = f"{framework}-{preferred_arch}"
                 if job_key in all_metrics:
-                    return BuildMetricsReader._process_artifact_metrics(all_metrics[job_key])
-                
+                    return BuildMetricsReader._process_artifact_metrics(
+                        all_metrics[job_key]
+                    )
+
                 # Try other architecture
-                other_arch = 'arm64' if preferred_arch == 'amd64' else 'amd64'
+                other_arch = "arm64" if preferred_arch == "amd64" else "amd64"
                 job_key = f"{framework}-{other_arch}"
                 if job_key in all_metrics:
-                    return BuildMetricsReader._process_artifact_metrics(all_metrics[job_key])
-                
+                    return BuildMetricsReader._process_artifact_metrics(
+                        all_metrics[job_key]
+                    )
+
                 # Try just framework name (backward compatibility)
                 if framework in all_metrics:
-                    return BuildMetricsReader._process_artifact_metrics(all_metrics[framework])
-                
-                print(f"⚠️  No metrics found for {framework} in consolidated file. Available keys: {list(all_metrics.keys())}")
-                
+                    return BuildMetricsReader._process_artifact_metrics(
+                        all_metrics[framework]
+                    )
+
+                print(
+                    f"⚠️  No metrics found for {framework} in consolidated file. Available keys: {list(all_metrics.keys())}"
+                )
+
             except Exception as e:
                 print(f"❌ Error reading consolidated build metrics: {e}")
-        
-        
+
         # Fallback to individual file approach for backward compatibility
         # Try framework-specific artifact (direct path)
-        artifact_path = f'build-metrics/metrics-{framework}-{preferred_arch}.json'
+        artifact_path = f"build-metrics/metrics-{framework}-{preferred_arch}.json"
         if not os.path.exists(artifact_path):
             # Try the other architecture (direct path)
-            other_arch = 'arm64' if preferred_arch == 'amd64' else 'amd64'
-            artifact_path = f'build-metrics/metrics-{framework}-{other_arch}.json'
+            other_arch = "arm64" if preferred_arch == "amd64" else "amd64"
+            artifact_path = f"build-metrics/metrics-{framework}-{other_arch}.json"
         if not os.path.exists(artifact_path):
             # Try artifact subdirectory structure (new format)
-            artifact_path = f'build-metrics/build-metrics-{framework}-{preferred_arch}/metrics-{framework}-{preferred_arch}.json'
+            artifact_path = f"build-metrics/build-metrics-{framework}-{preferred_arch}/metrics-{framework}-{preferred_arch}.json"
         if not os.path.exists(artifact_path):
             # Try other architecture in subdirectory
-            other_arch = 'arm64' if preferred_arch == 'amd64' else 'amd64'
-            artifact_path = f'build-metrics/build-metrics-{framework}-{other_arch}/metrics-{framework}-{other_arch}.json'
+            other_arch = "arm64" if preferred_arch == "amd64" else "amd64"
+            artifact_path = f"build-metrics/build-metrics-{framework}-{other_arch}/metrics-{framework}-{other_arch}.json"
         if not os.path.exists(artifact_path):
             # Try old naming convention (backward compatibility)
-            artifact_path = f'build-metrics/metrics-{framework}.json'
+            artifact_path = f"build-metrics/metrics-{framework}.json"
         if not os.path.exists(artifact_path):
             # Try alternative path (old format)
-            artifact_path = f'build-metrics/build-metrics-{framework}/metrics.json'
-        
+            artifact_path = f"build-metrics/build-metrics-{framework}/metrics.json"
+
         if os.path.exists(artifact_path):
             try:
-                with open(artifact_path, 'r') as f:
+                with open(artifact_path, "r") as f:
                     artifact_metrics = json.load(f)
-                    return BuildMetricsReader._process_artifact_metrics(artifact_metrics)
+                    return BuildMetricsReader._process_artifact_metrics(
+                        artifact_metrics
+                    )
             except Exception as e:
-                print(f"⚠️  Could not read {framework} build metrics from {artifact_path}: {e}")
-        
+                print(
+                    f"⚠️  Could not read {framework} build metrics from {artifact_path}: {e}"
+                )
+
         print(f"⚠️  No build metrics artifact found for {framework} at {artifact_path}")
         return None
 
 
 class TimingProcessor:
     """Centralized processor for all datetime and duration conversions using Python built-ins"""
-    
+
     @staticmethod
     def _parse_iso(iso_string: str) -> datetime:
         """Parse ISO datetime string using built-in fromisoformat"""
@@ -199,19 +218,19 @@ class TimingProcessor:
             return datetime.fromisoformat(iso_string)
         except ValueError:
             return None
-    
+
     @staticmethod
     def calculate_time_diff(start_time: str, end_time: str) -> int:
         """Calculate duration/queue time in integer seconds"""
         if not start_time or not end_time:
             return 0
-        
+
         start_dt = TimingProcessor._parse_iso(start_time)
         end_dt = TimingProcessor._parse_iso(end_time)
-        
+
         if not start_dt or not end_dt:
             return 0
-        
+
         # Return integer seconds directly
         duration = end_dt - start_dt
         return max(0, int(duration.total_seconds()))
@@ -221,12 +240,12 @@ def mask_sensitive_urls(error_msg: str, url: str) -> str:
     """Comprehensively mask sensitive URLs and hostnames in error messages"""
     if not url:
         return error_msg
-        
+
     try:
         parsed_url = urlparse(url)
         hostname = parsed_url.hostname
         path = parsed_url.path
-        
+
         # Replace components in order of specificity
         if hostname:
             error_msg = error_msg.replace(hostname, "***HOSTNAME***")
@@ -234,17 +253,17 @@ def mask_sensitive_urls(error_msg: str, url: str) -> str:
             error_msg = error_msg.replace(url, "***DATABASE_URL***")
         if path and path in error_msg:
             error_msg = error_msg.replace(path, "***PATH***")
-            
+
         # Also mask any remaining URL patterns
         if hostname:
             pattern = rf"https?://{re.escape(hostname)}"
             error_msg = re.sub(pattern, "***MASKED_URL***", error_msg)
-            
+
     except Exception:
         # If URL parsing fails, do basic masking
         if url in error_msg:
             error_msg = error_msg.replace(url, "***DATABASE_URL***")
-    
+
     return error_msg
 
 
@@ -254,7 +273,7 @@ class WorkflowMetricsUploader:
         self.workflow_index = os.getenv("WORKFLOW_INDEX", "")
         self.jobs_index = os.getenv("JOB_INDEX", "")
         self.steps_index = os.getenv("STEPS_INDEX", "")
-        
+
         # Validate that database URLs are provided
         if not self.workflow_index or not self.jobs_index or not self.steps_index:
             raise ValueError(
@@ -263,7 +282,7 @@ class WorkflowMetricsUploader:
                 "  JOB_INDEX - URL for job metrics\n"
                 "  STEPS_INDEX - URL for step metrics"
             )
-        
+
         # Get current workflow information
         self.repo = os.getenv("GITHUB_REPOSITORY")
         self.run_id = os.getenv("GITHUB_RUN_ID")
@@ -273,31 +292,31 @@ class WorkflowMetricsUploader:
         self.ref = os.getenv("GITHUB_REF")
         self.ref_name = os.getenv("GITHUB_REF_NAME")
         self.sha = os.getenv("GITHUB_SHA")
-        
+
         if not self.repo or not self.run_id:
             raise ValueError("Missing required GitHub environment variables")
-        
+
         print(
             f"Uploading metrics for workflow '{self.workflow_name}' (run {self.run_id}) in {self.repo}"
         )
-        
+
     def handle_upload_error(self, error: Exception, operation: str) -> str:
         """Centralized error handling with URL masking for all upload operations
-        
+
         Args:
             error: The exception that occurred
             operation: Description of the operation that failed
-            
+
         Returns:
             Sanitized error message with URLs masked
         """
         error_msg = str(error)
-        
+
         # Mask all configured URLs to prevent exposure
         for url in [self.workflow_index, self.jobs_index, self.steps_index]:
             if url:  # Only mask non-empty URLs
                 error_msg = mask_sensitive_urls(error_msg, url)
-        
+
         return f"Error during {operation}: {error_msg}"
 
     def post_to_db(self, url: str, data: Dict[str, Any]) -> None:
@@ -323,12 +342,12 @@ class WorkflowMetricsUploader:
                 "Error: No GitHub token found. Set GITHUB_TOKEN environment variable or repository secret."
             )
             return None
-            
+
         headers = {
             "Authorization": f"token {token}",
             "Accept": "application/vnd.github.v3+json",
         }
-        
+
         try:
             response = requests.get(
                 f"https://api.github.com{endpoint}", headers=headers, timeout=30
@@ -370,12 +389,12 @@ class WorkflowMetricsUploader:
         metric_type: str = "workflow",
     ) -> None:
         """Add standardized timing-related fields across all metric types
-        
+
         Args:
             db_data: Dictionary to add timing fields to
             creation_time: ISO datetime string for creation time
             start_time: ISO datetime string for when execution actually started
-            end_time: ISO datetime string for end time  
+            end_time: ISO datetime string for end time
             metric_type: Type of metric ("workflow", "job", "step") for field naming consistency
         """
         # Store original ISO timestamps
@@ -383,7 +402,7 @@ class WorkflowMetricsUploader:
         db_data[FIELD_END_TIME] = end_time or ""
         if creation_time:  # Don't add for steps
             db_data[FIELD_CREATION_TIME] = creation_time
-        
+
         # Duration in integer seconds (using l_ prefix for long type)
         db_data[FIELD_DURATION_SEC] = TimingProcessor.calculate_time_diff(
             start_time, end_time
@@ -394,7 +413,7 @@ class WorkflowMetricsUploader:
             db_data[FIELD_QUEUE_TIME] = TimingProcessor.calculate_time_diff(
                 creation_time, start_time
             )
-        
+
         # Use the end_time if available, otherwise use current time
         if end_time:
             # Ensure timestamp is in proper ISO format for OpenSearch date detection
@@ -429,7 +448,7 @@ class WorkflowMetricsUploader:
             if not jobs_data or "jobs" not in jobs_data:
                 print("Could not fetch jobs data from GitHub API")
                 return
-        
+
             # Count jobs to process (exclude specified jobs)
             workflow_name = workflow_data.get("name", "")
             jobs_to_process = [
@@ -473,7 +492,7 @@ class WorkflowMetricsUploader:
                     f"Workflow still {workflow_status} after {max_retries} attempts, uploading current state"
                 )
                 break
-        
+
         # Upload workflow metrics
         try:
             print("Processing workflow metrics...")
@@ -482,7 +501,7 @@ class WorkflowMetricsUploader:
         except Exception as e:
             sanitized_error = self.handle_upload_error(e, "workflow metrics upload")
             print(sanitized_error)
-        
+
         # Upload all job and step metrics
         try:
             print(f"Processing {len(jobs_data['jobs'])} jobs and their steps...")
@@ -502,7 +521,7 @@ class WorkflowMetricsUploader:
         """Internal method to upload workflow metrics"""
         db_data = {}
         db_data[FIELD_ID] = f"github-workflow-{self.run_id}"
-        
+
         # Schema fields
         # Use conclusion for completed workflows, fallback to status
         db_data[FIELD_STATUS] = str(
@@ -521,7 +540,7 @@ class WorkflowMetricsUploader:
         self.add_standardized_timing_fields(
             db_data, created_at, run_started_at, end_time, "workflow"
         )
-        
+
         # Common context fields
         self.add_common_context_fields(db_data, workflow_data)
 
@@ -534,7 +553,7 @@ class WorkflowMetricsUploader:
         """Internal method to upload all job and step metrics, returns (jobs_processed, steps_processed)"""
         jobs_processed = 0
         steps_processed = 0
-        
+
         for job in jobs_data["jobs"]:
             try:
                 job_name = job.get("name", "")
@@ -549,18 +568,18 @@ class WorkflowMetricsUploader:
                 # Upload job metrics
                 self._upload_single_job_metrics(job)
                 jobs_processed += 1
-                
+
                 # Upload step metrics for this job
                 if self.steps_index:
                     step_count = self._upload_job_step_metrics(job)
                     steps_processed += step_count
-                    
+
             except Exception as e:
                 print(
                     f"Error uploading metrics for job {job.get('name', 'unknown')}: {e}"
                 )
                 continue
-        
+
         return jobs_processed, steps_processed
 
     def _upload_single_job_metrics(self, job_data: Dict[str, Any]) -> None:
@@ -569,9 +588,9 @@ class WorkflowMetricsUploader:
         db_data = {}
         job_id = job_data["id"]
         job_name = job_data["name"]
-        
+
         db_data[FIELD_ID] = f"github-job-{job_id}"
-        
+
         # Schema fields
         db_data[FIELD_JOB_ID] = str(job_id)
         # Handle job status - prefer conclusion for completed jobs, fallback to status
@@ -592,21 +611,23 @@ class WorkflowMetricsUploader:
         self.add_standardized_timing_fields(
             db_data, created_at, started_at, completed_at, "job"
         )
-        
+
         # Runner info
         runner_id = job_data.get("runner_id")
         db_data[FIELD_RUNNER_ID] = str(runner_id) if runner_id is not None else ""
         db_data[FIELD_RUNNER_NAME] = str(job_data.get("runner_name", ""))
-        
+
         # Add common context fields
         self.add_common_context_fields(db_data)
         self.post_to_db(self.jobs_index, db_data)
         print(f"Uploaded metrics for job: {job_name}")
-        
+
         # Upload container metrics if this is a build job and metrics are available
         # Check if this is one of our framework build jobs
-        is_framework_job = any(framework in job_name.lower() for framework in FRAMEWORK_IMAGE_BUILD_JOBS)
-        
+        is_framework_job = any(
+            framework in job_name.lower() for framework in FRAMEWORK_IMAGE_BUILD_JOBS
+        )
+
         if is_framework_job:
             self._upload_container_metrics(job_data)
 
@@ -614,11 +635,11 @@ class WorkflowMetricsUploader:
         """Extract and post metrics for all steps in a job"""
         job_name = job_data["name"]
         steps = job_data.get("steps", [])
-        
+
         if not steps:
             print(f"No steps found for job {job_name}")
             return 0
-        
+
         steps_processed = 0
         for step_index, step in enumerate(steps):
             try:
@@ -630,7 +651,7 @@ class WorkflowMetricsUploader:
                     f"Error uploading metrics for step {step_name} in job {job_name}: {e}"
                 )
                 continue
-        
+
         print(f"Uploaded metrics for {steps_processed} steps in job {job_name}")
         return steps_processed
 
@@ -644,11 +665,11 @@ class WorkflowMetricsUploader:
         job_name = job_data["name"]
         step_name = step_data.get("name", f"step_{step_index}")
         step_number = step_data.get("number", step_index + 1)
-        
+
         # Create unique step ID and use standardized ID generation
         step_id = f"{job_id}_{step_number}"
         db_data[FIELD_ID] = f"github-step-{step_id}"
-        
+
         # Schema-compliant fields
         db_data[FIELD_STEP_ID] = str(step_id)
         db_data[FIELD_JOB_ID] = str(job_id)
@@ -664,16 +685,16 @@ class WorkflowMetricsUploader:
             db_data[FIELD_STATUS_NUMBER] = 1
         elif db_data[FIELD_STATUS] == "failure":
             db_data[FIELD_STATUS_NUMBER] = 0
-        
+
         # Timing fields using standardized method - Fix parameter order for steps
         started_at = step_data.get("started_at")
         completed_at = step_data.get("completed_at")
-        
+
         # For steps: creation_time=None (no queue time), start_time=started_at, end_time=completed_at
         self.add_standardized_timing_fields(
             db_data, None, started_at, completed_at, "step"
         )
-        
+
         # Command/script executed (GitHub API doesn't always provide this, but we can infer)
         command = ""
         if step_data.get("action"):
@@ -683,29 +704,35 @@ class WorkflowMetricsUploader:
                 "run: <script>"  # GitHub API doesn't expose the actual script content
             )
         db_data[FIELD_COMMAND] = command
-        
+
         # Add common context fields
         self.add_common_context_fields(db_data)
-        
+
         # Post to database
         self.post_to_db(self.steps_index, db_data)
         print(f"Uploaded metrics for step: {step_name} (step {step_number})")
 
-    def _upload_container_metrics(self, job_data: Dict[str, Any], build_metrics: Optional[Dict[str, Any]] = None) -> None:
+    def _upload_container_metrics(
+        self, job_data: Dict[str, Any], build_metrics: Optional[Dict[str, Any]] = None
+    ) -> None:
         """Upload container-specific metrics to CONTAINER_INDEX"""
-        container_index = os.getenv('CONTAINER_INDEX')
+        container_index = os.getenv("CONTAINER_INDEX")
         if not container_index:
-            print("⚠️  CONTAINER_INDEX not configured, skipping container metrics upload")
+            print(
+                "⚠️  CONTAINER_INDEX not configured, skipping container metrics upload"
+            )
             return
 
         # Get build metrics if not provided
         if build_metrics is None:
             # Try to get framework-specific build metrics based on job name
-            job_name = job_data.get('name', '')
+            job_name = job_data.get("name", "")
             build_metrics = BuildMetricsReader.get_build_metrics_for_job(job_name)
 
         if not build_metrics:
-            print(f"⚠️  No build metrics available for container upload for job: {job_data.get('name', 'unknown')}")
+            print(
+                f"⚠️  No build metrics available for container upload for job: {job_data.get('name', 'unknown')}"
+            )
             return
 
         print(f"📦 Uploading container metrics to {container_index}")
@@ -714,38 +741,53 @@ class WorkflowMetricsUploader:
         container_data = {}
 
         # Identity & Context - container-specific fields only
-        job_id = str(job_data['id'])
+        job_id = str(job_data["id"])
         job_name = job_data["name"]
-        container_data[FIELD_ID] = f"github-container-{job_id}-{build_metrics.get('framework', 'unknown')}"
+        container_data[
+            FIELD_ID
+        ] = f"github-container-{job_id}-{build_metrics.get('framework', 'unknown')}"
         container_data[FIELD_JOB_NAME] = str(job_name)
         container_data[FIELD_JOB_ID] = job_id
 
         # Find the "Build Container" step ID
         build_step_id = None
-        steps = job_data.get('steps', [])
+        steps = job_data.get("steps", [])
         for step in steps:
-            if 'build' in step.get('name', '').lower() and 'container' in step.get('name', '').lower():
+            if (
+                "build" in step.get("name", "").lower()
+                and "container" in step.get("name", "").lower()
+            ):
                 build_step_id = f"{job_id}_{step.get('number', 1)}"
                 break
 
         container_data[FIELD_STEP_ID] = build_step_id or f"{job_id}_build"
 
         # Status - container-specific
-        container_data[FIELD_STATUS] = str(job_data.get('conclusion') or job_data.get('status', 'unknown'))
+        container_data[FIELD_STATUS] = str(
+            job_data.get("conclusion") or job_data.get("status", "unknown")
+        )
 
         # Container Info (only truly container-specific fields)
-        container_data[FIELD_BUILD_FRAMEWORK] = build_metrics.get('framework', 'unknown')
-        container_data[FIELD_BUILD_SIZE_BYTES] = build_metrics.get('image_size_bytes', 0)
+        container_data[FIELD_BUILD_FRAMEWORK] = build_metrics.get(
+            "framework", "unknown"
+        )
+        container_data[FIELD_BUILD_SIZE_BYTES] = build_metrics.get(
+            "image_size_bytes", 0
+        )
 
         # Timing (reusing existing build timing fields)
-        if 'build_start_time' in build_metrics:
-            container_data[FIELD_BUILD_START_TIME] = build_metrics['build_start_time']
-        if 'build_end_time' in build_metrics:
-            container_data[FIELD_BUILD_END_TIME] = build_metrics['build_end_time']
-        container_data[FIELD_BUILD_DURATION_SEC] = build_metrics.get('build_duration_sec', 0)
+        if "build_start_time" in build_metrics:
+            container_data[FIELD_BUILD_START_TIME] = build_metrics["build_start_time"]
+        if "build_end_time" in build_metrics:
+            container_data[FIELD_BUILD_END_TIME] = build_metrics["build_end_time"]
+        container_data[FIELD_BUILD_DURATION_SEC] = build_metrics.get(
+            "build_duration_sec", 0
+        )
 
         # Add @timestamp for time-series data
-        container_data['@timestamp'] = build_metrics.get('build_end_time', datetime.now(timezone.utc).isoformat())
+        container_data["@timestamp"] = build_metrics.get(
+            "build_end_time", datetime.now(timezone.utc).isoformat()
+        )
 
         # Add common context fields
         self.add_common_context_fields(container_data)
@@ -753,7 +795,9 @@ class WorkflowMetricsUploader:
         # Upload to container index
         try:
             self.post_to_db(container_index, container_data)
-            print(f"✅ Container metrics uploaded for {build_metrics.get('framework', 'unknown')} framework")
+            print(
+                f"✅ Container metrics uploaded for {build_metrics.get('framework', 'unknown')} framework"
+            )
         except Exception as e:
             print(f"❌ Failed to upload container metrics: {e}")
 
@@ -765,11 +809,11 @@ def main():
     except ValueError as e:
         print(f"Configuration error: {e}")
         return
-    
+
     print(
         f"Processing complete metrics for workflow '{uploader.workflow_name}' (run {uploader.run_id})"
     )
-    
+
     # Upload all metrics (workflow, jobs, and steps) in one coordinated operation
     uploader.post_all_metrics()
 

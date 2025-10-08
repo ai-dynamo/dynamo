@@ -116,7 +116,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      
+
       - name: Build Container
         id: build-image
         uses: ./.github/actions/docker-build
@@ -132,7 +132,7 @@ jobs:
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      
+
       - name: Docker Tag and Push
         uses: ./.github/actions/docker-tag-push
         with:
@@ -148,7 +148,7 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      
+
       - name: Run tests
         # OPS-1140: Uncomment the below line
         # if: ${{ matrix.platform.arch != 'arm64' }}
@@ -178,7 +178,7 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      
+
       - name: Build Container
         id: build-image
         uses: ./.github/actions/docker-build
@@ -192,7 +192,7 @@ jobs:
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      
+
       - name: Docker Tag and Push
         uses: ./.github/actions/docker-tag-push
         with:
@@ -206,21 +206,21 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      
+
       - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
           pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow"
-  
+
   # Upload metrics for this workflow and all its jobs
   upload-workflow-metrics:
     name: Upload Workflow Metrics
     runs-on: gitlab
     if: always()  # Always run, even if other jobs fail
     needs: [backend-status-check]  # Wait for the status check which waits for all build jobs
-    
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4

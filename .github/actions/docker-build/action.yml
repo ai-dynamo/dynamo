@@ -75,15 +75,15 @@ runs:
         echo "🕐 Build started at: ${BUILD_START_TIME}"
         echo "BUILD_START_TIME=${BUILD_START_TIME}" >> $GITHUB_ENV
         echo "build-start-time=${BUILD_START_TIME}" >> $GITHUB_OUTPUT
-        
+
         echo "🔧 Setting up build environment for ${{ inputs.framework }}..."
-        
+
         # Add setup commands here if needed
         # Setup sccache
         # curl -L https://github.com/mozilla/sccache/releases/download/v0.7.4/sccache-v0.7.4-x86_64-unknown-linux-musl.tar.gz | tar xz
         # sudo mv sccache-*/sccache /usr/local/bin/sccache
         # sccache --start-server
-        
+
         echo "✅ Build environment setup complete"
 
     - name: Set up Docker Buildx
@@ -134,24 +134,24 @@ runs:
       shell: bash
       run: |
         echo "📊 Capturing build metrics for ${{ inputs.framework }}..."
-        
+
         # Create metrics directory
         mkdir -p build-metrics
-        
+
         # Get accurate build timing
         BUILD_START_TIME="${{ env.BUILD_START_TIME }}"
         BUILD_END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        
+
         # Calculate duration
         START_EPOCH=$(date -d "$BUILD_START_TIME" +%s)
         END_EPOCH=$(date -d "$BUILD_END_TIME" +%s)
         BUILD_DURATION_SEC=$((END_EPOCH - START_EPOCH))
-        
+
         echo "🕐 Build timing:"
         echo "  Start: ${BUILD_START_TIME}"
         echo "  End: ${BUILD_END_TIME}"
         echo "  Duration: ${BUILD_DURATION_SEC} seconds"
-        
+
         # Get image size using docker inspect
         IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
         if [ -n "$IMAGE_TAG" ]; then
@@ -161,9 +161,9 @@ runs:
           IMAGE_SIZE_BYTES=0
           echo "⚠️  No image tag available"
         fi
-        
+
         echo "📊 Final metrics captured"
-        
+
         # Create consolidated metrics JSON file
         echo "🔍 Debug: inputs.platform = '${{ inputs.platform }}'"
         PLATFORM_ARCH=$(echo "${{ inputs.platform }}" | sed 's/linux\///')
@@ -171,11 +171,11 @@ runs:
         echo "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV
         JOB_KEY="${{ inputs.framework }}-${PLATFORM_ARCH}"
         echo "🔍 Debug: JOB_KEY = '${JOB_KEY}'"
-        
+
         # Create job-specific metrics file
         mkdir -p build-metrics
         METRICS_FILE="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}.json"
-        
+
         # Create the job metrics file directly
         cat > "$METRICS_FILE" << EOF
         {
@@ -189,10 +189,10 @@ runs:
           "build_duration_sec": ${BUILD_DURATION_SEC}
         }
         EOF
-        
+
         echo "📁 Created build metrics file for ${JOB_KEY}:"
         cat "$METRICS_FILE"
-        
+
         # Set outputs
         echo "build-end-time=${BUILD_END_TIME}" >> $GITHUB_OUTPUT
         echo "build-duration-sec=${BUILD_DURATION_SEC}" >> $GITHUB_OUTPUT
