@@ -212,9 +212,9 @@ def _preprocess_for_encode_set(
 
 
 @register_encoder(argparse.Namespace)
-def _preprocess_for_encode_set(
+def _preprocess_for_encode_namespace(
     obj: argparse.Namespace,
-) -> list:  # pyright: ignore[reportUnusedFunction]
+) -> dict:  # pyright: ignore[reportUnusedFunction]
     return obj.__dict__
 
 
