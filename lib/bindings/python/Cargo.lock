@@ -1334,15 +1334,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "digit-layout"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09157630eece4139f6cc5a457556d308c3465ecd5af492f0e5aadc043997e2ce"
-dependencies = [
- "half",
-]
-
-[[package]]
 name = "dircpy"
 version = "0.3.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1496,12 +1487,10 @@ dependencies = [
  "futures",
  "futures-util",
  "galil-seiferas",
- "ggus",
  "hf-hub",
  "humantime",
  "itertools 0.14.0",
  "json-five",
- "memmap2",
  "minijinja",
  "minijinja-contrib",
  "modelexpress-client",
@@ -2372,30 +2361,6 @@ dependencies = [
  "r-efi",
  "wasi 0.14.3+wasi-0.2.4",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "ggml-quants"
-version = "0.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a27693512784e0786212eb0bef841779a6337d2d04520ed475b4d5a864f98366"
-dependencies = [
- "digit-layout",
- "half",
- "rayon",
-]
-
-[[package]]
-name = "ggus"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ac5654356c6f7f6116905aeaf92ab002c3d03414ada5dbe0bb2e32aa5fea173"
-dependencies = [
- "fancy-regex 0.14.0",
- "ggml-quants",
- "indexmap 2.11.0",
- "log",
- "num_enum",
 ]
 
 [[package]]

@@ -19,7 +19,6 @@ pub enum Output {
     Static(String),
 
     #[cfg(feature = "mistralrs")]
-    /// Run inference on a model in a GGUF file using mistralrs w/ candle
     MistralRs,
 
     #[cfg(feature = "llamacpp")]

@@ -135,10 +135,6 @@ minijinja = { version = "2.10.2", features = ["loader"] }
 minijinja-contrib = { version = "2.10.2", features = ["pycompat"] }
 json-five = { version = "0.3" }
 
-# GGUF
-ggus = "0.4.0"
-memmap2 = "0.9.5"
-
 # Publishers
 zeromq = "0.4.1"
 rmp-serde = "1.3"

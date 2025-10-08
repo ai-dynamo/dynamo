@@ -17,7 +17,6 @@ pub mod discovery;
 pub mod endpoint_type;
 pub mod engines;
 pub mod entrypoint;
-pub mod gguf;
 pub mod grpc;
 pub mod http;
 pub mod hub;
