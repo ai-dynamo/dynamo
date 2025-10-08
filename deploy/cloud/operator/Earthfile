@@ -48,7 +48,7 @@ docker:
     ARG DOCKER_SERVER=nvcr.io/nvidia/ai-dynamo
     ARG IMAGE_TAG=latest
     ARG IMAGE_SUFFIX=dynamo-operator
-    FROM nvcr.io/nvidia/distroless/go:v3.1.12
+    FROM nvcr.io/nvidia/distroless/go:v3.1.13
     WORKDIR /
     COPY +build/manager .
     USER 65532:65532
