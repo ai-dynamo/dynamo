@@ -34,22 +34,46 @@ python3 -m dynamo.sglang \
   --tp 1 \
   --trust-remote-code \
   --disaggregation-mode prefill \
-  --disaggregation-bootstrap-port 12345 \
   --host 0.0.0.0 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' \
   --disaggregation-transfer-backend nixl &
 PREFILL_PID=$!
 
-# run decode worker
+# run prefill worker
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --model-path Qwen/Qwen3-0.6B \
   --served-model-name Qwen/Qwen3-0.6B \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
-  --disaggregation-mode decode \
-  --disaggregation-bootstrap-port 12345 \
+  --disaggregation-mode prefill \
   --host 0.0.0.0 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5558"}' \
+  --disaggregation-transfer-backend nixl &
+PREFILL_PID=$!
+
+# run prefill worker
+CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
+  --page-size 16 \
+  --tp 1 \
+  --trust-remote-code \
+  --disaggregation-mode prefill \
+  --host 0.0.0.0 \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5559"}' \
+  --disaggregation-transfer-backend nixl &
+PREFILL_PID=$!
+
+# run decode worker
+CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.sglang \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
+  --page-size 16 \
+  --tp 1 \
+  --trust-remote-code \
+  --disaggregation-mode decode \
+  --host 0.0.0.0 \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5560"}' \
   --disaggregation-transfer-backend nixl \
   --enable-prefill-routing
