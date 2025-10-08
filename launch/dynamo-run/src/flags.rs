@@ -21,7 +21,6 @@ pub struct Flags {
     /// The model. The options depend on the engine.
     ///
     /// The full list - only mistralrs supports all three currently:
-    /// - Full path to a GGUF file
     /// - Full path of a checked out Hugging Face repository containing safetensor files
     /// - Name of a Hugging Face repository, e.g 'google/flan-t5-small'. The model will be
     ///   downloaded and cached.
@@ -56,7 +55,6 @@ pub struct Flags {
     /// llamacpp only
     ///
     /// The path to the tokenizer and model config because:
-    /// - llama_cpp only runs GGUF files
     /// - our engine is a 'core' engine in that we do the tokenization, so we need the vocab
     /// - TODO: we don't yet extract that from the GGUF. Once we do we can remove this flag.
     #[arg(long)]

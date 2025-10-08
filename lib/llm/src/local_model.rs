@@ -192,7 +192,6 @@ impl LocalModelBuilder {
     ///
     /// The model name will depend on what "model_path" is:
     /// - A folder: The last part of the folder name: "/data/llms/Qwen2.5-3B-Instruct" -> "Qwen2.5-3B-Instruct"
-    /// - A file: The GGUF filename: "/data/llms/Qwen2.5-3B-Instruct-Q6_K.gguf" -> "Qwen2.5-3B-Instruct-Q6_K.gguf"
     /// - An HF repo: The HF repo name: "Qwen/Qwen3-0.6B" stays the same
     pub async fn build(&mut self) -> anyhow::Result<LocalModel> {
         // Generate an endpoint ID for this model if the user didn't provide one.
@@ -377,12 +376,6 @@ impl LocalModel {
 
     pub fn namespace(&self) -> Option<&str> {
         self.namespace.as_deref()
-    }
-
-    pub fn is_gguf(&self) -> bool {
-        // GGUF is the only file (not-folder) we accept, so we don't need to check the extension
-        // We will error when we come to parse it
-        self.full_path.is_file()
     }
 
     /// An endpoint to identify this model by.

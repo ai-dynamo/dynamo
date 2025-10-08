@@ -11,12 +11,6 @@
 #
 # Pass `--interactive` or `-i` for text chat instead of HTTP server.
 #
-# For static mode (no etcd auto-discovery):
-# - python -m dynamo.frontend --model-name Qwen3-0.6B-Q8_0.gguf --model-path ~/llms/Qwen3-0.6B --static-endpoint dynamo.backend.generate
-# Worker example:
-# - cd lib/bindings/python/examples/hello_world
-# - python server_sglang_static.py
-#
 # For TLS:
 # - python -m dynamo.frontend --http-port 8443 --tls-cert-path cert.pem --tls-key-path key.pem
 #

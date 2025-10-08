@@ -1,6 +1,6 @@
 # Dynamo Run
 
-`dynamo-run` is a Rust binary that lets you easily run a model, explore the Dynamo components, and demonstrates the Rust API. It supports the `mistral.rs` and `llama.cpp` engines. `mistralrs` is the default for safe tensors, `llama.cpp` for GGUF files.
+`dynamo-run` is a Rust binary that lets you easily run a model, explore the Dynamo components, and demonstrates the Rust API. It supports the `mistral.rs` and `llama.cpp` engines. `mistralrs` is the default engine.
 
 It is primarily for development and rapid prototyping. For production use we recommend the Python wrapped components, see the main project README.
 
@@ -33,7 +33,7 @@ dynamo-run out=<engine> <HUGGING_FACE_ORGANIZATION/MODEL_NAME>
 
 For gated models (such as meta-llama/Llama-3.2-3B-Instruct), you must set an `HF_TOKEN` environment variable.
 
-The parameter can be the ID of a HuggingFace repository (which will be downloaded), a GPT-Generated Unified Format (GGUF) file, or a folder containing safetensors, config.json, or similar (perhaps a locally checked out HuggingFace repository).
+The parameter can be the ID of a HuggingFace repository (which will be downloaded) or a folder containing safetensors, config.json, or similar (perhaps a locally checked out HuggingFace repository).
 
 ### Run a model from local file
 
@@ -44,29 +44,23 @@ To run a model from local file:
 See the following sections for details.
 
 #### Download model from Hugging Face
-One of the models available from Hugging Face should be high quality and fast on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
-For example, try https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/blob/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf
-
-To download model file:
-```
-curl -L -o Llama-3.2-3B-Instruct-Q4_K_M.gguf "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf?download=true"
-```
+This model available from Hugging Face should be high quality and fast on almost any machine: https://huggingface.co/Qwen/Qwen3-0.6B
 
 To run the model:
 
 *Text interface*
 ```
-dynamo-run Llama-3.2-3B-Instruct-Q4_K_M.gguf # or path to a Hugging Face repo checkout instead of the GGUF file
+dynamo-run Qwen/Qwen3-0.6B
 ```
 
 You can also pipe a prompt into `dynamo-run`:
 ```
-echo 'What is the capital of Tuvalu?' | dynamo-run ~/llms/Qwen3-0.6B-Q8_0.gguf --context-length 4096
+echo 'What is the capital of Tuvalu?' | dynamo-run Qwen/Qwen3-0.6B --context-length 4096
 ```
 
 *HTTP interface*
 ```
-dynamo-run in=http out=mistralrs Llama-3.2-3B-Instruct-Q4_K_M.gguf
+dynamo-run in=http out=mistralrs Qwen/Qwen3-0.6B
 ```
 You can also list models or send a request:
 
@@ -77,7 +71,7 @@ curl localhost:8080/v1/models
 
 *Send a request*
 ```
-curl -d '{"model": "Llama-3.2-3B-Instruct-Q4_K_M", "max_completion_tokens": 2049, "messages":[{"role":"user", "content": "What is the capital of South Africa?" }]}' -H 'Content-Type: application/json' http://localhost:8080/v1/chat/completions
+curl -d '{"model": "Qwen/Qwen3-0.6B", "max_completion_tokens": 2049, "messages":[{"role":"user", "content": "What is the capital of South Africa?" }]}' -H 'Content-Type: application/json' http://localhost:8080/v1/chat/completions
 ```
 
 ## Distributed System
@@ -138,17 +132,6 @@ Example 4: Multiple component in a pipeline.
 In the P/D disaggregated setup you would have `deepseek-distill-llama8b.prefill.generate` (possibly multiple instances of this) and `deepseek-distill-llama8b.decode.generate`.
 
 For output it is always only `out=auto`. This tells Dynamo to auto-discover the instances, group them by model, and load balance appropriately (depending on `--router-mode` flag). The exception is static workers, see that section.
-
-### Static workers without etcd
-
-Normally in the distributed system the frontend uses etcd to discover workers. The option exists to have a static endpoint without etcd.
-
-```
-Node 1: dynamo-run in=http out=dyn://dynamo.backend.generate --model-name Qwen3-0.6B-Q8_0.gguf --model-path ~/llms/Qwen3-0.6B
-Node 2: dynamo-run in=dyn://dynamo.backend.generate out=llamacpp ~/llms/Qwen3-0.6B-Q8_0.gguf --static-worker --context-length 4096
-```
-
-Note how `out=` points to a single endpoint, which must match the worker. The model's name and config (to do pre-processing) are usually discovered by the frontend via etcd. Now we must pass them in (`--model-name` and `--model-path`).
 
 ### KV-aware routing
 
@@ -254,7 +237,7 @@ The input defaults to `in=text`. The output defaults to `out=mistralrs` engine, 
 
 ### mistralrs
 
-[mistral.rs](https://github.com/EricLBuehler/mistral.rs) is a pure Rust engine that is fast to run, fast to load, supports GGUF as well as safetensors, and runs well on CPU as well as GPU. For those reasons it is the default engine.
+[mistral.rs](https://github.com/EricLBuehler/mistral.rs) is a pure Rust engine that is fast to run and fast to load, and runs well on CPU as well as GPU. For those reasons it is the default engine.
 
 ```
 dynamo-run Qwen/Qwen3-4B
@@ -267,32 +250,6 @@ dynamo-run in=text out=mistralrs Qwen/Qwen3-4B
 ```
 
 If you have multiple GPUs, `mistral.rs` does automatic tensor parallelism. You do not need to pass any extra flags to dynamo-run to enable it.
-
-### llamacpp
-
-[llama.cpp](https://github.com/ggml-org/llama.cpp) is built for CPU by default. For an optimized build pass the appropriate feature flag (highly recommended):
-
-```
-cargo build --features cuda|metal|vulkan -p dynamo-run
-```
-
-For GNU OpenMP support add the `openmp` feature. On Ubuntu this requires `libgomp1` (part of `build-essential`) at build and runtime.
-
-```
-cargo build --features cuda,openmp -p dynamo-run
-```
-
-```
-dynamo-run out=llamacpp ~/llms/gemma-3-1b-it-q4_0.gguf
-dynamo-run out=llamacpp ~/llms/Qwen3-0.6B-Q8_0.gguf # From https://huggingface.co/ggml-org
-```
-
-Note that in some cases we are unable to extract the tokenizer from the GGUF, and so a Hugging Face checkout of a matching model must also be passed. Dynamo uses the weights from the GGUF and the pre-processor (`tokenizer.json`, etc) from the `--model-config`:
-```
-dynamo-run out=llamacpp ~/llms/Llama-4-Scout-17B-16E-Instruct-UD-IQ1_S.gguf --context-length 32768 --model-config ~/llms/Llama-4-Scout-17B-16E-Instruct
-```
-
-If you have multiple GPUs, llama.cpp does automatic tensor parallelism. You do not need to pass any extra flags to `dynamo-run` to enable it.
 
 ### Mocker engine
 
@@ -417,7 +374,6 @@ if __name__ == "__main__":
 The `model_path` can be:
 - A HuggingFace repo ID, optionally prefixed with `hf://`. It is downloaded and cached locally.
 - The path to a checkout of a HuggingFace repo - any folder containing safetensor files as well as `config.json`, `tokenizer.json` and `tokenizer_config.json`.
-- The path to a GGUF file, if your engine supports that.
 
 The `model_input` can be:
 - ModelInput.Tokens. Your engine expects pre-processed input (token IDs). Dynamo handles tokenization and pre-processing.
@@ -428,7 +384,7 @@ The `model_type` can be:
 - ModelType.Completions. Your `generate` method receives a `request` and must return a response dict of the older [Completions](https://platform.openai.com/docs/api-reference/completions).
 
 `register_llm` can also take the following kwargs:
-- `model_name`: The name to call the model. Your incoming HTTP requests model name must match this. Defaults to the hugging face repo name, the folder name, or the GGUF file name.
+- `model_name`: The name to call the model. Your incoming HTTP requests model name must match this. Defaults to the hugging face repo name, or the folder name.
 - `context_length`: Max model length in tokens. Defaults to the model's set max. Only set this if you need to reduce KV cache allocation to fit into VRAM.
 - `kv_cache_block_size`: Size of a KV block for the engine, in tokens. Defaults to 16.
 - `user_data`: Optional dictionary containing custom metadata for worker behavior (e.g., LoRA configuration). Defaults to None.

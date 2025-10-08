@@ -182,34 +182,8 @@ fn print_cuda(output: &Output) {
 #[cfg(not(any(feature = "mistralrs", feature = "llamacpp")))]
 fn print_cuda(_output: &Output) {}
 
-fn default_engine_for(local_model: &LocalModel) -> Output {
-    let default_engine = if local_model.card().is_gguf() {
-        gguf_default()
-    } else {
-        safetensors_default()
-    };
-    tracing::info!(
-        "Using default engine: {default_engine}. Use out=<engine> to specify one of {}",
-        Output::available_engines().join(", ")
-    );
-    default_engine
-}
-
-fn gguf_default() -> Output {
-    #[cfg(feature = "llamacpp")]
-    {
-        Output::LlamaCpp
-    }
-
-    #[cfg(all(feature = "mistralrs", not(feature = "llamacpp")))]
-    {
-        Output::MistralRs
-    }
-
-    #[cfg(not(any(feature = "mistralrs", feature = "llamacpp")))]
-    {
-        Output::Echo
-    }
+fn default_engine_for(_local_model: &LocalModel) -> Output {
+    safetensors_default()
 }
 
 fn safetensors_default() -> Output {
