@@ -7,9 +7,8 @@ import os
 import random
 
 import pandas as pd
-from tqdm import tqdm
-
 from prefix_data_generator.hasher import RollingHasher
+from tqdm import tqdm
 
 
 def parse_args():
