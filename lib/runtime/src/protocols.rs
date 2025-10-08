@@ -36,7 +36,7 @@ pub struct Component {
 ///
 /// Example format: `"namespace/component/endpoint"`
 ///
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct EndpointId {
     pub namespace: String,
     pub component: String,

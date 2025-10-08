@@ -191,6 +191,35 @@ class EmbeddingPayload(BasePayload):
 
 
 @dataclass
+class ModelInfoPayload(BasePayload):
+    """Payload for get_model_info endpoint."""
+
+    endpoint: str = "/get_model_info"
+
+    @staticmethod
+    def extract_model_info(response):
+        """
+        Process get_model_info API responses.
+        """
+        response.raise_for_status()
+        result = response.json()
+        assert "responses" in result, "Missing 'responses' in response"
+        assert len(result["responses"]) > 0, "Empty responses in response"
+
+        data = result["responses"][0].get("data", {})
+        assert "data" in data, "Missing 'data' in response data"
+        assert len(data["data"]) > 0, "Empty data in response"
+
+        model_info = data["data"][0]
+        assert "model_path" in model_info, "Missing 'model_path' in model info"
+
+        return f"Model: {model_info['model_path']}"
+
+    def response_handler(self, response: Any) -> str:
+        return ModelInfoPayload.extract_model_info(response)
+
+
+@dataclass
 class MetricsPayload(BasePayload):
     endpoint: str = "/metrics"
     method: str = "GET"

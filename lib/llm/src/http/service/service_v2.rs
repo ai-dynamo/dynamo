@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use super::Metrics;
 use super::RouteDoc;
+use super::dynamic_registry::DynamicEndpointWatcher;
 use super::metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
@@ -18,19 +19,19 @@ use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
+use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::logging::make_request_span;
-use dynamo_runtime::transports::etcd;
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
 /// HTTP service shared state
-#[derive(Default)]
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
-    etcd_client: Option<etcd::Client>,
+    distributed_runtime: Option<DistributedRuntime>,
+    dynamic_registry: Option<DynamicEndpointWatcher>,
     flags: StateFlags,
 }
 
@@ -75,7 +76,8 @@ impl State {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
-            etcd_client: None,
+            distributed_runtime: None,
+            dynamic_registry: None,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
@@ -85,11 +87,12 @@ impl State {
         }
     }
 
-    pub fn new_with_etcd(manager: Arc<ModelManager>, etcd_client: Option<etcd::Client>) -> Self {
+    pub fn new_with_drt(manager: Arc<ModelManager>, drt: Option<DistributedRuntime>) -> Self {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
-            etcd_client,
+            distributed_runtime: drt.clone(),
+            dynamic_registry: Some(DynamicEndpointWatcher::new(drt)),
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
@@ -111,8 +114,12 @@ impl State {
         self.manager.clone()
     }
 
-    pub fn etcd_client(&self) -> Option<&etcd::Client> {
-        self.etcd_client.as_ref()
+    pub fn distributed_runtime(&self) -> Option<&DistributedRuntime> {
+        self.distributed_runtime.as_ref()
+    }
+
+    pub fn dynamic_registry(&self) -> Option<DynamicEndpointWatcher> {
+        self.dynamic_registry.clone()
     }
 
     // TODO
@@ -171,7 +178,7 @@ pub struct HttpServiceConfig {
     request_template: Option<RequestTemplate>,
 
     #[builder(default = "None")]
-    etcd_client: Option<etcd::Client>,
+    distributed_runtime: Option<DistributedRuntime>,
 }
 
 impl HttpService {
@@ -294,8 +301,8 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let etcd_client = config.etcd_client;
-        let state = Arc::new(State::new_with_etcd(model_manager, etcd_client));
+        let drt = config.distributed_runtime;
+        let state = Arc::new(State::new_with_drt(model_manager, drt));
 
         state
             .flags
@@ -316,6 +323,8 @@ impl HttpServiceConfigBuilder {
 
         // Note: Metrics polling task will be started in run() method to have access to cancellation token
 
+        // Start dynamic endpoint watcher: rely on upstream to provide rx; handled in http.rs run()
+
         let mut router = axum::Router::new();
 
         let mut all_docs = Vec::new();
@@ -325,6 +334,7 @@ impl HttpServiceConfigBuilder {
             super::openai::list_models_router(state.clone(), var(HTTP_SVC_MODELS_PATH_ENV).ok()),
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
+            super::dynamic_endpoint::dynamic_endpoint_router(state.clone(), None),
         ];
 
         let endpoint_routes =
@@ -362,8 +372,8 @@ impl HttpServiceConfigBuilder {
         self
     }
 
-    pub fn with_etcd_client(mut self, etcd_client: Option<etcd::Client>) -> Self {
-        self.etcd_client = Some(etcd_client);
+    pub fn with_drt(mut self, drt: Option<DistributedRuntime>) -> Self {
+        self.distributed_runtime = Some(drt);
         self
     }
 

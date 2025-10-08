@@ -17,6 +17,7 @@ use crate::{
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
+use dynamo_runtime::component::INSTANCE_ROOT_PATH;
 use dynamo_runtime::transports::etcd;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use dynamo_runtime::{distributed::DistributedConfig, pipeline::RouterMode};
@@ -55,11 +56,10 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
     let http_service = match engine_config {
         EngineConfig::Dynamic(_) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
-            let etcd_client = distributed_runtime.etcd_client();
             // This allows the /health endpoint to query etcd for active instances
-            http_service_builder = http_service_builder.with_etcd_client(etcd_client.clone());
+            http_service_builder = http_service_builder.with_drt(Some(distributed_runtime.clone()));
             let http_service = http_service_builder.build()?;
-            match etcd_client {
+            match distributed_runtime.etcd_client() {
                 Some(ref etcd_client) => {
                     let router_config = engine_config.local_model().router_config();
                     // Listen for models registering themselves in etcd, add them to HTTP service
@@ -71,7 +71,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                     } else {
                         Some(namespace.to_string())
                     };
-                    run_watcher(
+                    run_model_watcher(
                         distributed_runtime,
                         http_service.state().manager_clone(),
                         etcd_client.clone(),
@@ -84,6 +84,10 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                         http_service.state().metrics_clone(),
                     )
                     .await?;
+
+                    // Start dynamic HTTP endpoint watcher
+                    run_endpoint_watcher(etcd_client.clone(), Arc::new(http_service.clone()))
+                        .await?;
                 }
                 None => {
                     // Static endpoints don't need discovery
@@ -221,7 +225,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
 /// Spawns a task that watches for new models in etcd at network_prefix,
 /// and registers them with the ModelManager so that the HTTP service can use them.
 #[allow(clippy::too_many_arguments)]
-async fn run_watcher(
+async fn run_model_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
     etcd_client: etcd::Client,
@@ -262,6 +266,24 @@ async fn run_watcher(
         watch_obj.watch(receiver, target_namespace.as_deref()).await;
     });
 
+    Ok(())
+}
+
+/// Spawns a task that watches instance records for dynamic HTTP endpoints and updates the
+/// DynamicEndpointWatcher held in the HTTP service state.
+async fn run_endpoint_watcher(
+    etcd_client: etcd::Client,
+    http_service: Arc<HttpService>,
+) -> anyhow::Result<()> {
+    if let Some(dep_watcher) = http_service.state().dynamic_registry() {
+        let instances_watcher = etcd_client
+            .kv_get_and_watch_prefix(INSTANCE_ROOT_PATH)
+            .await?;
+        let (_prefix2, _watcher2, instances_rx) = instances_watcher.dissolve();
+        tokio::spawn(async move {
+            dep_watcher.watch(instances_rx).await;
+        });
+    }
     Ok(())
 }
 

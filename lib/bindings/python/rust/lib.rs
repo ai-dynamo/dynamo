@@ -655,7 +655,7 @@ impl Component {
 
 #[pymethods]
 impl Endpoint {
-    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None))]
+    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None, http_endpoint_path = None))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
@@ -663,6 +663,7 @@ impl Endpoint {
         graceful_shutdown: Option<bool>,
         metrics_labels: Option<Vec<(String, String)>>,
         health_check_payload: Option<&Bound<'p, PyDict>>,
+        http_endpoint_path: Option<&str>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let engine = Arc::new(engine::PythonAsyncEngine::new(
             generator,
@@ -698,6 +699,10 @@ impl Endpoint {
 
         if let Some(payload) = health_payload_json {
             builder = builder.health_check_payload(payload);
+        }
+
+        if let Some(http_endpoint_path) = http_endpoint_path {
+            builder = builder.http_endpoint_path(http_endpoint_path);
         }
 
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);

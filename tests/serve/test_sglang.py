@@ -19,6 +19,7 @@ from tests.utils.payload_builder import (
     completion_payload_default,
     embedding_payload,
     embedding_payload_default,
+    model_info_payload_default,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,7 +43,11 @@ sglang_configs = {
         model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         env={},
         models_port=8000,
-        request_payloads=[chat_payload_default(), completion_payload_default()],
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            model_info_payload_default(),
+        ],
     ),
     "disaggregated": SGLangConfig(
         name="disaggregated",

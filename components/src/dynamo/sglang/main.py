@@ -27,6 +27,7 @@ from dynamo.sglang.request_handlers import (
     MultimodalPrefillWorkerHandler,
     MultimodalProcessorHandler,
     MultimodalWorkerHandler,
+    NativeApiHandler,
     PrefillWorkerHandler,
 )
 
@@ -76,7 +77,13 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
+    # publisher instantiates the metrics and kv event publishers
+    publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
+        engine, config, component, generate_endpoint
+    )
+
     prefill_client = None
+    native_api_tasks = []
     if config.serving_mode == DisaggregationMode.DECODE:
         logging.info("Initializing prefill client")
         prefill_client = (
@@ -85,11 +92,11 @@ async def init(runtime: DistributedRuntime, config: Config):
             .endpoint("generate")
             .client()
         )
-
-    # publisher instantiates the metrics and kv event publishers
-    publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
-        engine, config, component, generate_endpoint
-    )
+    # TODO: implement other native APIs and come up with clean layer to apply to agg/disagg/etc
+    if config.serving_mode == DisaggregationMode.AGGREGATED:
+        native_api_tasks = await NativeApiHandler(
+            component, engine, metrics_labels
+        ).init_native_apis()
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
@@ -99,7 +106,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     health_check_payload = SglangHealthCheckPayload(engine).to_dict()
 
     try:
-        # Start endpoint immediately and register model concurrently
         # Requests queue until ready_event is set
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -115,6 +121,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 dynamo_args,
                 readiness_gate=ready_event,
             ),
+            *native_api_tasks,
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
