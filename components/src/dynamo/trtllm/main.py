@@ -369,7 +369,9 @@ async def init(runtime: DistributedRuntime, config: Config):
             kv_listener = runtime.namespace(config.namespace).component(
                 config.component
             )
-            metrics_labels = [("model", config.served_model_name)]
+            # Use model_path as fallback if served_model_name is not provided
+            model_name_for_metrics = config.served_model_name or config.model_path
+            metrics_labels = [("model", model_name_for_metrics)]
             async with get_publisher(
                 component,
                 engine,
