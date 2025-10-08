@@ -17,7 +17,7 @@
 //! The module exposes two main endpoints:
 //!
 //! - `GET /openapi.json` - Returns the OpenAPI specification in JSON format
-//! - `GET /swagger-ui` - Serves the Swagger UI interface for interactive API exploration
+//! - `GET /docs` - Serves the Swagger UI interface for interactive API exploration
 //!
 //! ## Configuration
 //!
@@ -30,7 +30,7 @@
 //! Once the service is running, you can:
 //!
 //! 1. View the raw OpenAPI spec: `curl http://localhost:8000/openapi.json`
-//! 2. Access Swagger UI: Open `http://localhost:8000/swagger-ui` in a web browser
+//! 2. Access Swagger UI: Open `http://localhost:8000/docs` in a web browser
 //!
 //! ## Supported Endpoints
 //!
@@ -437,7 +437,7 @@ fn generate_summary_for_path(path: &str) -> String {
         "/live" => "Liveness check".to_string(),
         "/metrics" => "Prometheus metrics".to_string(),
         "/openapi.json" => "OpenAPI specification".to_string(),
-        "/swagger-ui" => "Swagger UI documentation".to_string(),
+        "/docs" => "API documentation".to_string(),
         _ => format!("Endpoint: {}", path),
     }
 }
@@ -461,7 +461,7 @@ fn generate_description_for_path(path: &str) -> String {
                 .to_string()
         }
         "/v1/responses" => {
-            "Creates a response for a given input. This is a Dynamo-specific endpoint."
+            "Creates a response for a given input. Compatible with OpenAI's responses API."
                 .to_string()
         }
         "/v1/models" => {
@@ -484,7 +484,7 @@ fn generate_description_for_path(path: &str) -> String {
             "Returns the OpenAPI 3.0 specification for this API in JSON format."
                 .to_string()
         }
-        "/swagger-ui" => {
+        "/docs" => {
             "Interactive API documentation powered by Swagger UI."
                 .to_string()
         }
@@ -547,11 +547,11 @@ pub fn openapi_router(route_docs: Vec<RouteDoc>, path: Option<String>) -> (Vec<R
             &openapi_path,
             get(move || async move { Json(openapi_spec.clone()).into_response() }),
         )
-        .route("/swagger-ui", get(swagger_ui_handler));
+        .route("/docs", get(swagger_ui_handler));
 
     let docs = vec![
         RouteDoc::new(axum::http::Method::GET, &openapi_path),
-        RouteDoc::new(axum::http::Method::GET, "/swagger-ui"),
+        RouteDoc::new(axum::http::Method::GET, "/docs"),
     ];
 
     (docs, router)

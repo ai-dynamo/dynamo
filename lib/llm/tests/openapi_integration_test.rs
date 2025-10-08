@@ -22,11 +22,11 @@ mod tests {
         let (docs, _router) = openapi_docs::openapi_router(route_docs, None);
 
         // Verify that the OpenAPI docs include the expected routes
-        assert_eq!(docs.len(), 2); // /openapi.json and /swagger-ui
+        assert_eq!(docs.len(), 2); // /openapi.json and /docs
 
         let paths: Vec<String> = docs.iter().map(|d| d.to_string()).collect();
         assert!(paths.iter().any(|p| p.contains("/openapi.json")));
-        assert!(paths.iter().any(|p| p.contains("/swagger-ui")));
+        assert!(paths.iter().any(|p| p.contains("/docs")));
     }
 
     #[test]
