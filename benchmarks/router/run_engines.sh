@@ -75,10 +75,29 @@ if [ ${#EXTRA_ARGS[@]} -eq 0 ]; then
         )
     elif [ "$USE_TRTLLM" = true ]; then
         # Default args for TensorRT-LLM engine
+        # Build override args based on prefill vs decode mode
+        # Configuration follows components/backends/trtllm/engine_configs/{prefill,decode}.yaml
+        if [ "$USE_PREFILLS" = true ]; then
+            # Prefill worker configuration:
+            # - enable_chunked_prefill: true (better prefill performance)
+            # - disable_overlap_scheduler: true (overlap not supported in prefill-only)
+            # - cuda_graph_config: optimization for CUDA graph execution
+            # - cache_transceiver_config: required for disaggregated serving KV transfer
+            OVERRIDE_ARGS='{"enable_chunked_prefill": true, "disable_overlap_scheduler": true, "cuda_graph_config": {"max_batch_size": 16}, "cache_transceiver_config": {"backend": "DEFAULT"}}'
+        else
+            # Decode worker configuration:
+            # - enable_chunked_prefill: true (supports mixed workloads)
+            # - disable_overlap_scheduler: false (overlap enabled for decode efficiency)
+            # - cuda_graph_config: optimization for CUDA graph execution
+            # - cache_transceiver_config: required for disaggregated serving KV transfer
+            OVERRIDE_ARGS='{"enable_chunked_prefill": true, "disable_overlap_scheduler": false, "cuda_graph_config": {"max_batch_size": 16}, "cache_transceiver_config": {"backend": "DEFAULT"}}'
+        fi
+
         EXTRA_ARGS=(
             "--max-num-tokens" "16384"
             "--max-seq-len" "32768"
             "--kv-block-size" "64"
+            "--override-engine-args" "$OVERRIDE_ARGS"
         )
     else
         # Default args for vLLM engine (explicitly include block-size)
