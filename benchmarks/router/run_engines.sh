@@ -78,18 +78,8 @@ if [ ${#EXTRA_ARGS[@]} -eq 0 ]; then
         # Build override args based on prefill vs decode mode
         # Configuration follows components/backends/trtllm/engine_configs/{prefill,decode}.yaml
         if [ "$USE_PREFILLS" = true ]; then
-            # Prefill worker configuration:
-            # - enable_chunked_prefill: true (better prefill performance)
-            # - disable_overlap_scheduler: true (overlap not supported in prefill-only)
-            # - cuda_graph_config: optimization for CUDA graph execution
-            # - cache_transceiver_config: required for disaggregated serving KV transfer
             OVERRIDE_ARGS='{"enable_chunked_prefill": true, "disable_overlap_scheduler": true, "cuda_graph_config": {"max_batch_size": 16}, "cache_transceiver_config": {"backend": "DEFAULT"}}'
         else
-            # Decode worker configuration:
-            # - enable_chunked_prefill: true (supports mixed workloads)
-            # - disable_overlap_scheduler: false (overlap enabled for decode efficiency)
-            # - cuda_graph_config: optimization for CUDA graph execution
-            # - cache_transceiver_config: required for disaggregated serving KV transfer
             OVERRIDE_ARGS='{"enable_chunked_prefill": true, "disable_overlap_scheduler": false, "cuda_graph_config": {"max_batch_size": 16}, "cache_transceiver_config": {"backend": "DEFAULT"}}'
         fi
 
