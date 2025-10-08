@@ -312,6 +312,7 @@ impl
                 .unwrap_or(det.top_n_logprobs),
             frequency_penalty: request.inner.frequency_penalty.or(det.frequency_penalty),
             presence_penalty: request.inner.presence_penalty.or(det.presence_penalty),
+            repetition_penalty: det.repetition_penalty,
             stop_toks: request.inner.stop.map(to_stop_tokens).or(det.stop_toks),
             max_len: {
                 let requested_max_tokens = request
@@ -510,6 +511,7 @@ impl
                 .unwrap_or(det.top_n_logprobs),
             frequency_penalty: request.inner.frequency_penalty.or(det.frequency_penalty),
             presence_penalty: request.inner.presence_penalty.or(det.presence_penalty),
+            repetition_penalty: det.repetition_penalty,
             stop_toks: request
                 .inner
                 .stop
