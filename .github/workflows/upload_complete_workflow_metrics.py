@@ -157,7 +157,6 @@ class BuildMetricsReader:
         metrics_dir = 'build-metrics'
         if os.path.exists(metrics_dir):
             print(f"🔍 Debug: Listing contents of {metrics_dir}/")
-            import os
             for root, dirs, files in os.walk(metrics_dir):
                 for file in files:
                     full_path = os.path.join(root, file)
