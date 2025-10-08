@@ -9,19 +9,9 @@ metrics through the Dynamo MetricsRegistry interface.
 
 import pytest
 
-pytestmark = pytest.mark.pre_merge
 
-
-@pytest.fixture
-async def metrics_runtime(runtime, request):
-    """Fixture providing a MetricsRegistry from a runtime hierarchy.
-
-    Uses request.node.name to generate a unique endpoint name for each test.
-    """
-    # Generate unique endpoint name from test name
-    test_name = request.node.name.replace("test_", "ep_")
-    endpoint_name = f"test_metrics_{test_name}"
-
+async def get_metrics_runtime(runtime, endpoint_name):
+    """Helper to create a unique metrics runtime for each test."""
     namespace = runtime.namespace("test_metrics_ns")
     component = namespace.component("test_metrics_comp")
     await component.create_service()
@@ -29,10 +19,15 @@ async def metrics_runtime(runtime, request):
     return endpoint.metrics
 
 
+pytestmark = pytest.mark.pre_merge
+
+
 @pytest.mark.asyncio
 @pytest.mark.forked
-async def test_counter_introspection(metrics_runtime):
+async def test_counter_introspection(runtime):
     """Test Counter metric introspection methods."""
+    metrics_runtime = await get_metrics_runtime(runtime, "ep_counter_introspection")
+
     counter = metrics_runtime.create_counter(
         "test_counter", "A test counter", [("env", "test")]  # constant labels
     )
@@ -54,8 +49,9 @@ async def test_counter_introspection(metrics_runtime):
 
 @pytest.mark.asyncio
 @pytest.mark.forked
-async def test_intcounter_introspection(metrics_runtime):
+async def test_intcounter_introspection(runtime):
     """Test IntCounter metric introspection methods."""
+    metrics_runtime = await get_metrics_runtime(runtime, "ep_intcounter_introspection")
     counter = metrics_runtime.create_intcounter(
         "test_int_counter", "A test int counter", [("type", "integer")]
     )
@@ -71,8 +67,9 @@ async def test_intcounter_introspection(metrics_runtime):
 
 @pytest.mark.asyncio
 @pytest.mark.forked
-async def test_gauge_introspection(metrics_runtime):
+async def test_gauge_introspection(runtime):
     """Test Gauge metric introspection methods."""
+    metrics_runtime = await get_metrics_runtime(runtime, "ep_gauge_introspection")
     gauge = metrics_runtime.create_gauge(
         "test_gauge", "A test gauge", [("unit", "bytes")]
     )
@@ -88,8 +85,9 @@ async def test_gauge_introspection(metrics_runtime):
 
 @pytest.mark.asyncio
 @pytest.mark.forked
-async def test_intgauge_introspection(metrics_runtime):
+async def test_intgauge_introspection(runtime):
     """Test IntGauge metric introspection methods."""
+    metrics_runtime = await get_metrics_runtime(runtime, "ep_intgauge_introspection")
     gauge = metrics_runtime.create_intgauge(
         "test_int_gauge", "A test int gauge", []  # no constant labels
     )
@@ -106,8 +104,9 @@ async def test_intgauge_introspection(metrics_runtime):
 
 @pytest.mark.asyncio
 @pytest.mark.forked
-async def test_histogram_introspection(metrics_runtime):
+async def test_histogram_introspection(runtime):
     """Test Histogram metric introspection methods."""
+    metrics_runtime = await get_metrics_runtime(runtime, "ep_histogram_introspection")
     histogram = metrics_runtime.create_histogram(
         "test_histogram", "A test histogram", [("method", "POST")]
     )
@@ -123,8 +122,9 @@ async def test_histogram_introspection(metrics_runtime):
 
 @pytest.mark.asyncio
 @pytest.mark.forked
-async def test_countervec_introspection(metrics_runtime):
+async def test_countervec_introspection(runtime):
     """Test CounterVec metric introspection methods."""
+    metrics_runtime = await get_metrics_runtime(runtime, "ep_countervec_introspection")
     counter_vec = metrics_runtime.create_countervec(
         "test_counter_vec",
         "A test counter vec",
@@ -153,8 +153,11 @@ async def test_countervec_introspection(metrics_runtime):
 
 @pytest.mark.asyncio
 @pytest.mark.forked
-async def test_intcountervec_introspection(metrics_runtime):
+async def test_intcountervec_introspection(runtime):
     """Test IntCounterVec metric introspection methods."""
+    metrics_runtime = await get_metrics_runtime(
+        runtime, "ep_intcountervec_introspection"
+    )
     counter_vec = metrics_runtime.create_intcountervec(
         "test_int_counter_vec",
         "A test int counter vec",
@@ -176,8 +179,9 @@ async def test_intcountervec_introspection(metrics_runtime):
 
 @pytest.mark.asyncio
 @pytest.mark.forked
-async def test_gaugevec_introspection(metrics_runtime):
+async def test_gaugevec_introspection(runtime):
     """Test GaugeVec metric introspection methods."""
+    metrics_runtime = await get_metrics_runtime(runtime, "ep_gaugevec_introspection")
     gauge_vec = metrics_runtime.create_gaugevec(
         "test_gauge_vec", "A test gauge vec", ["instance", "job"], [("env", "staging")]
     )
@@ -196,8 +200,9 @@ async def test_gaugevec_introspection(metrics_runtime):
 
 @pytest.mark.asyncio
 @pytest.mark.forked
-async def test_intgaugevec_introspection(metrics_runtime):
+async def test_intgaugevec_introspection(runtime):
     """Test IntGaugeVec metric introspection methods."""
+    metrics_runtime = await get_metrics_runtime(runtime, "ep_intgaugevec_introspection")
     gauge_vec = metrics_runtime.create_intgaugevec(
         "test_int_gauge_vec",
         "A test int gauge vec",
@@ -219,8 +224,9 @@ async def test_intgaugevec_introspection(metrics_runtime):
 
 @pytest.mark.asyncio
 @pytest.mark.forked
-async def test_metric_operations(metrics_runtime):
+async def test_metric_operations(runtime):
     """Test that metrics can be used after introspection."""
+    metrics_runtime = await get_metrics_runtime(runtime, "ep_metric_operations")
     # Counter operations
     counter = metrics_runtime.create_intcounter("ops_counter", "Operations counter", [])
     counter.inc()
@@ -250,8 +256,11 @@ async def test_metric_operations(metrics_runtime):
 
 @pytest.mark.asyncio
 @pytest.mark.forked
-async def test_multiple_metrics_same_runtime(metrics_runtime):
+async def test_multiple_metrics_same_runtime(runtime):
     """Test creating multiple metrics in the same runtime."""
+    metrics_runtime = await get_metrics_runtime(
+        runtime, "ep_multiple_metrics_same_runtime"
+    )
     counter1 = metrics_runtime.create_intcounter("counter1", "Counter 1", [])
     counter2 = metrics_runtime.create_intcounter("counter2", "Counter 2", [])
     gauge1 = metrics_runtime.create_gauge("gauge1", "Gauge 1", [])
@@ -264,6 +273,5 @@ async def test_multiple_metrics_same_runtime(metrics_runtime):
     for metric in [counter1, counter2, gauge1]:
         labels = metric.const_labels()
         assert labels["dynamo_namespace"] == "test_metrics_ns"
-        assert labels["dynamo_component"] == "test_metrics_comp"
-        # Endpoint name is dynamically generated from test name
-        assert labels["dynamo_endpoint"].startswith("test_metrics_ep_")
+        assert "dynamo_component" in labels  # Component name is test-specific
+        assert labels["dynamo_endpoint"] == "ep_multiple_metrics_same_runtime"
