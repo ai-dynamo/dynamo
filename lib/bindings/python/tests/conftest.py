@@ -130,17 +130,20 @@ def start_nats_and_etcd_default_ports():
     nats_data_dir = None
     etcd_data_dir = None
 
-    # Check if ports are already in use (error out to ensure isolation)
-    if wait_for_port("localhost", nats_port, timeout=0.1):
-        raise RuntimeError(
-            f"NATS port {nats_port} is already in use! Tests MUST run with isolated NATS/ETCD instances. "
-            f"Please kill existing services or set ENABLE_ISOLATED_ETCD_AND_NATS=1"
+    # Check if ports are already in use (reuse them if so)
+    # TODO: In the future, error out to ensure proper test isolation
+    nats_already_running = wait_for_port("localhost", nats_port, timeout=0.1)
+    etcd_already_running = wait_for_port("localhost", etcd_client_port, timeout=0.1)
+
+    if nats_already_running and etcd_already_running:
+        print(
+            f"Reusing existing NATS on port {nats_port} and ETCD on port {etcd_client_port}"
         )
-    if wait_for_port("localhost", etcd_client_port, timeout=0.1):
-        raise RuntimeError(
-            f"ETCD port {etcd_client_port} is already in use! Tests MUST run with isolated NATS/ETCD instances. "
-            f"Please kill existing services or set ENABLE_ISOLATED_ETCD_AND_NATS=1"
-        )
+        # Set environment variables for the runtime to use
+        os.environ["NATS_SERVER"] = f"nats://localhost:{nats_port}"
+        os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_client_port}"
+        # Return None for processes since we're reusing existing services
+        return None, None, nats_port, etcd_client_port, None, None
 
     # Set environment variables for the runtime to use
     os.environ["NATS_SERVER"] = f"nats://localhost:{nats_port}"
@@ -339,38 +342,47 @@ def nats_and_etcd():
     finally:
         # Teardown code - always runs even if setup fails or tests error
         print("Tearing down resources")
-        # Terminate both processes first (parallel shutdown)
-        try:
-            nats_server.terminate()
-        except Exception as e:
-            print(f"Error terminating NATS: {e}")
-        try:
-            etcd.terminate()
-        except Exception as e:
-            print(f"Error terminating ETCD: {e}")
 
-        # Wait for both processes to finish
-        try:
-            nats_server.wait(timeout=SERVICE_SHUTDOWN_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            print("NATS did not terminate gracefully, killing")
+        # Only terminate services if we started them (not reusing existing)
+        if nats_server is None and etcd is None:
+            print("Reused existing services, not stopping them")
+        else:
+            # Terminate both processes first (parallel shutdown)
             try:
-                nats_server.kill()
-            except Exception:
-                pass
-        except Exception as e:
-            print(f"Error waiting for NATS: {e}")
+                if nats_server:
+                    nats_server.terminate()
+            except Exception as e:
+                print(f"Error terminating NATS: {e}")
+            try:
+                if etcd:
+                    etcd.terminate()
+            except Exception as e:
+                print(f"Error terminating ETCD: {e}")
 
-        try:
-            etcd.wait(timeout=SERVICE_SHUTDOWN_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            print("ETCD did not terminate gracefully, killing")
+            # Wait for both processes to finish
             try:
-                etcd.kill()
-            except Exception:
-                pass
-        except Exception as e:
-            print(f"Error waiting for ETCD: {e}")
+                if nats_server:
+                    nats_server.wait(timeout=SERVICE_SHUTDOWN_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                print("NATS did not terminate gracefully, killing")
+                try:
+                    nats_server.kill()
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"Error waiting for NATS: {e}")
+
+            try:
+                if etcd:
+                    etcd.wait(timeout=SERVICE_SHUTDOWN_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                print("ETCD did not terminate gracefully, killing")
+                try:
+                    etcd.kill()
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"Error waiting for ETCD: {e}")
 
         # Clean up temporary data directories (if created)
         if nats_data_dir:

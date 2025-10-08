@@ -29,8 +29,8 @@ async def metrics_runtime(runtime, request):
     return endpoint.metrics
 
 
-@pytest.mark.forked
 @pytest.mark.asyncio
+@pytest.mark.forked
 async def test_counter_introspection(metrics_runtime):
     """Test Counter metric introspection methods."""
     counter = metrics_runtime.create_counter(
@@ -52,8 +52,8 @@ async def test_counter_introspection(metrics_runtime):
     assert labels["dynamo_namespace"] == "test_metrics_ns"
 
 
-@pytest.mark.forked
 @pytest.mark.asyncio
+@pytest.mark.forked
 async def test_intcounter_introspection(metrics_runtime):
     """Test IntCounter metric introspection methods."""
     counter = metrics_runtime.create_intcounter(
@@ -69,8 +69,8 @@ async def test_intcounter_introspection(metrics_runtime):
     assert labels["type"] == "integer"
 
 
-@pytest.mark.forked
 @pytest.mark.asyncio
+@pytest.mark.forked
 async def test_gauge_introspection(metrics_runtime):
     """Test Gauge metric introspection methods."""
     gauge = metrics_runtime.create_gauge(
@@ -86,8 +86,8 @@ async def test_gauge_introspection(metrics_runtime):
     assert labels["unit"] == "bytes"
 
 
-@pytest.mark.forked
 @pytest.mark.asyncio
+@pytest.mark.forked
 async def test_intgauge_introspection(metrics_runtime):
     """Test IntGauge metric introspection methods."""
     gauge = metrics_runtime.create_intgauge(
@@ -104,8 +104,8 @@ async def test_intgauge_introspection(metrics_runtime):
     assert "dynamo_namespace" in labels
 
 
-@pytest.mark.forked
 @pytest.mark.asyncio
+@pytest.mark.forked
 async def test_histogram_introspection(metrics_runtime):
     """Test Histogram metric introspection methods."""
     histogram = metrics_runtime.create_histogram(
@@ -121,8 +121,8 @@ async def test_histogram_introspection(metrics_runtime):
     assert labels["method"] == "POST"
 
 
-@pytest.mark.forked
 @pytest.mark.asyncio
+@pytest.mark.forked
 async def test_countervec_introspection(metrics_runtime):
     """Test CounterVec metric introspection methods."""
     counter_vec = metrics_runtime.create_countervec(
@@ -151,8 +151,8 @@ async def test_countervec_introspection(metrics_runtime):
     assert "status" in var_labels
 
 
-@pytest.mark.forked
 @pytest.mark.asyncio
+@pytest.mark.forked
 async def test_intcountervec_introspection(metrics_runtime):
     """Test IntCounterVec metric introspection methods."""
     counter_vec = metrics_runtime.create_intcountervec(
@@ -174,8 +174,8 @@ async def test_intcountervec_introspection(metrics_runtime):
     assert "zone" in var_labels
 
 
-@pytest.mark.forked
 @pytest.mark.asyncio
+@pytest.mark.forked
 async def test_gaugevec_introspection(metrics_runtime):
     """Test GaugeVec metric introspection methods."""
     gauge_vec = metrics_runtime.create_gaugevec(
@@ -194,8 +194,8 @@ async def test_gaugevec_introspection(metrics_runtime):
     assert "job" in var_labels
 
 
-@pytest.mark.forked
 @pytest.mark.asyncio
+@pytest.mark.forked
 async def test_intgaugevec_introspection(metrics_runtime):
     """Test IntGaugeVec metric introspection methods."""
     gauge_vec = metrics_runtime.create_intgaugevec(
@@ -217,8 +217,8 @@ async def test_intgaugevec_introspection(metrics_runtime):
     assert "partition" in var_labels
 
 
-@pytest.mark.forked
 @pytest.mark.asyncio
+@pytest.mark.forked
 async def test_metric_operations(metrics_runtime):
     """Test that metrics can be used after introspection."""
     # Counter operations
@@ -248,8 +248,8 @@ async def test_metric_operations(metrics_runtime):
     assert gauge_vec.get({"worker_id": "w1"}) == 6
 
 
-@pytest.mark.forked
 @pytest.mark.asyncio
+@pytest.mark.forked
 async def test_multiple_metrics_same_runtime(metrics_runtime):
     """Test creating multiple metrics in the same runtime."""
     counter1 = metrics_runtime.create_intcounter("counter1", "Counter 1", [])
