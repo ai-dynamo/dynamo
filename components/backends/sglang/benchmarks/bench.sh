@@ -56,7 +56,7 @@ if [[ "$TYPE" == "e2e" ]]; then
     for concurrency in "${CONCURRENCY_ARRAY[@]}"; do
         echo "Run e2e concurrency: $concurrency"
 
-        genai-perf profile \
+        aiperf profile \
             --model ${MODEL} \
             --tokenizer ${MODEL} \
             --endpoint-type chat \
@@ -76,9 +76,7 @@ if [[ "$TYPE" == "e2e" ]]; then
             --num-dataset-entries $(($concurrency*12)) \
             --random-seed 100 \
             --artifact-dir ${ARTIFACT_DIR} \
-            -- \
             -v \
-            --max-threads ${concurrency} \
             -H 'Authorization: Bearer NOT USED' \
             -H 'Accept: text/event-stream'
     done
@@ -108,7 +106,7 @@ elif [[ "$TYPE" == "warmup" ]]; then
         for concurrency in "${CONCURRENCY_ARRAY[@]}"; do
             echo "Run warmup phase $phase_num, concurrency: $concurrency, ISL: $ISL, OSL: $OSL"
 
-            genai-perf profile \
+            aiperf profile \
                 --model ${MODEL} \
                 --tokenizer ${MODEL} \
                 --endpoint-type chat \
@@ -129,9 +127,7 @@ elif [[ "$TYPE" == "warmup" ]]; then
                 --num-dataset-entries $(($concurrency*12)) \
                 --random-seed 100 \
                 --artifact-dir ${ARTIFACT_DIR} \
-                -- \
                 -v \
-                --max-threads ${concurrency} \
                 -H 'Authorization: Bearer NOT USED' \
                 -H 'Accept: text/event-stream'
 
@@ -151,7 +147,7 @@ else
     for concurrency in "${CONCURRENCY_ARRAY[@]}"; do
         echo "Run custom_completions concurrency: $concurrency"
 
-        genai-perf profile \
+        aiperf profile \
             --model ${MODEL} \
             --tokenizer ${MODEL} \
             --endpoint-type completions \
@@ -166,9 +162,7 @@ else
             --random-seed 100 \
             --artifact-dir ${ARTIFACT_DIR} \
             --warmup-requests 10 \
-            -- \
             -v \
-            --max-threads 256 \
             -H 'Authorization: Bearer NOT USED' \
             -H 'Accept: text/event-stream'
     done
