@@ -29,6 +29,8 @@
 //!
 //! TODO: Top-level Overview of Endpoints/Functions
 
+use std::fmt;
+
 use crate::{
     config::HealthStatus,
     discovery::Lease,
@@ -91,7 +93,7 @@ pub struct Registry {
     inner: Arc<tokio::sync::Mutex<RegistryInner>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Instance {
     pub component: String,
     pub endpoint: String,
@@ -110,6 +112,30 @@ impl Instance {
             component: self.component.clone(),
             name: self.endpoint.clone(),
         }
+    }
+}
+
+impl fmt::Display for Instance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}/{}/{}/{}",
+            self.namespace, self.component, self.endpoint, self.instance_id
+        )
+    }
+}
+
+/// Sort by string name
+impl std::cmp::Ord for Instance {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.to_string().cmp(&other.to_string())
+    }
+}
+
+impl PartialOrd for Instance {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // Since Ord is fully implemented, the comparison is always total.
+        Some(self.cmp(other))
     }
 }
 
@@ -255,6 +281,7 @@ impl Component {
             };
             instances.push(val);
         }
+        instances.sort();
         Ok(instances)
     }
 

@@ -303,11 +303,10 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let Some(etcd_client) = config.etcd_client else {
-            anyhow::bail!("Missing etcd_client in config, building HttpServiceConfig");
+        let state = match config.etcd_client {
+            Some(etcd_client) => Arc::new(State::new_with_etcd(model_manager, etcd_client)),
+            None => Arc::new(State::new(model_manager)),
         };
-        let state = Arc::new(State::new_with_etcd(model_manager, etcd_client));
-
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);

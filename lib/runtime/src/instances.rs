@@ -28,6 +28,7 @@ pub async fn list_all_instances(client: Arc<dyn KeyValueStore>) -> anyhow::Resul
             }
         }
     }
+    instances.sort();
 
     Ok(instances)
 }
