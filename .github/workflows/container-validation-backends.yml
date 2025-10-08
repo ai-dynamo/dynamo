@@ -260,29 +260,5 @@ jobs:
           BUILD_INDEX: ${{ secrets.BUILD_INDEX }}
           CONTAINER_INDEX: ${{ secrets.CONTAINER_INDEX }}
         run: |
-          # Show build metrics for debugging
-          echo "📊 Build Metrics Available:"
-          echo "  Duration: ${BUILD_DURATION_SEC} seconds"
-          echo "  Image Size: ${IMAGE_SIZE_BYTES} bytes"
-          echo "  Framework: ${BUILD_FRAMEWORK}"
-          echo "  Target: ${BUILD_TARGET}"
-          
-          # Check if build metrics files exist
-          echo "📁 Checking for build metrics files..."
-          if [ -d "build-metrics" ]; then
-            echo "Build metrics directory contents:"
-            ls -la build-metrics/
-            echo ""
-            for file in build-metrics/metrics-*.json; do
-              if [ -f "$file" ]; then
-                echo "📄 Contents of $file:"
-                cat "$file"
-                echo ""
-              fi
-            done
-          else
-            echo "⚠️  Build metrics directory not found, using job outputs only"
-          fi
-          
-          # Run the enhanced metrics upload script
+          # Upload complete workflow metrics including container metrics
           python3 .github/workflows/upload_complete_workflow_metrics.py

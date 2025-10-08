@@ -133,19 +133,16 @@ class BuildMetricsReader:
                 # Try preferred architecture first
                 job_key = f"{framework}-{preferred_arch}"
                 if job_key in all_metrics:
-                    print(f"📁 Loaded {framework} ({preferred_arch}) build metrics from consolidated file")
                     return BuildMetricsReader._process_artifact_metrics(all_metrics[job_key])
                 
                 # Try other architecture
                 other_arch = 'arm64' if preferred_arch == 'amd64' else 'amd64'
                 job_key = f"{framework}-{other_arch}"
                 if job_key in all_metrics:
-                    print(f"📁 Loaded {framework} ({other_arch}) build metrics from consolidated file")
                     return BuildMetricsReader._process_artifact_metrics(all_metrics[job_key])
                 
                 # Try just framework name (backward compatibility)
                 if framework in all_metrics:
-                    print(f"📁 Loaded {framework} build metrics from consolidated file (legacy key)")
                     return BuildMetricsReader._process_artifact_metrics(all_metrics[framework])
                 
                 print(f"⚠️  No metrics found for {framework} in consolidated file. Available keys: {list(all_metrics.keys())}")
@@ -153,14 +150,6 @@ class BuildMetricsReader:
             except Exception as e:
                 print(f"❌ Error reading consolidated build metrics: {e}")
         
-        # Debug: List all available files in build-metrics
-        metrics_dir = 'build-metrics'
-        if os.path.exists(metrics_dir):
-            print(f"🔍 Debug: Listing contents of {metrics_dir}/")
-            for root, dirs, files in os.walk(metrics_dir):
-                for file in files:
-                    full_path = os.path.join(root, file)
-                    print(f"  📄 {full_path}")
         
         # Fallback to individual file approach for backward compatibility
         # Try framework-specific artifact (direct path)
@@ -187,7 +176,6 @@ class BuildMetricsReader:
             try:
                 with open(artifact_path, 'r') as f:
                     artifact_metrics = json.load(f)
-                    print(f"📁 Loaded {framework} build metrics from individual file {artifact_path}")
                     return BuildMetricsReader._process_artifact_metrics(artifact_metrics)
             except Exception as e:
                 print(f"⚠️  Could not read {framework} build metrics from {artifact_path}: {e}")
@@ -764,18 +752,10 @@ class WorkflowMetricsUploader:
 
         # Upload to container index
         try:
-            print(f"🔍 Debug: Container data being uploaded:")
-            print(f"   Endpoint: {container_index}")
-            print(f"   Data: {container_data}")
-
             self.post_to_db(container_index, container_data)
-            print(f"✅ Container metrics uploaded successfully")
-            print(f"   Framework: {build_metrics.get('framework', 'N/A')}")
-            print(f"   Size: {build_metrics.get('image_size_bytes', 'N/A')} bytes")
-            print(f"   Build Duration: {build_metrics.get('build_duration_sec', 'N/A')} seconds")
+            print(f"✅ Container metrics uploaded for {build_metrics.get('framework', 'unknown')} framework")
         except Exception as e:
             print(f"❌ Failed to upload container metrics: {e}")
-            print(f"🔍 Debug: Container data that failed: {container_data}")
 
 
 def main():
