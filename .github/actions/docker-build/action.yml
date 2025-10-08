@@ -168,17 +168,12 @@ runs:
         PLATFORM_ARCH=$(echo "${{ inputs.platform }}" | sed 's/linux\///')
         JOB_KEY="${{ inputs.framework }}-${PLATFORM_ARCH}"
         
-        # Create or update consolidated metrics file
-        METRICS_FILE="build-metrics/consolidated-metrics.json"
+        # Create job-specific metrics file
+        mkdir -p build-metrics
+        METRICS_FILE="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}.json"
         
-        # Create base structure if file doesn't exist
-        if [ ! -f "$METRICS_FILE" ]; then
-          echo '{}' > "$METRICS_FILE"
-        fi
-        
-        # Use jq to add this job's metrics to the consolidated file
-        # First create the job metrics as a temporary file
-        cat > /tmp/job_metrics.json << EOF
+        # Create the job metrics file directly
+        cat > "$METRICS_FILE" << EOF
         {
           "framework": "${{ inputs.framework }}",
           "target": "${{ inputs.target }}",
@@ -191,26 +186,8 @@ runs:
         }
         EOF
         
-        # Install jq if not available (lightweight JSON processor)
-        if ! command -v jq &> /dev/null; then
-          echo "📦 Installing jq for JSON processing..."
-          sudo apt-get update -qq && sudo apt-get install -y jq
-        fi
-        
-        # Add job metrics to consolidated file with proper locking
-        (
-          flock -x 200
-          jq --argjson job_metrics "$(cat /tmp/job_metrics.json)" \
-             --arg job_key "$JOB_KEY" \
-             '.[$job_key] = $job_metrics' "$METRICS_FILE" > /tmp/updated_metrics.json
-          mv /tmp/updated_metrics.json "$METRICS_FILE"
-        ) 200>/tmp/metrics_lock
-        
-        echo "📁 Updated consolidated build metrics for ${JOB_KEY}:"
-        jq ".\"$JOB_KEY\"" "$METRICS_FILE"
-        
-        # Clean up temp file
-        rm -f /tmp/job_metrics.json
+        echo "📁 Created build metrics file for ${JOB_KEY}:"
+        cat "$METRICS_FILE"
         
         # Set outputs
         echo "build-end-time=${BUILD_END_TIME}" >> $GITHUB_OUTPUT
@@ -220,10 +197,10 @@ runs:
         echo "target=${{ inputs.target }}" >> $GITHUB_OUTPUT
         echo "platform-arch=${PLATFORM_ARCH}" >> $GITHUB_OUTPUT
 
-    # Upload consolidated build metrics as artifact
+    # Upload job-specific build metrics as artifact
     - name: Upload Build Metrics
       uses: actions/upload-artifact@v4
       with:
-        name: build-metrics-consolidated
-        path: build-metrics/consolidated-metrics.json
+        name: build-metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}
+        path: build-metrics/metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}.json
         retention-days: 7

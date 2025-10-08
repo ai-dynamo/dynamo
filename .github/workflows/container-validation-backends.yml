@@ -219,7 +219,7 @@ jobs:
     name: Upload Workflow Metrics
     runs-on: gitlab
     if: always()  # Always run, even if other jobs fail
-    needs: [backend-status-check]  # Wait for the status check which waits for all build jobs
+    needs: [vllm]  # Wait for the status check which waits for all build jobs
     
     steps:
       - name: Check out repository
@@ -238,8 +238,9 @@ jobs:
       - name: Download build metrics
         uses: actions/download-artifact@v4
         with:
-          name: build-metrics-consolidated
+          pattern: build-metrics-*
           path: build-metrics/
+          merge-multiple: true
         continue-on-error: true  # Don't fail if artifacts don't exist
 
       - name: Upload Complete Workflow Metrics
@@ -266,12 +267,21 @@ jobs:
           echo "  Framework: ${BUILD_FRAMEWORK}"
           echo "  Target: ${BUILD_TARGET}"
           
-          # Check if build metrics file exists
-          if [ -f "build-metrics/metrics.json" ]; then
-            echo "📁 Build metrics file found:"
-            cat build-metrics/metrics.json
+          # Check if build metrics files exist
+          echo "📁 Checking for build metrics files..."
+          if [ -d "build-metrics" ]; then
+            echo "Build metrics directory contents:"
+            ls -la build-metrics/
+            echo ""
+            for file in build-metrics/metrics-*.json; do
+              if [ -f "$file" ]; then
+                echo "📄 Contents of $file:"
+                cat "$file"
+                echo ""
+              fi
+            done
           else
-            echo "⚠️  Build metrics file not found, using job outputs only"
+            echo "⚠️  Build metrics directory not found, using job outputs only"
           fi
           
           # Run the enhanced metrics upload script
