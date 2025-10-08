@@ -74,18 +74,16 @@ if [ ${#EXTRA_ARGS[@]} -eq 0 ]; then
             "--block-size" "64"
         )
     elif [ "$USE_TRTLLM" = true ]; then
-        # Default args for TensorRT-LLM engine
+        # Default args for TensorRT-LLM engine using predefined YAML configs
+        # Config files located at: ../../components/backends/trtllm/engine_configs/{prefill,decode}.yaml
         if [ "$USE_PREFILLS" = true ]; then
-            OVERRIDE_ARGS='{"enable_chunked_prefill": true, "disable_overlap_scheduler": true, "cuda_graph_config": {"max_batch_size": 16}, "cache_transceiver_config": {"backend": "DEFAULT"}, "kv_cache_config": {"event_buffer_max_size": 1024}}'
+            ENGINE_CONFIG="../../components/backends/trtllm/engine_configs/prefill.yaml"
         else
-            OVERRIDE_ARGS='{"enable_chunked_prefill": true, "disable_overlap_scheduler": false, "cuda_graph_config": {"max_batch_size": 16}, "cache_transceiver_config": {"backend": "DEFAULT"}, "kv_cache_config": {"event_buffer_max_size": 1024}}'
+            ENGINE_CONFIG="../../components/backends/trtllm/engine_configs/decode.yaml"
         fi
 
         EXTRA_ARGS=(
-            "--max-num-tokens" "16384"
-            "--max-seq-len" "32768"
-            "--kv-block-size" "64"
-            "--override-engine-args" "$OVERRIDE_ARGS"
+            "--extra-engine-args" "$ENGINE_CONFIG"
             "--publish-events-and-metrics"
         )
     else
