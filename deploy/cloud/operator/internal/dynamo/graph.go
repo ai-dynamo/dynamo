@@ -331,11 +331,11 @@ func applyCliqueStartupDependencies(
 	backendFramework BackendFramework,
 	numberOfNodes int32,
 ) {
-	// deactivated for now.
-	// TODO: reactivate this when we have a better way to handle the readiness probe for the leader.
-	deactivated := true
+	// enabled for TRTLLM multinode deployments only
+	// TODO: reactivate for all backends when we have a better way to handle the readiness probe for the leader.
+	enabled := backendFramework == BackendFrameworkTRTLLM && numberOfNodes > 1
 
-	if deactivated || numberOfNodes <= 1 {
+	if !enabled {
 		return // No dependencies for single-node deployments
 	}
 

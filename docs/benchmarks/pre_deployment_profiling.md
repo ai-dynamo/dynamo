@@ -128,10 +128,13 @@ spec:
 
 **For MoE models**, use `profile_sla_moe_job.yaml` with TEP/DEP configuration instead.
 
+If you want to automatically deploy the optimized DGD with planner after profiling, add `--deploy-after-profile` to the profiling job. It will deploy the DGD with the engine of the optimized parallelization mapping found for the SLA targets.
+
 ### Advanced Configuration
 
 - **Model caching**: For large models, create a multi-attach PVC to cache the model. See [recipes](../../recipes/README.md) for details.
-- **Custom configurations**: Use the manifest injector to place custom DGD configurations in the PVC.
+- **Custom disaggregated configurations**: Use the manifest injector to place custom DGD configurations in the PVC.
+- **Planner Config Passthrough**: To specify custom planner configurations (e.g., `adjustment-interval` or `load-predictor`) in the generated or deployed DGD config, add a `planner-` prefix to the argument. For example, to specify `--adjustment-interval=60` in SLA planner, add `--planner-adjustment-interval=60` arg to the profiling job.
 - **Resource allocation**: Modify the job YAML to adjust GPU and memory requirements.
 
 ### Viewing Profiling Results
@@ -168,9 +171,10 @@ The profiling results directory contains the following structure:
 │   ├── raw_data.npz                           # Prefill interpolation data
 │   ├── prefill_ttft_interpolation.png         # TTFT vs ISL plot
 │   └── prefill_throughput_interpolation.png   # Throughput vs ISL plot
-└── selected_decode_interpolation/
-    ├── raw_data.npz                           # Decode interpolation data
-    └── decode_tp{best_tp}.png                 # 3D ITL surface plot
+├── selected_decode_interpolation/
+│   ├── raw_data.npz                           # Decode interpolation data
+│   └── decode_tp{best_tp}.png                 # 3D ITL surface plot
+└── config_with_planner.yaml                   # Generated DGD config with planner
 ```
 
 #### Viewing Performance Plots
@@ -272,11 +276,12 @@ Example command for TensorRT-LLM:
 ```bash
 python3 -m benchmarks.profiler.profile_sla \
    --config ./components/backends/trtllm/deploy/disagg.yaml \
+   --backend trtllm \
    --use-ai-configurator \
    --aic-system h200_sxm \
    --aic-model-name QWEN3_32B \
-   --backend trtllm \
-   --backend-version 0.20.0 \
+   --aic-backend trtllm \ # optional, will use --backend if not provided
+   --aic-backend-version 0.20.0 \
    --isl 3000 \
    --osl 150 \
    --ttft 0.2 \

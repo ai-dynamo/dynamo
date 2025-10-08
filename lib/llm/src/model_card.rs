@@ -13,11 +13,10 @@
 //! - Prompt formatter settings (PromptFormatterArtifact)
 
 use std::fmt;
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use crate::common::checked_file::{CheckedFile, Checksum};
+use crate::common::checked_file::CheckedFile;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_type::{ModelInput, ModelType};
 use anyhow::{Context, Result};
@@ -30,7 +29,6 @@ use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned, transports
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
 
-use crate::gguf::{Content, ContentConfig, ModelConfigLike};
 use crate::protocols::TokenIdType;
 
 /// Identify model deployment cards in the key-value store
@@ -40,14 +38,12 @@ pub const ROOT_PATH: &str = "v1/mdc";
 #[serde(rename_all = "snake_case")]
 pub enum ModelInfoType {
     HfConfigJson(CheckedFile),
-    GGUF(PathBuf),
 }
 
 impl ModelInfoType {
     pub fn checksum(&self) -> String {
         match self {
             ModelInfoType::HfConfigJson(c) => c.checksum().to_string(),
-            ModelInfoType::GGUF(_) => Checksum::default().to_string(),
         }
     }
 }
@@ -56,14 +52,12 @@ impl ModelInfoType {
 #[serde(rename_all = "snake_case")]
 pub enum TokenizerKind {
     HfTokenizerJson(CheckedFile),
-    GGUF(Box<HfTokenizer>),
 }
 
 impl TokenizerKind {
     pub fn checksum(&self) -> String {
         match self {
             TokenizerKind::HfTokenizerJson(c) => c.checksum().to_string(),
-            TokenizerKind::GGUF(_) => Checksum::default().to_string(),
         }
     }
 }
@@ -85,7 +79,6 @@ impl TokenizerKind {
 pub enum PromptFormatterArtifact {
     HfTokenizerConfigJson(CheckedFile),
     HfChatTemplate(CheckedFile),
-    GGUF(PathBuf),
 }
 
 impl PromptFormatterArtifact {
@@ -93,7 +86,6 @@ impl PromptFormatterArtifact {
         match self {
             PromptFormatterArtifact::HfTokenizerConfigJson(c) => c.checksum().to_string(),
             PromptFormatterArtifact::HfChatTemplate(c) => c.checksum().to_string(),
-            PromptFormatterArtifact::GGUF(_) => Checksum::default().to_string(),
         }
     }
 }
@@ -112,14 +104,12 @@ pub enum PromptContextMixin {
 #[serde(rename_all = "snake_case")]
 pub enum GenerationConfig {
     HfGenerationConfigJson(CheckedFile),
-    GGUF(PathBuf),
 }
 
 impl GenerationConfig {
     pub fn checksum(&self) -> String {
         match self {
             GenerationConfig::HfGenerationConfigJson(c) => c.checksum().to_string(),
-            GenerationConfig::GGUF(_) => Checksum::default().to_string(),
         }
     }
 }
@@ -308,17 +298,9 @@ impl ModelDeploymentCard {
                     .map_err(anyhow::Error::msg)
                     .with_context(|| p.display().to_string())
             }
-            Some(TokenizerKind::GGUF(t)) => Ok(*t.clone()),
             None => {
                 anyhow::bail!("Blank ModelDeploymentCard does not have a tokenizer");
             }
-        }
-    }
-
-    pub fn is_gguf(&self) -> bool {
-        match &self.model_info {
-            Some(info) => info.is_gguf(),
-            None => false,
         }
     }
 
@@ -451,24 +433,14 @@ impl ModelDeploymentCard {
         self.slug = Slug::from_string(name);
     }
 
-    /// Build an in-memory ModelDeploymentCard from either:
-    /// - a folder containing config.json, tokenizer.json and token_config.json
-    /// - a GGUF file
-    ///   With an optional custom template
+    /// Build an in-memory ModelDeploymentCard from a folder containing config.json,
+    /// tokenizer.json and tokenizer_config.json (i.e. a huggingface repo checkout).
+    /// Optional custom template.
     pub fn load_from_disk(
         config_path: impl AsRef<Path>,
         custom_template_path: Option<&Path>,
     ) -> anyhow::Result<ModelDeploymentCard> {
-        let config_path = config_path.as_ref();
-        if config_path.is_dir() {
-            Self::from_local_path(config_path, custom_template_path)
-        } else {
-            // GGUF files don't support custom templates yet
-            if custom_template_path.is_some() {
-                anyhow::bail!("Custom templates are not supported for GGUF files");
-            }
-            Self::from_gguf(config_path)
-        }
+        Self::from_local_path(config_path.as_ref(), custom_template_path)
     }
 
     pub fn requires_preprocessing(&self) -> bool {
@@ -529,47 +501,6 @@ impl ModelDeploymentCard {
             .ok_or_else(|| anyhow::anyhow!("Invalid model directory name"))?;
 
         Self::from_repo(&repo_id, model_name, custom_template_path)
-    }
-
-    fn from_gguf(gguf_file: &Path) -> anyhow::Result<Self> {
-        let model_name = gguf_file
-            .iter()
-            .next_back()
-            .map(|n| n.to_string_lossy().to_string());
-        let Some(model_name) = model_name else {
-            // I think this would only happy on an empty path
-            anyhow::bail!(
-                "Could not extract model name from path '{}'",
-                gguf_file.display()
-            );
-        };
-
-        // TODO: we do this in HFConfig also, unify
-        let content = load_gguf(gguf_file)?;
-        let context_length = content.get_metadata()[&format!("{}.context_length", content.arch())]
-            .to_u32()
-            .unwrap_or(0);
-        tracing::debug!(context_length, "Loaded context length from GGUF");
-
-        Ok(Self {
-            display_name: model_name.to_string(),
-            slug: Slug::from_string(model_name),
-            model_info: Some(ModelInfoType::GGUF(gguf_file.to_path_buf())),
-            tokenizer: Some(TokenizerKind::from_gguf(gguf_file)?),
-            gen_config: None, // AFAICT there is no equivalent in a GGUF
-            prompt_formatter: Some(PromptFormatterArtifact::GGUF(gguf_file.to_path_buf())),
-            chat_template_file: None,
-            prompt_context: None, // TODO - auto-detect prompt context
-            context_length,
-            kv_cache_block_size: 0,
-            migration_limit: 0,
-            model_type: Default::default(),  // set later
-            model_input: Default::default(), // set later
-            user_data: None,
-            runtime_config: ModelRuntimeConfig::default(),
-            cache_dir: None,
-            checksum: OnceLock::new(),
-        })
     }
 
     fn from_repo(
@@ -686,11 +617,7 @@ impl ModelInfoType {
                 };
                 Ok(HFConfig::from_json_file(path)?)
             }
-            Self::GGUF(path) => Ok(HFConfig::from_gguf(path)?),
         }
-    }
-    pub fn is_gguf(&self) -> bool {
-        matches!(self, Self::GGUF(_))
     }
 }
 
@@ -822,44 +749,6 @@ impl HFConfig {
 
         Ok(Arc::new(config))
     }
-    fn from_gguf(gguf_file: &Path) -> Result<Arc<dyn ModelInfo>> {
-        let content = load_gguf(gguf_file)?;
-        let model_config_metadata: ContentConfig = (&content).into();
-        let num_hidden_layers =
-            content.get_metadata()[&format!("{}.block_count", content.arch())].to_u32()? as usize;
-
-        let bos_token_id = content.get_metadata()["tokenizer.ggml.bos_token_id"].to_u32()?;
-        let eos_token_id = content.get_metadata()["tokenizer.ggml.eos_token_id"].to_u32()?;
-
-        // to_vec returns a Vec that's already there, so it's cheap
-        let vocab_size = content.get_metadata()["tokenizer.ggml.tokens"]
-            .to_vec()?
-            .len();
-
-        let arch = content.arch().to_string();
-        Ok(Arc::new(HFConfig {
-            architectures: vec![format!("{}ForCausalLM", capitalize(&arch))],
-            // "general.architecture"
-            model_type: arch,
-            text_config: Some(HFTextConfig {
-                bos_token_id: None,
-                final_bos_token_id: bos_token_id,
-
-                eos_token_id: None,
-                final_eos_token_ids: vec![eos_token_id],
-
-                // "llama.context_length"
-                max_position_embeddings: Some(model_config_metadata.max_seq_len()),
-                // "llama.block_count"
-                num_hidden_layers,
-                // "llama.attention.head_count"
-                num_attention_heads: Some(model_config_metadata.num_attn_heads()),
-                // "tokenizer.ggml.tokens".len()
-                vocab_size: Some(vocab_size),
-            }),
-            eos_token_id: None,
-        }))
-    }
 }
 
 impl ModelInfo for HFConfig {
@@ -885,31 +774,6 @@ impl ModelInfo for HFConfig {
 
     fn vocab_size(&self) -> Option<usize> {
         self.text_config.as_ref().unwrap().vocab_size
-    }
-}
-
-impl TokenizerKind {
-    pub fn from_gguf(gguf_file: &Path) -> anyhow::Result<Self> {
-        let content = load_gguf(gguf_file)?;
-        let out = crate::gguf::convert_gguf_to_hf_tokenizer(&content)
-            .with_context(|| gguf_file.display().to_string())?;
-        Ok(TokenizerKind::GGUF(Box::new(out.tokenizer)))
-    }
-}
-
-pub(crate) fn load_gguf(gguf_file: &Path) -> anyhow::Result<Content> {
-    let filename = gguf_file.display().to_string();
-    let mut f = File::open(gguf_file).with_context(|| filename.clone())?;
-    // vec because GGUF can be split into multiple files (shards)
-    let mut readers = vec![&mut f];
-    crate::gguf::Content::from_readers(&mut readers).with_context(|| filename.clone())
-}
-
-fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(first) => first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
     }
 }
 

@@ -68,10 +68,6 @@ impl PromptFormatter {
             PromptFormatterArtifact::HfChatTemplate(_) => Err(anyhow::anyhow!(
                 "prompt_formatter should not have type HfChatTemplate"
             )),
-            PromptFormatterArtifact::GGUF(gguf_path) => {
-                let config = ChatTemplate::from_gguf(gguf_path)?;
-                Self::from_parts(config, ContextMixins::default())
-            }
         }
     }
 

@@ -118,8 +118,8 @@
       "targets": [
         {
           "disableTextWrap": false,
-          "editorMode": "builder",
-          "expr": "dynamo_component_matched_tokens{dynamo_namespace=\"kvbm_connector_leader\"}",
+          "editorMode": "code",
+          "expr": "kvbm_matched_tokens",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",
@@ -227,8 +227,8 @@
       "targets": [
         {
           "disableTextWrap": false,
-          "editorMode": "builder",
-          "expr": "dynamo_component_offload_requests{dynamo_namespace=\"kvbm_connector_leader\"}",
+          "editorMode": "code",
+          "expr": "kvbm_offload_requests",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",
@@ -323,8 +323,8 @@
       "targets": [
         {
           "disableTextWrap": false,
-          "editorMode": "builder",
-          "expr": "dynamo_component_offload_blocks_d2h{dynamo_namespace=\"kvbm_connector_leader\"}",
+          "editorMode": "code",
+          "expr": "kvbm_offload_blocks_d2h",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",
@@ -334,102 +334,6 @@
         }
       ],
       "title": "Offload Blocks - Device to Host",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 18
-      },
-      "id": 1,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "12.0.1",
-      "targets": [
-        {
-          "disableTextWrap": false,
-          "editorMode": "builder",
-          "expr": "dynamo_component_save_kv_layer_requests{dynamo_namespace=\"kvbm_connector_worker\"}",
-          "fullMetaSearch": false,
-          "includeNullMetadata": true,
-          "legendFormat": "__auto",
-          "range": true,
-          "refId": "A",
-          "useBackend": false
-        }
-      ],
-      "title": "Save KV Layer Requests",
       "type": "timeseries"
     },
     {
@@ -528,8 +432,8 @@
       "targets": [
         {
           "disableTextWrap": false,
-          "editorMode": "builder",
-          "expr": "dynamo_component_onboard_requests{dynamo_namespace=\"kvbm_connector_leader\"}",
+          "editorMode": "code",
+          "expr": "kvbm_onboard_requests",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",
@@ -624,8 +528,8 @@
       "targets": [
         {
           "disableTextWrap": false,
-          "editorMode": "builder",
-          "expr": "dynamo_component_onboard_blocks_h2d{dynamo_namespace=\"kvbm_connector_leader\"}",
+          "editorMode": "code",
+          "expr": "kvbm_onboard_blocks_h2d",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",
@@ -720,8 +624,8 @@
       "targets": [
         {
           "disableTextWrap": false,
-          "editorMode": "builder",
-          "expr": "dynamo_component_onboard_blocks_d2d{dynamo_namespace=\"kvbm_connector_leader\"}",
+          "editorMode": "code",
+          "expr": "kvbm_onboard_blocks_d2d",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",

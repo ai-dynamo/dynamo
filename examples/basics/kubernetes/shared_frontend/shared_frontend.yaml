@@ -1,0 +1,125 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dynamo-model-cache
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: frontend
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      dynamoNamespace: dynamo
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg
+spec:
+  services:
+    VllmDecodeWorker:
+      pvc:
+        create: false
+        name: dynamo-model-cache
+        mountPoint: /root/.cache/huggingface
+      envFromSecret: hf-token-secret
+      dynamoNamespace: vllm-agg
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+          workingDir: /workspace/components/backends/vllm
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: agg-qwen
+spec:
+  backendFramework: vllm
+  services:
+    EncodeWorker:
+      pvc:
+        create: false
+        name: dynamo-model-cache
+        mountPoint: /root/.cache/huggingface
+      envFromSecret: hf-token-secret
+      dynamoNamespace: agg-qwen
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+          workingDir: /workspace/examples/multimodal
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 components/encode_worker.py --model Qwen/Qwen2.5-VL-7B-Instruct
+    VLMWorker:
+      pvc:
+        create: false
+        name: dynamo-model-cache
+        mountPoint: /root/.cache/huggingface
+      envFromSecret: hf-token-secret
+      dynamoNamespace: agg-qwen
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+          workingDir: /workspace/examples/multimodal
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 components/worker.py --model Qwen/Qwen2.5-VL-7B-Instruct --worker-type prefill
+    Processor:
+      pvc:
+        create: false
+        name: dynamo-model-cache
+        mountPoint: /root/.cache/huggingface
+      envFromSecret: hf-token-secret
+      dynamoNamespace: agg-qwen
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+          workingDir: /workspace/examples/multimodal
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - 'python3 components/processor.py --model Qwen/Qwen2.5-VL-7B-Instruct --prompt-template "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><prompt><|im_end|>\n<|im_start|>assistant\n"'

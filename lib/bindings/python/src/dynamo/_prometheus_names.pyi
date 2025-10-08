@@ -233,5 +233,3 @@ class KvStatsMetrics:
 
 # Module-level singleton instance for convenient access
 prometheus_names: PrometheusNames
-
-

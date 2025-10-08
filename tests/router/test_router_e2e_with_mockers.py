@@ -219,7 +219,13 @@ def get_runtime():
     except Exception as e:
         # If no existing runtime, create a new one
         logger.info(f"Creating new runtime (detached failed: {e})")
-        loop = asyncio.get_running_loop()
+        try:
+            # Try to get running loop (works in async context)
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop, create a new one (sync context)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
         _runtime_instance = DistributedRuntime(loop, False)
 
     return _runtime_instance

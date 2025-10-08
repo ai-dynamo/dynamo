@@ -34,7 +34,16 @@ flowchart TD
     style B fill:#fff8e1
 ```
 
-## Phase 1: Pre-Deployment Profiling (REQUIRED)
+## Prerequisites
+
+Before deploying the SLA planner, ensure:
+- **Dynamo platform installed** (see [Installation Guide](/docs/kubernetes/installation_guide.md))
+- **[kube-prometheus-stack](/docs/kubernetes/metrics.md) installed and running.** By default, the prometheus server is not deployed in the `monitoring` namespace. If it is deployed to a different namespace, set `dynamo-operator.dynamo.metrics.prometheusEndpoint="http://prometheus-kube-prometheus-prometheus.<namespace>.svc.cluster.local:9090"`.
+- **Benchmarking resources setup** (see [Kubernetes utilities for Dynamo Benchmarking and Profiling](../../deploy/utils/README.md)) The script will create a `dynamo-pvc` with `ReadWriteMany` access, if your cluster's default storageClassName does not allow `ReadWriteMany`, you need to specify a different storageClassName in `pvc.yaml`.
+
+## Pre-Deployment Profiling
+
+Deploying planner starts with running pre-deployment profiling.
 
 > [!WARNING]
 > **MANDATORY**: Pre-deployment profiling must be completed before deploying SLA planner. This process analyzes your model's performance characteristics to determine optimal tensor parallelism configurations and scaling parameters.
@@ -87,9 +96,12 @@ spec:
             - "20" # target ITL is 20ms
             - --backend
             - <vllm/sglang>
+            - --deploy-after-profile
 ```
 
 For MoE models, edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_moe_job.yaml` instead.
+
+To automatically deploy the optimized DGD with planner after profiling, add `--deploy-after-profile` to the profiling job. It will deploy the DGD with the engine of the optimized parallelization mapping found for the SLA targets.
 
 ### Step 1.4: Run Profiling
 
@@ -138,33 +150,14 @@ For detailed information about the output structure, performance plots, and how 
 ```
 Suggested prefill TP:4 (TTFT 48.37 ms, throughput 15505.23 tokens/s/GPU)
 Suggested decode TP:4 (ITL 4.83 ms, throughput 51.22 tokens/s/GPU)
+...
+Final DGD config with planner: {...}
+Deploying the optimized DGD with planner...
 ```
 
-## Phase 2: Deploy SLA Planner
-
-### Step 2.1: Verify Prerequisites
-
-Before deploying the SLA planner, ensure:
-
-- **Pre-deployment profiling completed successfully** (from Phase 1)
-- **Profiling results saved to `dynamo-pvc` PVC**
-- **[kube-prometheus-stack](/docs/kubernetes/metrics.md) installed and running.** By default, the prometheus server is not deployed in the `monitoring` namespace. If it is deployed to a different namespace, set `dynamo-operator.dynamo.metrics.prometheusEndpoint="http://prometheus-kube-prometheus-prometheus.<namespace>.svc.cluster.local:9090"`.
-- **Dynamo platform installed** (see [Installation Guide](/docs/kubernetes/installation_guide.md))
-- **Prefill and decode workers use the best parallelization mapping from profiling**
-
-### Step 2.2: Deploy the System
-
-We use vllm as the backend engine in this guide. SLA planner also supports SGLang and TensorRT-LLM.
+### Step 1.7: Wait for Deployment to be Ready
 
 ```bash
-# Apply the disaggregated planner deployment
-kubectl apply -f components/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE # for vllm
-
-kubectl apply -f components/backends/sglang/deploy/disagg_planner.yaml -n $NAMESPACE # for sglang
-
-kubectl apply -f components/backends/trtllm/deploy/disagg_planner.yaml -n $NAMESPACE # for trtllm
-
-# Check deployment status
 kubectl get pods -n $NAMESPACE
 ```
 
@@ -176,7 +169,7 @@ vllm-disagg-planner-backend-*             1/1 Running
 vllm-disagg-planner-prefill-*             1/1 Running
 ```
 
-### Step 2.3: Test the System
+### Step 1.8: Test the System
 
 ```bash
 # Port forward to frontend
@@ -198,7 +191,7 @@ curl -N http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-### Step 2.4: Monitor Scaling
+### Step 1.9: Monitor Scaling
 
 ```bash
 # Check planner logs for scaling decisions
@@ -213,7 +206,7 @@ Observed ttft: X.XXXs itl: X.XXXs
 Number of prefill workers: 1, number of decode workers: 1
 ```
 
-## Phase 3: Production Readiness
+## Production Readiness
 
 ### Monitoring Metrics
 

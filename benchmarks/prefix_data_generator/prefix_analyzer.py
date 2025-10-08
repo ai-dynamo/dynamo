@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import json
 from collections import Counter
@@ -37,7 +25,9 @@ class PrefixAnalyzer:
         self.dataset = self._load_dataset()
         self.hash_counter = self._build_hash_counter()
         self.repeated_hash_ids = {
-            hash_id for hash_id, count in self.hash_counter.items() if count > 1
+            (pos, hash_id)
+            for (pos, hash_id), count in self.hash_counter.items()
+            if count > 1
         }
 
     def _load_dataset(self) -> list:
@@ -50,11 +40,12 @@ class PrefixAnalyzer:
         return dataset
 
     def _build_hash_counter(self) -> Counter:
-        all_hash_ids = []
+        all_hash_positions = []
         for item in self.dataset:
-            all_hash_ids.extend(item["hash_ids"])
-        counter = Counter(all_hash_ids)
-        print(f"Hash counter built: {len(counter)} unique hash IDs")
+            for pos, hash_id in enumerate(item["hash_ids"]):
+                all_hash_positions.append((pos, hash_id))
+        counter = Counter(all_hash_positions)
+        print(f"Hash counter built: {len(counter)} unique (position, hash_id) pairs")
         return counter
 
     def analyze(self) -> dict[str, list]:
@@ -77,14 +68,19 @@ class PrefixAnalyzer:
             hash_ids = item["hash_ids"]
             assert len(hash_ids) * self.block_size >= input_len
 
-            # Special case: if all hash IDs in the row are repeated elsewhere
-            if all(hash_id in self.repeated_hash_ids for hash_id in hash_ids):
+            # Special case: if all (position, hash_id) pairs in the row are repeated elsewhere
+            if all(
+                (pos, hash_id) in self.repeated_hash_ids
+                for pos, hash_id in enumerate(hash_ids)
+            ):
                 prefix_len = input_len  # Set prefix length to input length
                 user_prompt_len = 0  # Set user prompt length to 0
             else:
-                # Count how many hash IDs in this row are repeated elsewhere in the dataset
+                # Count how many (position, hash_id) pairs in this row are repeated elsewhere in the dataset
                 repeated_count = sum(
-                    1 for hash_id in hash_ids if hash_id in self.repeated_hash_ids
+                    1
+                    for pos, hash_id in enumerate(hash_ids)
+                    if (pos, hash_id) in self.repeated_hash_ids
                 )
                 prefix_len = repeated_count * self.block_size
                 user_prompt_len = input_len - prefix_len
