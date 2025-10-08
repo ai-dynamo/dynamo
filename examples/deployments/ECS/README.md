@@ -31,7 +31,7 @@ Before creating the task definitions, you need to create the `ecsTaskExecutionRo
 
 Follow the [AWS documentation on creating the task execution IAM role](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_execution_IAM_role.html#create-task-execution-role) to create a role named `ecsTaskExecutionRole` with the `AmazonECSTaskExecutionRolePolicy` policy attached.
 
-Based on the task definition, you may need to add Amazon CloudWatch permissions and AWS Secrets Manager permissions to the `ecsTaskExecutionRole`. See details at AWS docs [here](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/permissions-reference-cwl.html) and [here](https://docs.aws.amazon.com/secretsmanager/latest/userguide/auth-and-access.html#auth-and-access_secrets)
+Based on the task definition, you may need to add Amazon CloudWatch permissions and AWS Secrets Manager permissions to the `ecsTaskExecutionRole`. See details in the [Amazon CloudWatch Logs permissions reference](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/permissions-reference-cwl.html) the [AWS Secrets Manager authentication and access control guide](https://docs.aws.amazon.com/secretsmanager/latest/userguide/auth-and-access.html#auth-and-access_secrets)
 
 > [!NOTE]
 > The role ARN will be `arn:aws:iam::<your-account-id>:role/ecsTaskExecutionRole`. Make sure to update `<your-account-id>` in any task definition JSON files with your actual AWS account ID.
