@@ -165,8 +165,12 @@ runs:
         echo "📊 Final metrics captured"
         
         # Create consolidated metrics JSON file
+        echo "🔍 Debug: inputs.platform = '${{ inputs.platform }}'"
         PLATFORM_ARCH=$(echo "${{ inputs.platform }}" | sed 's/linux\///')
+        echo "🔍 Debug: PLATFORM_ARCH = '${PLATFORM_ARCH}'"
+        echo "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV
         JOB_KEY="${{ inputs.framework }}-${PLATFORM_ARCH}"
+        echo "🔍 Debug: JOB_KEY = '${JOB_KEY}'"
         
         # Create job-specific metrics file
         mkdir -p build-metrics
@@ -201,6 +205,6 @@ runs:
     - name: Upload Build Metrics
       uses: actions/upload-artifact@v4
       with:
-        name: build-metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}
-        path: build-metrics/metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}.json
+        name: build-metrics-${{ inputs.framework }}-${{ steps.metrics.outputs.platform-arch }}
+        path: build-metrics/metrics-${{ inputs.framework }}-${{ steps.metrics.outputs.platform-arch }}.json
         retention-days: 7

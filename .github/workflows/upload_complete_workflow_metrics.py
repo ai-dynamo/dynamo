@@ -153,18 +153,35 @@ class BuildMetricsReader:
             except Exception as e:
                 print(f"❌ Error reading consolidated build metrics: {e}")
         
+        # Debug: List all available files in build-metrics
+        metrics_dir = 'build-metrics'
+        if os.path.exists(metrics_dir):
+            print(f"🔍 Debug: Listing contents of {metrics_dir}/")
+            import os
+            for root, dirs, files in os.walk(metrics_dir):
+                for file in files:
+                    full_path = os.path.join(root, file)
+                    print(f"  📄 {full_path}")
+        
         # Fallback to individual file approach for backward compatibility
-        # Try framework-specific artifact
+        # Try framework-specific artifact (direct path)
         artifact_path = f'build-metrics/metrics-{framework}-{preferred_arch}.json'
         if not os.path.exists(artifact_path):
-            # Try the other architecture
+            # Try the other architecture (direct path)
             other_arch = 'arm64' if preferred_arch == 'amd64' else 'amd64'
             artifact_path = f'build-metrics/metrics-{framework}-{other_arch}.json'
+        if not os.path.exists(artifact_path):
+            # Try artifact subdirectory structure (new format)
+            artifact_path = f'build-metrics/build-metrics-{framework}-{preferred_arch}/metrics-{framework}-{preferred_arch}.json'
+        if not os.path.exists(artifact_path):
+            # Try other architecture in subdirectory
+            other_arch = 'arm64' if preferred_arch == 'amd64' else 'amd64'
+            artifact_path = f'build-metrics/build-metrics-{framework}-{other_arch}/metrics-{framework}-{other_arch}.json'
         if not os.path.exists(artifact_path):
             # Try old naming convention (backward compatibility)
             artifact_path = f'build-metrics/metrics-{framework}.json'
         if not os.path.exists(artifact_path):
-            # Try alternative path (in case artifacts are merged differently)
+            # Try alternative path (old format)
             artifact_path = f'build-metrics/build-metrics-{framework}/metrics.json'
         
         if os.path.exists(artifact_path):
