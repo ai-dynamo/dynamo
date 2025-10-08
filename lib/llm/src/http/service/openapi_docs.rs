@@ -1,0 +1,375 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! OpenAPI documentation generation and Swagger UI integration
+//!
+//! This module provides automatic OpenAPI specification generation from the HTTP service routes
+//! and serves Swagger UI for interactive API documentation.
+//!
+//! ## Features
+//!
+//! - **OpenAPI 3.0 Specification**: Automatically generates OpenAPI spec from defined routes
+//! - **Swagger UI**: Interactive API documentation accessible via web browser
+//! - **Dynamic Route Documentation**: Introspects registered routes and generates documentation
+//!
+//! ## Endpoints
+//!
+//! The module exposes two main endpoints:
+//!
+//! - `GET /openapi.json` - Returns the OpenAPI specification in JSON format
+//! - `GET /swagger-ui` - Serves the Swagger UI interface for interactive API exploration
+//!
+//! ## Configuration
+//!
+//! The OpenAPI endpoint path can be customized using the environment variable:
+//! - `DYN_HTTP_SVC_OPENAPI_PATH` - Override the default `/openapi.json` path
+//!
+//! ## Example Usage
+//!
+//! The OpenAPI documentation is automatically integrated into the HTTP service.
+//! Once the service is running, you can:
+//!
+//! 1. View the raw OpenAPI spec: `curl http://localhost:8787/openapi.json`
+//! 2. Access Swagger UI: Open `http://localhost:8787/swagger-ui` in a web browser
+//!
+//! ## Supported Endpoints
+//!
+//! The generated documentation includes:
+//! - Chat Completions (`POST /v1/chat/completions`)
+//! - Text Completions (`POST /v1/completions`)
+//! - Embeddings (`POST /v1/embeddings`)
+//! - Responses (`POST /v1/responses`)
+//! - Model Listing (`GET /v1/models`)
+//! - Health Checks (`GET /health`, `GET /live`)
+//! - Metrics (`GET /metrics`)
+
+use std::sync::Arc;
+
+use axum::{
+    Json, Router,
+    extract::State,
+    response::{Html, IntoResponse, Response},
+    routing::get,
+};
+use utoipa::OpenApi;
+use utoipa::openapi::{PathItem, Paths};
+
+use crate::http::service::RouteDoc;
+use super::service_v2;
+
+/// OpenAPI documentation structure
+///
+/// This struct defines the complete OpenAPI specification for the Dynamo HTTP service.
+/// It includes all the schemas, paths, and metadata needed to document the API.
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "Dynamo LLM HTTP Service",
+        version = "1.0.0",
+        description = "OpenAI-compatible HTTP API for Dynamo LLM inference engine.\n\nThis service provides endpoints for chat completions, text completions, embeddings, and model management.",
+        license(name = "Apache-2.0"),
+        contact(name = "NVIDIA", url = "https://www.nvidia.com")
+    ),
+    servers(
+        (url = "/", description = "Current server")
+    )
+)]
+struct ApiDoc;
+
+/// Generate OpenAPI specification from route documentation
+fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenApi {
+    let mut openapi = ApiDoc::openapi();
+
+    // Build paths from route documentation
+    let mut paths = Paths::new();
+
+    for route in route_docs {
+        let path_str = route.to_string();
+        tracing::debug!("Adding route to OpenAPI spec: {}", path_str);
+
+        // Parse the route to extract method and path
+        let parts: Vec<&str> = path_str.split_whitespace().collect();
+        if parts.len() != 2 {
+            tracing::warn!("Invalid route format: {}", path_str);
+            continue;
+        }
+
+        let method = parts[0];
+        let path = parts[1];
+
+        // Add operation based on method
+        let operation = create_operation_for_route(method, path);
+
+        // Create PathItem with the operation
+        use utoipa::openapi::HttpMethod;
+        let path_item = match method.to_uppercase().as_str() {
+            "GET" => PathItem::new(HttpMethod::Get, operation),
+            "POST" => PathItem::new(HttpMethod::Post, operation),
+            "PUT" => PathItem::new(HttpMethod::Put, operation),
+            "DELETE" => PathItem::new(HttpMethod::Delete, operation),
+            "PATCH" => PathItem::new(HttpMethod::Patch, operation),
+            "HEAD" => PathItem::new(HttpMethod::Head, operation),
+            "OPTIONS" => PathItem::new(HttpMethod::Options, operation),
+            _ => {
+                tracing::warn!("Unknown HTTP method: {}", method);
+                continue;
+            }
+        };
+
+        paths.paths.insert(path.to_string(), path_item);
+    }
+
+    openapi.paths = paths;
+    openapi
+}
+
+/// Create an OpenAPI operation for a specific route
+fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path::Operation {
+    use utoipa::openapi::path::OperationBuilder;
+    use utoipa::openapi::ResponseBuilder;
+
+    let operation_id = format!("{}_{}", method.to_lowercase(), path.replace('/', "_").trim_matches('_'));
+    let summary = generate_summary_for_path(path);
+    let description = generate_description_for_path(path);
+
+    let mut operation = OperationBuilder::new()
+        .operation_id(Some(operation_id))
+        .summary(Some(summary))
+        .description(Some(description));
+
+    // Add request body for POST methods
+    if method.to_uppercase() == "POST" {
+        operation = add_request_body_for_path(operation, path);
+    }
+
+    // Add responses
+    operation = operation.response(
+        "200",
+        ResponseBuilder::new()
+            .description("Successful response")
+            .build()
+    );
+
+    operation = operation.response(
+        "400",
+        ResponseBuilder::new()
+            .description("Bad request - invalid input")
+            .build()
+    );
+
+    operation = operation.response(
+        "404",
+        ResponseBuilder::new()
+            .description("Model not found")
+            .build()
+    );
+
+    operation = operation.response(
+        "503",
+        ResponseBuilder::new()
+            .description("Service unavailable")
+            .build()
+    );
+
+    operation.build()
+}
+
+/// Add request body schema for POST endpoints
+fn add_request_body_for_path(
+    operation: utoipa::openapi::path::OperationBuilder,
+    path: &str,
+) -> utoipa::openapi::path::OperationBuilder {
+    use utoipa::openapi::request_body::RequestBodyBuilder;
+
+    let description = if path.contains("chat/completions") {
+        "Chat completion request with model, messages, and optional parameters"
+    } else if path.contains("completions") {
+        "Text completion request with model, prompt, and optional parameters"
+    } else if path.contains("embeddings") {
+        "Embedding request with model and input text"
+    } else if path.contains("responses") {
+        "Response request with model and input"
+    } else {
+        "Request body"
+    };
+
+    operation.request_body(Some(
+        RequestBodyBuilder::new()
+            .description(Some(description))
+            .required(Some(utoipa::openapi::Required::True))
+            .build()
+    ))
+}
+
+
+/// Generate a human-readable summary for a path
+fn generate_summary_for_path(path: &str) -> String {
+    match path {
+        p if p.contains("chat/completions") => "Create chat completion".to_string(),
+        p if p == "/v1/completions" => "Create text completion".to_string(),
+        p if p.contains("embeddings") => "Create embeddings".to_string(),
+        p if p.contains("responses") => "Create response".to_string(),
+        p if p.contains("models") => "List available models".to_string(),
+        p if p.contains("health") => "Health check".to_string(),
+        p if p.contains("live") => "Liveness check".to_string(),
+        p if p.contains("metrics") => "Prometheus metrics".to_string(),
+        _ => format!("Endpoint: {}", path),
+    }
+}
+
+/// Generate a detailed description for a path
+fn generate_description_for_path(path: &str) -> String {
+    match path {
+        p if p.contains("chat/completions") => {
+            "Creates a completion for a chat conversation. Supports both streaming and non-streaming modes. \
+            Compatible with OpenAI's chat completions API."
+                .to_string()
+        }
+        p if p == "/v1/completions" => {
+            "Creates a completion for a given prompt. Supports both streaming and non-streaming modes. \
+            Compatible with OpenAI's completions API."
+                .to_string()
+        }
+        p if p.contains("embeddings") => {
+            "Creates an embedding vector representing the input text. \
+            Compatible with OpenAI's embeddings API."
+                .to_string()
+        }
+        p if p.contains("responses") => {
+            "Creates a response for a given input. This is a Dynamo-specific endpoint."
+                .to_string()
+        }
+        p if p.contains("models") => {
+            "Lists the currently available models and provides basic information about each."
+                .to_string()
+        }
+        p if p.contains("health") => {
+            "Returns the health status of the service. Used for readiness probes."
+                .to_string()
+        }
+        p if p.contains("live") => {
+            "Returns the liveness status of the service. Used for liveness probes."
+                .to_string()
+        }
+        p if p.contains("metrics") => {
+            "Returns Prometheus metrics for monitoring the service."
+                .to_string()
+        }
+        _ => format!("Endpoint for path: {}", path),
+    }
+}
+
+/// Handler for serving the OpenAPI JSON specification
+#[allow(dead_code)]
+async fn openapi_json(State(_state): State<Arc<service_v2::State>>) -> Response {
+    // Get route documentation from somewhere - we'll need to pass this in
+    // For now, create an empty spec
+    let openapi = ApiDoc::openapi();
+    Json(openapi).into_response()
+}
+
+/// Serve Swagger UI HTML page
+async fn swagger_ui_handler() -> Html<&'static str> {
+    Html(r#"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dynamo LLM API Documentation</title>
+    <link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css" />
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+        }
+    </style>
+</head>
+<body>
+    <div id="swagger-ui"></div>
+    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-standalone-preset.js"></script>
+    <script>
+        window.onload = function() {
+            window.ui = SwaggerUIBundle({
+                url: "/openapi.json",
+                dom_id: '#swagger-ui',
+                presets: [
+                    SwaggerUIBundle.presets.apis,
+                    SwaggerUIStandalonePreset
+                ],
+                layout: "BaseLayout",
+                deepLinking: true
+            });
+        };
+    </script>
+</body>
+</html>
+    "#)
+}
+
+/// Create router for OpenAPI documentation endpoints
+pub fn openapi_router(
+    route_docs: Vec<RouteDoc>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    // Generate the OpenAPI spec from route docs
+    let openapi_spec = generate_openapi_spec(&route_docs);
+
+    let openapi_path = path.unwrap_or("/openapi.json".to_string());
+
+    // Create handler for JSON endpoint and Swagger UI
+    let router = Router::new()
+        .route(&openapi_path, get(move || async move {
+            Json(openapi_spec.clone()).into_response()
+        }))
+        .route("/swagger-ui", get(swagger_ui_handler));
+
+    let docs = vec![
+        RouteDoc::new(axum::http::Method::GET, &openapi_path),
+        RouteDoc::new(axum::http::Method::GET, "/swagger-ui"),
+    ];
+
+    (docs, router)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_openapi_spec() {
+        let routes = vec![
+            RouteDoc::new(axum::http::Method::POST, "/v1/chat/completions"),
+            RouteDoc::new(axum::http::Method::POST, "/v1/completions"),
+            RouteDoc::new(axum::http::Method::GET, "/v1/models"),
+        ];
+
+        let spec = generate_openapi_spec(&routes);
+
+        // Verify basic structure
+        assert_eq!(spec.info.title, "Dynamo LLM HTTP Service");
+        assert_eq!(spec.info.version, "1.0.0");
+
+        // Verify paths were added
+        assert!(spec.paths.paths.contains_key("/v1/chat/completions"));
+        assert!(spec.paths.paths.contains_key("/v1/completions"));
+        assert!(spec.paths.paths.contains_key("/v1/models"));
+    }
+
+    #[test]
+    fn test_summary_generation() {
+        assert_eq!(
+            generate_summary_for_path("/v1/chat/completions"),
+            "Create chat completion"
+        );
+        assert_eq!(
+            generate_summary_for_path("/v1/completions"),
+            "Create text completion"
+        );
+        assert_eq!(
+            generate_summary_for_path("/v1/models"),
+            "List available models"
+        );
+    }
+}

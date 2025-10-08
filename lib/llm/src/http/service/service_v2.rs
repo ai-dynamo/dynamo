@@ -335,6 +335,14 @@ impl HttpServiceConfigBuilder {
             all_docs.extend(route_docs);
         }
 
+        // Add OpenAPI documentation routes (must be after all other routes so it can document them)
+        let (openapi_docs, openapi_route) = super::openapi_docs::openapi_router(
+            all_docs.clone(),
+            std::env::var("DYN_HTTP_SVC_OPENAPI_PATH").ok(),
+        );
+        router = router.merge(openapi_route);
+        all_docs.extend(openapi_docs);
+
         // Add span for tracing
         router = router.layer(TraceLayer::new_for_http().make_span_with(make_request_span));
 
