@@ -91,7 +91,7 @@ class LLMServerManager:
             {
                 "RUST_BACKTRACE": "1",
                 # DynamoConnector connection settings
-                "NATS_SERVER": "nats://localhost:4222",
+                "NATS_SERVERS": "nats://localhost:4222",
                 "ETCD_ENDPOINTS": "http://localhost:2379",
             }
         )

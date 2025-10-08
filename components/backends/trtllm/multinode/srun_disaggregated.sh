@@ -31,7 +31,7 @@ ACCOUNT="$(sacctmgr -nP show assoc where user=$(whoami) format=account)"
 export HEAD_NODE="${SLURMD_NODENAME}"
 export HEAD_NODE_IP="$(hostname -i)"
 export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
-export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
+export NATS_SERVERS="nats://${HEAD_NODE_IP}:4222"
 
 if [[ -z ${IMAGE} ]]; then
   echo "ERROR: You need to set the IMAGE environment variable to the " \
@@ -70,7 +70,7 @@ for ((i=1; i<=${NUM_PREFILL_WORKERS}; i++)); do
     --oversubscribe \
     --container-image "${IMAGE}" \
     --container-mounts "${MOUNTS}" \
-    --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE,DISAGGREGATION_MODE,DISAGGREGATION_STRATEGY,ENGINE_CONFIG \
+    --container-env ETCD_ENDPOINTS,NATS_SERVERS,HEAD_NODE_IP,HEAD_NODE,DISAGGREGATION_MODE,DISAGGREGATION_STRATEGY,ENGINE_CONFIG \
     --verbose \
     --label \
     -A "${ACCOUNT}" \
@@ -90,7 +90,7 @@ for ((i=1; i<=${NUM_DECODE_WORKERS}; i++)); do
     --oversubscribe \
     --container-image "${IMAGE}" \
     --container-mounts "${MOUNTS}" \
-    --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE,DISAGGREGATION_MODE,DISAGGREGATION_STRATEGY,ENGINE_CONFIG \
+    --container-env ETCD_ENDPOINTS,NATS_SERVERS,HEAD_NODE_IP,HEAD_NODE,DISAGGREGATION_MODE,DISAGGREGATION_STRATEGY,ENGINE_CONFIG \
     --verbose \
     --label \
     -A "${ACCOUNT}" \

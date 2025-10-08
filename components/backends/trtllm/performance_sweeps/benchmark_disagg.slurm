@@ -112,7 +112,7 @@ nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
 export HEAD_NODE="${nodes[0]}"
 export HEAD_NODE_IP="$(hostname -i)"
 export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
-export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
+export NATS_SERVERS="nats://${HEAD_NODE_IP}:4222"
 
 # Create a temporary file to store PIDs
 PID_FILE=$(mktemp)
@@ -142,7 +142,7 @@ srun -l --container-name=${CONTAINER_NAME} \
         --mpi=pmix --overlap -N 1 -n 1 \
 	--oversubscribe \
 	--overlap \
-	--container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE \
+	--container-env ETCD_ENDPOINTS,NATS_SERVERS,HEAD_NODE_IP,HEAD_NODE \
         -w ${nodes[0]} \
         bash ${SCRIPTS_DIR}/scripts/start_frontend.sh &> ${full_logdir}/output_server.log &
 SERVER_PID=$!

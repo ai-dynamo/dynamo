@@ -126,7 +126,7 @@ On all nodes, set the etcd and NATS endpoints:
 export INFRA_NODE_IP=<INFRA_NODE_IP>
 
 export ETCD_ENDPOINTS=http://${INFRA_NODE_IP}:2379
-export NATS_SERVER=nats://${INFRA_NODE_IP}:4222
+export NATS_SERVERS=nats://${INFRA_NODE_IP}:4222
 export DYN_LOG=debug  # Enable debug logging to see routing decisions
 ```
 
@@ -432,7 +432,7 @@ curl http://${DYN_FRONTEND_IP}:8000/health
 
 2. Check NATS connectivity:
    ```bash
-   nats --server=$NATS_SERVER server check connection
+   nats --server=$NATS_SERVERS server check connection
    ```
 
 ### NIXL Transfer Failures

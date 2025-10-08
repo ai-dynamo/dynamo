@@ -1322,7 +1322,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 													},
 													{
-														Name:  "NATS_SERVER",
+														Name:  "NATS_SERVERS",
 														Value: "nats-address",
 													},
 													{
@@ -1465,7 +1465,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "2",
 													},
 													{
-														Name:  "NATS_SERVER",
+														Name:  "NATS_SERVERS",
 														Value: "nats-address",
 													},
 													{
@@ -1830,7 +1830,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "1",
 													},
 													{
-														Name:  "NATS_SERVER",
+														Name:  "NATS_SERVERS",
 														Value: "nats-address",
 													},
 													{
@@ -1983,7 +1983,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "1",
 													},
 													{
-														Name:  "NATS_SERVER",
+														Name:  "NATS_SERVERS",
 														Value: "nats-address",
 													},
 													{
@@ -2114,7 +2114,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 													},
 													{
-														Name:  "NATS_SERVER",
+														Name:  "NATS_SERVERS",
 														Value: "nats-address",
 													},
 													{
@@ -2248,7 +2248,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "2",
 													},
 													{
-														Name:  "NATS_SERVER",
+														Name:  "NATS_SERVERS",
 														Value: "nats-address",
 													},
 													{
@@ -2629,7 +2629,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "1",
 													},
 													{
-														Name:  "NATS_SERVER",
+														Name:  "NATS_SERVERS",
 														Value: "nats-address",
 													},
 													{
@@ -2769,7 +2769,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "1",
 													},
 													{
-														Name:  "NATS_SERVER",
+														Name:  "NATS_SERVERS",
 														Value: "nats-address",
 													},
 													{
@@ -2900,7 +2900,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 													},
 													{
-														Name:  "NATS_SERVER",
+														Name:  "NATS_SERVERS",
 														Value: "nats-address",
 													},
 													{
@@ -3041,7 +3041,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "2",
 													},
 													{
-														Name:  "NATS_SERVER",
+														Name:  "NATS_SERVERS",
 														Value: "nats-address",
 													},
 													{
