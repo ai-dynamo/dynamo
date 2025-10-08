@@ -52,14 +52,6 @@ pub struct Flags {
     #[arg(short = 'v', action = clap::ArgAction::Count, default_value_t = 0)]
     pub verbosity: u8,
 
-    /// llamacpp only
-    ///
-    /// The path to the tokenizer and model config because:
-    /// - our engine is a 'core' engine in that we do the tokenization, so we need the vocab
-    /// - TODO: we don't yet extract that from the GGUF. Once we do we can remove this flag.
-    #[arg(long)]
-    pub model_config: Option<PathBuf>,
-
     /// If using `out=dyn` with multiple instances, this says how to route the requests.
     ///
     /// Mostly interesting for KV-aware routing.
@@ -147,7 +139,7 @@ impl Flags {
     /// This takes validation out of the main engine creation path.
     pub fn validate(
         &self,
-        local_model: &LocalModel,
+        _local_model: &LocalModel,
         in_opt: &Input,
         out_opt: &Output,
     ) -> anyhow::Result<()> {
@@ -194,14 +186,6 @@ impl Flags {
             Output::Echo => {}
             #[cfg(feature = "mistralrs")]
             Output::MistralRs => {}
-            #[cfg(feature = "llamacpp")]
-            Output::LlamaCpp => {
-                if !local_model.path().is_file() {
-                    anyhow::bail!(
-                        "--model-path should refer to a GGUF file. llama_cpp does not support safetensors."
-                    );
-                }
-            }
             Output::Mocker => {
                 // nothing to check here
             }

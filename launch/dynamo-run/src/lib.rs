@@ -35,7 +35,6 @@ pub async fn run(
                 .or(flags.model_path_flag.clone()),
         )
         .model_name(flags.model_name.clone())
-        .model_config(flags.model_config.clone())
         .kv_cache_block_size(flags.kv_cache_block_size)
         // Only set if user provides. Usually loaded from tokenizer_config.json
         .context_length(flags.context_length)
@@ -94,7 +93,7 @@ pub async fn run(
 /// Create the engine matching `out_opt`
 /// Note validation happens in Flags::validate. In here assume everything is going to work.
 async fn engine_for(
-    cancel_token: CancellationToken,
+    _cancel_token: CancellationToken,
     out_opt: Output,
     flags: Flags,
     local_model: LocalModel,
@@ -120,12 +119,6 @@ async fn engine_for(
             model: Box::new(local_model),
             is_static: flags.static_worker,
         }),
-        #[cfg(feature = "llamacpp")]
-        Output::LlamaCpp => Ok(EngineConfig::StaticCore {
-            engine: dynamo_engine_llamacpp::make_engine(cancel_token, &local_model).await?,
-            model: Box::new(local_model),
-            is_static: flags.static_worker,
-        }),
         Output::Mocker => {
             let Either::Right(drt) = rt else {
                 panic!("Mocker requires a distributed runtime to run.");
@@ -146,18 +139,16 @@ async fn engine_for(
     }
 }
 
-/// If the user will benefit from CUDA/Metal/Vulkan, remind them to build with it.
+/// If the user will benefit from CUDA or Metal, remind them to build with it.
 /// If they have it, celebrate!
-// Only mistralrs and llamacpp need to be built with CUDA.
+// Only mistralrs needs to be built with CUDA.
 // The Python engines only need it at runtime.
-#[cfg(any(feature = "mistralrs", feature = "llamacpp"))]
+#[cfg(feature = "mistralrs")]
 fn print_cuda(output: &Output) {
     // These engines maybe be compiled in, but are they the chosen one?
     match output {
         #[cfg(feature = "mistralrs")]
         Output::MistralRs => {}
-        #[cfg(feature = "llamacpp")]
-        Output::LlamaCpp => {}
         _ => {
             return;
         }
@@ -171,15 +162,11 @@ fn print_cuda(output: &Output) {
     {
         tracing::info!("Metal on");
     }
-    #[cfg(feature = "vulkan")]
-    {
-        tracing::info!("Vulkan on");
-    }
-    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
-    tracing::info!("CPU mode. Rebuild with `--features cuda|metal|vulkan` for better performance");
+    #[cfg(not(any(feature = "cuda", feature = "metal")))]
+    tracing::info!("CPU mode. Rebuild with `--features cuda|metal` for better performance");
 }
 
-#[cfg(not(any(feature = "mistralrs", feature = "llamacpp")))]
+#[cfg(not(feature = "mistralrs"))]
 fn print_cuda(_output: &Output) {}
 
 fn default_engine_for(_local_model: &LocalModel) -> Output {

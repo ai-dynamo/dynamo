@@ -2092,18 +2092,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-engine-llamacpp"
-version = "0.5.1"
-dependencies = [
- "async-stream",
- "dynamo-llm",
- "dynamo-runtime",
- "llama-cpp-2",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "dynamo-engine-mistralrs"
 version = "0.5.1"
 dependencies = [
@@ -2241,7 +2229,6 @@ dependencies = [
  "async-trait",
  "clap 4.5.48",
  "dynamo-async-openai",
- "dynamo-engine-llamacpp",
  "dynamo-engine-mistralrs",
  "dynamo-llm",
  "dynamo-runtime",
@@ -2428,26 +2415,6 @@ name = "enum-ordinalize-derive"
 version = "4.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d28318a75d4aead5c4db25382e8ef717932d0346600cacae6357eb5941bc5ff"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.106",
-]
-
-[[package]]
-name = "enumflags2"
-version = "0.7.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1027f7680c853e056ebcec683615fb6fbbc07dbaa13b4d5d9442b146ded4ecef"
-dependencies = [
- "enumflags2_derive",
-]
-
-[[package]]
-name = "enumflags2_derive"
-version = "0.7.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67c78a4d8fdf9953a5c9d458f9efe940fd97a0cab0941c075a813ac594733827"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2676,15 +2643,6 @@ name = "find-msvc-tools"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ced73b1dacfc750a6db6c0a0c3a3853c8b41997e2e2c563dc90804ae6867959"
-
-[[package]]
-name = "find_cuda_helper"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9f9e65c593dd01ac77daad909ea4ad17f0d6d1776193fc8ea766356177abdad"
-dependencies = [
- "glob",
-]
 
 [[package]]
 name = "fixedbitset"
@@ -4283,33 +4241,6 @@ name = "litemap"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "241eaef5fd12c88705a01fc1066c48c4b36e0dd4377dcdc7ec3942cea7a69956"
-
-[[package]]
-name = "llama-cpp-2"
-version = "0.1.122"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d574d1f43b31c9e3d0e3bf596a31fa628e4b66894eb5db4dfe78e861c7f74275"
-dependencies = [
- "enumflags2",
- "llama-cpp-sys-2",
- "thiserror 1.0.69",
- "tracing",
- "tracing-core",
-]
-
-[[package]]
-name = "llama-cpp-sys-2"
-version = "0.1.122"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e09bdf53b6f486ecaeb96b08cd8a9d9df162f2aafa37efb5b40cf421a419c755"
-dependencies = [
- "bindgen 0.72.1",
- "cc",
- "cmake",
- "find_cuda_helper",
- "glob",
- "walkdir",
-]
 
 [[package]]
 name = "llguidance"
