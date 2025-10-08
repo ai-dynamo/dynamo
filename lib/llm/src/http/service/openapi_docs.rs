@@ -54,8 +54,8 @@ use axum::{
 use utoipa::OpenApi;
 use utoipa::openapi::{PathItem, Paths};
 
-use crate::http::service::RouteDoc;
 use super::service_v2;
+use crate::http::service::RouteDoc;
 
 /// OpenAPI documentation structure
 ///
@@ -125,10 +125,14 @@ fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenApi {
 
 /// Create an OpenAPI operation for a specific route
 fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path::Operation {
-    use utoipa::openapi::path::OperationBuilder;
     use utoipa::openapi::ResponseBuilder;
+    use utoipa::openapi::path::OperationBuilder;
 
-    let operation_id = format!("{}_{}", method.to_lowercase(), path.replace('/', "_").trim_matches('_'));
+    let operation_id = format!(
+        "{}_{}",
+        method.to_lowercase(),
+        path.replace('/', "_").trim_matches('_')
+    );
     let summary = generate_summary_for_path(path);
     let description = generate_description_for_path(path);
 
@@ -147,28 +151,28 @@ fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path
         "200",
         ResponseBuilder::new()
             .description("Successful response")
-            .build()
+            .build(),
     );
 
     operation = operation.response(
         "400",
         ResponseBuilder::new()
             .description("Bad request - invalid input")
-            .build()
+            .build(),
     );
 
     operation = operation.response(
         "404",
         ResponseBuilder::new()
             .description("Model not found")
-            .build()
+            .build(),
     );
 
     operation = operation.response(
         "503",
         ResponseBuilder::new()
             .description("Service unavailable")
-            .build()
+            .build(),
     );
 
     operation.build()
@@ -197,16 +201,15 @@ fn add_request_body_for_path(
         RequestBodyBuilder::new()
             .description(Some(description))
             .required(Some(utoipa::openapi::Required::True))
-            .build()
+            .build(),
     ))
 }
-
 
 /// Generate a human-readable summary for a path
 fn generate_summary_for_path(path: &str) -> String {
     match path {
         p if p.contains("chat/completions") => "Create chat completion".to_string(),
-        p if p == "/v1/completions" => "Create text completion".to_string(),
+        "/v1/completions" => "Create text completion".to_string(),
         p if p.contains("embeddings") => "Create embeddings".to_string(),
         p if p.contains("responses") => "Create response".to_string(),
         p if p.contains("models") => "List available models".to_string(),
@@ -225,7 +228,7 @@ fn generate_description_for_path(path: &str) -> String {
             Compatible with OpenAI's chat completions API."
                 .to_string()
         }
-        p if p == "/v1/completions" => {
+        "/v1/completions" => {
             "Creates a completion for a given prompt. Supports both streaming and non-streaming modes. \
             Compatible with OpenAI's completions API."
                 .to_string()
@@ -270,7 +273,8 @@ async fn openapi_json(State(_state): State<Arc<service_v2::State>>) -> Response 
 
 /// Serve Swagger UI HTML page
 async fn swagger_ui_handler() -> Html<&'static str> {
-    Html(r#"
+    Html(
+        r#"
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -305,14 +309,12 @@ async fn swagger_ui_handler() -> Html<&'static str> {
     </script>
 </body>
 </html>
-    "#)
+    "#,
+    )
 }
 
 /// Create router for OpenAPI documentation endpoints
-pub fn openapi_router(
-    route_docs: Vec<RouteDoc>,
-    path: Option<String>,
-) -> (Vec<RouteDoc>, Router) {
+pub fn openapi_router(route_docs: Vec<RouteDoc>, path: Option<String>) -> (Vec<RouteDoc>, Router) {
     // Generate the OpenAPI spec from route docs
     let openapi_spec = generate_openapi_spec(&route_docs);
 
@@ -320,9 +322,10 @@ pub fn openapi_router(
 
     // Create handler for JSON endpoint and Swagger UI
     let router = Router::new()
-        .route(&openapi_path, get(move || async move {
-            Json(openapi_spec.clone()).into_response()
-        }))
+        .route(
+            &openapi_path,
+            get(move || async move { Json(openapi_spec.clone()).into_response() }),
+        )
         .route("/swagger-ui", get(swagger_ui_handler));
 
     let docs = vec![

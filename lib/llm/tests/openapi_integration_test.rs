@@ -5,8 +5,8 @@
 
 #[cfg(test)]
 mod tests {
+    use axum::http::Method;
     use dynamo_llm::http::service::{RouteDoc, openapi_docs};
-    use axum::http::{Method, StatusCode};
 
     #[test]
     fn test_openapi_router_creation() {
@@ -31,12 +31,11 @@ mod tests {
 
     #[test]
     fn test_openapi_router_custom_path() {
-        let route_docs = vec![
-            RouteDoc::new(Method::POST, "/v1/chat/completions"),
-        ];
+        let route_docs = vec![RouteDoc::new(Method::POST, "/v1/chat/completions")];
 
         // Create the OpenAPI router with custom path
-        let (docs, _router) = openapi_docs::openapi_router(route_docs, Some("/api/docs.json".to_string()));
+        let (docs, _router) =
+            openapi_docs::openapi_router(route_docs, Some("/api/docs.json".to_string()));
 
         // Verify custom path is used
         let paths: Vec<String> = docs.iter().map(|d| d.to_string()).collect();
