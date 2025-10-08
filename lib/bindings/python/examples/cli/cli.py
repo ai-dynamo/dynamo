@@ -16,9 +16,6 @@
 # - "sglang", "vllm", "trtllm", "echo": An LLM worker.
 #
 # Must be in a virtualenv with the Dynamo bindings (or wheel) installed.
-#
-# There is no provided llama.cpp engine here, but there is one in components/llama_cpp/. It would be
-# easy enough to copy the few Python lines from there to here and add an `out=llama_cpp`.
 
 import argparse
 import asyncio

@@ -1,6 +1,6 @@
 # Dynamo Run
 
-`dynamo-run` is a Rust binary that lets you easily run a model, explore the Dynamo components, and demonstrates the Rust API. It supports the `mistral.rs` and `llama.cpp` engines. `mistralrs` is the default engine.
+`dynamo-run` is a Rust binary that lets you easily run a model, explore the Dynamo components, and demonstrates the Rust API. It supports the `mistral.rs` engines, as well as testing engines `echo` and `mocker`.
 
 It is primarily for development and rapid prototyping. For production use we recommend the Python wrapped components, see the main project README.
 
@@ -16,7 +16,6 @@ To adjust verbosity, use `-v` to enable debug logging or `-vv` to enable full tr
 
 ```bash
 dynamo-run in=http out=mistralrs <model> -v  # enables debug logging
-dynamo-run in=text out=llamacpp <model> -vv  # enables full trace logging
 ```
 
 ### Use model from Hugging Face
@@ -303,7 +302,7 @@ The default delay is 10ms, which produces approximately 100 tokens per second.
 `dynamo-run` can take a jsonl file full of prompts and evaluate them all:
 
 ```
-dynamo-run in=batch:prompts.jsonl out=llamacpp <model>
+dynamo-run in=batch:prompts.jsonl out=mistralrs <model>
 ```
 
 The input file should look like this:

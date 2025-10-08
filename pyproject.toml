@@ -63,11 +63,6 @@ sglang = [
     "sglang[all]==0.5.3rc0",
 ]
 
-llama_cpp = [
-    "uvloop",
-    "llama-cpp-python",
-]
-
 [dependency-groups]
 docs = [
     # Core Sphinx
