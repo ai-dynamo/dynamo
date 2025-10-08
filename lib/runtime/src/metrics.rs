@@ -113,6 +113,21 @@ impl PrometheusMetric for prometheus::IntGauge {
     }
 }
 
+impl PrometheusMetric for prometheus::GaugeVec {
+    fn with_opts(_opts: prometheus::Opts) -> Result<Self, prometheus::Error> {
+        Err(prometheus::Error::Msg(
+            "GaugeVec requires label names, use with_opts_and_label_names instead".to_string(),
+        ))
+    }
+
+    fn with_opts_and_label_names(
+        opts: prometheus::Opts,
+        label_names: &[&str],
+    ) -> Result<Self, prometheus::Error> {
+        prometheus::GaugeVec::new(opts, label_names)
+    }
+}
+
 impl PrometheusMetric for prometheus::IntGaugeVec {
     fn with_opts(_opts: prometheus::Opts) -> Result<Self, prometheus::Error> {
         Err(prometheus::Error::Msg(
@@ -252,21 +267,8 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
 
     // Handle different metric types
     let prometheus_metric = if std::any::TypeId::of::<T>()
-        == std::any::TypeId::of::<prometheus::Histogram>()
+        == std::any::TypeId::of::<prometheus::CounterVec>()
     {
-        // Special handling for Histogram with custom buckets
-        // buckets parameter is valid for Histogram, const_labels is not used
-        if const_labels.is_some() {
-            return Err(anyhow::anyhow!(
-                "const_labels parameter is not valid for Histogram"
-            ));
-        }
-        let mut opts = prometheus::HistogramOpts::new(&metric_name, metric_desc);
-        for (key, value) in &updated_labels {
-            opts = opts.const_label(key.clone(), value.clone());
-        }
-        T::with_histogram_opts_and_buckets(opts, buckets)?
-    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::CounterVec>() {
         // Special handling for CounterVec with label names
         // const_labels parameter is required for CounterVec
         if buckets.is_some() {
@@ -280,6 +282,49 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         }
         let label_names = const_labels
             .ok_or_else(|| anyhow::anyhow!("CounterVec requires const_labels parameter"))?;
+        T::with_opts_and_label_names(opts, label_names)?
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::GaugeVec>() {
+        // Special handling for GaugeVec with label names
+        // const_labels parameter is required for GaugeVec
+        if buckets.is_some() {
+            return Err(anyhow::anyhow!(
+                "buckets parameter is not valid for GaugeVec"
+            ));
+        }
+        let mut opts = prometheus::Opts::new(&metric_name, metric_desc);
+        for (key, value) in &updated_labels {
+            opts = opts.const_label(key.clone(), value.clone());
+        }
+        let label_names = const_labels
+            .ok_or_else(|| anyhow::anyhow!("GaugeVec requires const_labels parameter"))?;
+        T::with_opts_and_label_names(opts, label_names)?
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::Histogram>() {
+        // Special handling for Histogram with custom buckets
+        // buckets parameter is valid for Histogram, const_labels is not used
+        if const_labels.is_some() {
+            return Err(anyhow::anyhow!(
+                "const_labels parameter is not valid for Histogram"
+            ));
+        }
+        let mut opts = prometheus::HistogramOpts::new(&metric_name, metric_desc);
+        for (key, value) in &updated_labels {
+            opts = opts.const_label(key.clone(), value.clone());
+        }
+        T::with_histogram_opts_and_buckets(opts, buckets)?
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::IntCounterVec>() {
+        // Special handling for IntCounterVec with label names
+        // const_labels parameter is required for IntCounterVec
+        if buckets.is_some() {
+            return Err(anyhow::anyhow!(
+                "buckets parameter is not valid for IntCounterVec"
+            ));
+        }
+        let mut opts = prometheus::Opts::new(&metric_name, metric_desc);
+        for (key, value) in &updated_labels {
+            opts = opts.const_label(key.clone(), value.clone());
+        }
+        let label_names = const_labels
+            .ok_or_else(|| anyhow::anyhow!("IntCounterVec requires const_labels parameter"))?;
         T::with_opts_and_label_names(opts, label_names)?
     } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::IntGaugeVec>() {
         // Special handling for IntGaugeVec with label names
@@ -295,21 +340,6 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         }
         let label_names = const_labels
             .ok_or_else(|| anyhow::anyhow!("IntGaugeVec requires const_labels parameter"))?;
-        T::with_opts_and_label_names(opts, label_names)?
-    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::IntCounterVec>() {
-        // Special handling for IntCounterVec with label names
-        // const_labels parameter is required for IntCounterVec
-        if buckets.is_some() {
-            return Err(anyhow::anyhow!(
-                "buckets parameter is not valid for IntCounterVec"
-            ));
-        }
-        let mut opts = prometheus::Opts::new(&metric_name, metric_desc);
-        for (key, value) in &updated_labels {
-            opts = opts.const_label(key.clone(), value.clone());
-        }
-        let label_names = const_labels
-            .ok_or_else(|| anyhow::anyhow!("IntCounterVec requires const_labels parameter"))?;
         T::with_opts_and_label_names(opts, label_names)?
     } else {
         // Standard handling for Counter, IntCounter, Gauge, IntGauge
@@ -396,6 +426,9 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
     // - Summary: create_summary() - for quantiles and sum/count metrics
     // - SummaryVec: create_summary_vec() - for labeled summaries
     // - Untyped: create_untyped() - for untyped metrics
+    //
+    // NOTE: The order of create_* methods below is mirrored in lib/bindings/python/rust/lib.rs::Metrics
+    // Keep them synchronized when adding new metric types
 
     /// Create a Counter metric
     fn create_counter(
@@ -433,6 +466,24 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
         labels: &[(&str, &str)],
     ) -> anyhow::Result<prometheus::Gauge> {
         create_metric(self, name, description, labels, None, None)
+    }
+
+    /// Create a GaugeVec metric with label names (for dynamic labels)
+    fn create_gaugevec(
+        &self,
+        name: &str,
+        description: &str,
+        const_labels: &[&str],
+        const_label_values: &[(&str, &str)],
+    ) -> anyhow::Result<prometheus::GaugeVec> {
+        create_metric(
+            self,
+            name,
+            description,
+            const_label_values,
+            None,
+            Some(const_labels),
+        )
     }
 
     /// Create a Histogram metric with custom buckets
