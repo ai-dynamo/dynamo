@@ -66,33 +66,9 @@ FIELD_BUILD_TARGET = "s_build_target"
 FIELD_BUILD_FRAMEWORK = "s_build_framework"
 FIELD_BUILD_SIZE_BYTES = "l_build_size_bytes"
 
-# Test-specific fields (for TEST_INDEX)
-FIELD_TEST_FRAMEWORK = "s_test_framework"
-FIELD_TEST_TYPE = "s_test_type"
-FIELD_TEST_PLATFORM_ARCH = "s_test_platform_arch"
-FIELD_TEST_PYTEST_MARKS = "s_test_pytest_marks"
-FIELD_TEST_START_TIME = "ts_test_start_time"
-FIELD_TEST_END_TIME = "ts_test_end_time"
-FIELD_TEST_DURATION_SEC = "l_test_duration_sec"
-FIELD_TEST_STATUS = "s_test_status"
-FIELD_TEST_EXIT_CODE = "l_test_exit_code"
-FIELD_TOTAL_TESTS = "l_total_tests"
-FIELD_PASSED_TESTS = "l_passed_tests"
-FIELD_FAILED_TESTS = "l_failed_tests"
-FIELD_ERROR_TESTS = "l_error_tests"
-FIELD_SKIPPED_TESTS = "l_skipped_tests"
-
-# Individual test case fields (for TEST_INDEX)
-FIELD_TEST_CLASSNAME = "s_test_classname"
-FIELD_TEST_NAME = "s_test_name"
-FIELD_TEST_FULL_NAME = "s_test_full_name"
-FIELD_TEST_TIME = "l_test_time_ms"  # Individual test time in milliseconds
-FIELD_TEST_CASE_STATUS = "s_test_case_status"
-FIELD_FAILURE_MESSAGE = "s_failure_message"
-FIELD_FAILURE_TEXT = "s_failure_text"
-FIELD_ERROR_MESSAGE = "s_error_message"
-FIELD_ERROR_TEXT = "s_error_text"
-FIELD_SKIP_REASON = "s_skip_reason"
+# Test Info
+FIELD_FRAMEWORK = "s_framework"  # Framework name
+FIELD_ERROR_MESSAGE = "s_error_message"  # Error message if any
 
 
 class BuildMetricsReader:
@@ -536,14 +512,14 @@ class WorkflowMetricsUploader:
         retry_delay = 15  # seconds
 
         for attempt in range(max_retries):
-            # Get workflow and jobs data from GitHub API
+        # Get workflow and jobs data from GitHub API
             workflow_data = self.get_github_api_data(
                 f"/repos/{self.repo}/actions/runs/{self.run_id}"
             )
-            if not workflow_data:
-                print("Could not fetch workflow data from GitHub API")
-                return
-                
+        if not workflow_data:
+            print("Could not fetch workflow data from GitHub API")
+            return
+            
             jobs_data = self.get_github_api_data(
                 f"/repos/{self.repo}/actions/runs/{self.run_id}/jobs"
             )
@@ -920,7 +896,7 @@ class WorkflowMetricsUploader:
             print(f"⚠️  No test metrics available for job: {job_name}")
             return
 
-        print(f"🧪 Uploading test metrics to {test_index}")
+        print(f"🧪 Uploading individual test metrics")
 
         # Upload each test metrics entry (there can be multiple test types per job)
         for i, test_metrics in enumerate(test_metrics_list):
@@ -965,90 +941,78 @@ class WorkflowMetricsUploader:
             print(f"   Individual Tests Found: {len(individual_tests)}")
             print("   " + "="*50)
             
-            # Upload individual test cases
+            # Upload individual test cases using your specified schema
             for test_idx, individual_test in enumerate(individual_tests):
                 # Create individual test data payload
                 test_data = {}
                 
-                # Identity & Context
+                # Identity & Context - using your specified fields
                 test_classname = individual_test.get("classname", "")
                 test_name = individual_test.get("name", "")
                 test_full_name = f"{test_classname}::{test_name}" if test_classname else test_name
                 
-                test_data[FIELD_ID] = f"github-test-{job_id}-{test_framework}-{test_type}-{platform_arch}-{test_idx}"
-                test_data[FIELD_JOB_NAME] = str(job_name)
-                test_data[FIELD_JOB_ID] = job_id
+                test_data[FIELD_ID] = f"github-test-{job_id}-{test_name}"
                 test_data[FIELD_STEP_ID] = test_step_id
+                test_data[FIELD_JOB_ID] = job_id
+                test_data[FIELD_WORKFLOW_ID] = str(self.run_id)
+                test_data[FIELD_REPO] = self.repo
+                test_data[FIELD_WORKFLOW_NAME] = self.workflow_name
+                test_data[FIELD_BRANCH] = self.ref_name
+                test_data[FIELD_COMMIT_SHA] = self.sha
+                test_data[FIELD_PR_ID] = self.pr_id
 
-                # Test suite context
-                test_data[FIELD_TEST_FRAMEWORK] = test_framework
-                test_data[FIELD_TEST_TYPE] = test_type
-                test_data[FIELD_TEST_PLATFORM_ARCH] = platform_arch
-                test_data[FIELD_TEST_PYTEST_MARKS] = test_metrics.get("pytest_marks", "")
-                
-                # Suite timing (for context)
-                if "test_start_time" in test_metrics:
-                    test_data[FIELD_TEST_START_TIME] = test_metrics["test_start_time"]
-                if "test_end_time" in test_metrics:
-                    test_data[FIELD_TEST_END_TIME] = test_metrics["test_end_time"]
-                test_data[FIELD_TEST_DURATION_SEC] = test_metrics.get("test_duration_sec", 0)
-                test_data[FIELD_TEST_EXIT_CODE] = test_metrics.get("test_exit_code", 0)
-                
-                # Suite summary (for context)
-                test_data[FIELD_TOTAL_TESTS] = summary.get("total_tests", 0)
-                test_data[FIELD_PASSED_TESTS] = summary.get("passed_tests", 0)
-                test_data[FIELD_FAILED_TESTS] = summary.get("failed_tests", 0)
-                test_data[FIELD_ERROR_TESTS] = summary.get("error_tests", 0)
-                test_data[FIELD_SKIPPED_TESTS] = summary.get("skipped_tests", 0)
-
-                # Individual test case fields
-                test_data[FIELD_TEST_CLASSNAME] = test_classname
-                test_data[FIELD_TEST_NAME] = test_name
-                test_data[FIELD_TEST_FULL_NAME] = test_full_name
-                test_data[FIELD_TEST_TIME] = int(individual_test.get("time", 0) * 1000)  # Convert to milliseconds
-                test_data[FIELD_TEST_CASE_STATUS] = individual_test.get("status", "unknown")
-                
-                # Status and error details
+                # Status & Events - using your specified fields
                 test_data[FIELD_STATUS] = individual_test.get("status", "unknown")
-                if "failure_message" in individual_test:
-                    test_data[FIELD_FAILURE_MESSAGE] = individual_test["failure_message"]
-                if "failure_text" in individual_test:
-                    test_data[FIELD_FAILURE_TEXT] = individual_test["failure_text"]
-                if "error_message" in individual_test:
-                    test_data[FIELD_ERROR_MESSAGE] = individual_test["error_message"]
-                if "error_text" in individual_test:
-                    test_data[FIELD_ERROR_TEXT] = individual_test["error_text"]
-                if "skip_reason" in individual_test:
-                    test_data[FIELD_SKIP_REASON] = individual_test["skip_reason"]
+                test_data[FIELD_GITHUB_EVENT] = self.github_event
+
+                # Test Info - using your specified fields
+                test_data[FIELD_FRAMEWORK] = test_framework
+                
+                # Add error message if test failed or had error
+                error_msg = ""
+                if individual_test.get("status") == "failed":
+                    error_msg = individual_test.get("failure_message", "") or individual_test.get("failure_text", "")
+                elif individual_test.get("status") == "error":
+                    error_msg = individual_test.get("error_message", "") or individual_test.get("error_text", "")
+                elif individual_test.get("status") == "skipped":
+                    error_msg = individual_test.get("skip_reason", "")
+                
+                if error_msg:
+                    test_data[FIELD_ERROR_MESSAGE] = error_msg
+
+                # Timing - using your specified fields (build timing for test context)
+                if "test_start_time" in test_metrics:
+                    test_data[FIELD_BUILD_START_TIME] = test_metrics["test_start_time"]
+                if "test_end_time" in test_metrics:
+                    test_data[FIELD_BUILD_END_TIME] = test_metrics["test_end_time"]
+                test_data[FIELD_BUILD_DURATION_SEC] = test_metrics.get("test_duration_sec", 0)
 
                 # Add @timestamp for time-series data
                 test_data["@timestamp"] = test_metrics.get(
                     "test_end_time", datetime.now(timezone.utc).isoformat()
                 )
 
-                # Add common context fields
-                self.add_common_context_fields(test_data)
-
                 # Print individual test metrics instead of uploading for now
                 print(f"🧪 Individual test: {test_full_name}")
-                print(f"   Status: {test_data[FIELD_TEST_CASE_STATUS]}")
+                print(f"   ID: {test_data[FIELD_ID]}")
+                print(f"   Status: {test_data[FIELD_STATUS]}")
+                print(f"   Framework: {test_data[FIELD_FRAMEWORK]}")
                 print(f"   Duration: {individual_test.get('time', 0):.3f}s")
-                print(f"   Class: {test_classname}")
-                print(f"   Name: {test_name}")
-                if test_data[FIELD_TEST_CASE_STATUS] == "failed" and FIELD_FAILURE_MESSAGE in test_data:
-                    print(f"   Failure: {test_data[FIELD_FAILURE_MESSAGE]}")
-                elif test_data[FIELD_TEST_CASE_STATUS] == "error" and FIELD_ERROR_MESSAGE in test_data:
-                    print(f"   Error: {test_data[FIELD_ERROR_MESSAGE]}")
-                elif test_data[FIELD_TEST_CASE_STATUS] == "skipped" and FIELD_SKIP_REASON in test_data:
-                    print(f"   Skip Reason: {test_data[FIELD_SKIP_REASON]}")
+                print(f"   Step ID: {test_data[FIELD_STEP_ID]}")
+                print(f"   Job ID: {test_data[FIELD_JOB_ID]}")
+                print(f"   Workflow ID: {test_data[FIELD_WORKFLOW_ID]}")
+                print(f"   Repo: {test_data[FIELD_REPO]}")
+                print(f"   Branch: {test_data[FIELD_BRANCH]}")
+                if FIELD_ERROR_MESSAGE in test_data:
+                    print(f"   Error: {test_data[FIELD_ERROR_MESSAGE][:100]}...")
                 print("   " + "-"*30)
                 
-                # Uncomment the lines below when ready to actually upload:
-                # try:
-                #     self.post_to_db(test_index, test_data)
-                #     print(f"✅ Individual test uploaded: {test_full_name}")
-                # except Exception as e:
-                #     print(f"❌ Failed to upload individual test {test_full_name}: {e}")
+                # Upload individual test to the test index
+                try:
+                    self.post_to_db(test_index, test_data)
+                    print(f"✅ Individual test uploaded: {test_full_name}")
+                except Exception as e:
+                    print(f"❌ Failed to upload individual test {test_full_name}: {e}")
             
             print(f"📊 Processed {len(individual_tests)} individual tests for {test_framework} {test_type}")
             print("   " + "="*50)
