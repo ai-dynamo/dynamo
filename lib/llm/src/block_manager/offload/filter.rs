@@ -48,10 +48,15 @@ impl FrequencyFilter {
         let oversize_notify_clone = oversize_notify.clone();
 
         CriticalTaskExecutionHandle::new_with_runtime(
-            move |_cancel_token| async move {
+            move |cancel_token| async move {
                 let mut interval = tokio::time::interval(flush_interval);
                 loop {
                     tokio::select! {
+                        // Observe cancellation and exit the loop.
+                        _ = cancel_token.cancelled() => {
+                            break;
+                        }
+
                         // Prune the frequency map upon the flush interval.
                         _ = interval.tick() => {
                             let mut frequency_map = frequency_map_clone.lock().unwrap();
@@ -78,7 +83,6 @@ impl FrequencyFilter {
             &runtime,
         )?
         .detach();
-
         Ok(Self {
             min_offload_frequency,
             frequency_map,
