@@ -202,10 +202,6 @@ def test_request_cancellation_sglang_aggregated(
                 # For streaming, read 5 responses before cancelling
                 if request_type == "chat_completion_stream":
                     read_streaming_responses(cancellable_req, expected_count=5)
-                else:
-                    # Add delay to allow SGLang to start the cancellation monitor
-                    time.sleep(0.5)
-                    logger.info(f"SGLang started processing request {request_id}")
 
                 cancellable_req.cancel()
                 logger.info(f"Cancelled request ID: {request_id}")
@@ -227,9 +223,6 @@ def test_request_cancellation_sglang_aggregated(
                 )
 
                 logger.info(f"{description} detected successfully")
-
-                # Add small delay between tests to let system stabilize
-                time.sleep(1)
 
 
 @pytest.mark.e2e
@@ -287,9 +280,6 @@ def test_request_cancellation_sglang_decode_cancel(
 
                 # Read 5 streaming responses (decode phase)
                 read_streaming_responses(cancellable_req, expected_count=5)
-
-                # Add delay to allow SGLang to start the cancellation monitor
-                time.sleep(0.5)
 
                 # Now cancel the request
                 cancellable_req.cancel()

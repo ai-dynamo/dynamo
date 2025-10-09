@@ -193,9 +193,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         logging.debug(f"New Request ID: {context.id()}")
                         request_id_future.set_result(sglang_request_id)
 
-                # Note: No explicit cancellation checks needed here.
-                # When abort_request is called by the cancellation monitor,
-                # SGLang will terminate this async generator automatically.
+                # Check for cancellation before processing
+                # This ensures the monitor task gets a chance to run
+                if context.is_stopped() or context.is_killed():
+                    logging.debug(
+                        f"Request cancelled, stopping token stream for Context: {context.id()}"
+                    )
+                    return
 
                 finish_reason = res["meta_info"]["finish_reason"]
                 if finish_reason:
@@ -240,9 +244,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         logging.debug(f"New Request ID: {context.id()}")
                         request_id_future.set_result(sglang_request_id)
 
-                # Note: No explicit cancellation checks needed here.
-                # When abort_request is called by the cancellation monitor,
-                # SGLang will terminate this async generator automatically.
+                # Check for cancellation before processing
+                # This ensures the monitor task gets a chance to run
+                if context.is_stopped() or context.is_killed():
+                    logging.debug(
+                        f"Request cancelled, stopping text stream for Context: {context.id()}"
+                    )
+                    return
 
                 index = res.get("index", 0)
                 text = res.get("text", "")

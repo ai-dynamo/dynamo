@@ -130,29 +130,14 @@ class BaseWorkerHandler(ABC):
         try:
             logging.debug(f"Cancellation monitor started for Context: {context.id()}")
 
-            # Check if cancellation was already signaled
-            cancellation_pending = context.is_stopped() or context.is_killed()
-
             # Always wait for the request ID to ensure we can abort the request
-            try:
-                sglang_request_id = await request_id_future
-                logging.debug(
-                    f"Cancellation monitor received SGLang Request ID {sglang_request_id} for Context: {context.id()}"
-                )
-            except asyncio.CancelledError:
-                logging.debug(
-                    f"Request ID future cancelled for Context: {context.id()}"
-                )
-                raise
-            except Exception as e:
-                logging.error(
-                    f"Failed to get SGLang request ID for Context: {context.id()}: {e}"
-                )
-                return
+            sglang_request_id = await request_id_future
+            logging.debug(
+                f"Cancellation monitor received SGLang Request ID {sglang_request_id} for Context: {context.id()}"
+            )
+            logging.debug(f"Request ID future cancelled for Context: {context.id()}")
 
-            # If cancellation wasn't already pending, wait for it
-            if not cancellation_pending:
-                await context.async_killed_or_stopped()
+            await context.async_killed_or_stopped()
 
             logging.info(
                 f"Cancellation signal received for SGLang Request ID {sglang_request_id}, Context: {context.id()}"
@@ -163,19 +148,13 @@ class BaseWorkerHandler(ABC):
                 hasattr(self.engine, "tokenizer_manager")
                 and self.engine.tokenizer_manager
             ):
-                try:
-                    # Use SGLang's abort_request API
-                    logging.info(
-                        f"Calling SGLang abort_request for Request ID {sglang_request_id}"
-                    )
-                    self.engine.tokenizer_manager.abort_request(
-                        rid=sglang_request_id, abort_all=False
-                    )
-                    logging.info(f"Aborted Request ID: {context.id()}")
-                except Exception as e:
-                    logging.error(
-                        f"Failed to abort SGLang request {sglang_request_id}: {e}"
-                    )
+                logging.info(
+                    f"Calling SGLang abort_request for Request ID {sglang_request_id}"
+                )
+                self.engine.tokenizer_manager.abort_request(
+                    rid=sglang_request_id, abort_all=False
+                )
+                logging.info(f"Aborted Request ID: {context.id()}")
             else:
                 logging.error(
                     f"SGLang tokenizer_manager not found for abort request: {context.id()}"
