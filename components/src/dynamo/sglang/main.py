@@ -94,22 +94,16 @@ async def init(runtime: DistributedRuntime, config: Config):
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
-    async def gated_generate(request, context):
-        """Queue requests until model registration completes"""
-        await ready_event.wait()  # Block until model is ready
-        async for response in handler.generate(request, context):
-            yield response
-
     handler = DecodeWorkerHandler(component, engine, config, publisher, prefill_client)
 
     health_check_payload = SglangHealthCheckPayload(engine).to_dict()
 
     try:
         # Start endpoint immediately and register model concurrently
-        # Requests queue until ready_event is set
+        # Requests queue until ready_event is set (TODO: Part of new PR)
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
-                gated_generate,
+                handler.generate,
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,

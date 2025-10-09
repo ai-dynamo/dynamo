@@ -28,12 +28,19 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         self.engine = engine
         self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info(self.engine)
         super().__init__(component, engine, config)
+        self._consume_tasks = set()
         logging.info(
             f"Prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
         )
 
     def cleanup(self) -> None:
         """Shutdown the prefill engine and cleanup resources."""
+        # Cancel all pending consume tasks
+        for task in self._consume_tasks:
+            if not task.done():
+                task.cancel()
+        self._consume_tasks.clear()
+
         self.engine.shutdown()
         logging.info("Prefill engine shutdown")
         super().cleanup()
@@ -72,7 +79,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             bootstrap_room=bootstrap_room,
         )
 
-        asyncio.create_task(self._consume_results(results, context))
+        task = asyncio.create_task(self._consume_results(results, context))
+        self._consume_tasks.add(task)
+        task.add_done_callback(self._consume_tasks.discard)
 
     async def _consume_results(
         self, results: AsyncGenerator[Any, None], context: Context
