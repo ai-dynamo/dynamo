@@ -130,47 +130,28 @@ class BaseWorkerHandler(ABC):
         try:
             logging.debug(f"Cancellation monitor started for Context: {context.id()}")
 
-            # Race between getting the request ID and receiving cancellation signal
-            # This handles the case where cancellation happens before first response is consumed
-            done, pending = await asyncio.wait(
-                {
-                    request_id_future,
-                    context.async_killed_or_stopped(),
-                },
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            # Check if cancellation was already signaled
+            cancellation_pending = context.is_stopped() or context.is_killed()
 
-            # Cancel any pending tasks
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+            # Always wait for the request ID to ensure we can abort the request
+            try:
+                sglang_request_id = await request_id_future
+                logging.debug(
+                    f"Cancellation monitor received SGLang Request ID {sglang_request_id} for Context: {context.id()}"
+                )
+            except asyncio.CancelledError:
+                logging.debug(
+                    f"Request ID future cancelled for Context: {context.id()}"
+                )
+                raise
+            except Exception as e:
+                logging.error(
+                    f"Failed to get SGLang request ID for Context: {context.id()}: {e}"
+                )
+                return
 
-            # Check if we got the request ID
-            sglang_request_id = None
-            if request_id_future.done() and not request_id_future.cancelled():
-                try:
-                    sglang_request_id = request_id_future.result()
-                    logging.debug(
-                        f"Cancellation monitor received SGLang Request ID {sglang_request_id} for Context: {context.id()}"
-                    )
-                except Exception:
-                    pass
-
-            # Check if cancellation was signaled
-            if context.is_stopped() or context.is_killed():
-                if sglang_request_id is None:
-                    logging.info(
-                        f"Request cancelled before SGLang request ID available for Context: {context.id()}"
-                    )
-                    logging.info(f"Aborted Request ID: {context.id()}")
-                    # Request was cancelled before we could get the SGLang request ID
-                    # Nothing to abort since we don't have it
-                    return
-            else:
-                # Request ID became available, now wait for actual cancellation
+            # If cancellation wasn't already pending, wait for it
+            if not cancellation_pending:
                 await context.async_killed_or_stopped()
 
             logging.info(

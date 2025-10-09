@@ -207,7 +207,6 @@ def test_request_cancellation_sglang_aggregated(
                     time.sleep(0.5)
                     logger.info(f"SGLang started processing request {request_id}")
 
-                # Now cancel the request (this is a LATE cancellation)
                 cancellable_req.cancel()
                 logger.info(f"Cancelled request ID: {request_id}")
 
@@ -216,6 +215,7 @@ def test_request_cancellation_sglang_aggregated(
                     process=worker,
                     pattern=f"Aborted Request ID: {request_id}",
                     log_offset=worker_log_offset,
+                    max_wait_ms=2000,
                 )
 
                 # Verify frontend log has kill message
@@ -300,12 +300,14 @@ def test_request_cancellation_sglang_decode_cancel(
                     process=decode_worker,
                     pattern=f"Aborted Request ID: {request_id}",
                     log_offset=decode_log_offset,
+                    max_wait_ms=2000,
                 )
 
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
                     pattern="issued control message Kill to sender",
+                    max_wait_ms=2000,
                 )
 
                 logger.info(
