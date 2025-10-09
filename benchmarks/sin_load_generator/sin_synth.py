@@ -53,7 +53,7 @@ def main(args):
             t_req = t + (t_e - t) * req_idx / num_requests
             isl, osl = get_isl_osl(t_req)
             hash_ids = [
-                (random.randint(0, args.total_blocks),)
+                (random.randrange(args.total_blocks),)
                 for _ in range(math.ceil(isl / args.block_size))
             ]
             rolling_hash_ids = rolling_hasher(hash_ids)
