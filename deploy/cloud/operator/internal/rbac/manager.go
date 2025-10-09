@@ -34,6 +34,23 @@ func NewManager(client client.Client) *Manager {
 	return &Manager{client: client}
 }
 
+// needsRoleRefRecreate checks if the RoleRef has changed, which requires
+// deleting and recreating the RoleBinding since RoleRef is immutable.
+func needsRoleRefRecreate(existing *rbacv1.RoleBinding, clusterRoleName string) bool {
+	return existing.RoleRef.Name != clusterRoleName ||
+		existing.RoleRef.Kind != kindClusterRole ||
+		existing.RoleRef.APIGroup != apiGroupRBAC
+}
+
+// needsSubjectUpdate checks if the Subjects field needs updating.
+// Subjects are mutable so they can be updated in-place.
+func needsSubjectUpdate(existing *rbacv1.RoleBinding, serviceAccountName, targetNamespace string) bool {
+	return len(existing.Subjects) != 1 ||
+		existing.Subjects[0].Kind != kindServiceAccount ||
+		existing.Subjects[0].Name != serviceAccountName ||
+		existing.Subjects[0].Namespace != targetNamespace
+}
+
 // EnsureServiceAccountWithRBAC creates or updates a ServiceAccount and RoleBinding
 // in the target namespace. This should ONLY be called in cluster-wide mode.
 //
@@ -65,6 +82,18 @@ func (m *Manager) EnsureServiceAccountWithRBAC(
 	if clusterRoleName == "" {
 		return fmt.Errorf("cluster role name is required")
 	}
+
+	// Verify ClusterRole exists before creating RoleBinding
+	clusterRole := &rbacv1.ClusterRole{}
+	if err := m.client.Get(ctx, client.ObjectKey{Name: clusterRoleName}, clusterRole); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("cluster role %q does not exist: ensure it is created by Helm before deploying components", clusterRoleName)
+		}
+		return fmt.Errorf("failed to verify cluster role %q: %w", clusterRoleName, err)
+	}
+	logger.V(1).Info("ClusterRole verified",
+		"clusterRole", clusterRoleName,
+		"rules", len(clusterRole.Rules))
 
 	// Create/update ServiceAccount
 	sa := &corev1.ServiceAccount{
@@ -135,23 +164,8 @@ func (m *Manager) EnsureServiceAccountWithRBAC(
 			"namespace", targetNamespace)
 	} else {
 		// RoleBinding exists, check if it needs updating
-		needsUpdate := false
-		needsRecreate := false
-
-		// Check if RoleRef changed (immutable field - requires delete+recreate)
-		if existingRB.RoleRef.Name != clusterRoleName ||
-			existingRB.RoleRef.Kind != kindClusterRole ||
-			existingRB.RoleRef.APIGroup != apiGroupRBAC {
-			needsRecreate = true
-		}
-
-		// Check if Subjects need updating (mutable field)
-		if len(existingRB.Subjects) != 1 ||
-			existingRB.Subjects[0].Kind != kindServiceAccount ||
-			existingRB.Subjects[0].Name != serviceAccountName ||
-			existingRB.Subjects[0].Namespace != targetNamespace {
-			needsUpdate = true
-		}
+		needsRecreate := needsRoleRefRecreate(existingRB, clusterRoleName)
+		needsUpdate := needsSubjectUpdate(existingRB, serviceAccountName, targetNamespace)
 
 		if needsRecreate {
 			// RoleRef is immutable, so delete and recreate the RoleBinding

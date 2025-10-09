@@ -7,6 +7,7 @@ package rbac
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -35,9 +36,35 @@ func setupTest() (client.Client, *runtime.Scheme) {
 	return fakeClient, scheme
 }
 
+func setupTestWithClusterRole(clusterRoleName string) client.Client {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = rbacv1.AddToScheme(scheme)
+
+	// Pre-create ClusterRole
+	clusterRole := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: clusterRoleName,
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"nvidia.com"},
+				Resources: []string{"dynamocomponentdeployments", "dynamographdeployments"},
+				Verbs:     []string{"get", "list", "create", "update", "patch"},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(clusterRole).
+		Build()
+	return fakeClient
+}
+
 func TestEnsureServiceAccountWithRBAC_CreateNew(t *testing.T) {
 	// Setup
-	fakeClient, _ := setupTest()
+	fakeClient := setupTestWithClusterRole(testClusterRoleName)
 	manager := NewManager(fakeClient)
 	ctx := context.Background()
 
@@ -113,8 +140,21 @@ func TestEnsureServiceAccountWithRBAC_CreateNew(t *testing.T) {
 }
 
 func TestEnsureServiceAccountWithRBAC_AlreadyExists(t *testing.T) {
-	// Setup - pre-create ServiceAccount and RoleBinding
+	// Setup - pre-create ClusterRole, ServiceAccount and RoleBinding
 	_, scheme := setupTest()
+
+	clusterRole := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testClusterRoleName,
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"nvidia.com"},
+				Resources: []string{"dynamocomponentdeployments", "dynamographdeployments"},
+				Verbs:     []string{"get", "list", "create", "update", "patch"},
+			},
+		},
+	}
 
 	existingSA := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
@@ -152,7 +192,7 @@ func TestEnsureServiceAccountWithRBAC_AlreadyExists(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(existingSA, existingRB).
+		WithObjects(clusterRole, existingSA, existingRB).
 		Build()
 
 	manager := NewManager(fakeClient)
@@ -192,8 +232,21 @@ func TestEnsureServiceAccountWithRBAC_AlreadyExists(t *testing.T) {
 }
 
 func TestEnsureServiceAccountWithRBAC_UpdateRoleBinding(t *testing.T) {
-	// Setup - pre-create ServiceAccount and RoleBinding with wrong subject
+	// Setup - pre-create ClusterRole, ServiceAccount and RoleBinding with wrong subject
 	_, scheme := setupTest()
+
+	clusterRole := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testClusterRoleName,
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"nvidia.com"},
+				Resources: []string{"dynamocomponentdeployments", "dynamographdeployments"},
+				Verbs:     []string{"get", "list", "create", "update", "patch"},
+			},
+		},
+	}
 
 	existingSA := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
@@ -231,7 +284,7 @@ func TestEnsureServiceAccountWithRBAC_UpdateRoleBinding(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(existingSA, existingRB).
+		WithObjects(clusterRole, existingSA, existingRB).
 		Build()
 
 	manager := NewManager(fakeClient)
@@ -270,7 +323,7 @@ func TestEnsureServiceAccountWithRBAC_UpdateRoleBinding(t *testing.T) {
 
 func TestEnsureServiceAccountWithRBAC_MultipleNamespaces(t *testing.T) {
 	// Setup
-	fakeClient, _ := setupTest()
+	fakeClient := setupTestWithClusterRole(testClusterRoleName)
 	manager := NewManager(fakeClient)
 	ctx := context.Background()
 
@@ -312,8 +365,21 @@ func TestEnsureServiceAccountWithRBAC_MultipleNamespaces(t *testing.T) {
 }
 
 func TestEnsureServiceAccountWithRBAC_ServiceAccountExistsRoleBindingDoesNot(t *testing.T) {
-	// Setup - pre-create only ServiceAccount
+	// Setup - pre-create only ServiceAccount and ClusterRole
 	_, scheme := setupTest()
+
+	clusterRole := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testClusterRoleName,
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"nvidia.com"},
+				Resources: []string{"dynamocomponentdeployments", "dynamographdeployments"},
+				Verbs:     []string{"get", "list", "create", "update", "patch"},
+			},
+		},
+	}
 
 	existingSA := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
@@ -329,7 +395,7 @@ func TestEnsureServiceAccountWithRBAC_ServiceAccountExistsRoleBindingDoesNot(t *
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(existingSA).
+		WithObjects(clusterRole, existingSA).
 		Build()
 
 	manager := NewManager(fakeClient)
@@ -371,7 +437,7 @@ func TestEnsureServiceAccountWithRBAC_ServiceAccountExistsRoleBindingDoesNot(t *
 
 func TestEnsureServiceAccountWithRBAC_Idempotency(t *testing.T) {
 	// Setup
-	fakeClient, _ := setupTest()
+	fakeClient := setupTestWithClusterRole(testClusterRoleName)
 	manager := NewManager(fakeClient)
 	ctx := context.Background()
 
@@ -424,9 +490,75 @@ func TestNewManager(t *testing.T) {
 	}
 }
 
-func TestEnsureServiceAccountWithRBAC_DifferentClusterRoles(t *testing.T) {
-	// Setup
+func TestEnsureServiceAccountWithRBAC_ClusterRoleNotFound(t *testing.T) {
+	// Setup - no ClusterRole created
 	fakeClient, _ := setupTest()
+	manager := NewManager(fakeClient)
+	ctx := context.Background()
+
+	// Execute
+	err := manager.EnsureServiceAccountWithRBAC(
+		ctx,
+		testNamespace,
+		testServiceAccountName,
+		"non-existent-cluster-role",
+	)
+
+	// Verify - should fail with clear error message
+	if err == nil {
+		t.Fatal("Expected error when ClusterRole doesn't exist, got nil")
+	}
+	expectedMsg := "cluster role \"non-existent-cluster-role\" does not exist"
+	if !strings.Contains(err.Error(), expectedMsg) {
+		t.Errorf("Expected error message to contain %q, got: %v", expectedMsg, err)
+	}
+
+	// Verify no ServiceAccount or RoleBinding was created
+	sa := &corev1.ServiceAccount{}
+	err = fakeClient.Get(ctx, client.ObjectKey{
+		Namespace: testNamespace,
+		Name:      testServiceAccountName,
+	}, sa)
+	if !apierrors.IsNotFound(err) {
+		t.Error("Expected ServiceAccount not to be created when ClusterRole is missing")
+	}
+}
+
+func TestEnsureServiceAccountWithRBAC_DifferentClusterRoles(t *testing.T) {
+	// Setup - create two ClusterRoles
+	_, scheme := setupTest()
+
+	clusterRole1 := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cluster-role-1",
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"nvidia.com"},
+				Resources: []string{"dynamocomponentdeployments"},
+				Verbs:     []string{"get", "list"},
+			},
+		},
+	}
+
+	clusterRole2 := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cluster-role-2",
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"nvidia.com"},
+				Resources: []string{"dynamographdeployments"},
+				Verbs:     []string{"get", "list"},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(clusterRole1, clusterRole2).
+		Build()
+
 	manager := NewManager(fakeClient)
 	ctx := context.Background()
 
@@ -454,9 +586,29 @@ func TestEnsureServiceAccountWithRBAC_DifferentClusterRoles(t *testing.T) {
 		t.Errorf("Expected RoleRef name cluster-role-1, got %s", rb.RoleRef.Name)
 	}
 
-	// Note: In real Kubernetes, RoleRef is immutable so you can't change it
-	// This test documents the current behavior where the code attempts to update
-	// but would fail in a real cluster (the fake client doesn't enforce RoleRef immutability)
+	// Execute - change to second cluster role (should delete and recreate)
+	err = manager.EnsureServiceAccountWithRBAC(
+		ctx,
+		testNamespace,
+		testServiceAccountName,
+		"cluster-role-2",
+	)
+	if err != nil {
+		t.Fatalf("Second call failed: %v", err)
+	}
+
+	// Verify cluster role was changed
+	rb = &rbacv1.RoleBinding{}
+	err = fakeClient.Get(ctx, client.ObjectKey{
+		Namespace: testNamespace,
+		Name:      testRoleBindingName,
+	}, rb)
+	if err != nil {
+		t.Fatalf("RoleBinding not found after update: %v", err)
+	}
+	if rb.RoleRef.Name != "cluster-role-2" {
+		t.Errorf("Expected RoleRef name cluster-role-2 after update, got %s", rb.RoleRef.Name)
+	}
 }
 
 func TestEnsureServiceAccountWithRBAC_EmptyNamespace(t *testing.T) {
@@ -491,8 +643,34 @@ func TestEnsureServiceAccountWithRBAC_EmptyNamespace(t *testing.T) {
 }
 
 func TestEnsureServiceAccountWithRBAC_RoleRefChange(t *testing.T) {
-	// Setup - pre-create RoleBinding with old ClusterRole
+	// Setup - pre-create both ClusterRoles, ServiceAccount, and RoleBinding
 	_, scheme := setupTest()
+
+	oldClusterRole := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "old-cluster-role",
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"nvidia.com"},
+				Resources: []string{"dynamocomponentdeployments"},
+				Verbs:     []string{"get"},
+			},
+		},
+	}
+
+	newClusterRole := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "new-cluster-role",
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"nvidia.com"},
+				Resources: []string{"dynamographdeployments"},
+				Verbs:     []string{"get", "list"},
+			},
+		},
+	}
 
 	existingSA := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
@@ -520,7 +698,7 @@ func TestEnsureServiceAccountWithRBAC_RoleRefChange(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(existingSA, existingRB).
+		WithObjects(oldClusterRole, newClusterRole, existingSA, existingRB).
 		Build()
 
 	manager := NewManager(fakeClient)
@@ -558,8 +736,21 @@ func TestEnsureServiceAccountWithRBAC_RoleRefChange(t *testing.T) {
 }
 
 func TestEnsureServiceAccountWithRBAC_SubjectWrongNamespace(t *testing.T) {
-	// Setup - pre-create RoleBinding with wrong subject namespace
+	// Setup - pre-create ClusterRole, ServiceAccount, and RoleBinding with wrong subject namespace
 	_, scheme := setupTest()
+
+	clusterRole := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testClusterRoleName,
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"nvidia.com"},
+				Resources: []string{"dynamocomponentdeployments", "dynamographdeployments"},
+				Verbs:     []string{"get", "list", "create", "update", "patch"},
+			},
+		},
+	}
 
 	existingSA := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
@@ -587,7 +778,7 @@ func TestEnsureServiceAccountWithRBAC_SubjectWrongNamespace(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(existingSA, existingRB).
+		WithObjects(clusterRole, existingSA, existingRB).
 		Build()
 
 	manager := NewManager(fakeClient)
@@ -628,8 +819,21 @@ func TestEnsureServiceAccountWithRBAC_SubjectWrongNamespace(t *testing.T) {
 }
 
 func TestEnsureServiceAccountWithRBAC_SubjectWrongKind(t *testing.T) {
-	// Setup - pre-create RoleBinding with wrong subject kind
+	// Setup - pre-create ClusterRole, ServiceAccount, and RoleBinding with wrong subject kind
 	_, scheme := setupTest()
+
+	clusterRole := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testClusterRoleName,
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"nvidia.com"},
+				Resources: []string{"dynamocomponentdeployments", "dynamographdeployments"},
+				Verbs:     []string{"get", "list", "create", "update", "patch"},
+			},
+		},
+	}
 
 	existingSA := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
@@ -657,7 +861,7 @@ func TestEnsureServiceAccountWithRBAC_SubjectWrongKind(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(existingSA, existingRB).
+		WithObjects(clusterRole, existingSA, existingRB).
 		Build()
 
 	manager := NewManager(fakeClient)
@@ -698,8 +902,21 @@ func TestEnsureServiceAccountWithRBAC_SubjectWrongKind(t *testing.T) {
 }
 
 func TestEnsureServiceAccountWithRBAC_RoleRefKindChange(t *testing.T) {
-	// Setup - pre-create RoleBinding with wrong RoleRef kind
+	// Setup - pre-create ClusterRole, ServiceAccount, and RoleBinding with wrong RoleRef kind
 	_, scheme := setupTest()
+
+	clusterRole := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testClusterRoleName,
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"nvidia.com"},
+				Resources: []string{"dynamocomponentdeployments", "dynamographdeployments"},
+				Verbs:     []string{"get", "list", "create", "update", "patch"},
+			},
+		},
+	}
 
 	existingSA := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
@@ -727,7 +944,7 @@ func TestEnsureServiceAccountWithRBAC_RoleRefKindChange(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(existingSA, existingRB).
+		WithObjects(clusterRole, existingSA, existingRB).
 		Build()
 
 	manager := NewManager(fakeClient)
