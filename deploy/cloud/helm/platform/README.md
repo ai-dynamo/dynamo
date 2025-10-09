@@ -90,7 +90,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
 | oci://ghcr.io/nvidia/grove | grove(grove-charts) | v0.1.0-alpha.2 |
-| oci://ghcr.io/nvidia/kai-scheduler | kai-scheduler | v0.9.2 |
+| oci://ghcr.io/nvidia/kai-scheduler | kai-scheduler | v0.9.4 |
 
 ## Values
 
