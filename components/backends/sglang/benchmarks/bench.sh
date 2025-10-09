@@ -161,7 +161,7 @@ else
             --request-count ${concurrency} \
             --random-seed 100 \
             --artifact-dir ${ARTIFACT_DIR} \
-            --warmup-requests 10 \
+            --warmup-request-count 10 \
             -v \
             -H 'Authorization: Bearer NOT USED' \
             -H 'Accept: text/event-stream'
