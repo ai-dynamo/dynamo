@@ -85,7 +85,7 @@ pub fn load_and_validate_tensors(
 #[derive(Builder, Clone)]
 #[builder(pattern = "owned")]
 pub struct KvbmWorkerConfig {
-    drt: DistributedRuntime,
+    drt: Arc<DistributedRuntime>,
 
     num_device_blocks: usize,
 

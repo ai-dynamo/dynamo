@@ -4,6 +4,7 @@
 use super::*;
 
 use dynamo_runtime::DistributedRuntime;
+use tokio::runtime::Handle;
 use utils::*;
 use zmq::*;
 
@@ -64,7 +65,7 @@ pub struct KvbmLeaderConfig {
     leader_init_timeout_secs: u64,
 
     #[builder(setter(strip_option))]
-    drt: Option<DistributedRuntime>,
+    drt: Option<Arc<DistributedRuntime>>,
 
     #[builder(default = "KvbmLeaderNumBlocksConfig::default()")]
     host_blocks_config: KvbmLeaderNumBlocksConfig,
@@ -161,7 +162,7 @@ impl KvbmLeader {
         Ok(leader)
     }
 
-    fn spawn_barrier_task(&self, drt: DistributedRuntime, leader_urls: (String, String)) {
+    fn spawn_barrier_task(&self, drt: Arc<DistributedRuntime>, leader_urls: (String, String)) {
         let state = self.state.clone();
         let leader_config = self.config.clone();
         let ready = Arc::clone(&self.workers_sync_ready);
@@ -195,7 +196,7 @@ impl KvbmLeader {
     }
 
     async fn run_barrier_sync(
-        drt: DistributedRuntime,
+        drt: Arc<DistributedRuntime>,
         leader_urls: (String, String),
         leader_config: KvbmLeaderConfig,
     ) -> anyhow::Result<(usize, usize, usize)> {
@@ -317,11 +318,10 @@ impl KvbmLeader {
     }
 
     // This is supposed to be used in non-blocking leader initialization
-    pub fn spawn_leader_readiness_barrier(&self, drt: DistributedRuntime) {
+    pub fn spawn_leader_readiness_barrier(&self, drt: Arc<DistributedRuntime>, handle: Handle) {
         let timeout_secs = self.config.leader_init_timeout_secs;
         let state = self.state.clone();
         let leader_config = self.config.clone();
-        let handle = drt.runtime().primary();
         handle.spawn(async move {
             if !state.workers_allocation_ready.load(Ordering::Acquire) {
                 // Wait until ZMQ marks ready or we time out.
@@ -357,7 +357,7 @@ impl KvbmLeader {
     // This is supposed to be used in blocking leader initialization
     pub fn run_leader_readiness_barrier_blocking(
         &self,
-        drt: DistributedRuntime,
+        drt: Arc<DistributedRuntime>,
     ) -> anyhow::Result<()> {
         let state = self.state.clone();
         let timeout_secs = self.config.leader_init_timeout_secs;
@@ -390,7 +390,7 @@ impl KvbmLeader {
     }
 
     async fn run_leader_readiness(
-        drt: DistributedRuntime,
+        drt: Arc<DistributedRuntime>,
         leader_config: KvbmLeaderConfig,
     ) -> anyhow::Result<()> {
         let barrier_id_leader_ready =
