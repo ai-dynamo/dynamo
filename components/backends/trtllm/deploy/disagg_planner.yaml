@@ -9,9 +9,6 @@ spec:
   pvcs:
     - name: dynamo-pvc
       create: false
-  envs:
-    - name: DYNAMO_NAMESPACE
-      value: "trtllm-disagg-planner"
   services:
     Frontend:
       dynamoNamespace: trtllm-disagg-planner

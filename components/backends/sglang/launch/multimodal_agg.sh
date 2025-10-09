@@ -52,8 +52,6 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SGLANG_BACKEND_DIR="$SCRIPT_DIR/src"
 
-# run clear_namespace
-python3 -m dynamo.sglang.clear_namespace --namespace dynamo
 
 # run ingress
 python3 -m dynamo.frontend --http-port=8000 &

@@ -5,7 +5,7 @@
             "name": "dynamo-vllm-frontend",
             "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag",
             "repositoryCredentials": {
-                "credentialsParameter": "arn:aws:secretsmanager:us-east-2:AWS_ID:secret:ngc_nvcr_access"
+                "credentialsParameter": "arn:aws:secretsmanager:AWS_REGION:AWS_ID:secret:ngc_nvcr_access"
             },
             "cpu": 0,
             "portMappings": [
@@ -46,7 +46,7 @@
                     "mode": "non-blocking",
                     "awslogs-create-group": "true",
                     "max-buffer-size": "25m",
-                    "awslogs-region": "us-east-2",
+                    "awslogs-region": "AWS_REGION",
                     "awslogs-stream-prefix": "ecs"
                 },
                 "secretOptions": []

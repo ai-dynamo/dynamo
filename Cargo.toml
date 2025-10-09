@@ -3,7 +3,6 @@
 
 [workspace]
 members = [
-    "components/metrics",
     "launch/dynamo-run",
     "lib/llm",
     "lib/runtime",
@@ -18,7 +17,6 @@ members = [
 # - launch/dynamo-run
 # - lib/engines/*
 default-members = [
-    "components/metrics",
     "lib/llm",
     "lib/runtime",
     "lib/tokens",
