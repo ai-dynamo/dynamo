@@ -49,6 +49,11 @@ type DynamoGraphDeploymentSpec struct {
 	// BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm").
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
 	BackendFramework string `json:"backendFramework,omitempty"`
+	// ModelRef references a DynamoModel resource that provides the model artifact for this deployment.
+	// When specified, the controller will wait for the model to be ready and automatically
+	// configure all services with the appropriate model paths and mount the model's PVC.
+	// +kubebuilder:validation:Optional
+	ModelRef string `json:"modelRef,omitempty"`
 }
 
 // DynamoGraphDeploymentStatus defines the observed state of DynamoGraphDeployment.

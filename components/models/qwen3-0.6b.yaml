@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# DynamoModel for Qwen 3 0.6B - lightweight model for testing and development
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoModel
+metadata:
+  name: qwen3-0.6b
+spec:
+  # Canonical model name from HuggingFace
+  name: Qwen/Qwen3-0.6B
+
+  # Version pin (optional) - use a specific commit SHA for reproducibility
+  # version: main
+
+  # Source URL - HuggingFace Hub
+  sourceURL: hf://Qwen/Qwen3-0.6B
+
+  # Secret reference for authentication (optional for public models)
+  # secretRef: hf-token-secret
+
+  # PVC configuration for model storage
+  pvc:
+    create: true
+    storageClass: standard  # Update with your storage class
+    size: 10Gi  # Small model, only needs ~2GB but allocate extra space
+    volumeAccessMode: ReadWriteMany  # Required for multi-replica deployments
+

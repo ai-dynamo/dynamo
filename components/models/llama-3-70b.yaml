@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# DynamoModel for Llama 3.3 70B Instruct - production-ready large model
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoModel
+metadata:
+  name: llama-3-70b-instruct
+spec:
+  # Canonical model name from HuggingFace
+  name: meta-llama/Llama-3.3-70B-Instruct
+
+  # Version pin - use specific SHA for production
+  version: main
+
+  # Source URL - HuggingFace Hub
+  sourceURL: hf://meta-llama/Llama-3.3-70B-Instruct
+
+  # Secret reference for authentication (required for gated models)
+  secretRef: hf-token-secret
+
+  # PVC configuration for model storage
+  pvc:
+    create: true
+    storageClass: standard  # Update with your storage class
+    size: 200Gi  # Large model requires significant storage
+    volumeAccessMode: ReadWriteMany  # Required for multi-replica deployments
+

@@ -76,6 +76,8 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/finalizers,verbs=update
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamomodels,verbs=get;list;watch
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamomodels/status,verbs=get
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquesets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
@@ -158,8 +160,19 @@ type Resource interface {
 func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (State, Reason, Message, error) {
 	logger := log.FromContext(ctx)
 
+	// Check if all referenced models are ready
+	modelsReady, notReadyModels, err := r.checkModelReferences(ctx, dynamoDeployment)
+	if err != nil {
+		logger.Error(err, "Failed to check model references")
+		return "", "", "", fmt.Errorf("failed to check model references: %w", err)
+	}
+	if !modelsReady {
+		logger.Info("Waiting for models to be ready", "notReadyModels", notReadyModels)
+		return PendingState, "WaitingForModels", Message(fmt.Sprintf("Waiting for models to be ready: %v", notReadyModels)), nil
+	}
+
 	// Reconcile top-level PVCs first
-	err := r.reconcilePVCs(ctx, dynamoDeployment)
+	err = r.reconcilePVCs(ctx, dynamoDeployment)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile top-level PVCs")
 		return "", "", "", fmt.Errorf("failed to reconcile top-level PVCs: %w", err)
@@ -521,4 +534,38 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 func (r *DynamoGraphDeploymentReconciler) GetRecorder() record.EventRecorder {
 	return r.Recorder
+}
+
+// checkModelReferences checks if all referenced DynamoModels are ready
+func (r *DynamoGraphDeploymentReconciler) checkModelReferences(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (bool, []string, error) {
+	logger := log.FromContext(ctx)
+	notReadyModels := []string{}
+
+	// Check top-level modelRef
+	if dynamoDeployment.Spec.ModelRef != "" {
+		modelRef := dynamoDeployment.Spec.ModelRef
+		logger.Info("Found top-level model reference", "modelRef", modelRef)
+
+		model := &nvidiacomv1alpha1.DynamoModel{}
+		err := r.Get(ctx, types.NamespacedName{
+			Name:      modelRef,
+			Namespace: dynamoDeployment.Namespace,
+		}, model)
+
+		if err != nil {
+			if errors.IsNotFound(err) {
+				logger.Error(err, "Referenced model not found", "modelRef", modelRef)
+				return false, []string{modelRef}, fmt.Errorf("model %s not found", modelRef)
+			}
+			logger.Error(err, "Failed to get model", "modelRef", modelRef)
+			return false, notReadyModels, err
+		}
+
+		if !model.IsReady() {
+			logger.Info("Model not ready", "modelRef", modelRef, "state", model.Status.State)
+			notReadyModels = append(notReadyModels, modelRef)
+		}
+	}
+
+	return len(notReadyModels) == 0, notReadyModels, nil
 }

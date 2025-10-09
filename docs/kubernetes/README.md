@@ -84,7 +84,8 @@ Refer to the [API Reference and Documentation](/docs/kubernetes/api_reference.md
 
 For detailed technical specifications of Dynamo's Kubernetes resources:
 
-- **[API Reference](/docs/kubernetes/api_reference.md)** - Complete CRD field specifications for `DynamoGraphDeployment` and `DynamoComponentDeployment`
+- **[API Reference](/docs/kubernetes/api_reference.md)** - Complete CRD field specifications for `DynamoGraphDeployment`, `DynamoComponentDeployment`, and `DynamoModel`
+- **[DynamoModel Guide](/docs/kubernetes/dynamomodel.md)** - Model artifact management with version pinning and automated downloads
 - **[Operator Guide](/docs/kubernetes/dynamo_operator.md)** - Dynamo operator configuration and management
 - **[Create Deployment](/docs/kubernetes/create_deployment.md)** - Step-by-step deployment creation examples
 
@@ -170,6 +171,7 @@ Key customization points include:
 ## Additional Resources
 
 - **[Examples](/examples/README.md)** - Complete working examples
+- **[DynamoModel Examples](/examples/deployments/README.md)** - Model artifact management examples
 - **[Create Custom Deployments](/docs/kubernetes/create_deployment.md)** - Build your own CRDs
 - **[Operator Documentation](/docs/kubernetes/dynamo_operator.md)** - How the platform works
 - **[Helm Charts](/deploy/helm/README.md)** - For advanced users
