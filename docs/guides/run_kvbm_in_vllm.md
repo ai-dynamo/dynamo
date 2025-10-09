@@ -43,11 +43,17 @@ cd $DYNAMO_HOME/components/backends/vllm
 ./launch/agg_kvbm.sh
 ```
 
-### Disaggregated Serving with KVBM (1P1D)
+### Disaggregated Serving with KVBM
 ```bash
+# 1P1D - one prefill worker and one decode worker
 # NOTE: need at least 2 GPUs
 cd $DYNAMO_HOME/components/backends/vllm
 ./launch/disagg_kvbm.sh
+
+# 2P2D - two prefill workers and two decode workers
+# NOTE: need at least 4 GPUs
+cd $DYNAMO_HOME/components/backends/vllm
+./launch/disagg_kvbm_2p2d.sh
 ```
 > [!NOTE]
 > To tune the size of CPU or disk cache, set `DYN_KVBM_CPU_CACHE_GB` and `DYN_KVBM_DISK_CACHE_GB` accordingly. We only set `DYN_KVBM_CPU_CACHE_GB=20` in both scripts above.

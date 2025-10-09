@@ -60,6 +60,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/etcd"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/rbac"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secret"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secrets"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
@@ -116,6 +117,7 @@ func init() {
 	//+kubebuilder:scaffold:scheme
 }
 
+//nolint:gocyclo
 func main() {
 	var metricsAddr string
 	var enableLeaderElection bool
@@ -137,6 +139,7 @@ func main() {
 	var prometheusEndpoint string
 	var mpiRunSecretName string
 	var mpiRunSecretNamespace string
+	var plannerClusterRoleName string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -175,11 +178,18 @@ func main() {
 		"Name of the secret containing the SSH key for MPI Run (required)")
 	flag.StringVar(&mpiRunSecretNamespace, "mpi-run-ssh-secret-namespace", "",
 		"Namespace where the MPI SSH secret is located (required)")
+	flag.StringVar(&plannerClusterRoleName, "planner-cluster-role-name", "",
+		"Name of the ClusterRole for planner (cluster-wide mode only)")
 	opts := zap.Options{
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	if restrictedNamespace == "" && plannerClusterRoleName == "" {
+		setupLog.Error(nil, "planner-cluster-role-name is required in cluster-wide mode")
+		os.Exit(1)
+	}
 
 	// Validate modelExpressURL if provided
 	if modelExpressURL != "" {
@@ -224,6 +234,9 @@ func main() {
 		PrometheusEndpoint: prometheusEndpoint,
 		MpiRun: commonController.MpiRunConfig{
 			SecretName: mpiRunSecretName,
+		},
+		RBAC: commonController.RBACConfig{
+			PlannerClusterRoleName: plannerClusterRoleName,
 		},
 	}
 
@@ -421,6 +434,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Initialize RBAC manager for cross-namespace resource management
+	rbacManager := rbac.NewManager(mgr.GetClient())
+
 	if err = (&controller.DynamoGraphDeploymentReconciler{
 		Client:                mgr.GetClient(),
 		Recorder:              mgr.GetEventRecorderFor("dynamographdeployment"),
@@ -428,6 +444,7 @@ func main() {
 		DockerSecretRetriever: dockerSecretRetriever,
 		ScaleClient:           scaleClient,
 		MPISecretReplicator:   mpiSecretReplicator,
+		RBACManager:           rbacManager,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeployment")
 		os.Exit(1)
