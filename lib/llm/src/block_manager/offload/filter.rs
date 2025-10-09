@@ -108,12 +108,11 @@ impl OffloadFilter for FrequencyFilter {
         let entry = frequency_map
             .entry(sequence_hash)
             .and_modify(|count| {
-                *count *= 2;
+                *count = count.saturating_mul(2);
             })
             .or_insert(1);
 
         let should_offload = *entry >= self.min_offload_frequency;
-
         // Notify the offload manager that the frequency map is too large.
         if frequency_map.len() > self.max_num_entries {
             self.oversize_notify.notify_one();
