@@ -12,11 +12,38 @@ inputs:
     description: 'Maximum number of cores available to docker'
     required: false
     default: '10'
+  framework:
+    description: 'Framework name for test metrics'
+    required: false
+    default: 'unknown'
+  test_type:
+    description: 'Test type (unit, e2e, integration)'
+    required: false
+    default: 'e2e'
 
 
 runs:
   using: "composite"
   steps:
+    - name: Setup Test Environment and Capture Start Time
+      shell: bash
+      run: |
+        # Capture test start time
+        TEST_START_TIME=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")
+        echo "TEST_START_TIME=${TEST_START_TIME}" >> $GITHUB_ENV
+        echo "🕐 Test started at: ${TEST_START_TIME}"
+        
+        # Setup test directories
+        mkdir -p test-results test-metrics
+        
+        # Extract platform architecture from job context
+        PLATFORM_ARCH="amd64"  # Default
+        if [[ "${{ github.job }}" == *"arm64"* ]]; then
+          PLATFORM_ARCH="arm64"
+        fi
+        echo "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV
+        echo "🏗️  Platform architecture: ${PLATFORM_ARCH}"
+
     - name: Run tests
       shell: bash
       env:
@@ -25,9 +52,111 @@ runs:
         PYTEST_XML_FILE: pytest_test_report.xml
         HF_HOME: /runner/_work/_temp
       run: |
+        # Run pytest with detailed output and JUnit XML
+        set +e  # Don't exit on test failures
         docker run --runtime=nvidia --rm --gpus all -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
           --name ${{ env.CONTAINER_ID }}_pytest \
+          -v "$(pwd)/test-results:/test-results" \
           ${{ inputs.image_tag }} \
-          bash -c "pytest -xsv --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ inputs.pytest_marks }}\""
+          bash -c "pytest -v --tb=short --basetemp=/tmp --junitxml=/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
+        
+        TEST_EXIT_CODE=$?
+        echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
+        echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
+        
+        # Always continue to metrics capture
+        exit 0
+
+    - name: Capture Test Metrics
+      shell: bash
+      run: |
+        # Capture test end time and calculate duration
+        TEST_END_TIME=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")
+        echo "TEST_END_TIME=${TEST_END_TIME}" >> $GITHUB_ENV
+        
+        # Calculate test duration in seconds
+        START_EPOCH=$(date -d "${TEST_START_TIME}" +%s)
+        END_EPOCH=$(date -d "${TEST_END_TIME}" +%s)
+        TEST_DURATION_SEC=$((END_EPOCH - START_EPOCH))
+        
+        echo "🕐 Test ended at: ${TEST_END_TIME}"
+        echo "⏱️  Test duration: ${TEST_DURATION_SEC} seconds"
+        
+        # Parse JUnit XML for detailed test metrics
+        JUNIT_FILE="test-results/${{ env.PYTEST_XML_FILE }}"
+        TOTAL_TESTS=0
+        PASSED_TESTS=0
+        FAILED_TESTS=0
+        SKIPPED_TESTS=0
+        ERROR_TESTS=0
+        
+        if [[ -f "$JUNIT_FILE" ]]; then
+          # Extract test counts from JUnit XML
+          TOTAL_TESTS=$(grep -o 'tests="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+          FAILED_TESTS=$(grep -o 'failures="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+          ERROR_TESTS=$(grep -o 'errors="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+          SKIPPED_TESTS=$(grep -o 'skipped="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+          PASSED_TESTS=$((TOTAL_TESTS - FAILED_TESTS - ERROR_TESTS - SKIPPED_TESTS))
+          
+          echo "📊 Test Results:"
+          echo "   Total: ${TOTAL_TESTS}"
+          echo "   Passed: ${PASSED_TESTS}"
+          echo "   Failed: ${FAILED_TESTS}"
+          echo "   Errors: ${ERROR_TESTS}"
+          echo "   Skipped: ${SKIPPED_TESTS}"
+        else
+          echo "⚠️  JUnit XML file not found: $JUNIT_FILE"
+        fi
+        
+        # Determine overall test status
+        TEST_STATUS="success"
+        if [[ "${TEST_EXIT_CODE}" != "0" ]] || [[ "${FAILED_TESTS}" != "0" ]] || [[ "${ERROR_TESTS}" != "0" ]]; then
+          TEST_STATUS="failure"
+        fi
+        
+        # Create test metrics JSON
+        JOB_KEY="${{ inputs.framework }}-${{ inputs.test_type }}-${PLATFORM_ARCH}"
+        METRICS_FILE="test-metrics/test-metrics-${JOB_KEY}.json"
+        
+        cat > "$METRICS_FILE" << EOF
+        {
+          "framework": "${{ inputs.framework }}",
+          "test_type": "${{ inputs.test_type }}",
+          "platform_arch": "${PLATFORM_ARCH}",
+          "pytest_marks": "${{ inputs.pytest_marks }}",
+          "test_start_time": "${TEST_START_TIME}",
+          "test_end_time": "${TEST_END_TIME}",
+          "test_duration_sec": ${TEST_DURATION_SEC},
+          "test_status": "${TEST_STATUS}",
+          "test_exit_code": ${TEST_EXIT_CODE},
+          "total_tests": ${TOTAL_TESTS},
+          "passed_tests": ${PASSED_TESTS},
+          "failed_tests": ${FAILED_TESTS},
+          "error_tests": ${ERROR_TESTS},
+          "skipped_tests": ${SKIPPED_TESTS}
+        }
+        EOF
+        
+        echo "📁 Created test metrics file for ${JOB_KEY}:"
+        cat "$METRICS_FILE"
+        
+        # Exit with original test result to maintain workflow behavior
+        exit ${TEST_EXIT_CODE}
+
+    - name: Upload Test Metrics
+      uses: actions/upload-artifact@v4
+      if: always()  # Always upload metrics, even if tests failed
+      with:
+        name: test-metrics-${{ inputs.framework }}-${{ inputs.test_type }}-${{ env.PLATFORM_ARCH }}
+        path: test-metrics/test-metrics-${{ inputs.framework }}-${{ inputs.test_type }}-${{ env.PLATFORM_ARCH }}.json
+        retention-days: 7
+
+    - name: Upload Test Results
+      uses: actions/upload-artifact@v4
+      if: always()  # Always upload test results, even if tests failed
+      with:
+        name: test-results-${{ inputs.framework }}-${{ inputs.test_type }}-${{ env.PLATFORM_ARCH }}
+        path: test-results/${{ env.PYTEST_XML_FILE }}
+        retention-days: 7
