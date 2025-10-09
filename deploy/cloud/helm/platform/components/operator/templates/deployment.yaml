@@ -124,6 +124,9 @@ spec:
           - --mpi-run-ssh-secret-name={{ .Values.dynamo.mpiRun.secretName }}
           - --mpi-run-ssh-secret-namespace={{ .Release.Namespace }}
         {{- end }}
+        {{- if not .Values.namespaceRestriction.enabled }}
+          - --planner-cluster-role-name={{ include "dynamo-operator.fullname" . }}-planner
+        {{- end }}
         command:
         - /manager
         env:
