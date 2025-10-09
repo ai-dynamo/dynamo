@@ -39,7 +39,8 @@ flowchart TD
 Before deploying the SLA planner, ensure:
 - **Dynamo platform installed** (see [Installation Guide](/docs/kubernetes/installation_guide.md))
 - **[kube-prometheus-stack](/docs/kubernetes/metrics.md) installed and running.** By default, the prometheus server is not deployed in the `monitoring` namespace. If it is deployed to a different namespace, set `dynamo-operator.dynamo.metrics.prometheusEndpoint="http://prometheus-kube-prometheus-prometheus.<namespace>.svc.cluster.local:9090"`.
-- **Benchmarking resources setup** (see [Kubernetes utilities for Dynamo Benchmarking and Profiling](../../deploy/utils/README.md)) The script will create a `dynamo-pvc` with `ReadWriteMany` access, if your cluster's default storageClassName does not allow `ReadWriteMany`, you need to specify a different storageClassName in `pvc.yaml`.
+- **Benchmarking resources setup** (see [Kubernetes utilities for Dynamo Benchmarking and Profiling](../../deploy/utils/README.md)) The script will create a `dynamo-pvc` with `ReadWriteMany` access, if your cluster's default storageClassName does not allow `ReadWriteMany`, you need to specify a different storageClassName in `deploy/utils/manifests/pvc.yaml` which does support `ReadWriteMany`.
+
 
 ## Pre-Deployment Profiling
 

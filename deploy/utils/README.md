@@ -34,6 +34,26 @@ This includes:
 
 After setting up Dynamo Cloud, use this script to prepare your namespace with the additional resources needed for benchmarking and profiling workflows:
 
+The setup script creates a `dynamo-pvc` with `ReadWriteMany` (RWX). If your cluster's default `storageClassName` does not support RWX, set `storageClassName` in `deploy/utils/manifests/pvc.yaml` to an RWX-capable class before running the script.
+
+Example (add under `spec` in `deploy/utils/manifests/pvc.yaml`):
+```yaml
+...
+spec:
+  accessModes:
+  - ReadWriteMany
+  storageClassName: <your-rwx-storageclass>
+...
+```
+
+> [!TIP]
+> **Check your clusters storage classes**
+>
+> - List storage classes and provisioners:
+> ```bash
+> kubectl get sc -o wide
+> ```
+
 ```bash
 export NAMESPACE=your-dynamo-namespace
 export HF_TOKEN=<HF_TOKEN>  # Optional: for HuggingFace model access
