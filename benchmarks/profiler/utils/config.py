@@ -249,9 +249,7 @@ def get_service_name_by_type(
     # Look through services to find one with matching subComponentType
     services = config.spec.services
     for service_name, service_config in services.items():
-        if (
-            service_config.subComponentType == sub_component_type.value
-        ):
+        if service_config.subComponentType == sub_component_type.value:
             return service_name
 
     # Fall back to default component names
