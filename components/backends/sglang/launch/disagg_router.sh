@@ -15,7 +15,11 @@ trap cleanup EXIT INT TERM
 python3 -m dynamo.sglang.clear_namespace --namespace dynamo
 
 # run ingress
-python3 -m dynamo.frontend --http-port=8000 &
+python3 -m dynamo.frontend \
+ --http-port=8000 \
+ --router-mode kv \
+ --kv-overlap-score-weight 0 \
+ --router-reset-states &
 DYNAMO_PID=$!
 
 # run prefill router
