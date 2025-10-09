@@ -403,6 +403,10 @@ Worker components receive the following probe configurations:
 - **Timeout**: 5 seconds
 - **Failure Threshold**: 720 (allows up to 2 hours for startup: 10s × 720 = 7200s)
 
+:::{note}
+For larger models (typically >70B parameters) or slower storage systems, you may need to increase the `failureThreshold` to allow more time for model loading. Calculate the required threshold based on your expected startup time: `failureThreshold = (expected_startup_seconds / period)`. Override the startup probe in your component specification if the default 2-hour window is insufficient.
+:::
+
 ### Multinode Deployment Probe Modifications
 
 For multinode deployments, the operator modifies probes based on the backend framework and node role:
@@ -459,6 +463,24 @@ Planner components automatically receive the following service account:
 
 - **`serviceAccountName`**: `planner-serviceaccount`
 
+## Image Pull Secrets
+
+The operator automatically discovers and injects image pull secrets for container images. When a component specifies a container image, the operator:
+
+1. Scans all Kubernetes secrets of type `kubernetes.io/dockerconfigjson` in the component's namespace
+2. Extracts the docker registry server URLs from each secret's authentication configuration
+3. Matches the container image's registry host against the discovered registry URLs
+4. Automatically injects matching secrets as `imagePullSecrets` in the pod specification
+
+This eliminates the need to manually specify image pull secrets for each component. The operator maintains an internal index of docker secrets and their associated registries, refreshing this index periodically.
+
+**To disable automatic image pull secret discovery** for a specific component, add the following annotation:
+
+```yaml
+annotations:
+  nvidia.com/disable-image-pull-secret-discovery: "true"
+```
+
 ## Autoscaling Defaults
 
 When autoscaling is enabled but no metrics are specified, the operator applies:
@@ -496,6 +518,22 @@ Default container ports are configured based on component type:
 ### TensorRT-LLM
 - **SSH Port**: 2222 (for multinode MPI communication)
 - **OpenMPI Environment**: `OMPI_MCA_orte_keep_fqdn_hostnames=1`
+
+## Implementation Reference
+
+For users who want to understand the implementation details or contribute to the operator, the default values described in this document are set in the following source files:
+
+- **Health Probes & Pod Specifications**: [`internal/dynamo/graph.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/graph.go) - Contains the main logic for applying default probes, environment variables, shared memory, and pod configurations
+- **Component-Specific Defaults**: 
+  - [`internal/dynamo/component_frontend.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/component_frontend.go)
+  - [`internal/dynamo/component_worker.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/component_worker.go)
+  - [`internal/dynamo/component_planner.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/component_planner.go)
+- **Image Pull Secrets**: [`internal/secrets/docker.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/secrets/docker.go) - Implements the docker secret indexer and automatic discovery
+- **Backend-Specific Behavior**:
+  - [`internal/dynamo/backend_vllm.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/backend_vllm.go)
+  - [`internal/dynamo/backend_sglang.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/backend_sglang.go)
+  - [`internal/dynamo/backend_trtllm.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/backend_trtllm.go)
+- **Constants & Annotations**: [`internal/consts/consts.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/consts/consts.go) - Defines annotation keys and other constants
 
 ## Notes
 
