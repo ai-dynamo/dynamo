@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::block_manager::{
-    locality::{Logical, LogicalBlockData, LogicalResources},
     OffloadFilter,
+    locality::{Logical, LogicalBlockData, LogicalResources},
 };
 
 #[derive(Debug)]

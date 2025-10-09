@@ -126,7 +126,14 @@ mod tests {
     fn make_filter(min_offload_frequency: i64, max_num_entries: usize) -> FrequencyFilter {
         let cancel_token = CancellationToken::new();
         let runtime = Handle::current();
-        FrequencyFilter::new(min_offload_frequency, Duration::from_secs(3600), max_num_entries, cancel_token, runtime).unwrap()
+        FrequencyFilter::new(
+            min_offload_frequency,
+            Duration::from_secs(3600),
+            max_num_entries,
+            cancel_token,
+            runtime,
+        )
+        .unwrap()
     }
 
     fn hash(x: u32) -> SequenceHash {

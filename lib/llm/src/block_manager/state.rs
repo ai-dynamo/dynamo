@@ -18,8 +18,8 @@ use super::{
     locality::LogicalResources,
     metrics::BlockManagerMetrics,
     offload::{
-        filter::OffloadFilter, request::BlockResult, OffloadFilters, OffloadManager,
-        OffloadManagerConfig,
+        OffloadFilters, OffloadManager, OffloadManagerConfig, filter::OffloadFilter,
+        request::BlockResult,
     },
 };
 use derive_getters::Dissolve;

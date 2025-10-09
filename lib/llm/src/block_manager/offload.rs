@@ -43,8 +43,8 @@ use super::storage::{Cuda, Storage};
 use super::{DeviceStorage, DiskStorage, KvManagerModelConfig, PinnedStorage};
 use nixl_sys::Agent as NixlAgent;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicU64, Ordering},
 };
 use tokio::runtime::Handle;
 use tokio::sync::{
@@ -630,7 +630,9 @@ impl OffloadFiltersBuilder {
         };
 
         if host_is_none {
-            tracing::warn!("Host to Disk offload filter is not provided. All blocks in host will be offloaded to disk. This may result in excessive disk offloading and accelerated SSD degradation.");
+            tracing::warn!(
+                "Host to Disk offload filter is not provided. All blocks in host will be offloaded to disk. This may result in excessive disk offloading and accelerated SSD degradation."
+            );
         }
 
         Ok(())
