@@ -196,7 +196,7 @@ NOTE: To send a request to a multi-node deployment, target the node which is run
 
 ### Benchmarking
 
-To benchmark your deployment with GenAI-Perf, see this utility script, configuring the
+To benchmark your deployment with AIPerf, see this utility script, configuring the
 `model` name and `host` based on your deployment: [perf.sh](../../../benchmarks/llm/perf.sh)
 
 
@@ -236,7 +236,7 @@ NOTE: To send a request to a multi-node deployment, target the node which is run
 
 ## Benchmarking
 
-To benchmark your deployment with GenAI-Perf, see this utility script, configuring the
+To benchmark your deployment with AIPerf, see this utility script, configuring the
 `model` name and `host` based on your deployment: [perf.sh](../../../benchmarks/llm/perf.sh)
 
 ## Multimodal support
