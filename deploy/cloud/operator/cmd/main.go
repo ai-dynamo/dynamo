@@ -443,7 +443,7 @@ func main() {
 		DockerSecretRetriever: dockerSecretRetriever,
 		ScaleClient:           scaleClient,
 		MPISecretReplicator:   mpiSecretReplicator,
-		RBACMgr:               rbacManager,
+		RBACManager:           rbacManager,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeployment")
 		os.Exit(1)

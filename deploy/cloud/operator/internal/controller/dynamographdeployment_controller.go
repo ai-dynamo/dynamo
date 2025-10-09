@@ -76,7 +76,7 @@ type DynamoGraphDeploymentReconciler struct {
 	DockerSecretRetriever dockerSecretRetriever
 	ScaleClient           scale.ScalesGetter
 	MPISecretReplicator   *secret.SecretReplicator
-	RBACMgr               rbacManager
+	RBACManager           rbacManager
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
@@ -166,13 +166,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 
 	// Ensure planner RBAC exists in cluster-wide mode
 	if r.Config.RestrictedNamespace == "" {
-		if r.RBACMgr == nil {
+		if r.RBACManager == nil {
 			return "", "", "", fmt.Errorf("RBAC manager not initialized in cluster-wide mode")
 		}
 		if r.Config.RBAC.PlannerClusterRoleName == "" {
 			return "", "", "", fmt.Errorf("planner ClusterRole name is required in cluster-wide mode")
 		}
-		if err := r.RBACMgr.EnsureServiceAccountWithRBAC(
+		if err := r.RBACManager.EnsureServiceAccountWithRBAC(
 			ctx,
 			dynamoDeployment.Namespace,
 			consts.PlannerServiceAccountName,
