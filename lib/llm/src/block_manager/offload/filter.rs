@@ -77,12 +77,14 @@ impl FrequencyFilter {
                         }
                     }
                 }
+                Ok(())
             },
             cancel_token,
             "Frequency Decay Handler",
             &runtime,
         )?
         .detach();
+
         Ok(Self {
             min_offload_frequency,
             frequency_map,
