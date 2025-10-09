@@ -67784,3 +67784,80 @@ ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
 IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
 ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
 FOR ANY DIRECT, INDI
+
+************************************
+wget
+
+This package was debianized by
+Christian Schwarz <schwarz@monet.m.isar.de> on Mon, 18 Nov 1996 00:59:57 +0100
+J. Ramos Goncalves <ramos@debian.org> on Thu, 13 Feb 1997 23:15:18 +0000
+Nicolás Lichtmaier <nick@debian.org> on Sat, 18 Oct 1997 21:23:12 -0300
+Noël Köthe <noel@debian.org> on Mon, 18 Feb 2002 09:53:00 +0100
+
+It was downloaded from ftp://ftp.gnu.org/gnu/wget/
+        Homepage: http://www.gnu.org/directory/wget.html
+                  http://www.gnu.org/software/wget/wget.html
+
+Upstream Author: Giuseppe Scrivano <gscrivano@gnu.org>
+
+Copyright: (C) 2007 Free Software Foundation, Inc.
+
+Released under the terms of the GPL; see
+/usr/share/common-licenses/GPL-3.
+
+"In addition, as a special exception, the Free Software Foundation
+gives permission to link the code of its release of Wget with the
+OpenSSL project's "OpenSSL" library (or with modified versions of it
+that use the same license as the "OpenSSL" library), and distribute
+the linked executables.  You must obey the GNU General Public License
+in all respects for all of the code used other than "OpenSSL".  If you
+modify this file, you may extend this exception to your version of the
+file, but you are not obligated to do so.  If you do not wish to do
+so, delete this exception statement from your version."
+
+The wget(1) manpage and the wget info page are distributed under the
+terms of the GNU Free Documentation License ; see
+/usr/share/common-licenses/GFDL-1.2
+
+************************************
+ninja-build
+
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: ninja
+Upstream-Contact: martine@danga.com
+Source: https://ninja-build.org/
+
+Files: *
+Copyright: 2011-2014 Google
+License: Apache-2.0
+
+Files: src/getopt.*
+Copyright: 1997 Gregory Pietsch
+License: other
+ This file and the accompanying getopt.h header file are hereby placed in the
+ public domain without restrictions.  Just give the author credit, don't
+ claim you wrote it or prevent anyone else from using it.
+ .
+ Gregory Pietsch's current e-mail address:
+ gpietsch@comcast.net
+
+Files: debian/*
+Copyright: 2012 Gary Kramlich
+           2016 Felix Geyer
+License: Apache-2.0
+
+License: Apache-2.0
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+ .
+ http://www.apache.org/licenses/LICENSE-2.0
+ .
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+ .
+ On Debian systems, the complete text of the Apache version 2.0 license
+ can be found in "/usr/share/common-licenses/Apache-2.0".
