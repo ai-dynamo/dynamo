@@ -245,7 +245,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
                 (Some(pool), Some(blocks), offload_filter)
             }
             None => {
-                tracing::debug!("No disk layout provided; will not allocate disk blocks.");
+                tracing::debug!("No host layout provided; will not allocate host blocks.");
                 (None, None, None)
             }
         };
@@ -257,7 +257,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
                 (Some(pool), Some(blocks), offload_filter)
             }
             None => {
-                tracing::debug!("No disk layout provided; will not allocate disk blocks.");
+                tracing::debug!("No device layout provided; will not allocate device blocks.");
                 (None, None, None)
             }
         };
