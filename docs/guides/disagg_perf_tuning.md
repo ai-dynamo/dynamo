@@ -56,11 +56,11 @@ Typically, the number of GPUs vs the performance follows the following pattern:
 |       2 |                269 |                   135 |                        1.19x |
 |       4 |                578 |                   144 |                        1.28x |
 
-The best number of GPUs to use in the prefill and decode engines can be determined by running a few fixed ISL/OSL/concurrency test using [GenAI-Perf](https://github.com/triton-inference-server/perf_analyzer/tree/main/genai-perf) and compare with the SLA.
-GenAI-Perf is pre-installed in the dynamo container.
+The best number of GPUs to use in the prefill and decode engines can be determined by running a few fixed ISL/OSL/concurrency test using [AIPerf](https://github.com/ai-dynamo/aiperf/tree/main) and compare with the SLA.
+AIPerf is pre-installed in the dynamo container.
 
 > [!Tip]
-> If you are unfamiliar with GenAI-Perf, please see this helpful [tutorial](https://github.com/triton-inference-server/perf_analyzer/blob/main/genai-perf/docs/tutorial.md) to get you started.
+> If you are unfamiliar with AIPerf, please see this helpful [tutorial](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorial.md) to get you started.
 
 Besides the parallelization mapping, other common knobs to tune are maximum batch size, maximum number of tokens, and block size.
 For prefill engines, usually a small batch size and large `max_num_token` is preferred.

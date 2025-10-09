@@ -64,9 +64,9 @@ check_prerequisites() {
         exit 1
     fi
 
-    # Check for genai-perf
-    if ! command -v genai-perf &> /dev/null; then
-        log_error "genai-perf not found. This tool is required for load generation."
+    # Check for aiperf
+    if ! command -v aiperf &> /dev/null; then
+        log_error "aiperf not found. This tool is required for load generation."
         log_error "Please install the required dependencies by following the instructions in tests/planner/README.md"
         exit 1
     fi

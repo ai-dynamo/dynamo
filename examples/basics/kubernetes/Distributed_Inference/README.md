@@ -54,4 +54,4 @@ curl localhost:8000/v1/chat/completions \
     "max_tokens": 30
   }'
   ```
-You can also benchmark the performance of the endpoint by [GenAI-Perf](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/perf_analyzer/genai-perf/README.html)
+You can also benchmark the performance of the endpoint by [AIPerf](https://github.com/ai-dynamo/aiperf/blob/main/README.md)
