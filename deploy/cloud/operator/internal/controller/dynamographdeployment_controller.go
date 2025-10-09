@@ -166,6 +166,12 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 
 	// Ensure planner RBAC exists in cluster-wide mode
 	if r.Config.RestrictedNamespace == "" {
+		if r.RBACMgr == nil {
+			return "", "", "", fmt.Errorf("RBAC manager not initialized in cluster-wide mode")
+		}
+		if r.Config.RBAC.PlannerClusterRoleName == "" {
+			return "", "", "", fmt.Errorf("planner ClusterRole name is required in cluster-wide mode")
+		}
 		if err := r.RBACMgr.EnsureServiceAccountWithRBAC(
 			ctx,
 			dynamoDeployment.Namespace,

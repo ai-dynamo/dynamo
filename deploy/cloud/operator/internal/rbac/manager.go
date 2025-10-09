@@ -56,6 +56,16 @@ func (m *Manager) EnsureServiceAccountWithRBAC(
 ) error {
 	logger := log.FromContext(ctx)
 
+	if targetNamespace == "" {
+		return fmt.Errorf("target namespace is required")
+	}
+	if serviceAccountName == "" {
+		return fmt.Errorf("service account name is required")
+	}
+	if clusterRoleName == "" {
+		return fmt.Errorf("cluster role name is required")
+	}
+
 	// Create/update ServiceAccount
 	sa := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
