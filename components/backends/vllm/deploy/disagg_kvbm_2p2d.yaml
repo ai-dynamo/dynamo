@@ -4,7 +4,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-disagg-ziqif-kvbm-2p2d
+  name: vllm-disagg-kvbm-2p2d
 spec:
   services:
     Frontend:
