@@ -35,16 +35,20 @@ from dynamo.runtime import Component, DistributedRuntime
 pytestmark = pytest.mark.pre_merge
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 async def distributed_runtime():
-    """TODO: This should not use scope='module' as DistributedRuntime has singleton requirements.
-    and blocks any tests with DistributedRuntime(loop, True) from running in the same process, or any forked process.
+    """Function-scoped runtime fixture for use with @pytest.mark.forked tests.
+
+    Each test gets its own runtime in a forked process to avoid singleton conflicts.
     """
     loop = asyncio.get_running_loop()
-    return DistributedRuntime(loop, False)
+    runtime = DistributedRuntime(loop, False)
+    yield runtime
+    runtime.shutdown()
 
 
-# TODO: enable pytest.mark.forked + scope='function' runtime.
+@pytest.mark.asyncio
+@pytest.mark.forked
 async def test_radix_tree_binding(distributed_runtime):
     """Test RadixTree binding directly with store event and find matches"""
     import json
@@ -101,6 +105,8 @@ async def test_radix_tree_binding(distributed_runtime):
 # OnceCell initializations not being reset.
 # The test works individually if I run it with 32, then 11, then 64.
 # @pytest.mark.parametrize("kv_block_size", [11, 32, 64])
+@pytest.mark.asyncio
+@pytest.mark.forked
 @pytest.mark.skip(reason="Flakey in CI. Likely race condition going on.")
 async def test_event_handler(distributed_runtime):
     kv_block_size = 32
@@ -157,7 +163,8 @@ async def test_event_handler(distributed_runtime):
             ), f"Scores still present after {(retry+1)*0.5}s: {scores.scores}"
 
 
-# TODO: enable pytest.mark.forked + scope='function' runtime.
+@pytest.mark.asyncio
+@pytest.mark.forked
 async def test_approx_kv_indexer(distributed_runtime):
     kv_block_size = 32
     namespace = "kv_test"
@@ -215,7 +222,8 @@ class EventPublisher:
         self.event_id_counter += 1
 
 
-# TODO: enable pytest.mark.forked + scope='function' runtime.
+@pytest.mark.asyncio
+@pytest.mark.forked
 async def test_metrics_aggregator(distributed_runtime):
     namespace = "kv_test"
     component = "metrics"

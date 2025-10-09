@@ -1,5 +1,0 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-llama-cpp-python -C cmake.args="-DGGML_CUDA=on"
-uvloop

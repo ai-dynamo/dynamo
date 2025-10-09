@@ -274,7 +274,7 @@ def get_service_name_by_type(
 
 
 def get_worker_service_from_config(
-    config: dict,
+    config: Config,
     backend: str = "sglang",
     sub_component_type: SubComponentType = SubComponentType.DECODE,
 ):
@@ -299,8 +299,7 @@ def get_worker_service_from_config(
     service_name = get_service_name_by_type(config, backend, sub_component_type)
 
     # Get the actual service from the config
-    cfg = Config.model_validate(config)
-    return cfg.spec.services[service_name]
+    return config.spec.services[service_name]
 
 
 def setup_worker_service_resources(
@@ -461,7 +460,7 @@ class VllmV1ConfigModifier:
             cfg.spec.services[decode_service_name].subComponentType = "decode"
 
             worker_service = get_worker_service_from_config(
-                cfg.model_dump(),
+                cfg,
                 backend="vllm",
                 sub_component_type=SubComponentType.DECODE,
             )
@@ -495,7 +494,7 @@ class VllmV1ConfigModifier:
             cfg.spec.services[decode_service_name].subComponentType = "decode"
 
             worker_service = get_worker_service_from_config(
-                cfg.model_dump(),
+                cfg,
                 backend="vllm",
                 sub_component_type=SubComponentType.DECODE,
             )
@@ -529,7 +528,7 @@ class VllmV1ConfigModifier:
     ):
         cfg = Config.model_validate(config)
         worker_service = get_worker_service_from_config(
-            config, backend="vllm", sub_component_type=component_type
+            cfg, backend="vllm", sub_component_type=component_type
         )
 
         # Set up resources
@@ -575,8 +574,9 @@ class VllmV1ConfigModifier:
 
     @classmethod
     def get_model_name(cls, config: dict) -> str:
+        cfg = Config.model_validate(config)
         try:
-            worker_service = get_worker_service_from_config(config, backend="vllm")
+            worker_service = get_worker_service_from_config(cfg, backend="vllm")
             args = validate_and_get_worker_args(worker_service, backend="vllm")
         except (ValueError, KeyError):
             logger.warning(
@@ -686,7 +686,7 @@ class SGLangConfigModifier:
             cfg.spec.services[decode_service_name].subComponentType = "decode"
 
             worker_service = get_worker_service_from_config(
-                cfg.model_dump(),
+                cfg,
                 backend="sglang",
                 sub_component_type=SubComponentType.DECODE,
             )
@@ -720,7 +720,7 @@ class SGLangConfigModifier:
             cfg.spec.services[decode_service_name].subComponentType = "decode"
 
             worker_service = get_worker_service_from_config(
-                cfg.model_dump(),
+                cfg,
                 backend="sglang",
                 sub_component_type=SubComponentType.DECODE,
             )
@@ -767,7 +767,7 @@ class SGLangConfigModifier:
     ):
         cfg = Config.model_validate(config)
         worker_service = get_worker_service_from_config(
-            config, backend="sglang", sub_component_type=component_type
+            cfg, backend="sglang", sub_component_type=component_type
         )
 
         # Set up resources
@@ -792,7 +792,7 @@ class SGLangConfigModifier:
     ):
         cfg = Config.model_validate(config)
         worker_service = get_worker_service_from_config(
-            config, backend="sglang", sub_component_type=component_type
+            cfg, backend="sglang", sub_component_type=component_type
         )
 
         # Set up resources with multinode configuration
@@ -827,7 +827,7 @@ class SGLangConfigModifier:
     ):
         cfg = Config.model_validate(config)
         worker_service = get_worker_service_from_config(
-            config, backend="sglang", sub_component_type=component_type
+            cfg, backend="sglang", sub_component_type=component_type
         )
 
         # Set up resources with multinode configuration
@@ -854,8 +854,9 @@ class SGLangConfigModifier:
 
     @classmethod
     def get_model_name(cls, config: dict) -> str:
+        cfg = Config.model_validate(config)
         try:
-            worker_service = get_worker_service_from_config(config, backend="sglang")
+            worker_service = get_worker_service_from_config(cfg, backend="sglang")
             args = validate_and_get_worker_args(worker_service, backend="sglang")
         except (ValueError, KeyError):
             logger.warning(
@@ -963,7 +964,7 @@ class TrtllmConfigModifier:
             cfg.spec.services[decode_service_name].subComponentType = "decode"
 
             worker_service = get_worker_service_from_config(
-                cfg.model_dump(),
+                cfg,
                 backend="trtllm",
                 sub_component_type=SubComponentType.DECODE,
             )
@@ -1015,7 +1016,7 @@ class TrtllmConfigModifier:
 
             # Decode worker already has the correct name
             worker_service = get_worker_service_from_config(
-                cfg.model_dump(),
+                cfg,
                 backend="trtllm",
                 sub_component_type=SubComponentType.DECODE,
             )
@@ -1067,7 +1068,7 @@ class TrtllmConfigModifier:
         # Get the worker service using helper function
         # This assumes convert_config has been called, so the service is named decode_worker_k8s_name
         worker_service = get_worker_service_from_config(
-            config, backend="trtllm", sub_component_type=component_type
+            cfg, backend="trtllm", sub_component_type=component_type
         )
 
         # Set up resources
@@ -1118,8 +1119,9 @@ class TrtllmConfigModifier:
 
     @classmethod
     def get_model_name(cls, config: dict) -> str:
+        cfg = Config.model_validate(config)
         try:
-            worker_service = get_worker_service_from_config(config, backend="trtllm")
+            worker_service = get_worker_service_from_config(cfg, backend="trtllm")
             args = validate_and_get_worker_args(worker_service, backend="trtllm")
         except (ValueError, KeyError):
             logger.warning(

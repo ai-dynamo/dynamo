@@ -101,7 +101,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ## 2. Select an engine
 
-We publish Python wheels specialized for each of our supported engines: vllm, sglang, trtllm, and llama.cpp. The examples that follow use SGLang; continue reading for other engines.
+We publish Python wheels specialized for each of our supported engines: vllm, sglang, and trtllm. The examples that follow use SGLang; continue reading for other engines.
 
 ```
 uv venv venv

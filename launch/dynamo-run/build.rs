@@ -35,7 +35,7 @@ fn has_cuda_toolkit() -> bool {
 }
 
 fn is_cuda_engine() -> bool {
-    has_feature("mistralrs") || has_feature("llamacpp")
+    has_feature("mistralrs")
 }
 
 #[cfg(target_os = "macos")]
