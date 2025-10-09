@@ -16,8 +16,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# run clear_namespace
-python3 utils/clear_namespace.py --namespace dynamo
 
 # run frontend
 python3 -m dynamo.frontend --router-mode kv --http-port 8000 &
