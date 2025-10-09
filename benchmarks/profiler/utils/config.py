@@ -219,14 +219,14 @@ def set_multinode_config(worker_service, gpu_count: int, num_gpus_per_node: int)
 
 
 def get_service_name_by_type(
-    config: dict, backend: str, sub_component_type: SubComponentType
+    config: Config, backend: str, sub_component_type: SubComponentType
 ) -> str:
     """Helper function to get service name by subComponentType.
 
     First tries to find service by subComponentType, then falls back to component name.
 
     Args:
-        config: Configuration dictionary (with spec.services structure)
+        config: Configuration object
         backend: Backend name (e.g., "sglang", "vllm", "trtllm")
         sub_component_type: The type of sub-component to look for (PREFILL or DECODE)
 
@@ -234,11 +234,7 @@ def get_service_name_by_type(
         The service name
     """
     # Check if config has the expected structure
-    if (
-        not isinstance(config, dict)
-        or "spec" not in config
-        or "services" not in config.get("spec", {})
-    ):
+    if not config.spec or not config.spec.services:
         # Fall back to default name if structure is unexpected
         if sub_component_type == SubComponentType.DECODE:
             return WORKER_COMPONENT_NAMES[backend].decode_worker_k8s_name
@@ -246,12 +242,9 @@ def get_service_name_by_type(
             return WORKER_COMPONENT_NAMES[backend].prefill_worker_k8s_name
 
     # Look through services to find one with matching subComponentType
-    services = config["spec"]["services"]
+    services = config.spec.services
     for service_name, service_config in services.items():
-        if (
-            isinstance(service_config, dict)
-            and service_config.get("subComponentType") == sub_component_type.value
-        ):
+        if service_config.subComponentType == sub_component_type.value:
             return service_name
 
     # Fall back to default component names
@@ -439,10 +432,10 @@ class VllmV1ConfigModifier:
         if target == "prefill":
             # Get service names by inferring from subComponentType first
             prefill_service_name = get_service_name_by_type(
-                config, "vllm", SubComponentType.PREFILL
+                cfg, "vllm", SubComponentType.PREFILL
             )
             decode_service_name = get_service_name_by_type(
-                config, "vllm", SubComponentType.DECODE
+                cfg, "vllm", SubComponentType.DECODE
             )
 
             # convert prefill worker into decode worker
@@ -476,10 +469,10 @@ class VllmV1ConfigModifier:
         elif target == "decode":
             # Get service names by inferring from subComponentType first
             prefill_service_name = get_service_name_by_type(
-                config, "vllm", SubComponentType.PREFILL
+                cfg, "vllm", SubComponentType.PREFILL
             )
             decode_service_name = get_service_name_by_type(
-                config, "vllm", SubComponentType.DECODE
+                cfg, "vllm", SubComponentType.DECODE
             )
 
             # delete prefill worker
@@ -507,7 +500,7 @@ class VllmV1ConfigModifier:
         # set num workers to 1
         # Use the inferred decode service name
         final_decode_service_name = get_service_name_by_type(
-            cfg.model_dump(), "vllm", SubComponentType.DECODE
+            cfg, "vllm", SubComponentType.DECODE
         )
         decode_worker_config = cfg.spec.services[final_decode_service_name]
         decode_worker_config.replicas = 1
@@ -665,10 +658,10 @@ class SGLangConfigModifier:
         if target == "prefill":
             # Get service names by inferring from subComponentType first
             prefill_service_name = get_service_name_by_type(
-                config, "sglang", SubComponentType.PREFILL
+                cfg, "sglang", SubComponentType.PREFILL
             )
             decode_service_name = get_service_name_by_type(
-                config, "sglang", SubComponentType.DECODE
+                cfg, "sglang", SubComponentType.DECODE
             )
 
             # convert prefill worker into decode worker
@@ -702,10 +695,10 @@ class SGLangConfigModifier:
         elif target == "decode":
             # Get service names by inferring from subComponentType first
             prefill_service_name = get_service_name_by_type(
-                config, "sglang", SubComponentType.PREFILL
+                cfg, "sglang", SubComponentType.PREFILL
             )
             decode_service_name = get_service_name_by_type(
-                config, "sglang", SubComponentType.DECODE
+                cfg, "sglang", SubComponentType.DECODE
             )
 
             # delete prefill worker
@@ -746,7 +739,7 @@ class SGLangConfigModifier:
         # set num workers to 1
         # Use the inferred decode service name
         final_decode_service_name = get_service_name_by_type(
-            cfg.model_dump(), "sglang", SubComponentType.DECODE
+            cfg, "sglang", SubComponentType.DECODE
         )
         decode_worker_config = cfg.spec.services[final_decode_service_name]
         decode_worker_config.replicas = 1
@@ -942,10 +935,10 @@ class TrtllmConfigModifier:
         if target == "prefill":
             # Get service names by inferring from subComponentType first
             prefill_service_name = get_service_name_by_type(
-                config, "trtllm", SubComponentType.PREFILL
+                cfg, "trtllm", SubComponentType.PREFILL
             )
             decode_service_name = get_service_name_by_type(
-                config, "trtllm", SubComponentType.DECODE
+                cfg, "trtllm", SubComponentType.DECODE
             )
 
             # Convert to prefill-only aggregated setup
@@ -996,10 +989,10 @@ class TrtllmConfigModifier:
         elif target == "decode":
             # Get service names by inferring from subComponentType first
             prefill_service_name = get_service_name_by_type(
-                config, "trtllm", SubComponentType.PREFILL
+                cfg, "trtllm", SubComponentType.PREFILL
             )
             decode_service_name = get_service_name_by_type(
-                config, "trtllm", SubComponentType.DECODE
+                cfg, "trtllm", SubComponentType.DECODE
             )
 
             # Convert to decode-only aggregated setup
@@ -1044,7 +1037,7 @@ class TrtllmConfigModifier:
         # Set num workers to 1
         # Use the inferred decode service name
         final_decode_service_name = get_service_name_by_type(
-            cfg.model_dump(), "trtllm", SubComponentType.DECODE
+            cfg, "trtllm", SubComponentType.DECODE
         )
         worker_config = cfg.spec.services[final_decode_service_name]
         worker_config.replicas = 1

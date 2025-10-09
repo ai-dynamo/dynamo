@@ -329,19 +329,6 @@ impl DistributedRuntime {
         }
     }
 
-    /// Clear everything in etcd under a key.
-    /// todo: Remove as soon as we auto-delete the MDC.
-    pub async fn temp_clear_namespace(&self, name: &str) -> anyhow::Result<()> {
-        let Some(etcd_client) = self.etcd_client() else {
-            return Ok(()); // no etcd, nothing to clear
-        };
-        let kvs = etcd_client.kv_get_prefix(name).await?;
-        for kv in kvs {
-            etcd_client.kv_delete(kv.key(), None).await?;
-        }
-        Ok(())
-    }
-
     /// Get all registered hierarchy keys. Private because it is only used for testing.
     fn get_registered_hierarchies(&self) -> Vec<String> {
         let registries = self.hierarchy_to_metricsregistry.read().unwrap();

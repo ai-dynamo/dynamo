@@ -901,6 +901,8 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    # setup file logging
+    os.makedirs(args.output_dir, exist_ok=True)
     log_file_handler = logging.FileHandler(f"{args.output_dir}/profile_sla.log")
     log_file_handler.setLevel(logging.INFO)
     formatter = logging.Formatter(

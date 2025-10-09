@@ -12,8 +12,6 @@ export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"engine_configs/gpt_oss/decode.y
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
-# run clear_namespace
-python3 utils/clear_namespace.py --namespace dynamo
 
 # run frontend
 python3 -m dynamo.frontend --router-mode round-robin --http-port 8000 &
