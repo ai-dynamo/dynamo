@@ -342,10 +342,10 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                         continue;
                     }
 
-                    if let Some(offload_filter) = offload_filter.as_ref() {
-                        if !offload_filter.should_offload(request.sequence_hash) {
-                            continue;
-                        }
+                    if let Some(offload_filter) = offload_filter.as_ref()
+                        && !offload_filter.should_offload(request.sequence_hash)
+                    {
+                        continue;
                     }
 
                     let target_block = 'target_block: {
@@ -617,10 +617,10 @@ impl OffloadFilters {
 
 impl OffloadFiltersBuilder {
     pub fn validate(&self) -> Result<(), String> {
-        if let Some(disk) = self.disk.as_ref() {
-            if disk.is_some() {
-                return Err("Disk offload filter is not supported.".to_string());
-            }
+        if let Some(disk) = self.disk.as_ref()
+            && disk.is_some()
+        {
+            return Err("Disk offload filter is not supported.".to_string());
         }
 
         let host_is_none = if let Some(host) = self.host.as_ref() {
