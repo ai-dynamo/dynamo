@@ -147,7 +147,7 @@ decode:
 
 We currently provide 2 different ways to perform an end to end benchmark which includes using our OpenAI frontend and tokenization. We will continue to add better support for these sorts of large single batch workloads in the future.
 
-1. **GenAI Perf to benchmark end to end performance with 8k ISL 256 OSL**
+1. **AIPerf to benchmark end to end performance with 8k ISL 256 OSL**
    We've found that 8k ISL 256 OSL provides a good baseline for measuring end to end disaggregated serving performance for DSR1. As WideEP allows for a higher throughput, we provide a script that runs this workload at high concurrencies. DeepGEMM kernels can sometimes take a while to warm up. We provide a short ramping warmup script that can be used.
 
 Example usage:
@@ -161,8 +161,8 @@ curl -X POST http://${HEAD_PREFILL_NODE_IP}:9001/flush_cache
 ./utils/bench.sh HEAD_PREFILL_NODE_IP --type e2e
 ```
 
-2. **GenAI Perf to benchmark completions with custom dataset**
-   We provide a script that generates a JSONL file of the ShareGPT dataset and then use GenAI Perf to benchmark the prefill and decode workers. We use ShareGPT in order to leverage the pre-existing EPLB distributions provided by the SGLang team. If you don't want to use ShareGPT - you can also use GenAI Perf's synthetic dataset setup But note you will have to use dynamic EPLB configurations or record your own as the `init-expert-location` provided by SGLang is tuned specifically for the ShareGPT dataset at a 4096 ISL and 5 OSL.
+2. **AIPerf to benchmark completions with custom dataset**
+   We provide a script that generates a JSONL file of the ShareGPT dataset and then use AIPerf to benchmark the prefill and decode workers. We use ShareGPT in order to leverage the pre-existing EPLB distributions provided by the SGLang team. If you don't want to use ShareGPT - you can also use AIPerf's synthetic dataset setup But note you will have to use dynamic EPLB configurations or record your own as the `init-expert-location` provided by SGLang is tuned specifically for the ShareGPT dataset at a 4096 ISL and 5 OSL.
 
 Example usage:
 
