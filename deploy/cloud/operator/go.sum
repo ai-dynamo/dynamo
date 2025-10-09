@@ -1,7 +1,7 @@
 emperror.dev/errors v0.8.1 h1:UavXZ5cSX/4u9iyvH6aDcuGkVjeexUGJ7Ij7G4VfQT0=
 emperror.dev/errors v0.8.1/go.mod h1:YcRvLPh626Ubn2xqtoprejnA5nFha+TJ+2vew48kWuE=
-github.com/NVIDIA/grove/operator/api v0.1.0-alpha.1 h1:4DE6ZGa/3muBa5gk1GtJskMVss6GjeCPpn+xTnR1h9w=
-github.com/NVIDIA/grove/operator/api v0.1.0-alpha.1/go.mod h1:QlsR2wQLj9m/zVEqv5SsCPzyjN2ykYZ0r/NEnDf4WB4=
+github.com/NVIDIA/grove/operator/api v0.1.0-alpha.2 h1:Xg2hrC5eKJ0jhStGFoGX0DnUdt/75K5fJvOxKkN54oU=
+github.com/NVIDIA/grove/operator/api v0.1.0-alpha.2/go.mod h1:QlsR2wQLj9m/zVEqv5SsCPzyjN2ykYZ0r/NEnDf4WB4=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
 github.com/blang/semver/v4 v4.0.0 h1:1PFHFE6yCCTv8C1TeyNNarDzntLi7wMI5i/pzqYIsAM=

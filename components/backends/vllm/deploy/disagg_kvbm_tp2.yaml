@@ -4,25 +4,26 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-disagg
+  name: vllm-disagg-kvbm-tp2
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-disagg
+      dynamoNamespace: vllm-disagg-kvbm-tp2
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
     VllmDecodeWorker:
-      dynamoNamespace: vllm-disagg
+      dynamoNamespace: vllm-disagg-kvbm-tp2
       envFromSecret: hf-token-secret
       componentType: worker
-      subComponentType: decode
       replicas: 1
       resources:
+        requests:
+          gpu: "2"
         limits:
-          gpu: "1"
+          gpu: "2"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
@@ -33,16 +34,34 @@ spec:
           - dynamo.vllm
           args:
             - --model
-            - Qwen/Qwen3-0.6B
+            - Qwen/Qwen3-8B
+            - --gpu-memory-utilization
+            - "0.23"
+            - --disable-log-requests
+            - --max-model-len
+            - "32000"
+            - --enforce-eager
+            - --tensor-parallel-size
+            - "2"
     VllmPrefillWorker:
-      dynamoNamespace: vllm-disagg
+      dynamoNamespace: vllm-disagg-kvbm-tp2
       envFromSecret: hf-token-secret
       componentType: worker
-      subComponentType: prefill
       replicas: 1
       resources:
+        requests:
+          gpu: "2"
+          memory: "200Gi"
         limits:
-          gpu: "1"
+          gpu: "2"
+          memory: "250Gi"
+      envs:
+        - name: DYN_KVBM_CPU_CACHE_GB
+          value: "100"
+        - name: DYN_KVBM_BARRIER_ID_PREFIX
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
@@ -53,5 +72,16 @@ spec:
           - dynamo.vllm
           args:
             - --model
-            - Qwen/Qwen3-0.6B
+            - Qwen/Qwen3-8B
             - --is-prefill-worker
+            - --gpu-memory-utilization
+            - "0.23"
+            - --disable-log-requests
+            - --max-model-len
+            - "32000"
+            - --enforce-eager
+            - --connector
+            - kvbm
+            - nixl
+            - --tensor-parallel-size
+            - "2"

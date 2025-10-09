@@ -3,7 +3,7 @@
 1. Go to AWS ECS console, **Clusters** tab and click on **Create cluster** with name `dynamo-GPU`
 2. Input the cluster name and choose **AWS EC2 instances** as the infrastructure. This option will create a cluster with EC2 instances to deploy containers.
 3. Choose the ECS-optimized GPU AMI `Amazon Linux 2 (GPU)` (Amazon ECS–optimized), which includes NVIDIA drivers and the Docker GPU runtime out of the box.
-4. Choose `g6e.2xlarge` as the **EC2 instance type** and add an `SSH Key pair` so you can log in the instance for debugging purpose.
+4. Choose `g6e.2xlarge` as the **EC2 instance type** and add an `SSH Key pair` so you can log in the instance for debugging purpose. To test with disaggregated serving, we need at least 2 GPUs, so you can choose `g6e.12xlarge` with 4 GPUs
 5. Set **Root EBS volume size** as `200`
 6. For the networking, use the default settings. Make sure the **security group** has
 - an inbound rule which allows "All traffic" from this security group.
@@ -30,6 +30,8 @@ Before creating the task definitions, you need to create the `ecsTaskExecutionRo
 > If you create task definitions through the AWS Console's step-by-step wizard, this role is created automatically. However, when importing task definitions from JSON (as recommended in this guide), you must create this role manually.
 
 Follow the [AWS documentation on creating the task execution IAM role](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_execution_IAM_role.html#create-task-execution-role) to create a role named `ecsTaskExecutionRole` with the `AmazonECSTaskExecutionRolePolicy` policy attached.
+
+Based on the task definition, you may need to add Amazon CloudWatch permissions and AWS Secrets Manager permissions to the `ecsTaskExecutionRole`. See details in the [Amazon CloudWatch Logs permissions reference](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/permissions-reference-cwl.html) the [AWS Secrets Manager authentication and access control guide](https://docs.aws.amazon.com/secretsmanager/latest/userguide/auth-and-access.html#auth-and-access_secrets)
 
 > [!NOTE]
 > The role ARN will be `arn:aws:iam::<your-account-id>:role/ecsTaskExecutionRole`. Make sure to update `<your-account-id>` in any task definition JSON files with your actual AWS account ID.
@@ -61,8 +63,8 @@ Follow the [AWS documentation on creating the task execution IAM role](https://d
 > [!Note]
 > Ensure you have created the `ecsTaskExecutionRole` as described in section 3.1 before creating these task definitions.
 
-1. Dynamo vLLM Frontend Task
-This task will create vLLM frontend, processors, routers and a decode worker.
+1. Dynamo vLLM Frontend and Decoding Worker Task
+This task will create vLLM frontend, processors, routers and a decoding worker.
 Please follow steps below to create this task
 - Set container name as `dynamo-frontend` and use prebuild [Dynamo container](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime).
 - Choose `Amazon EC2 instances` as the **Launch type** with **Task size** `2 vCPU` and `40 GB`memory
@@ -99,11 +101,12 @@ You can create a service or directly run the task from the task definition
 - For **Security group**, select the same security group used by the EC2 cluster
 - Verify that outbound rules allow all traffic for downloading images and external communication
 - Wait for this deployment to finish, and get the **Private IP** of this task.
-2. Dynamo Frontend Task
+2. Dynamo Frontend and Decoding Worker Task
 - Choose the EC2 cluster (`dynamo-GPU`) for **Existing cluster** created in step 1.
 - In the **Container Overrides**, use the IP for ETCD/NATS task for the `ETCD_ENDPOINTS` and `NATS_SERVER` values.
+- After the deployment, an aggregated serving endpoint is created and you can test it with scripts in step 6.
 3. Dynamo PrefillWorker Task
-- Choose the EC2 cluster (`dynamo-GPU`) for **Existing cluster** created in step 1.
+- For disaggregated serving, you can deploy a separate prefill worker on another GPU. Choose the EC2 cluster (`dynamo-GPU`) for **Existing cluster** created in step 1 with at least 2 GPUs ( `g6e.12xlarge` for example)
 - In the **Container Overrides**, use the IP for ETCD/NATS task for the `ETCD_ENDPOINTS` and `NATS_SERVER` values.
 
 ## 6. Testing
