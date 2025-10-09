@@ -975,12 +975,32 @@ class WorkflowMetricsUploader:
             # Add common context fields
             self.add_common_context_fields(test_data)
 
-            # Upload to test index
-            try:
-                self.post_to_db(test_index, test_data)
-                print(f"✅ Test metrics uploaded for {test_framework} {test_type} tests")
-            except Exception as e:
-                print(f"❌ Failed to upload test metrics for {test_framework} {test_type}: {e}")
+            # Print test metrics instead of uploading for now
+            print(f"📋 Test metrics for {test_framework} {test_type} tests:")
+            print(f"   Framework: {test_framework}")
+            print(f"   Test Type: {test_type}")
+            print(f"   Platform: {platform_arch}")
+            print(f"   Status: {test_data[FIELD_TEST_STATUS]}")
+            print(f"   Duration: {test_data[FIELD_TEST_DURATION_SEC]}s")
+            print(f"   Total Tests: {test_data[FIELD_TOTAL_TESTS]}")
+            print(f"   Passed: {test_data[FIELD_PASSED_TESTS]}")
+            print(f"   Failed: {test_data[FIELD_FAILED_TESTS]}")
+            print(f"   Errors: {test_data[FIELD_ERROR_TESTS]}")
+            print(f"   Skipped: {test_data[FIELD_SKIPPED_TESTS]}")
+            print(f"   Exit Code: {test_data[FIELD_TEST_EXIT_CODE]}")
+            print(f"   Pytest Marks: {test_data[FIELD_TEST_PYTEST_MARKS]}")
+            print(f"   Start Time: {test_data.get(FIELD_TEST_START_TIME, 'N/A')}")
+            print(f"   End Time: {test_data.get(FIELD_TEST_END_TIME, 'N/A')}")
+            print(f"   Job ID: {test_data[FIELD_JOB_ID]}")
+            print(f"   Step ID: {test_data[FIELD_STEP_ID]}")
+            print("   " + "="*50)
+            
+            # Uncomment the lines below when ready to actually upload:
+            # try:
+            #     self.post_to_db(test_index, test_data)
+            #     print(f"✅ Test metrics uploaded for {test_framework} {test_type} tests")
+            # except Exception as e:
+            #     print(f"❌ Failed to upload test metrics for {test_framework} {test_type}: {e}")
 
 
 def main():
