@@ -129,7 +129,6 @@ impl KvConnectorLeaderRecorder {
 
         {
             let slot_manager_cell = slot_manager_cell.clone();
-            let inner_handle = handle.clone();
             handle.clone().spawn(async move {
                 let ready = leader.wait_worker_sync_ready().await;
                 if !ready {
@@ -163,9 +162,6 @@ impl KvConnectorLeaderRecorder {
                 );
 
                 let _ = slot_manager_cell.set(sm);
-
-                // another barrier sync to make sure worker init won't return before leader is ready
-                leader.spawn_leader_readiness_barrier(drt, inner_handle);
 
                 if leader_ready_tx.send("finished".to_string()).is_err() {
                     tracing::error!("main routine receiver dropped before result was sent");

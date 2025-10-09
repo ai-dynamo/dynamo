@@ -87,12 +87,7 @@ pub struct KvConnectorLeader {
 }
 
 impl KvConnectorLeader {
-    fn new(
-        worker_id: String,
-        drt: Arc<DistributedRuntime>,
-        page_size: usize,
-        leader_py: PyKvbmLeader,
-    ) -> Self {
+    fn new(worker_id: String, page_size: usize, leader_py: PyKvbmLeader) -> Self {
         tracing::info!(
             "KvConnectorLeader initialized with worker_id: {}",
             worker_id
@@ -147,9 +142,6 @@ impl KvConnectorLeader {
                 );
 
                 let _ = slot_manager_cell.set(sm);
-
-                // another barrier sync to make sure worker init won't return before leader is ready
-                let _ = leader.run_leader_readiness_barrier_blocking(drt);
 
                 if leader_ready_tx.send("finished".to_string()).is_err() {
                     tracing::error!("main routine receiver dropped before result was sent");
@@ -566,7 +558,7 @@ impl PyKvConnectorLeader {
                 worker_id, drt, page_size, leader,
             ))
         } else {
-            Box::new(KvConnectorLeader::new(worker_id, drt, page_size, leader))
+            Box::new(KvConnectorLeader::new(worker_id, page_size, leader))
         };
         Ok(Self { connector_leader })
     }

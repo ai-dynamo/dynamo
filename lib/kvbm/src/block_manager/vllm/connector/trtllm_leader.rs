@@ -11,10 +11,9 @@ use crate::block_manager::vllm::connector::leader::{
     kvbm_metrics_endpoint_enabled, parse_kvbm_metrics_port,
 };
 use crate::block_manager::{distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest};
-use crate::{extract_distributed_runtime_from_obj, get_current_tokio_handle};
+use crate::get_current_tokio_handle;
 use anyhow;
 use dynamo_llm::block_manager::metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry};
-use dynamo_runtime::DistributedRuntime;
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Handle;
@@ -66,7 +65,6 @@ pub struct KvConnectorLeader {
 impl KvConnectorLeader {
     fn new(
         worker_id: u64,
-        drt: Arc<DistributedRuntime>,
         page_size: usize,
         leader_py: PyKvbmLeader,
     ) -> Self {
@@ -91,7 +89,6 @@ impl KvConnectorLeader {
         {
             let slot_manager_cell = slot_manager_cell.clone();
 
-            let inner_handle = handle.clone();
             handle.spawn(async move {
                 let ready = leader.wait_worker_sync_ready().await;
                 if !ready {
@@ -125,9 +122,6 @@ impl KvConnectorLeader {
                 );
 
                 let _ = slot_manager_cell.set(sm);
-
-                // another barrier sync to make sure worker init won't return before leader is ready
-                leader.spawn_leader_readiness_barrier(drt, inner_handle);
 
                 tracing::info!("KvConnectorLeader init complete.");
             });
@@ -455,10 +449,8 @@ impl PyTrtllmKvConnectorLeader {
         page_size: usize,
         leader: PyKvbmLeader,
     ) -> PyResult<Self> {
-        let drt: Arc<DistributedRuntime> =
-            Python::with_gil(|py| extract_distributed_runtime_from_obj(py, drt))?;
         let connector_leader: Box<dyn Leader> =
-            Box::new(KvConnectorLeader::new(worker_id, drt, page_size, leader));
+            Box::new(KvConnectorLeader::new(worker_id, page_size, leader));
         Ok(Self { connector_leader })
     }
 
