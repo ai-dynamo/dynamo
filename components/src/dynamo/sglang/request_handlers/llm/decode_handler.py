@@ -171,18 +171,19 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         num_output_tokens_so_far = 0
 
         async for res in stream_source:
+            out = {}
             finish_reason = res["meta_info"]["finish_reason"]
             if finish_reason:
-                out = {"token_ids": [], "finish_reason": finish_reason["type"]}
-            else:
-                try:
-                    next_total_toks = len(res["output_ids"])
-                except KeyError:
-                    raise ValueError(
-                        f"Missing 'output_ids' in response. Response keys: {list(res.keys())}"
-                    )
-                out = {"token_ids": res["output_ids"][num_output_tokens_so_far:]}
-                num_output_tokens_so_far = next_total_toks
+                out["finish_reason"] = finish_reason["type"]
+
+            try:
+                next_total_toks = len(res["output_ids"])
+            except KeyError:
+                raise ValueError(
+                    f"Missing 'output_ids' in response. Response keys: {list(res.keys())}"
+                )
+            out["token_ids"] = res["output_ids"][num_output_tokens_so_far:]
+            num_output_tokens_so_far = next_total_toks
 
             yield out
 
