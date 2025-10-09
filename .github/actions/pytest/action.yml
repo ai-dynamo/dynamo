@@ -85,7 +85,7 @@ runs:
         echo "⏱️  Test duration: ${TEST_DURATION_SEC} seconds"
         
         # Parse JUnit XML for detailed test metrics
-        JUNIT_FILE="test-results/${{ env.PYTEST_XML_FILE }}"
+        JUNIT_FILE="test-results/pytest_test_report.xml"
         echo "🔍 Looking for JUnit XML at: ${JUNIT_FILE}"
         echo "📁 Contents of test-results directory:"
         ls -la test-results/ || echo "   Directory does not exist"
