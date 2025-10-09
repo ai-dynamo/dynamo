@@ -79,16 +79,12 @@ async def init(runtime: DistributedRuntime, config: Config):
     prefill_client = None
     prefill_router_client = None
     if config.serving_mode == DisaggregationMode.DECODE:
-        if config.dynamo_args.enable_prefill_routing:
-            logging.info(
-                "Initializing prefill router client. Prefill worker will be chosen via KV aware routing"
-            )
-            prefill_router_client = (
-                await runtime.namespace(dynamo_args.namespace)
-                .component("router")
-                .endpoint("best_worker_id")
-                .client()
-            )
+        prefill_router_client = (
+            await runtime.namespace(dynamo_args.namespace)
+            .component("router")
+            .endpoint("best_worker_id")
+            .client()
+        )
         prefill_client = (
             await runtime.namespace(dynamo_args.namespace)
             .component("prefill")

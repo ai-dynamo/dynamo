@@ -54,7 +54,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             self.prefill_client = prefill_client
             logging.info("Decode worker handler initialized")
 
-        self.enable_prefill_routing = config.dynamo_args.enable_prefill_routing
         self.prefill_router_client = prefill_router_client
         logging.info("Worker handler initialized")
 
@@ -115,11 +114,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         if self.serving_mode == DisaggregationMode.DECODE:
             # request the bootstrap info from the target prefill worker
-            if self.enable_prefill_routing:
+            if (
+                self.prefill_router_client is not None
+                and self.prefill_router_client.instance_ids()
+            ):
                 token_ids = request["token_ids"]
-                # Call router's best_worker_id endpoint - need to await the iterator properly
                 stream = await self.prefill_router_client.generate(token_ids)
-
                 result = await anext(stream)
                 (
                     worker_id,
@@ -134,7 +134,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     ).model_dump(),
                     worker_id,
                 )
-
             else:
                 prefill_stream = await self.prefill_client.generate(
                     DisaggPreprocessedRequest(

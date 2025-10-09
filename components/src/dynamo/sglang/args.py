@@ -86,12 +86,6 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": False,
         "help": "Run as embedding worker component (Dynamo flag, also sets SGLang's --is-embedding)",
     },
-    "enable-prefill-routing": {
-        "flags": ["--enable-prefill-routing"],
-        "action": "store_true",
-        "default": False,
-        "help": "Enable KV aware routing for the prefill worker. This flag is only applicable for the decode worker",
-    },
     "dump-config-to": {
         "flags": ["--dump-config-to"],
         "type": str,
@@ -107,9 +101,6 @@ class DynamoArgs:
     component: str
     endpoint: str
     migration_limit: int
-
-    # disaggregation specific options
-    enable_prefill_routing: bool = False
 
     # tool and reasoning parser options
     tool_call_parser: Optional[str] = None
@@ -331,7 +322,6 @@ def parse_args(args: list[str]) -> Config:
         component=parsed_component_name,
         endpoint=parsed_endpoint_name,
         migration_limit=parsed_args.migration_limit,
-        enable_prefill_routing=parsed_args.enable_prefill_routing,
         tool_call_parser=tool_call_parser,
         reasoning_parser=reasoning_parser,
         custom_jinja_template=expanded_template_path,
