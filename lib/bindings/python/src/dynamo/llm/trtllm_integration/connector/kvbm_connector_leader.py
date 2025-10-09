@@ -67,6 +67,14 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
                 req.computed_position,
             )
 
+        output.add_num_scheduled_tokens(
+            {
+                str(req.request_id): req.num_scheduled_tokens
+                for req in scheduler_output.new_requests
+                + scheduler_output.cached_requests
+            }
+        )
+
         return self._connector.build_connector_metadata(output)
 
     def get_num_new_matched_tokens(
