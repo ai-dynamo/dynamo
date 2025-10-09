@@ -86,6 +86,9 @@ runs:
         
         # Parse JUnit XML for detailed test metrics
         JUNIT_FILE="test-results/${{ env.PYTEST_XML_FILE }}"
+        echo "🔍 Looking for JUnit XML at: ${JUNIT_FILE}"
+        echo "📁 Contents of test-results directory:"
+        ls -la test-results/ || echo "   Directory does not exist"
         TOTAL_TESTS=0
         PASSED_TESTS=0
         FAILED_TESTS=0
@@ -116,6 +119,32 @@ runs:
           echo "⚠️  JUnit XML file not found: $JUNIT_FILE"
           echo "📁 Contents of test-results directory:"
           ls -la test-results/ || echo "   Directory does not exist"
+          echo "📁 Looking for any XML files in test-results:"
+          XML_FILES=$(find test-results/ -name "*.xml" 2>/dev/null)
+          if [[ -n "$XML_FILES" ]]; then
+            echo "$XML_FILES"
+            echo "📄 Contents of found XML files:"
+            for xml_file in $XML_FILES; do
+              echo "--- START $xml_file ---"
+              cat "$xml_file" 2>/dev/null || echo "Could not read $xml_file"
+              echo "--- END $xml_file ---"
+            done
+          else
+            echo "   No XML files found"
+          fi
+          echo "📁 Looking for any files with 'pytest' in the name:"
+          PYTEST_FILES=$(find test-results/ -name "*pytest*" 2>/dev/null)
+          if [[ -n "$PYTEST_FILES" ]]; then
+            echo "$PYTEST_FILES"
+            echo "📄 Contents of found pytest files:"
+            for pytest_file in $PYTEST_FILES; do
+              echo "--- START $pytest_file ---"
+              cat "$pytest_file" 2>/dev/null || echo "Could not read $pytest_file"
+              echo "--- END $pytest_file ---"
+            done
+          else
+            echo "   No pytest files found"
+          fi
         fi
         
         # Determine overall test status
