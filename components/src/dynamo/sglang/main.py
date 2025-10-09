@@ -149,7 +149,12 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
-    handler = PrefillWorkerHandler(component, engine, config)
+    # publisher instantiates the metrics and kv event publishers
+    publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
+        engine, config, component, generate_endpoint
+    )
+
+    handler = PrefillWorkerHandler(component, engine, config, publisher)
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 
@@ -157,7 +162,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         generate_endpoint.serve_endpoint(
             handler.generate,
             graceful_shutdown=True,
-            metrics_labels=[("model", server_args.served_model_name)],
+            metrics_labels=metrics_labels,
             health_check_payload=health_check_payload,
         )
     ]
@@ -168,6 +173,12 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         logging.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
+        metrics_task.cancel()
+        try:
+            await metrics_task
+        except asyncio.CancelledError:
+            logging.info("Metrics task successfully cancelled")
+            pass
         handler.cleanup()
 
 
