@@ -153,10 +153,11 @@ runs:
           TEST_STATUS="failure"
         fi
         
-        # Create test metrics JSON
+        # Create test metrics JSON with individual test cases
         JOB_KEY="${{ inputs.framework }}-${{ inputs.test_type }}-${PLATFORM_ARCH}"
         METRICS_FILE="test-metrics/test-metrics-${JOB_KEY}.json"
         
+        # Start building the JSON structure
         cat > "$METRICS_FILE" << EOF
         {
           "framework": "${{ inputs.framework }}",
@@ -168,15 +169,85 @@ runs:
           "test_duration_sec": ${TEST_DURATION_SEC},
           "test_status": "${TEST_STATUS}",
           "test_exit_code": ${TEST_EXIT_CODE},
-          "total_tests": ${TOTAL_TESTS},
-          "passed_tests": ${PASSED_TESTS},
-          "failed_tests": ${FAILED_TESTS},
-          "error_tests": ${ERROR_TESTS},
-          "skipped_tests": ${SKIPPED_TESTS}
+          "summary": {
+            "total_tests": ${TOTAL_TESTS},
+            "passed_tests": ${PASSED_TESTS},
+            "failed_tests": ${FAILED_TESTS},
+            "error_tests": ${ERROR_TESTS},
+            "skipped_tests": ${SKIPPED_TESTS}
+          },
+          "individual_tests": [
+        EOF
+        
+        # Parse individual test cases from JUnit XML if file exists
+        if [[ -f "$JUNIT_FILE" ]]; then
+          echo "🔍 Parsing individual test cases from JUnit XML..."
+          
+          # Use Python to parse XML and extract individual test cases
+          python3 << 'PYTHON_EOF' >> "$METRICS_FILE"
+        import xml.etree.ElementTree as ET
+        import json
+        import sys
+        
+        try:
+            # Parse the JUnit XML file
+            tree = ET.parse('test-results/pytest_test_report.xml')
+            root = tree.getroot()
+            
+            test_cases = []
+            
+            # Find all testcase elements
+            for testsuite in root.findall('.//testsuite'):
+                for testcase in testsuite.findall('testcase'):
+                    # Extract test case information
+                    test_info = {
+                        "classname": testcase.get('classname', ''),
+                        "name": testcase.get('name', ''),
+                        "time": float(testcase.get('time', 0)),
+                        "status": "passed"  # Default status
+                    }
+                    
+                    # Check for failure, error, or skipped elements
+                    if testcase.find('failure') is not None:
+                        test_info["status"] = "failed"
+                        failure_elem = testcase.find('failure')
+                        test_info["failure_message"] = failure_elem.get('message', '') if failure_elem is not None else ''
+                        test_info["failure_text"] = failure_elem.text if failure_elem is not None and failure_elem.text else ''
+                    elif testcase.find('error') is not None:
+                        test_info["status"] = "error"
+                        error_elem = testcase.find('error')
+                        test_info["error_message"] = error_elem.get('message', '') if error_elem is not None else ''
+                        test_info["error_text"] = error_elem.text if error_elem is not None and error_elem.text else ''
+                    elif testcase.find('skipped') is not None:
+                        test_info["status"] = "skipped"
+                        skipped_elem = testcase.find('skipped')
+                        test_info["skip_reason"] = skipped_elem.get('message', '') if skipped_elem is not None else ''
+                    
+                    test_cases.append(test_info)
+            
+            # Output JSON array elements (without the surrounding brackets)
+            for i, test_case in enumerate(test_cases):
+                if i > 0:
+                    print(",")
+                print("            " + json.dumps(test_case, separators=(',', ':')), end='')
+            
+        except Exception as e:
+            print(f'            // Error parsing XML: {str(e)}', file=sys.stderr)
+        
+        PYTHON_EOF
+        
+        else
+          echo "            // No JUnit XML file found for individual test parsing" >> "$METRICS_FILE"
+        fi
+        
+        # Close the JSON structure
+        cat >> "$METRICS_FILE" << EOF
+
+          ]
         }
         EOF
         
-        echo "📁 Created test metrics file for ${JOB_KEY}:"
+        echo "📁 Created test metrics file for ${JOB_KEY} with individual test cases:"
         cat "$METRICS_FILE"
         
         # Exit with original test result to maintain workflow behavior
