@@ -24,6 +24,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         config: Config,
         publisher: DynamoSglangPublisher,
         prefill_client: Optional[Client] = None,
+        prefill_router_client: Optional[Client] = None,
     ) -> None:
         """Initialize decode worker handler.
 
@@ -33,6 +34,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             config: SGLang and Dynamo configuration.
             publisher: Metrics publisher for the worker.
             prefill_client: Optional client for prefill worker in disaggregated mode.
+            prefill_router_client: Optional client for prefill router in disaggregated mode.
 
         Raises:
             ValueError: If prefill_client is not provided in decode serving mode.
@@ -52,6 +54,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             self.prefill_client = prefill_client
             logging.info("Decode worker handler initialized")
 
+        self.prefill_router_client = prefill_router_client
         logging.info("Worker handler initialized")
 
     def cleanup(self) -> None:
@@ -111,12 +114,33 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         if self.serving_mode == DisaggregationMode.DECODE:
             # request the bootstrap info from the target prefill worker
-            prefill_stream = await self.prefill_client.generate(
-                DisaggPreprocessedRequest(
-                    request=request,
-                    sampling_params=sampling_params,
-                ).model_dump()
-            )
+            if (
+                self.prefill_router_client is not None
+                and self.prefill_router_client.instance_ids()
+            ):
+                token_ids = request["token_ids"]
+                stream = await self.prefill_router_client.generate(token_ids)
+                result = await anext(stream)
+                (
+                    worker_id,
+                    overlap,
+                ) = result.data()  # Returns tuple (worker_id, overlap_amount)
+                logging.info(f"Best prefill worker ID: {worker_id}, overlap: {overlap}")
+
+                prefill_stream = await self.prefill_client.direct(
+                    DisaggPreprocessedRequest(
+                        request=request,
+                        sampling_params=sampling_params,
+                    ).model_dump(),
+                    worker_id,
+                )
+            else:
+                prefill_stream = await self.prefill_client.generate(
+                    DisaggPreprocessedRequest(
+                        request=request,
+                        sampling_params=sampling_params,
+                    ).model_dump()
+                )
 
             bootstrap_info = None
             async for info in prefill_stream:
