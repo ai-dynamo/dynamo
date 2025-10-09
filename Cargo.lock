@@ -4552,25 +4552,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "metrics"
-version = "0.5.1"
-dependencies = [
- "axum 0.8.4",
- "clap 4.5.48",
- "dynamo-llm",
- "dynamo-runtime",
- "futures",
- "prometheus",
- "rand 0.9.2",
- "reqwest 0.12.23",
- "serde",
- "serde_json",
- "thiserror 2.0.16",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
