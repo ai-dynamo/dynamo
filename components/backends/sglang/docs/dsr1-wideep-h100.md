@@ -41,13 +41,7 @@ docker run \
 
 In each container, you should be in the `/sgl-workspace/dynamo/components/backends/sglang` directory.
 
-3. On the head prefill node, run the helper script provided to generate commands to start the `nats-server`, `etcd`. This script will also tell you which environment variables to export on each node to make deployment easier.
-
-```bash
-./utils/gen_env_vars.sh
-```
-
-4. Run the ingress and prefill worker
+3. Run the ingress and prefill worker
 
 ```bash
 # run ingress
@@ -87,7 +81,7 @@ python3 -m dynamo.sglang \
 
 On the other prefill node (since this example has 4 total prefill nodes), run the same command but change `--node-rank` to 1,2, and 3
 
-5. Run the decode worker on the head decode node
+4. Run the decode worker on the head decode node
 
 ```bash
 python3 -m dynamo.sglang \

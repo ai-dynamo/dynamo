@@ -56,13 +56,7 @@ docker run \
     dynamo-wideep-gb200:latest
 ```
 
-3. On the head prefill node, run the helper script provided to generate commands to start the `nats-server`, `etcd`. This script will also tell you which environment variables to export on each node to make deployment easier.
-
-```bash
-./utils/gen_env_vars.sh
-```
-
-4. Run the ingress and prefill worker
+3. Run the ingress and prefill worker
 
 ```bash
 # run ingress
@@ -115,7 +109,7 @@ python3 -m dynamo.sglang \
   --log-level debug
 ```
 
-5. Run the decode worker on the head decode node
+4. Run the decode worker on the head decode node
 
 ```bash
 SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=768 \
