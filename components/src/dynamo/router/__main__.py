@@ -98,6 +98,7 @@ class StandaloneRouterHandler:
             "output_options": request.get("output_options", {}),
             "eos_token_ids": request.get("eos_token_ids", []),
             "annotations": request.get("annotations", []),
+            "disaggregated_params": request.get("disaggregated_params"),
             "extra_args": request.get("extra_args", {}),
         }
 
@@ -116,6 +117,7 @@ class StandaloneRouterHandler:
                 "top_logprobs": worker_output.get("top_logprobs"),
                 "finish_reason": worker_output.get("finish_reason"),
                 "index": worker_output.get("index"),
+                "disaggregated_params": worker_output.get("disaggregated_params"),
                 "extra_args": worker_output.get("extra_args"),
             }
             yield llm_engine_output

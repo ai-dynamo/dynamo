@@ -6,9 +6,6 @@ kind: DynamoGraphDeployment
 metadata:
   name: sglang-disagg-planner
 spec:
-  envs:
-    - name: DYNAMO_NAMESPACE
-      value: "dynamo"
   pvcs:
     - name: dynamo-pvc
       create: false # Must be pre-created before deployment and SLA profiler must have been run

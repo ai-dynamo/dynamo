@@ -9,7 +9,7 @@ spec:
   envs:
     - name: DYNAMO_SERVICE_CONFIG
       value: '{"Prometheus":{"global":{"scrape_interval":"5s"},"scrape_configs":[{"job_name":"prometheus","static_configs":[{"targets":["localhost:9090"]}]},{"job_name":"frontend","static_configs":[{"targets":["vllm-disagg-planner-frontend:8000"]}]}]}}'
-    - name: DYNAMO_NAMESPACE
+    - name: DYN_NAMESPACE
       value: "vllm-disagg-planner"
   services:
     Frontend:

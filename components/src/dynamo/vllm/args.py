@@ -351,11 +351,12 @@ def create_kv_transfer_config(config: Config) -> Optional[KVTransferConfig]:
         cfg = multi_connectors[0]
         return KVTransferConfig(**cfg)
 
-    # For multiple connectors, use MultiConnector
+    # For multiple connectors, use PdConnector
     return KVTransferConfig(
-        kv_connector="MultiConnector",
+        kv_connector="PdConnector",
         kv_role="kv_both",
         kv_connector_extra_config={"connectors": multi_connectors},
+        kv_connector_module_path="dynamo.llm.vllm_integration.connector",
     )
 
 

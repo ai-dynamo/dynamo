@@ -9,9 +9,6 @@ spec:
   pvcs:
     - name: dynamo-pvc
       create: false # Must be pre-created before deployment and SLA profiler must have been run
-  envs:
-    - name: DYNAMO_NAMESPACE
-      value: "vllm-disagg-planner"
   services:
     Frontend:
       dynamoNamespace: vllm-disagg-planner

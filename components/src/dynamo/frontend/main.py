@@ -21,6 +21,7 @@ import logging
 import os
 import pathlib
 import re
+import signal
 
 import uvloop
 
@@ -39,7 +40,7 @@ from dynamo.runtime import DistributedRuntime
 
 from . import __version__
 
-DYNAMO_NAMESPACE_ENV_VAR = "DYN_NAMESPACE"
+DYN_NAMESPACE_ENV_VAR = "DYN_NAMESPACE"
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +142,7 @@ def parse_args():
     parser.add_argument(
         "--namespace",
         type=str,
-        default=os.environ.get(DYNAMO_NAMESPACE_ENV_VAR),
+        default=os.environ.get(DYN_NAMESPACE_ENV_VAR),
         help="Dynamo namespace for model discovery scoping. If specified, models will only be discovered from this namespace. If not specified, discovers models from all namespaces (global discovery).",
     )
     parser.add_argument(
@@ -226,7 +227,15 @@ async def async_main():
         if prefix:
             os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
-    runtime = DistributedRuntime(asyncio.get_running_loop(), is_static)
+    loop = asyncio.get_running_loop()
+
+    runtime = DistributedRuntime(loop, is_static)
+
+    def signal_handler():
+        asyncio.create_task(graceful_shutdown(runtime))
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
 
     if flags.router_mode == "kv":
         router_mode = RouterMode.KV
@@ -287,6 +296,10 @@ async def async_main():
             await run_input(runtime, "http", engine)
     except asyncio.exceptions.CancelledError:
         pass
+
+
+async def graceful_shutdown(runtime):
+    runtime.shutdown()
 
 
 def main():

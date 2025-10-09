@@ -138,6 +138,22 @@ async def init(runtime: DistributedRuntime, config: Config):
             .client()
         )
 
+    # Set up prefill router client for decode workers
+    next_router_client = None
+    if config.disaggregation_mode.value == "decode":
+        try:
+            logging.info("Initializing prefill router client")
+            next_router_client = (
+                await runtime.namespace(config.namespace)
+                .component("router")  # Standalone router for prefill workers
+                .endpoint("generate")
+                .client()
+            )
+            logging.info("Prefill router client initialized successfully")
+        except Exception as e:
+            logging.warning(f"Failed to initialize prefill router client: {e}")
+            logging.info("Will use direct prefill worker client only")
+
     encode_client = None
     if config.encode_endpoint:
         logging.info(
@@ -329,6 +345,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             disaggregation_mode=config.disaggregation_mode,
             disaggregation_strategy=config.disaggregation_strategy,
             next_client=next_client,
+            next_router_client=next_router_client,
             encode_client=encode_client,
             multimodal_processor=multimodal_processor,
             connector=connector,
@@ -357,13 +374,15 @@ async def init(runtime: DistributedRuntime, config: Config):
         # Get health check payload (checks env var and falls back to TensorRT-LLM default)
         health_check_payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
 
-        if config.publish_events_and_metrics and is_first_worker(config):
+        if config.publish_events_and_metrics:
             # Initialize and pass in the publisher to the request handler to
             # publish events and metrics.
             kv_listener = runtime.namespace(config.namespace).component(
                 config.component
             )
-            metrics_labels = [("model", config.served_model_name)]
+            # Use model_path as fallback if served_model_name is not provided
+            model_name_for_metrics = config.served_model_name or config.model_path
+            metrics_labels = [("model", model_name_for_metrics)]
             async with get_publisher(
                 component,
                 engine,
