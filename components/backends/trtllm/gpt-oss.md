@@ -134,12 +134,9 @@ cd /workspace/components/backends/trtllm
 
 #### Option B: Manual Launch
 
-1. **Clear namespace and start frontend**:
+1. **Start frontend**:
 ```bash
 cd /workspace/dynamo/components/backends/trtllm
-
-# Clear any existing deployments
-python3 utils/clear_namespace.py --namespace dynamo
 
 # Start frontend with round-robin routing
 python3 -m dynamo.frontend --router-mode round-robin --http-port 8000 &

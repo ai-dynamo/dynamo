@@ -424,15 +424,6 @@ impl DistributedRuntime {
         })
     }
 
-    /// Remove everything in an etcd namespace.
-    /// Will be removed once we can clear the MDC automatically.
-    fn temp_clear_namespace<'p>(&self, py: Python<'p>, name: String) -> PyResult<Bound<'p, PyAny>> {
-        let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.temp_clear_namespace(&name).await.map_err(to_pyerr)
-        })
-    }
-
     fn namespace(&self, name: String) -> PyResult<Namespace> {
         Ok(Namespace {
             inner: self.inner.namespace(name).map_err(to_pyerr)?,
