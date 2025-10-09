@@ -17,6 +17,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+const (
+	// RBAC resource kind constants
+	kindClusterRole    = "ClusterRole"
+	kindServiceAccount = "ServiceAccount"
+	apiGroupRBAC       = "rbac.authorization.k8s.io"
+)
+
 // Manager handles dynamic RBAC creation for cluster-wide operator installations.
 type Manager struct {
 	client client.Client
@@ -92,13 +99,13 @@ func (m *Manager) EnsureServiceAccountWithRBAC(
 			},
 		},
 		Subjects: []rbacv1.Subject{{
-			Kind:      "ServiceAccount",
+			Kind:      kindServiceAccount,
 			Name:      serviceAccountName,
 			Namespace: targetNamespace,
 		}},
 		RoleRef: rbacv1.RoleRef{
-			APIGroup: "rbac.authorization.k8s.io",
-			Kind:     "ClusterRole",
+			APIGroup: apiGroupRBAC,
+			Kind:     kindClusterRole,
 			Name:     clusterRoleName,
 		},
 	}
@@ -117,18 +124,52 @@ func (m *Manager) EnsureServiceAccountWithRBAC(
 			"clusterRole", clusterRoleName,
 			"namespace", targetNamespace)
 	} else {
-		// RoleBinding exists, update if needed
+		// RoleBinding exists, check if it needs updating
+		needsUpdate := false
+		needsRecreate := false
+
+		// Check if RoleRef changed (immutable field - requires delete+recreate)
 		if existingRB.RoleRef.Name != clusterRoleName ||
-			len(existingRB.Subjects) != 1 ||
-			existingRB.Subjects[0].Name != serviceAccountName {
+			existingRB.RoleRef.Kind != kindClusterRole ||
+			existingRB.RoleRef.APIGroup != apiGroupRBAC {
+			needsRecreate = true
+		}
+
+		// Check if Subjects need updating (mutable field)
+		if len(existingRB.Subjects) != 1 ||
+			existingRB.Subjects[0].Kind != kindServiceAccount ||
+			existingRB.Subjects[0].Name != serviceAccountName ||
+			existingRB.Subjects[0].Namespace != targetNamespace {
+			needsUpdate = true
+		}
+
+		if needsRecreate {
+			// RoleRef is immutable, so delete and recreate the RoleBinding
+			if err := m.client.Delete(ctx, existingRB); err != nil {
+				return fmt.Errorf("failed to delete role binding for recreation: %w", err)
+			}
+			logger.V(1).Info("RoleBinding deleted for recreation due to RoleRef change",
+				"roleBinding", roleBindingName,
+				"oldClusterRole", existingRB.RoleRef.Name,
+				"newClusterRole", clusterRoleName,
+				"namespace", targetNamespace)
+
+			// Recreate with new RoleRef
+			if err := m.client.Create(ctx, rb); err != nil {
+				return fmt.Errorf("failed to recreate role binding: %w", err)
+			}
+			logger.V(1).Info("RoleBinding recreated",
+				"roleBinding", roleBindingName,
+				"clusterRole", clusterRoleName,
+				"namespace", targetNamespace)
+		} else if needsUpdate {
+			// Only Subjects changed, can update in-place
 			existingRB.Subjects = rb.Subjects
-			// Note: RoleRef is immutable, so if it changes, we'd need to delete and recreate
 			if err := m.client.Update(ctx, existingRB); err != nil {
 				return fmt.Errorf("failed to update role binding: %w", err)
 			}
-			logger.V(1).Info("RoleBinding updated",
+			logger.V(1).Info("RoleBinding subjects updated",
 				"roleBinding", roleBindingName,
-				"clusterRole", clusterRoleName,
 				"namespace", targetNamespace)
 		} else {
 			logger.V(1).Info("RoleBinding already up-to-date",

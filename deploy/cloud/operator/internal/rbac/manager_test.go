@@ -18,6 +18,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+const (
+	// Test constants
+	testServiceAccountName = "test-sa"
+	testNamespace          = "test-namespace"
+	testClusterRoleName    = "test-cluster-role"
+	testRoleBindingName    = "test-sa-binding"
+)
+
 func setupTest() (client.Client, *runtime.Scheme) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
@@ -36,9 +44,9 @@ func TestEnsureServiceAccountWithRBAC_CreateNew(t *testing.T) {
 	// Execute
 	err := manager.EnsureServiceAccountWithRBAC(
 		ctx,
-		"test-namespace",
-		"test-sa",
-		"test-cluster-role",
+		testNamespace,
+		testServiceAccountName,
+		testClusterRoleName,
 	)
 
 	// Verify
@@ -49,8 +57,8 @@ func TestEnsureServiceAccountWithRBAC_CreateNew(t *testing.T) {
 	// Check ServiceAccount was created
 	sa := &corev1.ServiceAccount{}
 	err = fakeClient.Get(ctx, client.ObjectKey{
-		Namespace: "test-namespace",
-		Name:      "test-sa",
+		Namespace: testNamespace,
+		Name:      testServiceAccountName,
 	}, sa)
 	if err != nil {
 		t.Fatalf("ServiceAccount not created: %v", err)
@@ -60,7 +68,7 @@ func TestEnsureServiceAccountWithRBAC_CreateNew(t *testing.T) {
 	expectedLabels := map[string]string{
 		"app.kubernetes.io/managed-by": "dynamo-operator",
 		"app.kubernetes.io/component":  "rbac",
-		"app.kubernetes.io/name":       "test-sa",
+		"app.kubernetes.io/name":       testServiceAccountName,
 	}
 	for k, v := range expectedLabels {
 		if sa.Labels[k] != v {
@@ -71,8 +79,8 @@ func TestEnsureServiceAccountWithRBAC_CreateNew(t *testing.T) {
 	// Check RoleBinding was created
 	rb := &rbacv1.RoleBinding{}
 	err = fakeClient.Get(ctx, client.ObjectKey{
-		Namespace: "test-namespace",
-		Name:      "test-sa-binding",
+		Namespace: testNamespace,
+		Name:      testRoleBindingName,
 	}, rb)
 	if err != nil {
 		t.Fatalf("RoleBinding not created: %v", err)
@@ -85,10 +93,10 @@ func TestEnsureServiceAccountWithRBAC_CreateNew(t *testing.T) {
 	if rb.Subjects[0].Kind != "ServiceAccount" {
 		t.Errorf("Expected subject kind ServiceAccount, got %s", rb.Subjects[0].Kind)
 	}
-	if rb.Subjects[0].Name != "test-sa" {
+	if rb.Subjects[0].Name != testServiceAccountName {
 		t.Errorf("Expected subject name test-sa, got %s", rb.Subjects[0].Name)
 	}
-	if rb.Subjects[0].Namespace != "test-namespace" {
+	if rb.Subjects[0].Namespace != testNamespace {
 		t.Errorf("Expected subject namespace test-namespace, got %s", rb.Subjects[0].Namespace)
 	}
 
@@ -96,7 +104,7 @@ func TestEnsureServiceAccountWithRBAC_CreateNew(t *testing.T) {
 	if rb.RoleRef.Kind != "ClusterRole" {
 		t.Errorf("Expected RoleRef kind ClusterRole, got %s", rb.RoleRef.Kind)
 	}
-	if rb.RoleRef.Name != "test-cluster-role" {
+	if rb.RoleRef.Name != testClusterRoleName {
 		t.Errorf("Expected RoleRef name test-cluster-role, got %s", rb.RoleRef.Name)
 	}
 	if rb.RoleRef.APIGroup != "rbac.authorization.k8s.io" {
@@ -110,35 +118,35 @@ func TestEnsureServiceAccountWithRBAC_AlreadyExists(t *testing.T) {
 
 	existingSA := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sa",
-			Namespace: "test-namespace",
+			Name:      testServiceAccountName,
+			Namespace: testNamespace,
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "dynamo-operator",
 				"app.kubernetes.io/component":  "rbac",
-				"app.kubernetes.io/name":       "test-sa",
+				"app.kubernetes.io/name":       testServiceAccountName,
 			},
 		},
 	}
 
 	existingRB := &rbacv1.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sa-binding",
-			Namespace: "test-namespace",
+			Name:      testRoleBindingName,
+			Namespace: testNamespace,
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "dynamo-operator",
 				"app.kubernetes.io/component":  "rbac",
-				"app.kubernetes.io/name":       "test-sa",
+				"app.kubernetes.io/name":       testServiceAccountName,
 			},
 		},
 		Subjects: []rbacv1.Subject{{
 			Kind:      "ServiceAccount",
-			Name:      "test-sa",
-			Namespace: "test-namespace",
+			Name:      testServiceAccountName,
+			Namespace: testNamespace,
 		}},
 		RoleRef: rbacv1.RoleRef{
 			APIGroup: "rbac.authorization.k8s.io",
 			Kind:     "ClusterRole",
-			Name:     "test-cluster-role",
+			Name:     testClusterRoleName,
 		},
 	}
 
@@ -153,9 +161,9 @@ func TestEnsureServiceAccountWithRBAC_AlreadyExists(t *testing.T) {
 	// Execute
 	err := manager.EnsureServiceAccountWithRBAC(
 		ctx,
-		"test-namespace",
-		"test-sa",
-		"test-cluster-role",
+		testNamespace,
+		testServiceAccountName,
+		testClusterRoleName,
 	)
 
 	// Verify
@@ -166,8 +174,8 @@ func TestEnsureServiceAccountWithRBAC_AlreadyExists(t *testing.T) {
 	// Verify resources still exist and unchanged
 	sa := &corev1.ServiceAccount{}
 	err = fakeClient.Get(ctx, client.ObjectKey{
-		Namespace: "test-namespace",
-		Name:      "test-sa",
+		Namespace: testNamespace,
+		Name:      testServiceAccountName,
 	}, sa)
 	if err != nil {
 		t.Fatalf("ServiceAccount not found: %v", err)
@@ -175,8 +183,8 @@ func TestEnsureServiceAccountWithRBAC_AlreadyExists(t *testing.T) {
 
 	rb := &rbacv1.RoleBinding{}
 	err = fakeClient.Get(ctx, client.ObjectKey{
-		Namespace: "test-namespace",
-		Name:      "test-sa-binding",
+		Namespace: testNamespace,
+		Name:      testRoleBindingName,
 	}, rb)
 	if err != nil {
 		t.Fatalf("RoleBinding not found: %v", err)
@@ -189,35 +197,35 @@ func TestEnsureServiceAccountWithRBAC_UpdateRoleBinding(t *testing.T) {
 
 	existingSA := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sa",
-			Namespace: "test-namespace",
+			Name:      testServiceAccountName,
+			Namespace: testNamespace,
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "dynamo-operator",
 				"app.kubernetes.io/component":  "rbac",
-				"app.kubernetes.io/name":       "test-sa",
+				"app.kubernetes.io/name":       testServiceAccountName,
 			},
 		},
 	}
 
 	existingRB := &rbacv1.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sa-binding",
-			Namespace: "test-namespace",
+			Name:      testRoleBindingName,
+			Namespace: testNamespace,
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "dynamo-operator",
 				"app.kubernetes.io/component":  "rbac",
-				"app.kubernetes.io/name":       "test-sa",
+				"app.kubernetes.io/name":       testServiceAccountName,
 			},
 		},
 		Subjects: []rbacv1.Subject{{
 			Kind:      "ServiceAccount",
 			Name:      "wrong-sa", // Wrong name
-			Namespace: "test-namespace",
+			Namespace: testNamespace,
 		}},
 		RoleRef: rbacv1.RoleRef{
 			APIGroup: "rbac.authorization.k8s.io",
 			Kind:     "ClusterRole",
-			Name:     "test-cluster-role",
+			Name:     testClusterRoleName,
 		},
 	}
 
@@ -232,9 +240,9 @@ func TestEnsureServiceAccountWithRBAC_UpdateRoleBinding(t *testing.T) {
 	// Execute
 	err := manager.EnsureServiceAccountWithRBAC(
 		ctx,
-		"test-namespace",
-		"test-sa",
-		"test-cluster-role",
+		testNamespace,
+		testServiceAccountName,
+		testClusterRoleName,
 	)
 
 	// Verify
@@ -245,8 +253,8 @@ func TestEnsureServiceAccountWithRBAC_UpdateRoleBinding(t *testing.T) {
 	// Verify RoleBinding was updated with correct subject
 	rb := &rbacv1.RoleBinding{}
 	err = fakeClient.Get(ctx, client.ObjectKey{
-		Namespace: "test-namespace",
-		Name:      "test-sa-binding",
+		Namespace: testNamespace,
+		Name:      testRoleBindingName,
 	}, rb)
 	if err != nil {
 		t.Fatalf("RoleBinding not found: %v", err)
@@ -255,7 +263,7 @@ func TestEnsureServiceAccountWithRBAC_UpdateRoleBinding(t *testing.T) {
 	if len(rb.Subjects) != 1 {
 		t.Fatalf("Expected 1 subject, got %d", len(rb.Subjects))
 	}
-	if rb.Subjects[0].Name != "test-sa" {
+	if rb.Subjects[0].Name != testServiceAccountName {
 		t.Errorf("Expected subject name test-sa, got %s", rb.Subjects[0].Name)
 	}
 }
@@ -273,8 +281,8 @@ func TestEnsureServiceAccountWithRBAC_MultipleNamespaces(t *testing.T) {
 		err := manager.EnsureServiceAccountWithRBAC(
 			ctx,
 			ns,
-			"test-sa",
-			"test-cluster-role",
+			testServiceAccountName,
+			testClusterRoleName,
 		)
 		if err != nil {
 			t.Fatalf("Failed for namespace %s: %v", ns, err)
@@ -286,7 +294,7 @@ func TestEnsureServiceAccountWithRBAC_MultipleNamespaces(t *testing.T) {
 		sa := &corev1.ServiceAccount{}
 		err := fakeClient.Get(ctx, client.ObjectKey{
 			Namespace: ns,
-			Name:      "test-sa",
+			Name:      testServiceAccountName,
 		}, sa)
 		if err != nil {
 			t.Errorf("ServiceAccount not found in namespace %s: %v", ns, err)
@@ -295,7 +303,7 @@ func TestEnsureServiceAccountWithRBAC_MultipleNamespaces(t *testing.T) {
 		rb := &rbacv1.RoleBinding{}
 		err = fakeClient.Get(ctx, client.ObjectKey{
 			Namespace: ns,
-			Name:      "test-sa-binding",
+			Name:      testRoleBindingName,
 		}, rb)
 		if err != nil {
 			t.Errorf("RoleBinding not found in namespace %s: %v", ns, err)
@@ -309,12 +317,12 @@ func TestEnsureServiceAccountWithRBAC_ServiceAccountExistsRoleBindingDoesNot(t *
 
 	existingSA := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sa",
-			Namespace: "test-namespace",
+			Name:      testServiceAccountName,
+			Namespace: testNamespace,
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "dynamo-operator",
 				"app.kubernetes.io/component":  "rbac",
-				"app.kubernetes.io/name":       "test-sa",
+				"app.kubernetes.io/name":       testServiceAccountName,
 			},
 		},
 	}
@@ -330,9 +338,9 @@ func TestEnsureServiceAccountWithRBAC_ServiceAccountExistsRoleBindingDoesNot(t *
 	// Execute
 	err := manager.EnsureServiceAccountWithRBAC(
 		ctx,
-		"test-namespace",
-		"test-sa",
-		"test-cluster-role",
+		testNamespace,
+		testServiceAccountName,
+		testClusterRoleName,
 	)
 
 	// Verify
@@ -343,8 +351,8 @@ func TestEnsureServiceAccountWithRBAC_ServiceAccountExistsRoleBindingDoesNot(t *
 	// Verify ServiceAccount still exists
 	sa := &corev1.ServiceAccount{}
 	err = fakeClient.Get(ctx, client.ObjectKey{
-		Namespace: "test-namespace",
-		Name:      "test-sa",
+		Namespace: testNamespace,
+		Name:      testServiceAccountName,
 	}, sa)
 	if err != nil {
 		t.Fatalf("ServiceAccount not found: %v", err)
@@ -353,8 +361,8 @@ func TestEnsureServiceAccountWithRBAC_ServiceAccountExistsRoleBindingDoesNot(t *
 	// Verify RoleBinding was created
 	rb := &rbacv1.RoleBinding{}
 	err = fakeClient.Get(ctx, client.ObjectKey{
-		Namespace: "test-namespace",
-		Name:      "test-sa-binding",
+		Namespace: testNamespace,
+		Name:      testRoleBindingName,
 	}, rb)
 	if err != nil {
 		t.Fatalf("RoleBinding not created: %v", err)
@@ -371,9 +379,9 @@ func TestEnsureServiceAccountWithRBAC_Idempotency(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		err := manager.EnsureServiceAccountWithRBAC(
 			ctx,
-			"test-namespace",
-			"test-sa",
-			"test-cluster-role",
+			testNamespace,
+			testServiceAccountName,
+			testClusterRoleName,
 		)
 		if err != nil {
 			t.Fatalf("Iteration %d failed: %v", i, err)
@@ -382,7 +390,7 @@ func TestEnsureServiceAccountWithRBAC_Idempotency(t *testing.T) {
 
 	// Verify - should still have exactly one ServiceAccount and one RoleBinding
 	saList := &corev1.ServiceAccountList{}
-	err := fakeClient.List(ctx, saList, client.InNamespace("test-namespace"))
+	err := fakeClient.List(ctx, saList, client.InNamespace(testNamespace))
 	if err != nil {
 		t.Fatalf("Failed to list ServiceAccounts: %v", err)
 	}
@@ -391,7 +399,7 @@ func TestEnsureServiceAccountWithRBAC_Idempotency(t *testing.T) {
 	}
 
 	rbList := &rbacv1.RoleBindingList{}
-	err = fakeClient.List(ctx, rbList, client.InNamespace("test-namespace"))
+	err = fakeClient.List(ctx, rbList, client.InNamespace(testNamespace))
 	if err != nil {
 		t.Fatalf("Failed to list RoleBindings: %v", err)
 	}
@@ -425,8 +433,8 @@ func TestEnsureServiceAccountWithRBAC_DifferentClusterRoles(t *testing.T) {
 	// Execute - create with first cluster role
 	err := manager.EnsureServiceAccountWithRBAC(
 		ctx,
-		"test-namespace",
-		"test-sa",
+		testNamespace,
+		testServiceAccountName,
 		"cluster-role-1",
 	)
 	if err != nil {
@@ -436,8 +444,8 @@ func TestEnsureServiceAccountWithRBAC_DifferentClusterRoles(t *testing.T) {
 	// Verify first cluster role
 	rb := &rbacv1.RoleBinding{}
 	err = fakeClient.Get(ctx, client.ObjectKey{
-		Namespace: "test-namespace",
-		Name:      "test-sa-binding",
+		Namespace: testNamespace,
+		Name:      testRoleBindingName,
 	}, rb)
 	if err != nil {
 		t.Fatalf("RoleBinding not found: %v", err)
@@ -461,8 +469,8 @@ func TestEnsureServiceAccountWithRBAC_EmptyNamespace(t *testing.T) {
 	err := manager.EnsureServiceAccountWithRBAC(
 		ctx,
 		"",
-		"test-sa",
-		"test-cluster-role",
+		testServiceAccountName,
+		testClusterRoleName,
 	)
 
 	// Verify - should fail because namespace is required
@@ -473,11 +481,285 @@ func TestEnsureServiceAccountWithRBAC_EmptyNamespace(t *testing.T) {
 		sa := &corev1.ServiceAccount{}
 		err = fakeClient.Get(ctx, client.ObjectKey{
 			Namespace: "",
-			Name:      "test-sa",
+			Name:      testServiceAccountName,
 		}, sa)
 		// In fake client this might work, but we document the behavior
 		if err != nil && !apierrors.IsNotFound(err) {
 			t.Logf("Expected behavior: empty namespace handled: %v", err)
 		}
+	}
+}
+
+func TestEnsureServiceAccountWithRBAC_RoleRefChange(t *testing.T) {
+	// Setup - pre-create RoleBinding with old ClusterRole
+	_, scheme := setupTest()
+
+	existingSA := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testServiceAccountName,
+			Namespace: testNamespace,
+		},
+	}
+
+	existingRB := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testRoleBindingName,
+			Namespace: testNamespace,
+		},
+		Subjects: []rbacv1.Subject{{
+			Kind:      "ServiceAccount",
+			Name:      testServiceAccountName,
+			Namespace: testNamespace,
+		}},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     "old-cluster-role", // Old ClusterRole name
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingSA, existingRB).
+		Build()
+
+	manager := NewManager(fakeClient)
+	ctx := context.Background()
+
+	// Execute with new ClusterRole name
+	err := manager.EnsureServiceAccountWithRBAC(
+		ctx,
+		testNamespace,
+		testServiceAccountName,
+		"new-cluster-role", // New ClusterRole name
+	)
+
+	// Verify
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	// Verify RoleBinding was recreated with new RoleRef
+	rb := &rbacv1.RoleBinding{}
+	err = fakeClient.Get(ctx, client.ObjectKey{
+		Namespace: testNamespace,
+		Name:      testRoleBindingName,
+	}, rb)
+	if err != nil {
+		t.Fatalf("RoleBinding not found: %v", err)
+	}
+
+	if rb.RoleRef.Name != "new-cluster-role" {
+		t.Errorf("Expected RoleRef name new-cluster-role, got %s", rb.RoleRef.Name)
+	}
+	if rb.Subjects[0].Name != testServiceAccountName {
+		t.Errorf("Expected subject name test-sa, got %s", rb.Subjects[0].Name)
+	}
+}
+
+func TestEnsureServiceAccountWithRBAC_SubjectWrongNamespace(t *testing.T) {
+	// Setup - pre-create RoleBinding with wrong subject namespace
+	_, scheme := setupTest()
+
+	existingSA := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testServiceAccountName,
+			Namespace: testNamespace,
+		},
+	}
+
+	existingRB := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testRoleBindingName,
+			Namespace: testNamespace,
+		},
+		Subjects: []rbacv1.Subject{{
+			Kind:      "ServiceAccount",
+			Name:      testServiceAccountName,
+			Namespace: "wrong-namespace", // Wrong namespace
+		}},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     testClusterRoleName,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingSA, existingRB).
+		Build()
+
+	manager := NewManager(fakeClient)
+	ctx := context.Background()
+
+	// Execute
+	err := manager.EnsureServiceAccountWithRBAC(
+		ctx,
+		testNamespace,
+		testServiceAccountName,
+		testClusterRoleName,
+	)
+
+	// Verify
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	// Verify RoleBinding was updated with correct namespace
+	rb := &rbacv1.RoleBinding{}
+	err = fakeClient.Get(ctx, client.ObjectKey{
+		Namespace: testNamespace,
+		Name:      testRoleBindingName,
+	}, rb)
+	if err != nil {
+		t.Fatalf("RoleBinding not found: %v", err)
+	}
+
+	if len(rb.Subjects) != 1 {
+		t.Fatalf("Expected 1 subject, got %d", len(rb.Subjects))
+	}
+	if rb.Subjects[0].Namespace != testNamespace {
+		t.Errorf("Expected subject namespace test-namespace, got %s", rb.Subjects[0].Namespace)
+	}
+	if rb.Subjects[0].Name != testServiceAccountName {
+		t.Errorf("Expected subject name test-sa, got %s", rb.Subjects[0].Name)
+	}
+}
+
+func TestEnsureServiceAccountWithRBAC_SubjectWrongKind(t *testing.T) {
+	// Setup - pre-create RoleBinding with wrong subject kind
+	_, scheme := setupTest()
+
+	existingSA := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testServiceAccountName,
+			Namespace: testNamespace,
+		},
+	}
+
+	existingRB := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testRoleBindingName,
+			Namespace: testNamespace,
+		},
+		Subjects: []rbacv1.Subject{{
+			Kind:      "User", // Wrong kind
+			Name:      testServiceAccountName,
+			Namespace: testNamespace,
+		}},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     testClusterRoleName,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingSA, existingRB).
+		Build()
+
+	manager := NewManager(fakeClient)
+	ctx := context.Background()
+
+	// Execute
+	err := manager.EnsureServiceAccountWithRBAC(
+		ctx,
+		testNamespace,
+		testServiceAccountName,
+		testClusterRoleName,
+	)
+
+	// Verify
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	// Verify RoleBinding was updated with correct kind
+	rb := &rbacv1.RoleBinding{}
+	err = fakeClient.Get(ctx, client.ObjectKey{
+		Namespace: testNamespace,
+		Name:      testRoleBindingName,
+	}, rb)
+	if err != nil {
+		t.Fatalf("RoleBinding not found: %v", err)
+	}
+
+	if len(rb.Subjects) != 1 {
+		t.Fatalf("Expected 1 subject, got %d", len(rb.Subjects))
+	}
+	if rb.Subjects[0].Kind != "ServiceAccount" {
+		t.Errorf("Expected subject kind ServiceAccount, got %s", rb.Subjects[0].Kind)
+	}
+	if rb.Subjects[0].Name != testServiceAccountName {
+		t.Errorf("Expected subject name test-sa, got %s", rb.Subjects[0].Name)
+	}
+}
+
+func TestEnsureServiceAccountWithRBAC_RoleRefKindChange(t *testing.T) {
+	// Setup - pre-create RoleBinding with wrong RoleRef kind
+	_, scheme := setupTest()
+
+	existingSA := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testServiceAccountName,
+			Namespace: testNamespace,
+		},
+	}
+
+	existingRB := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testRoleBindingName,
+			Namespace: testNamespace,
+		},
+		Subjects: []rbacv1.Subject{{
+			Kind:      "ServiceAccount",
+			Name:      testServiceAccountName,
+			Namespace: testNamespace,
+		}},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "Role", // Wrong kind (should be ClusterRole)
+			Name:     testClusterRoleName,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingSA, existingRB).
+		Build()
+
+	manager := NewManager(fakeClient)
+	ctx := context.Background()
+
+	// Execute
+	err := manager.EnsureServiceAccountWithRBAC(
+		ctx,
+		testNamespace,
+		testServiceAccountName,
+		testClusterRoleName,
+	)
+
+	// Verify
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	// Verify RoleBinding was recreated with correct RoleRef kind
+	rb := &rbacv1.RoleBinding{}
+	err = fakeClient.Get(ctx, client.ObjectKey{
+		Namespace: testNamespace,
+		Name:      testRoleBindingName,
+	}, rb)
+	if err != nil {
+		t.Fatalf("RoleBinding not found: %v", err)
+	}
+
+	if rb.RoleRef.Kind != "ClusterRole" {
+		t.Errorf("Expected RoleRef kind ClusterRole, got %s", rb.RoleRef.Kind)
+	}
+	if rb.RoleRef.Name != testClusterRoleName {
+		t.Errorf("Expected RoleRef name test-cluster-role, got %s", rb.RoleRef.Name)
 	}
 }
