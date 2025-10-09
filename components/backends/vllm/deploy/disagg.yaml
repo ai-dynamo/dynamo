@@ -18,6 +18,7 @@ spec:
       dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
+      subComponentType: decode
       replicas: 1
       resources:
         limits:
@@ -37,6 +38,7 @@ spec:
       dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
+      subComponentType: prefill
       replicas: 1
       resources:
         limits:

@@ -18,6 +18,7 @@ spec:
       envFromSecret: hf-token-secret
       dynamoNamespace: sglang-disagg
       componentType: worker
+      subComponentType: decode
       replicas: 1
       resources:
         limits:
@@ -50,6 +51,7 @@ spec:
       envFromSecret: hf-token-secret
       dynamoNamespace: sglang-disagg
       componentType: worker
+      subComponentType: prefill
       replicas: 1
       resources:
         limits:
@@ -59,7 +61,7 @@ spec:
           image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           command:
-          - python3
+          - python3E
           - -m
           - dynamo.sglang
           args:
