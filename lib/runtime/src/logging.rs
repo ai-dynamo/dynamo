@@ -279,22 +279,8 @@ impl TraceParent {
     }
 }
 
-// Takes Axum request and returning a span
-// TODO: This is the entrypoint for the request
-// Create a new span for the request
-// We want to check if the headers container a parent context by calling extract_trace_context_from_headers
-// if there is a parent context, we call set_parent on the span
-// extract the trace id from the .context() and set it as a field on the span (we'll do some work to persist this in the extensions of the span)
-// Note: This is only one of the places
 
-// TODO: Create a new span for the request
-// If there is a parent context (this is part of a different request, call extract_trace_context_from_headers and set as parent). This will require implementing the extractor for http headers
-// Get trace id, write this as a field of the trace_parent
-// propagator is still needed to set the trace id and span id in ways that otel can use it and propagate it
-// IMPROVEMENT: figure out if we can use the propagator for all keys
-// (distributed_span_from_headers):This is a more general function that takes in headers, determines if there is a parent context within them, and returns a span with the parent context correctly configured passing in the trace id as needed
-// as a first pass, we can potentially have a subroutine that intializes a traceparent as well, some of the fields are read from the headers and some are read from otel extension
-// we can later figure out how to ship all the details in the otel context
+// Takes Axum request and returning a span
 pub fn make_request_span<B>(req: &Request<B>) -> Span {
     let method = req.method();
     let uri = req.uri();
@@ -404,30 +390,6 @@ pub fn extract_otel_context_from_nats_headers(
 }
 
 
-// TODO: prepare_headers_from_span: method that takes the current span and prepares the headers for the outbound request (writing trace_id and span_id) to continue the distributed trace
-// just call the injector pattern after getting the context from the current span
-// improv: pass additional headers
-/// Simulate injecting trace context into HTTP headers (outgoing request)
-// fn inject_trace_context_into_headers(context: &opentelemetry::Context) -> HashMap<String, String> {
-//     let mut headers = HashMap::new();
-    
-//     // Create an injector that writes to our headers map
-//     struct HeaderInjector<'a>(&'a mut HashMap<String, String>);
-    
-//     impl<'a> Injector for HeaderInjector<'a> {
-//         fn set(&mut self, key: &str, value: String) {
-//             self.0.insert(key.to_string(), value);
-//         }
-//     }
-
-//     let mut injector = HeaderInjector(&mut headers);
-//     let propagator = opentelemetry::sdk::propagation::TraceContextPropagator::new();
-    
-//     // Inject the current context into headers
-//     propagator.inject_context(context, &mut injector);
-    
-//     headers
-// }
 /// Inject OpenTelemetry trace context into NATS headers using W3C Trace Context propagation
 pub fn inject_otel_context_into_nats_headers(
     headers: &mut async_nats::HeaderMap,
