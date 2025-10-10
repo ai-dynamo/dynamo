@@ -831,12 +831,7 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
 }
 
 /// Create a new router with optional custom backend metrics support
-pub fn router(
-    registry: Registry,
-    path: Option<String>,
-    _nim_on_demand: bool,
-    _nim_state: Option<Arc<super::service_v2::State>>,
-) -> (Vec<RouteDoc>, Router) {
+pub fn router(registry: Registry, path: Option<String>) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or_else(|| "/metrics".to_string());
     let doc = RouteDoc::new(axum::http::Method::GET, &path);
 
@@ -850,12 +845,7 @@ pub fn router(
     (vec![doc], route)
 }
 
-/// Create a basic router without custom backend support (backward compatibility)
-pub fn basic_router(registry: Registry, path: Option<String>) -> (Vec<RouteDoc>, Router) {
-    router(registry, path, false, None)
-}
-
-/// Unified metrics handler with optional custom backend support
+/// Unified metrics handler
 async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl IntoResponse {
     // Gather and encode metrics
     // Note: If nim_on_demand is enabled, the NimMetricsCollector registered with the registry

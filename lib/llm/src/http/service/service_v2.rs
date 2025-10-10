@@ -349,7 +349,7 @@ impl HttpServiceConfigBuilder {
         let mut all_docs = Vec::new();
 
         let mut routes = vec![
-            metrics::basic_router(registry, var(HTTP_SVC_METRICS_PATH_ENV).ok()),
+            metrics::router(registry, var(HTTP_SVC_METRICS_PATH_ENV).ok()),
             super::openai::list_models_router(state.clone(), var(HTTP_SVC_MODELS_PATH_ENV).ok()),
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
