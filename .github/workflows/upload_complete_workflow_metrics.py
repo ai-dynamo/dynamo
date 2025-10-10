@@ -69,6 +69,8 @@ FIELD_BUILD_SIZE_BYTES = "l_build_size_bytes"
 # Test Info
 FIELD_FRAMEWORK = "s_framework"  # Framework name
 FIELD_ERROR_MESSAGE = "s_error_message"  # Error message if any
+FIELD_TEST_MARKERS = "s_test_markers"  # Comma-separated list of marker names
+FIELD_TEST_MARKERS_DETAIL = "s_test_markers_detail"  # JSON string of detailed marker info
 
 
 class BuildMetricsReader:
@@ -512,14 +514,14 @@ class WorkflowMetricsUploader:
         retry_delay = 15  # seconds
 
         for attempt in range(max_retries):
-        # Get workflow and jobs data from GitHub API
+            # Get workflow and jobs data from GitHub API
             workflow_data = self.get_github_api_data(
                 f"/repos/{self.repo}/actions/runs/{self.run_id}"
             )
-        if not workflow_data:
-            print("Could not fetch workflow data from GitHub API")
-            return
-            
+            if not workflow_data:
+                print("Could not fetch workflow data from GitHub API")
+                return
+                
             jobs_data = self.get_github_api_data(
                 f"/repos/{self.repo}/actions/runs/{self.run_id}/jobs"
             )
@@ -979,6 +981,19 @@ class WorkflowMetricsUploader:
                 
                 if error_msg:
                     test_data[FIELD_ERROR_MESSAGE] = error_msg
+                
+                # Add marker information if available
+                marker_names = individual_test.get("marker_names", [])
+                markers_detail = individual_test.get("markers", [])
+                
+                if marker_names:
+                    test_data[FIELD_TEST_MARKERS] = ",".join(marker_names)
+                
+                if markers_detail:
+                    try:
+                        test_data[FIELD_TEST_MARKERS_DETAIL] = json.dumps(markers_detail)
+                    except Exception as e:
+                        print(f"⚠️  Failed to serialize markers detail: {e}")
 
                 # Timing - using your specified fields (build timing for test context)
                 if "test_start_time" in test_metrics:
@@ -1003,6 +1018,8 @@ class WorkflowMetricsUploader:
                 print(f"   Workflow ID: {test_data[FIELD_WORKFLOW_ID]}")
                 print(f"   Repo: {test_data[FIELD_REPO]}")
                 print(f"   Branch: {test_data[FIELD_BRANCH]}")
+                if FIELD_TEST_MARKERS in test_data:
+                    print(f"   Markers: {test_data[FIELD_TEST_MARKERS]}")
                 if FIELD_ERROR_MESSAGE in test_data:
                     print(f"   Error: {test_data[FIELD_ERROR_MESSAGE][:100]}...")
                 print("   " + "-"*30)

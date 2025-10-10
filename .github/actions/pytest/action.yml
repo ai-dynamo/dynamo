@@ -54,13 +54,16 @@ runs:
       run: |
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
+        # Copy the markers plugin into the container
+        cp .github/actions/pytest/pytest_markers_plugin.py test-results/
+        
         docker run --runtime=nvidia --rm --gpus all -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "$(pwd)/test-results:/test-results" \
           ${{ inputs.image_tag }} \
-          bash -c "pytest -v --tb=short --basetemp=/tmp --junitxml=/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
+          bash -c "pytest -v --tb=short --basetemp=/tmp --junitxml=/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -p /test-results/pytest_markers_plugin.py -m \"${{ inputs.pytest_marks }}\""
         
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
@@ -183,16 +186,30 @@ runs:
         if [[ -f "$JUNIT_FILE" ]]; then
           echo "🔍 Parsing individual test cases from JUnit XML..."
           
-          # Use Python to parse XML and extract individual test cases
+          # Use Python to parse XML and markers, then merge the data
           python3 << 'PYTHON_EOF' >> "$METRICS_FILE"
         import xml.etree.ElementTree as ET
         import json
         import sys
+        import os
         
         try:
             # Parse the JUnit XML file
             tree = ET.parse('test-results/pytest_test_report.xml')
             root = tree.getroot()
+            
+            # Load markers data if available
+            markers_data = {}
+            markers_file = 'test-results/pytest_markers.json'
+            if os.path.exists(markers_file):
+                try:
+                    with open(markers_file, 'r') as f:
+                        markers_data = json.load(f)
+                    print(f"            // Loaded markers for {len(markers_data)} tests", file=sys.stderr)
+                except Exception as e:
+                    print(f"            // Failed to load markers: {e}", file=sys.stderr)
+            else:
+                print(f"            // No markers file found at {markers_file}", file=sys.stderr)
             
             test_cases = []
             
@@ -200,9 +217,12 @@ runs:
             for testsuite in root.findall('.//testsuite'):
                 for testcase in testsuite.findall('testcase'):
                     # Extract test case information
+                    classname = testcase.get('classname', '')
+                    name = testcase.get('name', '')
+                    
                     test_info = {
-                        "classname": testcase.get('classname', ''),
-                        "name": testcase.get('name', ''),
+                        "classname": classname,
+                        "name": name,
                         "time": float(testcase.get('time', 0)),
                         "status": "passed"  # Default status
                     }
@@ -223,6 +243,35 @@ runs:
                         skipped_elem = testcase.find('skipped')
                         test_info["skip_reason"] = skipped_elem.get('message', '') if skipped_elem is not None else ''
                     
+                    # Try to find matching markers data
+                    # Look for test by various possible node IDs
+                    test_markers = None
+                    possible_ids = [
+                        f"{classname}::{name}",
+                        f"{classname.replace('.', '/')}.py::{name}",
+                        name
+                    ]
+                    
+                    for test_id in possible_ids:
+                        if test_id in markers_data:
+                            test_markers = markers_data[test_id]
+                            break
+                        # Also try partial matches
+                        for marker_id in markers_data:
+                            if marker_id.endswith(f"::{name}") and classname in marker_id:
+                                test_markers = markers_data[marker_id]
+                                break
+                        if test_markers:
+                            break
+                    
+                    # Add markers information if found
+                    if test_markers:
+                        test_info["markers"] = test_markers.get("markers", [])
+                        test_info["marker_names"] = test_markers.get("marker_names", [])
+                    else:
+                        test_info["markers"] = []
+                        test_info["marker_names"] = []
+                    
                     test_cases.append(test_info)
             
             # Output JSON array elements (without the surrounding brackets)
@@ -232,7 +281,7 @@ runs:
                 print("            " + json.dumps(test_case, separators=(',', ':')), end='')
             
         except Exception as e:
-            print(f'            // Error parsing XML: {str(e)}', file=sys.stderr)
+            print(f'            // Error parsing XML/markers: {str(e)}', file=sys.stderr)
         
         PYTHON_EOF
         
