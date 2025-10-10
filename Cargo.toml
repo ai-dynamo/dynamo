@@ -10,6 +10,7 @@ members = [
     "lib/async-openai",
     "lib/parsers",
     "lib/bindings/c",
+    "lib/bindings/python/codegen",
     "lib/engines/*",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
