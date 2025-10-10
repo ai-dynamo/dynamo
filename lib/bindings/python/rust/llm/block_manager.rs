@@ -133,7 +133,7 @@ impl BlockManager {
 
                 if leader.num_disk_blocks() > 0 {
                     if let Some(filter) =
-                        create_disk_offload_filter(&cancel_token, rt.inner().runtime().primary())
+                        create_disk_offload_filter(&cancel_token, &rt.inner().runtime().primary())
                             .map_err(to_pyerr)?
                     {
                         host_layout_config = host_layout_config.offload_filter(Some(filter));
@@ -339,7 +339,7 @@ impl BlockManagerBuilder {
 
             if leader_inner.num_disk_blocks() > 0 {
                 if let Some(filter) =
-                    create_disk_offload_filter(&cancel_token, drt.inner().runtime().primary())?
+                    create_disk_offload_filter(&cancel_token, &drt.inner().runtime().primary())?
                 {
                     host_layout_config = host_layout_config.offload_filter(Some(filter));
                 }
