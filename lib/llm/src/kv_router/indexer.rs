@@ -801,9 +801,8 @@ impl KvIndexer {
         let cancel_clone = token.clone();
 
         let task = std::thread::spawn(move || {
-            // create a new tokio runtime which will only perform work on a single thread
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1) // Single-threaded environment
+            // Create a single-threaded tokio runtime
+            let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
@@ -1058,8 +1057,7 @@ impl KvIndexerSharded {
             remove_worker_tx.push(shard_remove_worker_tx);
             dump_tx.push(shard_dump_tx); // Store dump sender
 
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
+            let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();

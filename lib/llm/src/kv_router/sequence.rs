@@ -367,9 +367,8 @@ impl ActiveSequencesMultiWorker {
         let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let handle = std::thread::spawn(move || {
-            // Create a new tokio runtime which will only perform work on a single thread
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1) // Single-threaded environment
+            // Create a single-threaded tokio runtime
+            let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
