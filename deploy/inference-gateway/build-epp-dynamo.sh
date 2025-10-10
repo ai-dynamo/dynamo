@@ -56,7 +56,7 @@ mkdir -p "${DYNAMO_INCLUDE_DIR}"
 echo "Copying files to the GAIE project..."
 cp "${HEADER_OUTPUT}" "${DYNAMO_INCLUDE_DIR}/"
 cp "${DYNAMO_DIR}/target/release/libdynamo_llm_capi.a" "${DYNAMO_LIB_DIR}/"
-cp "${DYNAMO_DIR}/container/Dockerfile.epp" "${GAIE_DIR}"
+cp "${DYNAMO_DIR}/container/Dockerfile.epp" "${GAIE_DIR}/Dockerfile.dynamo"
 
 # Verify files were copied
 if [[ ! -f "${DYNAMO_INCLUDE_DIR}/llm_engine.h" ]]; then
