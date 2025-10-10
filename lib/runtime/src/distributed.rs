@@ -313,6 +313,8 @@ impl DistributedRuntime {
     }
 
     /// Add a Prometheus update callback to the given hierarchies
+    /// TODO: rename this to register_callback, once we move the the MetricsRegistry trait
+    ///       out of the runtime, and make it into a composed module.
     pub fn register_prometheus_update_callback(
         &self,
         hierarchies: Vec<String>,
@@ -357,19 +359,6 @@ impl DistributedRuntime {
                 .or_default()
                 .add_prometheus_expfmt_callback(callback.clone());
         }
-    }
-
-    /// Clear everything in etcd under a key.
-    /// todo: Remove as soon as we auto-delete the MDC.
-    pub async fn temp_clear_namespace(&self, name: &str) -> anyhow::Result<()> {
-        let Some(etcd_client) = self.etcd_client() else {
-            return Ok(()); // no etcd, nothing to clear
-        };
-        let kvs = etcd_client.kv_get_prefix(name).await?;
-        for kv in kvs {
-            etcd_client.kv_delete(kv.key(), None).await?;
-        }
-        Ok(())
     }
 
     /// Get all registered hierarchy keys. Private because it is only used for testing.

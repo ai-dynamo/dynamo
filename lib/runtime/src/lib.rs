@@ -120,10 +120,7 @@ impl MetricsRegistryEntry {
     }
 
     /// Add an exposition text callback that returns Prometheus text
-    pub fn add_prometheus_expfmt_callback(
-        &mut self,
-        callback: PrometheusExpositionFormatCallback,
-    ) {
+    pub fn add_prometheus_expfmt_callback(&mut self, callback: PrometheusExpositionFormatCallback) {
         self.prometheus_expfmt_callbacks.push(callback);
     }
 

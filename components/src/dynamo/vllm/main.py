@@ -14,10 +14,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo._core import Endpoint
 from dynamo.common.config_dump import dump_config
-from dynamo.common.utils.prometheus import (
-    is_engine_metrics_callback_enabled,
-    register_engine_metrics_callback,
-)
+from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
@@ -291,8 +288,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     if kv_publisher:
         handler.kv_publisher = kv_publisher
 
-    # Setup vLLM metrics passthrough via callback
-    if is_engine_metrics_callback_enabled():
+    if config.engine_args.disable_log_stats is False:
         from prometheus_client import REGISTRY
 
         register_engine_metrics_callback(generate_endpoint, REGISTRY, "vllm:", "vLLM")

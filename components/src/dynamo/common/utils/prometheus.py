@@ -4,10 +4,10 @@
 """
 Prometheus metrics utilities for Dynamo components.
 
-This module provides shared functionality for collecting and logging Prometheus metrics
-across different backend components (SGLang, vLLM, etc.).
+This module provides shared functionality for collecting and exposing Prometheus metrics
+from backend engines (SGLang, vLLM, etc.) via Dynamo's metrics endpoint.
 
-Note: Engine metrics (vLLM, SGLang, TRT-LLM) take time to appear after engine initialization,
+Note: Engine metrics take time to appear after engine initialization,
 while Dynamo runtime metrics are available immediately after component creation.
 """
 
@@ -15,31 +15,12 @@ import logging
 from typing import TYPE_CHECKING, Optional
 
 from dynamo._core import Endpoint
-from dynamo.common.utils.env import env_is_truthy
 
 # Import CollectorRegistry only for type hints to avoid importing prometheus_client at module load time.
 # prometheus_client must be imported AFTER set_prometheus_multiproc_dir() is called.
 # See main.py worker() function for detailed explanation.
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
-
-
-def is_engine_metrics_callback_enabled() -> bool:
-    """
-    Check if engine metrics callback passthrough is enabled.
-
-    Returns:
-        True if callback-based metrics passthrough is enabled when DYN_ENGINE_METRICS_ENABLED is set to a truthy value.
-        False otherwise (including when not set).
-
-    Note: To enable, explicitly set DYN_ENGINE_METRICS_ENABLED=1 or =true
-
-    Example:
-        export DYN_ENGINE_METRICS_ENABLED=1     # Enable callback
-        export DYN_ENGINE_METRICS_ENABLED=true  # Enable callback
-        export DYN_ENGINE_METRICS_ENABLED=0     # Disable callback (or just unset)
-    """
-    return env_is_truthy("DYN_ENGINE_METRICS_ENABLED")
 
 
 def register_engine_metrics_callback(
@@ -49,10 +30,10 @@ def register_engine_metrics_callback(
     engine_name: str,
 ) -> None:
     """
-    Register a callback to expose engine Prometheus metrics via endpoint.
+    Register a callback to expose engine Prometheus metrics via Dynamo's metrics endpoint.
 
-    This function registers a callback that will be invoked when the /metrics endpoint
-    is scraped, allowing engine metrics to be included in the endpoint output.
+    This registers a callback that is invoked when /metrics is scraped, passing through
+    engine-specific metrics alongside Dynamo runtime metrics.
 
     Args:
         endpoint: Dynamo endpoint object with metrics.register_prometheus_expfmt_callback()
@@ -66,16 +47,13 @@ def register_engine_metrics_callback(
             generate_endpoint, REGISTRY, "vllm:", "vLLM"
         )
     """
-    if not is_engine_metrics_callback_enabled():
-        logging.info(f"{engine_name} metrics passthrough disabled")
-        return
 
     def get_expfmt() -> str:
         """Callback to return engine Prometheus metrics in exposition format"""
         return get_prometheus_expfmt(registry, metric_prefix_filter=metric_prefix)
 
     endpoint.metrics.register_prometheus_expfmt_callback(get_expfmt)
-    logging.info(f"Registered {engine_name} metrics exposition text callback")
+    logging.info(f"Registered {engine_name} metrics passthrough callback")
 
 
 def get_prometheus_expfmt(
@@ -87,6 +65,21 @@ def get_prometheus_expfmt(
 
     Collects all metrics from the registry and returns them in Prometheus text exposition format.
     Optionally filters metrics by prefix.
+
+    Prometheus exposition format consists of:
+    - Comment lines starting with # (HELP and TYPE declarations)
+    - Metric lines with format: metric_name{label="value"} metric_value timestamp
+
+    Example output format:
+        # HELP vllm:request_success_total Number of successful requests
+        # TYPE vllm:request_success_total counter
+        vllm:request_success_total{model="llama2",endpoint="generate"} 150.0
+        # HELP vllm:time_to_first_token_seconds Time to first token
+        # TYPE vllm:time_to_first_token_seconds histogram
+        vllm:time_to_first_token_seconds_bucket{model="llama2",le="0.01"} 10.0
+        vllm:time_to_first_token_seconds_bucket{model="llama2",le="0.1"} 45.0
+        vllm:time_to_first_token_seconds_count{model="llama2"} 50.0
+        vllm:time_to_first_token_seconds_sum{model="llama2"} 2.5
 
     Args:
         registry: Prometheus registry to collect from.
@@ -113,26 +106,19 @@ def get_prometheus_expfmt(
         metrics_text = generate_latest(registry).decode("utf-8")
 
         if metric_prefix_filter:
-            # Filter lines that contain the prefix
-            filtered_lines = []
-            for line in metrics_text.split("\n"):
-                # Keep comment lines (TYPE, HELP) and metric lines that match prefix
-                if line.startswith("#") or line.startswith(metric_prefix_filter):
-                    filtered_lines.append(line)
+            # Filter lines: keep metric lines starting with prefix and their HELP/TYPE comments
+            import re
 
+            escaped_prefix = re.escape(metric_prefix_filter)
+            pattern = rf"^(?:{escaped_prefix}|# (?:HELP|TYPE) {escaped_prefix})"
+            filtered_lines = [
+                line for line in metrics_text.split("\n") if re.match(pattern, line)
+            ]
             result = "\n".join(filtered_lines)
             if result:
-                logging.debug(f"=== {metric_prefix_filter} Prometheus Metrics ===")
-                logging.debug("\n" + result)
-                logging.debug("=" * 50)
                 # Ensure result ends with newline
                 if result and not result.endswith("\n"):
                     result += "\n"
-            else:
-                logging.debug(
-                    f"No {metric_prefix_filter} metrics collected yet. "
-                    f"Metrics will appear after engine initialization completes."
-                )
             return result
         else:
             if metrics_text.strip():

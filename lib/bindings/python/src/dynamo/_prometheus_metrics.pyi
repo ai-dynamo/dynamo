@@ -228,7 +228,7 @@ class RuntimeMetrics:
     Also provides utilities for registering metrics callbacks.
     """
 
-    def register_prometheus_update_callback(self, callback: Callable[[], None]) -> None:
+    def register_callback(self, callback: Callable[[], None]) -> None:
         """
         Register a Python callback to be invoked before metrics are scraped.
 
@@ -247,7 +247,7 @@ class RuntimeMetrics:
             def update_metrics():
                 counter.inc()
 
-            metrics.register_prometheus_update_callback(update_metrics)
+            metrics.register_callback(update_metrics)
             ```
         """
         ...

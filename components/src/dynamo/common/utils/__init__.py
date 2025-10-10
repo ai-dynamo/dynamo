@@ -8,10 +8,9 @@ This module contains shared utility functions used across multiple
 Dynamo backends and components.
 
 Submodules:
-    - env: Environment variable parsing utilities
     - prometheus: Prometheus metrics collection and logging utilities
 """
 
-from dynamo.common.utils import env, prometheus
+from dynamo.common.utils import prometheus
 
-__all__ = ["env", "prometheus"]
+__all__ = ["prometheus"]

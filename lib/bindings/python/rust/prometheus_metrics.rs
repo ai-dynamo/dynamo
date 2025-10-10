@@ -650,6 +650,8 @@ impl PyRuntimeMetrics {
         let hierarchy = registry_item.hierarchy();
 
         // Store the callback in the DRT's metrics callback registry using the registry_item's hierarchy
+        // TODO: rename this to register_callback, once we move the the MetricsRegistry trait
+        //       out of the runtime, and make it into a composed module.
         registry_item.drt().register_prometheus_update_callback(
             vec![hierarchy.clone()],
             Arc::new(move || {
@@ -671,18 +673,14 @@ impl PyRuntimeMetrics {
 impl PyRuntimeMetrics {
     /// Register a Python callback to be invoked before metrics are scraped
     /// This callback will be called for this endpoint's metrics hierarchy
-    fn register_prometheus_update_callback(&self, callback: PyObject, _py: Python) -> PyResult<()> {
+    fn register_callback(&self, callback: PyObject, _py: Python) -> PyResult<()> {
         Self::register_callback_for(self.metricsregistry.as_ref(), callback)
     }
 
     /// Register a Python callback that returns Prometheus exposition text
     /// The returned text will be appended to the /metrics endpoint output
     /// The callback should return a string in Prometheus text exposition format
-    fn register_prometheus_expfmt_callback(
-        &self,
-        callback: PyObject,
-        _py: Python,
-    ) -> PyResult<()> {
+    fn register_prometheus_expfmt_callback(&self, callback: PyObject, _py: Python) -> PyResult<()> {
         let hierarchy = self.metricsregistry.hierarchy();
 
         // Store the callback in the DRT's metrics exposition text callback registry
