@@ -178,16 +178,6 @@ def setup_vllm_engine(config, stat_logger=None):
     else:
         logger.info(f"VllmWorker for {config.model} has been initialized")
 
-    # Debug: Check if prometheus dir still exists and has files after engine creation
-    multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
-    if multiproc_dir and os.path.exists(multiproc_dir):
-        files = os.listdir(multiproc_dir)
-        logger.info(f"After engine creation, prometheus dir has {len(files)} files")
-    else:
-        logger.warning(
-            f"After engine creation, prometheus dir not found: {multiproc_dir}"
-        )
-
     return engine_client, vllm_config, default_sampling_params
 
 

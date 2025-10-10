@@ -100,8 +100,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         engine, config, component, generate_endpoint
     )
 
-    # Setup SGLang metrics passthrough via callback
-    # Note: metrics_task from setup_sgl_metrics doesn't have all the metrics.
+    # Setup SGLang metrics passthrough via callback for aggregated mode
     # This callback pulls from the full Prometheus MultiProcessCollector registry
     # which includes all SGLang metrics (scheduler, tokenizer, function latencies, etc.)
     registry = CollectorRegistry()
@@ -210,14 +209,6 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
-
-    # Setup SGLang metrics passthrough via callback
-    # Note: metrics_task from setup_sgl_metrics doesn't have all the metrics.
-    # This callback pulls from the full Prometheus MultiProcessCollector registry
-    # which includes all SGLang metrics (scheduler, tokenizer, function latencies, etc.)
-    registry = CollectorRegistry()
-    multiprocess.MultiProcessCollector(registry)
-    register_engine_metrics_callback(generate_endpoint, registry, "sglang:", "SGLang")
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
