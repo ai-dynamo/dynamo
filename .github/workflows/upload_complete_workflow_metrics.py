@@ -956,16 +956,9 @@ class WorkflowMetricsUploader:
                 test_data[FIELD_ID] = f"github-test-{job_id}-{test_name}"
                 test_data[FIELD_STEP_ID] = test_step_id
                 test_data[FIELD_JOB_ID] = job_id
-                test_data[FIELD_WORKFLOW_ID] = str(self.run_id)
-                test_data[FIELD_REPO] = self.repo
-                test_data[FIELD_WORKFLOW_NAME] = self.workflow_name
-                test_data[FIELD_BRANCH] = self.ref_name
-                test_data[FIELD_COMMIT_SHA] = self.sha
-                test_data[FIELD_PR_ID] = self.pr_id
 
                 # Status & Events - using your specified fields
                 test_data[FIELD_STATUS] = individual_test.get("status", "unknown")
-                test_data[FIELD_GITHUB_EVENT] = self.github_event
 
                 # Test Info - using your specified fields
                 test_data[FIELD_FRAMEWORK] = test_framework
@@ -1007,6 +1000,9 @@ class WorkflowMetricsUploader:
                     "test_end_time", datetime.now(timezone.utc).isoformat()
                 )
 
+                # Add common context fields (repo, branch, pr_id, etc.)
+                self.add_common_context_fields(test_data)
+
                 # Print individual test metrics instead of uploading for now
                 print(f"🧪 Individual test: {test_full_name}")
                 print(f"   ID: {test_data[FIELD_ID]}")
@@ -1018,6 +1014,7 @@ class WorkflowMetricsUploader:
                 print(f"   Workflow ID: {test_data[FIELD_WORKFLOW_ID]}")
                 print(f"   Repo: {test_data[FIELD_REPO]}")
                 print(f"   Branch: {test_data[FIELD_BRANCH]}")
+                print(f"   PR ID: {test_data[FIELD_PR_ID]}")
                 if FIELD_TEST_MARKERS in test_data:
                     print(f"   Markers: {test_data[FIELD_TEST_MARKERS]}")
                 if FIELD_ERROR_MESSAGE in test_data:
