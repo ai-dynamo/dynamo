@@ -24,9 +24,8 @@ import time
 
 import uvloop
 
-from dynamo._core import Component, Endpoint
-from dynamo._prometheus_metrics import Gauge, IntCounter, IntGauge, IntGaugeVec
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.prometheus_metrics import Gauge, IntCounter, IntGauge, IntGaugeVec
+from dynamo.runtime import Component, DistributedRuntime, Endpoint, dynamo_worker
 
 
 def metrics_updater_thread(

@@ -24,9 +24,8 @@ import uvloop
 
 # Note that these imports are for type hints only. They cannot be instantiated directly.
 # You can instantiate them using the endpoint.metrics.create_*() methods.
-from dynamo._core import Component, Endpoint
-from dynamo._prometheus_metrics import Gauge, IntCounter, IntGauge, IntGaugeVec
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.prometheus_metrics import Gauge, IntCounter, IntGauge, IntGaugeVec
+from dynamo.runtime import Component, DistributedRuntime, Endpoint, dynamo_worker
 
 
 @dynamo_worker()
