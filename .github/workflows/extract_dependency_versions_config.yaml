@@ -13,7 +13,7 @@ baseline:
 critical_dependencies:
   # List of critical dependencies (case-insensitive matching)
   # Supports exact names or partial matches (e.g., "CUDA" matches "NVIDIA CUDA")
-  
+
   # Core Runtime & Languages
   - name: "Python"
     reason: "Primary runtime language"
@@ -21,7 +21,7 @@ critical_dependencies:
     reason: "Systems programming language"
   - name: "CUDA"
     reason: "GPU compute platform"
-  
+
   # Infrastructure & Orchestration (Docker Compose and Helm Chart dependencies)
   - name: "etcd"
     reason: "Distributed configuration store"
@@ -35,7 +35,7 @@ critical_dependencies:
     reason: "Container orchestration"
   - name: "dynamo-operator"
     reason: "Dynamo Kubernetes operator"
-  
+
   # ML Frameworks & Base Images
   - name: "PyTorch"
     reason: "Deep learning framework"
@@ -43,7 +43,7 @@ critical_dependencies:
     reason: "TensorRT-LLM base container"
   - name: "CUDA-dl-base"
     reason: "vLLM/SGLang base container"
-  
+
   # Network & Communication (ARG names are formatted: NIXL_REF -> Nixl Ref)
   - name: "Nixl"
     reason: "Network interconnect library"
@@ -57,7 +57,7 @@ critical_dependencies:
     reason: "UCX Python bindings"
   - name: "Nvshmem"
     reason: "NVIDIA SHMEM communication"
-  
+
   # ML Inference & Optimization (ARG names are formatted: FLASH_ATTN_VER -> Flash Attn Ver)
   - name: "Flash Attn"
     reason: "Flash attention implementation"
@@ -71,7 +71,7 @@ critical_dependencies:
     reason: "Optimized GEMM operations"
   - name: "pplx"
     reason: "Inference kernels"
-  
+
   # Build & Package Tools
   - name: "CMake"
     reason: "Build system"
@@ -79,7 +79,7 @@ critical_dependencies:
     reason: "CMake version ARG"
   - name: "Uvicorn"
     reason: "ASGI server"
-  
+
   # Performance & Benchmarking
   - name: "Genai Perf"
     reason: "GenAI performance testing"
@@ -87,7 +87,7 @@ critical_dependencies:
     reason: "GenAI performance testing (pip package)"
   - name: "aiperf"
     reason: "AI performance benchmarking"
-  
+
   # Custom Components
   - name: "ModelExpress"
     reason: "Model serving infrastructure"
@@ -105,7 +105,7 @@ components:
       - "containers/Dockerfile.trtllm"  # fallback if moved
     scripts: []
     required: true
-  
+
   vllm:
     dockerfiles:
       - "container/Dockerfile.vllm"
@@ -114,7 +114,7 @@ components:
       - "container/deps/vllm/install_vllm.sh"
       - "container/dependencies/vllm/install_vllm.sh"  # fallback
     required: true
-  
+
   sglang:
     dockerfiles:
       - "container/Dockerfile.sglang"
@@ -122,7 +122,7 @@ components:
       - "containers/Dockerfile.sglang"  # fallback
     scripts: []
     required: true
-  
+
   operator:
     dockerfiles:
       - "deploy/cloud/operator/Dockerfile"
@@ -132,7 +132,7 @@ components:
       - "deployment/cloud/operator/go.mod"  # fallback
     scripts: []
     required: true
-  
+
   shared:
     dockerfiles:
       - "container/Dockerfile"
@@ -166,9 +166,9 @@ extraction:
   dockerfile:
     base_image_keywords: ["FROM"]
     version_arg_keywords: ["VERSION", "REF", "TAG", "_VER"]
-  
+
   requirements:
     version_operators: ["==", ">=", "<=", ">", "<", "~=", "!="]
-  
+
   go_mod:
     skip_indirect: false  # Set to true to skip indirect dependencies
