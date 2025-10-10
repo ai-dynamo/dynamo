@@ -28,7 +28,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Once;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use figment::{
     Figment,
@@ -521,15 +520,7 @@ where
     }
 
     // Adds W3C compliant span_id, trace_id, and parent_id if not already present
-    // TODO: Change to on_enter
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
-        
-        // Handling of trace_id:
-        // 1. Check if passed in (first span across a network boundary)
-        // 2. Check if set on parent span (all spans not first across a network boundary)
-        // 3. trace_id is retrieved from the builder (first span in a request)
-
-        // span id on the other hand can always be reliably retrieved from the otel extensions
         if let Some(span) = ctx.span(id) {
             let mut trace_id: Option<String> = None;
             let mut parent_id: Option<String> = None;
