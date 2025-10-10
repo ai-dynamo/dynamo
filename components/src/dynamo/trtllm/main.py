@@ -349,6 +349,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             encode_client=encode_client,
             multimodal_processor=multimodal_processor,
             connector=connector,
+            runtime=runtime,  # Pass runtime for graceful shutdown
         )
 
         if next_client:
@@ -392,7 +393,9 @@ async def init(runtime: DistributedRuntime, config: Config):
                 metrics_labels,
             ) as publisher:
                 handler_config.publisher = publisher
-                handler = RequestHandlerFactory().get_request_handler(handler_config)
+                handler = RequestHandlerFactory().get_request_handler(
+                    handler_config
+                )
                 await endpoint.serve_endpoint(
                     handler.generate,
                     metrics_labels=metrics_labels,
