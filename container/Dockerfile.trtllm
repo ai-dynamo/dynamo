@@ -2,10 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
-ARG BASE_IMAGE_TAG="25.06-py3"
+ARG BASE_IMAGE_TAG="25.09-py3"
+ARG RELEASE_BUILD
 ARG ENABLE_KVBM=false
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
-ARG RUNTIME_IMAGE_TAG="12.9.1-runtime-ubuntu24.04"
+ARG RUNTIME_IMAGE_TAG="13.0.1-runtime-ubuntu24.04"
 
 # TensorRT-LLM specific configuration
 ARG HAS_TRTLLM_CONTEXT=0
@@ -145,7 +146,7 @@ ENV OPAL_PREFIX=/opt/hpcx/ompi
 
 ### VIRTUAL ENVIRONMENT SETUP ###
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 # Create virtual environment
 RUN mkdir -p /opt/dynamo/venv && \
     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
