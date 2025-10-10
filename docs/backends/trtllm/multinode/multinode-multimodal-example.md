@@ -44,7 +44,7 @@ Before you begin, ensure you have completed the initial environment configuratio
 
 The following sections provide specific instructions for deploying `meta-llama/Llama-4-Maverick-17B-128E-Instruct`, including environment variable setup and launch commands. These steps can be adapted for other large multimodal models.
 
-### Environment Variable Setup
+## Environment Variable Setup
 
 Assuming you have already allocated your nodes via `salloc`, and are
 inside an interactive shell on one of the allocated nodes, set the

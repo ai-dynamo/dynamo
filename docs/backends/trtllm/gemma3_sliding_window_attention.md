@@ -23,9 +23,9 @@ VSWA is a mechanism in which a model’s layers alternate between multiple slidi
 > [!Note]
 > - Ensure that required services such as `nats` and `etcd` are running before starting.
 > - Request access to `google/gemma-3-1b-it` on Hugging Face and set your `HF_TOKEN` environment variable for authentication.
-> - It’s recommended to continue using the VSWA feature with the Dynamo 0.5.0 release and the TensorRT-LLM dynamo runtime image nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.0. The 0.5.1 release bundles TensorRT-LLM v1.1.0rc5, which has a regression that breaks VSWA.
+> - It's recommended to continue using the VSWA feature with the Dynamo 0.5.0 release and the TensorRT-LLM dynamo runtime image nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.0. The 0.5.1 release bundles TensorRT-LLM v1.1.0rc5, which has a regression that breaks VSWA.
 
-### Aggregated Serving
+## Aggregated Serving
 ```bash
 cd $DYNAMO_HOME/components/backends/trtllm
 export MODEL_PATH=google/gemma-3-1b-it
@@ -34,7 +34,7 @@ export AGG_ENGINE_ARGS=engine_configs/gemma3/vswa_agg.yaml
 ./launch/agg.sh
 ```
 
-### Aggregated Serving with KV Routing
+## Aggregated Serving with KV Routing
 ```bash
 cd $DYNAMO_HOME/components/backends/trtllm
 export MODEL_PATH=google/gemma-3-1b-it
@@ -43,7 +43,7 @@ export AGG_ENGINE_ARGS=engine_configs/gemma3/vswa_agg.yaml
 ./launch/agg_router.sh
 ```
 
-#### Disaggregated Serving
+## Disaggregated Serving
 ```bash
 cd $DYNAMO_HOME/components/backends/trtllm
 export MODEL_PATH=google/gemma-3-1b-it
@@ -53,7 +53,7 @@ export DECODE_ENGINE_ARGS=engine_configs/gemma3/vswa_decode.yaml
 ./launch/disagg.sh
 ```
 
-#### Disaggregated Serving with KV Routing
+## Disaggregated Serving with KV Routing
 ```bash
 cd $DYNAMO_HOME/components/backends/trtllm
 export MODEL_PATH=google/gemma-3-1b-it
