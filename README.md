@@ -84,6 +84,14 @@ The Dynamo team recommends the `uv` Python package manager, although any way wor
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
+### Install Python development headers
+
+Backend engines require Python development headers for JIT compilation. Install them with:
+
+```bash
+sudo apt install python3-dev
+```
+
 ### Install etcd and NATS (required)
 
 To coordinate across a data center, Dynamo relies on etcd and NATS. To run Dynamo locally, these need to be available.
