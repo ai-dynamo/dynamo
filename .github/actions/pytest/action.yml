@@ -54,8 +54,8 @@ runs:
       run: |
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
-        # Copy the markers plugin into the container
-        cp .github/actions/pytest/pytest_markers_plugin.py test-results/
+        # Copy the markers plugin into the container mount directory
+        cp ${{ github.action_path }}/pytest_markers_plugin.py test-results/
         
         docker run --runtime=nvidia --rm --gpus all -w /workspace \
           --cpus=${NUM_CPUS} \
@@ -63,7 +63,7 @@ runs:
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "$(pwd)/test-results:/test-results" \
           ${{ inputs.image_tag }} \
-          bash -c "pytest -v --tb=short --basetemp=/tmp --junitxml=/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -p /test-results/pytest_markers_plugin.py -m \"${{ inputs.pytest_marks }}\""
+          bash -c "PYTHONPATH=/test-results:$PYTHONPATH pytest -v --tb=short --basetemp=/tmp --junitxml=/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -p pytest_markers_plugin -m \"${{ inputs.pytest_marks }}\""
         
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
