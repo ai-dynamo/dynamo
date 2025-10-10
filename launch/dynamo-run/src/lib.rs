@@ -83,6 +83,7 @@ pub async fn run(
 
 /// Create the engine matching `out_opt`
 /// Note validation happens in Flags::validate. In here assume everything is going to work.
+#[allow(unused_variables)]
 async fn engine_for(
     out_opt: Output,
     flags: Flags,
