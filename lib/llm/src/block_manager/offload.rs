@@ -166,7 +166,10 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 config.cancellation_token.clone(),
             )),
             filters.device.clone(),
-            config.kvbm_metrics.as_ref().map(|m| m.offload_blocks_d2h.clone()),
+            config
+                .kvbm_metrics
+                .as_ref()
+                .map(|m| m.offload_blocks_d2h.clone()),
             config.cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
@@ -201,7 +204,10 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 config.cancellation_token.clone(),
             )),
             filters.host.clone(),
-            config.kvbm_metrics.as_ref().map(|m| m.offload_blocks_h2d.clone()),
+            config
+                .kvbm_metrics
+                .as_ref()
+                .map(|m| m.offload_blocks_h2d.clone()),
             config.cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(

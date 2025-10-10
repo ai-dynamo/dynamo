@@ -222,8 +222,7 @@ impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: Blo
     ) -> Result<Self> {
         let (futures_tx, mut futures_rx) = mpsc::channel(1);
 
-        let mut completion_manager =
-            TransferCompletionManager::new();
+        let mut completion_manager = TransferCompletionManager::new();
 
         CriticalTaskExecutionHandle::new_with_runtime(
             move |cancel_token| async move {

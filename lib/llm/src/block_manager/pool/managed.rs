@@ -517,12 +517,8 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> ProgressEngine
         async_runtime: Handle,
     ) -> Self {
         let (return_tx, return_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = State::<S, L, M>::new(
-            event_manager,
-            return_tx,
-            global_registry,
-            async_runtime,
-        );
+        let mut state =
+            State::<S, L, M>::new(event_manager, return_tx, global_registry, async_runtime);
 
         let count = blocks.len();
 
