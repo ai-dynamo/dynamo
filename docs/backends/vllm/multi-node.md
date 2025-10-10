@@ -95,9 +95,6 @@ python -m dynamo.vllm \
   --is-prefill-worker
 ```
 
-
-## TODO
-
 ## Large Model Deployment
 
 For models requiring more GPUs than available on a single node such as tensor-parallel-size 16:
