@@ -6,7 +6,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::*;
 
-
 pub use async_nats::service::endpoint::Stats as EndpointStats;
 
 #[derive(Educe, Builder, Dissolve)]
@@ -244,9 +243,16 @@ impl EndpointConfigBuilder {
                 .kv_create(&etcd_path, info, Some(lease_id))
                 .await
         {
-            tracing::error!("Unable to register service {}/{} for discovery: {:?}", component_name, endpoint_name, e);
+            tracing::error!(
+                "Unable to register service {}/{} for discovery: {:?}",
+                component_name,
+                endpoint_name,
+                e
+            );
             cancel_token.cancel();
-            return Err(error!("Unable to register service for discovery. Check discovery service status"));
+            return Err(error!(
+                "Unable to register service for discovery. Check discovery service status"
+            ));
         }
         task.await??;
 

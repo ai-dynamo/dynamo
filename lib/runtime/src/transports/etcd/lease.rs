@@ -20,7 +20,11 @@ pub async fn create_lease(
         match keep_alive(lease_client, id, ttl, child).await {
             Ok(_) => tracing::trace!("keep alive task exited successfully"),
             Err(e) => {
-                tracing::error!("{}: {:?}", "Unable to maintain lease. Check etcd server status", e);
+                tracing::error!(
+                    "{}: {:?}",
+                    "Unable to maintain lease. Check etcd server status",
+                    e
+                );
                 token.cancel();
             }
         }
@@ -63,7 +67,9 @@ pub async fn keep_alive(
         // if the deadline is exceeded, then we have failed to issue a heartbeat in time
         // we may be permanently disconnected from the etcd server, so we are now officially done
         if deadline < std::time::Instant::now() {
-            return Err(error!("Unable to refresh lease - deadline exceeded. Check etcd server status"));
+            return Err(error!(
+                "Unable to refresh lease - deadline exceeded. Check etcd server status"
+            ));
         }
 
         tokio::select! {

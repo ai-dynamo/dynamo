@@ -28,7 +28,6 @@ pub use path::*;
 
 use super::utils::build_in_runtime;
 
-
 /// ETCD Client
 #[derive(Clone)]
 pub struct Client {
@@ -96,22 +95,29 @@ impl Client {
 
         let ((client, lease_id), rt) = build_in_runtime(
             async move {
-                let client = etcd_client::Client::connect(config.etcd_url.clone(), config.etcd_connect_options)
-                    .await
-                    .with_context(|| format!(
+                let client = etcd_client::Client::connect(
+                    config.etcd_url.clone(),
+                    config.etcd_connect_options,
+                )
+                .await
+                .with_context(|| {
+                    format!(
                         "Unable to connect to etcd server at {}. Check etcd server status",
                         config.etcd_url.join(", ")
-                    ))?;
+                    )
+                })?;
 
                 let lease_id = if config.attach_lease {
                     let lease_client = client.lease_client();
 
                     let lease = create_lease(lease_client, 10, token)
                         .await
-                        .with_context(|| format!(
-                            "Unable to create lease. Check etcd server status at {}",
-                            config.etcd_url.join(", ")
-                        ))?;
+                        .with_context(|| {
+                            format!(
+                                "Unable to create lease. Check etcd server status at {}",
+                                config.etcd_url.join(", ")
+                            )
+                        })?;
 
                     lease.id
                 } else {
@@ -227,11 +233,17 @@ impl Client {
                 Some(response) => match response {
                     TxnOpResponse::Txn(response) => match response.succeeded() {
                         true => Ok(()),
-                        false => Err(error!("Unable to create or validate key. Check etcd server status")),
+                        false => Err(error!(
+                            "Unable to create or validate key. Check etcd server status"
+                        )),
                     },
-                    _ => Err(error!("Unable to validate key operation. Check etcd server status")),
+                    _ => Err(error!(
+                        "Unable to validate key operation. Check etcd server status"
+                    )),
                 },
-                None => Err(error!("Unable to create or validate key. Check etcd server status")),
+                None => Err(error!(
+                    "Unable to create or validate key. Check etcd server status"
+                )),
             }
         }
     }
