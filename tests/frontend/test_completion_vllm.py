@@ -210,9 +210,6 @@ def test_completion_multi_element_array_prompt() -> None:
 
     response = _send_completion_request(payload)
 
-    print('[{}]'.format("+" * 10))
-    print(response)
-
     # request should fail because we are sending multiple prompts
     assert response.status_code == 500, (
         f"Completion request ({reasoning_effort}) failed with status "
