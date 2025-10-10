@@ -13,8 +13,7 @@ use crate::block_manager::{
     VllmBlockManager, distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest,
     vllm::connector::leader::slot::VllmConnectorSlot,
 };
-use crate::{extract_distributed_runtime_from_obj, get_current_tokio_handle};
-use dynamo_runtime::DistributedRuntime;
+use crate::get_current_tokio_handle;
 
 use dynamo_llm::block_manager::{
     BasicMetadata, DiskStorage, ImmutableBlock, PinnedStorage,
@@ -543,19 +542,18 @@ impl PyKvConnectorLeader {
     #[pyo3(signature = (worker_id, drt, page_size, leader))]
     pub fn new(
         worker_id: String,
-        drt: PyObject,
+        drt: Option<PyObject>,
         page_size: usize,
         leader: PyKvbmLeader,
     ) -> PyResult<Self> {
-        let drt: Arc<DistributedRuntime> =
-            Python::with_gil(|py| extract_distributed_runtime_from_obj(py, drt))?;
+        let _ = &drt; // drt is currently un-used in leader
         let enable_kvbm_record = std::env::var("ENABLE_KVBM_RECORD")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
         let connector_leader: Box<dyn Leader> = if enable_kvbm_record {
             Box::new(recorder::KvConnectorLeaderRecorder::new(
-                worker_id, drt, page_size, leader,
+                worker_id, page_size, leader,
             ))
         } else {
             Box::new(KvConnectorLeader::new(worker_id, page_size, leader))

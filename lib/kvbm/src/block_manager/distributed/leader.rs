@@ -58,7 +58,7 @@ fn get_leader_init_timeout_secs(override_key: &str) -> u64 {
 #[derive(Clone, Dissolve)]
 pub struct KvbmLeader {
     leader: Arc<KvbmLeaderImpl>,
-    drt: Arc<rs::DistributedRuntime>,
+    drt: Option<Arc<rs::DistributedRuntime>>,
 }
 
 impl KvbmLeader {
@@ -70,10 +70,15 @@ impl KvbmLeader {
 #[pymethods]
 impl KvbmLeader {
     #[new]
-    #[pyo3(signature = (world_size, drt))]
-    fn new(world_size: usize, drt: PyObject) -> PyResult<Self> {
-        let drt: Arc<rs::DistributedRuntime> =
-            Python::with_gil(|py| extract_distributed_runtime_from_obj(py, drt))?;
+    #[pyo3(signature = (world_size, drt=None))]
+    fn new(world_size: usize, drt: Option<PyObject>) -> PyResult<Self> {
+        let drt: Option<Arc<rs::DistributedRuntime>> = Python::with_gil(|py| {
+            if let Some(obj) = drt {
+                extract_distributed_runtime_from_obj(py, obj)
+            } else {
+                Ok(None)
+            }
+        })?;
 
         let leader_init_timeout_sec: u64 =
             get_leader_init_timeout_secs(LEADER_WORKER_INIT_TIMEOUT_SECS);

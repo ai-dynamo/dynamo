@@ -131,7 +131,7 @@ impl BlockTransferHandler {
 #[derive(Clone)]
 pub struct KvbmWorker {
     inner: Arc<Mutex<KvbmWorkerImpl>>,
-    _drt: Arc<rs::DistributedRuntime>,
+    _drt: Option<Arc<rs::DistributedRuntime>>,
 }
 
 impl KvbmWorker {
@@ -156,13 +156,14 @@ impl KvbmWorker {
         host_layout_type: Option<PyLayoutType>,
         disk_layout_type: Option<PyLayoutType>,
     ) -> PyResult<Self> {
-        let drt_obj = drt.ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err("DistributedRuntime (drt) must be provided")
+        let drt: Option<Arc<rs::DistributedRuntime>> = Python::with_gil(|py| {
+            if let Some(obj) = drt {
+                extract_distributed_runtime_from_obj(py, obj)
+            } else {
+                Ok(None)
+            }
         })?;
 
-        // Get Arc<rs::DistributedRuntime> from the Python DistributedRuntime
-        let drt: Arc<rs::DistributedRuntime> =
-            Python::with_gil(|py| extract_distributed_runtime_from_obj(py, drt_obj))?;
         let rt = get_current_tokio_handle();
 
         let mut vllm_tensors: Vec<Arc<dyn TorchTensor>> = Vec::with_capacity(tensors.len());
@@ -173,7 +174,7 @@ impl KvbmWorker {
         }
 
         let config = KvbmWorkerConfig::builder()
-            .drt(drt.clone())
+            .cancel_token(get_current_cancel_token())
             .num_device_blocks(num_device_blocks)
             .page_size(page_size)
             .tensors(vllm_tensors)

@@ -11,8 +11,8 @@ use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
 use rand::seq::IteratorRandom as _;
 use rs::pipeline::network::Ingress;
-use std::fs;
 use std::ffi::CString;
+use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -460,10 +460,7 @@ impl DistributedRuntime {
             };
         let inner = inner.map_err(to_pyerr)?;
 
-        Ok(DistributedRuntime {
-            inner,
-            event_loop,
-        })
+        Ok(DistributedRuntime { inner, event_loop })
     }
 
     #[staticmethod]
@@ -633,7 +630,6 @@ impl DistributedRuntime {
         CancellationToken { inner }
     }
 
-    /// Return a typed PyCapsule carrying a Weak<rs::DistributedRuntime>.
     #[pyo3(name = "to_capsule")]
     fn to_capsule<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
         let arc: Arc<rs::DistributedRuntime> = Arc::new(self.inner.clone());

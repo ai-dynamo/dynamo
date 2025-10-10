@@ -1,20 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import Optional
+
 import torch
 from kvbm.trtllm_integration.rust import KvConnectorWorker as RustKvConnectorWorker
+from kvbm.utils import is_dyn_runtime_enabled
 from tensorrt_llm import logger
 from tensorrt_llm._torch.pyexecutor.kv_cache_connector import KvCacheConnectorWorker
 from tensorrt_llm.llmapi.llm_args import TorchLlmArgs
 
-from dynamo.runtime import DistributedRuntime
+DistributedRuntime = None
+if is_dyn_runtime_enabled():
+    from dynamo.runtime import DistributedRuntime
 
 
 class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
     def __init__(self, llm_args: TorchLlmArgs):
         super().__init__(llm_args)
 
-        self.drt = DistributedRuntime.detached()
+        drt: Optional[object] = None
+        if is_dyn_runtime_enabled():
+            drt = DistributedRuntime.detached()
+
+        self.drt = drt
 
         mappings = self._llm_args.parallel_config.to_mapping()
         self.rank = mappings.rank

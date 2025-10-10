@@ -28,9 +28,12 @@ if TYPE_CHECKING:
 #     KvConnectorWorker as RustKvConnectorWorker,
 # )
 
+from kvbm.utils import is_dyn_runtime_enabled
 from kvbm.vllm_integration.rust import KvConnectorWorker as RustKvConnectorWorker
 
-from dynamo.runtime import DistributedRuntime
+DistributedRuntime = None
+if is_dyn_runtime_enabled():
+    from dynamo.runtime import DistributedRuntime
 
 
 class DynamoConnectorMetadata(KVConnectorMetadata):
@@ -41,11 +44,14 @@ class DynamoConnectorMetadata(KVConnectorMetadata):
 
 class KvConnectorWorker:
     def __init__(self, vllm_config: "VllmConfig", engine_id: str, **kwargs):
-        drt = kwargs.get("drt", None)
-        if drt is None:
-            self.drt = DistributedRuntime.detached()
+        drt: Optional[object] = kwargs.get("drt")
+
+        if drt is None and is_dyn_runtime_enabled():
+            drt = DistributedRuntime.detached()
         else:
-            self.drt = drt
+            drt = None
+
+        self.drt = drt
 
         self.vllm_config = vllm_config
         self._connector = RustKvConnectorWorker(self.drt, engine_id)

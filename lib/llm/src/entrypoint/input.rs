@@ -12,7 +12,6 @@ use std::{
     io::{IsTerminal as _, Read as _},
     path::PathBuf,
     str::FromStr,
-    sync::Arc,
 };
 
 pub mod batch;

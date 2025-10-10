@@ -63,11 +63,7 @@ pub struct KvConnectorLeader {
 }
 
 impl KvConnectorLeader {
-    fn new(
-        worker_id: u64,
-        page_size: usize,
-        leader_py: PyKvbmLeader,
-    ) -> Self {
+    fn new(worker_id: u64, page_size: usize, leader_py: PyKvbmLeader) -> Self {
         tracing::info!(
             "KvConnectorLeader initialized with worker_id: {}",
             worker_id
@@ -445,10 +441,11 @@ impl PyTrtllmKvConnectorLeader {
     #[pyo3(signature = (worker_id, drt, page_size, leader))]
     pub fn new(
         worker_id: u64,
-        drt: PyObject,
+        drt: Option<PyObject>,
         page_size: usize,
         leader: PyKvbmLeader,
     ) -> PyResult<Self> {
+        let _ = &drt; // drt is currently un-used in leader
         let connector_leader: Box<dyn Leader> =
             Box::new(KvConnectorLeader::new(worker_id, page_size, leader));
         Ok(Self { connector_leader })

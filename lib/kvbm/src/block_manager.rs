@@ -157,7 +157,7 @@ impl BlockManager {
                     .await
                 })
                 .map_err(to_pyerr)?,
-            _drt: Some(drt),
+            _drt: drt,
             _controller: None,
         })
     }
@@ -324,7 +324,7 @@ impl BlockManagerBuilder {
 
         Ok(BlockManager {
             inner,
-            _drt: Some(drt),
+            _drt: drt,
             _controller: None,
         })
     }

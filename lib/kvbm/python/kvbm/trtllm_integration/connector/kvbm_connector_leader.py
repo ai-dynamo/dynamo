@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-from typing import List
+from typing import List, Optional
 
 from kvbm import KvbmLeader
 from kvbm.trtllm_integration.rust import KvbmRequest
 from kvbm.trtllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
 from kvbm.trtllm_integration.rust import SchedulerOutput as RustSchedulerOutput
+from kvbm.utils import is_dyn_runtime_enabled
 from tensorrt_llm._torch.pyexecutor.kv_cache_connector import (
     KvCacheConnectorScheduler,
     SchedulerOutput,
@@ -15,13 +16,20 @@ from tensorrt_llm._torch.pyexecutor.kv_cache_connector import (
 from tensorrt_llm.bindings.internal.batch_manager import LlmRequest
 from tensorrt_llm.llmapi.llm_args import TorchLlmArgs
 
-from dynamo.runtime import DistributedRuntime
+DistributedRuntime = None
+if is_dyn_runtime_enabled():
+    from dynamo.runtime import DistributedRuntime
 
 
 class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
     def __init__(self, llm_args: TorchLlmArgs):
         super().__init__(llm_args)
-        self.drt = DistributedRuntime.detached()
+
+        drt: Optional[object] = None
+        if is_dyn_runtime_enabled():
+            drt = DistributedRuntime.detached()
+
+        self.drt = drt
 
         mappings = self._llm_args.parallel_config.to_mapping()
 

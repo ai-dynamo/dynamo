@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_runtime::{DistributedRuntime, utils::task::CriticalTaskExecutionHandle};
+use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 use tokio::sync::{Mutex, RwLock, oneshot};
 
 struct WorkerState {
@@ -361,7 +361,7 @@ impl Handler for BlockTransferDispatch {
 #[derive(Builder, Clone)]
 #[builder(pattern = "owned")]
 pub struct KvbmWorkerConfig {
-    drt: Arc<DistributedRuntime>,
+    cancel_token: CancellationToken,
 
     num_device_blocks: usize,
 
@@ -530,7 +530,7 @@ impl KvbmWorker {
         CriticalTaskExecutionHandle,
         oneshot::Receiver<transfer::BlockTransferHandler>,
     )> {
-        let cancel_token = config.drt.primary_token().clone();
+        let cancel_token = config.cancel_token.clone();
 
         // establish a oneshot channel to get back the raw BlockTransferHandler
         let (handler_tx, handler_rx) = oneshot::channel();
@@ -581,7 +581,7 @@ impl KvbmWorker {
         CriticalTaskExecutionHandle,
         oneshot::Receiver<transfer::BlockTransferHandler>,
     )> {
-        let cancel_token = config.drt.primary_token().clone();
+        let cancel_token = config.cancel_token.clone();
         let scheduler_client = config.scheduler_client.clone();
 
         // channel to get BlockTransferHandler back to the caller
@@ -681,15 +681,7 @@ impl KvbmWorker {
         scheduler_client: Option<TransferSchedulerClient>,
         bytes_per_block: usize,
     ) -> anyhow::Result<()> {
-        let drt = config.drt.clone();
-
-        let worker_id = drt
-            .primary_lease()
-            .ok_or(anyhow::anyhow!(
-                "unable to get primary lease; check that drt is not static"
-            ))?
-            .id() as usize;
-
+        let worker_id = config.device_id;
         // Readiness gating for ping
         let state = Arc::new(WorkerState::new());
 

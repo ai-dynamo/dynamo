@@ -85,12 +85,7 @@ pub struct KvConnectorLeaderRecorder {
 }
 
 impl KvConnectorLeaderRecorder {
-    pub fn new(
-        worker_id: String,
-        drt: Arc<DistributedRuntime>,
-        page_size: usize,
-        leader_py: PyKvbmLeader,
-    ) -> Self {
+    pub fn new(worker_id: String, page_size: usize, leader_py: PyKvbmLeader) -> Self {
         tracing::info!(
             "KvConnectorLeaderRecorder initialized with worker_id: {}",
             worker_id
@@ -110,9 +105,7 @@ impl KvConnectorLeaderRecorder {
         let output_path = "/tmp/records.jsonl";
         tracing::info!("recording events to {}", output_path);
 
-        let recorder = drt
-            .runtime()
-            .primary()
+        let recorder = get_current_tokio_handle()
             .block_on(async { Recorder::new(token, &output_path, None, None, None).await })
             .unwrap();
 
@@ -120,8 +113,7 @@ impl KvConnectorLeaderRecorder {
         let recorder_tx = recorder.event_sender();
 
         // todo(kvbm): make this a critical task
-        drt.runtime()
-            .primary()
+        get_current_tokio_handle()
             .spawn(Self::forward_unbounded_to_sender(unbounded_rx, recorder_tx));
 
         let slot_manager_cell = Arc::new(OnceLock::new());

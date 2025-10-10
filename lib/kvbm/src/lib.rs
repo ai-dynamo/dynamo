@@ -91,7 +91,11 @@ struct Component {
 pub fn extract_distributed_runtime_from_obj(
     py: Python<'_>,
     drt_obj: PyObject,
-) -> PyResult<Arc<rs::DistributedRuntime>> {
+) -> PyResult<Option<Arc<rs::DistributedRuntime>>> {
+    if drt_obj.is_none(py) {
+        return Ok(None);
+    }
+
     let obj = drt_obj.bind(py);
 
     let cls = py.import("dynamo._core")?.getattr("DistributedRuntime")?;
@@ -102,9 +106,12 @@ pub fn extract_distributed_runtime_from_obj(
     }
 
     let cap_any = obj.call_method0("to_capsule")?;
-    let cap: &Bound<'_, PyCapsule> = cap_any.downcast()?; // borrow
+    let cap: &Bound<'_, PyCapsule> = cap_any.downcast()?;
     let weak: &Weak<rs::DistributedRuntime> = unsafe { cap.reference::<Weak<_>>() };
 
-    weak.upgrade()
-        .ok_or_else(|| PyRuntimeError::new_err("runtime is no longer alive"))
+    let strong = weak.upgrade().ok_or_else(|| {
+        PyRuntimeError::new_err("runtime is no longer alive (weak ref upgrade failed)")
+    })?;
+
+    Ok(Some(strong))
 }

@@ -49,7 +49,7 @@ pub trait Worker: Send + Sync {
 }
 
 pub struct KvConnectorWorker {
-    drt: Arc<DistributedRuntime>,
+    _drt: Option<Arc<DistributedRuntime>>,
     kvbm_worker: OnceLock<KvbmWorker>,
     connector: WorkerSchedulerClient,
     transfer_client: TransferSchedulerClient,
@@ -72,10 +72,11 @@ pub struct KvConnectorWorker {
 }
 
 impl KvConnectorWorker {
-    fn new(drt: Arc<DistributedRuntime>, trtllm_rank: String) -> anyhow::Result<Self> {
+    fn new(drt: Option<Arc<DistributedRuntime>>, trtllm_rank: String) -> anyhow::Result<Self> {
         let runtime = get_current_tokio_handle();
 
-        let (scheduler, worker_client, transfer_client) = Scheduler::new(drt.primary_token());
+        let (scheduler, worker_client, transfer_client) =
+            Scheduler::new(get_current_cancel_token());
 
         CriticalTaskExecutionHandle::new_with_runtime(
             move |_| {
@@ -94,7 +95,7 @@ impl KvConnectorWorker {
         );
 
         Ok(Self {
-            drt,
+            _drt: drt,
             kvbm_worker: OnceLock::new(),
             connector: worker_client,
             transfer_client,
@@ -128,7 +129,7 @@ impl Worker for KvConnectorWorker {
         let kv_cache_tensors = vec![kv_cache_tensor as Arc<dyn TorchTensor>];
 
         let config = KvbmWorkerConfig::builder()
-            .drt(self.drt.clone())
+            .cancel_token(get_current_cancel_token())
             .num_device_blocks(num_device_blocks)
             .page_size(page_size)
             .tensors(kv_cache_tensors)
@@ -394,9 +395,15 @@ pub struct PyTrtllmKvConnectorWorker {
 impl PyTrtllmKvConnectorWorker {
     #[new]
     #[pyo3(signature = (py_drt, trtllm_rank))]
-    pub fn new(py_drt: PyObject, trtllm_rank: String) -> PyResult<Self> {
-        let drt: Arc<DistributedRuntime> =
-            Python::with_gil(|py| extract_distributed_runtime_from_obj(py, py_drt))?;
+    pub fn new(py_drt: Option<PyObject>, trtllm_rank: String) -> PyResult<Self> {
+        let drt: Option<Arc<DistributedRuntime>> = Python::with_gil(|py| {
+            if let Some(obj) = py_drt {
+                extract_distributed_runtime_from_obj(py, obj)
+            } else {
+                Ok(None)
+            }
+        })?;
+
         let connector_worker: Box<dyn Worker> =
             Box::new(KvConnectorWorker::new(drt, trtllm_rank).map_err(to_pyerr)?);
         Ok(Self { connector_worker })

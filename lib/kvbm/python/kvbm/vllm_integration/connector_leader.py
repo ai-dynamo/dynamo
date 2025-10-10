@@ -29,11 +29,14 @@ if TYPE_CHECKING:
 # from kvbm.vllm_integration.rust import SchedulerOutput as RustSchedulerOutput
 
 from kvbm import KvbmLeader
+from kvbm.utils import is_dyn_runtime_enabled
 from kvbm.vllm_integration.rust import KvbmRequest
 from kvbm.vllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
 from kvbm.vllm_integration.rust import SchedulerOutput as RustSchedulerOutput
 
-from dynamo.runtime import DistributedRuntime
+DistributedRuntime = None
+if is_dyn_runtime_enabled():
+    from dynamo.runtime import DistributedRuntime
 
 
 class DynamoConnectorMetadata(KVConnectorMetadata):
@@ -52,12 +55,14 @@ class KvConnectorLeader:
     """
 
     def __init__(self, vllm_config: "VllmConfig", engine_id: str, **kwargs):
-        drt = kwargs.get("drt", None)
-        if drt is None:
-            self.drt = DistributedRuntime.detached()
-        else:
-            self.drt = drt
+        drt: Optional[object] = kwargs.get("drt")
 
+        if drt is None and is_dyn_runtime_enabled():
+            drt = DistributedRuntime.detached()
+        else:
+            drt = None
+
+        self.drt = drt
         self.vllm_config = vllm_config
         world_size = vllm_config.parallel_config.world_size
 
