@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg-dep
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: vllm-disagg-dep
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/vllm-runtime:my-tag
+          workingDir: /workspace/components/backends/vllm
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          args:
+            - --http-port
+            - "8000"
+    decode:
+      dynamoNamespace: vllm-disagg-dep
+      componentType: worker
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/vllm-runtime:my-tag
+          workingDir: /workspace/components/backends/vllm
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --data-parallel-size
+            - "2"
+            - --enable-expert-parallel
+    prefill:
+      dynamoNamespace: vllm-disagg
+      componentType: worker
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/vllm-runtime:my-tag
+          workingDir: /workspace/components/backends/vllm
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --is-prefill-worker
+            - --data-parallel-size
+            - "2"
+            - --enable-expert-parallel
