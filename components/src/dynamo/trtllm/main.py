@@ -28,6 +28,7 @@ from tensorrt_llm.llmapi import (
     KvCacheConfig,
     SchedulerConfig,
 )
+from tensorrt_llm.llmapi.llm_args import KvCacheConnectorConfig
 from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
@@ -100,6 +101,20 @@ async def get_engine_runtime_config(
         logging.error(f"Failed to get runtime config from TensorRT-LLM engine: {e}")
         # Return config with default/None values if retrieval fails
         return runtime_config
+
+def build_kv_connector_config(config: Config):
+
+    if config.connector is not None:
+        if config.connector == "kvbm":
+            return KvCacheConnectorConfig(
+                connector_module="dynamo.llm.trtllm_integration.connector",
+                connector_scheduler_class="DynamoKVBMConnectorLeader",
+                connector_worker_class="DynamoKVBMConnectorWorker",
+            )
+        else:
+            logging.error(f"Invalid connector: {config.connector}")
+            sys.exit(1)
+    return None
 
 
 @dynamo_worker(static=False)
@@ -205,6 +220,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         capacity_scheduler_policy=CapacitySchedulerPolicy.GUARANTEED_NO_EVICT,
         dynamic_batch_config=dynamic_batch_config,
     )
+    kv_connector_config = build_kv_connector_config(config)
+
     modality = getattr(config, "modality", None) or "text"
     arg_map = {
         "model": model_path,
@@ -222,6 +239,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         "max_beam_width": config.max_beam_width,
         "max_batch_size": config.max_batch_size,
         "return_perf_metrics": config.publish_events_and_metrics,
+        "kv_connector_config": kv_connector_config,
     }
 
     if config.extra_engine_args != "":
@@ -269,7 +287,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     # Populate default sampling params from the model
     tokenizer = tokenizer_factory(arg_map["model"])
     default_sampling_params = SamplingParams()
-    default_sampling_params._setup(tokenizer)
+    default_sampling_params.end_id = tokenizer.eos_token_id
     default_sampling_params.stop = None
     model_input = ModelInput.Tokens
     model_type = ModelType.Chat | ModelType.Completions
