@@ -262,7 +262,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			// add a factor for node index to the start rank
 			initialContainer: &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", dataParallelSizeFlag, "16"}, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("8")}}},
-			expectContains:   []string{"python3", "-m", "dynamo.vllm", dataParallelSizeFlag, "16", "--data-parallel-address", "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)", "--data-parallel-size-local", "8", "--data-parallel-rpc-port", "13445", "--data-parallel-start-rank", "$(( 8 * $((GROVE_PCLQ_POD_INDEX + 1)) ))"},
+			expectContains:   []string{"python3", "-m", "dynamo.vllm", dataParallelSizeFlag, "16", "--data-parallel-address", "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)", "--data-parallel-size-local", "8", "--data-parallel-rpc-port", "13445", "--data-parallel-start-rank", "$(( 8 * (GROVE_PCLQ_POD_INDEX + 1) ))"},
 		},
 		// {
 		// 	name:              "leader with empty args does not modify",
@@ -283,7 +283,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			role:              RoleWorker,
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialContainer:  &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", dataParallelSizeFlag, "16"}, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("8")}}},
-			expectContains:    []string{"python3", "-m", "dynamo.vllm", dataParallelSizeFlag, "16", "--data-parallel-address", "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)", "--data-parallel-size-local", "8", "--data-parallel-rpc-port", "13445", "--data-parallel-start-rank", "$(( 8 * $((GROVE_PCLQ_POD_INDEX + 1)) ))"},
+			expectContains:    []string{"python3", "-m", "dynamo.vllm", dataParallelSizeFlag, "16", "--data-parallel-address", "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)", "--data-parallel-size-local", "8", "--data-parallel-rpc-port", "13445", "--data-parallel-start-rank", "$(( 8 * (GROVE_PCLQ_POD_INDEX + 1) ))"},
 		},
 		// {
 		// 	name:              "worker with LWS deployment",

@@ -5,6 +5,8 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-disagg-dep
+  annotations:
+    nvidia.com/disable-image-pull-secret-discovery: "true"
 spec:
   services:
     Frontend:
@@ -13,7 +15,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
           workingDir: /workspace/components/backends/vllm
           command:
           - python3
@@ -33,20 +35,23 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
           workingDir: /workspace/components/backends/vllm
           command:
-          - python3
-          - -m
-          - dynamo.vllm
+          - sh
+          - -c
           args:
+            - exec
+            - python3
+            - -m
+            - dynamo.vllm
             - --model
             - Qwen/Qwen3-0.6B
             - --data-parallel-size
             - "2"
             - --enable-expert-parallel
     prefill:
-      dynamoNamespace: vllm-disagg
+      dynamoNamespace: vllm-disagg-dep
       componentType: worker
       replicas: 1
       multinode:
@@ -56,13 +61,16 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
           workingDir: /workspace/components/backends/vllm
           command:
-          - python3
-          - -m
-          - dynamo.vllm
+          - sh
+          - -c
           args:
+            - exec
+            - python3
+            - -m
+            - dynamo.vllm
             - --model
             - Qwen/Qwen3-0.6B
             - --is-prefill-worker
