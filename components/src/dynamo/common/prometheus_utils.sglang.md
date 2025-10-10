@@ -13,7 +13,7 @@ To update this document with the latest SGLang metrics:
 1. Start an SGLang worker with metrics enabled:
    ```bash
    DYN_LOG=error DYN_ENGINE_METRICS_ENABLED=1 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
-     python -m dynamo.sglang --model Qwen/Qwen3-0.6B --enable-metrics &
+     python -m dynamo.sglang --model Qwen/Qwen3-0.6B &
    SGLANG_PID=$!
    sleep 15  # Wait for engine to initialize
    ```
