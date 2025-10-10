@@ -16,10 +16,17 @@ use std::{
 
 use serde::Deserialize;
 
+/// Maximum number of custom backend gauges that can be registered to prevent unbounded growth.
+pub const MAX_CUSTOM_BACKEND_GAUGES: usize = 100;
+
 /// Registry for custom backend metrics discovered at runtime.
 ///
 /// Metrics from custom backends are exposed as Prometheus gauges since we're setting
 /// absolute values received from polling, not incrementing them locally.
+///
+/// All metrics are automatically prefixed when registered. For example, if the prefix is
+/// `dynamo_component` and a backend reports a gauge named `kv_cache_usage_perc`, it will
+/// be exposed as `dynamo_component_kv_cache_usage_perc` in Prometheus metrics.
 pub struct CustomBackendMetricsRegistry {
     gauges: Mutex<HashMap<String, prometheus::Gauge>>,
     prefix: String,
@@ -36,11 +43,22 @@ impl CustomBackendMetricsRegistry {
     }
 
     /// Get or create a gauge for the given metric name, registering it with Prometheus if new.
-    fn get_or_create_gauge(&self, name: &str) -> prometheus::Gauge {
+    /// Returns None if the maximum number of gauges has been reached.
+    fn get_or_create_gauge(&self, name: &str) -> Option<prometheus::Gauge> {
         let mut gauges = self.gauges.lock().unwrap();
 
         if let Some(gauge) = gauges.get(name) {
-            return gauge.clone();
+            return Some(gauge.clone());
+        }
+
+        // Cap the number of gauges to prevent unbounded growth
+        if gauges.len() >= MAX_CUSTOM_BACKEND_GAUGES {
+            tracing::warn!(
+                "Maximum number of custom backend gauges ({}) reached, dropping metric: {}",
+                MAX_CUSTOM_BACKEND_GAUGES,
+                name
+            );
+            return None;
         }
 
         let full_name = format!("{}_{}", self.prefix, name);
@@ -56,13 +74,14 @@ impl CustomBackendMetricsRegistry {
         }
 
         gauges.insert(name.to_string(), gauge.clone());
-        gauge
+        Some(gauge)
     }
 
     /// Update a gauge metric with a new value.
     pub fn set_gauge(&self, name: &str, value: f64) {
-        let gauge = self.get_or_create_gauge(name);
-        gauge.set(value);
+        if let Some(gauge) = self.get_or_create_gauge(name) {
+            gauge.set(value);
+        }
     }
 }
 
@@ -78,6 +97,10 @@ struct CustomBackendMetrics {
 }
 
 /// Spawn a background task that polls custom backend metrics periodically.
+///
+/// All metrics collected from the backend will be prefixed according to the registry's prefix
+/// (typically `dynamo_component_`). For example, a backend gauge `kv_cache_usage_perc` will
+/// appear as `dynamo_component_kv_cache_usage_perc` in Prometheus.
 pub fn spawn_custom_backend_polling_task(
     drt: dynamo_runtime::DistributedRuntime,
     namespace_component_endpoint: String,

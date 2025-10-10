@@ -19,6 +19,7 @@ use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
 use dynamo_runtime::logging::make_request_span;
+use dynamo_runtime::metrics::prometheus_names::name_prefix;
 use dynamo_runtime::transports::etcd;
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
@@ -335,7 +336,7 @@ impl HttpServiceConfigBuilder {
             {
                 Some(Arc::new(
                     super::custom_backend_metrics::CustomBackendMetricsRegistry::new(
-                        "dynamo_backend".to_string(),
+                        name_prefix::COMPONENT.to_string(),
                         registry.clone(),
                     ),
                 ))

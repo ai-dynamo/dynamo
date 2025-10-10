@@ -215,7 +215,7 @@ def parse_args():
         default=os.environ.get(
             CUSTOM_BACKEND_ENDPOINT_ENV_VAR, "nim.backend.runtime_stats"
         ),
-        help=f"Custom backend endpoint to poll for metrics in format 'namespace.component.endpoint' (default: 'nim.backend.runtime_stats'). Required if --custom-backend-metrics-polling-interval is specified. Can be set via {CUSTOM_BACKEND_ENDPOINT_ENV_VAR} env var.",
+        help=f"Custom backend endpoint to poll for metrics in format 'namespace.component.endpoint' (default: 'nim.backend.runtime_stats'). Required if --custom-backend-metrics-polling-interval is specified. All metrics will be prefixed with 'dynamo_component_' in Prometheus. Can be set via {CUSTOM_BACKEND_ENDPOINT_ENV_VAR} env var.",
     )
     parser.add_argument(
         "--custom-backend-metrics-polling-interval",
@@ -232,6 +232,10 @@ def parse_args():
         parser.error("--static-endpoint requires both --model-name and --model-path")
     if bool(flags.tls_cert_path) ^ bool(flags.tls_key_path):  # ^ is XOR
         parser.error("--tls-cert-path and --tls-key-path must be provided together")
+    if flags.custom_backend_metrics_polling_interval < 0:
+        parser.error(
+            "--custom-backend-metrics-polling-interval must be >= 0 (0=disabled)"
+        )
 
     return flags
 

@@ -59,6 +59,8 @@ The mock server returns:
 **Gauges:**
 - `kv_cache_usage_perc` - Cycles between 0.30 and 0.93
 
+**Note:** All metrics collected from custom backends are automatically prefixed with `dynamo_component_` when exposed via the frontend's `/metrics` endpoint. For example, the gauge `kv_cache_usage_perc` from the backend will appear as `dynamo_component_kv_cache_usage_perc` in Prometheus metrics.
+
 ## Implementation Details
 
 The frontend's NIM metrics collection is implemented in:
