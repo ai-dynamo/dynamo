@@ -96,10 +96,10 @@ impl HttpEndpoint {
             .set_endpoint_health_status(&endpoint_name, HealthStatus::Ready);
 
         // Build the router
-        // Pattern: POST /v1/dynamo/{endpoint}
+        // Pattern: POST /v1/dynamo/*endpoint (catches all paths under /v1/dynamo/)
         // Example: POST /v1/dynamo/namespace.default.component.backend.endpoint.generate.instance.0
         let rpc_root_path = Self::get_rpc_root_path();
-        let route_pattern = format!("{}/:endpoint", rpc_root_path);
+        let route_pattern = format!("{}/{{*endpoint}}", rpc_root_path);
 
         let app = Router::new()
             .route(&route_pattern, post(handle_request))

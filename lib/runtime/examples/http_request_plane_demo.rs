@@ -13,10 +13,17 @@
 //!    etcd
 //!    ```
 //!
-//! 2. Run the example with HTTP mode:
+//! 2. Run the server with HTTP mode:
 //!    ```bash
-//!    DYN_REQUEST_PLANE=http cargo run --example http_request_plane_demo
+//!    DYN_REQUEST_PLANE=http cargo run --example http_request_plane_demo -- server
 //!    ```
+//!
+//! 3. In another terminal, run the client:
+//!    ```bash
+//!    DYN_REQUEST_PLANE=http cargo run --example http_request_plane_demo -- client
+//!    ```
+//!
+//! 4. Or test with curl (shown in server output)
 //!
 //! # Configuration
 //!
@@ -28,14 +35,17 @@
 //! - `DYN_HTTP_RPC_ROOT_PATH`: HTTP RPC root path (default: "/v1/dynamo")
 //! - `DYN_HTTP_REQUEST_TIMEOUT`: HTTP request timeout in seconds (default: 5)
 
-use anyhow::Result;
 use dynamo_runtime::{
-    DistributedRuntime,
+    DistributedRuntime, Result, Runtime, Worker,
     config::RequestPlaneMode,
+    engine::{AsyncEngine, AsyncEngineContextProvider},
+    logging,
     pipeline::{
-        AsyncEngine, Data, Error, ManyOut, ServiceEngine, SingleIn,
-        network::Ingress,
+        Error, ManyOut, SingleIn,
+        network::Ingress, ResponseStream,
+        network::egress::push_router::{PushRouter, RouterMode},
     },
+    protocols::maybe_error::MaybeError,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -46,15 +56,24 @@ struct EchoRequest {
     message: String,
 }
 
-impl Data for EchoRequest {}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct EchoResponse {
     message: String,
     worker_id: String,
 }
 
-impl Data for EchoResponse {}
+impl MaybeError for EchoResponse {
+    fn err(&self) -> Option<anyhow::Error> {
+        None
+    }
+
+    fn from_err(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        Self {
+            message: format!("Error: {}", err),
+            worker_id: "error".to_string(),
+        }
+    }
+}
 
 /// Simple echo engine that returns the input message
 struct EchoEngine {
@@ -65,6 +84,7 @@ struct EchoEngine {
 impl AsyncEngine<SingleIn<EchoRequest>, ManyOut<EchoResponse>, Error> for EchoEngine {
     async fn generate(&self, request: SingleIn<EchoRequest>) -> Result<ManyOut<EchoResponse>, Error> {
         let (req, context) = request.transfer(());
+        let engine_ctx = context.context();
 
         // Simulate some processing
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -75,14 +95,27 @@ impl AsyncEngine<SingleIn<EchoRequest>, ManyOut<EchoResponse>, Error> for EchoEn
         };
 
         let stream = tokio_stream::once(response);
-        Ok(ManyOut::new(Box::pin(stream), context.context()))
+        Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Initialize tracing
-    tracing_subscriber::fmt::init();
+fn main() -> Result<()> {
+    logging::init();
+
+    // Check if running as server or client
+    let args: Vec<String> = std::env::args().collect();
+    let mode = args.get(1).map(|s| s.as_str()).unwrap_or("server");
+
+    let worker = Worker::from_settings()?;
+
+    match mode {
+        "client" => worker.execute(client_app),
+        "server" | _ => worker.execute(server_app),
+    }
+}
+
+async fn server_app(runtime: Runtime) -> Result<()> {
+    let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
 
     // Check request plane mode
     let mode = RequestPlaneMode::from_env();
@@ -93,84 +126,96 @@ async fn main() -> Result<()> {
             "Running in NATS mode. Set DYN_REQUEST_PLANE=http to use HTTP mode."
         );
     } else {
+        let host = std::env::var("DYN_HTTP_RPC_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+        let port = std::env::var("DYN_HTTP_RPC_PORT").unwrap_or_else(|_| "8081".to_string());
+        let root_path = std::env::var("DYN_HTTP_RPC_ROOT_PATH").unwrap_or_else(|_| "/v1/dynamo".to_string());
+
         tracing::info!("✓ Running in HTTP/2 mode");
-        tracing::info!(
-            "HTTP RPC endpoint: http://{}:{}{}",
-            std::env::var("DYN_HTTP_RPC_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
-            std::env::var("DYN_HTTP_RPC_PORT").unwrap_or_else(|_| "8081".to_string()),
-            std::env::var("DYN_HTTP_RPC_ROOT_PATH").unwrap_or_else(|_| "/v1/dynamo".to_string())
-        );
+        tracing::info!("HTTP RPC endpoint: http://{}:{}{}", host, port, root_path);
+
+        // Note about curl testing
+        tracing::info!("\n📋 To test the HTTP endpoint:");
+        tracing::info!("   Run the client: cargo run --example http_request_plane_demo -- client");
+        tracing::info!("\n   Note: Direct curl testing requires encoding the request with TwoPartCodec,");
+        tracing::info!("   which includes control headers + request payload. Use the client instead.\n");
     }
-
-    // Create distributed runtime
-    let drt = DistributedRuntime::builder()
-        .namespace("example")?
-        .build()
-        .await?;
-
-    // Create worker component
-    let worker_component = drt.component("echo-worker")?;
-
-    // Create service
-    let service = worker_component.service_builder().create().await?;
 
     // Create echo engine
     let echo_engine = Arc::new(EchoEngine {
         worker_id: "worker-1".to_string(),
     });
 
-    // Create service engine and ingress
-    let service_engine = ServiceEngine::new(echo_engine);
-    let ingress = Ingress::for_engine(service_engine)?;
+    // Create ingress
+    let ingress = Ingress::for_engine(echo_engine)?;
 
-    // Create endpoint
-    let endpoint = service.endpoint("echo").endpoint_builder().handler(ingress);
+    // Start service and endpoint
+    drt.namespace("example")?
+        .component("echo-worker")?
+        .service_builder()
+        .create()
+        .await?
+        .endpoint("echo")
+        .endpoint_builder()
+        .handler(ingress)
+        .start()
+        .await
+}
 
-    // Start endpoint in background
-    let endpoint_task = tokio::spawn(async move {
-        endpoint.start().await
-    });
+async fn client_app(runtime: Runtime) -> Result<()> {
+    let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
 
-    // Give the server time to start
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    // Check request plane mode
+    let mode = RequestPlaneMode::from_env();
+    tracing::info!("Client starting with request plane mode: {}", mode);
 
-    // Create client component
-    let client_component = drt.component("echo-client")?;
-    let client = client_component.endpoint("echo").client().await?;
+    // Create client
+    let client = drt
+        .namespace("example")?
+        .component("echo-worker")?
+        .endpoint("echo")
+        .client()
+        .await?;
+
+    // Wait for worker instances to be available
+    tracing::info!("Waiting for worker instances...");
+    client.wait_for_instances().await?;
+    tracing::info!("✓ Worker instances available");
 
     // Create router
-    use dynamo_runtime::pipeline::network::egress::push_router::{PushRouter, RouterMode};
     let router = PushRouter::<EchoRequest, EchoResponse>::from_client(
         client,
         RouterMode::RoundRobin,
     )
     .await?;
 
-    // Send requests
-    tracing::info!("Sending requests...");
+    // Send multiple requests
+    tracing::info!("\n🚀 Sending requests...\n");
+
     for i in 0..5 {
         let request = EchoRequest {
-            message: format!("Hello from request {}", i),
+            message: format!("Hello from request #{}", i + 1),
         };
+
+        tracing::info!("→ Sending: {:?}", request.message);
 
         let request = SingleIn::new(request);
         let mut stream = router.generate(request).await?;
 
         while let Some(response) = stream.next().await {
             tracing::info!(
-                "Received response: {:?} from worker: {}",
+                "← Received: message='{}' from worker='{}'",
                 response.message,
                 response.worker_id
             );
         }
     }
 
-    tracing::info!("All requests completed successfully!");
+    tracing::info!("\n✅ All requests completed successfully!\n");
 
     // Shutdown
-    drt.shutdown().await?;
-    endpoint_task.abort();
+    runtime.shutdown();
 
     Ok(())
 }
+
 

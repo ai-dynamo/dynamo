@@ -236,8 +236,37 @@ where
             }
         }
 
-        let subject = self.client.endpoint.subject_to(instance_id);
-        let request = request.map(|req| AddressedRequest::new(req, subject));
+        // Get the address based on transport type
+        let address = {
+            use crate::config::RequestPlaneMode;
+            use crate::component::TransportType;
+
+            let mode = RequestPlaneMode::from_env();
+            if mode.is_http() {
+                // In HTTP mode, get the HTTP endpoint URL from the instance
+                let instances = self.client.instances();
+                let instance = instances
+                    .iter()
+                    .find(|i| i.instance_id == instance_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Instance {} not found in available instances", instance_id)
+                    })?;
+
+                match &instance.transport {
+                    TransportType::HttpTcp { http_endpoint, .. } => http_endpoint.clone(),
+                    TransportType::NatsTcp(subject) => {
+                        // Fallback, but shouldn't happen in HTTP mode
+                        tracing::warn!("Expected HTTP transport but found NATS transport");
+                        subject.clone()
+                    }
+                }
+            } else {
+                // In NATS mode, use the subject
+                self.client.endpoint.subject_to(instance_id)
+            }
+        };
+
+        let request = request.map(|req| AddressedRequest::new(req, address));
 
         let stream: anyhow::Result<ManyOut<U>> = self.addressed.generate(request).await;
         match stream {
