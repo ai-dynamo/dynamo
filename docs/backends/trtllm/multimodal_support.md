@@ -21,7 +21,7 @@ TRTLLM supports multimodal models with dynamo. You can provide multimodal inputs
 
 Please note that you should provide **either image URLs or embedding file paths** in a single request.
 
-### Aggregated
+## Aggregated
 
 Here are quick steps to launch Llama-4 Maverick BF16 in aggregated mode
 ```bash
@@ -32,9 +32,9 @@ export SERVED_MODEL_NAME="meta-llama/Llama-4-Maverick-17B-128E-Instruct"
 export MODEL_PATH="meta-llama/Llama-4-Maverick-17B-128E-Instruct"
 ./launch/agg.sh
 ```
-### Example Requests
+## Example Requests
 
-#### With Image URL
+### With Image URL
 
 Below is an example of an image being sent to `Llama-4-Maverick-17B-128E-Instruct` model
 
@@ -69,7 +69,7 @@ Response :
 {"id":"unknown-id","choices":[{"index":0,"message":{"content":"The image depicts a serene landscape featuring a large rock formation, likely El Capitan in Yosemite National Park, California. The scene is characterized by a winding road that curves from the bottom-right corner towards the center-left of the image, with a few rocks and trees lining its edge.\n\n**Key Features:**\n\n* **Rock Formation:** A prominent, tall, and flat-topped rock formation dominates the center of the image.\n* **Road:** A paved road winds its way through the landscape, curving from the bottom-right corner towards the center-left.\n* **Trees and Rocks:** Trees are visible on both sides of the road, with rocks scattered along the left side.\n* **Sky:** The sky above is blue, dotted with white clouds.\n* **Atmosphere:** The overall atmosphere of the","refusal":null,"tool_calls":null,"role":"assistant","function_call":null,"audio":null},"finish_reason":"stop","logprobs":null}],"created":1753322607,"model":"meta-llama/Llama-4-Maverick-17B-128E-Instruct","service_tier":null,"system_fingerprint":null,"object":"chat.completion","usage":null}
 ```
 
-### Disaggregated
+## Disaggregated
 
 Here are quick steps to launch in disaggregated mode.
 
@@ -93,11 +93,11 @@ In general, disaggregated serving can run on a single node, provided the model f
 
 To deploy `Llama-4-Maverick-17B-128E-Instruct` in disaggregated mode, you will need to follow the multi-node setup instructions, which can be found [here](./multinode/multinode-multimodal-example.md).
 
-### Using Pre-computed Embeddings (Experimental)
+## Using Pre-computed Embeddings (Experimental)
 
 Dynamo with TensorRT-LLM supports providing pre-computed embeddings directly in an inference request. This bypasses the need for the model to process an image and generate embeddings itself, which is useful for performance optimization or when working with custom, pre-generated embeddings.
 
-#### How to Use
+### How to Use
 
 Once the container is built, you can send requests with paths to local embedding files.
 
@@ -107,7 +107,7 @@ Once the container is built, you can send requests with paths to local embedding
 
 When a request with a supported embedding file is received, Dynamo will load the tensor from the file and pass it directly to the model for inference, skipping the image-to-embedding pipeline.
 
-#### Example Request
+### Example Request
 
 Here is an example of how to send a request with a pre-computed embedding file.
 
@@ -135,7 +135,7 @@ curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '
     "max_tokens": 160
 }'
 ```
-### Encode-Prefill-Decode (EPD) Flow with NIXL
+## Encode-Prefill-Decode (EPD) Flow with NIXL
 
 Dynamo with the TensorRT-LLM backend supports multimodal models in Encode -> Decode -> Prefill fashion, enabling you to process embeddings seperately in a seperate worker. For detailed setup instructions, example requests, and best practices, see the [Multimodal EPD Support Guide](./multimodal_epd.md).
 
