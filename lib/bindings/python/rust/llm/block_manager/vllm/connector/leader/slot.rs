@@ -1363,7 +1363,9 @@ async fn process_offload_request(
         "offload - stage 4 complete"
     );
 
-    kvbm_metrics.offload_blocks_d2h.inc_by(blocks_to_register.len() as u64);
+    kvbm_metrics
+        .offload_blocks_d2h
+        .inc_by(blocks_to_register.len() as u64);
 
     // 5. Register the mutable blocks
     let immutable_blocks = block_manager
