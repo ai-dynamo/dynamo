@@ -80,6 +80,8 @@ pub struct OffloadManagerConfig {
     pub metrics: Arc<BlockManagerMetrics>,
     pub cancellation_token: CancellationToken,
     pub model_config: KvManagerModelConfig,
+    /// Optional KVBM-level metrics for tracking offload/onboard operations
+    pub kvbm_metrics: Option<crate::block_manager::metrics_kvbm::KvbmMetrics>,
 }
 
 /// The offload manager handles all block transfers between different cache levels.
@@ -101,6 +103,9 @@ pub struct OffloadManager<Locality: LocalityProvider, Metadata: BlockMetadata> {
 
     /// An incrementing counter for offloaded blocks. Within the same priority, blocks with lower tick values are processed first.
     tick: Arc<AtomicU64>,
+
+    /// Optional KVBM-level metrics for tracking offload/onboard operations
+    kvbm_metrics: Option<crate::block_manager::metrics_kvbm::KvbmMetrics>,
 }
 
 impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
@@ -129,6 +134,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             host_onboard_tx,
             disk_onboard_tx,
             tick: Arc::new(AtomicU64::new(0)),
+            kvbm_metrics: config.kvbm_metrics.clone(),
         });
 
         let cuda_ctx = Cuda::device_or_create(0)?;
@@ -485,6 +491,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 key,
             };
 
+            // Track metrics if available
+            if let Some(ref kvbm_metrics) = self.kvbm_metrics {
+                kvbm_metrics.offload_blocks_d2h.inc();
+            }
+
             self.device_offload_tx.send(request).unwrap();
         } else if let Some(host_block) =
             any_block.downcast_ref::<ImmutableBlock<PinnedStorage, Locality, Metadata>>()
@@ -499,6 +510,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 sequence_hash: host_block.sequence_hash(),
                 key,
             };
+
+            // Track metrics if available
+            if let Some(ref kvbm_metrics) = self.kvbm_metrics {
+                kvbm_metrics.offload_blocks_h2d.inc();
+            }
 
             self.host_offload_tx.send(request).unwrap();
         }

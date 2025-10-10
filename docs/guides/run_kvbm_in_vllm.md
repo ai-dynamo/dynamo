@@ -85,7 +85,7 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 Alternatively, can use `vllm serve` directly to use KVBM for aggregated serving:
 ```bash
-vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "dynamo.llm.vllm_integration.connector"}' deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "dynamo.llm.vllm_integration.connector"}' Qwen/Qwen3-0.6B
 ```
 
 ## Enable and View KVBM Metrics
@@ -97,9 +97,11 @@ docker compose -f deploy/docker-compose.yml --profile metrics up -d
 
 # set env var DYN_KVBM_METRICS to true, when launch via dynamo
 # Optionally set DYN_KVBM_METRICS_PORT to choose the /metrics port (default: 6880).
+# NOTE: update launch/disagg_kvbm.sh or launch/disagg_kvbm_2p2d.sh as needed
 DYN_KVBM_METRICS=true \
 python -m dynamo.vllm \
-    --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+    --model Qwen/Qwen3-0.6B \
+    --enforce-eager \
     --connector kvbm &
 
 # optional if firewall blocks KVBM metrics ports to send prometheus metrics
@@ -118,7 +120,7 @@ git clone https://github.com/LMCache/LMBenchmark.git
 # we are passing model, endpoint, output file prefix and qps to the sh script.
 cd LMBenchmark/synthetic-multi-round-qa
 ./long_input_short_output_run.sh \
-    "deepseek-ai/DeepSeek-R1-Distill-Llama-8B" \
+    "Qwen/Qwen3-0.6B" \
     "http://localhost:8000" \
     "benchmark_kvbm" \
     1
@@ -129,4 +131,4 @@ More details about how to use LMBenchmark could be found [here](https://github.c
 
 `NOTE`: if metrics are enabled as mentioned in the above section, you can observe KV offloading, and KV onboarding in the grafana dashboard.
 
-To compare, you can run `vllm serve deepseek-ai/DeepSeek-R1-Distill-Llama-8B` to turn KVBM off as the baseline.
+To compare, you can run `vllm serve Qwen/Qwen3-0.6B` to turn KVBM off as the baseline.
