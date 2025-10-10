@@ -373,88 +373,82 @@ impl ActiveSequencesMultiWorker {
                 .build()
                 .unwrap();
 
-            let local_set = tokio::task::LocalSet::new();
+            runtime.block_on(async move {
+                let mut active_sequences = ActiveSequences::new(block_size);
+                let mut request_rx = request_rx;
 
-            runtime.block_on(local_set.run_until(async move {
-                tokio::task::spawn_local(async move {
-                    let mut active_sequences = ActiveSequences::new(block_size);
-                    let mut request_rx = request_rx;
+                loop {
+                    tokio::select! {
+                        command = request_rx.recv() => {
+                            let Some(command) = command else {
+                                break;
+                            };
 
-                    loop {
-                        tokio::select! {
-                            command = request_rx.recv() => {
-                                let Some(command) = command else {
+                            match command {
+                                UpdateSequences::AddRequest {
+                                    request_id,
+                                    token_sequence,
+                                    isl,
+                                    overlap,
+                                    resp_tx,
+                                } => {
+                                    let removed = active_sequences.add_request(request_id, token_sequence, isl, overlap);
+                                    let _ = resp_tx.send(removed);
+                                }
+                                UpdateSequences::Free { request_id } => {
+                                    active_sequences.free(&request_id);
+                                }
+                                UpdateSequences::MarkPrefillCompleted { request_id } => {
+                                    active_sequences.mark_prefill_completed(&request_id);
+                                }
+                                UpdateSequences::NewBlocks {
+                                    token_sequence,
+                                    resp_tx,
+                                } => {
+                                    let new_blocks = active_sequences.new_blocks(&token_sequence);
+                                    let _ = resp_tx.send(new_blocks);
+                                }
+                                UpdateSequences::PotentialBlocks {
+                                    token_sequence,
+                                    resp_tx,
+                                } => {
+                                    let potential_blocks = active_sequences.potential_blocks(&token_sequence);
+                                    let _ = resp_tx.send(potential_blocks);
+                                }
+                                UpdateSequences::PotentialBlocksAndTokens {
+                                    token_sequence,
+                                    isl,
+                                    overlap,
+                                    resp_tx,
+                                } => {
+                                    let potential_tokens = active_sequences.potential_blocks_and_tokens(
+                                        token_sequence.as_ref().map(|v| v.as_slice()),
+                                        isl,
+                                        overlap,
+                                    );
+                                    let _ = resp_tx.send(potential_tokens);
+                                }
+                                UpdateSequences::ActiveBlocks { resp_tx } => {
+                                    let active_blocks = active_sequences.active_blocks();
+                                    let _ = resp_tx.send(active_blocks);
+                                }
+                                UpdateSequences::ActiveTokens { resp_tx } => {
+                                    let active_tokens = active_sequences.active_tokens();
+                                    let _ = resp_tx.send(active_tokens);
+                                }
+                                UpdateSequences::Shutdown => {
                                     break;
-                                };
-
-                                match command {
-                                    UpdateSequences::AddRequest {
-                                        request_id,
-                                        token_sequence,
-                                        isl,
-                                        overlap,
-                                        resp_tx,
-                                    } => {
-                                        let removed = active_sequences.add_request(request_id, token_sequence, isl, overlap);
-                                        let _ = resp_tx.send(removed);
-                                    }
-                                    UpdateSequences::Free { request_id } => {
-                                        active_sequences.free(&request_id);
-                                    }
-                                    UpdateSequences::MarkPrefillCompleted { request_id } => {
-                                        active_sequences.mark_prefill_completed(&request_id);
-                                    }
-                                    UpdateSequences::NewBlocks {
-                                        token_sequence,
-                                        resp_tx,
-                                    } => {
-                                        let new_blocks = active_sequences.new_blocks(&token_sequence);
-                                        let _ = resp_tx.send(new_blocks);
-                                    }
-                                    UpdateSequences::PotentialBlocks {
-                                        token_sequence,
-                                        resp_tx,
-                                    } => {
-                                        let potential_blocks = active_sequences.potential_blocks(&token_sequence);
-                                        let _ = resp_tx.send(potential_blocks);
-                                    }
-                                    UpdateSequences::PotentialBlocksAndTokens {
-                                        token_sequence,
-                                        isl,
-                                        overlap,
-                                        resp_tx,
-                                    } => {
-                                        let potential_tokens = active_sequences.potential_blocks_and_tokens(
-                                            token_sequence.as_ref().map(|v| v.as_slice()),
-                                            isl,
-                                            overlap,
-                                        );
-                                        let _ = resp_tx.send(potential_tokens);
-                                    }
-                                    UpdateSequences::ActiveBlocks { resp_tx } => {
-                                        let active_blocks = active_sequences.active_blocks();
-                                        let _ = resp_tx.send(active_blocks);
-                                    }
-                                    UpdateSequences::ActiveTokens { resp_tx } => {
-                                        let active_tokens = active_sequences.active_tokens();
-                                        let _ = resp_tx.send(active_tokens);
-                                    }
-                                    UpdateSequences::Shutdown => {
-                                        break;
-                                    }
                                 }
                             }
-                            // Handle cancellation
-                            _ = cancel_token.cancelled() => {
-                                tracing::debug!("Worker task cancelled");
-                                break;
-                            }
+                        }
+                        // Handle cancellation
+                        _ = cancel_token.cancelled() => {
+                            tracing::debug!("Worker task cancelled");
+                            break;
                         }
                     }
-                })
-                .await
-                .unwrap()
-            }));
+                }
+            });
 
             tracing::debug!("ActiveSequences worker task completed");
         });
