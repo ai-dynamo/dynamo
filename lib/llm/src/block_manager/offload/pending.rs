@@ -30,7 +30,6 @@ use nixl_sys::NixlDescriptor;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -51,8 +50,6 @@ use futures::{StreamExt, stream::FuturesUnordered};
 use super::BlockResult;
 
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
-
-const BLOCKS_BW_MIN_PUBLISH_INTERVAL_MS: u64 = 50;
 
 /// Manage a set of pending transfers.
 pub struct PendingTransfer<
@@ -163,9 +160,6 @@ struct TransferCompletionManager<
     Locality: LocalityProvider,
     Metadata: BlockMetadata,
 > {
-    transfer_type: String,
-    last_publish_time: Option<Instant>,
-    transfer_start: Instant,
     num_blocks_transferred: usize,
     _phantom: PhantomData<(Source, Target, Locality, Metadata)>,
 }
@@ -173,11 +167,8 @@ struct TransferCompletionManager<
 impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: BlockMetadata>
     TransferCompletionManager<Source, Target, Locality, Metadata>
 {
-    pub fn new(transfer_type: String) -> Self {
+    pub fn new() -> Self {
         Self {
-            transfer_type,
-            last_publish_time: None,
-            transfer_start: Instant::now(),
             num_blocks_transferred: 0,
             _phantom: PhantomData,
         }
@@ -188,23 +179,6 @@ impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: Blo
         pending_transfer: PendingTransfer<Source, Target, Locality, Metadata>,
     ) -> Result<()> {
         self.num_blocks_transferred += pending_transfer.sources.len();
-
-        let should_publish = self.last_publish_time.is_none_or(|last_publish_time| {
-            last_publish_time.elapsed() > Duration::from_millis(BLOCKS_BW_MIN_PUBLISH_INTERVAL_MS)
-        });
-
-        if should_publish {
-            self.last_publish_time = Some(Instant::now());
-            let duration = self.transfer_start.elapsed();
-            let blocks_per_sec = self.num_blocks_transferred as f64 / duration.as_secs_f64();
-
-            // Transfer performance tracking (blocks per second)
-            tracing::debug!(
-                "{} transfer performance: {:.2} blocks/sec",
-                self.transfer_type,
-                blocks_per_sec
-            );
-        }
 
         match pending_transfer.handle_complete().await {
             Ok(_) => {}
@@ -245,12 +219,11 @@ impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: Blo
         max_concurrent_transfers: usize,
         runtime: &Handle,
         cancellation_token: CancellationToken,
-        transfer_type: String,
     ) -> Result<Self> {
         let (futures_tx, mut futures_rx) = mpsc::channel(1);
 
         let mut completion_manager =
-            TransferCompletionManager::new(transfer_type.clone());
+            TransferCompletionManager::new();
 
         CriticalTaskExecutionHandle::new_with_runtime(
             move |cancel_token| async move {

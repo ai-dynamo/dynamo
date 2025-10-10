@@ -101,9 +101,6 @@ pub struct OffloadManager<Locality: LocalityProvider, Metadata: BlockMetadata> {
 
     /// An incrementing counter for offloaded blocks. Within the same priority, blocks with lower tick values are processed first.
     tick: Arc<AtomicU64>,
-
-    /// Optional KVBM-level metrics for tracking offload/onboard operations
-    kvbm_metrics: Option<crate::block_manager::metrics_kvbm::KvbmMetrics>,
 }
 
 impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
@@ -132,7 +129,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             host_onboard_tx,
             disk_onboard_tx,
             tick: Arc::new(AtomicU64::new(0)),
-            kvbm_metrics: config.kvbm_metrics.clone(),
         });
 
         let cuda_ctx = Cuda::device_or_create(0)?;
@@ -164,13 +160,13 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     MAX_CONCURRENT_TRANSFERS,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
-                    "offload_bw".to_string(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
             filters.device.clone(),
+            config.kvbm_metrics.as_ref().map(|m| m.offload_blocks_d2h.clone()),
             config.cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
@@ -199,13 +195,13 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     MAX_CONCURRENT_TRANSFERS,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
-                    "offload_bw".to_string(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
             filters.host.clone(),
+            config.kvbm_metrics.as_ref().map(|m| m.offload_blocks_h2d.clone()),
             config.cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
@@ -227,7 +223,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     MAX_CONCURRENT_TRANSFERS,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
-                    "onboard_bw".to_string(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
                 &config.async_rt_handle,
@@ -254,7 +249,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     MAX_CONCURRENT_TRANSFERS,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
-                    "onboard_bw".to_string(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
                 &config.async_rt_handle,
@@ -279,6 +273,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         mut offload_rx: mpsc::UnboundedReceiver<OffloadRequest<Source, Locality, Metadata>>,
         transfer_manager: Arc<dyn TransferManager<Source, Target, Locality, Metadata>>,
         offload_filter: Option<Arc<dyn OffloadFilter>>,
+        offload_metric: Option<prometheus::IntCounter>,
         cancellation_token: CancellationToken,
     ) -> Result<()> {
         if source_pool.is_none() || target_pool.is_none() {
@@ -355,6 +350,12 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                             "Offloading block with sequence hash {} to target pool.",
                             request.sequence_hash
                         );
+
+                        // Track the offload metric if available
+                        if let Some(ref metric) = offload_metric {
+                            metric.inc();
+                        }
+
                         transfer_manager
                             .enqueue_transfer(PendingTransfer::new(
                                 vec![block],
@@ -463,11 +464,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 key,
             };
 
-            // Track metrics if available
-            if let Some(ref kvbm_metrics) = self.kvbm_metrics {
-                kvbm_metrics.offload_blocks_d2h.inc();
-            }
-
             self.device_offload_tx.send(request).unwrap();
         } else if let Some(host_block) =
             any_block.downcast_ref::<ImmutableBlock<PinnedStorage, Locality, Metadata>>()
@@ -482,11 +478,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 sequence_hash: host_block.sequence_hash(),
                 key,
             };
-
-            // Track metrics if available
-            if let Some(ref kvbm_metrics) = self.kvbm_metrics {
-                kvbm_metrics.offload_blocks_h2d.inc();
-            }
 
             self.host_offload_tx.send(request).unwrap();
         }

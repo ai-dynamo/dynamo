@@ -316,12 +316,31 @@ impl BlockManagerBuilder {
         }
 
         if leader_inner.num_host_blocks() > 0 {
-            config = config.host_layout(
+            let mut host_layout_config =
                 dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
                     .num_blocks(leader_inner.num_host_blocks())
-                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
-                    .build()?,
-            );
+                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded));
+
+            if leader_inner.num_disk_blocks() > 0 {
+                // Check if disk offload filter is disabled via environment variable
+                let disable_filter = std::env::var("DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER")
+                    .map(|v| v == "true" || v == "1")
+                    .unwrap_or(false);
+
+                if !disable_filter {
+                    let frequency_filter = FrequencyFilter::new(
+                        2,
+                        Duration::from_secs(600),
+                        1e6 as usize,
+                        cancel_token.child_token(),
+                        drt.inner().runtime().primary().clone(),
+                    )?;
+                    host_layout_config =
+                        host_layout_config.offload_filter(Some(Arc::new(frequency_filter)));
+                }
+            }
+
+            config = config.host_layout(host_layout_config.build()?);
         }
 
         if leader_inner.num_disk_blocks() > 0 {

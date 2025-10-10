@@ -102,7 +102,7 @@ DYN_KVBM_METRICS=true \
 python -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
     --enforce-eager \
-    --connector kvbm &
+    --connector kvbm
 
 # optional if firewall blocks KVBM metrics ports to send prometheus metrics
 sudo ufw allow 6880/tcp
