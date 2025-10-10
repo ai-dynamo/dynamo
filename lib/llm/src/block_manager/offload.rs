@@ -37,7 +37,6 @@ use super::block::{
     locality::LocalityProvider,
     transfer::{PoolConfig, TransferContext},
 };
-use super::metrics::{BlockManagerMetrics, PoolMetrics};
 use super::pool::{BlockPool, BlockPoolError};
 use super::storage::{Cuda, Storage};
 use super::{DeviceStorage, DiskStorage, KvManagerModelConfig, PinnedStorage};
@@ -77,7 +76,6 @@ pub const MAX_TRANSFER_BATCH_SIZE: usize = 16;
 pub struct OffloadManagerConfig {
     pub nixl_agent: Arc<Option<NixlAgent>>,
     pub async_rt_handle: Handle,
-    pub metrics: Arc<BlockManagerMetrics>,
     pub cancellation_token: CancellationToken,
     pub model_config: KvManagerModelConfig,
     /// Optional KVBM-level metrics for tracking offload/onboard operations
@@ -155,10 +153,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             Some(pool_config),
         ));
 
-        let device_metrics = config.metrics.pool("device");
-        let host_metrics = config.metrics.pool("host");
-        let disk_metrics = config.metrics.pool("disk");
-
         // Device -> Host offload
         let device_to_host_task = OffloadManager::offload_worker(
             this.device.clone(),
@@ -170,7 +164,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     MAX_CONCURRENT_TRANSFERS,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
-                    device_metrics.clone(),
                     "offload_bw".to_string(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
@@ -178,7 +171,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 config.cancellation_token.clone(),
             )),
             filters.device.clone(),
-            device_metrics.clone(),
             config.cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
@@ -207,7 +199,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     MAX_CONCURRENT_TRANSFERS,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
-                    host_metrics.clone(),
                     "offload_bw".to_string(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
@@ -215,7 +206,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 config.cancellation_token.clone(),
             )),
             filters.host.clone(),
-            host_metrics.clone(),
             config.cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
@@ -237,14 +227,12 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     MAX_CONCURRENT_TRANSFERS,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
-                    host_metrics.clone(),
                     "onboard_bw".to_string(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
-            host_metrics.clone(),
             config.cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
@@ -266,14 +254,12 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     MAX_CONCURRENT_TRANSFERS,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
-                    disk_metrics.clone(),
                     "onboard_bw".to_string(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
-            disk_metrics.clone(),
             config.cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
@@ -293,7 +279,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         mut offload_rx: mpsc::UnboundedReceiver<OffloadRequest<Source, Locality, Metadata>>,
         transfer_manager: Arc<dyn TransferManager<Source, Target, Locality, Metadata>>,
         offload_filter: Option<Arc<dyn OffloadFilter>>,
-        pool_metrics: Arc<PoolMetrics>,
         cancellation_token: CancellationToken,
     ) -> Result<()> {
         if source_pool.is_none() || target_pool.is_none() {
@@ -315,7 +300,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 match offload_rx.try_recv() {
                     Ok(request) => {
                         queue.insert(request);
-                        pool_metrics.gauge("offload_queue_size").inc();
                     }
                     Err(TryRecvError::Empty) => {
                         break;
@@ -326,7 +310,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
 
             // If there is a request, process it.
             if let Some(request) = queue.pop_first() {
-                pool_metrics.gauge("offload_queue_size").dec();
                 // Try to upgrade the block to a strong reference.
                 let block = match request.block.upgrade() {
                     Some(block) => Some(ImmutableBlock::new(block)),
@@ -368,7 +351,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     };
 
                     if let Some(target_block) = target_block {
-                        pool_metrics.counter("offload_processed").inc();
                         tracing::debug!(
                             "Offloading block with sequence hash {} to target pool.",
                             request.sequence_hash
@@ -389,7 +371,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     _ = cancellation_token.cancelled() => return Ok(()),
                     Some(request) = offload_rx.recv() => {
                         queue.insert(request);
-                        pool_metrics.gauge("offload_queue_size").inc();
                     }
                 }
             }
@@ -401,7 +382,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         target_pool: Option<Arc<dyn BlockPool<Target, Locality, Metadata>>>,
         mut onboard_rx: mpsc::UnboundedReceiver<OnboardRequest<Source, Target, Locality, Metadata>>,
         transfer_manager: Arc<dyn TransferManager<Source, Target, Locality, Metadata>>,
-        pool_metrics: Arc<PoolMetrics>,
         cancellation_token: CancellationToken,
     ) -> Result<()> {
         if source_pool.is_none() || target_pool.is_none() {
@@ -413,10 +393,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             tokio::select! {
                 _ = cancellation_token.cancelled() => return Ok::<(), anyhow::Error>(()),
                 Some(request) = onboard_rx.recv() => {
-
-                    pool_metrics
-                        .gauge("onboard_queue_size")
-                        .set(onboard_rx.len() as i64);
 
                     // Try to allocate blocks on the device.
                     let target_blocks = if let Some(targets) = request.targets {
@@ -430,10 +406,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                             }
                         }
                     };
-
-                    pool_metrics
-                        .counter("onboard_processed")
-                        .inc_by(request.blocks.len() as u64);
 
                     tracing::debug!("Onboarding {} blocks to target pool.", request.blocks.len());
 
@@ -833,9 +805,9 @@ mod tests {
         let config = OffloadManagerConfig {
             nixl_agent: agent_arc,
             async_rt_handle,
-            metrics: BlockManagerMetrics::new(&Arc::new(Registry::new()))?,
             cancellation_token: CancellationToken::new(),
             model_config: minimal_config,
+            kvbm_metrics: None,
         };
 
         let manager = OffloadManager::new(

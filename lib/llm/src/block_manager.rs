@@ -15,7 +15,6 @@ pub mod connector;
 pub mod distributed;
 pub mod events;
 pub mod layout;
-pub mod metrics;
 pub mod metrics_kvbm;
 pub mod offload;
 pub mod pool;

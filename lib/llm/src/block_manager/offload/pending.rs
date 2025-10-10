@@ -41,7 +41,6 @@ use crate::block_manager::block::{
     locality::LocalityProvider,
     transfer::{TransferContext, WriteTo, WriteToStrategy},
 };
-use crate::block_manager::metrics::PoolMetrics;
 use crate::block_manager::pool::{BlockPool, BlockPoolError};
 use crate::block_manager::storage::{Local, Storage};
 
@@ -164,7 +163,6 @@ struct TransferCompletionManager<
     Locality: LocalityProvider,
     Metadata: BlockMetadata,
 > {
-    pool_metrics: Arc<PoolMetrics>,
     transfer_type: String,
     last_publish_time: Option<Instant>,
     transfer_start: Instant,
@@ -175,9 +173,8 @@ struct TransferCompletionManager<
 impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: BlockMetadata>
     TransferCompletionManager<Source, Target, Locality, Metadata>
 {
-    pub fn new(pool_metrics: Arc<PoolMetrics>, transfer_type: String) -> Self {
+    pub fn new(transfer_type: String) -> Self {
         Self {
-            pool_metrics,
             transfer_type,
             last_publish_time: None,
             transfer_start: Instant::now(),
@@ -201,9 +198,12 @@ impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: Blo
             let duration = self.transfer_start.elapsed();
             let blocks_per_sec = self.num_blocks_transferred as f64 / duration.as_secs_f64();
 
-            self.pool_metrics
-                .gauge(self.transfer_type.as_str())
-                .set(blocks_per_sec as i64);
+            // Transfer performance tracking (blocks per second)
+            tracing::debug!(
+                "{} transfer performance: {:.2} blocks/sec",
+                self.transfer_type,
+                blocks_per_sec
+            );
         }
 
         match pending_transfer.handle_complete().await {
@@ -245,13 +245,12 @@ impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: Blo
         max_concurrent_transfers: usize,
         runtime: &Handle,
         cancellation_token: CancellationToken,
-        pool_metrics: Arc<PoolMetrics>,
         transfer_type: String,
     ) -> Result<Self> {
         let (futures_tx, mut futures_rx) = mpsc::channel(1);
 
         let mut completion_manager =
-            TransferCompletionManager::new(pool_metrics.clone(), transfer_type.clone());
+            TransferCompletionManager::new(transfer_type.clone());
 
         CriticalTaskExecutionHandle::new_with_runtime(
             move |cancel_token| async move {
