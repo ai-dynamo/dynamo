@@ -49,7 +49,7 @@ tools.
 Try the following to begin interacting with a model:
 > dynamo --help
 > python -m dynamo.frontend [--http-port 8000]
-> python -m dynamo.vllm Qwen/Qwen2.5-3B-Instruct
+> python -m dynamo.vllm --model Qwen/Qwen2.5-3B-Instruct
 
 To run more complete deployment examples, instances of etcd and nats need to be
 accessible within the container. This is generally done by connecting to
