@@ -9,7 +9,6 @@ import sys
 import sglang as sgl
 import uvloop
 
-from dynamo._core import Endpoint
 from dynamo.common.config_dump import dump_config
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime, dynamo_worker
@@ -75,7 +74,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     )
     await component.create_service()
 
-    generate_endpoint: Endpoint = component.endpoint(dynamo_args.endpoint)
+    generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
     prefill_client = None
     prefill_router_client = None

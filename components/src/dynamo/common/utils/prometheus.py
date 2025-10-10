@@ -12,7 +12,10 @@ while Dynamo runtime metrics are available immediately after component creation.
 """
 
 import logging
+import re
 from typing import TYPE_CHECKING, Optional
+
+from prometheus_client import generate_latest
 
 from dynamo._core import Endpoint
 
@@ -53,7 +56,6 @@ def register_engine_metrics_callback(
         return get_prometheus_expfmt(registry, metric_prefix_filter=metric_prefix)
 
     endpoint.metrics.register_prometheus_expfmt_callback(get_expfmt)
-    logging.info(f"Registered {engine_name} metrics passthrough callback")
 
 
 def get_prometheus_expfmt(
@@ -100,15 +102,11 @@ def get_prometheus_expfmt(
         vllm_metrics = get_prometheus_expfmt(REGISTRY, metric_prefix_filter="vllm:")
     """
     try:
-        from prometheus_client import generate_latest
-
         # Generate metrics in Prometheus text format
         metrics_text = generate_latest(registry).decode("utf-8")
 
         if metric_prefix_filter:
             # Filter lines: keep metric lines starting with prefix and their HELP/TYPE comments
-            import re
-
             escaped_prefix = re.escape(metric_prefix_filter)
             pattern = rf"^(?:{escaped_prefix}|# (?:HELP|TYPE) {escaped_prefix})"
             filtered_lines = [
@@ -121,12 +119,6 @@ def get_prometheus_expfmt(
                     result += "\n"
             return result
         else:
-            if metrics_text.strip():
-                logging.debug("=== Prometheus Metrics ===")
-                logging.debug("\n" + metrics_text)
-                logging.debug("=" * 50)
-            else:
-                logging.debug("No metrics collected yet")
             # Ensure metrics_text ends with newline
             if metrics_text and not metrics_text.endswith("\n"):
                 metrics_text += "\n"

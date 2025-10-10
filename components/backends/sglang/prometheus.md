@@ -22,29 +22,15 @@ The official documentation includes:
 - Setup guide for Prometheus + Grafana monitoring
 - Troubleshooting tips and configuration examples
 
-## Key Metric Categories
-
-**Note:** Specific metrics are subject to change between SGLang versions. Always refer to the [official documentation](https://docs.sglang.ai/references/production_metrics.html) or inspect the `/metrics` endpoint for your SGLang version.
+## Metric Categories
 
 SGLang provides metrics in the following categories (all prefixed with `sglang:`):
+- Throughput metrics
+- Resource usage
+- Latency metrics
+- Disaggregation metrics (when enabled)
 
-### Throughput Metrics
-- Token processing counters (prompt/generation tokens)
-- Request throughput and latency
-
-### Resource Usage
-- Token cache usage and hit rates
-- Queue depths and running requests
-- GPU utilization
-
-### Latency Metrics
-- Time to first token (TTFT)
-- End-to-end request latency
-- Inter-token latency
-
-### Disaggregation Metrics (when enabled)
-- Prefill/decode queue metrics
-- KV cache transfer speed and latency
+**Note:** Specific metrics are subject to change between SGLang versions. Always refer to the [official documentation](https://docs.sglang.ai/references/production_metrics.html) or inspect the `/metrics` endpoint for your SGLang version.
 
 ## Enabling Metrics in Dynamo
 
@@ -64,7 +50,7 @@ export DYN_SYSTEM_PORT=8081
 # Start SGLang worker with metrics enabled
 python -m dynamo.sglang --model <model_name> --enable-metrics
 
-# Wait for engine to initialize (10-30 seconds depending on model)
+# Wait for engine to initialize
 ```
 
 Metrics will be available at: `http://localhost:8081/metrics`
@@ -72,14 +58,7 @@ Metrics will be available at: `http://localhost:8081/metrics`
 ### 2. Fetch Metrics via curl
 
 ```bash
-# Get all metrics
-curl http://localhost:8081/metrics
-
-# Filter for SGLang-specific metrics only
 curl http://localhost:8081/metrics | grep "^sglang:"
-
-# Get metric definitions (HELP and TYPE)
-curl http://localhost:8081/metrics | grep "^# .*sglang:"
 ```
 
 ### 3. Example Output

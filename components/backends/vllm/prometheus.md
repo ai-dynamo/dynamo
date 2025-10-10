@@ -22,35 +22,16 @@ The official documentation includes:
 - Information about v1 metrics migration
 - Future work and deprecated metrics
 
-## Key Metric Categories
-
-**Note:** Specific metrics are subject to change between vLLM versions. Always refer to the [official documentation](https://docs.vllm.ai/en/latest/design/metrics.html) or inspect the `/metrics` endpoint for your vLLM version.
+## Metric Categories
 
 vLLM provides metrics in the following categories (all prefixed with `vllm:`):
+- Request metrics
+- Performance metrics
+- Resource usage
+- Scheduler metrics
+- Disaggregation metrics (when enabled)
 
-### Request Metrics
-- Request counts and finished request counters
-- Prompt and generation token counts
-- Request latency histograms (time to first token, end-to-end)
-
-### Performance Metrics
-- Time per output token
-- Inter-token latency
-- Generation throughput
-
-### Resource Usage
-- KV cache usage and block counts
-- GPU cache utilization
-- CPU cache usage
-
-### Scheduler Metrics
-- Running and waiting requests
-- Queue depths
-- Scheduling events
-
-### Disaggregation Metrics (when enabled)
-- Prefill/decode worker metrics
-- KV cache transfer metrics
+**Note:** Specific metrics are subject to change between vLLM versions. Always refer to the [official documentation](https://docs.vllm.ai/en/latest/design/metrics.html) or inspect the `/metrics` endpoint for your vLLM version.
 
 ## Enabling Metrics in Dynamo
 
@@ -70,7 +51,7 @@ export DYN_SYSTEM_PORT=8081
 # Start vLLM worker (metrics enabled by default via --disable-log-stats=false)
 python -m dynamo.vllm --model <model_name>
 
-# Wait for engine to initialize (10-30 seconds depending on model)
+# Wait for engine to initialize
 ```
 
 Metrics will be available at: `http://localhost:8081/metrics`
@@ -78,14 +59,7 @@ Metrics will be available at: `http://localhost:8081/metrics`
 ### 2. Fetch Metrics via curl
 
 ```bash
-# Get all metrics
-curl http://localhost:8081/metrics
-
-# Filter for vLLM-specific metrics only
 curl http://localhost:8081/metrics | grep "^vllm:"
-
-# Get metric definitions (HELP and TYPE)
-curl http://localhost:8081/metrics | grep "^# .*vllm:"
 ```
 
 ### 3. Example Output
@@ -107,7 +81,8 @@ vllm:time_to_first_token_seconds_sum{model_name="meta-llama/Llama-3.1-8B"} 89.38
 
 ## Implementation Details
 
-- vLLM uses the standard Prometheus client library with a single process model
+- vLLM v1 uses multiprocess metrics collection via `prometheus_client.multiprocess`
+- `PROMETHEUS_MULTIPROC_DIR`: vLLM sets this environment variable to a temporary directory where multiprocess metrics are stored as memory-mapped files. Each worker process writes its metrics to separate files in this directory, which are aggregated when `/metrics` is scraped.
 - Metrics are filtered by the `vllm:` prefix before being exposed
 - The integration uses Dynamo's `register_engine_metrics_callback()` function
 - Metrics appear after vLLM engine initialization completes

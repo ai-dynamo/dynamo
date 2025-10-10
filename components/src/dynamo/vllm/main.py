@@ -11,8 +11,8 @@ import uvloop
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
-from dynamo._core import Endpoint
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import (
@@ -127,11 +127,8 @@ def setup_kv_event_publisher(
 
 
 def setup_vllm_engine(config, stat_logger=None):
-    # Setup Prometheus multiprocess directory for metrics collection
-    from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
-
     setup_multiprocess_prometheus()
-    logger.info(
+    logger.debug(
         f"Prometheus multiproc dir set to: {os.environ.get('PROMETHEUS_MULTIPROC_DIR')}"
     )
 
@@ -159,11 +156,6 @@ def setup_vllm_engine(config, stat_logger=None):
     factory = []
     if stat_logger:
         factory.append(stat_logger)
-
-    logger.info(
-        f"Creating AsyncLLM with disable_log_stats={engine_args.disable_log_stats}, "
-        f"stat_loggers={'custom' if factory else 'none'}"
-    )
 
     engine_client = AsyncLLM.from_vllm_config(
         vllm_config=vllm_config,
@@ -239,7 +231,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     component = runtime.namespace(config.namespace).component(config.component)
     await component.create_service()
 
-    generate_endpoint: Endpoint = component.endpoint(config.endpoint)
+    generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
     prefill_router_client = (
