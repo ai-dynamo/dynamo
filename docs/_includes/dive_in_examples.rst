@@ -11,20 +11,20 @@ The examples below assume you build the latest image yourself from source. If us
 
         Demonstrates the basic concepts of Dynamo by creating a simple GPU-unaware graph
 
-    .. grid-item-card:: :doc:`vLLM <../components/backends/vllm/README>`
-        :link: ../components/backends/vllm/README
+    .. grid-item-card:: :doc:`vLLM <../backends/vllm/README>`
+        :link: ../backends/vllm/README
         :link-type: doc
 
         Presents examples and reference implementations for deploying Large Language Models (LLMs) in various configurations with VLLM.
 
-    .. grid-item-card:: :doc:`SGLang <../components/backends/sglang/README>`
-        :link: ../components/backends/sglang/README
+    .. grid-item-card:: :doc:`SGLang <../backends/sglang/README>`
+        :link: ../backends/sglang/README
         :link-type: doc
 
         Presents examples and reference implementations for deploying Large Language Models (LLMs) in various configurations with SGLang.
 
-    .. grid-item-card:: :doc:`TensorRT-LLM <../components/backends/trtllm/README>`
-        :link: ../components/backends/trtllm/README
+    .. grid-item-card:: :doc:`TensorRT-LLM <../backends/trtllm/README>`
+        :link: ../backends/trtllm/README
         :link-type: doc
 
         Presents examples and reference implementations for deploying Large Language Models (LLMs) in various configurations with TensorRT-LLM.

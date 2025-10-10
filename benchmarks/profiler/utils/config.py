@@ -145,11 +145,6 @@ def remove_valued_arguments(args: list[str], key: str) -> list[str]:
     return args
 
 
-def join_arguments(args: list[str]) -> list[str]:
-    # Use shlex.join to properly quote arguments that contain spaces or special characters
-    return [shlex.join(args)]
-
-
 def append_argument(args: list[str], to_append) -> list[str]:
     idx = find_arg_index(args)
     if isinstance(to_append, list):
@@ -469,7 +464,7 @@ class VllmV1ConfigModifier:
             if "--no-enable-prefix-caching" not in args:
                 args = append_argument(args, "--no-enable-prefix-caching")
 
-            worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
+            worker_service.extraPodSpec.mainContainer.args = args
 
         elif target == "decode":
             # Get service names by inferring from subComponentType first
@@ -500,7 +495,7 @@ class VllmV1ConfigModifier:
             if "--no-enable-prefix-caching" in args:
                 args.remove("--no-enable-prefix-caching")
 
-            worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
+            worker_service.extraPodSpec.mainContainer.args = args
 
         # set num workers to 1
         # Use the inferred decode service name
@@ -537,7 +532,7 @@ class VllmV1ConfigModifier:
         except ValueError:
             args = append_argument(args, ["--tensor-parallel-size", str(tp_size)])
 
-        worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
+        worker_service.extraPodSpec.mainContainer.args = args
 
         return cfg.model_dump()
 
@@ -695,7 +690,7 @@ class SGLangConfigModifier:
             if "--disable-radix-cache" not in args:
                 args = append_argument(args, "--disable-radix-cache")
 
-            worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
+            worker_service.extraPodSpec.mainContainer.args = args
 
         elif target == "decode":
             # Get service names by inferring from subComponentType first
@@ -739,7 +734,7 @@ class SGLangConfigModifier:
                         args, ["--load-balance-method", "round_robin"]
                     )
 
-            worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
+            worker_service.extraPodSpec.mainContainer.args = args
 
         # set num workers to 1
         # Use the inferred decode service name
@@ -772,7 +767,7 @@ class SGLangConfigModifier:
         # Set --tp argument
         args = set_argument_value(args, "--tp", str(tp_size))
 
-        worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
+        worker_service.extraPodSpec.mainContainer.args = args
         return cfg.model_dump()
 
     @classmethod
@@ -807,7 +802,7 @@ class SGLangConfigModifier:
         if "--enable-dp-attention" in args:
             args.remove("--enable-dp-attention")
 
-        worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
+        worker_service.extraPodSpec.mainContainer.args = args
         return cfg.model_dump()
 
     @classmethod
@@ -842,7 +837,7 @@ class SGLangConfigModifier:
         # 4. Set --ep-size=dep_size (expert parallelism size)
         args = set_argument_value(args, "--ep-size", str(dep_size))
 
-        worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
+        worker_service.extraPodSpec.mainContainer.args = args
         return cfg.model_dump()
 
     @classmethod
@@ -989,7 +984,7 @@ class TrtllmConfigModifier:
             override_str = json.dumps(override_dict)
             args = append_argument(args, ["--override-engine-args", override_str])
 
-            worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
+            worker_service.extraPodSpec.mainContainer.args = args
 
         elif target == "decode":
             # Get service names by inferring from subComponentType first
@@ -1037,7 +1032,7 @@ class TrtllmConfigModifier:
             override_str = json.dumps(override_dict)
             args = append_argument(args, ["--override-engine-args", override_str])
 
-            worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
+            worker_service.extraPodSpec.mainContainer.args = args
 
         # Set num workers to 1
         # Use the inferred decode service name
@@ -1082,7 +1077,7 @@ class TrtllmConfigModifier:
         override_str = json.dumps(override_dict)
         args = append_argument(args, ["--override-engine-args", override_str])
 
-        worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
+        worker_service.extraPodSpec.mainContainer.args = args
 
         return cfg.model_dump()
 

@@ -9,6 +9,7 @@ import sglang as sgl
 
 from dynamo._core import Component
 from dynamo.sglang.args import Config
+from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 
@@ -16,7 +17,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
     """Handler for prefill workers in disaggregated serving mode."""
 
     def __init__(
-        self, component: Component, engine: sgl.Engine, config: Config
+        self,
+        component: Component,
+        engine: sgl.Engine,
+        config: Config,
+        publisher: DynamoSglangPublisher,
     ) -> None:
         """Initialize prefill worker handler.
 
@@ -24,10 +29,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             component: The Dynamo runtime component.
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
+            publisher: The SGLang publisher instance.
         """
         self.engine = engine
         self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info(self.engine)
-        super().__init__(component, engine, config)
+        super().__init__(component, engine, config, publisher)
         logging.info(
             f"Prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
         )

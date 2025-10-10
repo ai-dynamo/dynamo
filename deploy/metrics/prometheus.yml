@@ -33,13 +33,13 @@ scrape_configs:
     static_configs:
       - targets: ['dcgm-exporter:9401']  # on the "monitoring" network
 
-  # This is a demo service that needs to be launched manually. See components/metrics/README.md
-  # Note that you may need to disable the firewall on your host. On Ubuntu: sudo ufw allow 8080/tcp
-  # You can also force the port, if the default is different: python -m dynamo.frontend --http-port 8080
+  # This is a demo service that needs to be launched manually
+  # Note that you may need to disable the firewall on your host. On Ubuntu: sudo ufw allow 8000/tcp
+  # You can also force the port, if the default is different: python -m dynamo.frontend --http-port 8000
   - job_name: 'dynamo-frontend'
     scrape_interval: 10s
     static_configs:
-      - targets: ['host.docker.internal:8080']  # on the "monitoring" network
+      - targets: ['host.docker.internal:8000']  # on the "monitoring" network
 
   # Launch via: DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 dynamo.<backend> ...
   # If you want to update the scrape_interval, you may want to also update component.rs's MAX_DELAY
@@ -48,15 +48,6 @@ scrape_configs:
     static_configs:
       - targets: ['host.docker.internal:8081']
 
-  # DEPRECATED: This metrics aggregation service is being deprecated in favor of MetricsRegistry
-  # The new system uses the 'dynamo-backend' job above instead of this separate service
-  # This is another demo aggregator that needs to be launched manually. See components/metrics/README.md
-  # Note that you may need to disable the firewall on your host. On Ubuntu: sudo ufw allow 9091/tcp
-  - job_name: 'metrics-aggregation-service'
-    scrape_interval: 2s
-    static_configs:
-      # - targets: ['localhost:9091']  # metrics aggregation service on host
-      - targets: ['host.docker.internal:9091']  # metrics aggregation service on host
 
   # KVBM leader related metrics
   - job_name: 'kvbm-metrics'

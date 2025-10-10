@@ -1277,7 +1277,6 @@ async fn process_offload_request(
     leader: &Arc<KvbmLeader>,
     kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
-    kvbm_metrics.offload_requests.inc();
     kvbm_metrics
         .offload_blocks_d2h
         .inc_by(offload_req.block_ids.len() as u64);
@@ -1389,7 +1388,6 @@ async fn process_onboard_request(
     leader: &Arc<KvbmLeader>,
     kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
-    kvbm_metrics.onboard_requests.inc();
     if onboard_req.src_blocks.storage_pool() == BlockTransferPool::Host {
         kvbm_metrics
             .onboard_blocks_h2d
