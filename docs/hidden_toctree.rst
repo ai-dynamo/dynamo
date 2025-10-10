@@ -42,14 +42,32 @@
    architecture/request_migration.md
    architecture/request_cancellation.md
 
-   components/backends/trtllm/multinode/multinode-examples.md
-   components/backends/sglang/docs/multinode-examples.md
+   backends/trtllm/multinode/multinode-examples.md
+   backends/trtllm/multinode/multinode-multimodal-example.md
+   backends/trtllm/llama4_plus_eagle.md
+   backends/trtllm/kv-cache-transfer.md
+   backends/trtllm/multimodal_support.md
+   backends/trtllm/multimodal_epd.md
+   backends/trtllm/gemma3_sliding_window_attention.md
+   backends/trtllm/gpt-oss.md
+
+   backends/sglang/multinode-examples.md
+   backends/sglang/dsr1-wideep-gb200.md
+   backends/sglang/dsr1-wideep-h100.md
+   backends/sglang/expert-distribution-eplb.md
+   backends/sglang/gpt-oss.md
+   backends/sglang/multimodal_epd.md
+   backends/sglang/sgl-hicache-example.md
 
    examples/README.md
    examples/runtime/hello_world/README.md
 
    architecture/distributed_runtime.md
    architecture/dynamo_flow.md
+
+   backends/vllm/deepseek-r1.md
+   backends/vllm/gpt-oss.md
+   backends/vllm/multi-node.md
 
 
 ..   TODO: architecture/distributed_runtime.md and architecture/dynamo_flow.md

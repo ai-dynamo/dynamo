@@ -41,7 +41,7 @@ Please note that:
 3. `post_process.py` - Scan the genai-perf results to produce a json with entries to each config point.
 4. `plot_performance_comparison.py` - Takes the json result file for disaggregated and/or aggregated configuration sweeps and plots a pareto line for better visualization.
 
-For more finer grained details on how to launch TRTLLM backend workers with DeepSeek R1 on GB200 slurm, please refer [multinode-examples.md](../multinode/multinode-examples.md). This guide shares similar assumption to the multinode examples guide.
+For more finer grained details on how to launch TRTLLM backend workers with DeepSeek R1 on GB200 slurm, please refer [multinode-examples.md](../../../../docs/backends/trtllm/multinode/multinode-examples.md). This guide shares similar assumption to the multinode examples guide.
 
 ## Usage
 

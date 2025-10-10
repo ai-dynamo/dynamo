@@ -31,7 +31,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 The MultimodalEncodeWorker is responsible for encoding the image and passing the embeddings to the MultimodalWorker via a combination of NATS and RDMA.
 The work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface.
-Its MultimodalWorker then prefills and decodes the prompt, just like the [LLM aggregated serving](../README.md) example.
+Its MultimodalWorker then prefills and decodes the prompt, just like the [LLM aggregated serving](README.md) example.
 By separating the encode from the prefill and decode stages, we can have a more flexible deployment and scale the
 MultimodalEncodeWorker independently from the prefill and decode workers if needed.
 
@@ -116,7 +116,7 @@ You should see a response similar to this:
 
 For the Qwen2.5-VL model, embeddings are only required during the prefill stage. As such, the image embeddings are transferred using a NIXL descriptor from the encode worker to the worker and then passed to the prefill worker for processing.
 The prefill worker performs the prefilling step and forwards the KV cache to the worker for decoding.
-For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](../README.md) example.
+For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](README.md) example.
 
 This figure illustrates the workflow:
 ```mermaid
