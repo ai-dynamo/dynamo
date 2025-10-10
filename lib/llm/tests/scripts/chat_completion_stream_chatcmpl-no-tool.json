@@ -1,0 +1,1204 @@
+{
+  "request_id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+  "normal_content": "<|channel|>analysis<|message|>We need to call get_weather with location \"Tokyo\" and unit \"celsius\".<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"location\":\"Tokyo\",\"unit\":\"celsius\"}<|call|>",
+  "reasoning_content": "",
+  "tool_calls": [],
+  "data": [
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "<|channel|>",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "analysis",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "<|message|>",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "We",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": " need",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": " to",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": " call",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": " get",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "_weather",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": " with",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": " location",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": " \"",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "Tokyo",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "\"",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": " and",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": " unit",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": " \"",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "c",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "elsius",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "\".",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "<|end|>",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "<|start|>",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "assistant",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "<|channel|>",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "comment",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "ary",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": " to",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "=",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "functions",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": ".get",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "_weather",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": " ",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "<|constrain|>",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "json",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "<|message|>",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "{\"",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "location",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "\":\"",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "Tokyo",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "\",\"",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "unit",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "\":\"",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "c",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "elsius",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "\"}",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-972546bf-8161-4775-a51c-50b6b393a010",
+        "choices": [
+          {
+            "delta": {
+              "content": "<|call|>",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": null,
+              "reasoning_content": null
+            },
+            "finish_reason": "stop",
+            "index": 0,
+            "logprobs": null
+          }
+        ],
+        "created": 1760125758,
+        "model": "openai/gpt-oss-20b",
+        "object": "chat.completion.chunk",
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": null
+      }
+    }
+  ]
+}
