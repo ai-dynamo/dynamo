@@ -166,6 +166,10 @@ filterwarnings = [
     "ignore:.*unclosed event loop.*:ResourceWarning", # Ignore unclosed event loop warnings
     "ignore:.*Exception ignored in.*:pytest.PytestUnraisableExceptionWarning", # Ignore unraisable exception warnings
     "ignore:The pynvml package is deprecated.*:FutureWarning", # Ignore pynvml deprecation warning, temporary until upstream library updates to nvidia-ml-py
+    # Pydantic V2 deprecation warnings from TRTLLM dependencies (raised at import time during collection)
+    "ignore:Support for class-based `config`.*:pydantic.warnings.PydanticDeprecatedSince20",
+    "ignore:Using extra keyword arguments on `Field`.*:pydantic.warnings.PydanticDeprecatedSince20",
+    "ignore:The `schema` method is deprecated.*:pydantic.warnings.PydanticDeprecatedSince20",
 ]
 
 
