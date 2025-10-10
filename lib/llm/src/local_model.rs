@@ -12,7 +12,7 @@ use dynamo_runtime::storage::key_value_store::Key;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{
     component::Endpoint,
-    storage::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager},
+    storage::key_value_store::{EtcdStore, KeyValueStore, KeyValueStoreManager},
 };
 
 use crate::entrypoint::RouterConfig;
@@ -409,7 +409,7 @@ impl LocalModel {
         self.card.move_to_nats(nats_client.clone()).await?;
 
         // Publish the Model Deployment Card to KV store
-        let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
+        let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStore::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
         let lease_id = endpoint.drt().primary_lease().map(|l| l.id()).unwrap_or(0);
         let key = Key::from_raw(endpoint.unique_path(lease_id));

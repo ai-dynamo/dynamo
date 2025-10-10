@@ -72,7 +72,7 @@ pub mod service;
 
 pub use client::{Client, InstanceSource};
 
-/// The root etcd path where each instance registers itself in etcd.
+/// The root key-value path where each instance registers itself in.
 /// An instance is namespace+component+endpoint+lease_id and must be unique.
 pub const INSTANCE_ROOT_PATH: &str = "v1/instances";
 
@@ -223,8 +223,8 @@ impl MetricsRegistry for Component {
 }
 
 impl Component {
-    /// The component part of an instance path in etcd.
-    pub fn etcd_root(&self) -> String {
+    /// The component part of an instance path in key-value store.
+    pub fn instance_root(&self) -> String {
         let ns = self.namespace.name();
         let cp = &self.name;
         format!("{INSTANCE_ROOT_PATH}/{ns}/{cp}")
@@ -266,8 +266,8 @@ impl Component {
     }
 
     pub async fn list_instances(&self) -> anyhow::Result<Vec<Instance>> {
-        let client = self.drt.storage_client();
-        let Some(bucket) = client.get_bucket(&self.etcd_root()).await? else {
+        let client = self.drt.store();
+        let Some(bucket) = client.get_bucket(&self.instance_root()).await? else {
             return Ok(vec![]);
         };
         let entries = bucket.entries().await?;
@@ -467,7 +467,7 @@ impl Endpoint {
 
     /// The endpoint part of an instance path in etcd
     pub fn etcd_root(&self) -> String {
-        let component_path = self.component.etcd_root();
+        let component_path = self.component.instance_root();
         let endpoint_name = &self.name;
         format!("{component_path}/{endpoint_name}")
     }

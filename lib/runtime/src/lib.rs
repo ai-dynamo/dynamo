@@ -154,7 +154,7 @@ pub struct DistributedRuntime {
     // we might consider a unifed transport manager here
     etcd_client: Option<transports::etcd::Client>,
     nats_client: transports::nats::Client,
-    storage_client: Arc<dyn KeyValueStore>,
+    store: Arc<dyn KeyValueStore>,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
 

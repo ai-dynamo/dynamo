@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub use crate::component::Component;
-use crate::storage::key_value_store::{EtcdStorage, KeyValueStore, MemoryStorage};
+use crate::storage::key_value_store::{EtcdStore, KeyValueStore, MemoryStore};
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
     ErrorContext, RuntimeCallback,
@@ -45,15 +45,14 @@ impl DistributedRuntime {
 
         let runtime_clone = runtime.clone();
 
-        let (etcd_client, storage_client) = if is_static {
-            let storage_client: Arc<dyn KeyValueStore> = Arc::new(MemoryStorage::new());
-            (None, storage_client)
+        let (etcd_client, store) = if is_static {
+            let store: Arc<dyn KeyValueStore> = Arc::new(MemoryStore::new());
+            (None, store)
         } else {
             let etcd_client = etcd::Client::new(etcd_config.clone(), runtime_clone).await?;
-            let storage_client: Arc<dyn KeyValueStore> =
-                Arc::new(EtcdStorage::new(etcd_client.clone()));
+            let store: Arc<dyn KeyValueStore> = Arc::new(EtcdStore::new(etcd_client.clone()));
 
-            (Some(etcd_client), storage_client)
+            (Some(etcd_client), store)
         };
 
         let nats_client = nats_config.clone().connect().await?;
@@ -83,7 +82,7 @@ impl DistributedRuntime {
         let distributed_runtime = Self {
             runtime,
             etcd_client,
-            storage_client,
+            store,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
@@ -278,8 +277,9 @@ impl DistributedRuntime {
     }
 
     /// An interface to store things. Will eventually replace `etcd_client`.
-    pub fn storage_client(&self) -> Arc<dyn KeyValueStore> {
-        self.storage_client.clone()
+    /// Currently does key-value, but will grow to include whatever we need to store.
+    pub fn store(&self) -> Arc<dyn KeyValueStore> {
+        self.store.clone()
     }
 
     pub fn child_token(&self) -> CancellationToken {

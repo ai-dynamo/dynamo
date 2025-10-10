@@ -19,9 +19,9 @@ use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
 use dynamo_runtime::logging::make_request_span;
-use dynamo_runtime::storage::key_value_store::EtcdStorage;
+use dynamo_runtime::storage::key_value_store::EtcdStore;
 use dynamo_runtime::storage::key_value_store::KeyValueStore;
-use dynamo_runtime::storage::key_value_store::MemoryStorage;
+use dynamo_runtime::storage::key_value_store::MemoryStore;
 use dynamo_runtime::transports::etcd;
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
@@ -33,7 +33,7 @@ pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
     etcd_client: Option<etcd::Client>,
-    storage_client: Arc<dyn KeyValueStore>,
+    store: Arc<dyn KeyValueStore>,
     flags: StateFlags,
 }
 
@@ -79,7 +79,7 @@ impl State {
             manager,
             metrics: Arc::new(Metrics::default()),
             etcd_client: None,
-            storage_client: Arc::new(MemoryStorage::new()),
+            store: Arc::new(MemoryStore::new()),
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
@@ -93,7 +93,7 @@ impl State {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
-            storage_client: Arc::new(EtcdStorage::new(etcd_client.clone())),
+            store: Arc::new(EtcdStore::new(etcd_client.clone())),
             etcd_client: Some(etcd_client),
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
@@ -120,8 +120,8 @@ impl State {
         self.etcd_client.as_ref()
     }
 
-    pub fn storage_client(&self) -> Arc<dyn KeyValueStore> {
-        self.storage_client.clone()
+    pub fn store(&self) -> Arc<dyn KeyValueStore> {
+        self.store.clone()
     }
 
     // TODO
