@@ -113,7 +113,10 @@ sglang_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["bus"],
+                # NOTE: The response text may mention 'bus', 'train', 'streetcar', etc.
+                # so we need something consistently found in the response, or a different
+                # approach to validation for this test to be stable.
+                expected_response=["OUT OF SERVICE"],
                 temperature=0.0,
             )
         ],
