@@ -473,7 +473,6 @@ class DependencyExtractor:
         
         # Service-related notes
         if notes.startswith("Service:"):
-            service = notes.replace("Service:", "").strip()
             return f"Docker Compose service"
         
         # Keep certain notes as-is if they're already readable
@@ -582,10 +581,9 @@ class DependencyExtractor:
         formatted_name = self._format_dependency_name(name, category, version)
         
         # Check if this is a critical dependency (check both original and formatted names)
-        is_critical_orig, reason_orig = self._is_critical_dependency(name)
-        is_critical_formatted, reason_formatted = self._is_critical_dependency(formatted_name)
+        is_critical_orig, _ = self._is_critical_dependency(name)
+        is_critical_formatted, _ = self._is_critical_dependency(formatted_name)
         is_critical = is_critical_orig or is_critical_formatted
-        critical_reason = reason_orig if is_critical_orig else reason_formatted
         
         # Determine if this is new or changed (use FORMATTED name for key since CSV stores formatted names)
         key = f"{component}:{category}:{formatted_name}"
