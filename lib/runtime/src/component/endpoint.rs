@@ -6,8 +6,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::*;
 
-// Error message templates for component operations
-const COMPONENT_DISCOVERY_REGISTRATION_ERROR: &str = "Unable to register service for discovery. Check discovery service status";
 
 pub use async_nats::service::endpoint::Stats as EndpointStats;
 
@@ -248,7 +246,7 @@ impl EndpointConfigBuilder {
         {
             tracing::error!("Unable to register service {}/{} for discovery: {:?}", component_name, endpoint_name, e);
             cancel_token.cancel();
-            return Err(error!(COMPONENT_DISCOVERY_REGISTRATION_ERROR));
+            return Err(error!("Unable to register service for discovery. Check discovery service status"));
         }
         task.await??;
 

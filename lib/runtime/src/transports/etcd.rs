@@ -28,10 +28,6 @@ pub use path::*;
 
 use super::utils::build_in_runtime;
 
-// Error message templates for ETCD operations
-const ETCD_KEY_CREATE_ERROR: &str = "Unable to create key. Check etcd server status";
-const ETCD_KEY_VALIDATE_ERROR: &str = "Unable to create or validate key. Check etcd server status";
-const ETCD_KEY_OPERATION_ERROR: &str = "Unable to validate key operation. Check etcd server status";
 
 /// ETCD Client
 #[derive(Clone)]
@@ -190,7 +186,7 @@ impl Client {
             for resp in result.op_responses() {
                 tracing::warn!("kv_create etcd op response: {resp:?}");
             }
-            Err(error!(ETCD_KEY_CREATE_ERROR))
+            Err(error!("Unable to create key. Check etcd server status"))
         }
     }
 
@@ -231,11 +227,11 @@ impl Client {
                 Some(response) => match response {
                     TxnOpResponse::Txn(response) => match response.succeeded() {
                         true => Ok(()),
-                        false => Err(error!(ETCD_KEY_VALIDATE_ERROR)),
+                        false => Err(error!("Unable to create or validate key. Check etcd server status")),
                     },
-                    _ => Err(error!(ETCD_KEY_OPERATION_ERROR)),
+                    _ => Err(error!("Unable to validate key operation. Check etcd server status")),
                 },
-                None => Err(error!(ETCD_KEY_VALIDATE_ERROR)),
+                None => Err(error!("Unable to create or validate key. Check etcd server status")),
             }
         }
     }
