@@ -210,9 +210,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         request_id_future.set_result(sglang_request_id)
                         logging.debug(f"New SGLang Request ID: {sglang_request_id}")
 
-                # Note: No explicit cancellation checks needed here.
-                # When abort_request is called by the cancellation monitor,
-                # SGLang will terminate this async generator automatically.
+                # Check cancellation before yielding to allow proper cleanup.
+                # This lets SGLang proceed to the second token generation, which will
+                # async context switch and allow the abort monitor to signal cancellation.
+                # The loop should exit by itself when context.is_stopped() returns True.
                 out = {}
                 finish_reason = res["meta_info"]["finish_reason"]
                 if finish_reason:
@@ -221,13 +222,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 output_ids = res.get("output_ids", [])
                 # If request is not finished yet, but there are no outputs, return an error.
                 if not output_ids and not finish_reason:
-                    yield {"finish_reason": "error", "token_ids": []}
+                    if not context.is_stopped():
+                        yield {"finish_reason": "error", "token_ids": []}
                     break
 
                 next_total_toks = len(output_ids)
                 out["token_ids"] = output_ids[num_output_tokens_so_far:]
                 num_output_tokens_so_far = next_total_toks
-                yield out
+                if not context.is_stopped():
+                    yield out
 
     async def _process_text_stream(
         self,
@@ -257,9 +260,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         request_id_future.set_result(sglang_request_id)
                         logging.debug(f"New SGLang Request ID: {sglang_request_id}")
 
-                # Note: No explicit cancellation checks needed here.
-                # When abort_request is called by the cancellation monitor,
-                # SGLang will terminate this async generator automatically.
+                # Check cancellation before yielding to allow proper cleanup.
+                # This lets SGLang proceed to the second token generation, which will
+                # async context switch and allow the abort monitor to signal cancellation.
+                # The loop should exit by itself when context.is_stopped() returns True.
 
                 index = res.get("index", 0)
                 text = res.get("text", "")
@@ -282,5 +286,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "model": self.config.server_args.served_model_name,
                     "object": "chat.completion.chunk",
                 }
-                yield response
+                if not context.is_stopped():
+                    yield response
                 count = next_count
