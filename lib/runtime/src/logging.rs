@@ -99,6 +99,21 @@ const DEFAULT_FILTER_LEVEL: &str = "info";
 /// ENV used to set the path to the logging configuration file
 const CONFIG_PATH_ENV: &str = "DYN_LOGGING_CONFIG_PATH";
 
+/// Enable OTLP trace exporting (OpenTelemetry standard)
+const OTEL_TRACES_EXPORTER: &str = "OTEL_TRACES_EXPORTER";
+
+/// OTEL exporter endpoint (OpenTelemetry standard)
+const OTEL_EXPORTER_OTLP_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
+
+/// Default OTLP endpoint
+const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
+
+/// Service name environment variable (for Kubernetes pod name)
+const POD_NAME_ENV: &str = "POD_NAME";
+
+/// Default service name
+const DEFAULT_SERVICE_NAME: &str = "dynamo";
+
 /// Once instance to ensure the logger is only initialized once
 static INIT: Once = Once::new();
 
@@ -126,6 +141,19 @@ impl Default for LoggingConfig {
             ]),
         }
     }
+}
+
+/// Check if OTLP trace exporting is enabled
+fn otlp_exporter_enabled() -> bool {
+    std::env::var(OTEL_TRACES_EXPORTER)
+        .map(|v| v.to_lowercase() == "otlp")
+        .unwrap_or(false)
+}
+
+/// Get the service name from environment or use default
+fn get_service_name() -> String {
+    std::env::var(POD_NAME_ENV)
+        .unwrap_or_else(|_| DEFAULT_SERVICE_NAME.to_string())
 }
 
 /// Generate a 32-character, lowercase hex trace ID (W3C-compliant)
@@ -718,40 +746,60 @@ fn setup_logging() {
 }
 
 #[cfg(not(feature = "tokio-console"))]
-// TODO: Add a subroutine to format and return the otel layer here
-fn setup_logging() ->Result<(), Box<dyn std::error::Error>> {
+fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let fmt_filter_layer = filters(load_config());
     let trace_filter_layer = filters(load_config());
+
     if jsonl_logging_enabled() {
-
-        // OTEL Layer
-        // Add Otel layer to generate trace id/span id and handle exporting on span close
-        let otlp_exporter = opentelemetry_otlp::new_exporter()
-            .tonic()
-            .with_endpoint("http://localhost:4317")
-            .with_timeout(std::time::Duration::from_secs(2)); // Add timeout
-        let tracer = opentelemetry_otlp::new_pipeline()
-            .tracing()
-            .with_exporter(otlp_exporter)
-            .with_trace_config(
-                opentelemetry_sdk::trace::config()
-                    .with_resource(opentelemetry_sdk::Resource::new(vec![
-                        opentelemetry::KeyValue::new("service.name", "rust-tracing-playground"),
-                        opentelemetry::KeyValue::new("service.version", "1.0.0"),
-                    ]))
-            )
-            .install_batch(opentelemetry_sdk::runtime::Tokio)
-            .map_err(|e| {
-                eprintln!("Failed to initialize OTLP tracer: {}", e);
-                e
-            })?;
-
         let l = fmt::layer()
             .with_ansi(false)
             .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
             .event_format(CustomJsonFormatter::new())
             .with_writer(std::io::stderr)
             .with_filter(fmt_filter_layer);
+
+        // Create OpenTelemetry tracer - either with OTLP export or no-op
+        let service_name = get_service_name();
+        
+        let tracer = if otlp_exporter_enabled() {
+            // Export enabled: create OTLP exporter with batch processor
+            let endpoint = std::env::var(OTEL_EXPORTER_OTLP_ENDPOINT)
+                .unwrap_or_else(|_| DEFAULT_OTLP_ENDPOINT.to_string());
+            
+            let otlp_exporter = opentelemetry_otlp::new_exporter()
+                .tonic()
+                .with_endpoint(endpoint)
+                .with_timeout(std::time::Duration::from_secs(2));
+            
+            opentelemetry_otlp::new_pipeline()
+                .tracing()
+                .with_exporter(otlp_exporter)
+                .with_trace_config(
+                    opentelemetry_sdk::trace::config()
+                        .with_resource(opentelemetry_sdk::Resource::new(vec![
+                            opentelemetry::KeyValue::new("service.name", service_name.clone()),
+                        ]))
+                )
+                .install_batch(opentelemetry_sdk::runtime::Tokio)
+                .map_err(|e| {
+                    eprintln!("Failed to initialize OTLP tracer: {}", e);
+                    e
+                })?
+        } else {
+            // Export disabled: create tracer with no span processor
+            use opentelemetry::trace::TracerProvider as _;
+            use opentelemetry_sdk::trace::TracerProvider;
+            
+            TracerProvider::builder()
+                .with_config(
+                    opentelemetry_sdk::trace::config()
+                        .with_resource(opentelemetry_sdk::Resource::new(vec![
+                            opentelemetry::KeyValue::new("service.name", service_name),
+                        ]))
+                )
+                .build()
+                .tracer("dynamo")
+        };
 
         tracing_subscriber::registry()
             .with(tracing_opentelemetry::layer().with_tracer(tracer))
@@ -764,11 +812,13 @@ fn setup_logging() ->Result<(), Box<dyn std::error::Error>> {
             .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
             .with_writer(std::io::stderr)
             .with_filter(fmt_filter_layer);
+
         tracing_subscriber::registry().with(l).init();
     }
 
     Ok(())
 }
+
 
 fn filters(config: LoggingConfig) -> EnvFilter {
     let mut filter_layer = EnvFilter::builder()
