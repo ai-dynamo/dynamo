@@ -556,7 +556,9 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
     /// Get metrics in Prometheus text format
     fn prometheus_metrics_fmt(&self) -> anyhow::Result<String> {
         // Execute callbacks first to ensure any new metrics are added to the registry
-        let callback_results = self.drt().execute_metrics_callbacks(&self.hierarchy());
+        let callback_results = self
+            .drt()
+            .execute_prometheus_update_callbacks(&self.hierarchy());
 
         // Log any callback errors but continue
         for result in callback_results {
@@ -565,20 +567,31 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
             }
         }
 
-        // Get the Prometheus registry for this hierarchy
-        let prometheus_registry = {
+        // Get the Prometheus registry for this hierarchy and execute exposition text callbacks
+        let (prometheus_registry, exposition_text) = {
             let mut registry_entry = self.drt().hierarchy_to_metricsregistry.write().unwrap();
-            registry_entry
-                .entry(self.hierarchy())
-                .or_default()
-                .prometheus_registry
-                .clone()
+            let entry = registry_entry.entry(self.hierarchy()).or_default();
+            let registry = entry.prometheus_registry.clone();
+            let text = entry.execute_prometheus_exposition_text_callbacks();
+            (registry, text)
         };
+
+        // Encode metrics from the registry
         let metric_families = prometheus_registry.gather();
         let encoder = prometheus::TextEncoder::new();
         let mut buffer = Vec::new();
         encoder.encode(&metric_families, &mut buffer)?;
-        Ok(String::from_utf8(buffer)?)
+        let mut result = String::from_utf8(buffer)?;
+
+        // Append exposition text callback results if any
+        if !exposition_text.is_empty() {
+            if !result.ends_with('\n') {
+                result.push('\n');
+            }
+            result.push_str(&exposition_text);
+        }
+
+        Ok(result)
     }
 }
 
@@ -769,7 +782,7 @@ mod test_metricsregistry_units {
             // Add callbacks with different increment values
             for increment in [1, 10, 100] {
                 let counter_clone = counter.clone();
-                entry.add_callback(Arc::new(move || {
+                entry.add_prometheus_update_callback(Arc::new(move || {
                     counter_clone.fetch_add(increment, Ordering::SeqCst);
                     Ok(())
                 }));
@@ -779,23 +792,23 @@ mod test_metricsregistry_units {
             assert_eq!(counter.load(Ordering::SeqCst), 0);
 
             // First execution
-            let results = entry.execute_callbacks();
+            let results = entry.execute_prometheus_update_callbacks();
             assert_eq!(results.len(), 3);
             assert!(results.iter().all(|r| r.is_ok()));
             assert_eq!(counter.load(Ordering::SeqCst), 111); // 1 + 10 + 100
 
             // Second execution - callbacks should be reusable
-            let results = entry.execute_callbacks();
+            let results = entry.execute_prometheus_update_callbacks();
             assert_eq!(results.len(), 3);
             assert_eq!(counter.load(Ordering::SeqCst), 222); // 111 + 111
 
             // Test cloning - cloned entry should have no callbacks
             let cloned = entry.clone();
-            assert_eq!(cloned.execute_callbacks().len(), 0);
+            assert_eq!(cloned.execute_prometheus_update_callbacks().len(), 0);
             assert_eq!(counter.load(Ordering::SeqCst), 222); // No change
 
             // Original still has callbacks
-            entry.execute_callbacks();
+            entry.execute_prometheus_update_callbacks();
             assert_eq!(counter.load(Ordering::SeqCst), 333); // 222 + 111
         }
 
@@ -806,23 +819,25 @@ mod test_metricsregistry_units {
 
             // Successful callback
             let counter_clone = counter.clone();
-            entry.add_callback(Arc::new(move || {
+            entry.add_prometheus_update_callback(Arc::new(move || {
                 counter_clone.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }));
 
             // Error callback
-            entry.add_callback(Arc::new(|| Err(anyhow::anyhow!("Simulated error"))));
+            entry.add_prometheus_update_callback(Arc::new(|| {
+                Err(anyhow::anyhow!("Simulated error"))
+            }));
 
             // Another successful callback
             let counter_clone = counter.clone();
-            entry.add_callback(Arc::new(move || {
+            entry.add_prometheus_update_callback(Arc::new(move || {
                 counter_clone.fetch_add(10, Ordering::SeqCst);
                 Ok(())
             }));
 
             // Execute and verify mixed results
-            let results = entry.execute_callbacks();
+            let results = entry.execute_prometheus_update_callbacks();
             assert_eq!(results.len(), 3);
             assert!(results[0].is_ok());
             assert!(results[1].is_err());
@@ -838,7 +853,7 @@ mod test_metricsregistry_units {
             assert_eq!(counter.load(Ordering::SeqCst), 11); // 1 + 10
 
             // Execute again - errors should be consistent
-            let results = entry.execute_callbacks();
+            let results = entry.execute_prometheus_update_callbacks();
             assert!(results[1].is_err());
             assert_eq!(counter.load(Ordering::SeqCst), 22); // 11 + 11
         }
@@ -846,7 +861,7 @@ mod test_metricsregistry_units {
         // Test 3: Empty registry
         {
             let entry = MetricsRegistryEntry::new();
-            let results = entry.execute_callbacks();
+            let results = entry.execute_prometheus_update_callbacks();
             assert_eq!(results.len(), 0);
         }
     }

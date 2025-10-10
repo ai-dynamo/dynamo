@@ -9,9 +9,11 @@ Dynamo backends and components.
 
 Main submodules:
     - config_dump: Configuration dumping and system diagnostics utilities
+    - env_utils: Environment variable parsing utilities
+    - prometheus_utils: Prometheus metrics collection and logging utilities
 """
 
-from dynamo.common import config_dump
+from dynamo.common import config_dump, env_utils, prometheus_utils
 
 try:
     from ._version import __version__
@@ -23,4 +25,4 @@ except Exception:
     except Exception:
         __version__ = "0.0.0+unknown"
 
-__all__ = ["__version__", "config_dump"]
+__all__ = ["__version__", "config_dump", "env_utils", "prometheus_utils"]

@@ -304,7 +304,7 @@ mod tests {
 /// 3. Prometheus scrapes these Gauge values (snapshots, not live data)
 ///
 /// Flow: NATS Service → NatsStatsMetrics (Counters) → Metrics Callback → Prometheus Gauge
-/// Note: These are snapshots updated when execute_metrics_callbacks() is called.
+/// Note: These are snapshots updated when execute_prometheus_update_callbacks() is called.
 #[derive(Debug, Clone)]
 /// Prometheus metrics for NATS server components.
 /// Note: Metrics with `_total` names use IntGauge because we copy counter values

@@ -8,8 +8,11 @@ import sys
 
 import sglang as sgl
 import uvloop
+from prometheus_client import CollectorRegistry, multiprocess
 
+from dynamo._core import Endpoint
 from dynamo.common.config_dump import dump_config
+from dynamo.common.prometheus_utils import register_engine_metrics_callback
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -74,7 +77,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     )
     await component.create_service()
 
-    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    generate_endpoint: Endpoint = component.endpoint(dynamo_args.endpoint)
 
     prefill_client = None
     prefill_router_client = None
@@ -96,6 +99,14 @@ async def init(runtime: DistributedRuntime, config: Config):
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
+
+    # Setup SGLang metrics passthrough via callback
+    # Note: metrics_task from setup_sgl_metrics doesn't have all the metrics.
+    # This callback pulls from the full Prometheus MultiProcessCollector registry
+    # which includes all SGLang metrics (scheduler, tokenizer, function latencies, etc.)
+    registry = CollectorRegistry()
+    multiprocess.MultiProcessCollector(registry)
+    register_engine_metrics_callback(generate_endpoint, registry, "sglang:", "SGLang")
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
@@ -199,6 +210,14 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
+
+    # Setup SGLang metrics passthrough via callback
+    # Note: metrics_task from setup_sgl_metrics doesn't have all the metrics.
+    # This callback pulls from the full Prometheus MultiProcessCollector registry
+    # which includes all SGLang metrics (scheduler, tokenizer, function latencies, etc.)
+    registry = CollectorRegistry()
+    multiprocess.MultiProcessCollector(registry)
+    register_engine_metrics_callback(generate_endpoint, registry, "sglang:", "SGLang")
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()

@@ -228,7 +228,7 @@ class RuntimeMetrics:
     Also provides utilities for registering metrics callbacks.
     """
 
-    def register_update_callback(self, callback: Callable[[], None]) -> None:
+    def register_prometheus_update_callback(self, callback: Callable[[], None]) -> None:
         """
         Register a Python callback to be invoked before metrics are scraped.
 
@@ -247,7 +247,30 @@ class RuntimeMetrics:
             def update_metrics():
                 counter.inc()
 
-            metrics.register_update_callback(update_metrics)
+            metrics.register_prometheus_update_callback(update_metrics)
+            ```
+        """
+        ...
+
+    def register_prometheus_exposition_text_callback(self, callback: Callable[[], str]) -> None:
+        """
+        Register a Python callback that returns Prometheus exposition text.
+        The returned text will be appended to the /metrics endpoint output.
+
+        This allows you to integrate external Prometheus metrics (e.g. from vLLM)
+        directly into the endpoint's metrics output.
+
+        Args:
+            callback: A callable that takes no arguments and returns a string
+                     in Prometheus text exposition format
+
+        Example:
+            ```python
+            def get_external_metrics():
+                # Fetch metrics from external source
+                return "# HELP external_metric Some metric\\nexternal_metric 42.0\\n"
+
+            metrics.register_prometheus_exposition_text_callback(get_external_metrics)
             ```
         """
         ...

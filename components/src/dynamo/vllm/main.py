@@ -8,11 +8,14 @@ import signal
 from typing import Optional
 
 import uvloop
+from prometheus_client import REGISTRY
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
+from dynamo._core import Endpoint
 from dynamo.common.config_dump import dump_config
+from dynamo.common.prometheus_utils import register_engine_metrics_callback
 from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
@@ -125,6 +128,14 @@ def setup_kv_event_publisher(
 
 
 def setup_vllm_engine(config, stat_logger=None):
+    # Setup Prometheus multiprocess directory for metrics collection
+    from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
+
+    setup_multiprocess_prometheus()
+    logger.info(
+        f"Prometheus multiproc dir set to: {os.environ.get('PROMETHEUS_MULTIPROC_DIR')}"
+    )
+
     os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -150,6 +161,11 @@ def setup_vllm_engine(config, stat_logger=None):
     if stat_logger:
         factory.append(stat_logger)
 
+    logger.info(
+        f"Creating AsyncLLM with disable_log_stats={engine_args.disable_log_stats}, "
+        f"stat_loggers={'custom' if factory else 'none'}"
+    )
+
     engine_client = AsyncLLM.from_vllm_config(
         vllm_config=vllm_config,
         usage_context=usage_context,
@@ -161,6 +177,17 @@ def setup_vllm_engine(config, stat_logger=None):
         logger.info(f"VllmWorker for {config.model} has been initialized with LMCache")
     else:
         logger.info(f"VllmWorker for {config.model} has been initialized")
+
+    # Debug: Check if prometheus dir still exists and has files after engine creation
+    multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+    if multiproc_dir and os.path.exists(multiproc_dir):
+        files = os.listdir(multiproc_dir)
+        logger.info(f"After engine creation, prometheus dir has {len(files)} files")
+    else:
+        logger.warning(
+            f"After engine creation, prometheus dir not found: {multiproc_dir}"
+        )
+
     return engine_client, vllm_config, default_sampling_params
 
 
@@ -223,7 +250,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     component = runtime.namespace(config.namespace).component(config.component)
     await component.create_service()
 
-    generate_endpoint = component.endpoint(config.endpoint)
+    generate_endpoint: Endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
     prefill_router_client = (
@@ -271,6 +298,9 @@ async def init(runtime: DistributedRuntime, config: Config):
     )
     if kv_publisher:
         handler.kv_publisher = kv_publisher
+
+    # Setup vLLM metrics passthrough via callback
+    register_engine_metrics_callback(generate_endpoint, REGISTRY, "vllm:", "vLLM")
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
         runtime_config = ModelRuntimeConfig()
