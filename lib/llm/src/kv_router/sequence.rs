@@ -33,7 +33,8 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::traits::events::{EventPublisher, EventSubscriber};
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Weak};
+use std::rc::{Rc, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -51,8 +52,7 @@ pub type RequestId = String;
 /// A multi-request sequence manager that handles multiple active sequences with shared KV cache
 #[derive(Debug, Getters)]
 pub struct ActiveSequences {
-    // TODO: can probably use Rc here, but need to rework `ActiveSequencesMultiWorker`
-    active_seqs: HashMap<RequestId, Vec<(SequenceHash, Arc<()>)>>,
+    active_seqs: HashMap<RequestId, Vec<(SequenceHash, Rc<()>)>>,
 
     prefill_tokens: HashMap<RequestId, usize>,
 
@@ -88,16 +88,16 @@ impl ActiveSequences {
         }
     }
 
-    fn touch_block(&mut self, block: &SequenceHash) -> Arc<()> {
+    fn touch_block(&mut self, block: &SequenceHash) -> Rc<()> {
         if let Some(weak) = self.unique_blocks.get(block)
-            && let Some(arc) = weak.upgrade()
+            && let Some(rc) = weak.upgrade()
         {
-            return arc;
+            return rc;
         }
 
-        let arc = Arc::new(());
-        self.unique_blocks.insert(*block, Arc::downgrade(&arc));
-        arc
+        let rc = Rc::new(());
+        self.unique_blocks.insert(*block, Rc::downgrade(&rc));
+        rc
     }
 
     fn try_remove_block(&mut self, block: &SequenceHash) {
@@ -135,7 +135,7 @@ impl ActiveSequences {
         self.active_tokens += prefill_tokens;
 
         if let Some(sequence) = token_sequence {
-            let sequence_with_refs: Vec<(SequenceHash, Arc<()>)> = sequence
+            let sequence_with_refs: Vec<(SequenceHash, Rc<()>)> = sequence
                 .iter()
                 .map(|block| (*block, self.touch_block(block)))
                 .collect();
@@ -208,9 +208,9 @@ impl ActiveSequences {
             }
         };
 
-        // Drop each Arc reference, then clean up the corresponding weak reference
-        for (block_hash, arc) in token_seq {
-            drop(arc);
+        // Drop each Rc reference, then clean up the corresponding weak reference
+        for (block_hash, rc) in token_seq {
+            drop(rc);
             self.try_remove_block(&block_hash);
         }
 
@@ -282,7 +282,7 @@ enum UpdateSequences {
 pub struct ActiveSequencesMultiWorker {
     senders: Arc<DashMap<WorkerId, tokio::sync::mpsc::UnboundedSender<UpdateSequences>>>,
     request_to_worker: Arc<DashMap<RequestId, WorkerId>>,
-    handles: Arc<DashMap<WorkerId, tokio::task::JoinHandle<()>>>,
+    handles: Arc<DashMap<WorkerId, std::thread::JoinHandle<()>>>,
     block_size: usize,
     component: Component,
     router_id: Uuid,
@@ -359,22 +359,35 @@ impl ActiveSequencesMultiWorker {
     /// Helper method to start a worker task
     fn start_worker(
         block_size: usize,
-        cancel_token: CancellationToken, // Add cancellation token parameter
+        cancel_token: CancellationToken,
     ) -> (
         tokio::sync::mpsc::UnboundedSender<UpdateSequences>,
-        tokio::task::JoinHandle<()>,
+        std::thread::JoinHandle<()>,
     ) {
-        let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let handle = tokio::spawn(async move {
-            let mut active_sequences = ActiveSequences::new(block_size);
+        let handle = std::thread::spawn(move || {
+            // Create a new tokio runtime which will only perform work on a single thread
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1) // Single-threaded environment
+                .enable_all()
+                .build()
+                .unwrap();
 
-            loop {
-                tokio::select! {
-                    // Handle incoming commands
-                    command = request_rx.recv() => {
-                        match command {
-                            Some(command) => {
+            let local_set = tokio::task::LocalSet::new();
+
+            runtime.block_on(local_set.run_until(async move {
+                tokio::task::spawn_local(async move {
+                    let mut active_sequences = ActiveSequences::new(block_size);
+                    let mut request_rx = request_rx;
+
+                    loop {
+                        tokio::select! {
+                            command = request_rx.recv() => {
+                                let Some(command) = command else {
+                                    break;
+                                };
+
                                 match command {
                                     UpdateSequences::AddRequest {
                                         request_id,
@@ -432,19 +445,19 @@ impl ActiveSequencesMultiWorker {
                                     }
                                 }
                             }
-                            None => {
-                                // Channel closed, exit
+                            // Handle cancellation
+                            _ = cancel_token.cancelled() => {
+                                tracing::debug!("Worker task cancelled");
                                 break;
                             }
                         }
                     }
-                    // Handle cancellation
-                    _ = cancel_token.cancelled() => {
-                        tracing::debug!("Worker task cancelled");
-                        break;
-                    }
-                }
-            }
+                })
+                .await
+                .unwrap()
+            }));
+
+            tracing::debug!("ActiveSequences worker task completed");
         });
 
         (request_tx, handle)
@@ -559,9 +572,7 @@ impl ActiveSequencesMultiWorker {
             if let Some((_, sender)) = self.senders.remove(worker_id) {
                 let _ = sender.send(UpdateSequences::Shutdown);
             }
-            if let Some((_, handle)) = self.handles.remove(worker_id) {
-                handle.abort();
-            }
+            self.handles.remove(worker_id);
 
             // Clean up request_to_worker mappings for this worker
             self.request_to_worker
@@ -854,11 +865,6 @@ impl Drop for ActiveSequencesMultiWorker {
         // Send shutdown to all workers
         for entry in self.senders.iter() {
             let _ = entry.value().send(UpdateSequences::Shutdown);
-        }
-
-        // Abort all tasks
-        for entry in self.handles.iter() {
-            entry.value().abort();
         }
     }
 }
