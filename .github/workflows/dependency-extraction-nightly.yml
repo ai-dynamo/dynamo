@@ -50,7 +50,8 @@ jobs:
           # Generate timestamped version (for artifacts)
           python3 .github/workflows/extract_dependency_versions.py \
             --output .github/reports/dependency_versions_${TIMESTAMP}.csv \
-            --report-unversioned
+            --report-unversioned \
+            --report-removed .github/reports/removed_dependencies.json
           
           # Copy to latest version (for repo tracking)
           mkdir -p .github/reports
@@ -74,9 +75,41 @@ jobs:
             changed_count=$(grep -c ",Changed," .github/reports/dependency_versions_latest.csv 2>/dev/null || echo "0")
             unchanged_count=$(grep -c ",Unchanged," .github/reports/dependency_versions_latest.csv 2>/dev/null || echo "0")
             
+            # Parse removed dependencies from JSON
+            if [ -f ".github/reports/removed_dependencies.json" ]; then
+              removed_count=$(python3 -c "import json; print(json.load(open('.github/reports/removed_dependencies.json'))['count'])" 2>/dev/null || echo "0")
+              
+              # Format removed dependencies list for PR body (limit to first 10)
+              removed_list=$(python3 -c "
+import json
+try:
+    data = json.load(open('.github/reports/removed_dependencies.json'))
+    removed = data['removed'][:10]  # First 10
+    lines = []
+    for dep in removed:
+        critical = ' **[CRITICAL]**' if dep.get('Critical') == 'Yes' else ''
+        lines.append(f\"    • **{dep['Dependency Name']}** (was: \`{dep['Version']}\`){critical}\")
+        lines.append(f\"      _from {dep['Source File']}_\")
+    
+    if data['count'] > 10:
+        lines.append(f\"    _... and {data['count'] - 10} more (see CSV for full list)_\")
+    
+    print('\n'.join(lines))
+except:
+    print('    _No removed dependencies_')
+" 2>/dev/null || echo "    _Unable to parse removed dependencies_")
+            else
+              removed_count="0"
+              removed_list="    _No removed dependencies_"
+            fi
+            
             echo "new_deps=$new_count" >> $GITHUB_OUTPUT
             echo "changed_deps=$changed_count" >> $GITHUB_OUTPUT
             echo "unchanged_deps=$unchanged_count" >> $GITHUB_OUTPUT
+            echo "removed_deps=$removed_count" >> $GITHUB_OUTPUT
+            echo "removed_list<<EOF" >> $GITHUB_OUTPUT
+            echo "$removed_list" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
           else
             echo "has_changes=false" >> $GITHUB_OUTPUT
           fi
@@ -96,7 +129,11 @@ jobs:
             ### 📊 Summary
             - **New Dependencies:** ${{ steps.check_changes.outputs.new_deps }}
             - **Changed Versions:** ${{ steps.check_changes.outputs.changed_deps }}
+            - **Removed Dependencies:** ${{ steps.check_changes.outputs.removed_deps }}
             - **Unchanged:** ${{ steps.check_changes.outputs.unchanged_deps }}
+            
+            ### 🗑️ Removed Dependencies
+            ${{ steps.check_changes.outputs.removed_list }}
             
             ### 📋 Files Updated
             - ✅ `.github/reports/dependency_versions_latest.csv` - Latest dependency snapshot
@@ -107,6 +144,7 @@ jobs:
             ### ✔️ Review Checklist
             - [ ] Review new dependencies for security/licensing concerns
             - [ ] Check version changes for breaking updates
+            - [ ] Review removed dependencies (intentional?)
             - [ ] Verify unversioned dependencies report
             - [ ] Update baseline count if increase is expected
             

@@ -1407,15 +1407,55 @@ class DependencyExtractor:
             new_count = sum(1 for d in self.dependencies if d['Status'] == 'New')
             changed_count = sum(1 for d in self.dependencies if d['Status'] == 'Changed')
             unchanged_count = sum(1 for d in self.dependencies if d['Status'] == 'Unchanged')
+            removed = self.get_removed_dependencies()
             
             print(f"✓ Written {len(self.dependencies)} dependencies to {output_path}")
             print(f"  Changes since previous version:")
             print(f"    New: {new_count}")
             print(f"    Changed: {changed_count}")
+            print(f"    Removed: {len(removed)}")
             print(f"    Unchanged: {unchanged_count}")
+            
+            if removed:
+                print(f"\n  Removed dependencies:")
+                for dep in removed[:10]:  # Show first 10
+                    critical_flag = " [CRITICAL]" if dep['Critical'] == 'Yes' else ""
+                    print(f"    • {dep['Dependency Name']} (was: {dep['Version']}){critical_flag}")
+                    print(f"      from {dep['Source File']}")
+                if len(removed) > 10:
+                    print(f"    ... and {len(removed) - 10} more")
         else:
             print(f"✓ Written {len(self.dependencies)} dependencies to {output_path}")
 
+    def get_removed_dependencies(self) -> List[Dict[str, str]]:
+        """
+        Detect dependencies that were in the previous CSV but not in the current extraction.
+        Returns list of removed dependencies with their previous information.
+        """
+        if not self.previous_latest_dependencies:
+            return []
+        
+        # Build set of current dependency keys
+        current_keys = set()
+        for dep in self.dependencies:
+            key = f"{dep['Component']}:{dep['Category']}:{dep['Dependency Name']}"
+            current_keys.add(key)
+        
+        # Find dependencies in previous but not in current
+        removed = []
+        for prev_key, prev_dep in self.previous_latest_dependencies.items():
+            if prev_key not in current_keys:
+                removed.append({
+                    'Component': prev_dep.get('Component', ''),
+                    'Category': prev_dep.get('Category', ''),
+                    'Dependency Name': prev_dep.get('Dependency Name', ''),
+                    'Version': prev_dep.get('Version', ''),
+                    'Source File': prev_dep.get('Source File', ''),
+                    'Critical': prev_dep.get('Critical', 'No')
+                })
+        
+        return removed
+    
     def write_unversioned_report(self, output_path: Path) -> None:
         """Write a separate report of unversioned dependencies."""
         unversioned = [
@@ -1592,6 +1632,11 @@ def main():
         help="Generate separate report of unversioned dependencies"
     )
     parser.add_argument(
+        "--report-removed",
+        type=str,
+        help="Output removed dependencies to JSON file (e.g., removed.json)"
+    )
+    parser.add_argument(
         "--config",
         type=Path,
         default=None,
@@ -1751,6 +1796,17 @@ def main():
     if args.report_unversioned:
         unversioned_path = output_path.parent / f"{output_path.stem}_unversioned{output_path.suffix}"
         extractor.write_unversioned_report(unversioned_path)
+    
+    # Write removed dependencies report if requested
+    if args.report_removed:
+        removed_deps = extractor.get_removed_dependencies()
+        removed_path = Path(args.report_removed)
+        with open(removed_path, 'w') as f:
+            json.dump({
+                'count': len(removed_deps),
+                'removed': removed_deps
+            }, f, indent=2)
+        print(f"✓ Written {len(removed_deps)} removed dependencies to {removed_path}")
     
     # Print summary
     extractor.print_summary()
