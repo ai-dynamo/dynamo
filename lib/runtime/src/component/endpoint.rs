@@ -232,9 +232,9 @@ impl EndpointConfigBuilder {
 
         // client.register_service()
         let info = Instance {
-            component: component_name,
-            endpoint: endpoint_name,
-            namespace: namespace_name,
+            component: component_name.clone(),
+            endpoint: endpoint_name.clone(),
+            namespace: namespace_name.clone(),
             instance_id: lease_id,
             transport: TransportType::NatsTcp(subject),
         };
