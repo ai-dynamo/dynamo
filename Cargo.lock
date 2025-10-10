@@ -7050,19 +7050,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rust-tracing-playground"
-version = "0.5.1"
-dependencies = [
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "tokio",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "rustc-demangle"
 version = "0.1.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
