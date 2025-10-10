@@ -116,6 +116,11 @@ pub struct KvManagerLayoutConfig<S: Storage + NixlRegisterableStorage> {
     /// The type of block parallelism strategy to use
     #[builder(default)]
     pub logical: Option<BlockParallelismStrategy>,
+
+    /// The offload filter to use (if any).
+    /// This dictates which blocks will be offloaded to the next-lowest cache level.
+    #[builder(default = "None")]
+    pub offload_filter: Option<Arc<dyn OffloadFilter>>,
 }
 
 impl<S: Storage + NixlRegisterableStorage> KvManagerLayoutConfig<S> {
@@ -194,6 +199,10 @@ pub struct KvBlockManagerConfig {
     /// Channel to reset the block manager to a specific cache level
     #[builder(default)]
     pub block_reset_channel: Option<BlockResetChannel>,
+
+    /// Optional KVBM-level metrics for tracking offload/onboard operations
+    #[builder(default)]
+    pub kvbm_metrics: Option<crate::block_manager::metrics_kvbm::KvbmMetrics>,
 }
 
 impl KvBlockManagerConfig {

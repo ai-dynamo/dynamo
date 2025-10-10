@@ -229,10 +229,13 @@ class Processor(ProcessMixIn):
             "content": prompt,
         }
 
+        # Set stream=True - the http frontend will handle aggregation of
+        # streamed chunks into a single http response, or stream them
+        # back as SSE responses based on the stream flag in the request.
         chat_request = ChatCompletionRequest(
             model=raw_request.model,
             messages=[msg],
-            stream=raw_request.stream,
+            stream=True,
             max_tokens=raw_request.max_tokens,
             temperature=raw_request.temperature,
             request_id=str(uuid.uuid4()),

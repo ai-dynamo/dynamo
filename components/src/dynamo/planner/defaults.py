@@ -15,6 +15,7 @@
 
 import logging
 import os
+import shlex
 from enum import Enum
 from typing import Optional
 
@@ -83,7 +84,7 @@ def _get_default_prometheus_endpoint(port: str, namespace: str):
 
 class SLAPlannerDefaults(BasePlannerDefaults):
     port = os.environ.get("PROMETHEUS_PORT", "9090")
-    namespace = os.environ.get("DYNAMO_NAMESPACE", "vllm-disagg-planner")
+    namespace = os.environ.get("DYN_NAMESPACE", "vllm-disagg-planner")
     prometheus_endpoint = _get_default_prometheus_endpoint(port, namespace)
     profile_results_dir = "profiling_results"
     isl = 3000  # in number of tokens
@@ -143,12 +144,45 @@ class SubComponentType(str, Enum):
     DECODE = "decode"
 
 
+def break_arguments(args: list[str] | None) -> list[str]:
+    ans: list[str] = []
+    if args is None:
+        return ans
+    if isinstance(args, str):
+        # Use shlex.split to properly handle quoted arguments and JSON values
+        ans = shlex.split(args)
+    else:
+        for arg in args:
+            if arg is not None:
+                # Use shlex.split to properly handle quoted arguments
+                ans.extend(shlex.split(arg))
+    return ans
+
+
 class Service(BaseModel):
     name: str
     service: dict
 
     def number_replicas(self) -> int:
         return self.service.get("replicas", 0)
+
+    def get_model_name(self) -> Optional[str]:
+        args = (
+            self.service.get("extraPodSpec", {})
+            .get("mainContainer", {})
+            .get("args", [])
+        )
+
+        args = break_arguments(args)
+        if (
+            "--served-model-name" in args
+            and len(args) > args.index("--served-model-name") + 1
+        ):
+            return args[args.index("--served-model-name") + 1]
+        if "--model" in args and len(args) > args.index("--model") + 1:
+            return args[args.index("--model") + 1]
+
+        return None
 
 
 # TODO: still supporting framework component names for backwards compatibility

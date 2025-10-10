@@ -14,10 +14,23 @@
 # limitations under the License.
 
 
+import logging
 from typing import Optional
 
 import numpy as np
 import scipy
+
+from dynamo.runtime.logging import configure_dynamo_logging
+
+configure_dynamo_logging()
+logger = logging.getLogger(__name__)
+
+
+MISSING_PROFILING_DATA_ERROR_MESSAGE = (
+    "SLA-Planner requires pre-deployment profiling results to run.\n"
+    "Please follow /docs/benchmarks/pre_deployment_profiling.md to run the profiling first,\n"
+    "and make sure the profiling results are present in --profile-results-dir."
+)
 
 
 class PrefillInterpolator:
@@ -35,10 +48,20 @@ class PrefillInterpolator:
             prefill_npz_fn = (
                 f"{profile_results_dir}/selected_prefill_interpolation/raw_data.npz"
             )
-            with np.load(prefill_npz_fn) as raw_data:
-                self.prefill_isl = raw_data["prefill_isl"]
-                self.prefill_ttft = raw_data["prefill_ttft"] / 1000  # convert ms to s
-                self.prefill_thpt_per_gpu = raw_data["prefill_thpt_per_gpu"]
+            try:
+                with np.load(prefill_npz_fn) as raw_data:
+                    self.prefill_isl = raw_data["prefill_isl"]
+                    self.prefill_ttft = (
+                        raw_data["prefill_ttft"] / 1000
+                    )  # convert ms to s
+                    self.prefill_thpt_per_gpu = raw_data["prefill_thpt_per_gpu"]
+            except FileNotFoundError:
+                logger.error(
+                    f"Prefill interpolation file not found: {prefill_npz_fn}\n"
+                    f"{MISSING_PROFILING_DATA_ERROR_MESSAGE}"
+                )
+                exit(1)
+
         elif raw_data:
             self.prefill_isl = raw_data["prefill_isl"]
             self.prefill_ttft = raw_data["prefill_ttft"] / 1000  # convert ms to s
@@ -82,12 +105,19 @@ class DecodeInterpolator:
             decode_npz_fn = (
                 f"{profile_results_dir}/selected_decode_interpolation/raw_data.npz"
             )
-            with np.load(decode_npz_fn) as raw_data:
-                self.x_kv_usage = raw_data["x_kv_usage"]
-                self.y_context_length = raw_data["y_context_length"]
-                self.z_itl = raw_data["z_itl"]
-                self.z_thpt_per_gpu = raw_data["z_thpt_per_gpu"]
-                self.max_kv_tokens = raw_data["max_kv_tokens"][0]
+            try:
+                with np.load(decode_npz_fn) as raw_data:
+                    self.x_kv_usage = raw_data["x_kv_usage"]
+                    self.y_context_length = raw_data["y_context_length"]
+                    self.z_itl = raw_data["z_itl"]
+                    self.z_thpt_per_gpu = raw_data["z_thpt_per_gpu"]
+                    self.max_kv_tokens = raw_data["max_kv_tokens"][0]
+            except FileNotFoundError:
+                logger.error(
+                    f"Decode interpolation file not found: {decode_npz_fn}\n"
+                    f"{MISSING_PROFILING_DATA_ERROR_MESSAGE}"
+                )
+                exit(1)
         elif raw_data:
             self.x_kv_usage = raw_data["x_kv_usage"]
             self.y_context_length = raw_data["y_context_length"]

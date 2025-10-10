@@ -84,7 +84,7 @@ graph TD
 
 ### Local Active Block Management with Replica Sync
 
-Second, in addition to cached blocks, each router replica needs to track active blocks (blocks being used for ongoing generation) as load metrics. Since this information is highly time-sensitive, it must be predicted immediately when:
+Second, in addition to cached blocks, each router replica needs to track active blocks (blocks being used for ongoing generation) as load metrics. Since this information is highly time-sensitive, it should be predicted immediately when:
 - The router receives and routes a request
 - The first token is generated (prefill complete)
 - The response ends (request freed)
@@ -286,7 +286,7 @@ The publisher can be initialized and used through C bindings or Python bindings.
 
 ### Deterministic Event IDs
 
-For KV-aware routing to work across multiple workers and restarts, engines must emit deterministic block identifiers in KV events. Ensure all workers use identical engine versions/configuration so that block IDs for the same token content remain consistent. If your engine relies on Python's builtin `hash()` for any event IDs, set `PYTHONHASHSEED=0`; otherwise this setting has no effect. The router recomputes local block hashes from tokens for matching, but parent/child links and removals depend on engine-provided IDs being stable.
+Engines do not need to emit deterministic block identifiers in KV events, as the router uses local block hashes (computed from token content) for tracking and matching blocks across workers. However, it is strongly preferred that engines do emit deterministic block identifiers, as this keeps the KvIndexer's internal lookup table smaller and more efficient. To ensure deterministic behavior, all workers should use identical engine versions/configuration. If your engine relies on Python's builtin `hash()` for any event IDs, set `PYTHONHASHSEED=0`; otherwise this setting has no effect.
 
 ### KVIndexer
 The KVIndexer builds and maintains a global view of cached blocks in a prefix tree. We modify the original prefix tree by also storing the worker id on each node. This is so we can return the number of matched blocks for each worker.

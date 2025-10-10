@@ -23,9 +23,15 @@ Currently, the planner can scale the number of vllm workers up and down based on
 
 Key features include:
 
-* **Load-based scaling** that monitors KV cache utilization and prefill queue size to make scaling decisions
 * **SLA-based scaling** that uses predictive modeling and performance interpolation to proactively meet TTFT and ITL targets
 * **Graceful scaling** that ensures no requests are dropped during scale-down operations
+
+.. admonition:: 🚀 Quick Start
+   :class: seealso
+
+   **New to SLA Planner?** Start with the [SLA Planner Quick Start Guide](/docs/kubernetes/sla_planner_quickstart.md) for a complete, step-by-step workflow.
+
+   **Prerequisites**: SLA-based planner requires pre-deployment profiling (2-4 hours on real silicon or a few minutes using simulator) before deployment. The Quick Start guide includes everything you need.
 
 .. list-table::
    :widths: 20 5 75
@@ -35,7 +41,7 @@ Key features include:
      -
      - Feature
    * - **Backend**
-     - ✅
+     - ❌
      - Local
    * -
      - ✅
@@ -47,7 +53,7 @@ Key features include:
      - ✅
      - TensorRT-LLM
    * -
-     - ❌
+     - ✅
      - SGLang
    * - **Serving Type**
      - ✅
@@ -56,7 +62,7 @@ Key features include:
      - ✅
      - Disaggregated
    * - **Planner Actions**
-     - ✅
+     - ❌
      - Load-based scaling up/down prefill/decode workers
    * -
      - ✅
@@ -71,6 +77,6 @@ Key features include:
    :hidden:
 
    Overview <self>
+   SLA Planner Quick Start <../kubernetes/sla_planner_quickstart>
    Pre-Deployment Profiling <../benchmarks/pre_deployment_profiling.md>
-   Load-based Planner <load_planner.md>
    SLA-based Planner <sla_planner.md>

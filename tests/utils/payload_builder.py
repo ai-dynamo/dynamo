@@ -4,7 +4,12 @@
 from typing import Any, Dict, List, Optional, Union
 
 from tests.utils.client import send_request
-from tests.utils.payloads import ChatPayload, CompletionPayload, MetricsPayload
+from tests.utils.payloads import (
+    ChatPayload,
+    CompletionPayload,
+    EmbeddingPayload,
+    MetricsPayload,
+)
 
 # Common default text prompt used across tests
 TEXT_PROMPT = "Tell me a short joke about AI."
@@ -120,6 +125,47 @@ def completion_payload(
         repeat_count=repeat_count,
         expected_log=expected_log or [],
         expected_response=expected_response or [],
+    )
+
+
+def embedding_payload_default(
+    repeat_count: int = 3,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+) -> EmbeddingPayload:
+    return EmbeddingPayload(
+        body={
+            "input": ["The sky is blue.", "Machine learning is fascinating."],
+        },
+        repeat_count=repeat_count,
+        expected_log=expected_log or [],
+        expected_response=expected_response
+        or ["Generated 2 embeddings with dimension"],
+    )
+
+
+def embedding_payload(
+    input_text: Union[str, List[str]],
+    repeat_count: int = 3,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+) -> EmbeddingPayload:
+    # Normalize input to list for consistent processing
+    if isinstance(input_text, str):
+        input_list = [input_text]
+        expected_count = 1
+    else:
+        input_list = input_text
+        expected_count = len(input_text)
+
+    return EmbeddingPayload(
+        body={
+            "input": input_list,
+        },
+        repeat_count=repeat_count,
+        expected_log=expected_log or [],
+        expected_response=expected_response
+        or [f"Generated {expected_count} embeddings with dimension"],
     )
 
 

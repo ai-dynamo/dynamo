@@ -12,18 +12,15 @@ use dynamo_runtime::storage::key_value_store::Key;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{
     component::Endpoint,
-    storage::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager},
+    storage::key_value_store::{EtcdStore, KeyValueStore, KeyValueStoreManager},
 };
 
-use crate::discovery::ModelEntry;
 use crate::entrypoint::RouterConfig;
 use crate::mocker::protocols::MockEngineArgs;
 use crate::model_card::{self, ModelDeploymentCard};
 use crate::model_type::{ModelInput, ModelType};
 use crate::request_template::RequestTemplate;
 
-mod network_name;
-pub use network_name::ModelNetworkName;
 pub mod runtime_config;
 
 use runtime_config::ModelRuntimeConfig;
@@ -195,7 +192,6 @@ impl LocalModelBuilder {
     ///
     /// The model name will depend on what "model_path" is:
     /// - A folder: The last part of the folder name: "/data/llms/Qwen2.5-3B-Instruct" -> "Qwen2.5-3B-Instruct"
-    /// - A file: The GGUF filename: "/data/llms/Qwen2.5-3B-Instruct-Q6_K.gguf" -> "Qwen2.5-3B-Instruct-Q6_K.gguf"
     /// - An HF repo: The HF repo name: "Qwen/Qwen3-0.6B" stays the same
     pub async fn build(&mut self) -> anyhow::Result<LocalModel> {
         // Generate an endpoint ID for this model if the user didn't provide one.
@@ -382,12 +378,6 @@ impl LocalModel {
         self.namespace.as_deref()
     }
 
-    pub fn is_gguf(&self) -> bool {
-        // GGUF is the only file (not-folder) we accept, so we don't need to check the extension
-        // We will error when we come to parse it
-        self.full_path.is_file()
-    }
-
     /// An endpoint to identify this model by.
     pub fn endpoint_id(&self) -> &EndpointId {
         &self.endpoint_id
@@ -419,38 +409,15 @@ impl LocalModel {
         self.card.move_to_nats(nats_client.clone()).await?;
 
         // Publish the Model Deployment Card to KV store
-        let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
+        let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStore::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
-        let key = self.card.slug().to_string();
-        // TODO: Next PR will use this
-        //let lease_id = endpoint.drt().primary_lease().map(|l| l.id()).unwrap_or(0);
-        //let key = Key::from_raw(endpoint.unique_path(lease_id));
+        let lease_id = endpoint.drt().primary_lease().map(|l| l.id()).unwrap_or(0);
+        let key = Key::from_raw(endpoint.unique_path(lease_id));
 
-        card_store
-            .publish(
-                model_card::ROOT_PATH,
-                None,
-                &Key::from_raw(key),
-                &mut self.card,
-            )
+        let _outcome = card_store
+            .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
             .await?;
-
-        // Publish our ModelEntry to etcd. This allows ingress to find the model card.
-        // (Why don't we put the model card directly under this key?)
-        let network_name = ModelNetworkName::new();
-        tracing::debug!("Registering with etcd as {network_name}");
-        let model_registration = ModelEntry {
-            name: self.display_name().to_string(),
-            endpoint_id: endpoint.id(),
-            runtime_config: Some(self.runtime_config.clone()),
-        };
-        etcd_client
-            .kv_create(
-                &network_name,
-                serde_json::to_vec_pretty(&model_registration)?,
-                None, // use primary lease
-            )
-            .await
+        Ok(())
     }
 }
 

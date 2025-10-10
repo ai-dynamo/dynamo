@@ -97,6 +97,8 @@ def configure_dynamo_logging(
         configure_vllm_logging(dyn_level)
     if not get_bool_env_var("DYN_SKIP_SGLANG_LOG_FORMATTING"):
         configure_sglang_logging(dyn_level)
+    if not get_bool_env_var("DYN_SKIP_TRTLLM_LOG_FORMATTING"):
+        configure_trtllm_logging(dyn_level)
 
     # loggers that should be configured to ERROR
     error_loggers = ["tag"]
@@ -191,6 +193,43 @@ def configure_vllm_logging(dyn_level: int):
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(vllm_config, f)
         os.environ["VLLM_LOGGING_CONFIG_PATH"] = f.name
+
+
+def map_dyn_log_to_tllm_level(dyn_log_value: str) -> str:
+    """
+    Map DYN_LOG string value to TensorRT-LLM log level.
+
+    Args:
+        dyn_log_value: The DYN_LOG environment variable value (e.g., "debug", "info,module::path=trace")
+
+    Returns:
+        The corresponding TLLM_LOG_LEVEL value (e.g., "VERBOSE", "INFO")
+    """
+    # Extract the base level (handle cases like "debug,module::path=trace")
+    base_level = dyn_log_value.lower().split(",")[0].strip()
+
+    # Map DYN_LOG levels to TLLM_LOG_LEVEL
+    level_mapping = {
+        "debug": "DEBUG",
+        "info": "INFO",
+        "warn": "WARNING",
+        "warning": "WARNING",
+        "error": "ERROR",
+        "critical": "ERROR",
+        "trace": "TRACE",
+    }
+
+    return level_mapping.get(base_level, "INFO")
+
+
+def configure_trtllm_logging(dyn_level: int):
+    # Only set TLLM_LOG_LEVEL if it's not already set
+    # This allows users to override it explicitly if needed
+    if "TLLM_LOG_LEVEL" not in os.environ:
+        dyn_level_name = logging.getLevelName(dyn_level)
+        tllm_level = map_dyn_log_to_tllm_level(dyn_level_name)
+        os.environ["TLLM_LOG_LEVEL"] = tllm_level
+        logging.debug(f"Set TLLM_LOG_LEVEL to {tllm_level} based on DYN_LOG")
 
 
 def get_bool_env_var(name: str, default: str = "false") -> bool:

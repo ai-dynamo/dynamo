@@ -8,6 +8,17 @@ import os
 import signal
 import sys
 
+# Configure TLLM_LOG_LEVEL before importing tensorrt_llm
+# This must happen before any tensorrt_llm imports
+if "TLLM_LOG_LEVEL" not in os.environ and os.getenv(
+    "DYN_SKIP_TRTLLM_LOG_FORMATTING"
+) not in ("1", "true", "TRUE"):
+    # This import is safe because it doesn't trigger tensorrt_llm imports
+    from dynamo.runtime.logging import map_dyn_log_to_tllm_level
+
+    dyn_log = os.environ.get("DYN_LOG", "info")
+    tllm_level = map_dyn_log_to_tllm_level(dyn_log)
+    os.environ["TLLM_LOG_LEVEL"] = tllm_level
 import uvloop
 from tensorrt_llm.llmapi import (
     BuildConfig,
@@ -23,6 +34,7 @@ from torch.cuda import device_count
 from transformers import AutoConfig
 
 import dynamo.nixl_connect as nixl_connect
+from dynamo.common.config_dump import dump_config
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -125,6 +137,22 @@ async def init(runtime: DistributedRuntime, config: Config):
             .endpoint(parsed_endpoint_name)
             .client()
         )
+
+    # Set up prefill router client for decode workers
+    next_router_client = None
+    if config.disaggregation_mode.value == "decode":
+        try:
+            logging.info("Initializing prefill router client")
+            next_router_client = (
+                await runtime.namespace(config.namespace)
+                .component("router")  # Standalone router for prefill workers
+                .endpoint("generate")
+                .client()
+            )
+            logging.info("Prefill router client initialized successfully")
+        except Exception as e:
+            logging.warning(f"Failed to initialize prefill router client: {e}")
+            logging.info("Will use direct prefill worker client only")
 
     encode_client = None
     if config.encode_endpoint:
@@ -270,6 +298,10 @@ async def init(runtime: DistributedRuntime, config: Config):
     connector = nixl_connect.Connector()
     await connector.initialize()
 
+    dump_config(
+        config.dump_config_to, {"engine_args": engine_args, "dynamo_args": config}
+    )
+
     async with get_llm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)
 
@@ -313,6 +345,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             disaggregation_mode=config.disaggregation_mode,
             disaggregation_strategy=config.disaggregation_strategy,
             next_client=next_client,
+            next_router_client=next_router_client,
             encode_client=encode_client,
             multimodal_processor=multimodal_processor,
             connector=connector,
@@ -341,13 +374,15 @@ async def init(runtime: DistributedRuntime, config: Config):
         # Get health check payload (checks env var and falls back to TensorRT-LLM default)
         health_check_payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
 
-        if config.publish_events_and_metrics and is_first_worker(config):
+        if config.publish_events_and_metrics:
             # Initialize and pass in the publisher to the request handler to
             # publish events and metrics.
             kv_listener = runtime.namespace(config.namespace).component(
                 config.component
             )
-            metrics_labels = [("model", config.served_model_name)]
+            # Use model_path as fallback if served_model_name is not provided
+            model_name_for_metrics = config.served_model_name or config.model_path
+            metrics_labels = [("model", model_name_for_metrics)]
             async with get_publisher(
                 component,
                 engine,

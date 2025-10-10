@@ -14,7 +14,7 @@ ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG SGLANG_VERSION="0.5.0rc2"
+ARG SGLANG_VERSION="0.5.3"
 
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
@@ -203,8 +203,10 @@ RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*cp312*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-    /opt/dynamo/benchmarks && \
-    rm -rf /opt/dynamo/benchmarks
+    && cd /opt/dynamo/benchmarks \
+    && uv pip install . \
+    && cd - \
+    && rm -rf /opt/dynamo/benchmarks
 
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
@@ -225,8 +227,6 @@ COPY components/ /workspace/components/
 
 # Copy attribution files
 COPY ATTRIBUTION* LICENSE /workspace/
-
-ENV PYTHONPATH=/workspace/examples/sglang/utils:$PYTHONPATH
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

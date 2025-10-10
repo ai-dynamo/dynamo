@@ -120,7 +120,7 @@ dynamo-build:
     COPY deploy/ deploy/
 
     ENV CARGO_TARGET_DIR=/workspace/target
-    RUN cargo build --release --locked --features llamacpp,cuda && \
+    RUN cargo build --release --locked --features cuda && \
         cargo doc --no-deps
 
     RUN cd /workspace/lib/bindings/python && \

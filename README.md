@@ -30,7 +30,7 @@ High-throughput, low-latency inference framework designed for serving generative
 
 ## Latest News
 
-- [08/05] Deploy `openai/gpt-oss-120b` with disaggregated serving on NVIDIA Blackwell GPUs using Dynamo [➡️ link](./components/backends/trtllm/gpt-oss.md)
+- [08/05] Deploy `openai/gpt-oss-120b` with disaggregated serving on NVIDIA Blackwell GPUs using Dynamo [➡️ link](./docs/backends/trtllm/gpt-oss.md)
 
 ## The Era of Multi-GPU, Multi-Node
 
@@ -65,9 +65,9 @@ Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLa
 
 To learn more about each framework and their capabilities, check out each framework's README!
 
-- **[vLLM](components/backends/vllm/README.md)**
-- **[SGLang](components/backends/sglang/README.md)**
-- **[TensorRT-LLM](components/backends/trtllm/README.md)**
+- **[vLLM](docs/backends/vllm/README.md)**
+- **[SGLang](docs/backends/sglang/README.md)**
+- **[TensorRT-LLM](docs/backends/trtllm/README.md)**
 
 Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, OSS (Open Source Software) first development approach.
 
@@ -101,7 +101,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ## 2. Select an engine
 
-We publish Python wheels specialized for each of our supported engines: vllm, sglang, trtllm, and llama.cpp. The examples that follow use SGLang; continue reading for other engines.
+We publish Python wheels specialized for each of our supported engines: vllm, sglang, and trtllm. The examples that follow use SGLang; continue reading for other engines.
 
 ```
 uv venv venv
@@ -113,6 +113,16 @@ uv pip install "ai-dynamo[sglang]"  #replace with [vllm], [trtllm], etc.
 ```
 
 ## 3. Run Dynamo
+
+### Sanity check (optional)
+
+Before trying out Dynamo, you can verify your system configuration and dependencies:
+
+```bash
+./deploy/sanity_check.py
+```
+
+This is a quick check for system resources, development tools, LLM frameworks, and Dynamo components.
 
 ### Running an LLM API server
 

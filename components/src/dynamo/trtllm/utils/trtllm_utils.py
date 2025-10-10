@@ -8,6 +8,7 @@ from typing import Optional
 from tensorrt_llm.llmapi import BuildConfig
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
+from dynamo.common.config_dump import add_config_dump_args
 from dynamo.trtllm import __version__
 from dynamo.trtllm.request_handlers.handler_base import (
     DisaggregationMode,
@@ -59,6 +60,7 @@ class Config:
         self.max_file_size_mb: int = 50
         self.reasoning_parser: Optional[str] = None
         self.tool_call_parser: Optional[str] = None
+        self.dump_config_to: Optional[str] = None
         self.custom_jinja_template: Optional[str] = None
 
     def __str__(self) -> str:
@@ -91,6 +93,7 @@ class Config:
             f"max_file_size_mb={self.max_file_size_mb}, "
             f"reasoning_parser={self.reasoning_parser}, "
             f"tool_call_parser={self.tool_call_parser}, "
+            f"dump_config_to={self.dump_config_to},"
             f"custom_jinja_template={self.custom_jinja_template}"
         )
 
@@ -298,6 +301,7 @@ def cmd_line_args():
         choices=get_reasoning_parser_names(),
         help="Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
     )
+    add_config_dump_args(parser)
     parser.add_argument(
         "--custom-jinja-template",
         type=str,
@@ -374,6 +378,7 @@ def cmd_line_args():
 
     config.reasoning_parser = args.dyn_reasoning_parser
     config.tool_call_parser = args.dyn_tool_call_parser
+    config.dump_config_to = args.dump_config_to
 
     # Handle custom jinja template path expansion (environment variables and home directory)
     if args.custom_jinja_template:

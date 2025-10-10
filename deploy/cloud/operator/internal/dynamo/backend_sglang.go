@@ -22,7 +22,8 @@ func isPythonCommand(cmd string) bool {
 		return true
 	}
 	// Match python with version numbers like python3.11, python2.7, etc.
-	matched, _ := regexp.MatchString(`^python\d+(\.\d+)*$`, cmd)
+	// Also support absolute paths like /usr/bin/python3.8, /opt/python/bin/python3.11
+	matched, _ := regexp.MatchString(`^(.*/)?(python\d*(\.\d+)*)$`, cmd)
 	return matched
 }
 

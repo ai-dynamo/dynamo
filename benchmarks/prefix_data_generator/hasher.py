@@ -1,20 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import re
-from typing import Dict, List, Union, cast
+from typing import Dict, List, Sequence, Union, cast
 
 import numpy as np
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
@@ -28,6 +16,59 @@ lorem_text = (
     "in culpa qui officia deserunt mollit anim id est laborum."
 )
 words = np.array(list(set(re.findall(r"\b[a-zA-Z]+\b", lorem_text))))
+
+
+class RollingHasher:
+    """
+    A stateful rolling hasher that converts blocks of content into globally unique hash IDs.
+
+    This class maintains a mapping from content hashes to unique integer IDs across multiple
+    sequences. Each block's hash depends on its content and the hash of the previous block
+    (rolling/chained hashing).
+
+    Usage:
+        hasher = RollingHasher()
+        hash_ids = hasher(blocks)  # blocks is List[List[int]] or List[tuple]
+    """
+
+    def __init__(self):
+        """Initialize the hasher with empty state."""
+        self.hash_to_int: Dict[int, int] = {}
+        self.next_int = 0
+
+    def __call__(self, blocks: Sequence[Sequence[int]]) -> List[int]:
+        """
+        Convert a sequence of blocks into a sequence of unique hash IDs.
+
+        Args:
+            blocks: Sequence of blocks, where each block is a sequence of integers
+
+        Returns:
+            List of integer hash IDs, one per block
+        """
+        parent_hash = 0
+        hashes: List[int] = []
+
+        for block in blocks:
+            # Convert block to tuple for hashing
+            block_tuple = tuple(block) if not isinstance(block, tuple) else block
+            combined = (parent_hash, hash(block_tuple))
+            global_hash = hash(combined)
+
+            # Map global_hash to a unique integer
+            if global_hash not in self.hash_to_int:
+                self.hash_to_int[global_hash] = self.next_int
+                self.next_int += 1
+
+            hashes.append(self.hash_to_int[global_hash])
+            parent_hash = global_hash
+
+        return hashes
+
+    def reset(self):
+        """Reset the hasher state (clear all mappings)."""
+        self.hash_to_int.clear()
+        self.next_int = 0
 
 
 def texts_to_hashes(
@@ -64,30 +105,15 @@ def texts_to_hashes(
     # batch_encoding["input_ids"] is a List[List[int]]
     all_tokens: List[List[int]] = batch_encoding["input_ids"]
 
+    # Initialize the rolling hasher
+    hasher = RollingHasher()
     results: List[List[int]] = []
-    hash_to_int: Dict[int, int] = {}
-    next_int = 0
 
     for tokens in all_tokens:
         blocks: List[List[int]] = [
             tokens[i : i + block_size] for i in range(0, len(tokens), block_size)
         ]
-
-        parent_hash = 0
-        hashes: List[int] = []
-
-        for block in blocks:
-            combined = (parent_hash, hash(tuple(block)))
-            global_hash = hash(combined)
-
-            # Map global_hash to a unique integer
-            if global_hash not in hash_to_int:
-                hash_to_int[global_hash] = next_int
-                next_int += 1
-
-            hashes.append(hash_to_int[global_hash])
-            parent_hash = global_hash
-
+        hashes = hasher(blocks)
         results.append(hashes)
 
     return results

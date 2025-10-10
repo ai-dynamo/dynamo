@@ -20,8 +20,7 @@ Verbosity:
 Example:
 - cargo build --features cuda -p dynamo-run
 - cd target/debug
-- ./dynamo-run Qwen/Qwen3-0.6B
-- OR: ./dynamo-run /data/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+- ./dynamo-run Qwen/Qwen3-0.6B (OR ./dynamo-run /data/hf-checkouts/Qwen3-0.6B)
 
 See `docs/guides/dynamo_run.md` in the repo for full details.
 "#;

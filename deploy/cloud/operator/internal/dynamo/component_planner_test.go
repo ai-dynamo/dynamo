@@ -43,7 +43,7 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 				dynamoNamespace:                "dynamo-namespace",
 			},
 			want: corev1.Container{
-				Name: "main",
+				Name: commonconsts.MainContainerName,
 				Command: []string{
 					"/bin/sh",
 					"-c",

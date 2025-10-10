@@ -19,6 +19,13 @@ import pytest
 def pytest_addoption(parser):
     parser.addoption("--image", type=str, default=None)
     parser.addoption("--namespace", type=str, default="fault-tolerance-test")
+    parser.addoption(
+        "--client-type",
+        type=str,
+        default=None,
+        choices=["aiperf", "legacy"],
+        help="Client type for load generation: 'aiperf' (default) or 'legacy'",
+    )
 
 
 @pytest.fixture
@@ -29,3 +36,9 @@ def image(request):
 @pytest.fixture
 def namespace(request):
     return request.config.getoption("--namespace")
+
+
+@pytest.fixture
+def client_type(request):
+    """Get client type from command line or use scenario default."""
+    return request.config.getoption("--client-type")

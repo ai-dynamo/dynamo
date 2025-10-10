@@ -14,14 +14,11 @@ description = "Dynamo Run CLI"
 
 [features]
 # Build with `--no-default-features` to disable these defaults
-default = ["mistralrs", "llamacpp"]
+default = ["mistralrs"]
 mistralrs = ["dep:dynamo-engine-mistralrs"]
-llamacpp = ["dep:dynamo-engine-llamacpp"]
 
-cuda = ["dynamo-engine-llamacpp/cuda", "dynamo-engine-mistralrs/cuda"]
-metal = ["dynamo-engine-llamacpp/metal", "dynamo-engine-mistralrs/metal"]
-vulkan = ["dynamo-engine-llamacpp/vulkan"]
-openmp = ["dynamo-engine-llamacpp/openmp"]
+cuda = ["dynamo-engine-mistralrs/cuda"]
+metal = ["dynamo-engine-mistralrs/metal"]
 
 tokio-console = ["dynamo-runtime/tokio-console"]
 
@@ -29,7 +26,6 @@ tokio-console = ["dynamo-runtime/tokio-console"]
 dynamo-llm = { workspace = true }
 dynamo-runtime = { workspace = true }
 
-dynamo-engine-llamacpp = { path = "../../lib/engines/llamacpp", optional = true }
 dynamo-engine-mistralrs = { path = "../../lib/engines/mistralrs", optional = true }
 
 anyhow = { workspace = true }

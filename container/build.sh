@@ -332,6 +332,15 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
+
+        --vllm-max-jobs)
+            if [ "$2" ]; then
+                MAX_JOBS=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
          -?*)
             error 'ERROR: Unknown option: ' "$1"
             ;;
@@ -706,6 +715,10 @@ fi
 
 if [ -n "${NIXL_UCX_REF}" ]; then
     BUILD_ARGS+=" --build-arg NIXL_UCX_REF=${NIXL_UCX_REF} "
+fi
+
+if [ -n "${MAX_JOBS}" ]; then
+    BUILD_ARGS+=" --build-arg MAX_JOBS=${MAX_JOBS} "
 fi
 
 # Add sccache build arguments

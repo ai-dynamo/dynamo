@@ -11,10 +11,14 @@ import os
 
 QWEN = "Qwen/Qwen3-0.6B"
 LLAMA = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"  # on an l4 gpu, must limit --max-seq-len, otherwise it will not fit
+GPT_OSS = "openai/gpt-oss-20b"
+QWEN_EMBEDDING = "Qwen/Qwen3-Embedding-4B"
 
 TEST_MODELS = [
     QWEN,
     LLAMA,
+    GPT_OSS,
+    QWEN_EMBEDDING,
 ]
 
 # Env-driven defaults for specific test groups

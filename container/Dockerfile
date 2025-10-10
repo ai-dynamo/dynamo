@@ -79,7 +79,6 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 # Set SCCACHE environment variables
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-    SCCACHE_S3_KEY_PREFIX=${USE_SCCACHE:+${ARCH}} \
     RUSTC_WRAPPER=${USE_SCCACHE:+sccache} \
     CMAKE_C_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
     CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
@@ -122,19 +121,25 @@ RUN apt-get update -y \
         net-tools \
         ninja-build \
         pybind11-dev \
-        # These headers are missing with the hpcx installer, required
-        # by UCX to find RDMA devices
-        ibverbs-providers \
-        ibverbs-utils \
-        libibumad-dev \
-        libibverbs-dev \
-        librdmacm-dev \
-        libnuma-dev \
-        rdma-core \
         # Rust build dependencies
         clang \
         libclang-dev \
         protobuf-compiler \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# These headers are missing with the hpcx installer, required
+# by UCX to build and use RDMA devices. Reinstall to make sure to recreate
+# symlink .so to .so.1 in case some packages are already found.
+RUN apt-get update -y \
+    && DEBIAN_FRONTEND=noninteractive apt-get -y install --reinstall --no-install-recommends \
+        libibverbs-dev \
+        rdma-core \
+        ibverbs-utils \
+        libibumad-dev \
+        libnuma-dev \
+        librdmacm-dev \
+        ibverbs-providers \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -163,6 +168,7 @@ ENV PATH=/usr/local/bin/etcd/:$PATH
 # Build and install UCX
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
     rm -rf /opt/hpcx/ucx && \
     rm -rf /usr/local/ucx && \
     echo "Building UCX with reference $NIXL_UCX_REF" && \
@@ -198,9 +204,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     rm -rf ucx
 
 # UCX environment variables
-ENV CPATH=/usr/include:$CPATH \
-    PATH=/usr/bin:$PATH \
-    PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
+ENV CPATH=/usr/include \
+    PATH=/usr/bin:/usr/local/ucx/bin:$PATH \
+    PKG_CONFIG_PATH=/usr/lib/pkgconfig
 
 ##################################
 ########## NIXL Setup ############
@@ -327,7 +333,6 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 # Set SCCACHE environment variables
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-    SCCACHE_S3_KEY_PREFIX=${USE_SCCACHE:+${ARCH}} \
     RUSTC_WRAPPER=${USE_SCCACHE:+sccache}
 
 # Copy source code (order matters for layer caching)
@@ -338,6 +343,7 @@ COPY components/ /opt/dynamo/components/
 # Build wheels
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
     uv pip install maturin[patchelf] && \
@@ -360,8 +366,7 @@ FROM base AS dev
 
 # Application environment variables
 ENV DYNAMO_HOME=/opt/dynamo \
-    CARGO_TARGET_DIR=/opt/dynamo/target \
-    PYTHONPATH=/opt/dynamo:$PYTHONPATH
+    CARGO_TARGET_DIR=/opt/dynamo/target
 
 WORKDIR /opt/dynamo
 
@@ -376,8 +381,10 @@ RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*cp312*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-    /opt/dynamo/benchmarks && \
-    rm -rf /opt/dynamo/benchmarks
+    && cd /opt/dynamo/benchmarks \
+    && uv pip install . \
+    && cd - \
+    && rm -rf /opt/dynamo/benchmarks
 
 # Setup launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \

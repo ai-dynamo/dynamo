@@ -30,23 +30,29 @@ impl HttpService {
         Ok(Self { inner })
     }
 
-    pub fn add_completions_model(&self, model: String, engine: HttpAsyncEngine) -> PyResult<()> {
+    pub fn add_completions_model(
+        &self,
+        model: String,
+        checksum: String,
+        engine: HttpAsyncEngine,
+    ) -> PyResult<()> {
         let engine = Arc::new(engine);
         self.inner
             .model_manager()
-            .add_completions_model(&model, engine)
+            .add_completions_model(&model, &checksum, engine)
             .map_err(to_pyerr)
     }
 
     pub fn add_chat_completions_model(
         &self,
         model: String,
+        checksum: String,
         engine: HttpAsyncEngine,
     ) -> PyResult<()> {
         let engine = Arc::new(engine);
         self.inner
             .model_manager()
-            .add_chat_completions_model(&model, engine)
+            .add_chat_completions_model(&model, &checksum, engine)
             .map_err(to_pyerr)
     }
 

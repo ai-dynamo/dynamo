@@ -6,9 +6,6 @@ kind: DynamoGraphDeployment
 metadata:
   name: sglang-disagg-planner
 spec:
-  envs:
-    - name: DYNAMO_NAMESPACE
-      value: "dynamo"
   pvcs:
     - name: dynamo-pvc
       create: false # Must be pre-created before deployment and SLA profiler must have been run
@@ -25,32 +22,13 @@ spec:
       envFromSecret: hf-token-secret
       componentType: planner
       replicas: 1
-      livenessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
       volumeMounts:
         - name: dynamo-pvc
           mountPoint: /data
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
-          workingDir: /workspace/components/planner/src/dynamo/planner
+          workingDir: /workspace/components/src/dynamo/planner
           command:
           - python3
           - -m

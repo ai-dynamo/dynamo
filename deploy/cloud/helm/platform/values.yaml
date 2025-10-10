@@ -74,7 +74,7 @@ dynamo-operator:
   # Core Dynamo platform configuration
   dynamo:
     # -- How long to wait before forcefully terminating Grove instances
-    groveTerminationDelay: 15m
+    groveTerminationDelay: 4h
 
     # Internal utility images used by the platform
     internalImages:
@@ -147,10 +147,9 @@ kai-scheduler:
   enabled: false
 
 # etcd configuration - distributed key-value store for operator state
-# For complete configuration options, see: https://github.com/bitnami/charts/tree/main/bitnami/etcd
 etcd:
 
-  # -- Whether to enable etcd deployment, disable if you want to use an external etcd instance
+  # -- Whether to enable etcd deployment, disable if you want to use an external etcd instance. For complete configuration options, see: https://github.com/bitnami/charts/tree/main/bitnami/etcd , all etcd settings should be prefixed with "etcd."
   enabled: true
 
   image:
@@ -195,9 +194,8 @@ etcd:
   tolerations: []
 
 # NATS configuration - messaging system for operator communication
-# For complete configuration options, see: https://github.com/nats-io/k8s/tree/main/helm/charts/nats
 nats:
-  # -- Whether to enable NATS deployment, disable if you want to use an external NATS instance
+  # -- Whether to enable NATS deployment, disable if you want to use an external NATS instance. For complete configuration options, see: https://github.com/nats-io/k8s/tree/main/helm/charts/nats , all nats settings should be prefixed with "nats."
   enabled: true
 
   # TLS Certificate Authority configuration for secure communication
@@ -338,7 +336,9 @@ nats:
     #       token: << $TOKEN >>
     #     jetstream:
     #       max_memory_store: << 1GB >>
-    merge: {}
+    merge:
+      # 10MB which allows for larger context size : The default NATS max payload size is 1MB, and 256K tokens (with tokens being int32 - 4 bytes each) tips over that 1MB max.
+      max_payload: 10485760
     patch: []
 
   ############################################################

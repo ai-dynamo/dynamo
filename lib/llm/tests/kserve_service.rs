@@ -280,31 +280,32 @@ pub mod kserve_test {
         let failure = Arc::new(AlwaysFailEngine {});
         let long_running = Arc::new(LongRunningEngine::new(1_000));
 
-        manager
-            .add_completions_model("split", split.clone())
-            .unwrap();
         let mut card = ModelDeploymentCard::with_name_only("split");
         card.model_type = ModelType::Completions;
         card.model_input = ModelInput::Text;
-        manager.save_model_card("split", card);
+        manager
+            .add_completions_model("split", card.mdcsum(), split.clone())
+            .unwrap();
+        let _ = manager.save_model_card("split", card.clone());
 
-        manager
-            .add_chat_completions_model("failure", failure.clone())
-            .unwrap();
-        manager
-            .add_completions_model("failure", failure.clone())
-            .unwrap();
         let mut card = ModelDeploymentCard::with_name_only("failure");
         card.model_type = ModelType::Completions | ModelType::Chat;
         card.model_input = ModelInput::Text;
-        manager.save_model_card("failure", card);
         manager
-            .add_completions_model("long_running", long_running.clone())
+            .add_chat_completions_model("failure", card.mdcsum(), failure.clone())
             .unwrap();
+        manager
+            .add_completions_model("failure", card.mdcsum(), failure.clone())
+            .unwrap();
+        let _ = manager.save_model_card("failure", card);
+
         let mut card = ModelDeploymentCard::with_name_only("long_running");
         card.model_type = ModelType::Completions;
         card.model_input = ModelInput::Text;
-        manager.save_model_card("long_running", card);
+        manager
+            .add_completions_model("long_running", card.mdcsum(), long_running.clone())
+            .unwrap();
+        let _ = manager.save_model_card("long_running", card);
 
         (service, split, failure, long_running)
     }
@@ -1130,11 +1131,16 @@ pub mod kserve_test {
         text_input: inference::model_infer_request::InferInputTensor,
     ) {
         // add tensor model
+
+        // Failure, model registered as Tensor but does not provide model config (in runtime config)
+        let mut card = ModelDeploymentCard::with_name_only("tensor");
+        card.model_type = ModelType::TensorBased;
+        card.model_input = ModelInput::Tensor;
         let tensor = Arc::new(TensorEngine {});
         service_with_engines
             .0
             .model_manager()
-            .add_tensor_model("tensor", tensor.clone())
+            .add_tensor_model("tensor", card.mdcsum(), tensor.clone())
             .unwrap();
 
         // start server
@@ -1147,11 +1153,7 @@ pub mod kserve_test {
             version: "".into(),
         });
 
-        // Failure, model registered as Tensor but does not provide model config (in runtime config)
-        let mut card = ModelDeploymentCard::with_name_only("tensor");
-        card.model_type = ModelType::TensorBased;
-        card.model_input = ModelInput::Tensor;
-        service_with_engines
+        let _ = service_with_engines
             .0
             .model_manager()
             .save_model_card("key", card);
@@ -1217,7 +1219,7 @@ pub mod kserve_test {
             }),
             ..Default::default()
         };
-        service_with_engines
+        let _ = service_with_engines
             .0
             .model_manager()
             .save_model_card("key", card);

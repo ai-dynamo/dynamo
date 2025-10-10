@@ -28,8 +28,6 @@ pub use path::*;
 
 use super::utils::build_in_runtime;
 
-//pub use etcd::ConnectOptions as EtcdConnectOptions;
-
 /// ETCD Client
 #[derive(Clone)]
 pub struct Client {
@@ -575,21 +573,21 @@ impl KvCache {
                             let key = String::from_utf8_lossy(kv.key()).to_string();
                             let value = kv.value().to_vec();
 
-                            tracing::debug!("KvCache update: {} = {:?}", key, value);
+                            tracing::trace!("KvCache update: {} = {:?}", key, value);
                             let mut cache_write = cache.write().await;
                             cache_write.insert(key, value);
                         }
                         WatchEvent::Delete(kv) => {
                             let key = String::from_utf8_lossy(kv.key()).to_string();
 
-                            tracing::debug!("KvCache delete: {}", key);
+                            tracing::trace!("KvCache delete: {}", key);
                             let mut cache_write = cache.write().await;
                             cache_write.remove(&key);
                         }
                     }
                 }
 
-                tracing::info!("KvCache watcher for prefix '{}' stopped", prefix);
+                tracing::debug!("KvCache watcher for prefix '{}' stopped", prefix);
             });
         }
 
@@ -711,7 +709,7 @@ mod tests {
 
         // Create a unique test prefix to avoid conflicts with other tests
         let test_id = uuid::Uuid::new_v4().to_string();
-        let prefix = format!("test_kv_cache_{}/", test_id);
+        let prefix = format!("v1/test_kv_cache_{}/", test_id);
 
         // Initial values
         let mut initial_values = HashMap::new();

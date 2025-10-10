@@ -223,7 +223,7 @@ if [ "$ARCH" = "amd64" ]; then
     # TODO: Re-enable for arm64 after verifying lmcache compatibility and resolving the build issue.
 
     # Alec: Likely lmcache was compiled witha different version of torch and need to install it from source for arm64
-    uv pip install lmcache==0.3.3
+    uv pip install lmcache==0.3.7
     echo "✓ LMCache installed"
 else
     echo "⚠ Skipping LMCache on ARM64 (compatibility issues)"

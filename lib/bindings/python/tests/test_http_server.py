@@ -85,6 +85,7 @@ async def http_server(runtime: DistributedRuntime):
     model_name = "test_model"
     start_done = asyncio.Event()
     child_token = runtime.child_token()
+    checksum = "abc123"  # Checksum of ModelDeplomentCard for that model
 
     async def worker():
         """The server worker task."""
@@ -94,7 +95,7 @@ async def http_server(runtime: DistributedRuntime):
             engine = HttpAsyncEngine(python_engine.generate, loop)
 
             service = HttpService(port=port)
-            service.add_chat_completions_model(model_name, engine)
+            service.add_chat_completions_model(model_name, checksum, engine)
             service.enable_endpoint("chat", True)
 
             shutdown_signal = service.run(child_token)

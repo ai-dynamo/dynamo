@@ -38,17 +38,22 @@ This will start both etcd and NATS with the required configurations in the backg
 
 ## Usage Instructions
 
-### Step 1: Launch vLLM Workers
+### Step 1: Launch Workers
 
-Make sure you have 8 GPUs for these examples, unless you are using mockers (see below). First, start the vLLM worker engines in a terminal.
+Make sure you have 8 GPUs for these examples, unless you are using mockers (see below). First, start the worker engines in a terminal.
+
+The script supports three modes:
+- **`agg` (default)**: Aggregated/monolithic workers that handle both prefill and decode
+- **`decode`**: Workers dedicated to decode (token generation) phase
+- **`prefill`**: Workers dedicated to prefill (prompt processing) phase
 
 ```bash
-# Default: 8 vLLM workers with DeepSeek model (explicitly sets --block-size 64)
+# Default: 8 aggregated workers with DeepSeek model (handles both prefill and decode)
 ./run_engines.sh \
     --num-workers 8 \
     --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 
-# Example: 4 vLLM workers with larger model using tensor parallelism (2 GPUs per worker)
+# Example: 4 workers with larger model using tensor parallelism (2 GPUs per worker)
 # NOTE: this requires having Hopper or later GPU SKUs to support MXFP4 precision.
 ./run_engines.sh \
     --num-workers 4 \
@@ -56,19 +61,20 @@ Make sure you have 8 GPUs for these examples, unless you are using mockers (see 
     --tensor-parallel-size 2
 ```
 
-#### Prefill Workers
+#### Disaggregated Serving (Decode + Prefill Workers)
 
-You can also launch separate decode and prefill workers for disaggregated serving. This allows you to dedicate specific GPUs to prefill (prompt processing) and decode (token generation) tasks:
+You can launch separate decode and prefill workers for disaggregated serving. This allows you to dedicate specific GPUs to prefill (prompt processing) and decode (token generation) tasks:
 
 ```bash
 # Launch 4 decode workers (GPUs 0-3)
 ./run_engines.sh \
+    --decode \
     --num-workers 4 \
     --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 
 # Launch 4 prefill workers (GPUs 4-7)
 ./run_engines.sh \
-    --prefills \
+    --prefill \
     --num-workers 4 \
     --base-gpu-offset 4 \
     --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B

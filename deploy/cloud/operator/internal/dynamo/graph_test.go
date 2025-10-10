@@ -1202,7 +1202,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									},
 									VolumeMounts: []v1alpha1.VolumeMount{
 										{
-											Name:       "planner-pvc",
+											Name:       "dynamo-pvc",
 											MountPoint: "/planner",
 										},
 									},
@@ -1265,6 +1265,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeFrontend,
 									commonconsts.KubeLabelDynamoSubComponentType:    "test-sub-component",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoNamespace:           "dynamo-test-dynamo-graph-deployment",
 									"nvidia.com/label1":                             "label1",
 									"nvidia.com/label2":                             "label2",
 								},
@@ -1297,7 +1298,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "frontend-image",
 												Command: []string{
 													"/bin/sh",
@@ -1415,6 +1416,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-planner",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypePlanner,
+									commonconsts.KubeLabelDynamoNamespace:           "dynamo-test-dynamo-graph-deployment",
 								},
 								Annotations: map[string]string{},
 								Spec: grovev1alpha1.PodCliqueSpec{
@@ -1424,10 +1426,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									PodSpec: corev1.PodSpec{
 										Volumes: []corev1.Volume{
 											{
-												Name: "planner-pvc",
+												Name: "dynamo-pvc",
 												VolumeSource: corev1.VolumeSource{
 													PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-														ClaimName: "planner-pvc",
+														ClaimName: "dynamo-pvc",
 													},
 												},
 											},
@@ -1447,7 +1449,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "planner-image",
 												Command: []string{
 													"/bin/sh",
@@ -1538,7 +1540,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												VolumeMounts: []corev1.VolumeMount{
 													{
-														Name:      "planner-pvc",
+														Name:      "dynamo-pvc",
 														MountPath: "/planner",
 													},
 													{
@@ -1723,7 +1725,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									},
 									VolumeMounts: []v1alpha1.VolumeMount{
 										{
-											Name:       "planner-pvc",
+											Name:       "dynamo-pvc",
 											MountPoint: "/planner",
 										},
 									},
@@ -1798,6 +1800,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker-ldr",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoNamespace:           "dynamo-test-dynamo-graph-deployment",
 									"nvidia.com/label1":                             "label1",
 									"nvidia.com/label2":                             "label2",
 								},
@@ -1825,7 +1828,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										},
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "worker-image",
 												Command: []string{
 													"/bin/sh",
@@ -1934,7 +1937,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													TimeoutSeconds:   5,
 													PeriodSeconds:    10,
 													SuccessThreshold: 0,
-													FailureThreshold: 60,
+													FailureThreshold: 720,
 												},
 											},
 										},
@@ -1949,6 +1952,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker-wkr",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoNamespace:           "dynamo-test-dynamo-graph-deployment",
 									"nvidia.com/label1":                             "label1",
 									"nvidia.com/label2":                             "label2",
 								},
@@ -1977,7 +1981,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										},
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "worker-image",
 												Command: []string{
 													"/bin/sh",
@@ -2064,6 +2068,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-frontend",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeFrontend,
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoNamespace:           "dynamo-test-dynamo-graph-deployment",
 								},
 								Annotations: map[string]string{},
 								Spec: grovev1alpha1.PodCliqueSpec{
@@ -2091,7 +2096,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "frontend-image",
 												Command: []string{
 													"/bin/sh",
@@ -2201,6 +2206,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypePlanner,
+									commonconsts.KubeLabelDynamoNamespace:           "dynamo-test-dynamo-graph-deployment",
 								},
 								Annotations: map[string]string{},
 								Spec: grovev1alpha1.PodCliqueSpec{
@@ -2213,10 +2219,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Volumes: []corev1.Volume{
 											{
-												Name: "planner-pvc",
+												Name: "dynamo-pvc",
 												VolumeSource: corev1.VolumeSource{
 													PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-														ClaimName: "planner-pvc",
+														ClaimName: "dynamo-pvc",
 													},
 												},
 											},
@@ -2232,7 +2238,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										},
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "planner-image",
 												Command: []string{
 													"/bin/sh",
@@ -2315,7 +2321,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												VolumeMounts: []corev1.VolumeMount{
 													{
-														Name:      "planner-pvc",
+														Name:      "dynamo-pvc",
 														MountPath: "/planner",
 													},
 													{
@@ -2523,7 +2529,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									},
 									VolumeMounts: []v1alpha1.VolumeMount{
 										{
-											Name:       "planner-pvc",
+											Name:       "dynamo-pvc",
 											MountPoint: "/planner",
 										},
 									},
@@ -2597,6 +2603,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoNamespace:           "dynamo-test-dynamo-graph-deployment",
 									"nvidia.com/label1":                             "label1",
 									"nvidia.com/label2":                             "label2",
 								},
@@ -2624,7 +2631,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "worker-image",
 												Command: []string{
 													"/bin/sh",
@@ -2735,6 +2742,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker-wkr",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoNamespace:           "dynamo-test-dynamo-graph-deployment",
 									"nvidia.com/label1":                             "label1",
 									"nvidia.com/label2":                             "label2",
 								},
@@ -2763,7 +2771,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "worker-image",
 												Command: []string{
 													"/bin/sh",
@@ -2850,6 +2858,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-frontend",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoNamespace:           "dynamo-test-dynamo-graph-deployment",
 								},
 								Annotations: map[string]string{},
 								Spec: grovev1alpha1.PodCliqueSpec{
@@ -2877,7 +2886,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "frontend-image",
 												Command: []string{
 													"/bin/sh",
@@ -2987,6 +2996,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-planner",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypePlanner,
+									commonconsts.KubeLabelDynamoNamespace:           "dynamo-test-dynamo-graph-deployment",
 								},
 								Annotations: map[string]string{},
 								Spec: grovev1alpha1.PodCliqueSpec{
@@ -2998,10 +3008,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										ServiceAccountName:            commonconsts.PlannerServiceAccountName,
 										Volumes: []corev1.Volume{
 											{
-												Name: "planner-pvc",
+												Name: "dynamo-pvc",
 												VolumeSource: corev1.VolumeSource{
 													PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-														ClaimName: "planner-pvc",
+														ClaimName: "dynamo-pvc",
 													},
 												},
 											},
@@ -3018,7 +3028,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:  "main",
+												Name:  commonconsts.MainContainerName,
 												Image: "planner-image",
 												Command: []string{
 													"/bin/sh",
@@ -3108,7 +3118,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												VolumeMounts: []corev1.VolumeMount{
 													{
-														Name:      "planner-pvc",
+														Name:      "dynamo-pvc",
 														MountPath: "/planner",
 													},
 													{
@@ -3333,7 +3343,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 			}
 
 			// Check that container name is set
-			if container.Name != "main" {
+			if container.Name != commonconsts.MainContainerName {
 				t.Errorf("GeneratePodSpecForComponent() container name = %s, want main", container.Name)
 			}
 		})
@@ -3985,9 +3995,7 @@ func TestGetBackendFrameworkFromComponent(t *testing.T) {
 	}
 }
 
-// deactivated for now.
-// TODO: reactivate this when we have a better way to handle the readiness probe for the leader.
-func XTestApplyCliqueStartupDependencies(t *testing.T) {
+func TestApplyCliqueStartupDependencies(t *testing.T) {
 	tests := []struct {
 		name              string
 		roles             []ServiceRole
@@ -4006,9 +4014,9 @@ func XTestApplyCliqueStartupDependencies(t *testing.T) {
 			numberOfNodes:    3,
 			expectedDeps: map[string][]string{
 				"service-ldr": nil,
-				"service-wkr": {"service-ldr"},
+				"service-wkr": nil,
 			},
-			expectStartupType: true,
+			expectStartupType: false,
 		},
 		{
 			name: "sglang_multinode_applies_dependencies",
@@ -4020,9 +4028,9 @@ func XTestApplyCliqueStartupDependencies(t *testing.T) {
 			numberOfNodes:    3,
 			expectedDeps: map[string][]string{
 				"service-ldr": nil,
-				"service-wkr": {"service-ldr"},
+				"service-wkr": nil,
 			},
-			expectStartupType: true,
+			expectStartupType: false,
 		},
 		{
 			name: "trtllm_multinode_applies_dependencies",
@@ -4043,24 +4051,10 @@ func XTestApplyCliqueStartupDependencies(t *testing.T) {
 			roles: []ServiceRole{
 				{Name: "service", Role: RoleMain, Replicas: 1},
 			},
-			backendFramework: BackendFrameworkVLLM,
+			backendFramework: BackendFrameworkTRTLLM,
 			numberOfNodes:    1,
 			expectedDeps: map[string][]string{
 				"service": nil,
-			},
-			expectStartupType: false,
-		},
-		{
-			name: "noop_backend_no_dependencies",
-			roles: []ServiceRole{
-				{Name: "service-ldr", Role: RoleLeader, Replicas: 1},
-				{Name: "service-wkr", Role: RoleWorker, Replicas: 2},
-			},
-			backendFramework: BackendFrameworkNoop,
-			numberOfNodes:    3,
-			expectedDeps: map[string][]string{
-				"service-ldr": nil,
-				"service-wkr": nil,
 			},
 			expectStartupType: false,
 		},
@@ -4119,9 +4113,7 @@ func XTestApplyCliqueStartupDependencies(t *testing.T) {
 	}
 }
 
-// deactivated for now.
-// TODO: reactivate this when we have a better way to handle the readiness probe for the leader.
-func XTestGetCliqueStartupDependencies(t *testing.T) {
+func TestGetCliqueStartupDependencies(t *testing.T) {
 	tests := []struct {
 		name              string
 		role              Role
@@ -4130,38 +4122,6 @@ func XTestGetCliqueStartupDependencies(t *testing.T) {
 		workerCliqueNames []string
 		expected          []string
 	}{
-		{
-			name:              "vllm_worker_depends_on_leader",
-			role:              RoleWorker,
-			backendFramework:  BackendFrameworkVLLM,
-			leaderCliqueName:  "service-ldr",
-			workerCliqueNames: []string{"service-wkr"},
-			expected:          []string{"service-ldr"},
-		},
-		{
-			name:              "vllm_leader_has_no_dependencies",
-			role:              RoleLeader,
-			backendFramework:  BackendFrameworkVLLM,
-			leaderCliqueName:  "service-ldr",
-			workerCliqueNames: []string{"service-wkr"},
-			expected:          nil,
-		},
-		{
-			name:              "sglang_worker_depends_on_leader",
-			role:              RoleWorker,
-			backendFramework:  BackendFrameworkSGLang,
-			leaderCliqueName:  "service-ldr",
-			workerCliqueNames: []string{"service-wkr"},
-			expected:          []string{"service-ldr"},
-		},
-		{
-			name:              "sglang_leader_has_no_dependencies",
-			role:              RoleLeader,
-			backendFramework:  BackendFrameworkSGLang,
-			leaderCliqueName:  "service-ldr",
-			workerCliqueNames: []string{"service-wkr"},
-			expected:          nil,
-		},
 		{
 			name:              "trtllm_leader_depends_on_workers",
 			role:              RoleLeader,
@@ -4175,30 +4135,6 @@ func XTestGetCliqueStartupDependencies(t *testing.T) {
 			role:              RoleWorker,
 			backendFramework:  BackendFrameworkTRTLLM,
 			leaderCliqueName:  "service-ldr",
-			workerCliqueNames: []string{"service-wkr"},
-			expected:          nil,
-		},
-		{
-			name:              "noop_backend_has_no_dependencies",
-			role:              RoleWorker,
-			backendFramework:  BackendFrameworkNoop,
-			leaderCliqueName:  "service-ldr",
-			workerCliqueNames: []string{"service-wkr"},
-			expected:          nil,
-		},
-		{
-			name:              "main_role_has_no_dependencies",
-			role:              RoleMain,
-			backendFramework:  BackendFrameworkVLLM,
-			leaderCliqueName:  "",
-			workerCliqueNames: nil,
-			expected:          nil,
-		},
-		{
-			name:              "worker_with_empty_leader_name",
-			role:              RoleWorker,
-			backendFramework:  BackendFrameworkVLLM,
-			leaderCliqueName:  "",
 			workerCliqueNames: []string{"service-wkr"},
 			expected:          nil,
 		},
@@ -4228,31 +4164,32 @@ func XTestGetCliqueStartupDependencies(t *testing.T) {
 	}
 }
 
-// deactivated for now.
-// TODO: reactivate this when we have a better way to handle the readiness probe for the leader.
-func XTestGenerateGrovePodCliqueSet_StartsAfterDependencies(t *testing.T) {
+func TestGenerateGrovePodCliqueSet_StartsAfterDependencies(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
 
 	tests := []struct {
-		name             string
-		backendFramework string
-		expectedDeps     map[string][]string // clique name -> expected StartsAfter dependencies
+		name              string
+		backendFramework  string
+		expectedDeps      map[string][]string // clique name -> expected StartsAfter dependencies
+		expectStartupType bool
 	}{
 		{
 			name:             "vllm_worker_starts_after_leader",
 			backendFramework: string(BackendFrameworkVLLM),
 			expectedDeps: map[string][]string{
-				"main-wkr": {"main-ldr"}, // worker starts after leader
-				"main-ldr": nil,          // leader has no dependencies
+				"main-wkr": nil, // worker starts after leader
+				"main-ldr": nil, // leader has no dependencies
 			},
+			expectStartupType: false,
 		},
 		{
 			name:             "sglang_worker_starts_after_leader",
 			backendFramework: string(BackendFrameworkSGLang),
 			expectedDeps: map[string][]string{
-				"main-wkr": {"main-ldr"}, // worker starts after leader
-				"main-ldr": nil,          // leader has no dependencies
+				"main-wkr": nil, // worker starts after leader
+				"main-ldr": nil, // leader has no dependencies
 			},
+			expectStartupType: false,
 		},
 		{
 			name:             "trtllm_leader_starts_after_worker",
@@ -4261,6 +4198,7 @@ func XTestGenerateGrovePodCliqueSet_StartsAfterDependencies(t *testing.T) {
 				"main-ldr": {"main-wkr"}, // leader starts after worker
 				"main-wkr": nil,          // worker has no dependencies
 			},
+			expectStartupType: true,
 		},
 	}
 
@@ -4304,8 +4242,14 @@ func XTestGenerateGrovePodCliqueSet_StartsAfterDependencies(t *testing.T) {
 			}
 
 			// Verify that StartupType is set to Explicit
-			if got.Spec.Template.StartupType == nil || *got.Spec.Template.StartupType != grovev1alpha1.CliqueStartupTypeExplicit {
-				t.Errorf("Expected StartupType to be CliqueStartupTypeExplicit, got %v", got.Spec.Template.StartupType)
+			if tt.expectStartupType {
+				if got.Spec.Template.StartupType == nil || *got.Spec.Template.StartupType != grovev1alpha1.CliqueStartupTypeExplicit {
+					t.Errorf("Expected StartupType to be CliqueStartupTypeExplicit, got %v", got.Spec.Template.StartupType)
+				}
+			} else {
+				if got.Spec.Template.StartupType == nil || *got.Spec.Template.StartupType != grovev1alpha1.CliqueStartupTypeAnyOrder {
+					t.Errorf("Expected StartupType to be CliqueStartupTypeAnyOrder, got %v", got.Spec.Template.StartupType)
+				}
 			}
 
 			// Verify StartsAfter dependencies for each clique
@@ -4661,7 +4605,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 			expectedPodSpec: &corev1.PodSpec{
 				Containers: []corev1.Container{
 					{
-						Name:    "main",
+						Name:    commonconsts.MainContainerName,
 						Command: []string{"python3"},
 						Args:    []string{"-m", "dynamo.worker"},
 						Env: []corev1.EnvVar{
@@ -4711,7 +4655,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							},
 							PeriodSeconds:    10,
 							TimeoutSeconds:   5,
-							FailureThreshold: 60,
+							FailureThreshold: 720,
 						},
 						Ports: []corev1.ContainerPort{
 							{

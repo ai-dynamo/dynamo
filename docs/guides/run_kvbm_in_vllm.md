@@ -25,6 +25,7 @@ To learn what KVBM is, please check [here](https://docs.nvidia.com/dynamo/latest
 
 To use KVBM in vLLM, you can follow the steps below:
 
+### Docker Setup
 ```bash
 # start up etcd for KVBM leader/worker registration and discovery
 docker compose -f deploy/docker-compose.yml up -d
@@ -34,26 +35,43 @@ docker compose -f deploy/docker-compose.yml up -d
 
 # launch the container
 ./container/run.sh --framework vllm -it --mount-workspace --use-nixl-gds
+```
 
-# enable kv offloading to CPU memory
-# 4 means 4GB of CPU memory would be used
-export DYN_KVBM_CPU_CACHE_GB=4
+### Aggregated Serving with KVBM
+```bash
+cd $DYNAMO_HOME/components/backends/vllm
+./launch/agg_kvbm.sh
+```
 
-# enable kv offloading to disk
-# 8 means 8GB of disk would be used
-export DYN_KVBM_DISK_CACHE_GB=8
+### Disaggregated Serving with KVBM
+```bash
+# 1P1D - one prefill worker and one decode worker
+# NOTE: need at least 2 GPUs
+cd $DYNAMO_HOME/components/backends/vllm
+./launch/disagg_kvbm.sh
 
-# [DYNAMO] start dynamo frontend
-python -m dynamo.frontend --http-port 8000 &
+# 2P2D - two prefill workers and two decode workers
+# NOTE: need at least 4 GPUs
+cd $DYNAMO_HOME/components/backends/vllm
+./launch/disagg_kvbm_2p2d.sh
+```
+> [!NOTE]
+> To tune the size of CPU or disk cache, set `DYN_KVBM_CPU_CACHE_GB` and `DYN_KVBM_DISK_CACHE_GB` accordingly. We only set `DYN_KVBM_CPU_CACHE_GB=20` in both scripts above.
 
-# [DYNAMO] serve an LLM model using KVBM with dynamo
-python -m dynamo.vllm \
-    --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-    --connector kvbm &
+> [!NOTE]
+> `DYN_KVBM_CPU_CACHE_GB` must be set and `DYN_KVBM_DISK_CACHE_GB` is optional.
 
-# make a call to LLM
+> [!NOTE]
+> When disk offloading is enabled, to extend SSD lifespan, disk offload filtering would be enabled by default. The current policy is only offloading KV blocks from CPU to disk if the blocks have frequency equal or more than `2`. Frequency is determined via doubling on cache hit (init with 1) and decrement by 1 on each time decay step.
+>
+> To disable disk offload filtering, set `DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER` to true or 1.
+
+### Sample Request
+```bash
+# make a request to verify vLLM with KVBM is started up correctly
+# NOTE: change the model name if served with a different one
 curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "model": "Qwen/Qwen3-0.6B",
     "messages": [
     {
         "role": "user",
@@ -61,13 +79,13 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
     }
     ],
     "stream":false,
-    "max_tokens": 30
+    "max_tokens": 10
   }'
 ```
 
-Alternatively, can use "vllm serve" with KVBM by replacing the above two [DYNAMO] cmds with below:
+Alternatively, can use `vllm serve` directly to use KVBM for aggregated serving:
 ```bash
-vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "dynamo.llm.vllm_integration.connector"}' deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "dynamo.llm.vllm_integration.connector"}' Qwen/Qwen3-0.6B
 ```
 
 ## Enable and View KVBM Metrics
@@ -77,23 +95,24 @@ Follow below steps to enable metrics collection and view via Grafana dashboard:
 # Start the basic services (etcd & natsd), along with Prometheus and Grafana
 docker compose -f deploy/docker-compose.yml --profile metrics up -d
 
-# set env var DYN_SYSTEM_ENABLED to true, DYN_SYSTEM_PORT to 6880, DYN_KVBM_SLEEP to 5, when launch via dynamo
-# NOTE: Make sure port 6881 (for KVBM worker metrics) and port 6882 (for KVBM leader metrics) are available.
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=6880 \
+# set env var DYN_KVBM_METRICS to true, when launch via dynamo
+# Optionally set DYN_KVBM_METRICS_PORT to choose the /metrics port (default: 6880).
+# NOTE: update launch/disagg_kvbm.sh or launch/disagg_kvbm_2p2d.sh as needed
+DYN_KVBM_METRICS=true \
 python -m dynamo.vllm \
-    --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+    --model Qwen/Qwen3-0.6B \
+    --enforce-eager \
     --connector kvbm &
 
 # optional if firewall blocks KVBM metrics ports to send prometheus metrics
-sudo ufw allow 6881/tcp
-sudo ufw allow 6882/tcp
+sudo ufw allow 6880/tcp
 ```
 
 View grafana metrics via http://localhost:3001 (default login: dynamo/dynamo) and look for KVBM Dashboard
 
 ## Benchmark KVBM
 
-Once vllm serve is ready, follow below steps to use LMBenchmark to benchmark KVBM performance:
+Once the model is loaded ready, follow below steps to use LMBenchmark to benchmark KVBM performance:
 ```bash
 git clone https://github.com/LMCache/LMBenchmark.git
 
@@ -101,7 +120,7 @@ git clone https://github.com/LMCache/LMBenchmark.git
 # we are passing model, endpoint, output file prefix and qps to the sh script.
 cd LMBenchmark/synthetic-multi-round-qa
 ./long_input_short_output_run.sh \
-    "deepseek-ai/DeepSeek-R1-Distill-Llama-8B" \
+    "Qwen/Qwen3-0.6B" \
     "http://localhost:8000" \
     "benchmark_kvbm" \
     1
@@ -112,4 +131,4 @@ More details about how to use LMBenchmark could be found [here](https://github.c
 
 `NOTE`: if metrics are enabled as mentioned in the above section, you can observe KV offloading, and KV onboarding in the grafana dashboard.
 
-To compare, you can run `vllm serve deepseek-ai/DeepSeek-R1-Distill-Llama-8B` to turn KVBM off as the baseline.
+To compare, you can run `vllm serve Qwen/Qwen3-0.6B` to turn KVBM off as the baseline.

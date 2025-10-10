@@ -3,7 +3,7 @@
 
 //! Background processes for the KV Router including event consumption and snapshot uploads.
 
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use anyhow::Result;
 use dynamo_runtime::{
@@ -11,7 +11,7 @@ use dynamo_runtime::{
     prelude::*,
     traits::events::EventPublisher,
     transports::{
-        etcd::WatchEvent,
+        etcd::{Client as EtcdClient, WatchEvent},
         nats::{NatsQueue, Slug},
     },
 };
@@ -32,7 +32,7 @@ use crate::{
 struct SnapshotResources {
     nats_client: dynamo_runtime::transports::nats::Client,
     bucket_name: String,
-    etcd_client: dynamo_runtime::transports::etcd::Client,
+    etcd_client: EtcdClient,
     lock_name: String,
 }
 
@@ -91,7 +91,7 @@ pub async fn start_kv_router_background(
         stream_name.clone(),
         nats_server.clone(),
         std::time::Duration::from_secs(60), // 1 minute timeout
-        consumer_uuid,
+        consumer_uuid.clone(),
     );
     nats_queue.connect_with_reset(router_reset_states).await?;
 
@@ -151,6 +151,9 @@ pub async fn start_kv_router_background(
         .etcd_client()
         .ok_or_else(|| anyhow::anyhow!("etcd client not available"))?;
 
+    // Cleanup orphaned consumers on startup
+    cleanup_orphaned_consumers(&mut nats_queue, &etcd_client, &component, &consumer_uuid).await;
+
     // Watch for router deletions to clean up orphaned consumers
     let (_prefix_str, _watcher, mut router_replicas_rx) = etcd_client
         .kv_get_and_watch_prefix(&format!("{}/", KV_ROUTERS_ROOT_PATH))
@@ -205,12 +208,14 @@ pub async fn start_kv_router_background(
 
                     let key = String::from_utf8_lossy(kv.key());
 
-                    let Some(worker_id_str) = key.split('/').next_back() else {
+                    // Extract the hex worker ID after the colon (e.g., "generate:694d99badb9f7c07" -> "694d99badb9f7c07")
+                    let Some(worker_id_str) = key.split(':').next_back() else {
                         tracing::warn!("Could not extract worker ID from instance key: {}", key);
                         continue;
                     };
 
-                    let Ok(worker_id) = worker_id_str.parse::<i64>() else {
+                    // Parse as hexadecimal (base 16)
+                    let Ok(worker_id) = i64::from_str_radix(worker_id_str, 16) else {
                         tracing::warn!("Could not parse worker ID from instance key: {}", key);
                         continue;
                     };
@@ -298,9 +303,18 @@ pub async fn start_kv_router_background(
                     };
 
                     let key = String::from_utf8_lossy(kv.key());
-                    tracing::info!("Router deleted: {}", key);
+                    tracing::info!("Detected router replica deletion: {}", key);
 
-                    // Extract the router UUID from the key (format: kv_routers/<model>/<uuid>)
+                    // Only process deletions for routers on the same component
+                    if !key.contains(component.path().as_str()) {
+                        tracing::trace!(
+                            "Skipping router deletion from different component (key: {key}, subscriber component: {})",
+                            component.path()
+                        );
+                        continue;
+                    }
+
+                    // Extract the router UUID from the key
                     let Some(router_uuid) = key.split('/').next_back() else {
                         tracing::warn!("Could not extract UUID from router key: {}", key);
                         continue;
@@ -354,6 +368,44 @@ pub async fn start_kv_router_background(
     Ok(())
 }
 
+/// Cleanup orphaned NATS consumers that no longer have corresponding etcd router entries
+async fn cleanup_orphaned_consumers(
+    nats_queue: &mut NatsQueue,
+    etcd_client: &EtcdClient,
+    component: &Component,
+    consumer_uuid: &str,
+) {
+    let Ok(consumers) = nats_queue.list_consumers().await else {
+        return;
+    };
+
+    let router_prefix = format!("{}/{}/", KV_ROUTERS_ROOT_PATH, component.path());
+    let Ok(router_entries) = etcd_client.kv_get_prefix(&router_prefix).await else {
+        return;
+    };
+
+    let active_uuids: HashSet<String> = router_entries
+        .iter()
+        .filter_map(|kv| {
+            String::from_utf8_lossy(kv.key())
+                .split('/')
+                .next_back()
+                .map(str::to_string)
+        })
+        .collect();
+
+    for consumer in consumers {
+        if consumer == consumer_uuid {
+            // Never delete myself (extra/redundant safeguard)
+            continue;
+        }
+        if !active_uuids.contains(&consumer) {
+            tracing::info!("Cleaning up orphaned consumer: {}", consumer);
+            let _ = nats_queue.shutdown(Some(consumer)).await;
+        }
+    }
+}
+
 /// Perform snapshot upload and purge operations
 async fn purge_then_snapshot(
     nats_queue: &mut NatsQueue,
@@ -363,6 +415,8 @@ async fn purge_then_snapshot(
     // Purge before snapshot ensures new/warm-restarted routers won't replay already-acknowledged messages.
     // Since KV events are idempotent, this ordering reduces unnecessary reprocessing while maintaining
     // at-least-once delivery guarantees. The snapshot will capture the clean state after purge.
+    tracing::info!("Purging acknowledged messages and performing snapshot of radix tree");
+    let start_time = std::time::Instant::now();
 
     // First, purge acknowledged messages from the stream
     nats_queue.purge_acknowledged().await?;
@@ -395,9 +449,10 @@ async fn purge_then_snapshot(
         .map_err(|e| anyhow::anyhow!("Failed to upload snapshot: {e:?}"))?;
 
     tracing::info!(
-        "Successfully uploaded radix tree snapshot with {} events to bucket {}",
+        "Successfully performed snapshot of radix tree with {} events to bucket {} in {}ms",
         events.len(),
-        resources.bucket_name
+        resources.bucket_name,
+        start_time.elapsed().as_millis()
     );
 
     Ok(())

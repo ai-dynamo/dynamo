@@ -497,5 +497,5 @@ fn load(a: &AtomicUsize) -> usize {
 }
 
 fn root_key(namespace: &str) -> String {
-    format!("/{namespace}/planner/")
+    format!("v1/{namespace}/planner/")
 }
