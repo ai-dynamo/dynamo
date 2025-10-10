@@ -724,46 +724,6 @@ impl RuntimeMetrics {
         Self::register_callback_for(self.metricsregistry.as_ref(), callback)
     }
 
-    // TODO: Implement this method after adding exposition text callback support to DRT
-    // /// Register a Python callback that returns Prometheus exposition text
-    // /// The returned text will be appended to the /metrics endpoint output
-    // /// The callback should return a string in Prometheus text exposition format
-    // fn register_prometheus_exposition_text_callback(
-    //     &self,
-    //     callback: PyObject,
-    //     _py: Python,
-    // ) -> PyResult<()> {
-    //     let hierarchy = self.metricsregistry.hierarchy();
-    //
-    //     // Store the callback in the DRT's metrics exposition text callback registry
-    //     self.metricsregistry.drt().register_prometheus_exposition_text_callback(
-    //         vec![hierarchy.clone()],
-    //         Arc::new(move || {
-    //             // Execute the Python callback in the Python event loop
-    //             Python::with_gil(|py| {
-    //                 match callback.call0(py) {
-    //                     Ok(result) => {
-    //                         // Try to extract a string from the result
-    //                         match result.extract::<String>(py) {
-    //                             Ok(text) => Ok(text),
-    //                             Err(e) => {
-    //                                 tracing::error!("Metrics exposition text callback must return a string: {}", e);
-    //                                 Ok(String::new())
-    //                             }
-    //                         }
-    //                     }
-    //                     Err(e) => {
-    //                         tracing::error!("Metrics exposition text callback failed: {}", e);
-    //                         Ok(String::new())
-    //                     }
-    //                 }
-    //             })
-    //         }),
-    //     );
-    //
-    //     Ok(())
-    // }
-
     // NOTE: The order of create_* methods below matches lib/runtime/src/metrics.rs::MetricsRegistry trait
     // Keep them synchronized when adding new metric types
 
