@@ -13,6 +13,7 @@ export DECODE_CUDA_VISIBLE_DEVICES=${DECODE_CUDA_VISIBLE_DEVICES:-"1"}
 export MODALITY=${MODALITY:-"text"}
 # If you want to use multimodal, set MODALITY to "multimodal"
 #export MODALITY=${MODALITY:-"multimodal"}
+export MPI_CMD=${MPI_CMD:-""}
 
 # Setup cleanup trap
 cleanup() {
@@ -25,11 +26,11 @@ trap cleanup EXIT INT TERM
 
 
 # run frontend
-python3 -m dynamo.frontend --http-port 8000 &
+$MPI_CMD python3 -m dynamo.frontend --http-port 8000 &
 DYNAMO_PID=$!
 
 # run prefill worker
-CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
+CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES $MPI_CMD python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args  "$PREFILL_ENGINE_ARGS" \
@@ -39,7 +40,7 @@ CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
 PREFILL_PID=$!
 
 # run decode worker
-CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
+CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES $MPI_CMD python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args  "$DECODE_ENGINE_ARGS" \
