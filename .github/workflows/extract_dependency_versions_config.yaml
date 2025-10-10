@@ -6,6 +6,8 @@ github:
   branch: "main"
 
 baseline:
+  # Fallback baseline count for warnings (if no previous CSV exists)
+  # The script automatically uses the previous extraction's count as the baseline
   dependency_count: 251
 
 critical_dependencies:

@@ -208,7 +208,15 @@ class DependencyExtractor:
                     # Create unique key for each dependency
                     key = f"{row.get('Component', '')}:{row.get('Category', '')}:{row.get('Dependency Name', '')}"
                     target_dict[key] = row
-            print(f"Loaded {len(target_dict)} dependencies from previous {csv_type} CSV: {csv_path.name}")
+            
+            # Use the count from previous CSV as the baseline for warnings
+            # (only if this is the latest CSV, not release)
+            if csv_type == "latest" and len(target_dict) > 0:
+                self.baseline_count = len(target_dict)
+                print(f"Loaded {len(target_dict)} dependencies from previous {csv_type} CSV: {csv_path.name}")
+                print(f"Set baseline count to {self.baseline_count} (from previous extraction)")
+            else:
+                print(f"Loaded {len(target_dict)} dependencies from previous {csv_type} CSV: {csv_path.name}")
         except Exception as e:
             self.warnings.append(f"Error loading previous {csv_type} CSV: {e}")
     
