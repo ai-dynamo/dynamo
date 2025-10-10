@@ -21,9 +21,8 @@ pub async fn create_lease(
             Ok(_) => tracing::trace!("keep alive task exited successfully"),
             Err(e) => {
                 tracing::error!(
-                    "{}: {:?}",
-                    "Unable to maintain lease. Check etcd server status",
-                    e
+                    error = %e,
+                    "Unable to maintain lease. Check etcd server status"
                 );
                 token.cancel();
             }
@@ -104,7 +103,11 @@ pub async fn keep_alive(
                 // immediately try to tick the heartbeat
                 // this will repeat until either the heartbeat is reestablished or the deadline is exceeded
                 if let Err(e) = heartbeat_sender.keep_alive().await {
-                    tracing::warn!(lease_id, "{}: {:?}", "Unable to send lease heartbeat. Check etcd server status", e);
+                    tracing::warn!(
+                        lease_id,
+                        error = %e,
+                        "Unable to send lease heartbeat. Check etcd server status"
+                    );
                     ttl = 0;
                 }
             }

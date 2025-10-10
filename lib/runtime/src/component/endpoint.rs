@@ -244,10 +244,10 @@ impl EndpointConfigBuilder {
                 .await
         {
             tracing::error!(
-                "Unable to register service {}/{} for discovery: {:?}",
                 component_name,
                 endpoint_name,
-                e
+                error = %e,
+                "Unable to register service for discovery"
             );
             cancel_token.cancel();
             return Err(error!(

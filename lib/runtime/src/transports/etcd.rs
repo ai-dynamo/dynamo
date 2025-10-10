@@ -190,7 +190,7 @@ impl Client {
             Ok(())
         } else {
             for resp in result.op_responses() {
-                tracing::warn!("kv_create etcd op response: {resp:?}");
+                tracing::warn!(response = ?resp, "kv_create etcd op response");
             }
             Err(error!("Unable to create key. Check etcd server status"))
         }
