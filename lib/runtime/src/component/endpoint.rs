@@ -229,9 +229,9 @@ impl EndpointConfigBuilder {
 
         // client.register_service()
         let info = Instance {
-            component: component_name,
-            endpoint: endpoint_name,
-            namespace: namespace_name,
+            component: component_name.clone(),
+            endpoint: endpoint_name.clone(),
+            namespace: namespace_name.clone(),
             instance_id: lease_id,
             transport: TransportType::NatsTcp(subject),
         };
@@ -243,9 +243,16 @@ impl EndpointConfigBuilder {
                 .kv_create(&etcd_path, info, Some(lease_id))
                 .await
         {
-            tracing::error!("Failed to register discoverable service: {:?}", e);
+            tracing::error!(
+                component_name,
+                endpoint_name,
+                error = %e,
+                "Unable to register service for discovery"
+            );
             cancel_token.cancel();
-            return Err(error!("Failed to register discoverable service"));
+            return Err(error!(
+                "Unable to register service for discovery. Check discovery service status"
+            ));
         }
         task.await??;
 
