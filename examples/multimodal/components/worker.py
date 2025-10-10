@@ -44,7 +44,7 @@ class VllmBaseWorker:
     @classmethod
     def parse_args(cls) -> Tuple[argparse.Namespace, Config]:
         parser = FlexibleArgumentParser(
-            description="vLLM based encoder for Dynamo LLM."
+            description="vLLM based worker for Dynamo LLM."
         )
         parser.add_argument(
             "--endpoint",
@@ -270,38 +270,42 @@ class VllmPDWorker(VllmBaseWorker):
             request.multimodal_input.image_url is None
             and request.multimodal_input.video_url is None
         ):
-            # Process embeddings using the connector
-            # Create a descriptor based on the embedding shape.
-            embeddings = torch.empty(
-                request.embeddings_shape,
-                dtype=self.EMBEDDINGS_DTYPE,
-                device=self.EMBEDDINGS_DEVICE,
-            )
-            descriptor = connect.Descriptor(embeddings)
-
-            if descriptor is None:
-                raise RuntimeError(
-                    "Descriptor is None in PD worker - cannot process embeddings"
+            # Check if embeddings are provided via connector (for disaggregated serving)
+            if request.embeddings_shape is not None:
+                # Process embeddings using the connector
+                # Create a descriptor based on the embedding shape.
+                embeddings = torch.empty(
+                    request.embeddings_shape,
+                    dtype=self.EMBEDDINGS_DTYPE,
+                    device=self.EMBEDDINGS_DEVICE,
                 )
+                descriptor = connect.Descriptor(embeddings)
+                if descriptor is None:
+                    raise RuntimeError(
+                        "Descriptor is None in PD worker - cannot process embeddings"
+                    )
 
-            read_op = await self._connector.begin_read(
-                request.serialized_request, descriptor
-            )
-            await read_op.wait_for_completion()
-            if "video" in self.engine_args.model.lower():
-                video_numpy = embeddings.numpy()
-                multi_modal_data = construct_mm_data(
-                    self.engine_args.model,
-                    self.EMBEDDINGS_DTYPE,
-                    video_numpy=video_numpy,
+                read_op = await self._connector.begin_read(
+                    request.serialized_request, descriptor
                 )
+                await read_op.wait_for_completion()
+                if "video" in self.engine_args.model.lower():
+                    video_numpy = embeddings.numpy()
+                    multi_modal_data = construct_mm_data(
+                        self.engine_args.model,
+                        self.EMBEDDINGS_DTYPE,
+                        video_numpy=video_numpy,
+                    )
+                else:
+                    multi_modal_data = construct_mm_data(
+                        self.engine_args.model,
+                        self.EMBEDDINGS_DTYPE,
+                        image_embeds=embeddings,
+                        image_grid_thw=request.image_grid_thw,
+                    )
             else:
-                multi_modal_data = construct_mm_data(
-                    self.engine_args.model,
-                    self.EMBEDDINGS_DTYPE,
-                    image_embeds=embeddings,
-                    image_grid_thw=request.image_grid_thw,
-                )
+                # Text-only request: no multimodal data
+                multi_modal_data = None
         else:
             # Use PIL image instead of image embeddings
             multi_modal_data = {
