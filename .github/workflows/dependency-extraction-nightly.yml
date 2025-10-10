@@ -1,0 +1,155 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Nightly Dependency Extraction
+
+on:
+  schedule:
+    # Run at 2 AM UTC every day
+    - cron: '0 2 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  extract-dependencies:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Need history for comparison
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install dependencies
+        run: pip install pyyaml
+      
+      - name: Run dependency extraction
+        run: |
+          TIMESTAMP=$(date +%Y%m%d_%H%M)
+          
+          # Generate timestamped version (for artifacts)
+          python3 .github/workflows/extract_dependency_versions.py \
+            --output .github/reports/dependency_versions_${TIMESTAMP}.csv \
+            --report-unversioned
+          
+          # Copy to latest version (for repo tracking)
+          mkdir -p .github/reports
+          cp .github/reports/dependency_versions_${TIMESTAMP}.csv .github/reports/dependency_versions_latest.csv
+          
+          # Copy unversioned report if it exists
+          if [ -f "unversioned_dependencies_${TIMESTAMP}.csv" ]; then
+            cp unversioned_dependencies_${TIMESTAMP}.csv .github/reports/unversioned_dependencies_latest.csv
+          fi
+          
+          echo "TIMESTAMP=${TIMESTAMP}" >> $GITHUB_ENV
+      
+      - name: Check for changes
+        id: check_changes
+        run: |
+          if [[ -n $(git status --porcelain .github/reports/*_latest.csv) ]]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            
+            # Count dependencies by status from latest
+            new_count=$(grep -c ",New," .github/reports/dependency_versions_latest.csv 2>/dev/null || echo "0")
+            changed_count=$(grep -c ",Changed," .github/reports/dependency_versions_latest.csv 2>/dev/null || echo "0")
+            unchanged_count=$(grep -c ",Unchanged," .github/reports/dependency_versions_latest.csv 2>/dev/null || echo "0")
+            
+            echo "new_deps=$new_count" >> $GITHUB_OUTPUT
+            echo "changed_deps=$changed_count" >> $GITHUB_OUTPUT
+            echo "unchanged_deps=$unchanged_count" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Create Pull Request
+        if: steps.check_changes.outputs.has_changes == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: 'chore: Update dependency versions [automated]'
+          title: '[Automated] Nightly Dependency Version Update - $(date +%Y-%m-%d)'
+          body: |
+            ## 🤖 Automated Dependency Version Update
+            
+            This PR contains the nightly dependency extraction results.
+            
+            ### 📊 Summary
+            - **New Dependencies:** ${{ steps.check_changes.outputs.new_deps }}
+            - **Changed Versions:** ${{ steps.check_changes.outputs.changed_deps }}
+            - **Unchanged:** ${{ steps.check_changes.outputs.unchanged_deps }}
+            
+            ### 📋 Files Updated
+            - ✅ `.github/reports/dependency_versions_latest.csv` - Latest dependency snapshot
+            - ✅ `.github/reports/unversioned_dependencies_latest.csv` - Unversioned deps report (if applicable)
+            
+            > **Note:** Timestamped versions are stored in GitHub Artifacts (90-day retention) to avoid repo clutter.
+            
+            ### ✔️ Review Checklist
+            - [ ] Review new dependencies for security/licensing concerns
+            - [ ] Check version changes for breaking updates
+            - [ ] Verify unversioned dependencies report
+            - [ ] Update baseline count if increase is expected
+            
+            ---
+            
+            🔗 **Documentation:** [Dependency Extraction Guide](../docs/dependency_extraction.md)
+            📦 **Artifacts:** Download timestamped CSVs from workflow run
+            
+            _Generated by nightly dependency extraction workflow_
+            _Timestamp: ${{ env.TIMESTAMP }}_
+          branch: automated/dependency-extraction-${{ github.run_number }}
+          delete-branch: true
+          labels: |
+            automated
+            dependencies
+            documentation
+      
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-extraction-${{ github.run_number }}
+          path: |
+            .github/reports/dependency_versions_*.csv
+            .github/reports/unversioned_dependencies_*.csv
+          retention-days: 90
+      
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Dependency Extraction Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ steps.check_changes.outputs.has_changes }}" == "true" ]]; then
+            echo "✅ **Changes Detected**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- New Dependencies: ${{ steps.check_changes.outputs.new_deps }}" >> $GITHUB_STEP_SUMMARY
+            echo "- Changed Versions: ${{ steps.check_changes.outputs.changed_deps }}" >> $GITHUB_STEP_SUMMARY
+            echo "- Unchanged: ${{ steps.check_changes.outputs.unchanged_deps }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "📝 A pull request has been created for review." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "ℹ️ **No Changes Detected**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "All dependencies remain unchanged since the last extraction." >> $GITHUB_STEP_SUMMARY
+          fi
+

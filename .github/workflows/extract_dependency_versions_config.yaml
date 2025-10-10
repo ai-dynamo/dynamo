@@ -1,0 +1,173 @@
+# Dependency Extraction Configuration
+# This file defines where to find dependency information for each component
+
+github:
+  repo: "ai-dynamo/dynamo"
+  branch: "main"
+
+baseline:
+  dependency_count: 251
+
+critical_dependencies:
+  # List of critical dependencies (case-insensitive matching)
+  # Supports exact names or partial matches (e.g., "CUDA" matches "NVIDIA CUDA")
+  
+  # Core Runtime & Languages
+  - name: "Python"
+    reason: "Primary runtime language"
+  - name: "Rust"
+    reason: "Systems programming language"
+  - name: "CUDA"
+    reason: "GPU compute platform"
+  
+  # Infrastructure & Orchestration (Docker Compose and Helm Chart dependencies)
+  - name: "etcd"
+    reason: "Distributed configuration store"
+  - name: "bitnami"
+    reason: "ETCD container image"
+  - name: "nats"
+    reason: "Messaging system"
+  - name: "prometheus-nats-exporter"
+    reason: "NATS monitoring"
+  - name: "Kubernetes"
+    reason: "Container orchestration"
+  - name: "dynamo-operator"
+    reason: "Dynamo Kubernetes operator"
+  
+  # ML Frameworks & Base Images
+  - name: "PyTorch"
+    reason: "Deep learning framework"
+  - name: "NVIDIA PyTorch"
+    reason: "TensorRT-LLM base container"
+  - name: "CUDA-dl-base"
+    reason: "vLLM/SGLang base container"
+  
+  # Network & Communication (ARG names are formatted: NIXL_REF -> Nixl Ref)
+  - name: "Nixl"
+    reason: "Network interconnect library"
+  - name: "Nixl Ref"
+    reason: "Network interconnect library version"
+  - name: "Nixl Ucx Ref"
+    reason: "NIXL with UCX version"
+  - name: "Ucx"
+    reason: "Unified communication framework"
+  - name: "ucx-py"
+    reason: "UCX Python bindings"
+  - name: "Nvshmem"
+    reason: "NVIDIA SHMEM communication"
+  
+  # ML Inference & Optimization (ARG names are formatted: FLASH_ATTN_VER -> Flash Attn Ver)
+  - name: "Flash Attn"
+    reason: "Flash attention implementation"
+  - name: "Flashinf"
+    reason: "Flash attention (FlashInfer)"
+  - name: "flashinfer"
+    reason: "Flash attention in dependencies"
+  - name: "vllm [flashinfer]"
+    reason: "vLLM with FlashInfer support"
+  - name: "Deepgemm"
+    reason: "Optimized GEMM operations"
+  - name: "pplx"
+    reason: "Inference kernels"
+  
+  # Build & Package Tools
+  - name: "CMake"
+    reason: "Build system"
+  - name: "CMAKE_VERSION"
+    reason: "CMake version ARG"
+  - name: "Uvicorn"
+    reason: "ASGI server"
+  
+  # Performance & Benchmarking
+  - name: "Genai Perf"
+    reason: "GenAI performance testing"
+  - name: "genai-perf"
+    reason: "GenAI performance testing (pip package)"
+  - name: "aiperf"
+    reason: "AI performance benchmarking"
+  
+  # Custom Components
+  - name: "ModelExpress"
+    reason: "Model serving infrastructure"
+  - name: "modelexpress"
+    reason: "Model serving infrastructure (Rust crate)"
+  - name: "grove"
+    reason: "Scheduling component"
+  - name: "Kai"
+    reason: "Scheduler"
+
+components:
+  trtllm:
+    dockerfiles:
+      - "container/Dockerfile.trtllm"
+      - "containers/Dockerfile.trtllm"  # fallback if moved
+    scripts: []
+    required: true
+  
+  vllm:
+    dockerfiles:
+      - "container/Dockerfile.vllm"
+      - "containers/Dockerfile.vllm"  # fallback
+    scripts:
+      - "container/deps/vllm/install_vllm.sh"
+      - "container/dependencies/vllm/install_vllm.sh"  # fallback
+    required: true
+  
+  sglang:
+    dockerfiles:
+      - "container/Dockerfile.sglang"
+      - "container/Dockerfile.sglang-wideep"  # Has CMAKE_VERSION
+      - "containers/Dockerfile.sglang"  # fallback
+    scripts: []
+    required: true
+  
+  operator:
+    dockerfiles:
+      - "deploy/cloud/operator/Dockerfile"
+      - "deployment/cloud/operator/Dockerfile"  # fallback
+    go_modules:
+      - "deploy/cloud/operator/go.mod"
+      - "deployment/cloud/operator/go.mod"  # fallback
+    scripts: []
+    required: true
+  
+  shared:
+    dockerfiles:
+      - "container/Dockerfile"
+      - "containers/Dockerfile"  # fallback
+    requirements:
+      # Use glob patterns for multiple files
+      - pattern: "container/deps/requirements*.txt"
+        exclude: ["**/requirements.in"]
+      - pattern: "containers/deps/requirements*.txt"  # fallback
+        exclude: []
+    pyproject:
+      - "pyproject.toml"
+      - "benchmarks/pyproject.toml"
+    docker_compose:
+      - "deploy/docker-compose.yml"
+    helm_charts:
+      - "deploy/cloud/helm/platform/Chart.yaml"
+      - "deploy/helm/chart/Chart.yaml"
+    rust_toolchain:
+      - "rust-toolchain.toml"
+    cargo_toml:
+      - "Cargo.toml"
+    k8s_recipes:
+      - pattern: "recipes/**/perf.yaml"
+        exclude: []
+    scripts: []
+    required: true
+
+# Optional: Define custom extraction patterns
+extraction:
+  dockerfile:
+    base_image_keywords: ["FROM"]
+    version_arg_keywords: ["VERSION", "REF", "TAG", "_VER"]
+  
+  requirements:
+    version_operators: ["==", ">=", "<=", ">", "<", "~=", "!="]
+  
+  go_mod:
+    skip_indirect: false  # Set to true to skip indirect dependencies
+

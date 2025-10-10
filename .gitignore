@@ -38,6 +38,14 @@ CMakeCache.txt
 *pytest_report.md
 *pytest_report.xml
 
+# Dependency extraction timestamped outputs (keep latest only)
+dependency_versions_[0-9]*.csv
+unversioned_dependencies_[0-9]*.csv
+.github/reports/*_[0-9]*.csv
+!.github/reports/*_latest.csv
+!.github/reports/README.md
+!.github/reports/releases/dependency_versions_v*.csv
+
 **/__pycache__
 **/venv
 **/.venv
