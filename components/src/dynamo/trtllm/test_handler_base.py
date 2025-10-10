@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -10,11 +9,10 @@ This script mocks heavy dependencies before importing handler_base to test error
 """
 # type: ignore  # This file uses dynamic mocking which confuses mypy
 
-import sys
-import os
 import asyncio
-from unittest.mock import MagicMock, AsyncMock, patch
-from typing import Any, AsyncGenerator
+import os
+import sys
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Add both the current directory and the components/src directory to the Python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -74,15 +72,15 @@ class Context:
 
 sys.modules["dynamo._core"].Context = Context  # type: ignore[attr-defined]
 
+import pytest  # noqa: E402
+
 # Import handler_base directly from its location
-from request_handlers.handler_base import (
-    HandlerBase,
-    RequestHandlerConfig,
+from request_handlers.handler_base import (  # noqa: E402
     DisaggregationMode,
     DisaggregationStrategy,
+    HandlerBase,
+    RequestHandlerConfig,
 )
-
-import pytest
 
 
 class TestHandlerBase:

@@ -72,13 +72,13 @@ class RequestHandlerConfig:
     next_client: object
     next_router_client: Optional[object] = None
     encode_client: Optional[object] = None
-    multimodal_processor: Optional[
-        MultimodalRequestProcessor
-    ] = None  # for multimodal support
+    multimodal_processor: Optional[MultimodalRequestProcessor] = (
+        None  # for multimodal support
+    )
     connector: Optional[Connector] = None
-    runtime: Optional[
-        DistributedRuntime
-    ] = None  # DistributedRuntime reference for graceful shutdown
+    runtime: Optional[DistributedRuntime] = (
+        None  # DistributedRuntime reference for graceful shutdown
+    )
 
 
 class HandlerBase:
@@ -360,7 +360,7 @@ class HandlerBase:
                     "error": "Internal error - service restarting",
                     "token_ids": [],
                 }
-            except:
+            except Exception:
                 pass  # Best effort
 
             # Initiate graceful shutdown
