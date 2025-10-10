@@ -1,75 +1,3 @@
-diff --git a/Dockerfile.dynamo b/Dockerfile.dynamo
-new file mode 100644
-index 0000000..3f0e0a0
---- /dev/null
-+++ b/Dockerfile.dynamo
-@@ -0,0 +1,66 @@
-+# Dockerfile.dynamo - Custom Dockerfile for Dynamo FFI plugin
-+ARG BUILDER_IMAGE=golang:1.24
-+ARG BASE_IMAGE=ubuntu:22.04
-+
-+############################
-+# Builder
-+############################
-+FROM ${BUILDER_IMAGE} AS builder
-+
-+ENV CGO_ENABLED=1
-+ENV GOOS=linux
-+ENV GOARCH=amd64
-+# be explicit; helps cgo when linking libstdc++
-+ENV CC=gcc
-+ENV CXX=g++
-+
-+# C/C++ toolchain for cgo, and libstdc++ for link-time
-+RUN apt-get update && apt-get install -y --no-install-recommends \
-+    build-essential \
-+    gcc g++ \
-+    libc6-dev \
-+    ca-certificates \
-+ && rm -rf /var/lib/apt/lists/*
-+
-+ARG COMMIT_SHA=unknown
-+ARG BUILD_REF
-+
-+WORKDIR /src
-+
-+# deps first (cache)
-+COPY go.mod go.sum ./
-+RUN go mod download
-+
-+# source
-+COPY cmd/epp ./cmd/epp
-+COPY pkg/epp ./pkg/epp
-+COPY internal ./internal
-+COPY api ./api
-+
-+# sanity (optional)
-+RUN ls -la pkg/epp/scheduling/plugins/dynamo_kv_scorer/include/ || echo "Headers not found"
-+RUN ls -la pkg/epp/scheduling/plugins/dynamo_kv_scorer/lib/ || echo "Library not found"
-+
-+# build
-+WORKDIR /src/cmd/epp
-+RUN go build \
-+  -ldflags="-X sigs.k8s.io/gateway-api-inference-extension/pkg/epp/metrics.CommitSHA=${COMMIT_SHA} -X sigs.k8s.io/gateway-api-inference-extension/pkg/epp/metrics.BuildRef=${BUILD_REF}" \
-+  -o /epp
-+
-+############################
-+# Runtime
-+############################
-+FROM ${BASE_IMAGE} AS runtime
-+
-+# Minimal runtime deps; include libstdc++ runtime for -lstdc++
-+RUN apt-get update && apt-get install -y --no-install-recommends \
-+    ca-certificates \
-+    libstdc++6 \
-+ && rm -rf /var/lib/apt/lists/* \
-+ && groupadd -r nonroot && useradd -r -g nonroot nonroot
-+
-+WORKDIR /
-+COPY --from=builder /epp /epp
-+
-+USER nonroot:nonroot
-+ENTRYPOINT ["/epp"]
 diff --git a/Makefile b/Makefile
 index dee7e99..4679ce2 100644
 --- a/Makefile
@@ -149,6 +77,509 @@ index b5e0617..8592735 100644
  	if err := runner.NewRunner().Run(ctrl.SetupSignalHandler()); err != nil {
  		os.Exit(1)
  	}
+diff --git a/cmd/epp/runner/runner.go b/cmd/epp/runner/runner.go
+index f4a2c9b..692d2e4 100644
+--- a/cmd/epp/runner/runner.go
++++ b/cmd/epp/runner/runner.go
+@@ -18,8 +18,10 @@ package runner
+ 
+ import (
+ 	"context"
++	"crypto/tls"
+ 	"flag"
+ 	"fmt"
++	"net/http"
+ 	"net/http/pprof"
+ 	"os"
+ 
+@@ -136,7 +138,9 @@ var (
+ 
+ 	modelServerMetricsPort = flag.Int("modelServerMetricsPort", 0, "Port to scrape metrics from pods. "+
+ 		"Default value will be set to InferencePool.Spec.TargetPortNumber if not set.")
+-	modelServerMetricsPath = flag.String("modelServerMetricsPath", "/metrics", "Path to scrape metrics from pods")
++	modelServerMetricsPath                    = flag.String("modelServerMetricsPath", "/metrics", "Path to scrape metrics from pods")
++	modelServerMetricsScheme                  = flag.String("modelServerMetricsScheme", "http", "Scheme to scrape metrics from pods")
++	modelServerMetricsHttpsInsecureSkipVerify = flag.Bool("modelServerMetricsHttpsInsecureSkipVerify", true, "When using 'https' scheme for 'modelServerMetricsScheme', configure 'InsecureSkipVerify' (default to true)")
+ 
+ 	setupLog = ctrl.Log.WithName("setup")
+ )
+@@ -167,13 +171,15 @@ func (r *Runner) WithSchedulerConfig(schedulerConfig *scheduling.SchedulerConfig
+ func bindEnvToFlags() {
+ 	// map[ENV_VAR]flagName   – add more as needed
+ 	for env, flg := range map[string]string{
+-		"GRPC_PORT":                     "grpcPort",
+-		"GRPC_HEALTH_PORT":              "grpcHealthPort",
+-		"MODEL_SERVER_METRICS_PORT":     "modelServerMetricsPort",
+-		"MODEL_SERVER_METRICS_PATH":     "modelServerMetricsPath",
+-		"DESTINATION_ENDPOINT_HINT_KEY": "destinationEndpointHintKey",
+-		"POOL_NAME":                     "poolName",
+-		"POOL_NAMESPACE":                "poolNamespace",
++		"GRPC_PORT":                                       "grpcPort",
++		"GRPC_HEALTH_PORT":                                "grpcHealthPort",
++		"MODEL_SERVER_METRICS_PORT":                       "modelServerMetricsPort",
++		"MODEL_SERVER_METRICS_PATH":                       "modelServerMetricsPath",
++		"DESTINATION_ENDPOINT_HINT_KEY":                   "destinationEndpointHintKey",
++		"MODEL_SERVER_METRICS_SCHEME":                     "modelServerMetricsScheme",
++		"MODEL_SERVER_METRICS_HTTPS_INSECURE_SKIP_VERIFY": "modelServerMetricsHttpsInsecureSkipVerify",
++		"POOL_NAME":                                       "poolName",
++		"POOL_NAMESPACE":                                  "poolNamespace",
+ 		// durations & bools work too; flag.Set expects the *string* form
+ 		"REFRESH_METRICS_INTERVAL": "refreshMetricsInterval",
+ 		"SECURE_SERVING":           "secureServing",
+@@ -231,10 +237,26 @@ func (r *Runner) Run(ctx context.Context) error {
+ 		return err
+ 	}
+ 	verifyMetricMapping(*mapping, setupLog)
++
++	var metricsHttpClient *http.Client
++	if *modelServerMetricsScheme == "https" {
++		metricsHttpClient = &http.Client{
++			Transport: &http.Transport{
++				TLSClientConfig: &tls.Config{
++					InsecureSkipVerify: *modelServerMetricsHttpsInsecureSkipVerify,
++				},
++			},
++		}
++	} else {
++		metricsHttpClient = http.DefaultClient
++	}
++
+ 	pmf := backendmetrics.NewPodMetricsFactory(&backendmetrics.PodMetricsClientImpl{
+-		MetricMapping:          mapping,
+-		ModelServerMetricsPort: int32(*modelServerMetricsPort),
+-		ModelServerMetricsPath: *modelServerMetricsPath,
++		MetricMapping:            mapping,
++		ModelServerMetricsPort:   int32(*modelServerMetricsPort),
++		ModelServerMetricsPath:   *modelServerMetricsPath,
++		ModelServerMetricsScheme: *modelServerMetricsScheme,
++		Client:                   metricsHttpClient,
+ 	}, *refreshMetricsInterval)
+ 
+ 	datastore := datastore.NewDatastore(ctx, pmf)
+@@ -348,6 +370,8 @@ func (r *Runner) parsePluginsConfiguration(ctx context.Context) error {
+ 		return fmt.Errorf("failed to load the configuration - %w", err)
+ 	}
+ 
++	setupLog.Info("Configuration file loaded", "config", config)
++
+ 	r.schedulerConfig, err = loader.LoadSchedulerConfig(config.SchedulingProfiles, handle)
+ 	if err != nil {
+ 		return fmt.Errorf("failed to create Scheduler configuration - %w", err)
+@@ -410,6 +434,9 @@ func validateFlags() error {
+ 	if *configText != "" && *configFile != "" {
+ 		return fmt.Errorf("both the %q and %q flags can not be set at the same time", "configText", "configFile")
+ 	}
++	if *modelServerMetricsScheme != "http" && *modelServerMetricsScheme != "https" {
++		return fmt.Errorf("unexpected %q value for %q flag, it can only be set to 'http' or 'https'", *modelServerMetricsScheme, "model-server-metrics-scheme")
++	}
+ 
+ 	return nil
+ }
+diff --git a/config/charts/body-based-routing/values.yaml b/config/charts/body-based-routing/values.yaml
+index 0b88dc4..caccbc9 100644
+--- a/config/charts/body-based-routing/values.yaml
++++ b/config/charts/body-based-routing/values.yaml
+@@ -3,8 +3,8 @@ bbr:
+   replicas: 1
+   image:
+     name: bbr
+-    hub: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension
+-    tag: main
++    hub: registry.k8s.io/gateway-api-inference-extension
++    tag: v0.5.1
+     pullPolicy: Always
+   port: 9004
+   healthCheckPort: 9005
+diff --git a/config/charts/inferencepool/README.md b/config/charts/inferencepool/README.md
+index bed4f33..b8a8d0a 100644
+--- a/config/charts/inferencepool/README.md
++++ b/config/charts/inferencepool/README.md
+@@ -24,26 +24,44 @@ Note that the provider name is needed to deploy provider-specific resources. If
+ 
+ ### Install with Custom Environment Variables
+ 
+-To set custom environment variables for the EndpointPicker deployment:
++To set custom environment variables for the EndpointPicker deployment, you can define them as free-form YAML in the `values.yaml` file:
++
++```yaml
++inferenceExtension:
++  env:
++    - name: FEATURE_FLAG_ENABLED
++      value: "true"
++    - name: CUSTOM_ENV_VAR
++      value: "custom_value"
++    - name: POD_IP
++      valueFrom:
++        fieldRef:
++          fieldPath: status.podIP
++```
++
++Then apply it with:
+ 
+ ```txt
+-$ helm install vllm-llama3-8b-instruct \
+-  --set inferencePool.modelServers.matchLabels.app=vllm-llama3-8b-instruct \
+-  --set provider.name=[none|gke] \
+-  --set inferenceExtension.env.FEATURE_FLAG_ENABLED=true \
+-  oci://us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/charts/inferencepool --version v0
++$ helm install vllm-llama3-8b-instruct ./config/charts/inferencepool -f values.yaml
+ ```
+ 
+-Alternatively, you can define environment variables in a values file:
++### Install with Additional Ports
++
++To expose additional ports (e.g., for ZMQ), you can define them in the `values.yaml` file:
+ 
+ ```yaml
+-# values.yaml
+ inferenceExtension:
+-  env:
+-    FEATURE_FLAG_ENABLED: "true"
++  extraContainerPorts:
++    - name: zmq
++      containerPort: 5557
++      protocol: TCP
++  extraServicePorts: # if need to expose the port for external communication
++    - name: zmq
++      port: 5557
++      protocol: TCP
+ ```
+ 
+-And apply it with:
++Then apply it with:
+ 
+ ```txt
+ $ helm install vllm-llama3-8b-instruct ./config/charts/inferencepool -f values.yaml
+@@ -84,7 +102,10 @@ The following table list the configurable parameters of the chart.
+ | `inferenceExtension.image.tag`              | Image tag of the endpoint picker.                                                                                      |
+ | `inferenceExtension.image.pullPolicy`       | Image pull policy for the container. Possible values: `Always`, `IfNotPresent`, or `Never`. Defaults to `Always`.      |
+ | `inferenceExtension.extProcPort`            | Port where the endpoint picker service is served for external processing. Defaults to `9002`.                          |
+-| `inferenceExtension.env`                    | Map of environment variables to set in the endpoint picker container. Defaults to `{}`.                                |
++| `inferenceExtension.env`                    | List of environment variables to set in the endpoint picker container as free-form YAML. Defaults to `[]`.             |
++| `inferenceExtension.extraContainerPorts`    | List of additional container ports to expose. Defaults to `[]`.                                                       |
++| `inferenceExtension.extraServicePorts`      | List of additional service ports to expose. Defaults to `[]`.                                                         |
++| `inferenceExtension.logVerbosity`           | Logging verbosity level for the endpoint picker. Defaults to `"3"`.                                                   |
+ | `provider.name`                             | Name of the Inference Gateway implementation being used. Possible values: `gke`. Defaults to `none`.                   |
+ 
+ ## Notes
+diff --git a/config/charts/inferencepool/templates/epp-config.yaml b/config/charts/inferencepool/templates/epp-config.yaml
+new file mode 100644
+index 0000000..12cbd58
+--- /dev/null
++++ b/config/charts/inferencepool/templates/epp-config.yaml
+@@ -0,0 +1,85 @@
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  name: {{ include "gateway-api-inference-extension.name" . }}
++  namespace: {{ .Release.Namespace }}
++data:
++  default-plugins.yaml: |
++    apiVersion: inference.networking.x-k8s.io/v1alpha1
++    kind: EndpointPickerConfig
++    plugins:
++    - type: low-queue-filter
++      parameters:
++        threshold: 128
++    - type: lora-affinity-filter
++      parameters:
++        threshold: 0.999
++    - type: least-queue-filter
++    - type: least-kv-cache-filter
++    - type: decision-tree-filter
++      name: low-latency-filter
++      parameters:
++        current:
++          pluginRef: low-queue-filter
++        nextOnSuccess:
++          decisionTree:
++            current:
++              pluginRef: lora-affinity-filter
++            nextOnSuccessOrFailure:
++              decisionTree:
++                current:
++                  pluginRef: least-queue-filter
++                nextOnSuccessOrFailure:
++                  decisionTree:
++                    current:
++                      pluginRef: least-kv-cache-filter
++        nextOnFailure:
++          decisionTree:
++            current:
++              pluginRef: least-queue-filter
++            nextOnSuccessOrFailure:
++              decisionTree:
++                current:
++                  pluginRef: lora-affinity-filter
++                nextOnSuccessOrFailure:
++                  decisionTree:
++                    current:
++                      pluginRef: least-kv-cache-filter
++    - type: random-picker
++      parameters:
++        maxNumOfEndpoints: 1
++    - type: single-profile-handler
++    schedulingProfiles:
++    - name: default
++      plugins:
++      - pluginRef: low-latency-filter
++      - pluginRef: random-picker
++  plugins-v2.yaml: |
++    apiVersion: inference.networking.x-k8s.io/v1alpha1
++    kind: EndpointPickerConfig
++    plugins:
++    - type: queue-scorer
++    - type: kv-cache-scorer
++    - type: prefix-cache-scorer
++      parameters:
++        hashBlockSize: 64
++        maxPrefixBlocksToMatch: 256
++        lruCapacityPerServer: 31250
++    - type: max-score-picker
++      parameters:
++        maxNumOfEndpoints: 1
++    - type: single-profile-handler
++    schedulingProfiles:
++    - name: default
++      plugins:
++      - pluginRef: queue-scorer
++        weight: 1
++      - pluginRef: kv-cache-scorer
++        weight: 1
++      - pluginRef: prefix-cache-scorer
++        weight: 1
++      - pluginRef: max-score-picker
++  {{- if (hasKey .Values.inferenceExtension "pluginsCustomConfig") }}
++  {{- .Values.inferenceExtension.pluginsCustomConfig | toYaml | nindent 2 }}
++  {{- end }}
++  
+diff --git a/config/charts/inferencepool/templates/epp-deployment.yaml b/config/charts/inferencepool/templates/epp-deployment.yaml
+index fec91e4..7edc6a3 100644
+--- a/config/charts/inferencepool/templates/epp-deployment.yaml
++++ b/config/charts/inferencepool/templates/epp-deployment.yaml
+@@ -27,16 +27,21 @@ spec:
+         - {{ .Release.Name }}
+         - -poolNamespace
+         - {{ .Release.Namespace }}
+-        - -v
+-        - "3"
+-        - -grpcPort
++        - --v
++        - "{{ .Values.inferenceExtension.logVerbosity | default "3" }}"
++        - --grpcPort
+         - "9002"
+         - -grpcHealthPort
+         - "9003"
+         - -metricsPort
+         - "9090"
++        - -configFile
++        - "config/{{ .Values.inferenceExtension.pluginsConfigFile }}"
+         # https://pkg.go.dev/flag#hdr-Command_line_flag_syntax; space is only for non-bool flags
+-        - "-enablePprof={{ .Values.inferenceExtension.enablePprof }}"
++        - "--enablePprof={{ .Values.inferenceExtension.enablePprof }}"
++        - "--modelServerMetricsPath={{ .Values.inferenceExtension.modelServerMetricsPath }}"
++        - "--modelServerMetricsScheme={{ .Values.inferenceExtension.modelServerMetricsScheme }}"
++        - "--modelServerMetricsHttpsInsecureSkipVerify={{ .Values.inferenceExtension.modelServerMetricsHttpsInsecureSkipVerify }}"
+         {{- if eq (.Values.inferencePool.modelServerType | default "vllm") "triton-tensorrt-llm" }}
+         - -totalQueuedRequestsMetric
+         - "nv_trt_llm_request_metrics{request_type=waiting}"
+@@ -52,6 +57,9 @@ spec:
+           containerPort: 9003
+         - name: metrics
+           containerPort: 9090
++        {{- with .Values.inferenceExtension.extraContainerPorts }}
++        {{- toYaml . | nindent 8 }}
++        {{- end }}
+         livenessProbe:
+           grpc:
+             port: 9003
+@@ -64,8 +72,14 @@ spec:
+             service: inference-extension
+           initialDelaySeconds: 5
+           periodSeconds: 10
++        {{- with .Values.inferenceExtension.env }}
+         env:
+-        {{- range $key, $value := .Values.inferenceExtension.env }}
+-        - name: {{ $key }}
+-          value: {{ $value | quote }}
++        {{- toYaml . | nindent 8 }}
+         {{- end }}
++        volumeMounts:
++        - name: plugins-config-volume
++          mountPath: "/config"
++      volumes:
++      - name: plugins-config-volume
++        configMap:
++          name: {{ include "gateway-api-inference-extension.name" . }}
+diff --git a/config/charts/inferencepool/templates/epp-service.yaml b/config/charts/inferencepool/templates/epp-service.yaml
+index ed23db1..b1a48df 100644
+--- a/config/charts/inferencepool/templates/epp-service.yaml
++++ b/config/charts/inferencepool/templates/epp-service.yaml
+@@ -15,4 +15,7 @@ spec:
+     - name: http-metrics
+       protocol: TCP
+       port: {{ .Values.inferenceExtension.metricsPort | default 9090 }}
++    {{- with .Values.inferenceExtension.extraServicePorts }}
++    {{- toYaml . | nindent 4 }}
++    {{- end }}
+   type: ClusterIP
+diff --git a/config/charts/inferencepool/values.yaml b/config/charts/inferencepool/values.yaml
+index 2b4e800..1541863 100644
+--- a/config/charts/inferencepool/values.yaml
++++ b/config/charts/inferencepool/values.yaml
+@@ -2,16 +2,44 @@ inferenceExtension:
+   replicas: 1
+   image:
+     name: epp
+-    hub: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension
+-    tag: main
++    hub: registry.k8s.io/gateway-api-inference-extension
++    tag: v0.5.1
+     pullPolicy: Always
+   extProcPort: 9002
+-  env: {}
++  env: []
+   enablePprof: true # Enable pprof handlers for profiling and debugging
++  modelServerMetricsPath: "/metrics"
++  modelServerMetricsScheme: "http"
++  modelServerMetricsHttpsInsecureSkipVerify: true
++  # This is the plugins configuration file. 
++  pluginsConfigFile: "default-plugins.yaml"
++  # pluginsCustomConfig:
++  #   custom-plugins.yaml: |
++  #     apiVersion: inference.networking.x-k8s.io/v1alpha1
++  #     kind: EndpointPickerConfig
++  #     plugins:
++  #     - type: custom-scorer
++  #       parameters:
++  #         custom-threshold: 64
++  #     - type: max-score-picker
++  #     - type: single-profile-handler
++  #     schedulingProfiles:
++  #     - name: default
++  #       plugins:
++  #       - pluginRef: custom-scorer
++  #         weight: 1
++  #       - pluginRef: max-score-picker
++  #         weight: 1
++
+   # Example environment variables:
+   # env:
+   #   KV_CACHE_SCORE_WEIGHT: "1"
+ 
++  # Define additional container ports
++  extraContainerPorts: []
++  # Define additional service ports
++  extraServicePorts: []
++
+ inferencePool:
+   targetPortNumber: 8000
+   modelServerType: vllm # vllm, triton-tensorrt-llm
+diff --git a/config/manifests/inferencepool-resources.yaml b/config/manifests/inferencepool-resources.yaml
+index 9bb3ea1..cbe3885 100644
+--- a/config/manifests/inferencepool-resources.yaml
++++ b/config/manifests/inferencepool-resources.yaml
+@@ -1,6 +1,8 @@
+-# Note: If you change this file, please also change the file used for e2e tests!
+-# 
+-# https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/test/testdata/inferencepool-e2e.yaml
++# Note: If you change this file, please also change:
++#  - ./test/testdata/inferencepool-e2e.yaml
++#  - ./conformance/resources/manifests/manifests.yaml
++#  - ./site-src/guides/inferencepool-rollout.md
++---
+ apiVersion: inference.networking.x-k8s.io/v1alpha2
+ kind: InferencePool
+ metadata:
+@@ -48,8 +50,8 @@ spec:
+       terminationGracePeriodSeconds: 130
+       containers:
+       - name: epp
+-        image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:main
+-        imagePullPolicy: Always
++        image: registry.k8s.io/gateway-api-inference-extension/epp:v0.5.1
++        imagePullPolicy: IfNotPresent
+         args:
+         - -poolName
+         - "vllm-llama3-8b-instruct"
+diff --git a/config/manifests/vllm/cpu-deployment.yaml b/config/manifests/vllm/cpu-deployment.yaml
+index 485d44a..376b0f1 100644
+--- a/config/manifests/vllm/cpu-deployment.yaml
++++ b/config/manifests/vllm/cpu-deployment.yaml
+@@ -14,8 +14,8 @@ spec:
+     spec:
+       containers:
+         - name: lora
+-          image: "public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v0.9.1" # formal images can be found in https://gallery.ecr.aws/q9t5s3a7/vllm-cpu-release-repo
+-          imagePullPolicy: Always
++          image: "public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v0.9.2" # formal images can be found in https://gallery.ecr.aws/q9t5s3a7/vllm-cpu-release-repo
++          imagePullPolicy: IfNotPresent
+           command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+           args:
+           - "--model"
+diff --git a/config/manifests/vllm/gpu-deployment.yaml b/config/manifests/vllm/gpu-deployment.yaml
+index 16f9388..5664df0 100644
+--- a/config/manifests/vllm/gpu-deployment.yaml
++++ b/config/manifests/vllm/gpu-deployment.yaml
+@@ -14,8 +14,8 @@ spec:
+     spec:
+       containers:
+         - name: vllm
+-          image: "vllm/vllm-openai:latest"
+-          imagePullPolicy: Always
++          image: "vllm/vllm-openai:v0.9.2"
++          imagePullPolicy: IfNotPresent
+           command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+           args:
+           - "--model"
+diff --git a/config/manifests/vllm/sim-deployment.yaml b/config/manifests/vllm/sim-deployment.yaml
+index 196fe86..7021db9 100644
+--- a/config/manifests/vllm/sim-deployment.yaml
++++ b/config/manifests/vllm/sim-deployment.yaml
+@@ -15,7 +15,7 @@ spec:
+       containers:
+       - name: vllm-sim
+         image: ghcr.io/llm-d/llm-d-inference-sim:v0.1.2
+-        imagePullPolicy: Always
++        imagePullPolicy: IfNotPresent
+         args:
+         - --model
+         - meta-llama/Llama-3.1-8B-Instruct
+diff --git a/conformance/resources/manifests/manifests.yaml b/conformance/resources/manifests/manifests.yaml
+index 5fbcfdc..d1341c4 100644
+--- a/conformance/resources/manifests/manifests.yaml
++++ b/conformance/resources/manifests/manifests.yaml
+@@ -196,8 +196,8 @@ spec:
+       terminationGracePeriodSeconds: 130
+       containers:
+       - name: epp
+-        image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:main
+-        imagePullPolicy: Always
++        image: registry.k8s.io/gateway-api-inference-extension/epp:v0.5.1
++        imagePullPolicy: IfNotPresent
+         args:
+         - -poolName
+         - "primary-inference-pool"
+@@ -293,8 +293,8 @@ spec:
+       terminationGracePeriodSeconds: 130
+       containers:
+       - name: epp
+-        image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:main
+-        imagePullPolicy: Always
++        image: registry.k8s.io/gateway-api-inference-extension/epp:v0.5.1
++        imagePullPolicy: IfNotPresent
+         args:
+         - -poolName
+         - "secondary-inference-pool"
+@@ -342,7 +342,7 @@ apiVersion: v1
+ kind: ConfigMap
+ metadata:
+   name: plugins-config
+-  namespace: default
++  namespace: gateway-conformance-app-backend
+ data:
+   conformance-plugins.yaml: |
+     apiVersion: inference.networking.x-k8s.io/v1alpha1
 diff --git a/pkg/bbr/handlers/request.go b/pkg/bbr/handlers/request.go
 index 32fffc0..1aa1b85 100644
 --- a/pkg/bbr/handlers/request.go
@@ -375,6 +806,71 @@ index a580380..eb2893f 100644
  }
  
  func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
+diff --git a/pkg/epp/backend/metrics/metrics.go b/pkg/epp/backend/metrics/metrics.go
+index 590685c..6a50faa 100644
+--- a/pkg/epp/backend/metrics/metrics.go
++++ b/pkg/epp/backend/metrics/metrics.go
+@@ -37,9 +37,12 @@ const (
+ )
+ 
+ type PodMetricsClientImpl struct {
+-	MetricMapping          *MetricMapping
+-	ModelServerMetricsPort int32
+-	ModelServerMetricsPath string
++	MetricMapping            *MetricMapping
++	ModelServerMetricsPort   int32
++	ModelServerMetricsPath   string
++	ModelServerMetricsScheme string
++
++	Client *http.Client
+ }
+ 
+ // FetchMetrics fetches metrics from a given pod, clones the existing metrics object and returns an updated one.
+@@ -49,7 +52,7 @@ func (p *PodMetricsClientImpl) FetchMetrics(ctx context.Context, pod *backend.Po
+ 	if err != nil {
+ 		return nil, fmt.Errorf("failed to create request: %v", err)
+ 	}
+-	resp, err := http.DefaultClient.Do(req)
++	resp, err := p.Client.Do(req)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("failed to fetch metrics from %s: %w", pod.NamespacedName, err)
+ 	}
+@@ -73,7 +76,7 @@ func (p *PodMetricsClientImpl) getMetricEndpoint(pod *backend.Pod, targetPortNum
+ 	if p.ModelServerMetricsPort == 0 {
+ 		p.ModelServerMetricsPort = targetPortNumber
+ 	}
+-	return fmt.Sprintf("http://%s:%d%s", pod.Address, p.ModelServerMetricsPort, p.ModelServerMetricsPath)
++	return fmt.Sprintf("%s://%s:%d%s", p.ModelServerMetricsScheme, pod.Address, p.ModelServerMetricsPort, p.ModelServerMetricsPath)
+ }
+ 
+ // promToPodMetrics updates internal pod metrics with scraped Prometheus metrics.
+diff --git a/pkg/epp/backend/metrics/metrics_test.go b/pkg/epp/backend/metrics/metrics_test.go
+index 9f7c2b8..2dd8ca5 100644
+--- a/pkg/epp/backend/metrics/metrics_test.go
++++ b/pkg/epp/backend/metrics/metrics_test.go
+@@ -19,6 +19,7 @@ package metrics
+ import (
+ 	"context"
+ 	"errors"
++	"net/http"
+ 	"reflect"
+ 	"strconv"
+ 	"strings"
+@@ -495,7 +496,13 @@ func TestFetchMetrics(t *testing.T) {
+ 		},
+ 	}
+ 	existing := &MetricsState{}
+-	p := &PodMetricsClientImpl{ModelServerMetricsPort: 9999, ModelServerMetricsPath: "/metrics"} // No MetricMapping needed for this basic test
++	// No MetricMapping needed for this basic test
++	p := &PodMetricsClientImpl{
++		ModelServerMetricsScheme: "http",
++		ModelServerMetricsPort:   9999,
++		ModelServerMetricsPath:   "/metrics",
++		Client:                   http.DefaultClient,
++	}
+ 
+ 	_, err := p.FetchMetrics(ctx, pod, existing, 9999) // Use a port that's unlikely to be in use
+ 	if err == nil {
 diff --git a/pkg/epp/requestcontrol/plugins/dynamo_inject_workerid/plugin.go b/pkg/epp/requestcontrol/plugins/dynamo_inject_workerid/plugin.go
 new file mode 100644
 index 0000000..b6708fa
@@ -450,6 +946,186 @@ index 0000000..b6708fa
 +	}
 +
 +}
+diff --git a/pkg/epp/scheduling/framework/plugins/multi/prefix/indexer.go b/pkg/epp/scheduling/framework/plugins/multi/prefix/indexer.go
+index 716c9f2..1b75f0f 100644
+--- a/pkg/epp/scheduling/framework/plugins/multi/prefix/indexer.go
++++ b/pkg/epp/scheduling/framework/plugins/multi/prefix/indexer.go
+@@ -85,13 +85,14 @@ func (i *indexer) Get(hash BlockHash) podSet {
+ 	i.mu.RLock()
+ 	defer i.mu.RUnlock()
+ 
+-	res := podSet{}
+-	pods, ok := i.hashToPods[hash]
+-	if !ok {
+-		return res
++	pods := i.hashToPods[hash]
++	res := make(podSet, len(pods))
++	for pod := range pods {
++		// Deep copy to avoid race condition.
++		res[pod] = struct{}{}
+ 	}
+ 
+-	return pods
++	return res
+ }
+ 
+ // makeEvictionFn returns a per-pod LRU eviction callback that removes the pod from hashToPods on eviction.
+diff --git a/pkg/epp/scheduling/framework/plugins/multi/prefix/indexer_test.go b/pkg/epp/scheduling/framework/plugins/multi/prefix/indexer_test.go
+index 2409850..a151121 100644
+--- a/pkg/epp/scheduling/framework/plugins/multi/prefix/indexer_test.go
++++ b/pkg/epp/scheduling/framework/plugins/multi/prefix/indexer_test.go
+@@ -41,4 +41,7 @@ func TestIndexer_AddAndGet(t *testing.T) {
+ 	// Add another entry to the cache, which should evict the first one due to max size.
+ 	i.Add([]BlockHash{BlockHash(3)}, server)
+ 	assert.Equal(t, 2, i.podToLRU[server].Len(), "Cache size should still be 2 after adding an entry")
++
++	servers = i.Get(BlockHash(4))
++	assert.Empty(t, servers, "Cache should not contain non-existent hash")
+ }
+diff --git a/pkg/epp/scheduling/framework/plugins/picker/max_score_picker.go b/pkg/epp/scheduling/framework/plugins/picker/max_score_picker.go
+index bf3ca8d..e7ee333 100644
+--- a/pkg/epp/scheduling/framework/plugins/picker/max_score_picker.go
++++ b/pkg/epp/scheduling/framework/plugins/picker/max_score_picker.go
+@@ -20,7 +20,9 @@ import (
+ 	"context"
+ 	"encoding/json"
+ 	"fmt"
++	"math/rand"
+ 	"slices"
++	"time"
+ 
+ 	"sigs.k8s.io/controller-runtime/pkg/log"
+ 
+@@ -58,13 +60,15 @@ func NewMaxScorePicker(maxNumOfEndpoints int) *MaxScorePicker {
+ 	return &MaxScorePicker{
+ 		typedName:         plugins.TypedName{Type: MaxScorePickerType, Name: MaxScorePickerType},
+ 		maxNumOfEndpoints: maxNumOfEndpoints,
++		randomGenerator:   rand.New(rand.NewSource(time.Now().UnixNano())),
+ 	}
+ }
+ 
+ // MaxScorePicker picks pod(s) with the maximum score from the list of candidates.
+ type MaxScorePicker struct {
+ 	typedName         plugins.TypedName
+-	maxNumOfEndpoints int // maximum number of endpoints to pick
++	maxNumOfEndpoints int        // maximum number of endpoints to pick
++	randomGenerator   *rand.Rand // randomGenerator for randomly pick endpoint on tie-break
+ }
+ 
+ // WithName sets the picker's name
+@@ -83,6 +87,11 @@ func (p *MaxScorePicker) Pick(ctx context.Context, cycleState *types.CycleState,
+ 	log.FromContext(ctx).V(logutil.DEBUG).Info(fmt.Sprintf("Selecting maximum '%d' pods from %d candidates sorted by max score: %+v", p.maxNumOfEndpoints,
+ 		len(scoredPods), scoredPods))
+ 
++	// Shuffle in-place - needed for random tie break when scores are equal
++	p.randomGenerator.Shuffle(len(scoredPods), func(i, j int) {
++		scoredPods[i], scoredPods[j] = scoredPods[j], scoredPods[i]
++	})
++
+ 	slices.SortStableFunc(scoredPods, func(i, j *types.ScoredPod) int { // highest score first
+ 		if i.Score > j.Score {
+ 			return -1
+diff --git a/pkg/epp/scheduling/framework/plugins/picker/picker_test.go b/pkg/epp/scheduling/framework/plugins/picker/picker_test.go
+index 2089ed3..2c3aceb 100644
+--- a/pkg/epp/scheduling/framework/plugins/picker/picker_test.go
++++ b/pkg/epp/scheduling/framework/plugins/picker/picker_test.go
+@@ -21,6 +21,7 @@ import (
+ 	"testing"
+ 
+ 	"github.com/google/go-cmp/cmp"
++	"github.com/google/go-cmp/cmp/cmpopts"
+ 	k8stypes "k8s.io/apimachinery/pkg/types"
+ 
+ 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/backend"
+@@ -34,10 +35,11 @@ func TestPickMaxScorePicker(t *testing.T) {
+ 	pod3 := &types.PodMetrics{Pod: &backend.Pod{NamespacedName: k8stypes.NamespacedName{Name: "pod3"}}}
+ 
+ 	tests := []struct {
+-		name   string
+-		picker framework.Picker
+-		input  []*types.ScoredPod
+-		output []types.Pod
++		name               string
++		picker             framework.Picker
++		input              []*types.ScoredPod
++		output             []types.Pod
++		tieBreakCandidates int // tie break is random, specify how many candidate with max score
+ 	}{
+ 		{
+ 			name:   "Single max score",
+@@ -63,6 +65,7 @@ func TestPickMaxScorePicker(t *testing.T) {
+ 				&types.ScoredPod{Pod: pod1, Score: 50},
+ 				&types.ScoredPod{Pod: pod2, Score: 50},
+ 			},
++			tieBreakCandidates: 2,
+ 		},
+ 		{
+ 			name:   "Multiple results sorted by highest score, more pods than needed",
+@@ -104,6 +107,7 @@ func TestPickMaxScorePicker(t *testing.T) {
+ 				&types.ScoredPod{Pod: pod3, Score: 30},
+ 				&types.ScoredPod{Pod: pod2, Score: 25},
+ 			},
++			tieBreakCandidates: 2,
+ 		},
+ 	}
+ 
+@@ -112,6 +116,19 @@ func TestPickMaxScorePicker(t *testing.T) {
+ 			result := test.picker.Pick(context.Background(), types.NewCycleState(), test.input)
+ 			got := result.TargetPods
+ 
++			if test.tieBreakCandidates > 0 {
++				testMaxScoredPods := test.output[:test.tieBreakCandidates]
++				gotMaxScoredPods := got[:test.tieBreakCandidates]
++				diff := cmp.Diff(testMaxScoredPods, gotMaxScoredPods, cmpopts.SortSlices(func(a, b types.Pod) bool {
++					return a.String() < b.String() // predictable order within the pods with equal scores
++				}))
++				if diff != "" {
++					t.Errorf("Unexpected output (-want +got): %v", diff)
++				}
++				test.output = test.output[test.tieBreakCandidates:]
++				got = got[test.tieBreakCandidates:]
++			}
++
+ 			if diff := cmp.Diff(test.output, got); diff != "" {
+ 				t.Errorf("Unexpected output (-want +got): %v", diff)
+ 			}
+diff --git a/pkg/epp/scheduling/framework/plugins/picker/random_picker.go b/pkg/epp/scheduling/framework/plugins/picker/random_picker.go
+index bb272f1..eb62c37 100644
+--- a/pkg/epp/scheduling/framework/plugins/picker/random_picker.go
++++ b/pkg/epp/scheduling/framework/plugins/picker/random_picker.go
+@@ -21,6 +21,7 @@ import (
+ 	"encoding/json"
+ 	"fmt"
+ 	"math/rand"
++	"time"
+ 
+ 	"sigs.k8s.io/controller-runtime/pkg/log"
+ 
+@@ -57,6 +58,7 @@ func NewRandomPicker(maxNumOfEndpoints int) *RandomPicker {
+ 	return &RandomPicker{
+ 		typedName:         plugins.TypedName{Type: RandomPickerType, Name: RandomPickerType},
+ 		maxNumOfEndpoints: maxNumOfEndpoints,
++		randomGenerator:   rand.New(rand.NewSource(time.Now().UnixNano())),
+ 	}
+ }
+ 
+@@ -64,6 +66,7 @@ func NewRandomPicker(maxNumOfEndpoints int) *RandomPicker {
+ type RandomPicker struct {
+ 	typedName         plugins.TypedName
+ 	maxNumOfEndpoints int
++	randomGenerator   *rand.Rand // randomGenerator for randomly pick endpoint on tie-break
+ }
+ 
+ // WithName sets the name of the picker.
+@@ -83,7 +86,7 @@ func (p *RandomPicker) Pick(ctx context.Context, _ *types.CycleState, scoredPods
+ 		len(scoredPods), scoredPods))
+ 
+ 	// Shuffle in-place
+-	rand.Shuffle(len(scoredPods), func(i, j int) {
++	p.randomGenerator.Shuffle(len(scoredPods), func(i, j int) {
+ 		scoredPods[i], scoredPods[j] = scoredPods[j], scoredPods[i]
+ 	})
+ 
 diff --git a/pkg/epp/scheduling/plugins/dynamo_kv_scorer/epp-config-dynamo.yaml b/pkg/epp/scheduling/plugins/dynamo_kv_scorer/epp-config-dynamo.yaml
 new file mode 100644
 index 0000000..b689c00
@@ -647,7 +1323,7 @@ index 0000000..1f6a41f
 +)
 +
 +func loadDynamoConfig() {
-+	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE", "vllm-agg")
++	ffiNamespace = getEnvOrDefault("DYNAMO_NAMESPACE", "vllm-agg")
 +	ffiComponent = getEnvOrDefault("DYNAMO_COMPONENT", "backend")
 +	ffiModel = getEnvOrDefault("DYNAMO_MODEL", "Qwen/Qwen3-0.6B")
 +	ffiWorkerID = getEnvInt64OrDefault("DYNAMO_WORKER_ID", 1)
@@ -911,3 +1587,194 @@ index 0000000..1f6a41f
 +	}
 +	return nil
 +}
+diff --git a/site-src/guides/inferencepool-rollout.md b/site-src/guides/inferencepool-rollout.md
+index 89a384a..809fb7f 100644
+--- a/site-src/guides/inferencepool-rollout.md
++++ b/site-src/guides/inferencepool-rollout.md
+@@ -177,7 +177,6 @@ spec:
+       terminationGracePeriodSeconds: 130
+       nodeSelector:
+         cloud.google.com/gke-accelerator: "nvidia-h100-80gb"
+-
+       volumes:
+         - name: data
+           emptyDir: {}
+@@ -250,40 +249,133 @@ spec:
+     spec:
+       terminationGracePeriodSeconds: 130
+       containers:
+-        - name: epp
+-          image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:main
+-          imagePullPolicy: Always
+-          args:
+-            - -poolName
+-            - "vllm-llama3-8b-instruct-new"
+-            - "-poolNamespace"
+-            - "default"
+-            - -v
+-            - "4"
+-            - --zap-encoder
+-            - "json"
+-            - -grpcPort
+-            - "9002"
+-            - -grpcHealthPort
+-            - "9003"
+-          ports:
+-            - containerPort: 9002
+-            - containerPort: 9003
+-            - name: metrics
+-              containerPort: 9090
+-          livenessProbe:
+-            grpc:
+-              port: 9003
+-              service: inference-extension
+-            initialDelaySeconds: 5
+-            periodSeconds: 10
+-          readinessProbe:
+-            grpc:
+-              port: 9003
+-              service: inference-extension
+-            initialDelaySeconds: 5
+-            periodSeconds: 10
+-  EOF
++      - name: epp
++        image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:main
++        imagePullPolicy: Always
++        args:
++        - -poolName
++        - "vllm-llama3-8b-instruct-new"
++        - -poolNamespace
++        - "default"
++        - -v
++        - "4"
++        - --zap-encoder
++        - "json"
++        - -grpcPort
++        - "9002"
++        - -grpcHealthPort
++        - "9003"
++        - -configFile
++        - "/config/default-plugins.yaml"
++        ports:
++        - containerPort: 9002
++          name: grpc
++        - containerPort: 9003
++          name: grpc-health
++        - containerPort: 9090
++          name: metrics
++        livenessProbe:
++          grpc:
++            port: 9003
++            service: inference-extension
++          initialDelaySeconds: 5
++          periodSeconds: 10
++        readinessProbe:
++          grpc:
++            port: 9003
++            service: inference-extension
++          initialDelaySeconds: 5
++          periodSeconds: 10
++        volumeMounts:
++        - name: plugins-config-volume
++          mountPath: /config
++      volumes:
++      - name: plugins-config-volume
++        configMap:
++          name: plugins-config
++---
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  name: plugins-config
++  namespace: default
++data:
++  default-plugins.yaml: |
++    apiVersion: inference.networking.x-k8s.io/v1alpha1
++    kind: EndpointPickerConfig
++    plugins:
++    - type: low-queue-filter
++      parameters:
++        threshold: 128
++    - type: lora-affinity-filter
++      parameters:
++        threshold: 0.999
++    - type: least-queue-filter
++    - type: least-kv-cache-filter
++    - type: decision-tree-filter
++      name: low-latency-filter
++      parameters:
++        current:
++          pluginRef: low-queue-filter
++        nextOnSuccess:
++          decisionTree:
++            current:
++              pluginRef: lora-affinity-filter
++            nextOnSuccessOrFailure:
++              decisionTree:
++                current:
++                  pluginRef: least-queue-filter
++                nextOnSuccessOrFailure:
++                  decisionTree:
++                    current:
++                      pluginRef: least-kv-cache-filter
++        nextOnFailure:
++          decisionTree:
++            current:
++              pluginRef: least-queue-filter
++            nextOnSuccessOrFailure:
++              decisionTree:
++                current:
++                  pluginRef: lora-affinity-filter
++                nextOnSuccessOrFailure:
++                  decisionTree:
++                    current:
++                      pluginRef: least-kv-cache-filter
++    - type: random-picker
++      parameters:
++        maxNumOfEndpoints: 1
++    - type: single-profile-handler
++    schedulingProfiles:
++    - name: default
++      plugins:
++      - pluginRef: low-latency-filter
++      - pluginRef: random-picker
++  plugins-v2.yaml: |
++    apiVersion: inference.networking.x-k8s.io/v1alpha1
++    kind: EndpointPickerConfig
++    plugins:
++    - type: queue-scorer
++    - type: kv-cache-scorer
++    - type: prefix-cache-scorer
++      parameters:
++        hashBlockSize: 64
++        maxPrefixBlocksToMatch: 256
++        lruCapacityPerServer: 31250
++    - type: max-score-picker
++      parameters:
++        maxNumOfEndpoints: 1
++    - type: single-profile-handler
++    schedulingProfiles:
++    - name: default
++      plugins:
++      - pluginRef: queue-scorer
++        weight: 1
++      - pluginRef: kv-cache-scorer
++        weight: 1
++      - pluginRef: prefix-cache-scorer
++        weight: 1
++      - pluginRef: max-score-picker
++EOF
+ ```
+ 
+ ### Direct traffic to the new inference pool
+diff --git a/version/version.go b/version/version.go
+index 1da42f2..1372ba8 100644
+--- a/version/version.go
++++ b/version/version.go
+@@ -18,5 +18,5 @@ package version
+ 
+ const (
+ 	// BundleVersion is the value used for labeling the version of the gateway-api-inference-extension.
+-	BundleVersion = "v0.4.0-dev"
++	BundleVersion = "v0.5.1"
+ )
