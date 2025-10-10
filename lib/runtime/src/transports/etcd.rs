@@ -28,6 +28,13 @@ pub use path::*;
 
 use super::utils::build_in_runtime;
 
+// Error message templates for ETCD operations
+const ETCD_CONNECTION_ERROR: &str = "Unable to connect to etcd server at {}. Check etcd server status";
+const ETCD_LEASE_ERROR: &str = "Unable to create lease. Check etcd server status at {}";
+const ETCD_KEY_CREATE_ERROR: &str = "Unable to create key. Check etcd server status";
+const ETCD_KEY_VALIDATE_ERROR: &str = "Unable to create or validate key. Check etcd server status";
+const ETCD_KEY_OPERATION_ERROR: &str = "Unable to validate key operation. Check etcd server status";
+
 /// ETCD Client
 #[derive(Clone)]
 pub struct Client {
@@ -95,16 +102,22 @@ impl Client {
 
         let ((client, lease_id), rt) = build_in_runtime(
             async move {
-                let client =
-                    etcd_client::Client::connect(config.etcd_url, config.etcd_connect_options)
-                        .await?;
+                let client = etcd_client::Client::connect(config.etcd_url.clone(), config.etcd_connect_options)
+                    .await
+                    .with_context(|| format!(
+                        ETCD_CONNECTION_ERROR,
+                        config.etcd_url.join(", ")
+                    ))?;
 
                 let lease_id = if config.attach_lease {
                     let lease_client = client.lease_client();
 
                     let lease = create_lease(lease_client, 10, token)
                         .await
-                        .context("creating primary lease")?;
+                        .with_context(|| format!(
+                            ETCD_LEASE_ERROR,
+                            config.etcd_url.join(", ")
+                        ))?;
 
                     lease.id
                 } else {
@@ -179,7 +192,7 @@ impl Client {
             for resp in result.op_responses() {
                 tracing::warn!("kv_create etcd op response: {resp:?}");
             }
-            Err(error!("failed to create key"))
+            Err(error!(ETCD_KEY_CREATE_ERROR))
         }
     }
 
@@ -220,11 +233,11 @@ impl Client {
                 Some(response) => match response {
                     TxnOpResponse::Txn(response) => match response.succeeded() {
                         true => Ok(()),
-                        false => Err(error!("failed to create or validate key")),
+                        false => Err(error!(ETCD_KEY_VALIDATE_ERROR)),
                     },
-                    _ => Err(error!("unexpected response type")),
+                    _ => Err(error!(ETCD_KEY_OPERATION_ERROR)),
                 },
-                None => Err(error!("failed to create or validate key")),
+                None => Err(error!(ETCD_KEY_VALIDATE_ERROR)),
             }
         }
     }
