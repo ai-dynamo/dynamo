@@ -190,19 +190,27 @@ def test_request_cancellation_sglang_aggregated(
                 # Send the request (non-blocking)
                 cancellable_req = send_cancellable_request(request_type)
 
-                # Poll for "New Request ID" pattern
+                # Poll for "New Request ID" pattern (Dynamo context ID)
                 request_id, worker_log_offset = poll_for_pattern(
                     process=worker,
                     pattern="New Request ID: ",
                     log_offset=worker_log_offset,
                     match_type="contains",
-                    max_wait_ms=1000,  # Increased timeout for slower requests
                 )
 
-                # For streaming, read 5 responses before cancelling
+                # For streaming, read one response first to trigger SGLang ID logging
                 if request_type == "chat_completion_stream":
-                    read_streaming_responses(cancellable_req, expected_count=5)
+                    read_streaming_responses(cancellable_req, expected_count=1)
 
+                # Wait for SGLang to actually start processing (get SGLang request ID)
+                _, worker_log_offset = poll_for_pattern(
+                    process=worker,
+                    pattern="New SGLang Request ID: ",
+                    log_offset=worker_log_offset,
+                    match_type="contains",
+                )
+
+                # Now we know SGLang has the request, cancel it
                 cancellable_req.cancel()
                 logger.info(f"Cancelled request ID: {request_id}")
 
@@ -219,7 +227,6 @@ def test_request_cancellation_sglang_aggregated(
                     process=frontend,
                     pattern="issued control message Kill to sender",
                     log_offset=frontend_log_offset,
-                    max_wait_ms=2000,
                 )
 
                 logger.info(f"{description} detected successfully")
@@ -265,7 +272,7 @@ def test_request_cancellation_sglang_decode_cancel(
                 # Send streaming request (non-blocking)
                 cancellable_req = send_cancellable_request("chat_completion_stream")
 
-                # Poll for "New Request ID" pattern in decode worker
+                # Poll for "New Request ID" pattern in decode worker (Dynamo context ID)
                 request_id, decode_log_offset = poll_for_pattern(
                     process=decode_worker,
                     pattern="New Request ID: ",
@@ -278,10 +285,18 @@ def test_request_cancellation_sglang_decode_cancel(
                     pattern=f"New Request ID: {request_id}",
                 )
 
-                # Read 5 streaming responses (decode phase)
-                read_streaming_responses(cancellable_req, expected_count=5)
+                # Read one response first to trigger SGLang ID logging in decode worker
+                read_streaming_responses(cancellable_req, expected_count=1)
 
-                # Now cancel the request
+                # Wait for SGLang to start processing in decode worker
+                _, decode_log_offset = poll_for_pattern(
+                    process=decode_worker,
+                    pattern="New SGLang Request ID: ",
+                    log_offset=decode_log_offset,
+                    match_type="contains",
+                )
+
+                # Now we know SGLang has the request in decode worker, cancel it
                 cancellable_req.cancel()
                 logger.info(f"Cancelled request ID: {request_id}")
 
@@ -290,14 +305,12 @@ def test_request_cancellation_sglang_decode_cancel(
                     process=decode_worker,
                     pattern=f"Aborted Request ID: {request_id}",
                     log_offset=decode_log_offset,
-                    max_wait_ms=2000,
                 )
 
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
                     pattern="issued control message Kill to sender",
-                    max_wait_ms=2000,
                 )
 
                 logger.info(

@@ -107,8 +107,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     meta_info = res.get("meta_info", {})
                     sglang_request_id = meta_info.get("id")
                     if sglang_request_id:
-                        logging.debug(f"New Prefill Request ID: {sglang_request_id}")
                         request_id_future.set_result(sglang_request_id)
+                        logging.debug(f"New Prefill Request ID: {sglang_request_id}")
 
                 # Note: No explicit cancellation checks needed here.
                 # When abort_request is called by the cancellation monitor,

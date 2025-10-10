@@ -151,10 +151,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 bootstrap_info = info.data()
                 break
 
-            if context.is_stopped() or context.is_killed():
-                logging.debug(f"Aborted Request ID: {context.id()}")
-                return
-
             if not bootstrap_info:
                 raise RuntimeError("No bootstrap info received from prefill worker")
 
@@ -214,16 +210,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     meta_info = res.get("meta_info", {})
                     sglang_request_id = meta_info.get("id")
                     if sglang_request_id:
-                        logging.debug(f"New Request ID: {context.id()}")
                         request_id_future.set_result(sglang_request_id)
+                        logging.debug(f"New SGLang Request ID: {sglang_request_id}")
 
-                # Check for cancellation before processing
-                # This ensures the monitor task gets a chance to run
-                if context.is_stopped() or context.is_killed():
-                    logging.debug(
-                        f"Request cancelled, stopping token stream for Context: {context.id()}"
-                    )
-                    return
+                # Note: No explicit cancellation checks needed here.
+                # When abort_request is called by the cancellation monitor,
+                # SGLang will terminate this async generator automatically.
 
                 finish_reason = res["meta_info"]["finish_reason"]
                 if finish_reason:
@@ -265,16 +257,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     meta_info = res.get("meta_info", {})
                     sglang_request_id = meta_info.get("id")
                     if sglang_request_id:
-                        logging.debug(f"New Request ID: {context.id()}")
                         request_id_future.set_result(sglang_request_id)
+                        logging.debug(f"New SGLang Request ID: {sglang_request_id}")
 
-                # Check for cancellation before processing
-                # This ensures the monitor task gets a chance to run
-                if context.is_stopped() or context.is_killed():
-                    logging.debug(
-                        f"Request cancelled, stopping text stream for Context: {context.id()}"
-                    )
-                    return
+                # Note: No explicit cancellation checks needed here.
+                # When abort_request is called by the cancellation monitor,
+                # SGLang will terminate this async generator automatically.
 
                 index = res.get("index", 0)
                 text = res.get("text", "")
