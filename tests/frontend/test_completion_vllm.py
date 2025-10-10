@@ -212,6 +212,5 @@ def test_completion_multi_element_array_prompt() -> None:
 
     # request should fail because we are sending multiple prompts
     assert response.status_code == 500, (
-        f"Completion request ({reasoning_effort}) failed with status "
-        f"{response.status_code}: {response.text}"
+        f"Request should fail with code 500; response:{response.text}"
     )
