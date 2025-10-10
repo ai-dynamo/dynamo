@@ -18,6 +18,7 @@ import time
 
 import uvloop
 
+from dynamo._core import Component, Endpoint
 from dynamo._prometheus_metrics import Gauge, IntCounter, IntGauge, IntGaugeVec
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
@@ -60,10 +61,10 @@ async def worker(runtime: DistributedRuntime) -> None:
 
 async def init(runtime: DistributedRuntime):
     # Create component and endpoint
-    component = runtime.namespace("ns557").component("cp557")
+    component: Component = runtime.namespace("ns557").component("cp557")
     await component.create_service()
 
-    endpoint = component.endpoint("ep557")
+    endpoint: Endpoint = component.endpoint("ep557")
 
     # Create metrics using the endpoint's metrics property
     print("[python] Creating metrics...")
@@ -87,10 +88,10 @@ async def init(runtime: DistributedRuntime):
         [("update_method", "background_thread")],
     )
 
-    print(f"[python] Created IntGauge: {request_total_slots.name}")
-    print(f"[python] Created Gauge: {gpu_cache_usage_perc.name}")
-    print(f"[python] Created IntGaugeVec: {worker_active_requests.name}")
-    print(f"[python] Created IntCounter: {update_count.name}")
+    print(f"[python] Created IntGauge: {request_total_slots.name()}")
+    print(f"[python] Created Gauge: {gpu_cache_usage_perc.name()}")
+    print(f"[python] Created IntGaugeVec: {worker_active_requests.name()}")
+    print(f"[python] Created IntCounter: {update_count.name()}")
     print("[python] Metrics automatically registered with endpoint!")
 
     # Set initial values

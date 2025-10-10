@@ -18,6 +18,7 @@ import uvloop
 
 # Note that these imports are for type hints only. They cannot be instantiated directly.
 # You can instantiate them using the endpoint.metrics.create_*() methods.
+from dynamo._core import Component, Endpoint
 from dynamo._prometheus_metrics import Gauge, IntCounter, IntGauge, IntGaugeVec
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
@@ -29,10 +30,10 @@ async def worker(runtime: DistributedRuntime) -> None:
 
 async def init(runtime: DistributedRuntime):
     # Create component and endpoint
-    component = runtime.namespace("ns556").component("cp556")
+    component: Component = runtime.namespace("ns556").component("cp556")
     await component.create_service()
 
-    endpoint = component.endpoint("ep556")
+    endpoint: Endpoint = component.endpoint("ep556")
 
     # Step 1: Create metrics using the endpoint's metrics property
     print("[python] Creating metrics...")
@@ -59,11 +60,10 @@ async def init(runtime: DistributedRuntime):
         [("update_method", "callback")],
     )
 
-    print(f"[python] Created IntGauge: {request_total_slots.name}")
-    print(f"[python] Created Gauge: {gpu_cache_usage_perc.name}")
-    print(f"[python] Created IntGaugeVec: {worker_active_requests.name}")
-    print(f"[python] Created IntCounter with constant labels: {update_count.name}")
-    print(f"[python]   Const labels: {update_count.const_labels}")
+    print(f"[python] Created IntGauge: {request_total_slots.name()}")
+    print(f"[python] Created Gauge: {gpu_cache_usage_perc.name()}")
+    print(f"[python] Created IntGaugeVec: {worker_active_requests.name()}")
+    print(f"[python] Created IntCounter: {update_count.name()}")
     print("[python] Metrics automatically registered with endpoint!")
 
     # Step 2: Register a callback to update metrics on-demand

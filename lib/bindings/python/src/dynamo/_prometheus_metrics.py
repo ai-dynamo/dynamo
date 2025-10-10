@@ -19,7 +19,7 @@ Both files are needed: .py provides the runtime imports, .pyi provides static ty
 # because the Rust code (lib.rs) creates and registers the prometheus_metrics submodule
 # via PyModule::new() and add_submodule(). The type: ignore suppresses the false warning.
 from dynamo._core import (  # type: ignore[attr-defined]
-    PyRuntimeMetrics,
+    RuntimeMetrics,
     prometheus_metrics,
 )
 
@@ -44,5 +44,5 @@ __all__ = [
     "IntCounterVec",
     "IntGauge",
     "IntGaugeVec",
-    "PyRuntimeMetrics",
+    "RuntimeMetrics",
 ]
