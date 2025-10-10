@@ -187,7 +187,7 @@ impl ApproxKvIndexer {
         let (dump_tx, mut dump_rx) = mpsc::channel::<DumpRequest>(16);
         let cancel_clone = token.clone();
         let task = std::thread::spawn(move || {
-            // Create a single-threaded tokio runtime
+            // create a new tokio runtime which will only perform work on a single thread
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
