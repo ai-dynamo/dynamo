@@ -15,7 +15,7 @@ import logging
 from typing import TYPE_CHECKING, Optional
 
 from dynamo._core import Endpoint
-from dynamo.common.env_utils import env_is_truthy
+from dynamo.common.utils.env import env_is_truthy
 
 # Import CollectorRegistry only for type hints to avoid importing prometheus_client at module load time.
 # prometheus_client must be imported AFTER set_prometheus_multiproc_dir() is called.

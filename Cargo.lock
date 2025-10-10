@@ -2102,18 +2102,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-engine-llamacpp"
-version = "0.5.1"
-dependencies = [
- "async-stream",
- "dynamo-llm",
- "dynamo-runtime",
- "llama-cpp-2",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "dynamo-engine-mistralrs"
 version = "0.5.1"
 dependencies = [

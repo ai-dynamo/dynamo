@@ -12,7 +12,7 @@ from prometheus_client import CollectorRegistry, multiprocess
 
 from dynamo._core import Endpoint
 from dynamo.common.config_dump import dump_config
-from dynamo.common.prometheus_utils import (
+from dynamo.common.utils.prometheus import (
     is_engine_metrics_callback_enabled,
     register_engine_metrics_callback,
 )
