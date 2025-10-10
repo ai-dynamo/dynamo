@@ -801,57 +801,50 @@ impl KvIndexer {
         let cancel_clone = token.clone();
 
         let task = std::thread::spawn(move || {
-            // create a new tokio runtime which will only perform work on a single thread
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1) // Single-threaded environment
+            // Create a single-threaded tokio runtime
+            let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
 
-            let local_set = tokio::task::LocalSet::new();
+            runtime.block_on(async move {
+                let cancel = cancel_clone;
+                let mut match_rx = match_rx;
+                let mut event_rx = event_rx;
+                let mut remove_worker_rx = remove_worker_rx;
+                let mut dump_rx = dump_rx;
+                let mut trie = RadixTree::new_with_frequency(expiration_duration);
+                loop {
+                    tokio::select! {
+                        biased;
 
-            runtime.block_on(local_set.run_until(async move {
-                tokio::task::spawn_local(async move {
-                    let cancel = cancel_clone;
-                    let mut match_rx = match_rx;
-                    let mut event_rx = event_rx;
-                    let mut remove_worker_rx = remove_worker_rx;
-                    let mut dump_rx = dump_rx;
-                    let mut trie = RadixTree::new_with_frequency(expiration_duration);
-                    loop {
-                        tokio::select! {
-                            biased;
+                        _ = cancel.cancelled() => {
+                            tracing::debug!("KvCacheIndexer progress loop shutting down");
+                            return;
+                        }
 
-                            _ = cancel.cancelled() => {
-                                tracing::debug!("KvCacheIndexer progress loop shutting down");
-                                return;
-                            }
+                        Some(worker) = remove_worker_rx.recv() => {
+                            trie.remove_worker(worker);
+                        }
 
-                            Some(worker) = remove_worker_rx.recv() => {
-                                trie.remove_worker(worker);
-                            }
+                        Some(event) = event_rx.recv() => {
+                            let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
+                            let result = trie.apply_event(event);
+                            metrics.increment_event_applied(event_type, result);
+                        }
 
-                            Some(event) = event_rx.recv() => {
-                                let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
-                                let result = trie.apply_event(event);
-                                metrics.increment_event_applied(event_type, result);
-                            }
+                        Some(dump_req) = dump_rx.recv() => {
+                            let events = trie.dump_tree_as_events();
+                            let _ = dump_req.resp.send(events);
+                        }
 
-                            Some(dump_req) = dump_rx.recv() => {
-                                let events = trie.dump_tree_as_events();
-                                let _ = dump_req.resp.send(events);
-                            }
-
-                            Some(req) = match_rx.recv() => {
-                                let matches = trie.find_matches(req.sequence, req.early_exit);
-                                let _ = req.resp.send(matches);
-                            }
+                        Some(req) = match_rx.recv() => {
+                            let matches = trie.find_matches(req.sequence, req.early_exit);
+                            let _ = req.resp.send(matches);
                         }
                     }
-                })
-                .await
-                .unwrap()
-            }));
+                }
+            });
 
             tracing::debug!("KvCacheIndexer task completed");
         });
@@ -1058,54 +1051,47 @@ impl KvIndexerSharded {
             remove_worker_tx.push(shard_remove_worker_tx);
             dump_tx.push(shard_dump_tx); // Store dump sender
 
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
+            let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
 
             tasks.push(std::thread::spawn(move || {
-                let local_set = tokio::task::LocalSet::new();
+                runtime.block_on(async move {
+                    let mut trie = RadixTree::new_with_frequency(expiration_duration);
+                    loop {
+                        tokio::select! {
+                            biased;
 
-                runtime.block_on(local_set.run_until(async move {
-                    tokio::task::spawn_local(async move {
-                        let mut trie = RadixTree::new_with_frequency(expiration_duration);
-                        loop {
-                            tokio::select! {
-                                biased;
+                            _ = cancel.cancelled() => {
+                                tracing::trace!("KvCacheIndexer progress loop shutting down");
+                                return;
+                            }
 
-                                _ = cancel.cancelled() => {
-                                    tracing::trace!("KvCacheIndexer progress loop shutting down");
-                                    return;
-                                }
+                            Some(worker) = shard_remove_worker_rx.recv() => {
+                                trie.remove_worker(worker);
+                            }
 
-                                Some(worker) = shard_remove_worker_rx.recv() => {
-                                    trie.remove_worker(worker);
-                                }
+                            Some(event) = shard_event_rx.recv() => {
+                                let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
+                                let result = trie.apply_event(event);
+                                metrics.increment_event_applied(event_type, result);
+                            }
 
-                                Some(event) = shard_event_rx.recv() => {
-                                    let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
-                                    let result = trie.apply_event(event);
-                                    metrics.increment_event_applied(event_type, result);
-                                }
+                            Some(dump_req) = shard_dump_rx.recv() => {
+                                let events = trie.dump_tree_as_events();
+                                let _ = dump_req.resp.send(events);
+                            }
 
-                                Some(dump_req) = shard_dump_rx.recv() => {
-                                    let events = trie.dump_tree_as_events();
-                                    let _ = dump_req.resp.send(events);
-                                }
-
-                                Ok(req) = shard_broadcast_rx.recv() => {
-                                    let matches = trie.find_matches(req.sequence, req.early_exit);
-                                    if let Err(e) = req.resp.send(matches).await {
-                                        tracing::trace!("Failed to send match response: {:?}", e);
-                                    }
+                            Ok(req) = shard_broadcast_rx.recv() => {
+                                let matches = trie.find_matches(req.sequence, req.early_exit);
+                                if let Err(e) = req.resp.send(matches).await {
+                                    tracing::trace!("Failed to send match response: {:?}", e);
                                 }
                             }
                         }
-                    })
-                    .await
-                    .unwrap()
-                }));
+                    }
+                });
 
                 tracing::debug!("KvCacheIndexer task completed");
             }));

@@ -1,8 +1,8 @@
-## Encode-Prefill-Decode (EPD) Flow with NIXL
+# Encode-Prefill-Decode (EPD) Flow with NIXL
 
 For high-performance multimodal inference with large embeddings, Dynamo supports a specialized **Encode-Prefill-Decode (EPD)** flow using **NIXL (RDMA)** for zero-copy tensor transfer.
 
-### Enabling the Feature
+## Enabling the Feature
 
 This is an experimental feature that requires using a specific TensorRT-LLM commit.
 To enable it build the dynamo container with the `--tensorrtllm-commit` flag, followed by the commit hash:
@@ -11,14 +11,14 @@ To enable it build the dynamo container with the `--tensorrtllm-commit` flag, fo
 ./container/build.sh --framework trtllm --tensorrtllm-commit b4065d8ca64a64eee9fdc64b39cb66d73d4be47c
 ```
 
-### Key Features
+## Key Features
 
 - **High Performance**: Zero-copy RDMA transfer for embeddings
 - **Dynamic Shape Allocation**: Automatically handles variable embedding shapes per image
 - **Multi-Format Support**: Works with tensor files (`.pt`) and dictionary-based embeddings
 - **Hybrid Transfer**: Large tensors via NIXL, small metadata via JSON
 
-### How to use
+## How to use
 
 ```bash
 cd $DYNAMO_HOME/components/backends/trtllm
@@ -27,7 +27,7 @@ cd $DYNAMO_HOME/components/backends/trtllm
 ./launch/epd_disagg.sh
 ```
 
-### Configuration
+## Configuration
 
 The EPD flow uses a dedicated **Encode Worker** that runs separately from the Prefill and Decode workers. The `ENCODE_ENDPOINT` environment variable specifies how the Prefill worker communicates with the Encode worker:
 
@@ -49,7 +49,7 @@ For tensor file size protection, use the `--max-file-size-mb "$MAX_FILE_SIZE_MB"
 export MAX_FILE_SIZE_MB=50
 ```
 
-### Architecture Overview
+## Architecture Overview
 
 The EPD flow implements a **3-worker architecture** for high-performance multimodal inference:
 
@@ -57,9 +57,9 @@ The EPD flow implements a **3-worker architecture** for high-performance multimo
 - **Prefill Worker**: Handles initial context processing and KV-cache generation
 - **Decode Worker**: Performs streaming token generation
 
-### Request Flow Diagrams
+## Request Flow Diagrams
 
-#### Prefill-First Disaggregation Strategy
+### Prefill-First Disaggregation Strategy
 
 ```mermaid
 sequenceDiagram
@@ -103,7 +103,7 @@ sequenceDiagram
     Gateway->>Client: Final response + [DONE]
 ```
 
-#### Decode-First Disaggregation Strategy
+### Decode-First Disaggregation Strategy
 
 ```mermaid
 sequenceDiagram
@@ -155,7 +155,7 @@ sequenceDiagram
     Gateway->>Client: Final response + [DONE]
 ```
 
-### How the System Works
+## How the System Works
 
 1. **Request Processing**: Multimodal requests containing embedding file paths OR urls are routed based on disaggregation strategy
 2. **Multimodal Loading**: EncodeWorker loads large embedding files and extracts auxiliary metadata
@@ -163,7 +163,7 @@ sequenceDiagram
 4. **Dynamic Allocation**: Consumer workers allocate tensors with exact shapes received from EncodeWorker
 5. **Reconstruction**: Original embedding format (dictionary or tensor) is reconstructed for model processing
 
-### Example Request
+## Example Request
 
 The request format is identical to regular multimodal requests:
 
