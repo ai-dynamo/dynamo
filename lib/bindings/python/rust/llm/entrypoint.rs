@@ -107,7 +107,6 @@ pub(crate) struct EntrypointArgs {
     engine_type: EngineType,
     model_path: Option<PathBuf>,
     model_name: Option<String>,
-    model_config: Option<PathBuf>,
     endpoint_id: Option<EndpointId>,
     context_length: Option<u32>,
     template_file: Option<PathBuf>,
@@ -125,12 +124,11 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, model_config=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None))]
     pub fn new(
         engine_type: EngineType,
         model_path: Option<PathBuf>,
         model_name: Option<String>, // e.g. "dyn://namespace.component.endpoint"
-        model_config: Option<PathBuf>,
         endpoint_id: Option<String>,
         context_length: Option<u32>,
         template_file: Option<PathBuf>,
@@ -155,7 +153,6 @@ impl EntrypointArgs {
             engine_type,
             model_path,
             model_name,
-            model_config,
             endpoint_id: endpoint_id_obj,
             context_length,
             template_file,
@@ -188,7 +185,6 @@ pub fn make_engine<'p>(
     builder
         .model_path(args.model_path.clone())
         .model_name(args.model_name.clone())
-        .model_config(args.model_config.clone())
         .endpoint_id(args.endpoint_id.clone())
         .context_length(args.context_length)
         .request_template(args.template_file.clone())

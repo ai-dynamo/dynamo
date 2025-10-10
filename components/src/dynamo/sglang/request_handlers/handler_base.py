@@ -1,15 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+import logging
 import random
 import socket
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Tuple
+from contextlib import asynccontextmanager
+from typing import Any, AsyncGenerator, Dict, Optional, Tuple
 
 import sglang as sgl
 from sglang.srt.utils import get_local_ip_auto
 
-from dynamo._core import Client, Component
+from dynamo._core import Client, Component, Context
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
@@ -48,11 +51,12 @@ class BaseWorkerHandler(ABC):
         self.skip_tokenizer_init = config.server_args.skip_tokenizer_init
 
     @abstractmethod
-    async def generate(self, request: Dict[str, Any]):
+    async def generate(self, request: Dict[str, Any], context: Context):
         """Generate response from request.
 
         Args:
             request: Request dict with input and parameters.
+            context: Context object for cancellation handling.
 
         Yields:
             Response data (format varies by handler implementation).
@@ -112,3 +116,107 @@ class BaseWorkerHandler(ABC):
             bootstrap_host = get_local_ip_auto()
 
         return bootstrap_host, bootstrap_port
+
+    async def _handle_cancellation(
+        self, request_id_future: asyncio.Future, context: Context
+    ):
+        """Background task to handle cancellation by monitoring context state.
+
+        Args:
+            request_id_future: Future that will be set with the SGLang request ID
+                              when the first response arrives.
+            context: Context object for cancellation handling.
+        """
+        try:
+            logging.debug(f"Cancellation monitor started for Context: {context.id()}")
+
+            # Always wait for the request ID to ensure we can abort the request
+            sglang_request_id = await request_id_future
+            logging.debug(
+                f"Cancellation monitor received SGLang Request ID {sglang_request_id} for Context: {context.id()}"
+            )
+            logging.debug(f"Request ID future cancelled for Context: {context.id()}")
+
+            await context.async_killed_or_stopped()
+
+            logging.info(
+                f"Cancellation signal received for SGLang Request ID {sglang_request_id}, Context: {context.id()}"
+            )
+
+            # Call abort_request on the tokenizer_manager through the engine
+            if (
+                hasattr(self.engine, "tokenizer_manager")
+                and self.engine.tokenizer_manager
+            ):
+                logging.info(
+                    f"Calling SGLang abort_request for Request ID {sglang_request_id}"
+                )
+                self.engine.tokenizer_manager.abort_request(
+                    rid=sglang_request_id, abort_all=False
+                )
+                logging.info(f"Aborted Request ID: {context.id()}")
+            else:
+                logging.error(
+                    f"SGLang tokenizer_manager not found for abort request: {context.id()}"
+                )
+        except asyncio.CancelledError:
+            # Task was cancelled, which is expected when generation completes
+            request_id = "unknown"
+            if request_id_future.done() and not request_id_future.cancelled():
+                try:
+                    request_id = request_id_future.result()
+                except Exception:
+                    pass
+            logging.debug(
+                f"Cancellation monitor task cancelled for SGLang Request ID {request_id}, Context: {context.id()}"
+            )
+            raise
+
+    @asynccontextmanager
+    async def _cancellation_monitor(
+        self, request_id_future: asyncio.Future, context: Context
+    ) -> AsyncGenerator[asyncio.Task, None]:
+        """
+        Context manager for monitoring request cancellation.
+        Automatically creates a background task to monitor for cancellation and
+        cleans it up when the context exits.
+
+        Args:
+            request_id_future: Future that will be set with the SGLang request ID
+                              when the first response arrives.
+            context: Context object for cancellation handling
+
+        Yields:
+            asyncio.Task: The cancellation monitoring task being managed
+        """
+        logging.info(f"Creating cancellation monitor task for Context: {context.id()}")
+
+        # Start the cancellation monitoring task
+        cancellation_task = asyncio.create_task(
+            self._handle_cancellation(request_id_future, context)
+        )
+
+        try:
+            yield cancellation_task
+        finally:
+            # Clean up the background cancellation task
+            request_id = "unknown"
+            if request_id_future.done() and not request_id_future.cancelled():
+                try:
+                    request_id = request_id_future.result()
+                except Exception:
+                    pass
+
+            if not cancellation_task.done():
+                logging.debug(
+                    f"Cancelling cancellation monitor task for SGLang Request ID {request_id}, Context: {context.id()}"
+                )
+                cancellation_task.cancel()
+                try:
+                    await cancellation_task
+                except asyncio.CancelledError:
+                    pass
+            else:
+                logging.debug(
+                    f"Cancellation monitor task already completed for SGLang Request ID {request_id}, Context: {context.id()}"
+                )
