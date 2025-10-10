@@ -33,7 +33,7 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::traits::events::{EventPublisher, EventSubscriber};
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -51,17 +51,15 @@ pub type RequestId = String;
 /// A multi-request sequence manager that handles multiple active sequences with shared KV cache
 #[derive(Debug, Getters)]
 pub struct ActiveSequences {
-    active_seqs: HashMap<RequestId, Vec<SequenceHash>>,
+    // TODO: can probably use Rc here, but need to rework `ActiveSequencesMultiWorker`
+    active_seqs: HashMap<RequestId, Vec<(SequenceHash, Arc<()>)>>,
 
     prefill_tokens: HashMap<RequestId, usize>,
 
-    unique_blocks: HashMap<SequenceHash, HashSet<RequestId>>,
+    unique_blocks: HashMap<SequenceHash, Weak<()>>,
 
     #[getter(copy)]
     block_size: usize,
-
-    #[getter(copy)]
-    active_blocks: usize,
 
     #[getter(copy)]
     active_tokens: usize,
@@ -84,37 +82,34 @@ impl ActiveSequences {
             prefill_tokens: HashMap::new(),
             unique_blocks: HashMap::new(),
             block_size,
-            active_blocks: 0,
             active_tokens: 0,
             expiry_timer: Instant::now() + EXPIRY_DURATION,
             expiry_requests: HashSet::new(),
         }
     }
 
-    fn add_block(&mut self, request_id: RequestId, block: &SequenceHash) {
-        let is_new_block = !self.unique_blocks.contains_key(block);
+    fn add_block(&mut self, block: &SequenceHash) -> Arc<()> {
+        if let Some(weak) = self.unique_blocks.get(block)
+            && let Some(arc) = weak.upgrade()
+        {
+            return arc;
+        }
 
-        self.unique_blocks
-            .entry(*block)
-            .or_default()
-            .insert(request_id.clone());
+        let arc = Arc::new(());
+        self.unique_blocks.insert(*block, Arc::downgrade(&arc));
+        arc
+    }
 
-        if is_new_block {
-            self.active_blocks += 1;
+    fn remove_block(&mut self, block: &SequenceHash) {
+        if let Some(weak) = self.unique_blocks.get(block)
+            && weak.strong_count() == 0
+        {
+            self.unique_blocks.remove(block);
         }
     }
 
-    fn remove_block(&mut self, request_id: &RequestId, block: &SequenceHash) {
-        let Some(request_ids) = self.unique_blocks.get_mut(block) else {
-            return;
-        };
-
-        // Remove the unique block if no more requests using it
-        request_ids.retain(|w| w != request_id);
-        if request_ids.is_empty() {
-            self.active_blocks -= 1;
-            self.unique_blocks.remove(block);
-        }
+    pub fn active_blocks(&self) -> usize {
+        self.unique_blocks.len()
     }
 
     /// Add a new request with its initial tokens
@@ -140,10 +135,12 @@ impl ActiveSequences {
         self.active_tokens += prefill_tokens;
 
         if let Some(sequence) = token_sequence {
-            for block in &sequence {
-                self.add_block(request_id.clone(), block);
-            }
-            self.active_seqs.insert(request_id.clone(), sequence);
+            let sequence_with_refs: Vec<(SequenceHash, Arc<()>)> = sequence
+                .iter()
+                .map(|block| (*block, self.add_block(block)))
+                .collect();
+            self.active_seqs
+                .insert(request_id.clone(), sequence_with_refs);
         } else {
             // dummy empty sequence
             self.active_seqs.insert(request_id.clone(), Vec::new());
@@ -174,9 +171,9 @@ impl ActiveSequences {
         overlap: u32,
     ) -> (usize, usize) {
         let potential_blocks = if let Some(token_seq) = token_sequence {
-            self.new_blocks(token_seq) + self.active_blocks
+            self.new_blocks(token_seq) + self.active_blocks()
         } else {
-            self.active_blocks
+            self.active_blocks()
         };
         let potential_tokens = self.new_tokens(isl, overlap) + self.active_tokens;
         (potential_blocks, potential_tokens)
@@ -193,7 +190,7 @@ impl ActiveSequences {
     /// Return the total number of blocks that would be used if the token sequence was added
     /// This is the sum of new blocks that would be added plus the current active blocks
     pub fn potential_blocks(&self, token_sequence: &[SequenceHash]) -> usize {
-        self.new_blocks(token_sequence) + self.active_blocks
+        self.new_blocks(token_sequence) + self.active_blocks()
     }
 
     /// Free all blocks associated with a request
@@ -207,15 +204,16 @@ impl ActiveSequences {
             Some(seq) => seq,
             None => {
                 tracing::warn!("Trying to free non-existent request {request_id}");
-                return self.active_blocks;
+                return self.active_blocks();
             }
         };
 
-        for block in token_seq {
-            self.remove_block(request_id, &block)
+        // Drop all Arc references, then clean up weak references
+        for (block_hash, _arc) in token_seq {
+            self.remove_block(&block_hash);
         }
 
-        self.active_blocks
+        self.active_blocks()
     }
 
     /// Force expiry of stale requests if the timer has elapsed
