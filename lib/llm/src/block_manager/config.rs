@@ -199,6 +199,10 @@ pub struct KvBlockManagerConfig {
     /// Channel to reset the block manager to a specific cache level
     #[builder(default)]
     pub block_reset_channel: Option<BlockResetChannel>,
+
+    /// Optional KVBM-level metrics for tracking offload/onboard operations
+    #[builder(default)]
+    pub kvbm_metrics: Option<crate::block_manager::metrics_kvbm::KvbmMetrics>,
 }
 
 impl KvBlockManagerConfig {

@@ -83,13 +83,13 @@ python3 -m dynamo.frontend --http-port 8000 &
 
 # [DYNAMO] To serve an LLM model with dynamo
 python3 -m dynamo.trtllm \
-  --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
   --extra-engine-args /tmp/kvbm_llm_api_config.yaml &
 
 # make a call to LLM
 curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "model": "Qwen/Qwen3-0.6B",
     "messages": [
     {
         "role": "user",
@@ -104,7 +104,7 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 Alternatively, can use "trtllm-serve" with KVBM by replacing the above two [DYNAMO] cmds with below:
 ```bash
-trtllm-serve deepseek-ai/DeepSeek-R1-Distill-Llama-8B --host localhost --port 8000 --backend pytorch --extra_llm_api_options /tmp/kvbm_llm_api_config.yaml
+trtllm-serve Qwen/Qwen3-0.6B --host localhost --port 8000 --backend pytorch --extra_llm_api_options /tmp/kvbm_llm_api_config.yaml
 ```
 
 ## Enable and View KVBM Metrics
@@ -118,8 +118,8 @@ docker compose -f deploy/docker-compose.yml --profile metrics up -d
 # Optionally set DYN_KVBM_METRICS_PORT to choose the /metrics port (default: 6880).
 DYN_KVBM_METRICS=true \
 python3 -m dynamo.trtllm \
-  --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
   --extra-engine-args /tmp/kvbm_llm_api_config.yaml &
 
 # optional if firewall blocks KVBM metrics ports to send prometheus metrics
@@ -138,7 +138,7 @@ git clone https://github.com/LMCache/LMBenchmark.git
 # we are passing model, endpoint, output file prefix and qps to the sh script.
 cd LMBenchmark/synthetic-multi-round-qa
 ./long_input_short_output_run.sh \
-    "deepseek-ai/DeepSeek-R1-Distill-Llama-8B" \
+    "Qwen/Qwen3-0.6B" \
     "http://localhost:8000" \
     "benchmark_kvbm" \
     1
@@ -160,5 +160,5 @@ kv_cache_config:
 EOF
 
 # run trtllm-serve for the baseline for comparison
-trtllm-serve deepseek-ai/DeepSeek-R1-Distill-Llama-8B --host localhost --port 8000 --backend pytorch --extra_llm_api_options /tmp/llm_api_config.yaml &
+trtllm-serve Qwen/Qwen3-0.6B --host localhost --port 8000 --backend pytorch --extra_llm_api_options /tmp/llm_api_config.yaml &
 ```

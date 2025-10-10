@@ -113,7 +113,9 @@ sglang_configs = {
                     },
                 ],
                 repeat_count=1,
-                # Updating this as response to fix flakiness in CI
+                # NOTE: The response text may mention 'bus', 'train', 'streetcar', etc.
+                # so we need something consistently found in the response, or a different
+                # approach to validation for this test to be stable.
                 expected_response=["image"],
                 temperature=0.0,
             )

@@ -240,6 +240,7 @@ pub struct BlockManagerBuilder {
     leader: Option<distributed::KvbmLeader>,
     page_size: usize,
     disable_device_pool: bool,
+    kvbm_metrics: Option<dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics>,
 }
 
 impl BlockManagerBuilder {
@@ -264,6 +265,13 @@ impl BlockManagerBuilder {
     }
     pub fn disable_device_pool(mut self, yes: bool) -> Self {
         self.disable_device_pool = yes;
+        self
+    }
+    pub fn kvbm_metrics(
+        mut self,
+        metrics: dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics,
+    ) -> Self {
+        self.kvbm_metrics = Some(metrics);
         self
     }
 
@@ -325,7 +333,11 @@ impl BlockManagerBuilder {
             );
         }
 
-        let config = config.build()?;
+        let mut config_builder = config;
+        if let Some(kvbm_metrics) = self.kvbm_metrics {
+            config_builder = config_builder.kvbm_metrics(Some(kvbm_metrics));
+        }
+        let config = config_builder.build()?;
 
         let resources =
             DistributedLeaderWorkerResources::new(Some(leader_inner), cancel_token.child_token())?;
