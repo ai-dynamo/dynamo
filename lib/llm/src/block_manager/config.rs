@@ -116,6 +116,11 @@ pub struct KvManagerLayoutConfig<S: Storage + NixlRegisterableStorage> {
     /// The type of block parallelism strategy to use
     #[builder(default)]
     pub logical: Option<BlockParallelismStrategy>,
+
+    /// The offload filter to use (if any).
+    /// This dictates which blocks will be offloaded to the next-lowest cache level.
+    #[builder(default = "None")]
+    pub offload_filter: Option<Arc<dyn OffloadFilter>>,
 }
 
 impl<S: Storage + NixlRegisterableStorage> KvManagerLayoutConfig<S> {
