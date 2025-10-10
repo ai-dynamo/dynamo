@@ -120,7 +120,7 @@ class TestHandlerBase:
         """Helper to create a mock generation result"""
         mock_gen_result = MagicMock()
 
-        async def mock_generator(self):
+        async def mock_generator():
             # Create a mock result that matches what handler_base expects
             mock_res = MagicMock()
             mock_res.finished = False
@@ -134,7 +134,9 @@ class TestHandlerBase:
             if exception_to_raise:
                 raise exception_to_raise
 
-        mock_gen_result.__aiter__ = mock_generator
+        # __aiter__ should be a method that returns the async generator
+        # The lambda needs to accept self (passed by MagicMock) but ignore it
+        mock_gen_result.__aiter__ = lambda self: mock_generator()
         return mock_gen_result
 
     def get_test_request(self):
