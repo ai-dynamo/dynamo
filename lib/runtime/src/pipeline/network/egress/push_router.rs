@@ -89,13 +89,25 @@ impl RouterMode {
 }
 
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
-    let Some(nats_client) = endpoint.drt().nats_client() else {
-        anyhow::bail!("Missing NATS. Please ensure it is running and accessible.");
-    };
-    AddressedPushRouter::new(
-        nats_client.client().clone(),
-        endpoint.drt().tcp_server().await?,
-    )
+    use crate::config::RequestPlaneMode;
+
+    let mode = RequestPlaneMode::from_env();
+    let tcp_server = endpoint.drt().tcp_server().await?;
+
+    match mode {
+        RequestPlaneMode::Nats => {
+            let Some(nats_client) = endpoint.drt().nats_client() else {
+                anyhow::bail!("Missing NATS. Please ensure it is running and accessible.");
+            };
+            AddressedPushRouter::new(
+                nats_client.client().clone(),
+                endpoint.drt().tcp_server().await?,
+            )
+        }
+        RequestPlaneMode::Http => {
+            AddressedPushRouter::from_mode(mode, None, tcp_server)
+        }
+    }
 }
 
 impl<T, U> PushRouter<T, U>

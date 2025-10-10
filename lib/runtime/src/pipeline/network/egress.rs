@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod addressed_router;
+pub mod http_router;
 pub mod push_router;
 
 use super::*;

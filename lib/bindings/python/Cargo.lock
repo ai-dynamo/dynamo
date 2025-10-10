@@ -1627,6 +1627,7 @@ dependencies = [
  "rand 0.9.2",
  "rayon",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "socket2 0.5.10",

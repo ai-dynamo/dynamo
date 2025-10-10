@@ -94,9 +94,17 @@ sudo apt install python3-dev
 
 ### Install etcd and NATS (required)
 
-To coordinate across a data center, Dynamo relies on etcd and NATS. To run Dynamo locally, these need to be available.
+To coordinate across a data center, Dynamo relies on etcd for service discovery. For request distribution, Dynamo supports two modes:
+
+- **HTTP mode (recommended)**: Uses HTTP/2 for request distribution. Only etcd is required.
+- **NATS mode (legacy)**: Uses NATS for request distribution. Requires both etcd and NATS.
+
+#### Install etcd
 
 - [etcd](https://etcd.io/) can be run directly as `./etcd`.
+
+#### Install NATS (only if using NATS mode)
+
 - [nats](https://nats.io/) needs jetstream enabled: `nats-server -js`.
 
 To quickly setup etcd & NATS, you can also run:
@@ -105,6 +113,29 @@ To quickly setup etcd & NATS, you can also run:
 # At the root of the repository:
 # Edit deploy/docker-compose.yml to comment out "runtime: nvidia" of the dcgm-exporter service if the nvidia container runtime isn't deployed or to be used.
 docker compose -f deploy/docker-compose.yml up -d
+```
+
+#### Configure Request Plane Mode
+
+Set the `DYN_REQUEST_PLANE` environment variable to choose the request distribution mode:
+
+```bash
+# Use HTTP/2 for request distribution (recommended)
+export DYN_REQUEST_PLANE=http
+
+# Use NATS for request distribution (default, legacy)
+export DYN_REQUEST_PLANE=nats
+```
+
+When using HTTP mode, configure the HTTP RPC endpoint:
+
+```bash
+# HTTP RPC server bind address (default: 0.0.0.0:8081)
+export DYN_HTTP_RPC_HOST=0.0.0.0
+export DYN_HTTP_RPC_PORT=8081
+
+# HTTP RPC root path (default: /v1/dynamo)
+export DYN_HTTP_RPC_ROOT_PATH=/v1/dynamo
 ```
 
 ## 2. Select an engine

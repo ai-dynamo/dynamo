@@ -6,6 +6,7 @@
 pub mod codec;
 pub mod egress;
 pub mod ingress;
+pub mod request_plane;
 pub mod tcp;
 
 use crate::SystemHealth;

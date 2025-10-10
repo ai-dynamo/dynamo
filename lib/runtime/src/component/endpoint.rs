@@ -110,11 +110,21 @@ impl EndpointConfigBuilder {
                 .insert(endpoint.subject_to(lease_id), stats_handler);
         }
 
-        // creates an endpoint for the service
-        let service_endpoint = group
-            .endpoint(&endpoint.name_with_id(lease_id))
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to start endpoint: {e}"))?;
+        // Determine request plane mode
+        use crate::config::RequestPlaneMode;
+        let request_plane_mode = RequestPlaneMode::from_env();
+
+        // creates an endpoint for the service (NATS only)
+        let service_endpoint = if request_plane_mode.is_nats() {
+            Some(
+                group
+                    .endpoint(&endpoint.name_with_id(lease_id))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to start endpoint: {e}"))?,
+            )
+        } else {
+            None
+        };
 
         // Create a token that responds to both runtime shutdown and lease expiration
         let runtime_shutdown_token = endpoint.drt().child_token();
@@ -130,12 +140,35 @@ impl EndpointConfigBuilder {
 
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
+            // Build transport based on request plane mode
+            let transport = if request_plane_mode.is_http() {
+                // For HTTP mode, construct the HTTP endpoint URL
+                let http_host = std::env::var("DYN_HTTP_RPC_HOST")
+                    .unwrap_or_else(|_| "0.0.0.0".to_string());
+                let http_port = std::env::var("DYN_HTTP_RPC_PORT")
+                    .ok()
+                    .and_then(|p| p.parse::<u16>().ok())
+                    .unwrap_or(8081);
+                let rpc_root = std::env::var("DYN_HTTP_RPC_ROOT_PATH")
+                    .unwrap_or_else(|_| "/v1/dynamo".to_string());
+
+                let http_endpoint = format!("http://{}:{}{}/{}", http_host, http_port, rpc_root, subject);
+                let tcp_endpoint = format!("{}:{}", http_host, http_port);
+
+                TransportType::HttpTcp {
+                    http_endpoint,
+                    tcp_endpoint,
+                }
+            } else {
+                TransportType::NatsTcp(subject.clone())
+            };
+
             let instance = Instance {
                 component: component_name.clone(),
                 endpoint: endpoint_name.clone(),
                 namespace: namespace_name.clone(),
                 instance_id: lease_id,
-                transport: TransportType::NatsTcp(subject.clone()),
+                transport,
             };
             tracing::debug!(endpoint_name = %endpoint_name, "Registering endpoint health check target");
             let guard = system_health.lock();
@@ -184,14 +217,7 @@ impl EndpointConfigBuilder {
             tracing::debug!("Endpoint '{}' has graceful_shutdown=false", endpoint.name);
         }
 
-        let push_endpoint = PushEndpoint::builder()
-            .service_handler(handler)
-            .cancellation_token(cancel_token.clone())
-            .graceful_shutdown(graceful_shutdown)
-            .build()
-            .map_err(|e| anyhow::anyhow!("Failed to build push endpoint: {e}"))?;
-
-        // launch in primary runtime
+        // Launch endpoint based on request plane mode
         let tracker_clone = if graceful_shutdown {
             Some(endpoint.drt().graceful_shutdown_tracker())
         } else {
@@ -203,36 +229,111 @@ impl EndpointConfigBuilder {
         let component_name_for_task = component_name.clone();
         let endpoint_name_for_task = endpoint_name.clone();
 
-        let task = tokio::spawn(async move {
-            let result = push_endpoint
-                .start(
-                    service_endpoint,
-                    namespace_name_for_task,
-                    component_name_for_task,
-                    endpoint_name_for_task,
-                    lease_id,
-                    system_health,
-                )
-                .await;
+        let task = if request_plane_mode.is_http() {
+            // HTTP mode - use HttpEndpoint
+            use crate::pipeline::network::ingress::http_endpoint::HttpEndpoint;
 
-            // Unregister from graceful shutdown tracker
-            if let Some(tracker) = tracker_clone {
-                tracing::debug!("Unregistering endpoint from graceful shutdown tracker");
-                tracker.unregister_endpoint();
-            }
+            let http_host = std::env::var("DYN_HTTP_RPC_HOST")
+                .unwrap_or_else(|_| "0.0.0.0".to_string());
+            let http_port = std::env::var("DYN_HTTP_RPC_PORT")
+                .ok()
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(8081);
+            let bind_addr: std::net::SocketAddr = format!("{}:{}", http_host, http_port)
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid HTTP bind address: {}", e))?;
 
-            result
-        });
+            let http_endpoint = HttpEndpoint::builder()
+                .service_handler(handler)
+                .cancellation_token(cancel_token.clone())
+                .graceful_shutdown(graceful_shutdown)
+                .build()
+                .map_err(|e| anyhow::anyhow!("Failed to build HTTP endpoint: {e}"))?;
+
+            tokio::spawn(async move {
+                let result = http_endpoint
+                    .start(
+                        bind_addr,
+                        namespace_name_for_task,
+                        component_name_for_task,
+                        endpoint_name_for_task,
+                        lease_id,
+                        system_health,
+                    )
+                    .await;
+
+                // Unregister from graceful shutdown tracker
+                if let Some(tracker) = tracker_clone {
+                    tracing::debug!("Unregister endpoint from graceful shutdown tracker");
+                    tracker.unregister_endpoint();
+                }
+
+                result
+            })
+        } else {
+            // NATS mode - use PushEndpoint
+            let service_endpoint = service_endpoint
+                .ok_or_else(|| anyhow::anyhow!("NATS service endpoint not created"))?;
+
+            let push_endpoint = PushEndpoint::builder()
+                .service_handler(handler)
+                .cancellation_token(cancel_token.clone())
+                .graceful_shutdown(graceful_shutdown)
+                .build()
+                .map_err(|e| anyhow::anyhow!("Failed to build push endpoint: {e}"))?;
+
+            tokio::spawn(async move {
+                let result = push_endpoint
+                    .start(
+                        service_endpoint,
+                        namespace_name_for_task,
+                        component_name_for_task,
+                        endpoint_name_for_task,
+                        lease_id,
+                        system_health,
+                    )
+                    .await;
+
+                // Unregister from graceful shutdown tracker
+                if let Some(tracker) = tracker_clone {
+                    tracing::debug!("Unregistering endpoint from graceful shutdown tracker");
+                    tracker.unregister_endpoint();
+                }
+
+                result
+            })
+        };
 
         // make the components service endpoint discovery in etcd
 
-        // client.register_service()
+        // Build transport for etcd registration based on request plane mode
+        let transport = if request_plane_mode.is_http() {
+            let http_host = std::env::var("DYN_HTTP_RPC_HOST")
+                .unwrap_or_else(|_| "0.0.0.0".to_string());
+            let http_port = std::env::var("DYN_HTTP_RPC_PORT")
+                .ok()
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(8081);
+            let rpc_root = std::env::var("DYN_HTTP_RPC_ROOT_PATH")
+                .unwrap_or_else(|_| "/v1/dynamo".to_string());
+
+            let http_endpoint = format!("http://{}:{}{}/{}", http_host, http_port, rpc_root, subject);
+            let tcp_endpoint = format!("{}:{}", http_host, http_port);
+
+            TransportType::HttpTcp {
+                http_endpoint,
+                tcp_endpoint,
+            }
+        } else {
+            TransportType::NatsTcp(subject.clone())
+        };
+
         let info = Instance {
             component: component_name.clone(),
             endpoint: endpoint_name.clone(),
             namespace: namespace_name.clone(),
             instance_id: lease_id,
-            transport: TransportType::NatsTcp(subject),
+            transport,
         };
 
         let info = serde_json::to_vec_pretty(&info)?;

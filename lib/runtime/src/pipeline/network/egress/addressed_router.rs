@@ -6,6 +6,8 @@ use async_nats::{HeaderMap, HeaderValue};
 use tracing as log;
 
 use super::*;
+use super::http_router::{HttpRequestClient, HttpAddressedRouter};
+use crate::config::RequestPlaneMode;
 use crate::logging::DistributedTraceContext;
 use crate::logging::get_distributed_tracing_context;
 use crate::logging::inject_otel_context_into_nats_headers;
@@ -45,28 +47,65 @@ impl<T> AddressedRequest<T> {
         Self { request, address }
     }
 
-    fn into_parts(self) -> (T, String) {
+    pub(crate) fn into_parts(self) -> (T, String) {
         (self.request, self.address)
     }
 }
 
-pub struct AddressedPushRouter {
-    // todo: generalize with a generic
-    req_transport: Client,
+/// Transport mode for AddressedPushRouter
+enum RequestTransport {
+    Nats(Client),
+    Http(Arc<HttpRequestClient>),
+}
 
-    // todo: generalize with a generic
+pub struct AddressedPushRouter {
+    // Request transport (NATS or HTTP)
+    req_transport: RequestTransport,
+
+    // Response transport (TCP streaming - unchanged)
     resp_transport: Arc<tcp::server::TcpStreamServer>,
 }
 
 impl AddressedPushRouter {
+    /// Create a new router with NATS request transport
     pub fn new(
         req_transport: Client,
         resp_transport: Arc<tcp::server::TcpStreamServer>,
     ) -> Result<Arc<Self>> {
         Ok(Arc::new(Self {
-            req_transport,
+            req_transport: RequestTransport::Nats(req_transport),
             resp_transport,
         }))
+    }
+
+    /// Create a new router with HTTP request transport
+    pub fn new_http(
+        http_client: Arc<HttpRequestClient>,
+        resp_transport: Arc<tcp::server::TcpStreamServer>,
+    ) -> Result<Arc<Self>> {
+        Ok(Arc::new(Self {
+            req_transport: RequestTransport::Http(http_client),
+            resp_transport,
+        }))
+    }
+
+    /// Create router based on request plane mode from environment
+    pub fn from_mode(
+        mode: RequestPlaneMode,
+        nats_client: Option<Client>,
+        resp_transport: Arc<tcp::server::TcpStreamServer>,
+    ) -> Result<Arc<Self>> {
+        match mode {
+            RequestPlaneMode::Nats => {
+                let nats_client = nats_client
+                    .ok_or_else(|| anyhow::anyhow!("NATS client required for NATS mode"))?;
+                Self::new(nats_client, resp_transport)
+            }
+            RequestPlaneMode::Http => {
+                let http_client = Arc::new(HttpRequestClient::from_env()?);
+                Self::new_http(http_client, resp_transport)
+            }
+        }
     }
 }
 
@@ -140,33 +179,57 @@ where
 
         // TRANSPORT ABSTRACT REQUIRED - END HERE
 
-        log::trace!(request_id, "enqueueing two-part message to nats");
+        // Send request based on transport mode
+        match &self.req_transport {
+            RequestTransport::Nats(client) => {
+                log::trace!(request_id, "enqueueing two-part message to NATS");
 
-        // Insert Trace Context into Headers
-        // Enables span to be created in push_endpoint before
-        // payload is parsed
+                // Prepare trace headers using the OpenTelemetry injector pattern
+                // This handles traceparent and tracestate headers according to W3C Trace Context standard
+                let mut headers = HeaderMap::new();
+                inject_otel_context_into_nats_headers(&mut headers, None);
 
-        // Prepare trace headers using the OpenTelemetry injector pattern
-        // This handles traceparent and tracestate headers according to W3C Trace Context standard
-        let mut headers = HeaderMap::new();
-        inject_otel_context_into_nats_headers(&mut headers, None);
+                // Add additional custom headers that aren't handled by the OpenTelemetry propagator
+                if let Some(trace_context) = get_distributed_tracing_context() {
+                    if let Some(x_request_id) = trace_context.x_request_id {
+                        headers.insert("x-request-id", x_request_id);
+                    }
+                    if let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id {
+                        headers.insert("x-dynamo-request-id", x_dynamo_request_id);
+                    }
+                }
 
-        // Add additional custom headers that aren't handled by the OpenTelemetry propagator
-        if let Some(trace_context) = get_distributed_tracing_context() {
-            if let Some(x_request_id) = trace_context.x_request_id {
-                headers.insert("x-request-id", x_request_id);
+                let _response = client
+                    .request_with_headers(address.to_string(), headers, buffer)
+                    .await?;
             }
-            if let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id {
-                headers.insert("x-dynamo-request-id", x_dynamo_request_id);
+            RequestTransport::Http(http_client) => {
+                log::trace!(request_id, "sending HTTP request to {}", address);
+
+                // Insert Trace Context into Headers
+                let mut headers = std::collections::HashMap::new();
+                if let Some(trace_context) = get_distributed_tracing_context() {
+                    headers.insert(
+                        "traceparent".to_string(),
+                        trace_context.create_traceparent(),
+                    );
+                    if let Some(tracestate) = trace_context.tracestate {
+                        headers.insert("tracestate".to_string(), tracestate);
+                    }
+                    if let Some(x_request_id) = trace_context.x_request_id {
+                        headers.insert("x-request-id".to_string(), x_request_id);
+                    }
+                    if let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id {
+                        headers.insert("x-dynamo-request-id".to_string(), x_dynamo_request_id);
+                    }
+                }
+
+                use crate::pipeline::network::request_plane::RequestPlaneClient;
+                let _response = http_client
+                    .send_request(address, buffer, headers)
+                    .await?;
             }
         }
-
-        // we might need to add a timeout on this if there is no subscriber to the subject; however, I think nats
-        // will handle this for us
-        let _response = self
-            .req_transport
-            .request_with_headers(address.to_string(), headers, buffer)
-            .await?;
 
         log::trace!(request_id, "awaiting transport handshake");
         let response_stream = response_stream_provider

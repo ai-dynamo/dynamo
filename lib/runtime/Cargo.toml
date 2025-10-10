@@ -39,6 +39,7 @@ humantime = { workspace = true }
 parking_lot = { workspace = true }
 prometheus = { workspace = true }
 rand = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
@@ -78,7 +79,6 @@ tokio-rayon = { version = "2.1" }
 assert_matches = { version = "1.5.0" }
 criterion = { version = "0.5", features = ["async_tokio"] }
 env_logger = { version = "0.11" }
-reqwest = { workspace = true }
 rstest = { version = "0.23.0" }
 temp-env = { version = "0.3.6" , features=["async_closure"] }
 stdio-override = {version= "0.2.0"}

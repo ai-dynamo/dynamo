@@ -80,6 +80,10 @@ pub const INSTANCE_ROOT_PATH: &str = "v1/instances";
 #[serde(rename_all = "snake_case")]
 pub enum TransportType {
     NatsTcp(String),
+    HttpTcp {
+        http_endpoint: String,
+        tcp_endpoint: String,
+    },
 }
 
 #[derive(Default)]
