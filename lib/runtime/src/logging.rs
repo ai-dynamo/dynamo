@@ -102,9 +102,6 @@ const CONFIG_PATH_ENV: &str = "DYN_LOGGING_CONFIG_PATH";
 /// Once instance to ensure the logger is only initialized once
 static INIT: Once = Once::new();
 
-/// Global flag to track if lazy OTEL initialization has been completed
-static LAZY_OTEL_INITIALIZED: AtomicBool = AtomicBool::new(false);
-
 #[derive(Serialize, Deserialize, Debug)]
 struct LoggingConfig {
     log_level: String,
@@ -302,101 +299,18 @@ pub fn make_request_span<B>(req: &Request<B>) -> Span {
 }
 
 
-/// Create a span from NATS headers representing an entry point across a process boundary
-/// 
-/// This function extracts trace context from incoming NATS headers and creates a new span
-/// that properly continues the distributed trace. The span will have the extracted context
-/// as its parent and will include trace_id and parent_id fields for bootstrapping the
-/// distributed tracing system.
-/// 
-/// # Arguments
-/// * `headers` - Reference to async_nats::HeaderMap containing trace context headers
-/// 
-/// # Returns
-/// A configured tracing::Span that represents the entry point for this service
-/// 
-/// # Example
-/// ```rust
-/// let span = create_span_from_nats_headers(&headers);
-/// let _enter = span.enter();
-/// // All subsequent spans will be children of this entry span
-/// ```
-pub fn create_span_from_nats_headers(
-    headers: &async_nats::HeaderMap,
-) -> Span {
-    // Extract the trace context and individual IDs from headers
-    let (otel_context, trace_id, parent_span_id) = extract_otel_context_from_nats_headers(headers);
-    
-    // Parse the TraceParent struct to get all additional fields
-    let trace_parent = TraceParent::from_headers(headers);
-    
-    // Create the span with trace context fields for bootstrapping
-    // Use span! macro with target and level to allow dynamic span names
-    let span = if let (Some(trace_id), Some(parent_id)) = (trace_id.as_ref(), parent_span_id.as_ref()) {
-        // Create span with trace_id and parent_id fields to bootstrap our distributed tracing layer
-        // Include all additional fields from the TraceParent struct
-        let span = tracing::info_span!(
-            "continuing-request-across-process-boundary",
-            trace_id = trace_id.as_str(),
-            parent_id = parent_id.as_str(),
-            x_request_id = trace_parent.x_request_id,
-            x_dynamo_request_id = trace_parent.x_dynamo_request_id,
-            tracestate = trace_parent.tracestate,
-        );
-
-        // Set the extracted OpenTelemetry context as the parent if available
-        if let Some(context) = otel_context {
-            span.set_parent(context);
-        }
-        span
-    } else {
-        // No trace context found, create a regular span (this will generate new trace context)
-        // Still include additional fields from TraceParent if they exist
-        let span = tracing::info_span!(
-            "new-request",
-            x_request_id = trace_parent.x_request_id,
-            x_dynamo_request_id = trace_parent.x_dynamo_request_id,
-            tracestate = trace_parent.tracestate,
-        );
-        span
-    };
-    
-    span
-}
-
-/// Create a handle_payload span from NATS headers with additional context fields
-/// 
-/// This function creates a span specifically for handling payloads in the push endpoint.
-/// It extracts trace context from NATS headers and includes component, endpoint, namespace,
-/// and instance_id fields for better observability.
-/// 
-/// # Arguments
-/// * `headers` - Reference to async_nats::HeaderMap containing trace context headers
-/// * `component` - Component name to include in the span
-/// * `endpoint` - Endpoint name to include in the span
-/// * `namespace` - Namespace to include in the span
-/// * `instance_id` - Instance ID to include in the span
-/// 
-/// # Returns
-/// A configured tracing::Span for handling payloads
+/// Create a handle_payload span from NATS headers with component context
 pub fn create_handle_payload_span_from_nats_headers(
     headers: &async_nats::HeaderMap,
     component: &str,
     endpoint: &str,
     namespace: &str,
     instance_id: i64,
-) -> Span {
-    
-    // Extract the trace context and individual IDs from headers
+)  -> Span {
     let (otel_context, trace_id, parent_span_id) = extract_otel_context_from_nats_headers(headers);
-    
-    // Parse the TraceParent struct to get all additional fields
     let trace_parent = TraceParent::from_headers(headers);
     
-    // Create the span with trace context fields for bootstrapping
     let span = if let (Some(trace_id), Some(parent_id)) = (trace_id.as_ref(), parent_span_id.as_ref()) {
-        // Create span with trace_id and parent_id fields to bootstrap our distributed tracing layer
-        // Include all additional fields from the TraceParent struct and context fields
         let span = tracing::info_span!(
             "handle_payload",
             trace_id = trace_id.as_str(),
@@ -410,14 +324,11 @@ pub fn create_handle_payload_span_from_nats_headers(
             instance_id = instance_id,
         );
 
-        // Set the extracted OpenTelemetry context as the parent if available
         if let Some(context) = otel_context {
             span.set_parent(context);
         }
         span
     } else {
-        // No trace context found, create a regular span (this will generate new trace context)
-        // Still include additional fields from TraceParent if they exist
         let span = tracing::info_span!(
             "handle_payload",
             x_request_id = trace_parent.x_request_id,
@@ -434,39 +345,17 @@ pub fn create_handle_payload_span_from_nats_headers(
     span
 }
 
-/// Extract OpenTelemetry trace context from async_nats::HeaderMap
-/// 
-/// This function uses the OpenTelemetry extractor pattern to extract trace context
-/// from NATS headers for distributed tracing across service boundaries.
-/// 
-/// # Arguments
-/// * `headers` - Reference to async_nats::HeaderMap to extract context from
-/// 
-/// # Returns
-/// A tuple containing:
-/// * `Option<opentelemetry::Context>` - The extracted OTEL context (None if no traceparent found)
-/// * `Option<String>` - The trace_id from the traceparent header
-/// * `Option<String>` - The span_id from the traceparent header (this becomes the parent_id for child spans)
+/// Extract OpenTelemetry trace context from NATS headers for distributed tracing
 pub fn extract_otel_context_from_nats_headers(
     headers: &async_nats::HeaderMap,
 ) -> (Option<opentelemetry::Context>, Option<String>, Option<String>) {
-    
-    // First check if traceparent header exists
     let traceparent_value = match headers.get("traceparent") {
-        Some(value) => {
-            let val_str = value.as_str();
-            val_str
-        },
-        None => {
-            // No traceparent header found, return None for all values
-            return (None, None, None);
-        }
+        Some(value) => value.as_str(),
+        None => return (None, None, None),
     };
 
-    // Parse the traceparent header to extract trace_id and span_id
     let (trace_id, parent_span_id) = parse_traceparent(traceparent_value);
 
-    // Create an extractor that reads from the NATS headers map
     struct NatsHeaderExtractor<'a>(&'a async_nats::HeaderMap);
 
     impl<'a> Extractor for NatsHeaderExtractor<'a> {
@@ -475,9 +364,6 @@ pub fn extract_otel_context_from_nats_headers(
         }
 
         fn keys(&self) -> Vec<&str> {
-            // Convert HeaderMap keys to a Vec of string references
-            // Note: async_nats::HeaderMap doesn't expose all keys directly,
-            // but the propagator typically only looks for known keys like "traceparent" and "tracestate"
             vec!["traceparent", "tracestate"]
                 .into_iter()
                 .filter(|&key| self.0.get(key).is_some())
@@ -487,11 +373,8 @@ pub fn extract_otel_context_from_nats_headers(
 
     let extractor = NatsHeaderExtractor(headers);
     let propagator = opentelemetry::sdk::propagation::TraceContextPropagator::new();
-    
-    // Extract the context from headers using the W3C Trace Context propagation standard
     let otel_context = propagator.extract(&extractor);
 
-    // Check if we actually got a valid context (not just the default empty context)
     let context_with_trace = if otel_context.span().span_context().is_valid() {
         Some(otel_context)
     } else {
@@ -526,29 +409,13 @@ pub fn extract_otel_context_from_nats_headers(
     
 //     headers
 // }
-/// Inject OpenTelemetry trace context into async_nats::HeaderMap
-/// 
-/// This function uses the OpenTelemetry propagator pattern to inject trace context
-/// into NATS headers for distributed tracing across service boundaries.
-/// 
-/// # Arguments
-/// * `headers` - Mutable reference to async_nats::HeaderMap to inject headers into
-/// * `context` - Optional OpenTelemetry context. If None, derives from current span
+/// Inject OpenTelemetry trace context into NATS headers using W3C Trace Context propagation
 pub fn inject_otel_context_into_nats_headers(
     headers: &mut async_nats::HeaderMap,
     context: Option<opentelemetry::Context>,
 ) {
-    
-    // Get the context from parameter or derive from current span
-    // Bug: We take the context from the current span
-    let otel_context = context.unwrap_or_else(|| {
-        let current_span = Span::current();
-        let ctx = current_span.context();
-        ctx
-    });
+    let otel_context = context.unwrap_or_else(|| Span::current().context());
 
-
-    // Create an injector that writes to the NATS headers map
     struct NatsHeaderInjector<'a>(&'a mut async_nats::HeaderMap);
 
     impl<'a> Injector for NatsHeaderInjector<'a> {
@@ -559,58 +426,32 @@ pub fn inject_otel_context_into_nats_headers(
 
     let mut injector = NatsHeaderInjector(headers);
     let propagator = opentelemetry::sdk::propagation::TraceContextPropagator::new();
-    
-    // Inject the context into headers using the W3C Trace Context propagation standard
     propagator.inject_context(&otel_context, &mut injector);
 }
 
-/// Convenience function to inject trace context from current span into NATS headers
-/// 
-/// This is a simplified version that automatically uses the current span's context.
+/// Inject trace context from current span into NATS headers
 pub fn inject_current_trace_into_nats_headers(headers: &mut async_nats::HeaderMap) {
     inject_otel_context_into_nats_headers(headers, None);
 }
 
-/// Create a client_request span that is properly linked to the current trace context
-/// 
-/// This function creates a span for client requests that is a child of the current span.
-/// It uses the extractor pattern to derive the OpenTelemetry parent context from the
-/// DistributedTraceContext by creating a synthetic traceparent header and extracting it.
-/// 
-/// # Arguments
-/// * `operation` - The operation name (e.g., "round_robin", "direct", "random")
-/// * `request_id` - The request ID to include in the span
-/// * `trace_context` - Optional distributed trace context containing trace_id, span_id, etc.
-/// * `instance_id` - Optional instance ID for direct requests
-/// 
-/// # Returns
-/// A configured tracing::Span that is properly linked to the parent trace context
+/// Create a client_request span linked to the parent trace context
 pub fn create_client_request_span(
     operation: &str,
     request_id: &str,
     trace_context: Option<&DistributedTraceContext>,
     instance_id: Option<&str>,
 ) -> Span {
-    
-    // Create the span based on whether we have trace context and instance_id
     let span = if let Some(ctx) = trace_context {
-        
-        // Create a synthetic NATS header map with the traceparent from the context
         let mut headers = async_nats::HeaderMap::new();
-        let traceparent = ctx.create_traceparent();
-        headers.insert("traceparent", traceparent);
+        headers.insert("traceparent", ctx.create_traceparent());
         
-        // Also add tracestate if present
         if let Some(ref tracestate) = ctx.tracestate {
             headers.insert("tracestate", tracestate.as_str());
         }
         
-        // Extract the OpenTelemetry context using the extractor pattern
         let (otel_context, _extracted_trace_id, _extracted_parent_span_id) = 
             extract_otel_context_from_nats_headers(&headers);
         
-        
-        // Create span with all trace context fields
         let span = if let Some(inst_id) = instance_id {
             tracing::info_span!(
                 "client_request",
@@ -636,15 +477,12 @@ pub fn create_client_request_span(
             )
         };
         
-        // Set the extracted OpenTelemetry context as the parent if available
         if let Some(context) = otel_context {
             span.set_parent(context);
         }
         
         span
     } else {
-        
-        // Create span without trace context fields
         let span = if let Some(inst_id) = instance_id {
             tracing::info_span!(
                 "client_request",
@@ -847,33 +685,7 @@ pub fn get_distributed_tracing_context() -> Option<DistributedTraceContext> {
         .flatten()
 }
 
-/// Lazy initialize OTEL tracing when Tokio runtime is available
-/// This should be called from request processing functions
-pub fn lazy_init_otel() {
-    // Only attempt lazy init if JSONL logging is enabled and not already initialized
-    if !jsonl_logging_enabled() || LAZY_OTEL_INITIALIZED.load(Ordering::Relaxed) {
-        return;
-    }
-    
-    // Check if we have a Tokio runtime available
-    if tokio::runtime::Handle::try_current().is_err() {
-        return; // Still no runtime, skip for now
-    }
-    
-    // Use INIT to ensure we only initialize once
-    INIT.call_once(|| {
-        if let Err(e) = setup_logging() {
-            eprintln!("Failed to initialize OTEL logging: {}", e);
-            // Don't exit here since we're in request processing
-        } else {
-            LAZY_OTEL_INITIALIZED.store(true, Ordering::Relaxed);
-            tracing::info!("OTEL tracing initialized lazily");
-        }
-    });
-}
-
-/// Initialize the logger
-/// This should be called when Tokio runtime is available (e.g., in DistributedRuntime::new())
+/// Initialize the logger - must be called when Tokio runtime is available
 pub fn init() {
     // Initialize logging (works for both JSONL and non-JSONL now)
     INIT.call_once(|| {
