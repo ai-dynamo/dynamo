@@ -54,8 +54,9 @@ runs:
       run: |
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
+        # TODO: Pytest marker collection temporarily disabled
         # Copy the markers plugin into the container mount directory
-        cp ${{ github.action_path }}/pytest_markers_plugin.py test-results/
+        # cp ${{ github.action_path }}/pytest_markers_plugin.py test-results/
         
         docker run --runtime=nvidia --rm --gpus all -w /workspace \
           --cpus=${NUM_CPUS} \
@@ -63,7 +64,7 @@ runs:
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "$(pwd)/test-results:/test-results" \
           ${{ inputs.image_tag }} \
-          bash -c "PYTHONPATH=/test-results:$PYTHONPATH pytest -v --tb=short --basetemp=/tmp --junitxml=/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -p pytest_markers_plugin -m \"${{ inputs.pytest_marks }}\""
+          bash -c "pytest -v --tb=short --basetemp=/tmp --junitxml=/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
         
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
@@ -198,18 +199,19 @@ runs:
             tree = ET.parse('test-results/pytest_test_report.xml')
             root = tree.getroot()
             
+            # TODO: Marker loading temporarily disabled
             # Load markers data if available
             markers_data = {}
-            markers_file = 'test-results/pytest_markers.json'
-            if os.path.exists(markers_file):
-                try:
-                    with open(markers_file, 'r') as f:
-                        markers_data = json.load(f)
-                    print(f"            // Loaded markers for {len(markers_data)} tests", file=sys.stderr)
-                except Exception as e:
-                    print(f"            // Failed to load markers: {e}", file=sys.stderr)
-            else:
-                print(f"            // No markers file found at {markers_file}", file=sys.stderr)
+            # markers_file = 'test-results/pytest_markers.json'
+            # if os.path.exists(markers_file):
+            #     try:
+            #         with open(markers_file, 'r') as f:
+            #             markers_data = json.load(f)
+            #         print(f"            // Loaded markers for {len(markers_data)} tests", file=sys.stderr)
+            #     except Exception as e:
+            #         print(f"            // Failed to load markers: {e}", file=sys.stderr)
+            # else:
+            #     print(f"            // No markers file found at {markers_file}", file=sys.stderr)
             
             test_cases = []
             
@@ -243,34 +245,39 @@ runs:
                         skipped_elem = testcase.find('skipped')
                         test_info["skip_reason"] = skipped_elem.get('message', '') if skipped_elem is not None else ''
                     
+                    # TODO: Marker matching temporarily disabled
                     # Try to find matching markers data
                     # Look for test by various possible node IDs
-                    test_markers = None
-                    possible_ids = [
-                        f"{classname}::{name}",
-                        f"{classname.replace('.', '/')}.py::{name}",
-                        name
-                    ]
+                    # test_markers = None
+                    # possible_ids = [
+                    #     f"{classname}::{name}",
+                    #     f"{classname.replace('.', '/')}.py::{name}",
+                    #     name
+                    # ]
+                    # 
+                    # for test_id in possible_ids:
+                    #     if test_id in markers_data:
+                    #         test_markers = markers_data[test_id]
+                    #         break
+                    #     # Also try partial matches
+                    #     for marker_id in markers_data:
+                    #         if marker_id.endswith(f"::{name}") and classname in marker_id:
+                    #             test_markers = markers_data[marker_id]
+                    #             break
+                    #     if test_markers:
+                    #         break
+                    # 
+                    # # Add markers information if found
+                    # if test_markers:
+                    #     test_info["markers"] = test_markers.get("markers", [])
+                    #     test_info["marker_names"] = test_markers.get("marker_names", [])
+                    # else:
+                    #     test_info["markers"] = []
+                    #     test_info["marker_names"] = []
                     
-                    for test_id in possible_ids:
-                        if test_id in markers_data:
-                            test_markers = markers_data[test_id]
-                            break
-                        # Also try partial matches
-                        for marker_id in markers_data:
-                            if marker_id.endswith(f"::{name}") and classname in marker_id:
-                                test_markers = markers_data[marker_id]
-                                break
-                        if test_markers:
-                            break
-                    
-                    # Add markers information if found
-                    if test_markers:
-                        test_info["markers"] = test_markers.get("markers", [])
-                        test_info["marker_names"] = test_markers.get("marker_names", [])
-                    else:
-                        test_info["markers"] = []
-                        test_info["marker_names"] = []
+                    # Set empty markers for now
+                    test_info["markers"] = []
+                    test_info["marker_names"] = []
                     
                     test_cases.append(test_info)
             
