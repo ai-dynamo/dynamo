@@ -12,10 +12,8 @@ To update this document with the latest vLLM metrics:
 
 1. Start a vLLM worker with metrics enabled:
    ```bash
-   unset HF_TOKEN
    DYN_LOG=error DYN_ENGINE_METRICS_ENABLED=1 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
-     python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 \
-     --enforce-eager --no-enable-prefix-caching --max-num-seqs 64 &
+     python -m dynamo.vllm --model Qwen/Qwen3-0.6B &
    VLLM_PID=$!
    sleep 15  # Wait for engine to initialize
    ```

@@ -12,12 +12,16 @@ while Dynamo runtime metrics are available immediately after component creation.
 """
 
 import logging
-from typing import Optional
-
-from prometheus_client import CollectorRegistry
+from typing import TYPE_CHECKING, Optional
 
 from dynamo._core import Endpoint
 from dynamo.common.env_utils import env_is_truthy
+
+# Import CollectorRegistry only for type hints to avoid importing prometheus_client at module load time.
+# prometheus_client must be imported AFTER set_prometheus_multiproc_dir() is called.
+# See main.py worker() function for detailed explanation.
+if TYPE_CHECKING:
+    from prometheus_client import CollectorRegistry
 
 
 def is_engine_metrics_callback_enabled() -> bool:
@@ -40,7 +44,7 @@ def is_engine_metrics_callback_enabled() -> bool:
 
 def register_engine_metrics_callback(
     endpoint: Endpoint,
-    registry: CollectorRegistry,
+    registry: "CollectorRegistry",
     metric_prefix: str,
     engine_name: str,
 ) -> None:
