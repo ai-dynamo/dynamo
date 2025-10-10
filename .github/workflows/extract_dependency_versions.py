@@ -434,7 +434,6 @@ class DependencyExtractor:
         
         # Handle "ARG: VARIABLE_NAME" format
         if notes.startswith("ARG: "):
-            var_name = notes[5:]  # Remove "ARG: " prefix
             return f"Dockerfile build argument"
         
         # Handle "From install script: VARIABLE_NAME" format
@@ -447,8 +446,6 @@ class DependencyExtractor:
         
         # Handle Git dependency notes
         if notes.startswith("Git dependency:"):
-            # Extract the package name after the colon
-            pkg = notes.split(":", 1)[1].strip() if ":" in notes else ""
             return f"Git repository dependency"
         
         # Handle "Git-based pip install from ..."
@@ -754,7 +751,6 @@ class DependencyExtractor:
                 lines = f.readlines()
             
             for i, line in enumerate(lines, 1):
-                original_line = line
                 line = line.strip()
                 
                 # Skip comments and empty lines
