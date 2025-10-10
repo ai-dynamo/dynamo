@@ -55,7 +55,7 @@ def register_engine_metrics_callback(
     is scraped, allowing engine metrics to be included in the endpoint output.
 
     Args:
-        endpoint: Dynamo endpoint object with metrics.register_prometheus_exposition_text_callback()
+        endpoint: Dynamo endpoint object with metrics.register_prometheus_expfmt_callback()
         registry: Prometheus registry to collect from (e.g., REGISTRY or CollectorRegistry)
         metric_prefix: Prefix to filter metrics (e.g., "vllm:" or "sglang:")
         engine_name: Name of the engine for logging (e.g., "vLLM" or "SGLang")
@@ -70,17 +70,15 @@ def register_engine_metrics_callback(
         logging.info(f"{engine_name} metrics passthrough disabled")
         return
 
-    def get_exposition_text() -> str:
+    def get_expfmt() -> str:
         """Callback to return engine Prometheus metrics in exposition format"""
-        return get_prometheus_exposition_text(
-            registry, metric_prefix_filter=metric_prefix
-        )
+        return get_prometheus_expfmt(registry, metric_prefix_filter=metric_prefix)
 
-    endpoint.metrics.register_prometheus_exposition_text_callback(get_exposition_text)
+    endpoint.metrics.register_prometheus_expfmt_callback(get_expfmt)
     logging.info(f"Registered {engine_name} metrics exposition text callback")
 
 
-def get_prometheus_exposition_text(
+def get_prometheus_expfmt(
     registry,
     metric_prefix_filter: Optional[str] = None,
 ) -> str:
@@ -102,11 +100,11 @@ def get_prometheus_exposition_text(
 
     Example:
         from prometheus_client import REGISTRY
-        metrics_text = get_prometheus_exposition_text(REGISTRY)
+        metrics_text = get_prometheus_expfmt(REGISTRY)
         print(metrics_text)
 
         # With filter
-        vllm_metrics = get_prometheus_exposition_text(REGISTRY, metric_prefix_filter="vllm:")
+        vllm_metrics = get_prometheus_expfmt(REGISTRY, metric_prefix_filter="vllm:")
     """
     try:
         from prometheus_client import generate_latest

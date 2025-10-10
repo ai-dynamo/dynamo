@@ -37,7 +37,7 @@ Note: Each histogram metric produces multiple time series (_bucket, _count, _sum
 but in vLLM's HELP text, they document only the base metric name.
 
 The metrics are exposed via the `register_engine_metrics_callback()` function which uses
-`get_prometheus_exposition_text()` to fetch and filter metrics by prefix.
+`get_prometheus_expfmt()` to fetch and filter metrics by prefix.
 -->
 
 ## vLLM Engine Metrics

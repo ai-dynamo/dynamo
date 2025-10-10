@@ -345,17 +345,17 @@ impl DistributedRuntime {
     }
 
     /// Add a Prometheus exposition text callback that returns Prometheus text for the given hierarchies
-    pub fn register_prometheus_exposition_text_callback(
+    pub fn register_prometheus_expfmt_callback(
         &self,
         hierarchies: Vec<String>,
-        callback: crate::PrometheusExpositionTextCallback,
+        callback: crate::PrometheusExpositionFormatCallback,
     ) {
         let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
         for hierarchy in &hierarchies {
             registries
                 .entry(hierarchy.clone())
                 .or_default()
-                .add_prometheus_exposition_text_callback(callback.clone());
+                .add_prometheus_expfmt_callback(callback.clone());
         }
     }
 

@@ -36,7 +36,7 @@ To update this document with the latest SGLang metrics:
 Note: SGLang uses multiprocess metrics collection via prometheus_client.multiprocess.MultiProcessCollector
 
 The metrics are exposed via the `register_engine_metrics_callback()` function which uses
-`get_prometheus_exposition_text()` to fetch and filter metrics by prefix.
+`get_prometheus_expfmt()` to fetch and filter metrics by prefix.
 -->
 
 ## SGLang Engine Metrics

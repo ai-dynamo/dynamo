@@ -252,7 +252,7 @@ class RuntimeMetrics:
         """
         ...
 
-    def register_prometheus_exposition_text_callback(self, callback: Callable[[], str]) -> None:
+    def register_prometheus_expfmt_callback(self, callback: Callable[[], str]) -> None:
         """
         Register a Python callback that returns Prometheus exposition text.
         The returned text will be appended to the /metrics endpoint output.
@@ -270,7 +270,7 @@ class RuntimeMetrics:
                 # Fetch metrics from external source
                 return "# HELP external_metric Some metric\\nexternal_metric 42.0\\n"
 
-            metrics.register_prometheus_exposition_text_callback(get_external_metrics)
+            metrics.register_prometheus_expfmt_callback(get_external_metrics)
             ```
         """
         ...

@@ -91,7 +91,7 @@ pub struct Runtime {
 type PrometheusUpdateCallback = Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync + 'static>;
 
 /// Type alias for exposition text callback functions that return Prometheus text
-type PrometheusExpositionTextCallback =
+type PrometheusExpositionFormatCallback =
     Arc<dyn Fn() -> anyhow::Result<String> + Send + Sync + 'static>;
 
 /// Structure to hold Prometheus registries and associated callbacks for a given hierarchy
@@ -101,7 +101,7 @@ pub struct MetricsRegistryEntry {
     /// List of update callbacks invoked before metrics are scraped
     pub prometheus_update_callbacks: Vec<PrometheusUpdateCallback>,
     /// List of callbacks that return Prometheus exposition text to be appended to metrics output
-    pub prometheus_exposition_text_callbacks: Vec<PrometheusExpositionTextCallback>,
+    pub prometheus_expfmt_callbacks: Vec<PrometheusExpositionFormatCallback>,
 }
 
 impl MetricsRegistryEntry {
@@ -110,7 +110,7 @@ impl MetricsRegistryEntry {
         Self {
             prometheus_registry: prometheus::Registry::new(),
             prometheus_update_callbacks: Vec::new(),
-            prometheus_exposition_text_callbacks: Vec::new(),
+            prometheus_expfmt_callbacks: Vec::new(),
         }
     }
 
@@ -120,11 +120,11 @@ impl MetricsRegistryEntry {
     }
 
     /// Add an exposition text callback that returns Prometheus text
-    pub fn add_prometheus_exposition_text_callback(
+    pub fn add_prometheus_expfmt_callback(
         &mut self,
-        callback: PrometheusExpositionTextCallback,
+        callback: PrometheusExpositionFormatCallback,
     ) {
-        self.prometheus_exposition_text_callbacks.push(callback);
+        self.prometheus_expfmt_callbacks.push(callback);
     }
 
     /// Execute all update callbacks and return their results
@@ -136,9 +136,9 @@ impl MetricsRegistryEntry {
     }
 
     /// Execute all exposition text callbacks and return their concatenated text
-    pub fn execute_prometheus_exposition_text_callbacks(&self) -> String {
+    pub fn execute_prometheus_expfmt_callbacks(&self) -> String {
         let mut result = String::new();
-        for callback in &self.prometheus_exposition_text_callbacks {
+        for callback in &self.prometheus_expfmt_callbacks {
             match callback() {
                 Ok(text) => {
                     if !text.is_empty() {
@@ -176,7 +176,7 @@ impl Clone for MetricsRegistryEntry {
         Self {
             prometheus_registry: self.prometheus_registry.clone(),
             prometheus_update_callbacks: Vec::new(), // Callbacks cannot be cloned, so we start with an empty list
-            prometheus_exposition_text_callbacks: Vec::new(), // Callbacks cannot be cloned, so we start with an empty list
+            prometheus_expfmt_callbacks: Vec::new(), // Callbacks cannot be cloned, so we start with an empty list
         }
     }
 }

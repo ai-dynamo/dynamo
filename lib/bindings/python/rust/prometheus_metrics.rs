@@ -678,7 +678,7 @@ impl PyRuntimeMetrics {
     /// Register a Python callback that returns Prometheus exposition text
     /// The returned text will be appended to the /metrics endpoint output
     /// The callback should return a string in Prometheus text exposition format
-    fn register_prometheus_exposition_text_callback(
+    fn register_prometheus_expfmt_callback(
         &self,
         callback: PyObject,
         _py: Python,
@@ -686,7 +686,7 @@ impl PyRuntimeMetrics {
         let hierarchy = self.metricsregistry.hierarchy();
 
         // Store the callback in the DRT's metrics exposition text callback registry
-        self.metricsregistry.drt().register_prometheus_exposition_text_callback(
+        self.metricsregistry.drt().register_prometheus_expfmt_callback(
             vec![hierarchy.clone()],
             Arc::new(move || {
                 // Execute the Python callback in the Python event loop

@@ -213,7 +213,7 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     }
 
     // Get all metrics from DistributedRuntime (top-level)
-    let mut response = match state.drt().prometheus_metrics_fmt() {
+    let mut response = match state.drt().prometheus_expfmt() {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Failed to get metrics from registry: {}", e);
@@ -226,20 +226,20 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
 
     // Collect and append Prometheus exposition text from all hierarchies
     for hierarchy in &all_hierarchies {
-        let exposition_text = {
+        let expfmt = {
             let registries = state.drt().hierarchy_to_metricsregistry.read().unwrap();
             if let Some(entry) = registries.get(hierarchy) {
-                entry.execute_prometheus_exposition_text_callbacks()
+                entry.execute_prometheus_expfmt_callbacks()
             } else {
                 String::new()
             }
         };
 
-        if !exposition_text.is_empty() {
+        if !expfmt.is_empty() {
             if !response.ends_with('\n') {
                 response.push('\n');
             }
-            response.push_str(&exposition_text);
+            response.push_str(&expfmt);
         }
     }
 
@@ -322,7 +322,7 @@ mod integration_tests {
             // so we don't need to create it again here
 
             // The uptime_seconds metric should already be registered and available
-            let response = drt.prometheus_metrics_fmt().unwrap();
+            let response = drt.prometheus_expfmt().unwrap();
             println!("Full metrics response:\n{}", response);
 
             // Filter out NATS client metrics for comparison
