@@ -5,13 +5,14 @@
 
 use super::*;
 use crate::logging::{DistributedTraceContext, get_distributed_tracing_context};
-use crate::{Result, protocols::maybe_error::MaybeError};
 use crate::pipeline::network::{
+    ConnectionInfo, NetworkStreamWrapper, PendingConnections, ResponseStream, STREAM_ERR_MSG,
+    StreamOptions,
     codec::{TwoPartCodec, TwoPartMessage},
     request_plane::{Headers, RequestPlaneClient},
-    ConnectionInfo, NetworkStreamWrapper, PendingConnections, ResponseStream, StreamOptions, STREAM_ERR_MSG,
 };
-use crate::pipeline::{AddressedRequest, Error, ManyOut, SingleIn, Data, AsyncEngine};
+use crate::pipeline::{AddressedRequest, AsyncEngine, Data, Error, ManyOut, SingleIn};
+use crate::{Result, protocols::maybe_error::MaybeError};
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -19,8 +20,8 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::StreamExt;
-use tracing::Instrument;
 use tracing as log;
+use tracing::Instrument;
 
 /// Default timeout for HTTP requests (ack only, not full response)
 const DEFAULT_HTTP_REQUEST_TIMEOUT_SECS: u64 = 5;
@@ -297,4 +298,3 @@ mod tests {
         assert!(result.is_err());
     }
 }
-

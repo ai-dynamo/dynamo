@@ -238,8 +238,8 @@ where
 
         // Get the address based on transport type
         let address = {
-            use crate::config::RequestPlaneMode;
             use crate::component::TransportType;
+            use crate::config::RequestPlaneMode;
 
             let mode = RequestPlaneMode::from_env();
             if mode.is_http() {

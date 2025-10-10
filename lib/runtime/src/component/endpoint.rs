@@ -143,8 +143,8 @@ impl EndpointConfigBuilder {
             // Build transport based on request plane mode
             let transport = if request_plane_mode.is_http() {
                 // For HTTP mode, construct the HTTP endpoint URL
-                let http_host = std::env::var("DYN_HTTP_RPC_HOST")
-                    .unwrap_or_else(|_| "0.0.0.0".to_string());
+                let http_host =
+                    std::env::var("DYN_HTTP_RPC_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
                 let http_port = std::env::var("DYN_HTTP_RPC_PORT")
                     .ok()
                     .and_then(|p| p.parse::<u16>().ok())
@@ -152,7 +152,8 @@ impl EndpointConfigBuilder {
                 let rpc_root = std::env::var("DYN_HTTP_RPC_ROOT_PATH")
                     .unwrap_or_else(|_| "/v1/dynamo".to_string());
 
-                let http_endpoint = format!("http://{}:{}{}/{}", http_host, http_port, rpc_root, subject);
+                let http_endpoint =
+                    format!("http://{}:{}{}/{}", http_host, http_port, rpc_root, subject);
                 let tcp_endpoint = format!("{}:{}", http_host, http_port);
 
                 TransportType::HttpTcp {
@@ -233,8 +234,8 @@ impl EndpointConfigBuilder {
             // HTTP mode - use HttpEndpoint
             use crate::pipeline::network::ingress::http_endpoint::HttpEndpoint;
 
-            let http_host = std::env::var("DYN_HTTP_RPC_HOST")
-                .unwrap_or_else(|_| "0.0.0.0".to_string());
+            let http_host =
+                std::env::var("DYN_HTTP_RPC_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
             let http_port = std::env::var("DYN_HTTP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
@@ -308,8 +309,8 @@ impl EndpointConfigBuilder {
 
         // Build transport for etcd registration based on request plane mode
         let transport = if request_plane_mode.is_http() {
-            let http_host = std::env::var("DYN_HTTP_RPC_HOST")
-                .unwrap_or_else(|_| "0.0.0.0".to_string());
+            let http_host =
+                std::env::var("DYN_HTTP_RPC_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
             let http_port = std::env::var("DYN_HTTP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
@@ -317,7 +318,8 @@ impl EndpointConfigBuilder {
             let rpc_root = std::env::var("DYN_HTTP_RPC_ROOT_PATH")
                 .unwrap_or_else(|_| "/v1/dynamo".to_string());
 
-            let http_endpoint = format!("http://{}:{}{}/{}", http_host, http_port, rpc_root, subject);
+            let http_endpoint =
+                format!("http://{}:{}{}/{}", http_host, http_port, rpc_root, subject);
             let tcp_endpoint = format!("{}:{}", http_host, http_port);
 
             TransportType::HttpTcp {

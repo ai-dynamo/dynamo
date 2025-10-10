@@ -154,7 +154,7 @@ export FRAMEWORK=VLLM
 ./container/build.sh --framework $FRAMEWORK
 # Now you have a development image dynamo:latest-vllm
 
-./container/build.sh --dev-image dynamo:latest-${FRAMEWORK,,}
+./container/build.sh --dev-image dynamo:latest-${FRAMEWORK}
 # Now you have a local-dev image dynamo:latest-vllm-local-dev
 ```
 

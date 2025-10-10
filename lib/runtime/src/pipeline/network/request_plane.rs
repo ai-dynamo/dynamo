@@ -63,4 +63,3 @@ impl RequestMessage {
         Self { payload, headers }
     }
 }
-

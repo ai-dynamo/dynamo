@@ -91,11 +91,26 @@ mod tests {
 
     #[test]
     fn test_request_plane_mode_from_str() {
-        assert_eq!("nats".parse::<RequestPlaneMode>().unwrap(), RequestPlaneMode::Nats);
-        assert_eq!("http".parse::<RequestPlaneMode>().unwrap(), RequestPlaneMode::Http);
-        assert_eq!("http2".parse::<RequestPlaneMode>().unwrap(), RequestPlaneMode::Http);
-        assert_eq!("NATS".parse::<RequestPlaneMode>().unwrap(), RequestPlaneMode::Nats);
-        assert_eq!("HTTP".parse::<RequestPlaneMode>().unwrap(), RequestPlaneMode::Http);
+        assert_eq!(
+            "nats".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Nats
+        );
+        assert_eq!(
+            "http".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Http
+        );
+        assert_eq!(
+            "http2".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Http
+        );
+        assert_eq!(
+            "NATS".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Nats
+        );
+        assert_eq!(
+            "HTTP".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Http
+        );
         assert!("invalid".parse::<RequestPlaneMode>().is_err());
     }
 
@@ -118,4 +133,3 @@ mod tests {
         assert!(!RequestPlaneMode::Http.is_nats());
     }
 }
-

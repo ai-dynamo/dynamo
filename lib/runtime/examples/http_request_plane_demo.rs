@@ -41,8 +41,8 @@ use dynamo_runtime::{
     engine::{AsyncEngine, AsyncEngineContextProvider},
     logging,
     pipeline::{
-        Error, ManyOut, SingleIn,
-        network::Ingress, ResponseStream,
+        Error, ManyOut, ResponseStream, SingleIn,
+        network::Ingress,
         network::egress::push_router::{PushRouter, RouterMode},
     },
     protocols::maybe_error::MaybeError,
@@ -82,7 +82,10 @@ struct EchoEngine {
 
 #[async_trait::async_trait]
 impl AsyncEngine<SingleIn<EchoRequest>, ManyOut<EchoResponse>, Error> for EchoEngine {
-    async fn generate(&self, request: SingleIn<EchoRequest>) -> Result<ManyOut<EchoResponse>, Error> {
+    async fn generate(
+        &self,
+        request: SingleIn<EchoRequest>,
+    ) -> Result<ManyOut<EchoResponse>, Error> {
         let (req, context) = request.transfer(());
         let engine_ctx = context.context();
 
@@ -122,13 +125,12 @@ async fn server_app(runtime: Runtime) -> Result<()> {
     tracing::info!("Request plane mode: {}", mode);
 
     if mode.is_nats() {
-        tracing::warn!(
-            "Running in NATS mode. Set DYN_REQUEST_PLANE=http to use HTTP mode."
-        );
+        tracing::warn!("Running in NATS mode. Set DYN_REQUEST_PLANE=http to use HTTP mode.");
     } else {
         let host = std::env::var("DYN_HTTP_RPC_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
         let port = std::env::var("DYN_HTTP_RPC_PORT").unwrap_or_else(|_| "8081".to_string());
-        let root_path = std::env::var("DYN_HTTP_RPC_ROOT_PATH").unwrap_or_else(|_| "/v1/dynamo".to_string());
+        let root_path =
+            std::env::var("DYN_HTTP_RPC_ROOT_PATH").unwrap_or_else(|_| "/v1/dynamo".to_string());
 
         tracing::info!("✓ Running in HTTP/2 mode");
         tracing::info!("HTTP RPC endpoint: http://{}:{}{}", host, port, root_path);
@@ -136,8 +138,12 @@ async fn server_app(runtime: Runtime) -> Result<()> {
         // Note about curl testing
         tracing::info!("\n📋 To test the HTTP endpoint:");
         tracing::info!("   Run the client: cargo run --example http_request_plane_demo -- client");
-        tracing::info!("\n   Note: Direct curl testing requires encoding the request with TwoPartCodec,");
-        tracing::info!("   which includes control headers + request payload. Use the client instead.\n");
+        tracing::info!(
+            "\n   Note: Direct curl testing requires encoding the request with TwoPartCodec,"
+        );
+        tracing::info!(
+            "   which includes control headers + request payload. Use the client instead.\n"
+        );
     }
 
     // Create echo engine
@@ -182,11 +188,9 @@ async fn client_app(runtime: Runtime) -> Result<()> {
     tracing::info!("✓ Worker instances available");
 
     // Create router
-    let router = PushRouter::<EchoRequest, EchoResponse>::from_client(
-        client,
-        RouterMode::RoundRobin,
-    )
-    .await?;
+    let router =
+        PushRouter::<EchoRequest, EchoResponse>::from_client(client, RouterMode::RoundRobin)
+            .await?;
 
     // Send multiple requests
     tracing::info!("\n🚀 Sending requests...\n");
@@ -217,5 +221,3 @@ async fn client_app(runtime: Runtime) -> Result<()> {
 
     Ok(())
 }
-
-

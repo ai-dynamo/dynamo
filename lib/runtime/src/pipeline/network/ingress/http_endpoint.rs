@@ -176,20 +176,18 @@ async fn handle_request(
         tracing::trace!(instance_id, "handling new HTTP request");
         let result = service_handler
             .handle_payload(body)
-            .instrument(
-                tracing::info_span!(
-                    "handle_payload",
-                    component = component_name.as_ref(),
-                    endpoint = endpoint_name.as_ref(),
-                    namespace = namespace.as_ref(),
-                    instance_id = instance_id,
-                    trace_id = traceparent.trace_id,
-                    parent_id = traceparent.parent_id,
-                    x_request_id = traceparent.x_request_id,
-                    x_dynamo_request_id = traceparent.x_dynamo_request_id,
-                    tracestate = traceparent.tracestate
-                ),
-            )
+            .instrument(tracing::info_span!(
+                "handle_payload",
+                component = component_name.as_ref(),
+                endpoint = endpoint_name.as_ref(),
+                namespace = namespace.as_ref(),
+                instance_id = instance_id,
+                trace_id = traceparent.trace_id,
+                parent_id = traceparent.parent_id,
+                x_request_id = traceparent.x_request_id,
+                x_dynamo_request_id = traceparent.x_dynamo_request_id,
+                tracestate = traceparent.tracestate
+            ))
             .await;
         match result {
             Ok(_) => {
@@ -245,7 +243,7 @@ impl TraceParent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::{PipelineError, SingleIn, ManyOut};
+    use crate::pipeline::{ManyOut, PipelineError, SingleIn};
     use bytes::Bytes;
 
     struct MockHandler;
@@ -295,4 +293,3 @@ mod tests {
         assert_eq!(traceparent.x_dynamo_request_id, Some("dyn-456".to_string()));
     }
 }
-

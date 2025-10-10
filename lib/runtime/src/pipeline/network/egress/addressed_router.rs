@@ -5,8 +5,8 @@ use async_nats::client::Client;
 use async_nats::{HeaderMap, HeaderValue};
 use tracing as log;
 
+use super::http_router::{HttpAddressedRouter, HttpRequestClient};
 use super::*;
-use super::http_router::{HttpRequestClient, HttpAddressedRouter};
 use crate::config::RequestPlaneMode;
 use crate::logging::DistributedTraceContext;
 use crate::logging::get_distributed_tracing_context;
@@ -225,9 +225,7 @@ where
                 }
 
                 use crate::pipeline::network::request_plane::RequestPlaneClient;
-                let _response = http_client
-                    .send_request(address, buffer, headers)
-                    .await?;
+                let _response = http_client.send_request(address, buffer, headers).await?;
             }
         }
 
