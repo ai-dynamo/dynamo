@@ -12,9 +12,7 @@ use super::{
     ContentProvider, OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider,
     OpenAIStopConditionsProvider,
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
-    common_ext::{
-        CommonExt, CommonExtProvider, choose_with_deprecation, emit_nvext_deprecation_warning,
-    },
+    common_ext::{CommonExt, CommonExtProvider},
     nvext::{NvExt, NvExtProvider},
     validate,
 };
@@ -149,88 +147,39 @@ impl CommonExtProvider for NvCreateCompletionRequest {
 
     /// Guided Decoding Options
     fn get_guided_json(&self) -> Option<&serde_json::Value> {
-        // Note: This one needs special handling since it returns a reference
-        if let Some(nvext) = &self.nvext
-            && nvext.guided_json.is_some()
-        {
-            emit_nvext_deprecation_warning("guided_json", true, self.common.guided_json.is_some());
-        }
-        self.common
-            .guided_json
-            .as_ref()
-            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_json.as_ref()))
+        self.common.guided_json.as_ref()
     }
 
     fn get_guided_regex(&self) -> Option<String> {
-        choose_with_deprecation(
-            "guided_regex",
-            self.common.guided_regex.as_ref(),
-            self.nvext.as_ref().and_then(|nv| nv.guided_regex.as_ref()),
-        )
+        self.common.guided_regex.clone()
     }
 
     fn get_guided_grammar(&self) -> Option<String> {
-        choose_with_deprecation(
-            "guided_grammar",
-            self.common.guided_grammar.as_ref(),
-            self.nvext
-                .as_ref()
-                .and_then(|nv| nv.guided_grammar.as_ref()),
-        )
+        self.common.guided_grammar.clone()
     }
 
     fn get_guided_choice(&self) -> Option<Vec<String>> {
-        choose_with_deprecation(
-            "guided_choice",
-            self.common.guided_choice.as_ref(),
-            self.nvext.as_ref().and_then(|nv| nv.guided_choice.as_ref()),
-        )
+        self.common.guided_choice.clone()
     }
 
     fn get_guided_decoding_backend(&self) -> Option<String> {
-        choose_with_deprecation(
-            "guided_decoding_backend",
-            self.common.guided_decoding_backend.as_ref(),
-            self.nvext
-                .as_ref()
-                .and_then(|nv| nv.guided_decoding_backend.as_ref()),
-        )
+        self.common.guided_decoding_backend.clone()
     }
 
     fn get_guided_whitespace_pattern(&self) -> Option<String> {
-        choose_with_deprecation(
-            "guided_whitespace_pattern",
-            self.common.guided_whitespace_pattern.as_ref(),
-            self.nvext
-                .as_ref()
-                .and_then(|nv| nv.guided_whitespace_pattern.as_ref()),
-        )
+        self.common.guided_whitespace_pattern.clone()
     }
 
     fn get_top_k(&self) -> Option<i32> {
-        choose_with_deprecation(
-            "top_k",
-            self.common.top_k.as_ref(),
-            self.nvext.as_ref().and_then(|nv| nv.top_k.as_ref()),
-        )
+        self.common.top_k
     }
 
     fn get_min_p(&self) -> Option<f32> {
-        choose_with_deprecation(
-            "min_p",
-            self.common.min_p.as_ref(),
-            self.nvext.as_ref().and_then(|nv| nv.min_p.as_ref()),
-        )
+        self.common.min_p
     }
 
     fn get_repetition_penalty(&self) -> Option<f32> {
-        choose_with_deprecation(
-            "repetition_penalty",
-            self.common.repetition_penalty.as_ref(),
-            self.nvext
-                .as_ref()
-                .and_then(|nv| nv.repetition_penalty.as_ref()),
-        )
+        self.common.repetition_penalty
     }
 
     fn get_include_stop_str_in_output(&self) -> Option<bool> {
@@ -259,14 +208,9 @@ impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
         self.common.ignore_eos
     }
 
-    /// Get the effective ignore_eos value, considering both CommonExt and NvExt.
-    /// CommonExt (root-level) takes precedence over NvExt.
+    /// Get the effective ignore_eos value from CommonExt.
     fn get_ignore_eos(&self) -> Option<bool> {
-        choose_with_deprecation(
-            "ignore_eos",
-            self.get_common_ignore_eos().as_ref(),
-            NvExtProvider::nvext(self).and_then(|nv| nv.ignore_eos.as_ref()),
-        )
+        self.common.ignore_eos
     }
 }
 

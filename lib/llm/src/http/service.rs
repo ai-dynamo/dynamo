@@ -24,6 +24,7 @@ pub mod disconnect;
 pub mod error;
 pub mod health;
 pub mod metrics;
+pub mod openapi_docs;
 pub mod service_v2;
 
 pub use axum;

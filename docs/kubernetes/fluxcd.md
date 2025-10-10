@@ -1,6 +1,6 @@
 # GitOps Deployment with FluxCD
 
-This section describes how to use FluxCD for GitOps-based deployment of Dynamo inference graphs. GitOps enables you to manage your Dynamo deployments declaratively using Git as the source of truth. We'll use the [aggregated vLLM example](/components/backends/vllm/README.md) to demonstrate the workflow.
+This section describes how to use FluxCD for GitOps-based deployment of Dynamo inference graphs. GitOps enables you to manage your Dynamo deployments declaratively using Git as the source of truth. We'll use the [aggregated vLLM example](/docs/backends/vllm/README.md) to demonstrate the workflow.
 
 ## Prerequisites
 

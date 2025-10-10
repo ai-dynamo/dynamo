@@ -40,7 +40,7 @@ from dynamo.runtime import DistributedRuntime
 
 from . import __version__
 
-DYNAMO_NAMESPACE_ENV_VAR = "DYN_NAMESPACE"
+DYN_NAMESPACE_ENV_VAR = "DYN_NAMESPACE"
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +142,7 @@ def parse_args():
     parser.add_argument(
         "--namespace",
         type=str,
-        default=os.environ.get(DYNAMO_NAMESPACE_ENV_VAR),
+        default=os.environ.get(DYN_NAMESPACE_ENV_VAR),
         help="Dynamo namespace for model discovery scoping. If specified, models will only be discovered from this namespace. If not specified, discovers models from all namespaces (global discovery).",
     )
     parser.add_argument(

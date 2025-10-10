@@ -23,7 +23,7 @@ use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::storage::key_value_store::{
-    EtcdStorage, Key, KeyValueStore, KeyValueStoreManager,
+    EtcdStore, Key, KeyValueStore, KeyValueStoreManager,
 };
 use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned, transports::nats};
 use serde::{Deserialize, Serialize};
@@ -457,7 +457,7 @@ impl ModelDeploymentCard {
             // Should be impossible because we only get here on an etcd event
             anyhow::bail!("Missing etcd_client");
         };
-        let store: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client));
+        let store: Box<dyn KeyValueStore> = Box::new(EtcdStore::new(etcd_client));
         let card_store = Arc::new(KeyValueStoreManager::new(store));
         let Some(mut card) = card_store
             .load::<ModelDeploymentCard>(ROOT_PATH, mdc_key)

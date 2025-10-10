@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub use crate::component::Component;
+use crate::storage::key_value_store::{EtcdStore, KeyValueStore, MemoryStore};
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
     ErrorContext, RuntimeCallback,
@@ -44,10 +45,14 @@ impl DistributedRuntime {
 
         let runtime_clone = runtime.clone();
 
-        let etcd_client = if is_static {
-            None
+        let (etcd_client, store) = if is_static {
+            let store: Arc<dyn KeyValueStore> = Arc::new(MemoryStore::new());
+            (None, store)
         } else {
-            Some(etcd::Client::new(etcd_config.clone(), runtime_clone).await?)
+            let etcd_client = etcd::Client::new(etcd_config.clone(), runtime_clone).await?;
+            let store: Arc<dyn KeyValueStore> = Arc::new(EtcdStore::new(etcd_client.clone()));
+
+            (Some(etcd_client), store)
         };
 
         let nats_client = nats_config.clone().connect().await?;
@@ -77,6 +82,7 @@ impl DistributedRuntime {
         let distributed_runtime = Self {
             runtime,
             etcd_client,
+            store,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
@@ -270,6 +276,12 @@ impl DistributedRuntime {
         self.etcd_client.clone()
     }
 
+    /// An interface to store things. Will eventually replace `etcd_client`.
+    /// Currently does key-value, but will grow to include whatever we need to store.
+    pub fn store(&self) -> Arc<dyn KeyValueStore> {
+        self.store.clone()
+    }
+
     pub fn child_token(&self) -> CancellationToken {
         self.runtime.child_token()
     }
@@ -327,19 +339,6 @@ impl DistributedRuntime {
             Some(callbacks) => callbacks.iter().map(|callback| callback()).collect(),
             None => Vec::new(),
         }
-    }
-
-    /// Clear everything in etcd under a key.
-    /// todo: Remove as soon as we auto-delete the MDC.
-    pub async fn temp_clear_namespace(&self, name: &str) -> anyhow::Result<()> {
-        let Some(etcd_client) = self.etcd_client() else {
-            return Ok(()); // no etcd, nothing to clear
-        };
-        let kvs = etcd_client.kv_get_prefix(name).await?;
-        for kv in kvs {
-            etcd_client.kv_delete(kv.key(), None).await?;
-        }
-        Ok(())
     }
 
     /// Get all registered hierarchy keys. Private because it is only used for testing.

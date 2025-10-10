@@ -10,8 +10,6 @@ import pathlib
 from enum import Enum
 from typing import Any, Dict, Optional
 
-from dynamo.common._version import __version__
-
 from .environment import get_environment_vars
 from .system_info import (
     get_gpu_info,
@@ -77,6 +75,16 @@ def _get_vllm_version() -> Optional[str]:
         return None
 
 
+def _get_dynamo_version() -> str:
+    """Get Dynamo version."""
+    try:
+        from dynamo.common import __version__
+    except Exception:
+        __version__ = "0.0.0+unknown"
+
+    return __version__
+
+
 def dump_config(dump_config_to: Optional[str], config: Any) -> None:
     """
     Dump the configuration to a file or stdout.
@@ -131,7 +139,7 @@ def get_config_dump(config: Any, extra_info: Optional[Dict[str, Any]] = None) ->
             "environment": get_environment_vars(),
             "config": config,
             "runtime_info": get_runtime_info(),
-            "dynamo_version": __version__,
+            "dynamo_version": _get_dynamo_version(),
             "gpu_info": get_gpu_info(),
             "installed_packages": get_package_info(),
         }
