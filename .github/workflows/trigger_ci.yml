@@ -20,7 +20,7 @@ on:
     branches:
       - main
       - release/*.*.*
-      - "pull-request/[0-9]+"
+      # - "pull-request/[0-9]+"
     # Skip docs only changes
     paths-ignore:
       - '**.md'
