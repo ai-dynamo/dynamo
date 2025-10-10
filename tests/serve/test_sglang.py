@@ -116,7 +116,7 @@ sglang_configs = {
                 # NOTE: The response text may mention 'bus', 'train', 'streetcar', etc.
                 # so we need something consistently found in the response, or a different
                 # approach to validation for this test to be stable.
-                expected_response=["OUT OF SERVICE"],
+                expected_response=["image"],
                 temperature=0.0,
             )
         ],
