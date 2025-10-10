@@ -1405,6 +1405,10 @@ class DependencyExtractor:
             if "=" in line and any(
                 keyword in line for keyword in ["VERSION", "_REF", "_VER"]
             ):
+                # Skip lines with command substitution (runtime-determined versions)
+                if "$(" in line or "`" in line:
+                    continue
+
                 # Extract bash variable assignments
                 match = re.match(r'^\s*([A-Z_]+)="?([^"#\s]+)"?', line)
                 if match:
