@@ -10,6 +10,12 @@ This shows an alternative approach where:
 2. A background thread continuously updates metrics in a loop
 3. No callback is used - metrics are updated directly by the thread
 4. The metrics are automatically served via the /metrics endpoint
+
+Usage:
+    DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 ./server_with_loop.py
+
+    # In another terminal, query the metrics:
+    curl http://localhost:8081/metrics
 """
 
 import asyncio

@@ -10,6 +10,12 @@ This shows how Python code can:
 2. Register them with an endpoint
 3. Update their values using type-safe methods (set for gauges, inc for counters)
 4. The metrics are automatically served via the /metrics endpoint
+
+Usage:
+    DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 ./server_with_callback.py
+
+    # In another terminal, query the metrics:
+    curl http://localhost:8081/metrics
 """
 
 import asyncio
