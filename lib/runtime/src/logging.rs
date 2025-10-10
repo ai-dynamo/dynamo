@@ -70,24 +70,15 @@ use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::SpanData;
 use uuid::Uuid;
 
-// // OpenTelemetry imports
-// use opentelemetry::global;
-// use opentelemetry::trace::{TraceContextExt};
-// use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
-// use opentelemetry_otlp::WithExportConfig;
-// use tracing_opentelemetry::OpenTelemetrySpanExt;
-
-
 use opentelemetry::global;
 use opentelemetry::trace::{TraceContextExt};
 use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
 use opentelemetry_otlp::WithExportConfig;
-// use std::collections::HashMap;
+
 use std::time::Duration;
 use tracing::{info, instrument};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-// use std::fmt;
 
 
 /// ENV used to set the log level
