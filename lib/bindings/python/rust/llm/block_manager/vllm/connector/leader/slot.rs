@@ -7,6 +7,7 @@ use dynamo_llm::{
     block_manager::{
         Storage,
         block::{BlockMetadata, locality::LocalityProvider},
+        config::should_bypass_cpu_cache,
         connector::protocol::{LeaderTransferRequest, RequestType, TransferType},
         distributed::{BlockTransferPool, BlockTransferRequest, KvbmLeader},
     },
@@ -1277,11 +1278,6 @@ async fn process_offload_request(
     leader: &Arc<KvbmLeader>,
     kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
-    kvbm_metrics.offload_requests.inc();
-    kvbm_metrics
-        .offload_blocks_d2h
-        .inc_by(offload_req.block_ids.len() as u64);
-
     let request_id = &offload_req.request_id;
     let operation_id = &offload_req.operation_id;
 
@@ -1290,97 +1286,205 @@ async fn process_offload_request(
         offload_req.block_ids.len()
     );
 
-    // 1. Acquire mutable host blocks
-    let host_blocks = block_manager
-        .host()
-        .unwrap()
-        .allocate_blocks(offload_req.block_ids.len())
-        .await?;
-    let token_blocks = offload_req.token_blocks;
+    // Determine if we should bypass CPU memory (G2) and offload directly from GPU (G1) to Disk (G3)
+    let bypass_cpu_mem = should_bypass_cpu_cache();
 
-    let host_block_ids: Vec<usize> = host_blocks.iter().map(|b| b.block_id()).collect();
-    let block_pairs: Vec<(usize, usize)> = offload_req
-        .block_ids
-        .into_iter()
-        .zip(host_block_ids.into_iter())
-        .collect();
+    if bypass_cpu_mem {
+        // Direct G1 -> G3 path (Device to Disk, bypassing Host)
+        kvbm_metrics.offload_requests_d2d.inc();
+        kvbm_metrics
+            .offload_blocks_d2d
+            .inc_by(offload_req.block_ids.len() as u64);
 
-    tracing::debug!(
-        request_id = request_id,
-        operation_id = %operation_id,
-        "offload - stage 1 complete"
-    );
+        tracing::debug!(
+            request_id = request_id,
+            operation_id = %operation_id,
+            "offloading directly to disk (bypassing host)"
+        );
 
-    // 2. Apply token blocks
+        // 1. Acquire mutable disk blocks
+        let disk_blocks = block_manager
+            .disk()
+            .unwrap()
+            .allocate_blocks(offload_req.block_ids.len())
+            .await?;
+        let token_blocks = offload_req.token_blocks;
 
-    // create an iterator over the mutable blocks zipped with the token blocks
-    let mut blocks_to_register = Vec::new();
-    let zipped_blocks = host_blocks.into_iter().zip(token_blocks.into_iter());
+        let disk_block_ids: Vec<usize> = disk_blocks.iter().map(|b| b.block_id()).collect();
+        let block_pairs: Vec<(usize, usize)> = offload_req
+            .block_ids
+            .into_iter()
+            .zip(disk_block_ids.into_iter())
+            .collect();
 
-    // apply the token blocks to the mutable blocks
-    for (mut mutable_block, token_block) in zipped_blocks {
-        mutable_block
-            .apply_token_block(token_block.clone())
-            .map_err(|e| anyhow::anyhow!("failed to apply token block: {:?}", e))?;
+        tracing::debug!(
+            request_id = request_id,
+            operation_id = %operation_id,
+            "offload to disk - stage 1 complete"
+        );
 
-        blocks_to_register.push(mutable_block);
-    }
-    tracing::debug!(
-        request_id = request_id,
-        operation_id = %operation_id,
-        "offload - stage 2 complete"
-    );
+        // 2. Apply token blocks
+        let mut blocks_to_register = Vec::new();
+        let zipped_blocks = disk_blocks.into_iter().zip(token_blocks.into_iter());
 
-    // 3. Issue the offload request using `leader`
+        for (mut mutable_block, token_block) in zipped_blocks {
+            mutable_block
+                .apply_token_block(token_block.clone())
+                .map_err(|e| anyhow::anyhow!("failed to apply token block: {:?}", e))?;
 
-    let block_xfer_req = BlockTransferRequest {
-        from_pool: BlockTransferPool::Device,
-        to_pool: BlockTransferPool::Host,
-        blocks: block_pairs,
-        connector_req: Some(LeaderTransferRequest {
-            request_id: offload_req.request_id.clone(),
-            uuid: offload_req.operation_id,
-            requirement: None,
-            request_type: RequestType::Scheduled,
-        }),
-    };
-    let notify_receiver = leader.transfer_blocks_request(block_xfer_req).await?;
-    tracing::debug!(
-        request_id = request_id,
-        operation_id = %operation_id,
-        "offload - stage 3 complete"
-    );
-
-    // 4. Wait for the offload request to complete
-    match notify_receiver.await {
-        Ok(_) => {
-            tracing::debug!("Offloading transfer completed successfully");
+            blocks_to_register.push(mutable_block);
         }
-        Err(_) => {
-            return Err(anyhow::anyhow!(
-                "Offloading transfer completion notification failed"
-            ));
+        tracing::debug!(
+            request_id = request_id,
+            operation_id = %operation_id,
+            "offload to disk - stage 2 complete"
+        );
+
+        // 3. Issue the offload request using `leader` (Device to Disk)
+        let block_xfer_req = BlockTransferRequest {
+            from_pool: BlockTransferPool::Device,
+            to_pool: BlockTransferPool::Disk,
+            blocks: block_pairs,
+            connector_req: Some(LeaderTransferRequest {
+                request_id: offload_req.request_id.clone(),
+                uuid: offload_req.operation_id,
+                requirement: None,
+                request_type: RequestType::Scheduled,
+            }),
+        };
+        let notify_receiver = leader.transfer_blocks_request(block_xfer_req).await?;
+        tracing::debug!(
+            request_id = request_id,
+            operation_id = %operation_id,
+            "offload to disk - stage 3 complete"
+        );
+
+        // 4. Wait for the offload request to complete
+        match notify_receiver.await {
+            Ok(_) => {
+                tracing::debug!("Offloading transfer to disk completed successfully");
+            }
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "Offloading transfer completion notification failed"
+                ));
+            }
         }
+        tracing::debug!(
+            request_id = request_id,
+            operation_id = %operation_id,
+            "offload to disk - stage 4 complete"
+        );
+
+        // 5. Register the mutable blocks
+        let immutable_blocks = block_manager
+            .disk()
+            .unwrap()
+            .register_blocks(blocks_to_register)
+            .await?;
+
+        tracing::debug!(
+            request_id = request_id,
+            operation_id = %operation_id,
+            "registered {} blocks to disk",
+            immutable_blocks.len()
+        );
+    } else {
+        // Standard path: G1 -> G2 (Device to Host)
+        kvbm_metrics.offload_requests_d2h.inc();
+        kvbm_metrics
+            .offload_blocks_d2h
+            .inc_by(offload_req.block_ids.len() as u64);
+
+        // 1. Acquire mutable host blocks
+        let host_blocks = block_manager
+            .host()
+            .unwrap()
+            .allocate_blocks(offload_req.block_ids.len())
+            .await?;
+        let token_blocks = offload_req.token_blocks;
+
+        let host_block_ids: Vec<usize> = host_blocks.iter().map(|b| b.block_id()).collect();
+        let block_pairs: Vec<(usize, usize)> = offload_req
+            .block_ids
+            .into_iter()
+            .zip(host_block_ids.into_iter())
+            .collect();
+
+        tracing::debug!(
+            request_id = request_id,
+            operation_id = %operation_id,
+            "offload to host - stage 1 complete"
+        );
+
+        // 2. Apply token blocks
+        let mut blocks_to_register = Vec::new();
+        let zipped_blocks = host_blocks.into_iter().zip(token_blocks.into_iter());
+
+        for (mut mutable_block, token_block) in zipped_blocks {
+            mutable_block
+                .apply_token_block(token_block.clone())
+                .map_err(|e| anyhow::anyhow!("failed to apply token block: {:?}", e))?;
+
+            blocks_to_register.push(mutable_block);
+        }
+        tracing::debug!(
+            request_id = request_id,
+            operation_id = %operation_id,
+            "offload to host - stage 2 complete"
+        );
+
+        // 3. Issue the offload request using `leader`
+        let block_xfer_req = BlockTransferRequest {
+            from_pool: BlockTransferPool::Device,
+            to_pool: BlockTransferPool::Host,
+            blocks: block_pairs,
+            connector_req: Some(LeaderTransferRequest {
+                request_id: offload_req.request_id.clone(),
+                uuid: offload_req.operation_id,
+                requirement: None,
+                request_type: RequestType::Scheduled,
+            }),
+        };
+        let notify_receiver = leader.transfer_blocks_request(block_xfer_req).await?;
+        tracing::debug!(
+            request_id = request_id,
+            operation_id = %operation_id,
+            "offload to host - stage 3 complete"
+        );
+
+        // 4. Wait for the offload request to complete
+        match notify_receiver.await {
+            Ok(_) => {
+                tracing::debug!("Offloading transfer to host completed successfully");
+            }
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "Offloading transfer completion notification failed"
+                ));
+            }
+        }
+        tracing::debug!(
+            request_id = request_id,
+            operation_id = %operation_id,
+            "offload to host - stage 4 complete"
+        );
+
+        // 5. Register the mutable blocks
+        let immutable_blocks = block_manager
+            .host()
+            .unwrap()
+            .register_blocks(blocks_to_register)
+            .await?;
+
+        tracing::debug!(
+            request_id = request_id,
+            operation_id = %operation_id,
+            "registered {} blocks to host",
+            immutable_blocks.len()
+        );
     }
-    tracing::debug!(
-        request_id = request_id,
-        operation_id = %operation_id,
-        "offload - stage 4 complete"
-    );
 
-    // 5. Register the mutable blocks
-    let immutable_blocks = block_manager
-        .host()
-        .unwrap()
-        .register_blocks(blocks_to_register)
-        .await?;
-
-    tracing::debug!(
-        request_id = request_id,
-        operation_id = %operation_id,
-        "registered {} blocks",
-        immutable_blocks.len()
-    );
     Ok(())
 }
 

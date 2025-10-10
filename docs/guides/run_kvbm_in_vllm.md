@@ -55,11 +55,22 @@ cd $DYNAMO_HOME/components/backends/vllm
 cd $DYNAMO_HOME/components/backends/vllm
 ./launch/disagg_kvbm_2p2d.sh
 ```
-> [!NOTE]
-> To tune the size of CPU or disk cache, set `DYN_KVBM_CPU_CACHE_GB` and `DYN_KVBM_DISK_CACHE_GB` accordingly. We only set `DYN_KVBM_CPU_CACHE_GB=20` in both scripts above.
 
 > [!NOTE]
-> `DYN_KVBM_CPU_CACHE_GB` must be set and `DYN_KVBM_DISK_CACHE_GB` is optional.
+> Configure KVBM cache tiers (choose one of the following options):
+> ```bash
+> # Option 1: CPU cache only (GPU -> CPU offloading)
+> export DYN_KVBM_CPU_CACHE_GB=4
+>
+> # Option 2: Disk cache only (GPU -> Disk direct offloading, bypassing CPU)
+> export DYN_KVBM_DISK_CACHE_GB=8
+>
+> # Option 3: Both CPU and Disk cache (GPU -> CPU -> Disk tiered offloading)
+> export DYN_KVBM_CPU_CACHE_GB=4
+> export DYN_KVBM_DISK_CACHE_GB=8
+>
+> You can also use "DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS" or
+> "DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS" to specify exact block counts instead of GB
 
 ### Sample Request
 ```bash

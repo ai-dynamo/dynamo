@@ -24,9 +24,8 @@ To learn what KVBM is, please check [here](https://docs.nvidia.com/dynamo/latest
 > [!Note]
 > - Ensure that `etcd` and `nats` are running before starting.
 > - KVBM does not currently support CUDA graphs in TensorRT-LLM.
-> - KVBM only supports TensorRT-LLM’s PyTorch backend.
-> - To enable disk cache offloading, you must first enable a CPU memory cache offloading.
-> - Disable partial reuse `enable_partial_reuse: false` in the LLM API config’s `kv_connector_config` to increase offloading cache hits.
+> - KVBM only supports TensorRT-LLM's PyTorch backend.
+> - Disable partial reuse `enable_partial_reuse: false` in the LLM API config's `kv_connector_config` to increase offloading cache hits.
 > - KVBM requires TensorRT-LLM v1.1.0rc5 or newer.
 > - Enabling KVBM metrics with TensorRT-LLM is still a work in progress.
 
@@ -44,13 +43,20 @@ docker compose -f deploy/docker-compose.yml up -d
 # launch the container
 ./container/run.sh --framework trtllm -it --mount-workspace --use-nixl-gds
 
-# enable kv offloading to CPU memory
-# 4 means 4GB of pinned CPU memory would be used
+# Configure KVBM cache tiers (choose one of the following options):
+
+# Option 1: CPU cache only (GPU -> CPU offloading)
 export DYN_KVBM_CPU_CACHE_GB=4
 
-# enable kv offloading to disk. Note: To enable disk cache offloading, you must first enable a CPU memory cache offloading.
-# 8 means 8GB of disk would be used
+# Option 2: Disk cache only (GPU -> Disk direct offloading, bypassing CPU)
 export DYN_KVBM_DISK_CACHE_GB=8
+
+# Option 3: Both CPU and Disk cache (GPU -> CPU -> Disk tiered offloading)
+export DYN_KVBM_CPU_CACHE_GB=4
+export DYN_KVBM_DISK_CACHE_GB=8
+
+# Note: You can also use DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS or
+# DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS to specify exact block counts instead of GB
 
 # Allocating memory and disk storage can take some time.
 # We recommend setting a higher timeout for leader–worker initialization.

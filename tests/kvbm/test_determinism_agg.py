@@ -49,6 +49,7 @@ class LLMServerManager:
         base_url: Optional[str] = None,
         port: Optional[int] = None,
         cpu_cache_blocks: Optional[int] = None,
+        disk_cache_blocks: Optional[int] = None,
         gpu_cache_blocks: Optional[int] = None,
         log_dir: Optional[Path] = None,
         server_type: Optional[str] = ServerType.vllm,
@@ -58,15 +59,14 @@ class LLMServerManager:
         self.base_url = base_url or f"http://localhost:{self.port}"
         self.process: Optional[subprocess.Popen] = None
         self.cpu_cache_blocks = cpu_cache_blocks
+        self.disk_cache_blocks = disk_cache_blocks
         self.gpu_cache_blocks = gpu_cache_blocks
 
         # Prepare logging
         self.log_dir = log_dir or Path(".")
         self.log_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        config_str = (
-            f"cpu{cpu_cache_blocks or 'default'}_gpu{gpu_cache_blocks or 'default'}"
-        )
+        config_str = f"cpu{cpu_cache_blocks or 'default'}_disk{disk_cache_blocks or 'default'}_gpu{gpu_cache_blocks or 'default'}"
         self.server_log_file = (
             self.log_dir / f"{self.server_type}_server_{config_str}_{timestamp}.log"
         )
@@ -87,6 +87,10 @@ class LLMServerManager:
         # CPU cache blocks override via env
         if cpu_cache_blocks is not None:
             self.env["DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS"] = str(cpu_cache_blocks)
+
+        # Disk cache blocks override via env
+        if disk_cache_blocks is not None:
+            self.env["DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS"] = str(disk_cache_blocks)
 
         if self.server_type == ServerType.vllm:
             self._set_up_vllm_config(gpu_cache_blocks)
@@ -305,12 +309,13 @@ def llm_server(request, runtime_services):
     """Start and stop a LLM server for each test with optional cache block overrides.
 
     To parametrize, use:
-      @pytest.mark.parametrize("llm_server", [{"cpu_blocks": 10000, "gpu_blocks": 2048}], indirect=True)
+      @pytest.mark.parametrize("llm_server", [{"cpu_blocks": 10000, "disk_blocks": 20000, "gpu_blocks": 2048}], indirect=True)
     """
     logger = logging.getLogger("pytest")
     logger.setLevel(logging.INFO)
 
     cpu_blocks = getattr(request, "param", {}).get("cpu_blocks", None)
+    disk_blocks = getattr(request, "param", {}).get("disk_blocks", None)
     gpu_blocks = getattr(request, "param", {}).get("gpu_blocks", None)
     port = getattr(request, "param", {}).get("port", None)
 
@@ -329,6 +334,7 @@ def llm_server(request, runtime_services):
     server_manager = LLMServerManager(
         port=port,
         cpu_cache_blocks=cpu_blocks,
+        disk_cache_blocks=disk_blocks,
         gpu_cache_blocks=gpu_blocks,
         log_dir=log_dir,
         server_type=server_type,
@@ -369,6 +375,31 @@ class TestDeterminismAgg(BaseTestDeterminism):
         self, tester, llm_server, runtime_services
     ):
         """Test determinism across cache reset: run test with warmup, reset cache, run again without warmup."""
+        # Call the base class implementation
+        super().base_test_determinism_with_cache_reset(
+            tester, llm_server, runtime_services
+        )
+
+    @pytest.mark.parametrize(
+        "llm_server",
+        [
+            {
+                "gpu_blocks": int(os.environ.get("KVBM_GPU_BLOCKS", "1000")),
+                "disk_blocks": int(os.environ.get("KVBM_DISK_BLOCKS", "10000")),
+            },
+        ],
+        indirect=True,
+    )
+    def test_determinism_agg_g1_to_g3_bypass(
+        self, tester, llm_server, runtime_services
+    ):
+        """Test determinism with G1->G3 direct offloading (bypassing G2/CPU).
+
+        This test verifies that when only disk cache is configured (no CPU cache),
+        KVBM correctly offloads from GPU (G1) directly to Disk (G3), bypassing
+        CPU memory (G2), and that onboarding from G3 back to G1 produces
+        deterministic results matching the baseline without offloading.
+        """
         # Call the base class implementation
         super().base_test_determinism_with_cache_reset(
             tester, llm_server, runtime_services

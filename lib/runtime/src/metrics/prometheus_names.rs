@@ -320,11 +320,23 @@ pub mod distributed_runtime {
 
 /// KVBM
 pub mod kvbm {
-    /// The number of offload requests
-    pub const OFFLOAD_REQUESTS: &str = "offload_requests";
+    /// The number of offload requests from device to host
+    pub const OFFLOAD_REQUESTS_D2H: &str = "offload_requests_d2h";
+
+    /// The number of offload requests from device to disk
+    pub const OFFLOAD_REQUESTS_D2D: &str = "offload_requests_d2d";
+
+    /// The number of offload requests from host to disk
+    pub const OFFLOAD_REQUESTS_H2D: &str = "offload_requests_h2d";
 
     /// The number of offload blocks from device to host
     pub const OFFLOAD_BLOCKS_D2H: &str = "offload_blocks_d2h";
+
+    /// The number of offload blocks from device to disk
+    pub const OFFLOAD_BLOCKS_D2D: &str = "offload_blocks_d2d";
+
+    /// The number of offload blocks from host to disk
+    pub const OFFLOAD_BLOCKS_H2D: &str = "offload_blocks_h2d";
 
     /// The number of onboard requests
     pub const ONBOARD_REQUESTS: &str = "onboard_requests";

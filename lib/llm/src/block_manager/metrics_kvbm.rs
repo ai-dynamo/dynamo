@@ -4,7 +4,8 @@
 use axum::Router;
 use dynamo_runtime::metrics::prometheus_names::{
     kvbm::{
-        MATCHED_TOKENS, OFFLOAD_BLOCKS_D2H, OFFLOAD_REQUESTS, ONBOARD_BLOCKS_D2D,
+        MATCHED_TOKENS, OFFLOAD_BLOCKS_D2D, OFFLOAD_BLOCKS_D2H, OFFLOAD_BLOCKS_H2D,
+        OFFLOAD_REQUESTS_D2D, OFFLOAD_REQUESTS_D2H, OFFLOAD_REQUESTS_H2D, ONBOARD_BLOCKS_D2D,
         ONBOARD_BLOCKS_H2D, ONBOARD_REQUESTS,
     },
     sanitize_prometheus_name,
@@ -17,11 +18,23 @@ use crate::http::service::{RouteDoc, metrics::router};
 
 #[derive(Clone, Debug)]
 pub struct KvbmMetrics {
-    // number of offload requests
-    pub offload_requests: IntCounter,
+    // number of offload requests from device to host
+    pub offload_requests_d2h: IntCounter,
+
+    // number of offload requests from device to disk
+    pub offload_requests_d2d: IntCounter,
+
+    // number of offload requests from host to disk
+    pub offload_requests_h2d: IntCounter,
 
     // number of blocks offloaded from device to host
     pub offload_blocks_d2h: IntCounter,
+
+    // number of blocks offloaded from device to disk
+    pub offload_blocks_d2d: IntCounter,
+
+    // number of blocks offloaded from host to disk
+    pub offload_blocks_h2d: IntCounter,
 
     // number of onboard requests
     pub onboard_requests: IntCounter,
@@ -43,13 +56,45 @@ impl KvbmMetrics {
     /// Non-blocking: the HTTP server runs on a background task.
     pub fn new(mr: &KvbmMetricsRegistry, create_endpoint: bool, metrics_port: u16) -> Self {
         // 1) register kvbm metrics
-        let offload_requests = mr
-            .create_intcounter(OFFLOAD_REQUESTS, "The number of offload requests", &[])
+        let offload_requests_d2h = mr
+            .create_intcounter(
+                OFFLOAD_REQUESTS_D2H,
+                "The number of offload requests from device to host",
+                &[],
+            )
+            .unwrap();
+        let offload_requests_d2d = mr
+            .create_intcounter(
+                OFFLOAD_REQUESTS_D2D,
+                "The number of offload requests from device to disk",
+                &[],
+            )
+            .unwrap();
+        let offload_requests_h2d = mr
+            .create_intcounter(
+                OFFLOAD_REQUESTS_H2D,
+                "The number of offload requests from host to disk",
+                &[],
+            )
             .unwrap();
         let offload_blocks_d2h = mr
             .create_intcounter(
                 OFFLOAD_BLOCKS_D2H,
                 "The number of offload blocks from device to host",
+                &[],
+            )
+            .unwrap();
+        let offload_blocks_d2d = mr
+            .create_intcounter(
+                OFFLOAD_BLOCKS_D2D,
+                "The number of offload blocks from device to disk",
+                &[],
+            )
+            .unwrap();
+        let offload_blocks_h2d = mr
+            .create_intcounter(
+                OFFLOAD_BLOCKS_H2D,
+                "The number of offload blocks from host to disk",
                 &[],
             )
             .unwrap();
@@ -77,8 +122,12 @@ impl KvbmMetrics {
         // early return if no endpoint is needed
         if !create_endpoint {
             return Self {
-                offload_requests,
+                offload_requests_d2h,
+                offload_requests_d2d,
+                offload_requests_h2d,
                 offload_blocks_d2h,
+                offload_blocks_d2d,
+                offload_blocks_h2d,
                 onboard_requests,
                 onboard_blocks_h2d,
                 onboard_blocks_d2d,
@@ -131,8 +180,12 @@ impl KvbmMetrics {
         }
 
         Self {
-            offload_requests,
+            offload_requests_d2h,
+            offload_requests_d2d,
+            offload_requests_h2d,
             offload_blocks_d2h,
+            offload_blocks_d2d,
+            offload_blocks_h2d,
             onboard_requests,
             onboard_blocks_h2d,
             onboard_blocks_d2d,
