@@ -88,7 +88,7 @@ impl ActiveSequences {
         }
     }
 
-    fn add_block(&mut self, block: &SequenceHash) -> Arc<()> {
+    fn touch_block(&mut self, block: &SequenceHash) -> Arc<()> {
         if let Some(weak) = self.unique_blocks.get(block)
             && let Some(arc) = weak.upgrade()
         {
@@ -100,7 +100,7 @@ impl ActiveSequences {
         arc
     }
 
-    fn remove_block(&mut self, block: &SequenceHash) {
+    fn try_remove_block(&mut self, block: &SequenceHash) {
         if let Some(weak) = self.unique_blocks.get(block)
             && weak.strong_count() == 0
         {
@@ -137,7 +137,7 @@ impl ActiveSequences {
         if let Some(sequence) = token_sequence {
             let sequence_with_refs: Vec<(SequenceHash, Arc<()>)> = sequence
                 .iter()
-                .map(|block| (*block, self.add_block(block)))
+                .map(|block| (*block, self.touch_block(block)))
                 .collect();
             self.active_seqs
                 .insert(request_id.clone(), sequence_with_refs);
@@ -211,7 +211,7 @@ impl ActiveSequences {
         // Drop each Arc reference, then clean up the corresponding weak reference
         for (block_hash, arc) in token_seq {
             drop(arc);
-            self.remove_block(&block_hash);
+            self.try_remove_block(&block_hash);
         }
 
         self.active_blocks()
