@@ -12,7 +12,10 @@ from prometheus_client import CollectorRegistry, multiprocess
 
 from dynamo._core import Endpoint
 from dynamo.common.config_dump import dump_config
-from dynamo.common.prometheus_utils import register_engine_metrics_callback
+from dynamo.common.prometheus_utils import (
+    is_engine_metrics_callback_enabled,
+    register_engine_metrics_callback,
+)
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -70,6 +73,11 @@ async def worker(runtime: DistributedRuntime):
 async def init(runtime: DistributedRuntime, config: Config):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
+    # Enable SGLang metrics if engine metrics callback is enabled. If this is not set
+    # and then you try to gather registry via MultiProcessCollector, it will fail.
+    if is_engine_metrics_callback_enabled():
+        server_args.enable_metrics = True
+
     engine = sgl.Engine(server_args=server_args)
 
     component = runtime.namespace(dynamo_args.namespace).component(
@@ -103,9 +111,12 @@ async def init(runtime: DistributedRuntime, config: Config):
     # Setup SGLang metrics passthrough via callback for aggregated mode
     # This callback pulls from the full Prometheus MultiProcessCollector registry
     # which includes all SGLang metrics (scheduler, tokenizer, function latencies, etc.)
-    registry = CollectorRegistry()
-    multiprocess.MultiProcessCollector(registry)
-    register_engine_metrics_callback(generate_endpoint, registry, "sglang:", "SGLang")
+    if is_engine_metrics_callback_enabled():
+        registry = CollectorRegistry()
+        multiprocess.MultiProcessCollector(registry)
+        register_engine_metrics_callback(
+            generate_endpoint, registry, "sglang:", "SGLang"
+        )
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()

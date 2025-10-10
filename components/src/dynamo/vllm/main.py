@@ -8,14 +8,16 @@ import signal
 from typing import Optional
 
 import uvloop
-from prometheus_client import REGISTRY
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo._core import Endpoint
 from dynamo.common.config_dump import dump_config
-from dynamo.common.prometheus_utils import register_engine_metrics_callback
+from dynamo.common.prometheus_utils import (
+    is_engine_metrics_callback_enabled,
+    register_engine_metrics_callback,
+)
 from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
@@ -290,7 +292,10 @@ async def init(runtime: DistributedRuntime, config: Config):
         handler.kv_publisher = kv_publisher
 
     # Setup vLLM metrics passthrough via callback
-    register_engine_metrics_callback(generate_endpoint, REGISTRY, "vllm:", "vLLM")
+    if is_engine_metrics_callback_enabled():
+        from prometheus_client import REGISTRY
+
+        register_engine_metrics_callback(generate_endpoint, REGISTRY, "vllm:", "vLLM")
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
         runtime_config = ModelRuntimeConfig()
