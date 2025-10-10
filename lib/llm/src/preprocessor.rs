@@ -351,7 +351,7 @@ impl OpenAIPreprocessor {
                                 builder.token_ids(encoding.token_ids().to_vec());
                             } else {
                                 bail!(
-                                    "Batch text input not supported for more than one text in completion requests (got {})",
+                                    "Batch text input not supported for more than one text in requests (got {})",
                                     texts.len()
                                 );
                             }
