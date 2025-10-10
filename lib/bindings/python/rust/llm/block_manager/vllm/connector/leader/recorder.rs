@@ -88,7 +88,8 @@ impl KvConnectorLeaderRecorder {
     pub fn new(
         worker_id: String,
         drt: PyDistributedRuntime,
-        page_size: usize,
+        engine_page_size: usize,
+        offload_page_size: usize,
         leader_py: PyKvbmLeader,
     ) -> Self {
         tracing::info!(
@@ -143,7 +144,8 @@ impl KvConnectorLeaderRecorder {
                 let block_manager = match BlockManagerBuilder::new()
                     .worker_id(0)
                     .leader(leader_py)
-                    .page_size(page_size)
+                    .engine_page_size(engine_page_size)
+                    .offload_page_size(offload_page_size)
                     .disable_device_pool(false)
                     .build()
                     .await
@@ -185,7 +187,8 @@ impl KvConnectorLeaderRecorder {
 
         let connector_leader = KvConnectorLeader {
             slot_manager: slot_manager_cell,
-            block_size: page_size,
+            engine_page_size,
+            offload_page_size,
             inflight_requests: HashSet::new(),
             onboarding_slots: HashSet::new(),
             iteration_counter: 0,

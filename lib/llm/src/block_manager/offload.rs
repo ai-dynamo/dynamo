@@ -74,6 +74,7 @@ pub struct OffloadManagerConfig {
     pub metrics: Arc<BlockManagerMetrics>,
     pub cancellation_token: CancellationToken,
     pub model_config: KvManagerModelConfig,
+    pub offload_block_size_ratio: usize,
 }
 
 /// The offload manager handles all block transfers between different cache levels.
@@ -131,6 +132,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
             num_outer_components: config.model_config.outer_dim,
             num_layers: config.model_config.num_layers,
+            offload_block_size_ratio: config.offload_block_size_ratio,
         };
 
         // We want cuda offloads to happen in parallel with host onboards, so we need to use a different stream.
@@ -765,6 +767,7 @@ mod tests {
             metrics: BlockManagerMetrics::new(&Arc::new(Registry::new()))?,
             cancellation_token: CancellationToken::new(),
             model_config: minimal_config,
+            offload_block_size_ratio: 1,
         };
 
         let manager = OffloadManager::new(

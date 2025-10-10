@@ -104,6 +104,7 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
 {
     pub async fn new(config: KvBlockManagerConfig, logical_resources: R) -> Result<Arc<Self>> {
         let model_config = config.model.clone();
+        let offload_block_size_ratio = config.offload_block_size_ratio;
         let mut resources = Resources::new(config)?;
         let block_data_factories =
             logical::LogicalBlockFactories::new(&mut resources, logical_resources)?;
@@ -152,6 +153,7 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
             metrics: resources.metrics.clone(),
             cancellation_token: resources.cancellation_token.clone(),
             model_config,
+            offload_block_size_ratio,
         };
 
         let offload_manager = OffloadManager::new(
@@ -213,6 +215,7 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
 impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
     pub async fn new(config: KvBlockManagerConfig) -> Result<Arc<Self>> {
         let model_config = config.model.clone();
+        let offload_block_size_ratio = config.offload_block_size_ratio;
         let mut resources = Resources::new(config)?;
         let block_data_factories = local::LocalBlockDataFactories::new(&mut resources)?;
 
@@ -267,6 +270,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
             metrics: resources.metrics.clone(),
             cancellation_token: resources.cancellation_token.clone(),
             model_config,
+            offload_block_size_ratio,
         };
 
         let offload_manager = OffloadManager::new(
