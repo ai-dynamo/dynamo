@@ -208,8 +208,9 @@ impl ActiveSequences {
             }
         };
 
-        // Drop all Arc references, then clean up weak references
-        for (block_hash, _arc) in token_seq {
+        // Drop each Arc reference, then clean up the corresponding weak reference
+        for (block_hash, arc) in token_seq {
+            drop(arc);
             self.remove_block(&block_hash);
         }
 
