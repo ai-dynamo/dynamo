@@ -31,6 +31,7 @@ Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API
 ### Resource Types
 - [DynamoComponentDeployment](#dynamocomponentdeployment)
 - [DynamoGraphDeployment](#dynamographdeployment)
+- [DynamoGraphDeploymentRequest](#dynamographdeploymentrequest)
 
 
 
@@ -55,6 +56,61 @@ _Appears in:_
 | `metrics` _[MetricSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#metricspec-v2-autoscaling) array_ |  |  |  |
 
 
+
+
+#### ConfigMapKeySelector
+
+
+
+ConfigMapKeySelector selects a key from a ConfigMap.
+
+
+
+_Appears in:_
+- [ProfilingConfigSpec](#profilingconfigspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name of the ConfigMap. |  | Required: {} <br /> |
+| `key` _string_ | Key in the ConfigMap to select. | disagg.yaml |  |
+
+
+#### DeploymentOverridesSpec
+
+
+
+DeploymentOverridesSpec defines metadata overrides for the auto-created DGD.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the name for the created DynamoGraphDeployment.<br />If not specified, defaults to the DGDR name. |  | Optional: {} <br /> |
+| `namespace` _string_ | Namespace is the namespace for the created DynamoGraphDeployment.<br />If not specified, defaults to the DGDR namespace. |  | Optional: {} <br /> |
+| `labels` _object (keys:string, values:string)_ | Labels are additional labels to add to the DynamoGraphDeployment.<br />These are merged with auto-generated labels. |  | Optional: {} <br /> |
+| `annotations` _object (keys:string, values:string)_ | Annotations are additional annotations to add to the DynamoGraphDeployment. |  | Optional: {} <br /> |
+
+
+#### DeploymentStatus
+
+
+
+DeploymentStatus tracks the auto-created DGD status.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestStatus](#dynamographdeploymentrequeststatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the name of the created DynamoGraphDeployment. |  |  |
+| `namespace` _string_ | Namespace is the namespace of the created DynamoGraphDeployment. |  |  |
+| `state` _string_ | State is the current state of the DynamoGraphDeployment.<br />This is mirrored from the DGD's status.state field. |  |  |
+| `created` _boolean_ | Created indicates whether the DGD has been created.<br />Used to prevent recreation if DGD is deleted by user. |  |  |
 
 
 #### DynamoComponentDeployment
@@ -92,12 +148,13 @@ _Appears in:_
 | `labels` _object (keys:string, values:string)_ | Labels to add to generated Kubernetes resources for this component. |  |  |
 | `serviceName` _string_ | The name of the component |  |  |
 | `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
+| `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
 | `dynamoNamespace` _string_ | Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive) |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Autoscaling config for this component (replica range, target utilization, etc.). |  |  |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
 | `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
-| `pvc` _[PVC](#pvc)_ | PVC config describing volumes to be mounted by the component. |  |  |
+| `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  |  |
 | `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  |  |
 | `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  |  |
 | `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  |  |
@@ -128,12 +185,13 @@ _Appears in:_
 | `labels` _object (keys:string, values:string)_ | Labels to add to generated Kubernetes resources for this component. |  |  |
 | `serviceName` _string_ | The name of the component |  |  |
 | `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
+| `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
 | `dynamoNamespace` _string_ | Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive) |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Autoscaling config for this component (replica range, target utilization, etc.). |  |  |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
 | `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
-| `pvc` _[PVC](#pvc)_ | PVC config describing volumes to be mounted by the component. |  |  |
+| `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  |  |
 | `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  |  |
 | `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  |  |
 | `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  |  |
@@ -163,6 +221,73 @@ DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 | `status` _[DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)_ | Status reflects the current observed state of this graph deployment. |  |  |
 
 
+#### DynamoGraphDeploymentRequest
+
+
+
+DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests API.
+It serves as the primary interface for users to request model deployments with
+specific performance and resource constraints, enabling SLA-driven deployments.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
+| `kind` _string_ | `DynamoGraphDeploymentRequest` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)_ | Spec defines the desired state for this deployment request. |  |  |
+| `status` _[DynamoGraphDeploymentRequestStatus](#dynamographdeploymentrequeststatus)_ | Status reflects the current observed state of this deployment request. |  |  |
+
+
+#### DynamoGraphDeploymentRequestSpec
+
+
+
+DynamoGraphDeploymentRequestSpec defines the desired state of DynamoGraphDeploymentRequest.
+This CRD serves as the primary interface for users to request model deployments
+with specific performance and resource constraints for SLA-driven deployments.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequest](#dynamographdeploymentrequest)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `modelName` _string_ | ModelName specifies the model to deploy (e.g., "meta/llama3-70b"). |  | Required: {} <br /> |
+| `backend` _string_ | Backend specifies the backend framework to use. | trtllm | Enum: [vllm sglang trtllm] <br /> |
+| `sla` _[SLASpec](#slaspec)_ | SLA defines the Service Level Agreement profiling targets. |  | Required: {} <br /> |
+| `gpu` _[GPUSpec](#gpuspec)_ | GPU defines optional GPU type specification. |  | Optional: {} <br /> |
+| `online` _boolean_ | Online indicates whether to use online profiler (true) or AI Configurator (false).<br />When true, uses real deployment for profiling (2-4 hours).<br />When false, uses AI Configurator for fast profiling (20-30 seconds). | false |  |
+| `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, only the spec is generated in status. | false |  |
+| `deploymentOverrides` _[DeploymentOverridesSpec](#deploymentoverridesspec)_ | DeploymentOverrides allows overriding metadata for the auto-created DGD.<br />Only used when AutoApply is true. |  | Optional: {} <br /> |
+| `profilingConfig` _[ProfilingConfigSpec](#profilingconfigspec)_ | ProfilingConfig provides configuration for the profiling job.<br />Only used when Online is true. |  | Optional: {} <br /> |
+
+
+#### DynamoGraphDeploymentRequestStatus
+
+
+
+DynamoGraphDeploymentRequestStatus defines the observed state of DynamoGraphDeploymentRequest.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequest](#dynamographdeploymentrequest)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `state` _string_ | State is a high-level textual status of the deployment request lifecycle.<br />Possible values: "Pending", "Profiling", "Deploying", "Ready", "DeploymentDeleted", "Failed" |  |  |
+| `observedGeneration` _integer_ | ObservedGeneration reflects the generation of the most recently observed spec.<br />Used to detect spec changes and enforce immutability. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />The slice is merged by type on patch updates. |  |  |
+| `profilingResults` _string_ | ProfilingResults contains references to the profiling data and results. |  | Optional: {} <br /> |
+| `generatedDeployment` _[RawExtension](#rawextension)_ | GeneratedDeployment contains the full generated DynamoGraphDeployment (including metadata)<br />based on profiling results. This can be used to create a DynamoGraphDeployment resource.<br />Stored as RawExtension to preserve all fields including metadata. |  | EmbeddedResource: {} <br />Optional: {} <br /> |
+| `deployment` _[DeploymentStatus](#deploymentstatus)_ | Deployment tracks the auto-created DGD if AutoApply is true. |  | Optional: {} <br /> |
+
+
 #### DynamoGraphDeploymentSpec
 
 
@@ -177,6 +302,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `dynamoGraph` _string_ | DynamoGraph selects the graph (workflow/topology) to deploy. This must match<br />a graph name packaged with the Dynamo archive. |  |  |
+| `pvcs` _[PVC](#pvc) array_ | PVCs defines a list of persistent volume claims that can be referenced by components.<br />Each PVC must have a unique name that can be referenced in component specifications. |  | Optional: {} <br /> |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs are environment variables applied to all services in the graph unless<br />overridden by service-specific configuration. |  | Optional: {} <br /> |
 | `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
 
@@ -196,6 +322,22 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `state` _string_ | State is a high-level textual status of the graph deployment lifecycle. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the graph deployment.<br />The slice is merged by type on patch updates. |  |  |
+
+
+#### GPUSpec
+
+
+
+GPUSpec defines optional GPU type specification.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `type` _string_ | Type specifies the GPU type (e.g., "h200", "h100", "a100"). |  | Optional: {} <br /> |
 
 
 #### IngressSpec
@@ -266,17 +408,48 @@ _Appears in:_
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
-- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `create` _boolean_ | Create indicates to create a new PVC |  |  |
-| `name` _string_ | Name is the name of the PVC |  |  |
-| `storageClass` _string_ | StorageClass to be used for PVC creation. Leave it as empty if the PVC is already created. |  |  |
-| `size` _[Quantity](#quantity)_ | Size of the NIM cache in Gi, used during PVC creation |  |  |
-| `volumeAccessMode` _[PersistentVolumeAccessMode](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumeaccessmode-v1-core)_ | VolumeAccessMode is the volume access mode of the PVC |  |  |
-| `mountPoint` _string_ |  |  |  |
+| `name` _string_ | Name is the name of the PVC |  | Required: {} <br /> |
+| `storageClass` _string_ | StorageClass to be used for PVC creation. Required when create is true. |  |  |
+| `size` _[Quantity](#quantity)_ | Size of the volume in Gi, used during PVC creation. Required when create is true. |  |  |
+| `volumeAccessMode` _[PersistentVolumeAccessMode](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumeaccessmode-v1-core)_ | VolumeAccessMode is the volume access mode of the PVC. Required when create is true. |  |  |
+
+
+#### ProfilingConfigSpec
+
+
+
+ProfilingConfigSpec defines the profiling configuration.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `configMapRef` _[ConfigMapKeySelector](#configmapkeyselector)_ | ConfigMapRef is a reference to a ConfigMap containing the profiling configuration.<br />The ConfigMap should contain a key (default: "disagg.yaml") with the configuration file.<br />This is only used for online profiling. |  | Optional: {} <br /> |
+
+
+#### SLASpec
+
+
+
+SLASpec defines the Service Level Agreement profiling targets.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `itl` _integer_ | ITL is the target Inter-Token Latency in milliseconds. |  | Required: {} <br /> |
+| `ttft` _integer_ | TTFT is the target Time To First Token in milliseconds. |  | Required: {} <br /> |
 
 
 #### SharedMemorySpec
@@ -295,5 +468,24 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `disabled` _boolean_ |  |  |  |
 | `size` _[Quantity](#quantity)_ |  |  |  |
+
+
+#### VolumeMount
+
+
+
+VolumeMount references a PVC defined at the top level for volumes to be mounted by the component
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name references a PVC name defined in the top-level PVCs map |  | Required: {} <br /> |
+| `mountPoint` _string_ | MountPoint specifies where to mount the volume.<br />If useAsCompilationCache is true and mountPoint is not specified,<br />a backend-specific default will be used. |  |  |
+| `useAsCompilationCache` _boolean_ | UseAsCompilationCache indicates this volume should be used as a compilation cache.<br />When true, backend-specific environment variables will be set and default mount points may be used. | false |  |
 
 

@@ -140,6 +140,8 @@ func main() {
 	var mpiRunSecretName string
 	var mpiRunSecretNamespace string
 	var plannerClusterRoleName string
+	var profilerImage string
+	var dgdrProfilingClusterRoleName string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -180,6 +182,10 @@ func main() {
 		"Namespace where the MPI SSH secret is located (required)")
 	flag.StringVar(&plannerClusterRoleName, "planner-cluster-role-name", "",
 		"Name of the ClusterRole for planner (cluster-wide mode only)")
+	flag.StringVar(&profilerImage, "profiler-image", "",
+		"Container image to use for profiling jobs (both online and offline/AIC) (for DynamoGraphDeploymentRequest)")
+	flag.StringVar(&dgdrProfilingClusterRoleName, "dgdr-profiling-cluster-role-name", "",
+		"Name of the ClusterRole for DGDR profiling jobs (cluster-wide mode only)")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -236,7 +242,8 @@ func main() {
 			SecretName: mpiRunSecretName,
 		},
 		RBAC: commonController.RBACConfig{
-			PlannerClusterRoleName: plannerClusterRoleName,
+			PlannerClusterRoleName:       plannerClusterRoleName,
+			DGDRProfilingClusterRoleName: dgdrProfilingClusterRoleName,
 		},
 	}
 
@@ -447,6 +454,17 @@ func main() {
 		RBACManager:           rbacManager,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeployment")
+		os.Exit(1)
+	}
+
+	if err = (&controller.DynamoGraphDeploymentRequestReconciler{
+		Client:        mgr.GetClient(),
+		Recorder:      mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
+		ProfilerImage: profilerImage,
+		Config:        ctrlConfig,
+		RBACManager:   rbacManager,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeploymentRequest")
 		os.Exit(1)
 	}
 	//+kubebuilder:scaffold:builder

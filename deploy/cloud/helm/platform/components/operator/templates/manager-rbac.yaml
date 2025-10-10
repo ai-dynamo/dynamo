@@ -359,6 +359,7 @@ rules:
   - nvidia.com
   resources:
   - dynamocomponentdeployments
+  - dynamographdeploymentrequests
   - dynamographdeployments
   verbs:
   - create
@@ -372,6 +373,7 @@ rules:
   - nvidia.com
   resources:
   - dynamocomponentdeployments/finalizers
+  - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
   verbs:
   - update
@@ -379,6 +381,7 @@ rules:
   - nvidia.com
   resources:
   - dynamocomponentdeployments/status
+  - dynamographdeploymentrequests/status
   - dynamographdeployments/status
   verbs:
   - get

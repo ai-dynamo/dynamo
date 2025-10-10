@@ -135,6 +135,11 @@ dynamo-operator:
         # -- Whether to enable SSH key generation for MPI Run
         enabled: true
 
+    # DynamoGraphDeploymentRequest (DGDR) configuration
+    dgdr:
+      # -- Container image to use for profiling jobs (both online and offline/AIC)
+      profilerImage: ""
+
 
 # Grove component - distributed inference orchestration
 grove:
