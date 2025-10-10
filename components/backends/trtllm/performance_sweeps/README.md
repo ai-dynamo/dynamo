@@ -41,7 +41,7 @@ Please note that:
 3. `post_process.py` - Scan the genai-perf results to produce a json with entries to each config point.
 4. `plot_performance_comparison.py` - Takes the json result file for disaggregated and/or aggregated configuration sweeps and plots a pareto line for better visualization.
 
-For more finer grained details on how to launch TRTLLM backend workers with DeepSeek R1 on GB200 slurm, please refer [multinode-examples.md](../multinode/multinode-examples.md). This guide shares similar assumption to the multinode examples guide.
+For more finer grained details on how to launch TRTLLM backend workers with DeepSeek R1 on GB200 slurm, please refer [multinode-examples.md](../../../../docs/backends/trtllm/multinode/multinode-examples.md). This guide shares similar assumption to the multinode examples guide.
 
 ## Usage
 
@@ -74,7 +74,7 @@ export IMAGE="<dynamo_trtllm_image>"
 
 # NOTE: In general, Deepseek R1 is very large, so it is recommended to
 # pre-download the model weights and save them in some shared location,
-# NFS storage, HF_CACHE, etc. and modify the `--model-path` below
+# NFS storage, HF_HOME, etc. and modify the `--model-path` below
 # to reuse the pre-downloaded weights instead.
 #
 # On Blackwell systems (ex: GB200), it is recommended to use the FP4 weights:

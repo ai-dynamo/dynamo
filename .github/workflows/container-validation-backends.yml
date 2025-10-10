@@ -1,70 +1,223 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: NVIDIA Dynamo Backends Github Validation
+name: Docker Build and Test
 
 on:
   push:
     branches:
       - main
       - "pull-request/[0-9]+"
+      - release/*.*.*
+
+concurrency:
+    group: ${{ github.workflow }}-build-test-${{ github.ref_name || github.run_id }}
+    cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  build-test:
-    runs-on: gpu-l40-runners
+  changed-files:
+    runs-on: ubuntu-latest
+    outputs:
+      has_code_changes: ${{ steps.filter.outputs.has_code_changes }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Check for changes
+        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36  # v3.0.2
+        id: filter
+        with:
+          filters: .github/filters.yaml
+
+  backend-status-check:
+    runs-on: ubuntu-latest
+    needs: [vllm, sglang, trtllm]
+    if: always()
+    steps:
+      - name: "Check all dependent jobs"
+        run: |
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+
+  vllm:
+    needs: changed-files
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
+      fail-fast: false
       matrix:
-        framework: [vllm]
-        include:
-          - framework: vllm
-            target: runtime
-            pytest_marks: "e2e and vllm and gpu_1 and not slow"
-    # Do not cancel main branch runs
-    concurrency:
-      group: ${{ github.workflow }}-${{ matrix.framework }}-build-test-${{ github.ref_name || github.run_id }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+        platform:
+          - { arch: amd64, runner: gpu-l40-amd64 }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+    name: vllm (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Build Container
+        id: build-image
+        uses: ./.github/actions/docker-build
+        with:
+          framework: vllm
+          target: runtime
+          platform: 'linux/${{ matrix.platform.arch }}'
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Docker Tag and Push
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build-image.outputs.image_tag }}
+          push_tag: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
+          # OPS-1145: Switch aws_push to true
+          aws_push: 'false'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Run unit tests
+        if: ${{ matrix.platform.arch != 'arm64' }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          pytest_marks: "unit and vllm and gpu_1"
+      - name: Run e2e tests
+        if: ${{ matrix.platform.arch != 'arm64' }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          pytest_marks: "e2e and vllm and gpu_1 and not slow"
 
-    name: Build and Test - ${{ matrix.framework }}
-    env:
-      CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ matrix.framework }}
-      PYTEST_XML_FILE: pytest_test_report.xml
-      FRAMEWORK: ${{ matrix.framework }}
-      TARGET: ${{ matrix.target }}
-      PYTEST_MARKS: ${{ matrix.pytest_marks }}
-
+  sglang:
+    needs: changed-files
+    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # OPS-1140: Uncomment this for sglang arm switch to wideep
+    # strategy:
+    #   fail-fast: false
+    #   matrix:
+    #     platform:
+    #       - { arch: amd64, runner: gpu-l40-amd64 }
+    #       - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+    # name: sglang (${{ matrix.platform.arch }})
+    # runs-on: ${{ matrix.platform.runner }}
+    # OPS-1140: Remove this runs-on line, replaced with the above line
+    runs-on: gpu-l40-amd64
     steps:
       - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Build Container
+        id: build-image
+        uses: ./.github/actions/docker-build
+        with:
+          framework: sglang
+          target: runtime
+          platform: 'linux/amd64'
+          # OPS-1140: Replace the above line with the uncommented below line
+          # platform: 'linux/${{ matrix.platform.arch }}'
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Docker Tag and Push
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build-image.outputs.image_tag }}
+          push_tag: ai-dynamo/dynamo:${{ github.sha }}-sglang-amd64
+          # OPS-1140: Replace the above line with the uncommented below line
+          # push_tag: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
+          # OPS-1145: Switch aws_push to true
+          aws_push: 'false'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Run tests
+        # OPS-1140: Uncomment the below line
+        # if: ${{ matrix.platform.arch != 'arm64' }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          pytest_marks: "e2e and sglang and gpu_1"
+
+  trtllm:
+    needs: changed-files
+    if: needs.changed-files.outputs.has_code_changes == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: gpu-l40-amd64 }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+    name: trtllm (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Build Container
+        id: build-image
+        uses: ./.github/actions/docker-build
+        with:
+          framework: trtllm
+          target: runtime
+          platform: 'linux/${{ matrix.platform.arch }}'
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Docker Tag and Push
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build-image.outputs.image_tag }}
+          push_tag: ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
+          # OPS-1145: Switch aws_push to true
+          aws_push: 'false'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Run tests
+        if: ${{ matrix.platform.arch != 'arm64' }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow"
+
+  # Upload metrics for this workflow and all its jobs
+  upload-workflow-metrics:
+    name: Upload Workflow Metrics
+    runs-on: gitlab
+    if: always()  # Always run, even if other jobs fail
+    needs: [backend-status-check]  # Wait for the status check which waits for all build jobs
+
+    steps:
+      - name: Check out repository
         uses: actions/checkout@v4
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Login to NGC
-        if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
         run: |
-          echo "${{ secrets.NGC_CI_ACCESS_TOKEN }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
-      - name: Cleanup
-        if: always()
-        run: |
-          docker system prune -af
-      - name: Debug
-        run: |
-          lsmod | grep nvidia
-          sudo dmesg | grep -i nvrm || true
-          nvidia-smi
-      - name: Build image
+          python -m pip install --upgrade pip
+          pip install requests
+      - name: Upload Complete Workflow Metrics
         env:
-          GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
-          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
-          SCCACHE_S3_BUCKET:  ${{ secrets.SCCACHE_S3_BUCKET }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKFLOW_INDEX: ${{ secrets.WORKFLOW_INDEX }}
+          JOB_INDEX: ${{ secrets.JOB_INDEX }}
+          STEPS_INDEX: ${{ secrets.STEPS_INDEX }}
         run: |
-          ./container/build.sh --tag ${{ matrix.framework }}:latest \
-            --target ${{ matrix.target }} \
-            --framework ${{ matrix.framework }} \
-            --use-sccache \
-            --sccache-bucket "$SCCACHE_S3_BUCKET" \
-            --sccache-region "$AWS_DEFAULT_REGION"
-      - name: Run pytest
-        run: |
-          docker run --rm --gpus all -w /workspace \
-            --name ${{ env.CONTAINER_ID }}_pytest \
-            ${{ matrix.framework }}:latest \
-            bash -c "pytest -xsv --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\""
+          # Run the enhanced metrics upload script
+          python3 .github/workflows/upload_complete_workflow_metrics.py

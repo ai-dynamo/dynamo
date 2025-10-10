@@ -1,0 +1,84 @@
+{
+    "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
+    "copyright": [
+        "SPDX-FileCopyrightText: Copyright (c) {{ current_year }} NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
+        "SPDX-License-Identifier: Apache-2.0"
+    ],
+    "name": "Dynamo {{ framework.upper() }} Dev Container",
+    "remoteUser": "ubuntu", // Matches our container user
+    "updateRemoteUserUID": true, // Updates the UID of the remote user to match the host user, avoids permission errors
+    "image": "dynamo:latest-{{ framework }}-local-dev", // Use the latest {{ framework.upper() }} dev image
+    "runArgs": [
+        "--gpus=all",
+        "--network=host",
+        "--ipc=host",
+        "--cap-add=SYS_PTRACE",
+        "--shm-size=10G",
+        "--ulimit=memlock=-1",
+        "--ulimit=stack=67108864",
+        "--ulimit=nofile=65536:65536"
+    ],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "rust-lang.rust-analyzer"
+            ],
+            "settings": {
+                // Disable automatic copying of .gitconfig to avoid errors
+                "dev.containers.copyGitConfig": false,
+                "terminal.integrated.defaultProfile.linux": "bash",
+                "terminal.integrated.cwd": "/home/ubuntu/dynamo",
+
+                "python.defaultInterpreterPath": "/opt/dynamo/venv/bin/python",
+                "python.linting.enabled": true,
+
+                "rust-analyzer.memoryLimit": 4096, // larger memory limit to reduce latency
+                "rust-analyzer.checkOnSave.command": "clippy",
+                "rust-analyzer.checkOnSave.enable": true,
+                "rust-analyzer.cargo.buildScripts.enable": true,
+                "rust-analyzer.cargo.targetDir": "/home/ubuntu/dynamo/.build/target",
+                "rust-analyzer.procMacro.enable": true,
+                "rust-analyzer.completion.autoimport.enable": true,
+
+                // Enhanced rust-analyzer configuration
+                "rust-analyzer.linkedProjects": [
+                    "Cargo.toml",
+                    "lib/runtime/Cargo.toml",
+                    "lib/llm/Cargo.toml",
+                    "lib/tokens/Cargo.toml",
+                    "lib/bindings/python/Cargo.toml",
+                    "launch/dynamo-run/Cargo.toml"
+                ],
+                "files.trimTrailingWhitespace": true,
+                "files.insertFinalNewline": true
+            }
+        }
+    },
+    "workspaceFolder": "/home/ubuntu/dynamo",
+    "workspaceMount": "source=${localWorkspaceFolder},target=/home/ubuntu/dynamo,type=bind,consistency=cached",
+    "userEnvProbe": "interactiveShell",
+    "postCreateCommand": "/bin/bash /home/ubuntu/dynamo/.devcontainer/post-create.sh", // Runs cargo build and pip installs packages
+    "containerEnv": {
+        "DYNAMO_HOME": "/home/ubuntu/dynamo",
+        "CARGO_HOME": "/home/ubuntu/dynamo/.build/.cargo",
+        "RUSTUP_HOME": "/home/ubuntu/dynamo/.build/.rustup",
+        "CARGO_TARGET_DIR": "/home/ubuntu/dynamo/.build/target"
+    },
+    "remoteEnv": {
+        // Optional convenience tokens passed from host. SSH agent is forwarded via your IDE setting, not here by default.
+        "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}",
+        "HF_TOKEN": "${localEnv:HF_TOKEN}"
+        // "SSH_AUTH_SOCK": "${env:SSH_AUTH_SOCK}" // Optional: only if you also bind-mount the socket path
+    },
+    "mounts": [
+        // These are for convenience, so that the history and pre-commit cache are persisted between sessions
+        "source=dynamo-bashhistory,target=/home/ubuntu/.commandhistory,type=volume",
+        "source=dynamo-precommit-cache,target=/home/ubuntu/.cache/pre-commit,type=volume",
+        // Default mounts
+        "source=/tmp/,target=/tmp/,type=bind"
+        // Uncomment this to reuse your Hugging Face cache
+        //"source=${localEnv:HOME}/.cache/huggingface,target=/home/ubuntu/.cache/huggingface,type=bind"
+    ]
+}

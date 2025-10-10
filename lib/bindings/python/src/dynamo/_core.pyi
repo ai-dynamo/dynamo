@@ -10,8 +10,11 @@ from typing import (
     List,
     Optional,
     Tuple,
-    Union,
 )
+
+# Import from specialized modules
+from ._prometheus_metrics import RuntimeMetrics
+from ._prometheus_names import prometheus_names
 
 def log_message(level: str, message: str, module: str, file: str, line: int) -> None:
     """
@@ -41,9 +44,10 @@ class DistributedRuntime:
         """
         ...
 
-    def etcd_client(self) -> Optional[EtcdClient]:
+    def allocate_port_block(self, namespace, port_min, port_max, block_size, context=None) -> List[int]:
         """
-        Get the `EtcdClient` object. Not available for static workers.
+        Allocate a contiguous block of ports from the specified range and atomically reserve them.
+        Returns a list of all allocated ports in order.
         """
         ...
 
@@ -52,131 +56,26 @@ class DistributedRuntime:
         Shutdown the runtime by triggering the cancellation token
         """
         ...
-class EtcdClient:
-    """
-    Etcd is used for discovery in the DistributedRuntime
-    """
 
-    def primary_lease_id(self) -> int:
+    def child_token(self) -> CancellationToken:
         """
-        return the primary lease id.
+        Get a child cancellation token that can be passed to async tasks
         """
         ...
 
-    async def kv_create(
-        self, key: str, value: bytes, lease_id: Optional[int] = None
-    ) -> None:
+class CancellationToken:
+    def cancel(self) -> None:
         """
-        Atomically create a key in etcd, fail if the key already exists.
-        """
-        ...
-
-    async def kv_create_or_validate(
-        self, key: str, value: bytes, lease_id: Optional[int] = None
-    ) -> None:
-        """
-        Atomically create a key if it does not exist, or validate the values are identical if the key exists.
+        Cancel the token and all its children
         """
         ...
 
-    async def kv_put(
-        self, key: str, value: bytes, lease_id: Optional[int] = None
-    ) -> None:
+    async def cancelled(self) -> None:
         """
-        Put a key-value pair into etcd
+        Await until the token is cancelled
         """
         ...
 
-    async def kv_get_prefix(self, prefix: str) -> List[Dict[str, JsonLike]]:
-        """
-        Get all keys with a given prefix
-        """
-        ...
-
-    async def revoke_lease(self, lease_id: int) -> None:
-        """
-        Revoke a lease
-        """
-        ...
-
-class EtcdKvCache:
-    """
-    A cache for key-value pairs stored in etcd.
-    """
-
-    @staticmethod
-    async def new(
-        etcd_client: EtcdClient,
-        prefix: str,
-        initial_values: Dict[str, Union[str, bytes]]
-    ) -> "EtcdKvCache":
-        """
-        Create a new EtcdKvCache instance.
-
-        Args:
-            etcd_client: The etcd client to use for operations
-            prefix: The prefix to use for all keys in this cache.
-                EtcdKvCache will continuously watch the changes of the keys under this prefix.
-            initial_values: Initial key-value pairs to populate the cache with
-                NOTE: if the key already exists, it won't be updated
-
-        Returns:
-            A new EtcdKvCache instance
-        """
-        ...
-
-    async def get(self, key: str) -> Optional[bytes]:
-        """
-        Get a value from the cache.
-
-        Args:
-            key: The key to retrieve
-
-        Returns:
-            The value as bytes if found, None otherwise
-
-        NOTE: this get is cheap because internally there is a cache that holds the latest kv pairs.
-        To prevent race condition, there is a lock when reading/writing the internal cache.
-        """
-        ...
-
-    async def get_all(self) -> Dict[str, bytes]:
-        """
-        Get all key-value pairs from the cache.
-
-        Returns:
-            A dictionary of all key-value pairs, with keys stripped of the prefix
-            (i.e., in the same format as in `initial_values`.keys())
-        """
-        ...
-
-    async def put(
-        self,
-        key: str,
-        value: bytes,
-        lease_id: Optional[int] = None
-    ) -> None:
-        """
-        Put a key-value pair into the cache and etcd.
-
-        Args:
-            key: The key to store
-            value: The value to store
-            lease_id: Optional lease ID to associate with this key-value pair
-        """
-        ...
-
-    async def delete(self, key: str) -> None:
-        """
-        Delete a key-value pair from the cache and etcd.
-        """
-        ...
-
-    async def clear_all(self) -> None:
-        """
-        Delete all key-value pairs from the cache and etcd.
-        """
-        ...
 
 class Namespace:
     """
@@ -191,6 +90,16 @@ class Namespace:
         """
         ...
 
+    @property
+    def metrics(self) -> RuntimeMetrics:
+        """
+        Get a RuntimeMetrics helper for creating Prometheus metrics.
+
+        Returns:
+            A RuntimeMetrics object that provides create_* methods for different metric types
+        """
+        ...
+
 class Component:
     """
     A component is a collection of endpoints
@@ -198,7 +107,7 @@ class Component:
 
     ...
 
-    def create_service(self) -> None:
+    async def create_service(self) -> None:
         """
         Create a service
         """
@@ -210,6 +119,16 @@ class Component:
         """
         ...
 
+    @property
+    def metrics(self) -> RuntimeMetrics:
+        """
+        Get a RuntimeMetrics helper for creating Prometheus metrics.
+
+        Returns:
+            A RuntimeMetrics object that provides create_* methods for different metric types
+        """
+        ...
+
 class Endpoint:
     """
     An Endpoint is a single API endpoint
@@ -217,7 +136,7 @@ class Endpoint:
 
     ...
 
-    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None) -> None:
+    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None) -> None:
         """
         Serve an endpoint discoverable by all connected clients at
         `{{ namespace }}/components/{{ component_name }}/endpoints/{{ endpoint_name }}`
@@ -226,6 +145,8 @@ class Endpoint:
             handler: The request handler function
             graceful_shutdown: Whether to wait for inflight requests to complete during shutdown (default: True)
             metrics_labels: Optional list of metrics labels to add to the metrics
+            health_check_payload: Optional dict containing the health check request payload
+                                  that will be used to verify endpoint health
         """
         ...
 
@@ -240,6 +161,17 @@ class Endpoint:
         Return primary lease id. Currently, cannot set a different lease id.
         """
         ...
+
+    @property
+    def metrics(self) -> RuntimeMetrics:
+        """
+        Get a RuntimeMetrics helper for creating Prometheus metrics.
+
+        Returns:
+            A RuntimeMetrics object that provides create_* methods for different metric types
+        """
+        ...
+
 
 class Client:
     """
@@ -350,6 +282,93 @@ def compute_block_hash_for_seq_py(tokens: List[int], kv_block_size: int) -> List
     """
 
     ...
+
+class Context:
+    """
+    Context wrapper around AsyncEngineContext for Python bindings.
+    Provides tracing and cancellation capabilities for request handling.
+    """
+
+    def __init__(self, id: Optional[str] = None) -> None:
+        """
+        Create a new Context instance.
+
+        Args:
+            id: Optional request ID. If None, a default ID will be generated.
+        """
+        ...
+
+    def is_stopped(self) -> bool:
+        """
+        Check if the context has been stopped (synchronous).
+
+        Returns:
+            True if the context is stopped, False otherwise.
+        """
+        ...
+
+    def is_killed(self) -> bool:
+        """
+        Check if the context has been killed (synchronous).
+
+        Returns:
+            True if the context is killed, False otherwise.
+        """
+        ...
+
+    def stop_generating(self) -> None:
+        """
+        Issue a stop generating signal to the context.
+        """
+        ...
+
+    def id(self) -> Optional[str]:
+        """
+        Get the context ID.
+
+        Returns:
+            The context identifier string, or None if not set.
+        """
+        ...
+
+    async def async_killed_or_stopped(self) -> bool:
+        """
+        Asynchronously wait until the context is killed or stopped.
+
+        Returns:
+            True when the context is killed or stopped.
+        """
+        ...
+
+    @property
+    def trace_id(self) -> Optional[str]:
+        """
+        Get the distributed trace ID if available.
+
+        Returns:
+            The trace ID string, or None if no trace context.
+        """
+        ...
+
+    @property
+    def span_id(self) -> Optional[str]:
+        """
+        Get the distributed span ID if available.
+
+        Returns:
+            The span ID string, or None if no trace context.
+        """
+        ...
+
+    @property
+    def parent_span_id(self) -> Optional[str]:
+        """
+        Get the parent span ID if available.
+
+        Returns:
+            The parent span ID string, or None if no trace context.
+        """
+        ...
 
 class WorkerStats:
     """
@@ -827,13 +846,6 @@ class HttpService:
 
     ...
 
-class HttpError:
-    """
-    An error that occurred in the HTTP service
-    """
-
-    ...
-
 class HttpAsyncEngine:
     """
     An async engine for a distributed Dynamo http service. This is an extension of the
@@ -844,11 +856,11 @@ class HttpAsyncEngine:
     ...
 
 class ModelInput:
-    """What type of request this model needs: Text or Tokens"""
+    """What type of request this model needs: Text, Tokens or Tensor"""
     ...
 
 class ModelType:
-    """What type of request this model needs: Chat, Completions or Embedding"""
+    """What type of request this model needs: Chat, Completions, Embedding or Tensor"""
     ...
 
 class RouterMode:
@@ -890,71 +902,6 @@ async def make_engine(args: EntrypointArgs) -> EngineConfig:
 async def run_input(runtime: DistributedRuntime, input: str, engine_config: EngineConfig) -> None:
     """Start an engine, connect it to an input, and run until stopped."""
     ...
-
-class NatsQueue:
-    """
-    A queue implementation using NATS JetStream for task distribution
-    """
-
-    def __init__(self, stream_name: str, nats_server: str, dequeue_timeout: float) -> None:
-        """
-        Create a new NatsQueue instance.
-
-        Args:
-            stream_name: Name of the NATS JetStream stream
-            nats_server: URL of the NATS server
-            dequeue_timeout: Default timeout in seconds for dequeue operations
-        """
-        ...
-
-    async def connect(self) -> None:
-        """
-        Connect to the NATS server
-        """
-        ...
-
-    async def ensure_connection(self) -> None:
-        """
-        Ensure connection to the NATS server, connecting if not already connected
-        """
-        ...
-
-    async def close(self) -> None:
-        """
-        Close the connection to the NATS server
-        """
-        ...
-
-    async def enqueue_task(self, task_data: bytes) -> None:
-        """
-        Enqueue a task to the NATS JetStream
-
-        Args:
-            task_data: The task data as bytes
-        """
-        ...
-
-    async def dequeue_task(self, timeout: Optional[float] = None) -> Optional[bytes]:
-        """
-        Dequeue a task from the NATS JetStream
-
-        Args:
-            timeout: Optional timeout in seconds for this specific dequeue operation.
-                    If None, uses the default timeout specified during initialization.
-
-        Returns:
-            The task data as bytes if available, None if no task is available
-        """
-        ...
-
-    async def get_queue_size(self) -> int:
-        """
-        Get the current size of the queue
-
-        Returns:
-            The number of messages in the queue
-        """
-        ...
 
 class Layer:
     """
@@ -1271,7 +1218,6 @@ class KvPushRouter:
 
     async def best_worker_id(
         self,
-        context_id: str,
         token_ids: List[int],
         router_config_override: Optional[JsonLike] = None,
     ) -> Tuple[int, int]:
@@ -1279,7 +1225,6 @@ class KvPushRouter:
         Find the best matching worker for the given tokens without updating states.
 
         Args:
-            context_id: String identifier for the request
             token_ids: List of token IDs to find matches for
             router_config_override: Optional router configuration override
 
@@ -1324,3 +1269,57 @@ class EntrypointArgs:
     """
 
     ...
+
+class PlannerDecision:
+    """A request from planner to client to perform a scaling action.
+    Fields: num_prefill_workers, num_decode_workers, decision_id.
+            -1 in any of those fields mean not set, usually because planner hasn't decided anything yet.
+    Call VirtualConnectorClient.complete(event) when action is completed.
+    """
+    ...
+
+class VirtualConnectorCoordinator:
+    """Internal planner virtual connector component"""
+
+    def __init__(self, runtime: DistributedRuntime, dynamo_namespace: str, check_interval_secs: int, max_wait_time_secs: int, max_retries: int) -> None:
+        ...
+
+    async def async_init(self) -> None:
+        """Call this before using the object"""
+        ...
+
+    def read_state(self) -> PlannerDecision:
+        """Get the current values. Most for test / debug."""
+        ...
+
+    async def update_scaling_decision(self, num_prefill: Optional[int] = None, num_decode: Optional[int] = None) -> None:
+        ...
+
+    async def wait_for_scaling_completion(self) -> None:
+        ...
+
+class VirtualConnectorClient:
+    """How a client discovers planner requests and marks them complete"""
+
+    def __init__(self, runtime: DistributedRuntime, dynamo_namespace: str) -> None:
+        ...
+
+    async def get(self) -> PlannerDecision:
+        ...
+
+    async def complete(self, decision: PlannerDecision) -> None:
+        ...
+
+    async def wait(self) -> None:
+        """Blocks until there is a new decision to fetch using 'get'"""
+        ...
+
+__all__ = [
+    "Backend",
+    "Client",
+    "Component",
+    "Context",
+    "ModelDeploymentCard",
+    "OAIChatPreprocessor",
+    "prometheus_names",
+]

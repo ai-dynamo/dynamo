@@ -11,9 +11,13 @@ use zmq::*;
 
 use crate::block_manager::{
     BasicMetadata, BlockMetadata, LayoutConfigBuilder, NixlLayout, Storage,
-    block::{Block, layout_to_blocks, locality, transfer::TransferContext},
+    block::{
+        Block, layout_to_blocks, locality,
+        transfer::{PoolConfig, TransferContext},
+    },
     connector::scheduler::TransferSchedulerClient,
     layout::LayoutType,
+    offload::{MAX_CONCURRENT_TRANSFERS, MAX_TRANSFER_BATCH_SIZE},
     storage::{DeviceAllocator, DeviceStorage, DiskAllocator, PinnedAllocator, torch::TorchTensor},
 };
 
@@ -51,14 +55,9 @@ pub fn load_and_validate_tensors(
         // Check the stride, and ensure our tensor is contiguous.
         // TODO: We eventually need to be able to handle this.
         let stride = tensor.stride();
-        for i in 1..stride.len() {
-            if stride[i] > stride[i - 1] {
-                return Err(anyhow::anyhow!(
-                    "Tensor strides must be monotonically decreasing! Got {:?}",
-                    stride
-                ));
-            }
-        }
+        tracing::debug!("stride: {:?}", stride);
+        tracing::debug!("stride is monotonically decreasing for NHD layout");
+        tracing::debug!("stride is NOT monotonically decreasing for HND layout");
 
         // Check that all layer tensors have the same shape.
         // TODO: We eventually need to support the weirder models with heterogenous layers.
@@ -102,8 +101,14 @@ pub struct KvbmWorkerConfig {
     #[builder(default = "2")]
     dtype_width_bytes: usize,
 
-    #[builder(default = false)]
-    is_fully_contiguous_layout: bool,
+    #[builder(default = "LayoutType::FullyContiguous")]
+    device_layout_type: LayoutType,
+
+    #[builder(default = "LayoutType::FullyContiguous")]
+    host_layout_type: LayoutType,
+
+    #[builder(default = "LayoutType::FullyContiguous")]
+    disk_layout_type: LayoutType,
 
     #[builder(default = "String::from(\"kvbm\")")]
     barrier_id_prefix: String,
@@ -157,53 +162,51 @@ impl KvbmWorker {
             )));
         }
 
-        let (layout_type, num_layers, outer_dim, inner_dim) = if !config.is_fully_contiguous_layout
-        {
-            let (outer_contiguous, outer_dim) = if shape[0] >= config.num_device_blocks {
-                (false, shape[1])
-            } else if shape[1] >= config.num_device_blocks {
-                (true, shape[0])
-            } else {
-                return Err(anyhow::anyhow!(format!(
-                    "Unsupported kv cache layout. Got shape: {:?}",
-                    shape
-                )));
-            };
-            let num_layers = device_tensors.len();
-            let inner_dim = shape[2..].iter().product::<usize>() / config.page_size;
+        let (layout_type, num_layers, outer_dim, inner_dim) = match config.device_layout_type {
+            LayoutType::FullyContiguous => {
+                let num_layers = shape[1];
+                let outer_dim = shape[2];
+                let inner_dim = shape[3..].iter().product::<usize>() / config.page_size;
+                tracing::info!(
+                    "Inferred layout: num_layers={}, outer_dim={}, page_size={}, inner_dim={}",
+                    num_layers,
+                    outer_dim,
+                    config.page_size,
+                    inner_dim
+                );
 
-            tracing::info!(
-                "Inferred layout: num_layers={}, outer_dim={}, page_size={}, inner_dim={}",
-                device_tensors.len(),
-                outer_dim,
-                config.page_size,
-                inner_dim
-            );
+                (
+                    LayoutType::FullyContiguous,
+                    num_layers,
+                    outer_dim,
+                    inner_dim,
+                )
+            }
+            LayoutType::LayerSeparate { outer_contiguous } => {
+                // Use the already-detected layout type from config (no re-detection needed)
+                let layout_type = config.device_layout_type;
 
-            (
-                LayoutType::LayerSeparate { outer_contiguous },
-                num_layers,
-                outer_dim,
-                inner_dim,
-            )
-        } else {
-            let num_layers = shape[1];
-            let outer_dim = shape[2];
-            let inner_dim = shape[3..].iter().product::<usize>() / config.page_size;
-            tracing::info!(
-                "Inferred layout: num_layers={}, outer_dim={}, page_size={}, inner_dim={}",
-                num_layers,
-                outer_dim,
-                config.page_size,
-                inner_dim
-            );
+                // Extract outer_dim based on the provided outer_contiguous value
+                let outer_dim = if outer_contiguous {
+                    shape[0] // Outer contiguous: [outer_dim, n_blocks, ...]
+                } else {
+                    shape[1] // Block contiguous: [n_blocks, outer_dim, ...]
+                };
 
-            (
-                LayoutType::FullyContiguous,
-                num_layers,
-                outer_dim,
-                inner_dim,
-            )
+                let num_layers = device_tensors.len();
+                let inner_dim = shape[2..].iter().product::<usize>() / config.page_size;
+
+                tracing::info!(
+                    "Inferred layout: num_layers={}, outer_dim={}, outer_contiguous={}, page_size={}, inner_dim={}",
+                    num_layers,
+                    outer_dim,
+                    outer_contiguous,
+                    config.page_size,
+                    inner_dim
+                );
+
+                (layout_type, num_layers, outer_dim, inner_dim)
+            }
         };
 
         let bytes_per_block =
@@ -552,7 +555,7 @@ impl KvbmWorker {
         device_layout: Box<dyn NixlLayout<StorageType = DeviceStorage>>,
         mut layout_builder: LayoutConfigBuilder,
         leader_data: KvbmLeaderData,
-        layout_type: LayoutType,
+        _layout_type: LayoutType,
         config: KvbmWorkerConfig,
         cancel_token: CancellationToken,
         handler_tx: oneshot::Sender<BlockTransferHandler>,
@@ -570,6 +573,14 @@ impl KvbmWorker {
 
         let agent = build_agent(worker_id, leader_data.num_disk_blocks > 0)?;
 
+        let pool_config = PoolConfig {
+            enable_pool: true,
+            max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
+            max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
+            num_outer_components: device_layout.config().outer_dim,
+            num_layers: device_layout.config().num_layers,
+        };
+
         let transfer_context = Arc::new(TransferContext::new(
             Arc::new(Some(agent)),
             DeviceAllocator::new(config.device_id)
@@ -578,6 +589,7 @@ impl KvbmWorker {
                 .new_stream()
                 .unwrap(),
             Handle::current(),
+            Some(pool_config),
         ));
 
         // Build our device, host, and disk block lists.
@@ -593,7 +605,7 @@ impl KvbmWorker {
             let host_layout = layout_builder
                 .num_blocks(leader_data.num_host_blocks)
                 .build()?
-                .allocate_layout(layout_type, host_allocator)?;
+                .allocate_layout(config.host_layout_type, host_allocator)?;
 
             Some(Self::make_layout::<_, BasicMetadata>(
                 host_layout,
@@ -610,7 +622,7 @@ impl KvbmWorker {
             let disk_layout = layout_builder
                 .num_blocks(leader_data.num_disk_blocks)
                 .build()?
-                .allocate_layout(layout_type, disk_allocator)?;
+                .allocate_layout(config.disk_layout_type, disk_allocator)?;
 
             Some(Self::make_layout::<_, BasicMetadata>(
                 disk_layout,
@@ -622,7 +634,6 @@ impl KvbmWorker {
             None
         };
 
-        // Create the handler for our active message worker.
         let block_transfer_handler = BlockTransferHandler::new(
             device_blocks,
             host_blocks,

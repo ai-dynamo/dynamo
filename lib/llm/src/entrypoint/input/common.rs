@@ -5,13 +5,13 @@ use std::pin::Pin;
 
 use crate::{
     backend::{Backend, ExecutionContext},
-    discovery::{MODEL_ROOT_PATH, ModelManager, ModelWatcher},
+    discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::{self, EngineConfig},
     kv_router::{KvPushRouter, KvRouter},
     migration::Migration,
-    model_card::ModelDeploymentCard,
-    preprocessor::OpenAIPreprocessor,
+    model_card::{self, ModelDeploymentCard},
+    preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
     types::{
@@ -73,7 +73,9 @@ pub async fn prepare_engine(
                 None,
                 None,
             ));
-            let models_watcher = etcd_client.kv_get_and_watch_prefix(MODEL_ROOT_PATH).await?;
+            let models_watcher = etcd_client
+                .kv_get_and_watch_prefix(model_card::ROOT_PATH)
+                .await?;
             let (_prefix, _watcher, receiver) = models_watcher.dissolve();
 
             let inner_watch_obj = watch_obj.clone();
@@ -131,10 +133,18 @@ pub async fn prepare_engine(
                 None
             };
 
+            let hf_tokenizer = card.tokenizer_hf()?;
             let chat_engine = entrypoint::build_routed_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(card, &client, router_mode, None, kv_chooser.clone())
+            >(
+                card,
+                &client,
+                router_mode,
+                None,
+                kv_chooser.clone(),
+                hf_tokenizer,
+            )
             .await?;
 
             let service_name = local_model.service_name().to_string();
@@ -167,7 +177,7 @@ pub async fn prepare_engine(
             let pipeline = build_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(model.card(), inner_engine)
+            >(model.card(), inner_engine, model.card().tokenizer_hf()?)
             .await?;
 
             let service_name = model.service_name().to_string();
@@ -186,6 +196,7 @@ pub async fn prepare_engine(
 pub async fn build_pipeline<Req, Resp>(
     card: &ModelDeploymentCard,
     engine: ExecutionContext,
+    hf_tokenizer: tokenizers::Tokenizer,
 ) -> anyhow::Result<Arc<ServiceFrontend<SingleIn<Req>, ManyOut<Annotated<Resp>>>>>
 where
     Req: Data,
@@ -198,10 +209,11 @@ where
         >,
 {
     let frontend = ServiceFrontend::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
-    let preprocessor = OpenAIPreprocessor::new((*card).clone())
-        .await?
-        .into_operator();
-    let backend = Backend::from_mdc((*card).clone()).await?.into_operator();
+    let PromptFormatter::OAI(formatter) = PromptFormatter::from_mdc(card)?;
+    let preprocessor =
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())?
+            .into_operator();
+    let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
     let engine = ServiceBackend::from_engine(engine);
 
     Ok(frontend
@@ -219,6 +231,7 @@ pub async fn build_routed_pipeline<Req, Resp>(
     router_mode: RouterMode,
     busy_threshold: Option<f64>,
     chooser: Option<Arc<KvRouter>>,
+    hf_tokenizer: tokenizers::Tokenizer,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
     Req: Data,
@@ -230,7 +243,9 @@ where
             Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
         >,
 {
-    let preprocessor = OpenAIPreprocessor::new(card.clone()).await?;
+    let PromptFormatter::OAI(formatter) = PromptFormatter::from_mdc(card)?;
+    let preprocessor =
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())?;
     build_routed_pipeline_with_preprocessor(
         card,
         client,
@@ -238,6 +253,7 @@ where
         busy_threshold,
         chooser,
         preprocessor,
+        hf_tokenizer,
     )
     .await
 }
@@ -249,6 +265,7 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     busy_threshold: Option<f64>,
     chooser: Option<Arc<KvRouter>>,
     preprocessor: Arc<OpenAIPreprocessor>,
+    hf_tokenizer: tokenizers::Tokenizer,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
     Req: Data,
@@ -262,8 +279,8 @@ where
 {
     let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let preprocessor_op = preprocessor.into_operator();
-    let backend = Backend::from_mdc(card.clone()).await?.into_operator();
-    let migration = Migration::from_mdc(card.clone()).await?.into_operator();
+    let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
+    let migration = Migration::from_mdc(card).into_operator();
     let router =
         PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
             client.clone(),
@@ -294,54 +311,4 @@ where
         .link(preprocessor_op.backward_edge())?
         .link(frontend)?;
     Ok(engine)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::openai::{
-        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-        completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
-    };
-
-    const HF_PATH: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/data/sample-models/mock-llama-3.1-8b-instruct"
-    );
-
-    #[tokio::test]
-    async fn test_build_chat_completions_pipeline_core_engine_succeeds() -> anyhow::Result<()> {
-        // Create test model card
-        let card = ModelDeploymentCard::load(HF_PATH, None).await?;
-        let engine = crate::engines::make_engine_core();
-
-        // Build pipeline for chat completions
-        let pipeline = build_pipeline::<
-            NvCreateChatCompletionRequest,
-            NvCreateChatCompletionStreamResponse,
-        >(&card, engine)
-        .await?;
-
-        // Verify pipeline was created
-        assert!(Arc::strong_count(&pipeline) >= 1);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_build_completions_pipeline_core_engine_succeeds() -> anyhow::Result<()> {
-        // Create test model card
-        let card = ModelDeploymentCard::load(HF_PATH, None).await?;
-        let engine = crate::engines::make_engine_core();
-
-        // Build pipeline for completions
-        let pipeline =
-            build_pipeline::<NvCreateCompletionRequest, NvCreateCompletionResponse>(&card, engine)
-                .await?;
-
-        // Verify pipeline was created
-        assert!(Arc::strong_count(&pipeline) >= 1);
-
-        Ok(())
-    }
 }

@@ -19,6 +19,7 @@ on:
     workflows: ['NVIDIA Test Github Validation']
     types:
       - completed
+
 jobs:
   test-results:
     name: Test Results

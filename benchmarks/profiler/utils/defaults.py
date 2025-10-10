@@ -13,22 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-DECODE_NUM_REQUESTS_RANGE = [
-    1,
-    5,
-    10,
-    25,
-    50,
-    100,
-    150,
-    200,
-    250,
-    300,
-    350,
-    400,
-    450,
-    500,
-]
-
 DEFAULT_MODEL_NAME = "Qwen/Qwen3-0.6B"
 DYNAMO_RUN_DEFAULT_PORT = 8000
+
+# set a decode maximum concurrency due to limits of profiling tools
+# for MoE models with attn-dp, we might hit this limit
+DECODE_MAX_CONCURRENCY = 2000

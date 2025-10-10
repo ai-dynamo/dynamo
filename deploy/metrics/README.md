@@ -23,7 +23,7 @@ graph TD
         PROMETHEUS[Prometheus server :9090] -->|:2379/metrics| ETCD_SERVER[etcd-server :2379, :2380]
         PROMETHEUS -->|:9401/metrics| DCGM_EXPORTER[dcgm-exporter :9401]
         PROMETHEUS -->|:7777/metrics| NATS_PROM_EXP
-        PROMETHEUS -->|:8080/metrics| DYNAMOFE[Dynamo HTTP FE :8080]
+        PROMETHEUS -->|:8000/metrics| DYNAMOFE[Dynamo HTTP FE :8000]
         PROMETHEUS -->|:8081/metrics| DYNAMOBACKEND[Dynamo backend :8081]
         DYNAMOFE --> DYNAMOBACKEND
         GRAFANA -->|:9090/query API| PROMETHEUS
@@ -36,7 +36,7 @@ As of Q2 2025, Dynamo HTTP Frontend metrics are exposed when you build container
 
 ### Available Metrics
 
-#### Component Metrics
+#### Backend Component Metrics
 
 The core Dynamo backend system automatically exposes metrics with the `dynamo_component_*` prefix for all components that use the `DistributedRuntime` framework:
 
@@ -46,6 +46,19 @@ The core Dynamo backend system automatically exposes metrics with the `dynamo_co
 - `dynamo_component_requests_total`: Total requests processed (counter)
 - `dynamo_component_response_bytes_total`: Total bytes sent in responses (counter)
 - `dynamo_component_system_uptime_seconds`: DistributedRuntime uptime (gauge)
+
+#### KV Router Statistics (kvstats)
+
+KV router statistics are automatically exposed by LLM workers and KV router components with the `dynamo_component_kvstats_*` prefix. These metrics provide insights into GPU memory usage and cache efficiency:
+
+- `dynamo_component_kvstats_active_blocks`: Number of active KV cache blocks currently in use (gauge)
+- `dynamo_component_kvstats_total_blocks`: Total number of KV cache blocks available (gauge)
+- `dynamo_component_kvstats_gpu_cache_usage_percent`: GPU cache usage as a percentage (0.0-1.0) (gauge)
+- `dynamo_component_kvstats_gpu_prefix_cache_hit_rate`: GPU prefix cache hit rate as a percentage (0.0-1.0) (gauge)
+
+These metrics are published by:
+- **LLM Workers**: vLLM and TRT-LLM backends publish these metrics through their respective publishers
+- **KV Router**: The KV router component aggregates and exposes these metrics for load balancing decisions
 
 #### Specialized Component Metrics
 
@@ -58,12 +71,99 @@ Some components expose additional metrics specific to their functionality:
 When using Dynamo HTTP Frontend (`--framework VLLM` or `--framework TRTLLM`), these metrics are automatically exposed with the `dynamo_frontend_*` prefix and include `model` labels containing the model name:
 
 - `dynamo_frontend_inflight_requests`: Inflight requests (gauge)
+- `dynamo_frontend_queued_requests`: Number of requests in HTTP processing queue (gauge)
 - `dynamo_frontend_input_sequence_tokens`: Input sequence length (histogram)
 - `dynamo_frontend_inter_token_latency_seconds`: Inter-token latency (histogram)
 - `dynamo_frontend_output_sequence_tokens`: Output sequence length (histogram)
 - `dynamo_frontend_request_duration_seconds`: LLM request duration (histogram)
 - `dynamo_frontend_requests_total`: Total LLM requests (counter)
 - `dynamo_frontend_time_to_first_token_seconds`: Time to first token (histogram)
+
+**Note**: The `dynamo_frontend_inflight_requests` metric tracks requests from HTTP handler start until the complete response is finished, while `dynamo_frontend_queued_requests` tracks requests from HTTP handler start until first token generation begins (including prefill time). HTTP queue time is a subset of inflight time.
+
+##### Model Configuration Metrics
+
+The frontend also exposes model configuration metrics with the `dynamo_frontend_model_*` prefix. These metrics are populated from the worker backend registration service when workers register with the system:
+
+**Runtime Config Metrics (from ModelRuntimeConfig):**
+These metrics come from the runtime configuration provided by worker backends during registration.
+
+- `dynamo_frontend_model_total_kv_blocks`: Total KV blocks available for a worker serving the model (gauge)
+- `dynamo_frontend_model_max_num_seqs`: Maximum number of sequences for a worker serving the model (gauge)
+- `dynamo_frontend_model_max_num_batched_tokens`: Maximum number of batched tokens for a worker serving the model (gauge)
+
+**MDC Metrics (from ModelDeploymentCard):**
+These metrics come from the Model Deployment Card information provided by worker backends during registration. Note that when multiple worker instances register with the same model name, only the first instance's configuration metrics (runtime config and MDC metrics) will be populated. Subsequent instances with duplicate model names will be skipped for configuration metric updates, though the worker count metric will reflect all instances.
+
+- `dynamo_frontend_model_context_length`: Maximum context length for a worker serving the model (gauge)
+- `dynamo_frontend_model_kv_cache_block_size`: KV cache block size for a worker serving the model (gauge)
+- `dynamo_frontend_model_migration_limit`: Request migration limit for a worker serving the model (gauge)
+
+**Worker Management Metrics:**
+- `dynamo_frontend_model_workers`: Number of worker instances currently serving the model (gauge)
+
+#### Request Processing Flow
+
+This section explains the distinction between two key metrics used to track request processing:
+
+1. **Inflight**: Tracks requests from HTTP handler start until the complete response is finished
+2. **HTTP Queue**: Tracks requests from HTTP handler start until first token generation begins (including prefill time)
+
+**Example Request Flow:**
+```
+curl -s localhost:8000/v1/completions -H "Content-Type: application/json" -d '{
+  "model": "Qwen/Qwen3-0.6B",
+  "prompt": "Hello let's talk about LLMs",
+  "stream": false,
+  "max_tokens": 1000
+}'
+```
+
+**Timeline:**
+```
+Timeline:    0, 1, ...
+Client ────> Frontend:8000 ────────────────────> Dynamo component/backend (vLLM, SGLang, TRT)
+             │request start                     │received                              │
+             |                                  |                                      |
+             │                                  ├──> start prefill ──> first token ──> |last token
+             │                                  │     (not impl)       |               |
+             ├─────actual HTTP queue¹ ──────────┘                      │               |
+             │                                                         │               │
+             ├─────implemented HTTP queue ─────────────────────────────┘               |
+             │                                                                         │
+             └─────────────────────────────────── Inflight ────────────────────────────┘
+```
+
+**Concurrency Example:**
+Suppose the backend allows 3 concurrent requests and there are 10 clients continuously hitting the frontend:
+- All 10 requests will be counted as inflight (from start until complete response)
+- 7 requests will be in HTTP queue most of the time
+- 3 requests will be actively processed (between first token and last token)
+
+**Testing Setup:**
+Try launching a frontend and a Mocker backend that allows 3 concurrent requests:
+```bash
+$ python -m dynamo.frontend --http-port 8000
+$ python -m dynamo.mocker --model-path Qwen/Qwen3-0.6B --max-num-seqs 3
+# Launch your 10 concurrent clients here
+# Then check the queued_requests and inflight_requests metrics from the frontend:
+$ curl -s localhost:8000/metrics|grep -v '^#'|grep -E 'queue|inflight'
+dynamo_frontend_queued_requests{model="qwen/qwen3-0.6b"} 7
+dynamo_frontend_inflight_requests{model="qwen/qwen3-0.6b"} 10
+```
+
+**Real setup using vLLM (instead of Mocker):**
+```bash
+$ python -m dynamo.vllm --model Qwen/Qwen3-0.6B  \
+   --enforce-eager --no-enable-prefix-caching --max-num-seqs 3
+```
+
+**Key Differences:**
+- **Inflight**: Measures total request lifetime including processing time
+- **HTTP Queue**: Measures queuing time before processing begins (including prefill time)
+- **HTTP Queue ≤ Inflight** (HTTP queue is a subset of inflight time)
+
+¹ **TODO**: Implement the "actual" HTTP queue metric that tracks from request start until first token generation begins, rather than the current implementation that tracks until first token is received by the frontend
 
 ### Required Files
 
@@ -74,7 +174,36 @@ The following configuration files should be present in this directory:
 - [grafana_dashboards/grafana-dashboard-providers.yml](./grafana_dashboards/grafana-dashboard-providers.yml): Contains Grafana dashboard provider configuration
 - [grafana_dashboards/grafana-dynamo-dashboard.json](./grafana_dashboards/grafana-dynamo-dashboard.json): A general Dynamo Dashboard for both SW and HW metrics.
 - [grafana_dashboards/grafana-dcgm-metrics.json](./grafana_dashboards/grafana-dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
-- [grafana_dashboards/grafana-llm-metrics.json](./grafana_dashboards/grafana-llm-metrics.json): This file, which is being phased out, contains the Grafana dashboard configuration for LLM-specific metrics. It requires an additional `metrics` component to operate concurrently. A new version is under development.
+- [grafana_dashboards/grafana-kvbm-dashboard.json](./grafana_dashboards/grafana-kvbm-dashboard.json): Contains Grafana dashboard configuration for KVBM metrics
+
+### Metric Name Constants
+
+The [prometheus_names.rs](../../lib/runtime/src/metrics/prometheus_names.rs) module provides centralized Prometheus metric name constants and sanitization utilities for the Dynamo metrics system. This module ensures consistency across all components and prevents metric name duplication.
+
+#### Key Features
+
+- **Centralized Constants**: All Prometheus metric names are defined as constants to avoid duplication and typos
+- **Automatic Sanitization**: Functions to sanitize metric and label names according to Prometheus naming rules
+- **Component Organization**: Metric names are organized by component (frontend, work_handler, nats_client, etc.)
+- **Validation Arrays**: Arrays of metric names for iteration and validation purposes
+
+#### Metric Name Prefixes
+
+- `dynamo_component_*`: Core component metrics (requests, latency, bytes, etc.)
+- `dynamo_frontend_*`: Frontend service metrics (LLM HTTP service)
+- `nats_client_*`: NATS client connection and message metrics
+- `nats_service_*`: NATS service statistics metrics
+- `kvstats_*`: KV cache statistics from LLM workers
+
+#### Sanitization Functions
+
+The module provides functions to ensure metric and label names comply with Prometheus naming conventions:
+
+- `sanitize_prometheus_name()`: Sanitizes metric names (allows colons and `__`)
+- `sanitize_prometheus_label()`: Sanitizes label names (no colons, no `__` prefix)
+- `build_component_metric_name()`: Builds full component metric names with proper prefixing
+
+This centralized approach ensures all Dynamo components use consistent, valid Prometheus metric names without manual coordination.
 
 ## Getting Started
 
@@ -108,8 +237,6 @@ The following configuration files should be present in this directory:
    - DCGM Exporter: `http://localhost:9401/metrics`
 
 
-   - Start the [components/metrics](../../components/metrics/README.md) application to begin monitoring for metric events from dynamo workers and aggregating them on a Prometheus metrics endpoint: `http://localhost:9091/metrics`.
-   - Uncomment the appropriate lines in prometheus.yml to poll port 9091.
    - Start worker(s) that publishes KV Cache metrics: [lib/runtime/examples/service_metrics/README.md](../../lib/runtime/examples/service_metrics/README.md) can populate dummy KV Cache metrics.
 
 ### Configuration
@@ -146,7 +273,7 @@ Grafana is pre-configured with:
   docker compose logs grafana
   ```
 
-3. For issues with the legacy metrics component (being phased out), see [components/metrics/README.md](../../components/metrics/README.md) for details on the exposed metrics and troubleshooting steps.
+3. Check Prometheus targets at `http://localhost:9090/targets` to verify metric collection.
 
 ## Developer Guide
 
@@ -163,8 +290,8 @@ let component = namespace.component("my_component")?;
 let endpoint = component.endpoint("my_endpoint")?;
 
 // Create endpoint-level counters (this is a Prometheus Counter type)
-let total_requests = endpoint.create_counter(
-    "total_requests",
+let requests_total = endpoint.create_counter(
+    "requests_total",
     "Total requests across all namespaces",
     &[]
 )?;
@@ -341,28 +468,13 @@ let latency = endpoint.create_histogram(
 
 ```rust
 // Aggregate metrics across multiple endpoints
-let total_requests = namespace.create_counter(
-    "total_requests",
+let requests_total = namespace.create_counter(
+    "requests_total",
     "Total requests across all endpoints",
     &[]
 )?;
 ```
 
-## Running the deprecated `components/metrics` program
-
-⚠️ **DEPRECATION NOTICE** ⚠️
-
-When you run the example [components/metrics](../../components/metrics/README.md) program, it exposes a Prometheus /metrics endpoint with the following metrics (defined in [components/metrics/src/lib.rs](../../components/metrics/src/lib.rs)):
-
-**⚠️ The following `llm_kv_*` metrics are deprecated:**
-
-- `llm_requests_active_slots`: Active request slots per worker
-- `llm_requests_total_slots`: Total available request slots per worker
-- `llm_kv_blocks_active`: Active KV blocks per worker
-- `llm_kv_blocks_total`: Total KV blocks available per worker
-- `llm_kv_hit_rate_percent`: KV Cache hit percent per worker
-- `llm_load_avg`: Average load across workers
-- `llm_load_std`: Load standard deviation across workers
 
 ## Troubleshooting
 
@@ -377,4 +489,4 @@ When you run the example [components/metrics](../../components/metrics/README.md
   docker compose logs grafana
   ```
 
-3. For issues with the legacy metrics component (being phased out), see [components/metrics/README.md](../../components/metrics/README.md) for details on the exposed metrics and troubleshooting steps.
+3. Check Prometheus targets at `http://localhost:9090/targets` to verify metric collection.

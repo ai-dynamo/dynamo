@@ -57,9 +57,7 @@ async fn make_mdc_from_repo(
     //TODO: remove this once we have nim-hub support. See the NOTE above.
     let downloaded_path = maybe_download_model(local_path, hf_repo, hf_revision).await;
     let display_name = format!("{}--{}", hf_repo, hf_revision);
-    let mut mdc = ModelDeploymentCard::load(downloaded_path, None)
-        .await
-        .unwrap();
+    let mut mdc = ModelDeploymentCard::load_from_disk(downloaded_path, None).unwrap();
     mdc.set_name(&display_name);
     mdc.prompt_context = mixins;
     mdc
@@ -272,6 +270,7 @@ impl Request {
             inner,
             common: Default::default(),
             nvext: None,
+            chat_template_args: None,
         }
     }
 }
@@ -285,7 +284,7 @@ async fn test_single_turn() {
     let mdcs = make_mdcs().await;
 
     for mdc in mdcs.iter() {
-        let formatter = PromptFormatter::from_mdc(mdc.clone()).await.unwrap();
+        let formatter = PromptFormatter::from_mdc(mdc).unwrap();
 
         // assert its an OAI formatter
         let formatter = match formatter {
@@ -317,7 +316,7 @@ async fn test_single_turn_with_tools() {
     let mdcs = make_mdcs().await;
 
     for mdc in mdcs.iter() {
-        let formatter = PromptFormatter::from_mdc(mdc.clone()).await.unwrap();
+        let formatter = PromptFormatter::from_mdc(mdc).unwrap();
 
         // assert its an OAI formatter
         let formatter = match formatter {
@@ -354,7 +353,7 @@ async fn test_mulit_turn_without_system() {
     let mdcs = make_mdcs().await;
 
     for mdc in mdcs.iter() {
-        let formatter = PromptFormatter::from_mdc(mdc.clone()).await.unwrap();
+        let formatter = PromptFormatter::from_mdc(mdc).unwrap();
 
         // assert its an OAI formatter
         let formatter = match formatter {
@@ -386,7 +385,7 @@ async fn test_mulit_turn_with_system() {
     let mdcs = make_mdcs().await;
 
     for mdc in mdcs.iter() {
-        let formatter = PromptFormatter::from_mdc(mdc.clone()).await.unwrap();
+        let formatter = PromptFormatter::from_mdc(mdc).unwrap();
 
         // assert its an OAI formatter
         let formatter = match formatter {
@@ -424,7 +423,7 @@ async fn test_multi_turn_with_system_with_tools() {
     let mdcs = make_mdcs().await;
 
     for mdc in mdcs.iter() {
-        let formatter = PromptFormatter::from_mdc(mdc.clone()).await.unwrap();
+        let formatter = PromptFormatter::from_mdc(mdc).unwrap();
 
         // assert its an OAI formatter
         let formatter = match formatter {
@@ -467,7 +466,7 @@ async fn test_multi_turn_with_continuation() {
     )
     .await;
 
-    let formatter = PromptFormatter::from_mdc(mdc.clone()).await.unwrap();
+    let formatter = PromptFormatter::from_mdc(&mdc).unwrap();
 
     // assert its an OAI formatter
     let formatter = match formatter {

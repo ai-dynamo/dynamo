@@ -28,4 +28,4 @@ kv_cache_config:
   free_gpu_memory_fraction: 0.85
 
 cache_transceiver_config:
-  backend: default
+  backend: DEFAULT

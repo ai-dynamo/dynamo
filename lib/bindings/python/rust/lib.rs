@@ -3,21 +3,24 @@
 
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
-use pyo3::exceptions::PyStopAsyncIteration;
-use pyo3::types::PyBytes;
-use pyo3::types::{PyDict, PyList, PyString};
 use pyo3::IntoPyObjectExt;
+use pyo3::exceptions::PyStopAsyncIteration;
+use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
+use rand::seq::IteratorRandom as _;
 use rs::pipeline::network::Ingress;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
+use std::time::Duration;
 use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
+use tracing::{Instrument, info_span};
 
 use dynamo_runtime::{
     self as rs, logging,
     pipeline::{
-        context::Context as RsContext, network::egress::push_router::RouterMode as RsRouterMode,
-        EngineStream, ManyOut, SingleIn,
+        EngineStream, ManyOut, SingleIn, context::Context as RsContext,
+        network::egress::push_router::RouterMode as RsRouterMode,
     },
     protocols::annotated::Annotated as RsAnnotated,
     traits::DistributedRuntimeProvider,
@@ -51,6 +54,9 @@ mod engine;
 mod http;
 mod llm;
 mod parsers;
+mod planner;
+mod prometheus_metrics;
+mod prometheus_names;
 
 type JsonServerStreamingIngress =
     Ingress<SingleIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
@@ -58,6 +64,65 @@ type JsonServerStreamingIngress =
 static INIT: OnceCell<()> = OnceCell::new();
 
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
+
+// Helper to create client span - always emit spans for consistency
+fn create_client_span(
+    operation: &str,
+    request_id: &str,
+    trace_context: Option<&dynamo_runtime::logging::DistributedTraceContext>,
+) -> tracing::Span {
+    if let Some(ctx) = trace_context {
+        info_span!(
+            "client_request",
+            operation = operation,
+            request_id = request_id,
+            trace_id = ctx.trace_id.as_str(),
+            parent_id = ctx.span_id.as_str(),
+            x_request_id = ctx.x_request_id.as_deref().unwrap_or(""),
+            x_dynamo_request_id = ctx.x_dynamo_request_id.as_deref().unwrap_or(""),
+            tracestate = ctx.tracestate.as_deref().unwrap_or("")
+        )
+    } else {
+        info_span!(
+            "client_request",
+            operation = operation,
+            request_id = request_id,
+        )
+    }
+}
+
+// Helper to get appropriate span for instrumentation - always emit spans
+fn get_span_for_context(context: &context::Context, operation: &str) -> tracing::Span {
+    create_client_span(operation, context.inner().id(), context.trace_context())
+}
+
+// Helper to create span for direct method with instance_id
+fn get_span_for_direct_context(
+    context: &context::Context,
+    operation: &str,
+    instance_id: &str,
+) -> tracing::Span {
+    if let Some(trace_ctx) = context.trace_context() {
+        info_span!(
+            "client_request",
+            operation = operation,
+            request_id = context.inner().id(),
+            instance_id = instance_id,
+            trace_id = trace_ctx.trace_id.as_str(),
+            parent_id = trace_ctx.span_id.as_str(),
+            x_request_id = trace_ctx.x_request_id.as_deref().unwrap_or(""),
+            x_dynamo_request_id = trace_ctx.x_dynamo_request_id.as_deref().unwrap_or(""),
+            tracestate = trace_ctx.tracestate.as_deref().unwrap_or("")
+        )
+    } else {
+        info_span!(
+            "client_request",
+            operation = operation,
+            request_id = context.inner().id(),
+            instance_id = instance_id,
+        )
+    }
+}
 
 /// A Python module implemented in Rust. The name of this function must match
 /// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
@@ -77,7 +142,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Component>()?;
     m.add_class::<Endpoint>()?;
     m.add_class::<Client>()?;
-    m.add_class::<EtcdClient>()?;
     m.add_class::<AsyncResponseStream>()?;
     m.add_class::<llm::disagg_router::DisaggregatedRouter>()?;
     m.add_class::<llm::entrypoint::EntrypointArgs>()?;
@@ -102,12 +166,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::ZmqKvEventPublisher>()?;
     m.add_class::<llm::kv::ZmqKvEventPublisherConfig>()?;
     m.add_class::<llm::kv::KvRecorder>()?;
-    m.add_class::<llm::nats::NatsQueue>()?;
     m.add_class::<http::HttpService>()?;
-    m.add_class::<http::HttpError>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
     m.add_class::<context::Context>()?;
-    m.add_class::<EtcdKvCache>()?;
     m.add_class::<ModelType>()?;
     m.add_class::<ModelInput>()?;
     m.add_class::<llm::kv::ForwardPassMetrics>()?;
@@ -117,9 +178,19 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::KvPushRouter>()?;
     m.add_class::<llm::kv::KvPushRouterStream>()?;
     m.add_class::<RouterMode>()?;
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add_class::<planner::VirtualConnectorCoordinator>()?;
+    m.add_class::<planner::VirtualConnectorClient>()?;
+    m.add_class::<planner::PlannerDecision>()?;
 
     engine::add_to_module(m)?;
     parsers::add_to_module(m)?;
+    prometheus_names::add_to_module(m)?;
+
+    m.add_class::<prometheus_metrics::PyRuntimeMetrics>()?;
+    let prometheus_metrics = PyModule::new(m.py(), "prometheus_metrics")?;
+    prometheus_metrics::add_to_module(&prometheus_metrics)?;
+    m.add_submodule(&prometheus_metrics)?;
 
     #[cfg(feature = "block-manager")]
     llm::block_manager::add_to_module(m)?;
@@ -162,6 +233,7 @@ fn register_llm<'p>(
     let model_input = match model_input {
         ModelInput::Text => llm_rs::model_type::ModelInput::Text,
         ModelInput::Tokens => llm_rs::model_type::ModelInput::Tokens,
+        ModelInput::Tensor => llm_rs::model_type::ModelInput::Tensor,
     };
 
     let model_type_obj = model_type.inner;
@@ -217,12 +289,6 @@ fn register_llm<'p>(
 
 #[pyclass]
 #[derive(Clone)]
-struct EtcdKvCache {
-    inner: Arc<rs::transports::etcd::KvCache>,
-}
-
-#[pyclass]
-#[derive(Clone)]
 pub struct DistributedRuntime {
     inner: rs::DistributedRuntime,
     event_loop: PyObject,
@@ -230,15 +296,9 @@ pub struct DistributedRuntime {
 
 impl DistributedRuntime {
     #[allow(dead_code)]
-    fn inner(&self) -> &rs::DistributedRuntime {
+    pub(crate) fn inner(&self) -> &rs::DistributedRuntime {
         &self.inner
     }
-}
-
-#[pyclass]
-#[derive(Clone)]
-struct EtcdClient {
-    inner: rs::transports::etcd::Client,
 }
 
 #[pyclass]
@@ -295,6 +355,10 @@ impl ModelType {
     const Embedding: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Embedding,
     };
+    #[classattr]
+    const TensorBased: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::TensorBased,
+    };
 
     fn __or__(&self, other: &Self) -> Self {
         ModelType {
@@ -312,6 +376,7 @@ impl ModelType {
 enum ModelInput {
     Text = 1,
     Tokens = 2,
+    Tensor = 3,
 }
 
 #[pymethods]
@@ -366,11 +431,136 @@ impl DistributedRuntime {
         })
     }
 
-    fn etcd_client(&self) -> PyResult<Option<EtcdClient>> {
-        match self.inner.etcd_client().clone() {
-            Some(etcd_client) => Ok(Some(EtcdClient { inner: etcd_client })),
-            None => Ok(None),
+    /// Allocate a contiguous block of ports from the specified range and atomically reserve them.
+    /// Returns a list of all allocated ports in order.
+    #[pyo3(signature = (namespace, port_min, port_max, block_size, context=None))]
+    fn allocate_port_block<'p>(
+        &self,
+        py: Python<'p>,
+        namespace: &str,
+        port_min: u16,
+        port_max: u16,
+        block_size: u16,
+        context: Option<String>, // Optional info to store alongside the reservation
+    ) -> PyResult<Bound<'p, PyAny>> {
+        const MAX_ALLOCATE_ATTEMPTS: usize = 100;
+        if block_size == 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Block size must be at least 1",
+            ));
         }
+
+        let Some(etcd_client) = self.inner.etcd_client() else {
+            return Err(PyErr::new::<PyException, _>(
+                "Static workers should not need to reserve ports",
+            ));
+        };
+
+        let min = port_min;
+        let max = port_max;
+
+        // Compute maximum valid starting port (inclusive)
+        let max_start_port = max.saturating_sub(block_size.saturating_sub(1));
+        if max_start_port < min {
+            return Err(PyErr::new::<PyException, _>(format!(
+                "Port range {min}-{max} is too small for block size {block_size}",
+            )));
+        }
+
+        // Randomize candidate starting ports to reduce contention/races
+        let candidate_count =
+            (max_start_port - port_min + 1).min(MAX_ALLOCATE_ATTEMPTS as u16) as usize;
+        let mut rng = rand::rng();
+        let candidate_ports: Vec<u16> =
+            (port_min..=max_start_port).choose_multiple(&mut rng, candidate_count);
+
+        let local_ip = match local_ip() {
+            Ok(ip) => ip,
+            Err(err) => {
+                return Err(PyErr::new::<PyException, _>(format!(
+                    "Failed fetching local IP address: {err}"
+                )));
+            }
+        };
+
+        let context_bytes = context.map(|s| s.as_bytes().to_vec()).unwrap_or_default();
+        let namespace = namespace.to_owned();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            for (attempt_idx, start_port) in candidate_ports.into_iter().enumerate() {
+                let end_port_exclusive = start_port + block_size;
+                let ports_to_reserve: Vec<u16> = (start_port..end_port_exclusive).collect();
+
+                // Hold/bind all ports in the block
+                let mut sockets = Vec::with_capacity(ports_to_reserve.len());
+                let mut bind_failed = false;
+
+                for &port in &ports_to_reserve {
+                    match bind_tcp_port(port) {
+                        Ok(sock) => sockets.push(sock),
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to bind to port block starting at {start_port} (attempt {}): {e}",
+                                attempt_idx + 1,
+                            );
+                            bind_failed = true;
+                            break;
+                        }
+                    }
+                }
+
+                if bind_failed {
+                    // Let previously bound sockets drop here
+                    if attempt_idx < candidate_count - 1 {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    continue;
+                }
+
+                // With sockets held, reserve in ETCD
+                let mut reserved_keys = Vec::with_capacity(ports_to_reserve.len());
+                let mut reservation_failed = false;
+                for port in &ports_to_reserve {
+                    let key = make_port_key(&namespace, local_ip, *port).map_err(to_pyerr)?;
+
+                    if let Err(e) = etcd_client
+                        .kv_create(&key, context_bytes.clone(), None)
+                        .await
+                    {
+                        tracing::error!(
+                            "Failed to reserve port block starting at {start_port} (attempt {}): {e}",
+                            attempt_idx + 1,
+                        );
+                        reservation_failed = true;
+                        break;
+                    }
+                    reserved_keys.push(key);
+                }
+
+                if reservation_failed {
+                    // Cleanup partial reservations
+                    for key in reserved_keys {
+                        if let Err(e) = etcd_client.kv_delete(key.as_str(), None).await {
+                            tracing::warn!("Failed to cleanup reserved port {key}: {e}");
+                        }
+                    }
+
+                    // Sockets automatically released via RAII
+                    if attempt_idx < candidate_count - 1 {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    continue;
+                }
+
+                // Success - sockets will be released automatically
+                tracing::debug!("Reserved port block {ports_to_reserve:?}");
+                return Ok(ports_to_reserve);
+            }
+
+            Err(PyErr::new::<PyException, _>(format!(
+                "Failed to allocate and reserve a port block of size {block_size} from range {min}-{max} after {candidate_count} attempts"
+            )))
+        })
     }
 
     fn shutdown(&self) {
@@ -380,153 +570,38 @@ impl DistributedRuntime {
     fn event_loop(&self) -> PyObject {
         self.event_loop.clone()
     }
+
+    fn child_token(&self) -> CancellationToken {
+        let inner = self.inner.runtime().child_token();
+        CancellationToken { inner }
+    }
 }
 
-#[pymethods]
-impl EtcdKvCache {
-    #[new]
-    fn py_new(
-        _etcd_client: &EtcdClient,
-        _prefix: String,
-        _initial_values: &Bound<'_, PyDict>,
-    ) -> PyResult<Self> {
-        // We can't create the KvCache here because it's async, so we'll return an error
-        Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "EtcdKvCache must be created using the 'new' class method",
-        ))
-    }
+// Bind a TCP port and return a socket held until dropped.
+fn bind_tcp_port(port: u16) -> std::io::Result<socket2::Socket> {
+    let sock = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    sock.set_reuse_address(true)?;
+    let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port));
+    sock.bind(&addr.into())?;
+    Ok(sock)
+}
 
-    #[staticmethod]
-    #[allow(clippy::new_ret_no_self)]
-    fn create<'p>(
-        py: Python<'p>,
-        etcd_client: &EtcdClient,
-        prefix: String,
-        initial_values: &Bound<'p, PyDict>,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let client = etcd_client.inner.clone();
+fn make_port_key(namespace: &str, node_ip: IpAddr, port: u16) -> anyhow::Result<String> {
+    Ok(format!("v1/{namespace}/ports/{node_ip}/{port}"))
+}
 
-        // Convert Python dict to Rust HashMap
-        let mut rust_initial_values = std::collections::HashMap::new();
-        for (key, value) in initial_values.iter() {
-            let key_str = key.extract::<String>()?;
-
-            // Handle both string and bytes values
-            let value_bytes = if let Ok(bytes) = value.extract::<Vec<u8>>() {
-                bytes
-            } else if let Ok(string) = value.extract::<String>() {
-                string.into_bytes()
-            } else {
-                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "Values must be either strings or bytes",
-                ));
-            };
-
-            rust_initial_values.insert(key_str, value_bytes);
+fn local_ip() -> Result<IpAddr, local_ip_address::Error> {
+    local_ip_address::local_ip().or_else(|err| match err {
+        local_ip_address::Error::LocalIpAddressNotFound => {
+            // Fall back to IPv6 if no IPv4 addresses are found
+            local_ip_address::local_ipv6()
         }
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let kv_cache = rs::transports::etcd::KvCache::new(client, prefix, rust_initial_values)
-                .await
-                .map_err(to_pyerr)?;
-
-            Ok(EtcdKvCache {
-                inner: Arc::new(kv_cache),
-            })
-        })
-    }
-
-    fn get<'p>(&self, py: Python<'p>, key: String) -> PyResult<Bound<'p, PyAny>> {
-        let inner = self.inner.clone();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            if let Some(value) = inner.get(&key).await {
-                match Python::with_gil(|py| {
-                    let py_obj = PyBytes::new(py, &value).into_pyobject(py)?;
-                    Ok(py_obj.unbind().into_any())
-                }) {
-                    Ok(result) => Ok(result),
-                    Err(e) => Err(e),
-                }
-            } else {
-                Ok(Python::with_gil(|py| py.None()))
-            }
-        })
-    }
-
-    fn get_all<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let inner = self.inner.clone();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let all_values = inner.get_all().await;
-
-            Python::with_gil(|py| {
-                let dict = PyDict::new(py);
-                for (key, value) in all_values {
-                    // Strip the prefix from the key
-                    let stripped_key = if let Some(stripped) = key.strip_prefix(&inner.prefix) {
-                        stripped.to_string()
-                    } else {
-                        key
-                    };
-                    dict.set_item(stripped_key, PyBytes::new(py, &value))?;
-                }
-                let py_obj = dict.into_pyobject(py)?;
-                Ok(py_obj.unbind().into_any())
-            })
-        })
-    }
-
-    #[pyo3(signature = (key, value, lease_id=None))]
-    fn put<'p>(
-        &self,
-        py: Python<'p>,
-        key: String,
-        value: Vec<u8>,
-        lease_id: Option<i64>,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let inner = self.inner.clone();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.put(&key, value, lease_id).await.map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-
-    fn delete<'p>(&self, py: Python<'p>, key: String) -> PyResult<Bound<'p, PyAny>> {
-        let inner = self.inner.clone();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.delete(&key).await.map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-
-    fn clear_all<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let inner = self.inner.clone();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // Get all keys with the prefix
-            let all_keys = inner
-                .get_all()
-                .await
-                .keys()
-                .cloned()
-                .collect::<Vec<String>>();
-
-            // Delete each key
-            for key in all_keys {
-                // Strip the prefix from the key before deleting
-                if let Some(stripped_key) = key.strip_prefix(&inner.prefix) {
-                    inner.delete(stripped_key).await.map_err(to_pyerr)?;
-                } else {
-                    inner.delete(&key).await.map_err(to_pyerr)?;
-                }
-            }
-
-            Ok(())
-        })
-    }
+        _ => Err(err),
+    })
 }
 
 #[pymethods]
@@ -561,28 +636,61 @@ impl Component {
             Ok(())
         })
     }
+
+    /// Get a RuntimeMetrics helper for creating Prometheus metrics
+    #[getter]
+    fn metrics(&self) -> prometheus_metrics::PyRuntimeMetrics {
+        prometheus_metrics::PyRuntimeMetrics::from_component(self.inner.clone())
+    }
 }
 
 #[pymethods]
 impl Endpoint {
-    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None))]
+    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
         generator: PyObject,
         graceful_shutdown: Option<bool>,
         metrics_labels: Option<Vec<(String, String)>>,
+        health_check_payload: Option<&Bound<'p, PyDict>>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let engine = Arc::new(engine::PythonAsyncEngine::new(
             generator,
             self.event_loop.clone(),
         )?);
         let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
-        let builder = self
+
+        // Convert Python dict to serde_json::Value if provided and validate it's an object
+        let health_payload_json = health_check_payload
+            .map(|dict| pythonize::depythonize::<serde_json::Value>(dict))
+            .transpose()
+            .map_err(|err| {
+                pyo3::exceptions::PyTypeError::new_err(format!(
+                    "Failed to convert health_check_payload: {}",
+                    err
+                ))
+            })?;
+
+        // Require an object/dict
+        if let Some(ref payload) = health_payload_json
+            && !payload.is_object()
+        {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "health_check_payload must be a JSON object (dict)",
+            ));
+        }
+
+        let mut builder = self
             .inner
             .endpoint_builder()
             .metrics_labels(metrics_labels)
             .handler(ingress);
+
+        if let Some(payload) = health_payload_json {
+            builder = builder.health_check_payload(payload);
+        }
+
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             builder
@@ -617,6 +725,12 @@ impl Endpoint {
             .map(|l| l.id())
             .unwrap_or(0)
     }
+
+    /// Get a RuntimeMetrics helper for creating Prometheus metrics
+    #[getter]
+    fn metrics(&self) -> prometheus_metrics::PyRuntimeMetrics {
+        prometheus_metrics::PyRuntimeMetrics::from_endpoint(self.inner.clone())
+    }
 }
 
 #[pymethods]
@@ -628,102 +742,11 @@ impl Namespace {
             event_loop: self.event_loop.clone(),
         })
     }
-}
 
-#[pymethods]
-impl EtcdClient {
-    #[pyo3(signature = (key, value, lease_id=None))]
-    fn kv_create<'p>(
-        &self,
-        py: Python<'p>,
-        key: String,
-        value: Vec<u8>,
-        lease_id: Option<i64>,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let client = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            client
-                .kv_create(&key, value, lease_id)
-                .await
-                .map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-
-    #[pyo3(signature = (key, value, lease_id=None))]
-    fn kv_create_or_validate<'p>(
-        &self,
-        py: Python<'p>,
-        key: String,
-        value: Vec<u8>,
-        lease_id: Option<i64>,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let client = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            client
-                .kv_create_or_validate(key, value, lease_id)
-                .await
-                .map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-
-    fn primary_lease_id(&self) -> i64 {
-        self.inner.lease_id()
-    }
-
-    #[pyo3(signature = (key, value, lease_id=None))]
-    fn kv_put<'p>(
-        &self,
-        py: Python<'p>,
-        key: String,
-        value: Vec<u8>,
-        lease_id: Option<i64>,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let client = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            client
-                .kv_put(key, value, lease_id)
-                .await
-                .map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-
-    fn kv_get_prefix<'p>(&self, py: Python<'p>, prefix: String) -> PyResult<Bound<'p, PyAny>> {
-        let client = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = client
-                .kv_get_prefix(prefix)
-                .await
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-
-            // Convert Vec<KeyValue> to a list of dictionaries
-            let py_list = Python::with_gil(|py| {
-                let list = PyList::empty(py);
-                for kv in result {
-                    let dict = PyDict::new(py);
-                    dict.set_item("key", String::from_utf8_lossy(kv.key()).to_string())?;
-                    dict.set_item("value", PyBytes::new(py, kv.value()))?;
-                    dict.set_item("create_revision", kv.create_revision())?;
-                    dict.set_item("mod_revision", kv.mod_revision())?;
-                    dict.set_item("version", kv.version())?;
-                    dict.set_item("lease", kv.lease())?;
-                    list.append(dict)?;
-                }
-                Ok::<Py<PyList>, PyErr>(list.into())
-            })?;
-
-            Ok(py_list)
-        })
-    }
-
-    fn revoke_lease<'p>(&self, py: Python<'p>, lease_id: i64) -> PyResult<Bound<'p, PyAny>> {
-        let client = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            client.revoke_lease(lease_id).await.map_err(to_pyerr)?;
-            Ok(())
-        })
+    /// Get a RuntimeMetrics helper for creating Prometheus metrics
+    #[getter]
+    fn metrics(&self) -> prometheus_metrics::PyRuntimeMetrics {
+        prometheus_metrics::PyRuntimeMetrics::from_namespace(self.inner.clone())
     }
 }
 
@@ -782,8 +805,13 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request = RsContext::with_id(request, context.inner().id().to_string());
-                    let stream = client.round_robin(request).await.map_err(to_pyerr)?;
+                    let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
+
+                    // Always instrument with appropriate span (none if no trace context)
+                    let span = get_span_for_context(&context, "round_robin");
+                    let stream_future = client.round_robin(request_ctx).instrument(span);
+
+                    let stream = stream_future.await.map_err(to_pyerr)?;
                     context.inner().link_child(stream.context());
                     stream
                 }
@@ -815,8 +843,12 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request = RsContext::with_id(request, context.inner().id().to_string());
-                    let stream = client.random(request).await.map_err(to_pyerr)?;
+                    let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
+
+                    let span = get_span_for_context(&context, "random");
+                    let stream_future = client.random(request_ctx).instrument(span);
+
+                    let stream = stream_future.await.map_err(to_pyerr)?;
                     context.inner().link_child(stream.context());
                     stream
                 }
@@ -849,11 +881,13 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request = RsContext::with_id(request, context.inner().id().to_string());
-                    let stream = client
-                        .direct(request, instance_id)
-                        .await
-                        .map_err(to_pyerr)?;
+                    let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
+
+                    let span =
+                        get_span_for_direct_context(&context, "direct", &instance_id.to_string());
+                    let stream_future = client.direct(request_ctx, instance_id).instrument(span);
+
+                    let stream = stream_future.await.map_err(to_pyerr)?;
                     context.inner().link_child(stream.context());
                     stream
                 }
@@ -890,8 +924,12 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request = RsContext::with_id(request, context.inner().id().to_string());
-                    let stream = client.r#static(request).await.map_err(to_pyerr)?;
+                    let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
+
+                    let span = get_span_for_context(&context, "static");
+                    let stream_future = client.r#static(request_ctx).instrument(span);
+
+                    let stream = stream_future.await.map_err(to_pyerr)?;
                     context.inner().link_child(stream.context());
                     stream
                 }
@@ -917,11 +955,10 @@ async fn process_stream(
         // Convert the response to a PyObject using Python's GIL
         let annotated: RsAnnotated<serde_json::Value> = response;
         let annotated: RsAnnotated<PyObject> = annotated.map_data(|data| {
-            let result = Python::with_gil(|py| match pythonize::pythonize(py, &data) {
+            Python::with_gil(|py| match pythonize::pythonize(py, &data) {
                 Ok(pyobj) => Ok(pyobj.into()),
                 Err(e) => Err(e.to_string()),
-            });
-            result
+            })
         });
 
         let is_error = annotated.is_error();

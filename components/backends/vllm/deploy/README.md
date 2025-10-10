@@ -82,7 +82,7 @@ extraPodSpec:
 
 Before using these templates, ensure you have:
 
-1. **Dynamo Cloud Platform installed** - See [Quickstart Guide](../../../../docs/guides/dynamo_deploy/README.md)
+1. **Dynamo Cloud Platform installed** - See [Quickstart Guide](../../../../docs/kubernetes/README.md)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for vLLM runtime images
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
@@ -116,7 +116,7 @@ Edit the template to match your environment:
 
 ```yaml
 # Update image registry and tag
-image: your-registry/vllm-runtime:your-tag
+image: my-registry/vllm-runtime:my-tag
 
 # Configure your model
 args:
@@ -197,7 +197,7 @@ See the [vLLM CLI documentation](https://docs.vllm.ai/en/v0.9.2/configuration/se
 Send a test request to verify your deployment:
 
 ```bash
-curl localhost:8080/v1/chat/completions \
+curl localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen/Qwen3-0.6B",
@@ -234,10 +234,10 @@ args:
 
 ## Further Reading
 
-- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/guides/dynamo_deploy/create_deployment.md)
-- **Quickstart**: [Deployment Quickstart](../../../../docs/guides/dynamo_deploy/README.md)
-- **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/guides/dynamo_deploy/dynamo_cloud.md)
-- **SLA Planner**: [SLA Planner Deployment Guide](../../../../docs/guides/dynamo_deploy/sla_planner_deployment.md)
+- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/create_deployment.md)
+- **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
+- **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/kubernetes/installation_guide.md)
+- **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/kubernetes/sla_planner_quickstart.md)
 - **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
 - **Architecture Docs**: [Disaggregated Serving](../../../../docs/architecture/disagg_serving.md), [KV-Aware Routing](../../../../docs/architecture/kv_cache_routing.md)
 
@@ -251,4 +251,4 @@ Common issues and solutions:
 4. **Out of memory**: Increase memory limits or reduce model batch size
 5. **Port forwarding issues**: Ensure correct pod UUID in port-forward command
 
-For additional support, refer to the [deployment troubleshooting guide](../../../../docs/guides/dynamo_deploy/README.md).
+For additional support, refer to the [deployment troubleshooting guide](../../../../docs/kubernetes/README.md).

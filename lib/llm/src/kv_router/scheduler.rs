@@ -2,14 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::local_model::runtime_config::ModelRuntimeConfig;
+use anyhow::Result;
 use dynamo_runtime::component::{Component, Instance};
+use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::traits::events::EventPublisher;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{RwLock, watch};
 
 use super::KV_HIT_RATE_SUBJECT;
 use super::KvRouterConfig;
@@ -54,8 +56,8 @@ pub struct SchedulingResponse {
 }
 
 pub struct SchedulingRequest {
-    pub request_id: String,
-    pub token_seq: Vec<SequenceHash>,
+    pub maybe_request_id: Option<String>,
+    pub token_seq: Option<Vec<SequenceHash>>,
     pub isl_tokens: usize,
     pub overlaps: OverlapScores,
     pub decode_blocks: HashMap<i64, usize>,
@@ -91,93 +93,117 @@ impl KvScheduler {
     pub async fn start(
         component: Component,
         block_size: u32,
-        mut instances_rx: watch::Receiver<Vec<Instance>>,
-        mut runtime_configs_rx: watch::Receiver<HashMap<i64, ModelRuntimeConfig>>,
+        instances_rx: watch::Receiver<Vec<Instance>>,
+        runtime_configs_rx: watch::Receiver<HashMap<i64, ModelRuntimeConfig>>,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
+        router_uuid: String,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
-        let mut instances: Vec<Instance> = instances_rx.borrow_and_update().clone();
-        let mut runtime_configs: HashMap<i64, ModelRuntimeConfig> =
-            runtime_configs_rx.borrow_and_update().clone();
+        let instances: Vec<Instance> = instances_rx.borrow().clone();
+        let runtime_configs: HashMap<i64, ModelRuntimeConfig> = runtime_configs_rx.borrow().clone();
 
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<KVHitRateEvent>();
-        let ns_clone = component.namespace().clone();
-        tokio::spawn(async move {
-            let mut event_rx = event_rx;
-            while let Some(event) = event_rx.recv().await {
-                if let Err(e) = ns_clone.publish(KV_HIT_RATE_SUBJECT, &event).await {
-                    tracing::warn!("Failed to publish KV hit rate event: {:?}", e);
+        // Create shared workers_with_configs wrapped in Arc<RwLock>
+        let workers_with_configs: Arc<RwLock<HashMap<i64, Option<ModelRuntimeConfig>>>> = {
+            let mut initial_map = HashMap::new();
+            for instance in &instances {
+                let worker_id = instance.instance_id;
+                let config = runtime_configs.get(&worker_id).cloned();
+                if config.is_some() {
+                    tracing::info!("Runtime config found for worker_id: {}", worker_id);
                 }
+                initial_map.insert(worker_id, config);
             }
-        });
+            Arc::new(RwLock::new(initial_map))
+        };
 
         let worker_ids: Vec<i64> = instances
             .iter()
             .map(|instance| instance.instance_id)
             .collect();
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
-            component,
+            component.clone(),
             block_size as usize,
             worker_ids,
             replica_sync,
+            router_uuid,
         ));
 
+        // Spawn background task to monitor and update workers_with_configs
+        let workers_monitor = workers_with_configs.clone();
+        let slots_monitor = slots.clone();
+        let mut instances_monitor_rx = instances_rx.clone();
+        let mut configs_monitor_rx = runtime_configs_rx.clone();
+        let monitor_cancel_token = component.drt().primary_token();
+        tokio::spawn(async move {
+            tracing::trace!("workers monitoring task started");
+            loop {
+                // Wait for either instances or configs to change
+                tokio::select! {
+                    _ = monitor_cancel_token.cancelled() => {
+                        tracing::trace!("workers monitoring task shutting down");
+                        break;
+                    }
+                    result = instances_monitor_rx.changed() => {
+                        if result.is_err() {
+                            tracing::warn!("endpoint watch sender shutdown in monitor");
+                            break;
+                        }
+                    }
+                    result = configs_monitor_rx.changed() => {
+                        if result.is_err() {
+                            tracing::warn!("runtime configs watch sender shutdown in monitor");
+                            break;
+                        }
+                    }
+                }
+
+                // Get the latest values from both channels
+                let new_instances = instances_monitor_rx.borrow_and_update().clone();
+                let new_configs = configs_monitor_rx.borrow_and_update().clone();
+
+                // Update workers when instances change
+                let worker_ids: Vec<i64> = new_instances
+                    .iter()
+                    .map(|instance| instance.instance_id)
+                    .collect();
+                slots_monitor.update_workers(worker_ids);
+
+                // Update the shared workers_with_configs
+                let mut workers_map = workers_monitor.write().await;
+                workers_map.clear();
+                for instance in &new_instances {
+                    let worker_id = instance.instance_id;
+                    let config = new_configs.get(&worker_id).cloned();
+                    if config.is_some() {
+                        tracing::info!("Runtime config found for worker_id: {}", worker_id);
+                    }
+                    workers_map.insert(worker_id, config);
+                }
+                tracing::trace!(
+                    "Updated workers_with_configs with {} workers",
+                    workers_map.len()
+                );
+            }
+            tracing::trace!("workers monitoring task shutting down");
+        });
+
         let slots_clone = slots.clone();
+        let workers_scheduler = workers_with_configs.clone();
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
+        let scheduler_cancel_token = component.drt().primary_token();
+        let ns_clone = component.namespace().clone();
+
         // Background task to handle scheduling requests
         tokio::spawn(async move {
             let mut request_rx = request_rx;
             tracing::trace!("scheduler background task started");
-            let mut workers_with_configs: HashMap<i64, Option<ModelRuntimeConfig>> = HashMap::new();
-            let mut needs_rebuild = true;
 
             loop {
-                // Check for instance updates (non-blocking)
-                let instances_changed = instances_rx.has_changed();
-                let configs_changed = runtime_configs_rx.has_changed();
-
-                match instances_changed {
-                    Ok(true) => {
-                        instances = instances_rx.borrow_and_update().clone();
-                        let worker_ids: Vec<i64> = instances
-                            .iter()
-                            .map(|instance| instance.instance_id)
-                            .collect();
-                        slots_clone.update_workers(worker_ids);
-                        needs_rebuild = true;
-                    }
-                    Ok(false) => {}
-                    Err(_) => {
-                        tracing::warn!("endpoint watch sender shutdown");
-                        break;
-                    }
-                }
-
-                // Check for runtime config updates
-                match configs_changed {
-                    Ok(true) => {
-                        runtime_configs = runtime_configs_rx.borrow_and_update().clone();
-                        needs_rebuild = true;
-                    }
-                    Ok(false) => {}
-                    Err(_) => {
-                        tracing::warn!("runtime configs watch sender shutdown");
-                    }
-                }
-
-                // Rebuild workers hashmap only when needed
-                if needs_rebuild {
-                    workers_with_configs.clear();
-                    for instance in &instances {
-                        let worker_id = instance.instance_id;
-                        let config = runtime_configs.get(&worker_id).cloned();
-                        if config.is_none() {
-                            tracing::warn!("Runtime config not found for worker_id: {}", worker_id);
-                        }
-                        workers_with_configs.insert(worker_id, config);
-                    }
-                    needs_rebuild = false;
+                // Check for cancellation at beginning of loop
+                if scheduler_cancel_token.is_cancelled() {
+                    tracing::trace!("scheduler background task shutting down");
+                    break;
                 }
 
                 // Wait for a new request
@@ -197,14 +223,18 @@ impl KvScheduler {
                 request.decode_blocks = decode_blocks;
                 request.prefill_tokens = prefill_tokens;
 
-                match selector.select_worker(&workers_with_configs, &request, block_size) {
+                // Read the current workers configuration
+                let workers = workers_scheduler.read().await.clone();
+
+                match selector.select_worker(&workers, &request, block_size) {
                     Ok(selection) => {
-                        if let Err(e) = event_tx.send(KVHitRateEvent {
+                        let event = KVHitRateEvent {
                             worker_id: selection.worker_id,
                             isl_blocks: selection.required_blocks as usize,
                             overlap_blocks: selection.overlap_blocks,
-                        }) {
-                            tracing::warn!("Failed to send KV hit rate event: {:?}", e);
+                        };
+                        if let Err(e) = ns_clone.publish(KV_HIT_RATE_SUBJECT, &event).await {
+                            tracing::warn!("Failed to publish KV hit rate event: {:?}", e);
                         }
 
                         let response = SchedulingResponse {
@@ -213,20 +243,32 @@ impl KvScheduler {
                         };
                         request.respond(response);
 
-                        // Only update the state if update_states is true
-                        if request.update_states {
-                            let _ = slots_clone
-                                .add_request(
-                                    request.request_id,
-                                    request.token_seq,
-                                    request.isl_tokens,
-                                    selection.overlap_blocks,
-                                    selection.worker_id,
-                                )
-                                .await;
+                        // Skip state update if not requested
+                        if !request.update_states {
+                            continue;
                         }
 
-                        continue;
+                        let Some(request_id) = request.maybe_request_id else {
+                            tracing::error!(
+                                "No request_id provided to add_request to the slot tracker"
+                            );
+                            continue;
+                        };
+
+                        if let Err(e) = slots_clone
+                            .add_request(
+                                request_id.clone(),
+                                request.token_seq,
+                                request.isl_tokens,
+                                selection.overlap_blocks,
+                                selection.worker_id,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to add request {request_id} to local slot tracker: {e:?}"
+                            );
+                        }
                     }
                     Err(KvSchedulerError::NoEndpoints) => {
                         tracing::trace!("no endpoints available; waiting for endpoints update");
@@ -254,16 +296,16 @@ impl KvScheduler {
 
     pub async fn schedule(
         &self,
-        request_id: String,
+        maybe_request_id: Option<String>,
         isl_tokens: usize,
-        token_seq: Vec<SequenceHash>,
+        token_seq: Option<Vec<SequenceHash>>,
         overlaps: OverlapScores,
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
     ) -> Result<i64, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
-            request_id,
+            maybe_request_id,
             token_seq,
             isl_tokens,
             overlaps,
@@ -289,7 +331,7 @@ impl KvScheduler {
     pub async fn add_request(
         &self,
         request_id: String,
-        token_sequence: Vec<SequenceHash>,
+        token_sequence: Option<Vec<SequenceHash>>,
         isl: usize,
         overlap: u32,
         worker_id: i64,
@@ -300,20 +342,19 @@ impl KvScheduler {
             .await;
     }
 
-    pub async fn mark_prefill_completed(&self, request_id: &str) {
-        let _ = self
-            .slots
+    pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<()> {
+        self.slots
             .mark_prefill_completed(&request_id.to_string())
-            .await;
+            .await
     }
 
-    pub async fn free(&self, request_id: &str) {
-        let _ = self.slots.free(&request_id.to_string()).await;
+    pub async fn free(&self, request_id: &str) -> Result<()> {
+        self.slots.free(&request_id.to_string()).await
     }
 
     pub async fn get_potential_loads(
         &self,
-        token_seq: Vec<SequenceHash>,
+        token_seq: Option<Vec<SequenceHash>>,
         isl_tokens: usize,
         overlaps: OverlapScores,
     ) -> Vec<PotentialLoad> {

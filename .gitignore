@@ -68,6 +68,7 @@ llm_engine.h
 
 ### Virtual Environment ###
 .venv/
+.venv-docs/
 
 ### Ruff ###
 .ruff_cache/
@@ -91,3 +92,16 @@ generated-values.yaml
 .build/
 **/.devcontainer/.env
 TensorRT-LLM
+
+# Ruler Generated Files
+/.cursor/instructions.md
+/.cursor/instructions.md.bak
+/CLAUDE.md
+/CLAUDE.md.bak
+
+# Benchmarks
+benchmarks/results
+profiling_results*
+
+# Direnv
+.envrc

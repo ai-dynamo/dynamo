@@ -1,19 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 pub use crate::component::Component;
+use crate::storage::key_value_store::{EtcdStore, KeyValueStore, MemoryStore};
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
     ErrorContext, RuntimeCallback,
@@ -56,10 +45,14 @@ impl DistributedRuntime {
 
         let runtime_clone = runtime.clone();
 
-        let etcd_client = if is_static {
-            None
+        let (etcd_client, store) = if is_static {
+            let store: Arc<dyn KeyValueStore> = Arc::new(MemoryStore::new());
+            (None, store)
         } else {
-            Some(etcd::Client::new(etcd_config.clone(), runtime_clone).await?)
+            let etcd_client = etcd::Client::new(etcd_config.clone(), runtime_clone).await?;
+            let store: Arc<dyn KeyValueStore> = Arc::new(EtcdStore::new(etcd_client.clone()));
+
+            (Some(etcd_client), store)
         };
 
         let nats_client = nats_config.clone().connect().await?;
@@ -89,6 +82,7 @@ impl DistributedRuntime {
         let distributed_runtime = Self {
             runtime,
             etcd_client,
+            store,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
@@ -165,6 +159,31 @@ impl DistributedRuntime {
             tracing::debug!(
                 "System status server HTTP endpoints disabled, but uptime metrics are being tracked"
             );
+        }
+
+        // Start health check manager if enabled
+        if config.health_check_enabled {
+            let health_check_config = crate::health_check::HealthCheckConfig {
+                canary_wait_time: std::time::Duration::from_secs(config.canary_wait_time_secs),
+                request_timeout: std::time::Duration::from_secs(
+                    config.health_check_request_timeout_secs,
+                ),
+            };
+
+            // Start the health check manager (spawns per-endpoint monitoring tasks)
+            match crate::health_check::start_health_check_manager(
+                distributed_runtime.clone(),
+                Some(health_check_config),
+            )
+            .await
+            {
+                Ok(()) => tracing::info!(
+                    "Health check manager started (canary_wait_time: {}s, request_timeout: {}s)",
+                    config.canary_wait_time_secs,
+                    config.health_check_request_timeout_secs
+                ),
+                Err(e) => tracing::error!("Health check manager failed to start: {}", e),
+            }
         }
 
         Ok(distributed_runtime)
@@ -257,6 +276,12 @@ impl DistributedRuntime {
         self.etcd_client.clone()
     }
 
+    /// An interface to store things. Will eventually replace `etcd_client`.
+    /// Currently does key-value, but will grow to include whatever we need to store.
+    pub fn store(&self) -> Arc<dyn KeyValueStore> {
+        self.store.clone()
+    }
+
     pub fn child_token(&self) -> CancellationToken {
         self.runtime.child_token()
     }
@@ -287,11 +312,13 @@ impl DistributedRuntime {
     }
 
     /// Add a callback function to metrics registries for the given hierarchies
+    // TODO: Rename to register_metrics_update_callback for consistency with Python API.
+    //       Do this after we move the MetricsRegistry trait to composition pattern.
     pub fn register_metrics_callback(&self, hierarchies: Vec<String>, callback: RuntimeCallback) {
         let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
-        for hierarchy in hierarchies {
+        for hierarchy in &hierarchies {
             registries
-                .entry(hierarchy)
+                .entry(hierarchy.clone())
                 .or_default()
                 .add_callback(callback.clone());
         }

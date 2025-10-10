@@ -178,7 +178,8 @@ By making a contribution to this project, I certify that:
 ```
 
 We require that every contribution to Dynamo is signed with
-a Developer Certificate of Origin. Additionally, please use your real name.
+a Developer Certificate of Origin, this is verified by a required CI check.
+Additionally, please use your real name.
 We do not accept anonymous contributors nor those utilizing pseudonyms.
 
 Each commit must include a DCO which looks like this
@@ -190,3 +191,6 @@ You may type this line on your own when writing your commit messages.
 However, if your user.name and user.email are set in your git configs,
 you can use `-s` or `--signoff` to add the `Signed-off-by` line to
 the end of the commit message.
+
+⚠️ **Contributor-Friendly DCO Guide:**
+If your pull request fails the DCO check, don’t worry! Check out our [DCO Troubleshooting Guide](DCO.md) for step-by-step instructions to fix it quickly.

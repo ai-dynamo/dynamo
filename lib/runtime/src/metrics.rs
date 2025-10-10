@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! Metrics registry trait and implementation for Prometheus metrics
 //!
@@ -122,6 +110,21 @@ impl PrometheusMetric for prometheus::Gauge {
 impl PrometheusMetric for prometheus::IntGauge {
     fn with_opts(opts: prometheus::Opts) -> Result<Self, prometheus::Error> {
         prometheus::IntGauge::with_opts(opts)
+    }
+}
+
+impl PrometheusMetric for prometheus::GaugeVec {
+    fn with_opts(_opts: prometheus::Opts) -> Result<Self, prometheus::Error> {
+        Err(prometheus::Error::Msg(
+            "GaugeVec requires label names, use with_opts_and_label_names instead".to_string(),
+        ))
+    }
+
+    fn with_opts_and_label_names(
+        opts: prometheus::Opts,
+        label_names: &[&str],
+    ) -> Result<Self, prometheus::Error> {
+        prometheus::GaugeVec::new(opts, label_names)
     }
 }
 
@@ -264,21 +267,8 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
 
     // Handle different metric types
     let prometheus_metric = if std::any::TypeId::of::<T>()
-        == std::any::TypeId::of::<prometheus::Histogram>()
+        == std::any::TypeId::of::<prometheus::CounterVec>()
     {
-        // Special handling for Histogram with custom buckets
-        // buckets parameter is valid for Histogram, const_labels is not used
-        if const_labels.is_some() {
-            return Err(anyhow::anyhow!(
-                "const_labels parameter is not valid for Histogram"
-            ));
-        }
-        let mut opts = prometheus::HistogramOpts::new(&metric_name, metric_desc);
-        for (key, value) in &updated_labels {
-            opts = opts.const_label(key.clone(), value.clone());
-        }
-        T::with_histogram_opts_and_buckets(opts, buckets)?
-    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::CounterVec>() {
         // Special handling for CounterVec with label names
         // const_labels parameter is required for CounterVec
         if buckets.is_some() {
@@ -292,6 +282,49 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         }
         let label_names = const_labels
             .ok_or_else(|| anyhow::anyhow!("CounterVec requires const_labels parameter"))?;
+        T::with_opts_and_label_names(opts, label_names)?
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::GaugeVec>() {
+        // Special handling for GaugeVec with label names
+        // const_labels parameter is required for GaugeVec
+        if buckets.is_some() {
+            return Err(anyhow::anyhow!(
+                "buckets parameter is not valid for GaugeVec"
+            ));
+        }
+        let mut opts = prometheus::Opts::new(&metric_name, metric_desc);
+        for (key, value) in &updated_labels {
+            opts = opts.const_label(key.clone(), value.clone());
+        }
+        let label_names = const_labels
+            .ok_or_else(|| anyhow::anyhow!("GaugeVec requires const_labels parameter"))?;
+        T::with_opts_and_label_names(opts, label_names)?
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::Histogram>() {
+        // Special handling for Histogram with custom buckets
+        // buckets parameter is valid for Histogram, const_labels is not used
+        if const_labels.is_some() {
+            return Err(anyhow::anyhow!(
+                "const_labels parameter is not valid for Histogram"
+            ));
+        }
+        let mut opts = prometheus::HistogramOpts::new(&metric_name, metric_desc);
+        for (key, value) in &updated_labels {
+            opts = opts.const_label(key.clone(), value.clone());
+        }
+        T::with_histogram_opts_and_buckets(opts, buckets)?
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::IntCounterVec>() {
+        // Special handling for IntCounterVec with label names
+        // const_labels parameter is required for IntCounterVec
+        if buckets.is_some() {
+            return Err(anyhow::anyhow!(
+                "buckets parameter is not valid for IntCounterVec"
+            ));
+        }
+        let mut opts = prometheus::Opts::new(&metric_name, metric_desc);
+        for (key, value) in &updated_labels {
+            opts = opts.const_label(key.clone(), value.clone());
+        }
+        let label_names = const_labels
+            .ok_or_else(|| anyhow::anyhow!("IntCounterVec requires const_labels parameter"))?;
         T::with_opts_and_label_names(opts, label_names)?
     } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::IntGaugeVec>() {
         // Special handling for IntGaugeVec with label names
@@ -307,21 +340,6 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         }
         let label_names = const_labels
             .ok_or_else(|| anyhow::anyhow!("IntGaugeVec requires const_labels parameter"))?;
-        T::with_opts_and_label_names(opts, label_names)?
-    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::IntCounterVec>() {
-        // Special handling for IntCounterVec with label names
-        // const_labels parameter is required for IntCounterVec
-        if buckets.is_some() {
-            return Err(anyhow::anyhow!(
-                "buckets parameter is not valid for IntCounterVec"
-            ));
-        }
-        let mut opts = prometheus::Opts::new(&metric_name, metric_desc);
-        for (key, value) in &updated_labels {
-            opts = opts.const_label(key.clone(), value.clone());
-        }
-        let label_names = const_labels
-            .ok_or_else(|| anyhow::anyhow!("IntCounterVec requires const_labels parameter"))?;
         T::with_opts_and_label_names(opts, label_names)?
     } else {
         // Standard handling for Counter, IntCounter, Gauge, IntGauge
@@ -408,6 +426,9 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
     // - Summary: create_summary() - for quantiles and sum/count metrics
     // - SummaryVec: create_summary_vec() - for labeled summaries
     // - Untyped: create_untyped() - for untyped metrics
+    //
+    // NOTE: The order of create_* methods below is mirrored in lib/bindings/python/rust/lib.rs::Metrics
+    // Keep them synchronized when adding new metric types
 
     /// Create a Counter metric
     fn create_counter(
@@ -445,6 +466,24 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
         labels: &[(&str, &str)],
     ) -> anyhow::Result<prometheus::Gauge> {
         create_metric(self, name, description, labels, None, None)
+    }
+
+    /// Create a GaugeVec metric with label names (for dynamic labels)
+    fn create_gaugevec(
+        &self,
+        name: &str,
+        description: &str,
+        const_labels: &[&str],
+        const_label_values: &[(&str, &str)],
+    ) -> anyhow::Result<prometheus::GaugeVec> {
+        create_metric(
+            self,
+            name,
+            description,
+            const_label_values,
+            None,
+            Some(const_labels),
+        )
     }
 
     /// Create a Histogram metric with custom buckets
@@ -879,12 +918,21 @@ mod test_metricsregistry_prefixes {
         assert_eq!(component.parent_hierarchy().len(), 2);
         assert_eq!(endpoint.parent_hierarchy().len(), 3);
 
-        // Invalid namespace behavior (sanitization should still error after becoming "123")
+        // Invalid namespace behavior - sanitizes to "_123" and succeeds
+        // @ryanolson intended to enable validation (see TODO comment in component.rs) but didn't turn it on,
+        // so invalid characters are sanitized in MetricsRegistry rather than rejected.
         let invalid_namespace = drt.namespace("@@123").unwrap();
         let result = invalid_namespace.create_counter("test_counter", "A test counter", &[]);
-        assert!(result.is_err());
-        if let Err(e) = &result {
-            assert!(e.to_string().contains("123"));
+        assert!(result.is_ok());
+        if let Ok(counter) = &result {
+            // Verify the namespace was sanitized to "_123" in the label
+            let desc = counter.desc();
+            let namespace_label = desc[0]
+                .const_label_pairs
+                .iter()
+                .find(|l| l.name() == "dynamo_namespace")
+                .expect("Should have dynamo_namespace label");
+            assert_eq!(namespace_label.value(), "_123");
         }
 
         // Valid namespace works
@@ -1179,8 +1227,8 @@ dynamo_component_nats_client_connection_state 1
 # TYPE dynamo_component_latency histogram
 dynamo_component_latency_bucket{le="0.1"} 10
 dynamo_component_latency_bucket{le="0.5"} 25
-dynamo_component_nats_service_total_requests 100
-dynamo_component_nats_service_total_errors 5"#;
+dynamo_component_nats_service_requests_total 100
+dynamo_component_nats_service_errors_total 5"#;
 
         // Test remove_nats_lines (excludes NATS lines but keeps help/type)
         let filtered_out = super::test_helpers::remove_nats_lines(test_input);
@@ -1424,7 +1472,11 @@ mod test_metricsregistry_nats {
                 1.0,
                 1.0,
             ), // Should be connected
-            (build_component_metric_name(nats_client::CONNECTS), 1.0, 1.0), // Should have 1 connection
+            (
+                build_component_metric_name(nats_client::CURRENT_CONNECTIONS),
+                1.0,
+                1.0,
+            ), // Should have 1 connection
             (
                 build_component_metric_name(nats_client::IN_TOTAL_BYTES),
                 800.0,
@@ -1447,22 +1499,22 @@ mod test_metricsregistry_nats {
             ), // Wide range around 2
             // Component NATS metrics (ordered to match COMPONENT_NATS_METRICS)
             (
-                build_component_metric_name(nats_service::AVG_PROCESSING_MS),
+                build_component_metric_name(nats_service::PROCESSING_MS_AVG),
                 0.0,
                 0.0,
             ), // No processing yet
             (
-                build_component_metric_name(nats_service::TOTAL_ERRORS),
+                build_component_metric_name(nats_service::ERRORS_TOTAL),
                 0.0,
                 0.0,
             ), // No errors yet
             (
-                build_component_metric_name(nats_service::TOTAL_REQUESTS),
+                build_component_metric_name(nats_service::REQUESTS_TOTAL),
                 0.0,
                 0.0,
             ), // No requests yet
             (
-                build_component_metric_name(nats_service::TOTAL_PROCESSING_MS),
+                build_component_metric_name(nats_service::PROCESSING_MS_TOTAL),
                 0.0,
                 0.0,
             ), // No processing yet
@@ -1527,6 +1579,10 @@ mod test_metricsregistry_nats {
         }
         println!("✓ Sent messages and received responses successfully");
 
+        println!("\n=== Waiting 500ms for metrics to update ===");
+        sleep(Duration::from_millis(500)).await;
+        println!("✓ Wait complete, getting final metrics...");
+
         let final_drt_output = drt.prometheus_metrics_fmt().unwrap();
         println!("\n=== Final Prometheus DRT output ===");
         println!("{}", final_drt_output);
@@ -1542,10 +1598,6 @@ mod test_metricsregistry_nats {
             .filter_map(|line| super::test_helpers::parse_prometheus_metric(line.as_str()))
             .collect();
 
-        println!("\n=== Waiting 1 second for metrics to stabilize ===");
-        sleep(Duration::from_secs(1)).await;
-        println!("✓ Wait complete, checking final metrics...");
-
         let post_expected_metric_values = [
             // DRT NATS metrics
             (
@@ -1553,7 +1605,11 @@ mod test_metricsregistry_nats {
                 1.0,
                 1.0,
             ), // Connected
-            (build_component_metric_name(nats_client::CONNECTS), 1.0, 1.0), // 1 connection
+            (
+                build_component_metric_name(nats_client::CURRENT_CONNECTIONS),
+                1.0,
+                1.0,
+            ), // 1 connection
             (
                 build_component_metric_name(nats_client::IN_TOTAL_BYTES),
                 20000.0,
@@ -1576,22 +1632,22 @@ mod test_metricsregistry_nats {
             ), // Wide range around 16
             // Component NATS metrics
             (
-                build_component_metric_name(nats_service::AVG_PROCESSING_MS),
+                build_component_metric_name(nats_service::PROCESSING_MS_AVG),
                 0.0,
                 1.0,
             ), // Low processing time
             (
-                build_component_metric_name(nats_service::TOTAL_ERRORS),
+                build_component_metric_name(nats_service::ERRORS_TOTAL),
                 0.0,
                 0.0,
             ), // No errors
             (
-                build_component_metric_name(nats_service::TOTAL_REQUESTS),
+                build_component_metric_name(nats_service::REQUESTS_TOTAL),
                 0.0,
-                0.0,
-            ), // No work handler requests
+                10.0,
+            ), // NATS service stats requests (may differ from work handler count)
             (
-                build_component_metric_name(nats_service::TOTAL_PROCESSING_MS),
+                build_component_metric_name(nats_service::PROCESSING_MS_TOTAL),
                 0.0,
                 5.0,
             ), // Low total processing time

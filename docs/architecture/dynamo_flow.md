@@ -23,7 +23,7 @@ This diagram shows the NVIDIA Dynamo disaggregated inference system as implement
 The primary user journey through the system:
 
 1. **Discovery (S1)**: Client discovers the service endpoint
-2. **Request (S2)**: HTTP client sends API request to Frontend (OpenAI-compatible server on port 8080)
+2. **Request (S2)**: HTTP client sends API request to Frontend (OpenAI-compatible server on port 8000)
 3. **Validate (S3)**: Frontend forwards request to Processor for validation and routing
 4. **Route (S3)**: Processor routes the validated request to appropriate Decode Worker
 
@@ -84,7 +84,7 @@ graph TD
     %% Top Layer - Client & Frontend
     Client["<b>HTTP Client</b>"]
     S1[["<b>1 DISCOVERY</b>"]]
-    Frontend["<b>Frontend</b><br/><i>OpenAI Compatible Server<br/>Port 8080</i>"]
+    Frontend["<b>Frontend</b><br/><i>OpenAI Compatible Server<br/>Port 8000</i>"]
     S2[["<b>2 REQUEST</b>"]]
 
     %% Processing Layer

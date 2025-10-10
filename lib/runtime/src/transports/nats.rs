@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! NATS transport
 //!
@@ -173,10 +161,10 @@ impl Client {
     }
 
     /// Upload file to NATS at this URL
-    pub async fn object_store_upload(&self, filepath: &Path, nats_url: Url) -> anyhow::Result<()> {
+    pub async fn object_store_upload(&self, filepath: &Path, nats_url: &Url) -> anyhow::Result<()> {
         let mut disk_file = TokioFile::open(filepath).await?;
 
-        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let (bucket_name, key) = url_to_bucket_and_key(nats_url)?;
         let bucket = self.get_or_create_bucket(&bucket_name, true).await?;
 
         let key_meta = async_nats::jetstream::object_store::ObjectMetadata {
@@ -193,12 +181,12 @@ impl Client {
     /// Download file from NATS at this URL
     pub async fn object_store_download(
         &self,
-        nats_url: Url,
+        nats_url: &Url,
         filepath: &Path,
     ) -> anyhow::Result<()> {
         let mut disk_file = TokioFile::create(filepath).await?;
 
-        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let (bucket_name, key) = url_to_bucket_and_key(nats_url)?;
         let bucket = self.get_or_create_bucket(&bucket_name, false).await?;
 
         let mut obj_reader = bucket.get(&key).await.map_err(|e| {
@@ -225,7 +213,7 @@ impl Client {
     }
 
     /// Upload a serializable struct to NATS object store using bincode
-    pub async fn object_store_upload_data<T>(&self, data: &T, nats_url: Url) -> anyhow::Result<()>
+    pub async fn object_store_upload_data<T>(&self, data: &T, nats_url: &Url) -> anyhow::Result<()>
     where
         T: Serialize,
     {
@@ -233,7 +221,7 @@ impl Client {
         let binary_data = bincode::serialize(data)
             .map_err(|e| anyhow::anyhow!("Failed to serialize data with bincode: {e}"))?;
 
-        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let (bucket_name, key) = url_to_bucket_and_key(nats_url)?;
         let bucket = self.get_or_create_bucket(&bucket_name, true).await?;
 
         let key_meta = async_nats::jetstream::object_store::ObjectMetadata {
@@ -251,11 +239,11 @@ impl Client {
     }
 
     /// Download and deserialize a struct from NATS object store using bincode
-    pub async fn object_store_download_data<T>(&self, nats_url: Url) -> anyhow::Result<T>
+    pub async fn object_store_download_data<T>(&self, nats_url: &Url) -> anyhow::Result<T>
     where
         T: DeserializeOwned,
     {
-        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let (bucket_name, key) = url_to_bucket_and_key(nats_url)?;
         let bucket = self.get_or_create_bucket(&bucket_name, false).await?;
 
         let mut obj_reader = bucket.get(&key).await.map_err(|e| {
@@ -269,6 +257,7 @@ impl Client {
         tokio::io::copy(&mut obj_reader, &mut buffer)
             .await
             .map_err(|e| anyhow::anyhow!("Failed reading object data: {e}"))?;
+        tracing::debug!("Downloaded {} bytes from {bucket_name}/{key}", buffer.len());
 
         // Deserialize from bincode
         let data = bincode::deserialize(&buffer)
@@ -526,49 +515,40 @@ impl NatsQueue {
 
             let client = client_options.connect().await?;
 
-            // Always try to create the stream (removes the race condition)
+            // messages older than a hour in the stream will be automatically purged
+            let max_age = std::env::var("DYN_NATS_STREAM_MAX_AGE")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(time::Duration::from_secs)
+                .unwrap_or_else(|| time::Duration::from_secs(60 * 60));
+
             let stream_config = jetstream::stream::Config {
                 name: self.stream_name.clone(),
                 subjects: vec![self.subject.clone()],
-                // messages older than a hour in the stream will be automatically purged
-                max_age: time::Duration::from_secs(60 * 60),
+                max_age,
                 ..Default::default()
             };
 
-            match client.jetstream().create_stream(stream_config).await {
-                Ok(_) => {
-                    log::debug!("Successfully created NATS stream {}", self.stream_name);
-                }
-                Err(e) => {
-                    // Log warning but continue - stream likely already exists
-                    log::debug!(
-                        "Failed to create NATS stream '{}': {e}. Stream likely already exists, continuing...",
-                        self.stream_name
-                    );
+            // Get or create the stream
+            let stream = client
+                .jetstream()
+                .get_or_create_stream(stream_config)
+                .await?;
 
-                    // If reset_stream is true, purge all messages from the newly created stream
-                    if reset_stream {
-                        match client
-                            .jetstream()
-                            .get_stream(&self.stream_name)
-                            .await?
-                            .purge()
-                            .await
-                        {
-                            Ok(purge_info) => {
-                                log::debug!(
-                                    "Successfully purged {} messages from NATS stream {}",
-                                    purge_info.purged,
-                                    self.stream_name
-                                );
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "Failed to purge NATS stream '{}': {e}",
-                                    self.stream_name
-                                );
-                            }
-                        }
+            log::debug!("Stream {} is ready", self.stream_name);
+
+            // If reset_stream is true, purge all messages from the stream
+            if reset_stream {
+                match stream.purge().await {
+                    Ok(purge_info) => {
+                        log::info!(
+                            "Successfully purged {} messages from NATS stream {}",
+                            purge_info.purged,
+                            self.stream_name
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to purge NATS stream '{}': {e}", self.stream_name);
                     }
                 }
             }
@@ -581,7 +561,6 @@ impl NatsQueue {
                     ..Default::default()
                 };
 
-                let stream = client.jetstream().get_stream(&self.stream_name).await?;
                 let subscriber = stream.create_consumer(consumer_config).await?;
                 self.subscriber = Some(subscriber);
             }
@@ -665,6 +644,17 @@ impl NatsQueue {
             let mut stream = client.jetstream().get_stream(&self.stream_name).await?;
             let info = stream.info().await?;
             Ok(info.state.consumer_count)
+        } else {
+            Err(anyhow::anyhow!("Client not connected"))
+        }
+    }
+
+    /// List all consumer names for the stream
+    pub async fn list_consumers(&mut self) -> Result<Vec<String>> {
+        self.ensure_connection().await?;
+
+        if let Some(client) = &self.client {
+            client.list_consumers(&self.stream_name).await
         } else {
             Err(anyhow::anyhow!("Client not connected"))
         }
@@ -941,8 +931,8 @@ impl DRTNatsClientPrometheusMetrics {
             &[],
         )?;
         let connects = drt.create_intgauge(
-            nats_metrics::CONNECTS,
-            "Total number of connections established by NATS client",
+            nats_metrics::CURRENT_CONNECTIONS,
+            "Current number of active connections for NATS client",
             &[],
         )?;
         let connection_state = drt.create_intgauge(
@@ -1078,13 +1068,13 @@ mod tests {
 
         // Upload the data
         client
-            .object_store_upload_data(&test_data, url.clone())
+            .object_store_upload_data(&test_data, &url)
             .await
             .expect("Failed to upload data");
 
         // Download the data
         let downloaded_data: TestData = client
-            .object_store_download_data(url.clone())
+            .object_store_download_data(&url)
             .await
             .expect("Failed to download data");
 

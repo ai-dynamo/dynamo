@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -31,6 +19,7 @@ use super::{
 
 pub mod aggregator;
 mod delta;
+pub mod jail;
 
 pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
@@ -53,6 +42,10 @@ pub struct NvCreateChatCompletionRequest {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
+
+    /// Extra args to pass to the chat template rendering context
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_template_args: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 /// A response structure for unary chat completion responses, embedding OpenAI's
@@ -139,6 +132,20 @@ impl OpenAISamplingOptionsProvider for NvCreateChatCompletionRequest {
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
     }
+    /// Retrieves the seed value for random number generation, if set.
+    fn get_seed(&self) -> Option<i64> {
+        self.inner.seed
+    }
+
+    /// Retrieves the number of completions to generate for each prompt, if set.
+    fn get_n(&self) -> Option<u8> {
+        self.inner.n
+    }
+
+    /// Retrieves the best_of parameter, if set.
+    fn get_best_of(&self) -> Option<u8> {
+        None // Not supported in chat completions
+    }
 }
 
 /// Implements `CommonExtProvider` for `NvCreateChatCompletionRequest`,
@@ -199,11 +206,29 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
         )
     }
 
+    fn get_guided_whitespace_pattern(&self) -> Option<String> {
+        choose_with_deprecation(
+            "guided_whitespace_pattern",
+            self.common.guided_whitespace_pattern.as_ref(),
+            self.nvext
+                .as_ref()
+                .and_then(|nv| nv.guided_whitespace_pattern.as_ref()),
+        )
+    }
+
     fn get_top_k(&self) -> Option<i32> {
         choose_with_deprecation(
             "top_k",
             self.common.top_k.as_ref(),
             self.nvext.as_ref().and_then(|nv| nv.top_k.as_ref()),
+        )
+    }
+
+    fn get_min_p(&self) -> Option<f32> {
+        choose_with_deprecation(
+            "min_p",
+            self.common.min_p.as_ref(),
+            self.nvext.as_ref().and_then(|nv| nv.min_p.as_ref()),
         )
     }
 
@@ -306,7 +331,7 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_model(&self.inner.model)?;
         // none for store
         validate::validate_reasoning_effort(&self.inner.reasoning_effort)?;
-        validate::validate_metadata(&self.inner.metadata)?;
+        // none for metadata
         validate::validate_frequency_penalty(self.inner.frequency_penalty)?;
         validate::validate_logit_bias(&self.inner.logit_bias)?;
         // none for logprobs
@@ -332,6 +357,10 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_user(self.inner.user.as_deref())?;
         // none for function call
         // none for functions
+        // Common Ext
+        validate::validate_repetition_penalty(self.get_repetition_penalty())?;
+        validate::validate_min_p(self.get_min_p())?;
+        validate::validate_top_k(self.get_top_k())?;
 
         Ok(())
     }

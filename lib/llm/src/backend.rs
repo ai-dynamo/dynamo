@@ -17,11 +17,11 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use anyhow::{Error, Result};
+use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use tracing as log;
 
-use crate::model_card::{ModelDeploymentCard, TokenizerKind};
+use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::{
     pipeline::{
         AsyncEngineContextProvider, ManyOut, Operator, ResponseStream, ServerStreamingEngine,
@@ -66,30 +66,27 @@ struct DecoderUnfoldState {
 }
 
 impl Backend {
-    pub async fn from_tokenizer(tokenizer: HfTokenizer) -> Result<Arc<Self>> {
+    pub fn from_tokenizer(tokenizer: HfTokenizer) -> Arc<Self> {
         let tokenizer = HuggingFaceTokenizer::from_tokenizer(tokenizer);
         let tokenizer = Tokenizer::from(Arc::new(tokenizer));
 
-        Ok(Arc::new(Self {
+        Arc::new(Self {
             tokenizer: Some(tokenizer),
             validate_engine_decode: false,
-        }))
+        })
     }
 
-    pub async fn from_mdc(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
-        let tokenizer = match &mdc.tokenizer {
-            Some(TokenizerKind::HfTokenizerJson(file)) => {
-                HfTokenizer::from_file(file).map_err(Error::msg)?
-            }
-            Some(TokenizerKind::GGUF(t)) => *t.clone(),
-            None => {
-                return Ok(Arc::new(Self {
+    pub fn from_mdc(mdc: &ModelDeploymentCard) -> Arc<Self> {
+        match mdc.tokenizer_hf() {
+            Ok(tokenizer) => Self::from_tokenizer(tokenizer),
+            Err(err) => {
+                tracing::warn!(%err, "tokenizer_hf error converting ModelDeploymentCard to HF tokenizer");
+                Arc::new(Self {
                     tokenizer: None,
                     validate_engine_decode: false,
-                }));
+                })
             }
-        };
-        Self::from_tokenizer(tokenizer).await
+        }
     }
 
     fn decoder(

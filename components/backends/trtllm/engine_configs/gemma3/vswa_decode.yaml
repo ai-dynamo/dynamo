@@ -26,4 +26,4 @@ kv_cache_config:
     - 32768
 
 cache_transceiver_config:
-  backend: default
+  backend: DEFAULT

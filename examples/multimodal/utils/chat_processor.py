@@ -162,7 +162,6 @@ class ChatProcessor:
             documents=request.documents,
             chat_template_kwargs=request.chat_template_kwargs,
             tool_parser=self.openai_serving.tool_parser,
-            truncate_prompt_tokens=request.truncate_prompt_tokens,
             add_special_tokens=request.add_special_tokens,
         )
 
@@ -288,7 +287,6 @@ class CompletionsProcessor:
             request,
             self.tokenizer,
             input_or_inputs=request.prompt,
-            truncate_prompt_tokens=request.truncate_prompt_tokens,
             add_special_tokens=request.add_special_tokens,
         )
 

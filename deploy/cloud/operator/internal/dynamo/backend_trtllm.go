@@ -11,11 +11,27 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-type TRTLLMBackend struct{}
+type TRTLLMBackend struct {
+	MpiRunSecretName string
+}
 
 func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+	// Check for volumeMounts with useAsCompilationCache=true
+	for _, volumeMount := range component.VolumeMounts {
+		if volumeMount.UseAsCompilationCache {
+			logger := log.Log.WithName("trtllm-backend")
+			logger.Info("Compilation cache configured for TensorRT-LLM but not yet fully supported",
+				"backend", "trtllm",
+				"status", "partial-support",
+				"use-as-compilation-cache", true,
+				"env-vars-set", false,
+				"next-steps", "upstream TensorRT-LLM changes needed")
+		}
+	}
+
 	// For single node, nothing to do
 	if numberOfNodes <= 1 {
 		return
@@ -63,10 +79,10 @@ func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int
 	// Add SSH keypair volume for TRTLLM multinode deployments
 	if numberOfNodes > 1 {
 		sshVolume := corev1.Volume{
-			Name: commonconsts.MpiRunSshSecretName,
+			Name: b.MpiRunSecretName,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName:  commonconsts.MpiRunSshSecretName,
+					SecretName:  b.MpiRunSecretName,
 					DefaultMode: func() *int32 { mode := int32(0644); return &mode }(),
 				},
 			},
@@ -78,7 +94,7 @@ func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int
 // addSSHVolumeMount adds the SSH keypair secret volume mount to the container
 func (b *TRTLLMBackend) addSSHVolumeMount(container *corev1.Container) {
 	sshVolumeMount := corev1.VolumeMount{
-		Name:      commonconsts.MpiRunSshSecretName,
+		Name:      b.MpiRunSecretName,
 		MountPath: "/ssh-pk",
 		ReadOnly:  true,
 	}
@@ -92,9 +108,20 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 
 	// Store original command/args for later use
 	var originalCommand string
-	if len(container.Args) > 0 {
+
+	if len(container.Command) > 0 && isPythonCommand(container.Command[0]) {
+		// Direct Python command: combine command + args
+		var parts []string
+		parts = append(parts, container.Command...)
+		if len(container.Args) > 0 {
+			parts = append(parts, container.Args...)
+		}
+		originalCommand = strings.Join(parts, " ")
+	} else if len(container.Args) > 0 {
+		// Shell command (sh -c): args contains the full command
 		originalCommand = strings.Join(container.Args, " ")
 	} else if len(container.Command) > 0 {
+		// Fallback: just command
 		originalCommand = strings.Join(container.Command, " ")
 	}
 

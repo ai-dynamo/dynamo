@@ -33,7 +33,7 @@ use dynamo_runtime::engine::AsyncEngineContext;
 use futures::{Stream, StreamExt};
 use std::sync::Arc;
 
-use crate::http::service::metrics::InflightGuard;
+use crate::http::service::metrics::{InflightGuard, Metrics};
 
 #[derive(Clone, Copy)]
 pub enum ConnectionStatus {
@@ -99,6 +99,7 @@ impl Drop for ConnectionHandle {
 /// The handles are returned in the order of the first being armed and the second being disarmed.
 pub async fn create_connection_monitor(
     engine_context: Arc<dyn AsyncEngineContext>,
+    metrics: Option<Arc<Metrics>>,
 ) -> (ConnectionHandle, ConnectionHandle) {
     // these oneshot channels monitor possible disconnects from the client in two different scopes:
     // - the local task (connection_handle)
@@ -111,6 +112,7 @@ pub async fn create_connection_monitor(
         engine_context.clone(),
         connection_rx,
         stream_rx,
+        metrics,
     ));
 
     // Two handles, the first is armed, the second is disarmed
@@ -125,11 +127,15 @@ async fn connection_monitor(
     engine_context: Arc<dyn AsyncEngineContext>,
     connection_rx: tokio::sync::oneshot::Receiver<ConnectionStatus>,
     stream_rx: tokio::sync::oneshot::Receiver<ConnectionStatus>,
+    metrics: Option<Arc<Metrics>>,
 ) {
     match connection_rx.await {
         Err(_) | Ok(ConnectionStatus::ClosedUnexpectedly) => {
             // the client has disconnected, no need to gracefully cancel, just kill the context
             tracing::trace!("Connection closed unexpectedly; issuing cancellation");
+            if let Some(metrics) = &metrics {
+                metrics.inc_client_disconnect();
+            }
             engine_context.kill();
         }
         Ok(ConnectionStatus::ClosedGracefully) => {
@@ -141,6 +147,9 @@ async fn connection_monitor(
     match stream_rx.await {
         Err(_) | Ok(ConnectionStatus::ClosedUnexpectedly) => {
             tracing::trace!("Stream closed unexpectedly; issuing cancellation");
+            if let Some(metrics) = &metrics {
+                metrics.inc_client_disconnect();
+            }
             engine_context.kill();
         }
         Ok(ConnectionStatus::ClosedGracefully) => {

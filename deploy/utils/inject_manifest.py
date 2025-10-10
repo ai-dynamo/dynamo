@@ -21,12 +21,15 @@ Manifest Injection Script
 Copies any Kubernetes manifest file into the PVC for later use by jobs.
 Both the source manifest path and destination path in the PVC are required.
 
+IMPORTANT: The PVC is mounted at /data in the access pod for security reasons.
+All destination paths must start with '/data/'.
+
 Usage:
     python3 inject_manifest.py --namespace <namespace> --src <local_manifest.yaml> --dest <absolute_path_in_pvc>
 
 Examples:
-    python3 inject_manifest.py --namespace <ns> --src ./my-disagg.yaml --dest /configs/disagg.yaml
-    python3 inject_manifest.py --namespace <ns> --src ./my-agg.yaml    --dest /configs/agg.yaml
+    python3 inject_manifest.py --namespace <ns> --src ./disagg.yaml --dest /data/configs/disagg.yaml
+    python3 inject_manifest.py --namespace <ns> --src ./my-data.yaml    --dest /data/custom/path/data.yaml
 """
 
 import argparse
@@ -37,7 +40,7 @@ from deploy.utils.kubernetes import (
     PVC_ACCESS_POD_NAME,
     check_kubectl_access,
     cleanup_access_pod,
-    deploy_access_pod,
+    ensure_clean_access_pod,
     run_command,
 )
 
@@ -100,16 +103,39 @@ def main():
     parser.add_argument(
         "--dest",
         required=True,
-        help="Absolute target path in PVC (e.g., /profiling_results/agg.yaml)",
+        help="Absolute target path in PVC (must start with /data/, e.g., /data/configs/agg.yaml)",
     )
 
     args = parser.parse_args()
 
-    # Validate target_path to prevent directory traversal
-    if not args.dest.startswith("/"):
-        print(
-            "ERROR: Target path must be an absolute path inside the PVC (start with '/')."
-        )
+    # Validate target_path to prevent directory traversal and ensure it's within PVC
+    if not args.dest.startswith("/data/"):
+        print("=" * 60)
+        print("❌ ERROR: Invalid target path")
+        print("=" * 60)
+        print("The PVC is mounted at /data in the access pod.")
+        print("All paths must start with '/data/' for security reasons.")
+        print("")
+        print("💡 QUICK FIX:")
+        if args.dest.startswith("/"):
+            # Suggest the fix
+            suggested_path = f"/data{args.dest}"
+            print(f"  Change: {args.dest}")
+            print(f"  To:     {suggested_path}")
+            print("")
+            print("📝 Example commands:")
+            print("  python3 -m deploy.utils.inject_manifest \\")
+            print(f"    --namespace {args.namespace} \\")
+            print(f"    --src {args.src} \\")
+            print(f"    --dest {suggested_path}")
+        else:
+            print(f"  Use: /data/{args.dest.lstrip('/')}")
+        print("")
+        print("🔍 Common patterns:")
+        print("  /configs/file.yaml     → /data/configs/file.yaml")
+        print("  /results/data.yaml     → /data/results/data.yaml")
+        print("  /profiling_results/... → /data/profiling_results/...")
+        print("=" * 60)
         sys.exit(1)
 
     if ".." in args.dest:
@@ -123,7 +149,7 @@ def main():
     check_kubectl_access(args.namespace)
 
     # Deploy access pod
-    deploy_access_pod(args.namespace)
+    ensure_clean_access_pod(args.namespace)
     try:
         # Copy manifest
         copy_manifest(args.namespace, args.src, args.dest)

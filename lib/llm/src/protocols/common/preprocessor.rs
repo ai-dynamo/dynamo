@@ -59,6 +59,16 @@ pub struct PreprocessedRequest {
     /// Router configuration overrides for this specific request
     #[builder(default)]
     pub router_config_override: Option<RouterConfigOverride>,
+
+    /// Disaggregated execution parameters (for prefill/decode separation)
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disaggregated_params: Option<serde_json::Value>,
+
+    /// Additional arguments for extensibility
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_args: Option<serde_json::Value>,
 }
 
 impl PreprocessedRequest {

@@ -34,6 +34,27 @@ Advanced disaggregated deployment with KV cache routing capabilities.
 - `TRTLLMDecodeWorker`: Specialized decode-only worker
 - `TRTLLMPrefillWorker`: Specialized prefill-only worker (2 replicas for load balancing)
 
+### 5. **Aggregated Deployment with Config** (`agg-with-config.yaml`)
+Aggregated deployment with custom configuration.
+
+**Architecture:**
+- `nvidia-config`: ConfigMap containing a custom trtllm configuration
+- `Frontend`: OpenAI-compatible API server (with kv router mode disabled)
+- `TRTLLMWorker`: Single worker handling both prefill and decode with custom configuration mounted from the configmap
+
+### 6. **Disaggregated Planner Deployment** (`disagg_planner.yaml`)
+Advanced disaggregated deployment with SLA-based automatic scaling.
+
+**Architecture:**
+- `Frontend`: HTTP API server coordinating between workers
+- `Planner`: SLA-based planner that monitors performance and scales workers automatically
+- `Prometheus`: Metrics collection and monitoring
+- `TRTLLMDecodeWorker`: Specialized decode-only worker
+- `TRTLLMPrefillWorker`: Specialized prefill-only worker
+
+> [!NOTE]
+> This deployment requires pre-deployment profiling to be completed first. See [Pre-Deployment Profiling](../../../../docs/benchmarks/pre_deployment_profiling.md) for detailed instructions.
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:
@@ -68,7 +89,7 @@ resources:
 ```yaml
 extraPodSpec:
   mainContainer:
-    image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
+    image: my-registry/trtllm-runtime:my-tag
     workingDir: /workspace/components/backends/trtllm
     args:
       - "python3"
@@ -81,14 +102,14 @@ extraPodSpec:
 
 Before using these templates, ensure you have:
 
-1. **Dynamo Cloud Platform installed** - See [Quickstart Guide](../../../../docs/guides/dynamo_deploy/README.md)
+1. **Dynamo Cloud Platform installed** - See [Quickstart Guide](../../../../docs/kubernetes/README.md)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for TensorRT-LLM runtime images
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
 
 ### Container Images
 
-The deployment files currently require access to `nvcr.io/nvidian/nim-llm-dev/trtllm-runtime`. If you don't have access, build and push your own image:
+The deployment files currently require access to `my-registry/trtllm-runtime`. If you don't have access, build and push your own image:
 
 ```bash
 ./container/build.sh --framework tensorrtllm
@@ -120,7 +141,7 @@ Edit the template to match your environment:
 
 ```yaml
 # Update image registry and tag
-image: your-registry/trtllm-runtime:your-tag
+image: my-registry/trtllm-runtime:my-tag
 
 # Configure your model and deployment settings
 args:
@@ -132,7 +153,7 @@ args:
 
 ### 3. Deploy
 
-See the [Create Deployment Guide](../../../../docs/guides/dynamo_deploy/create_deployment.md) to learn how to deploy the deployment file.
+See the [Create Deployment Guide](../../../../docs/kubernetes/create_deployment.md) to learn how to deploy the deployment file.
 
 First, create a secret for the HuggingFace token.
 ```bash
@@ -211,7 +232,7 @@ envs:
 
 ## Testing the Deployment
 
-Send a test request to verify your deployment. See the [client section](../../../../components/backends/vllm/README.md#client) for detailed instructions.
+Send a test request to verify your deployment. See the [client section](../../../../docs/backends/vllm/README.md#client) for detailed instructions.
 
 **Note:** For multi-node deployments, target the node running `python3 -m dynamo.frontend <args>`.
 
@@ -233,7 +254,7 @@ TensorRT-LLM supports two methods for KV cache transfer in disaggregated serving
 - **UCX** (default): Standard method for KV cache transfer
 - **NIXL** (experimental): Alternative transfer method
 
-For detailed configuration instructions, see the [KV cache transfer guide](../kv-cache-transfer.md).
+For detailed configuration instructions, see the [KV cache transfer guide](../../../../docs/backends/trtllm/kv-cache-transfer.md).
 
 ## Request Migration
 
@@ -256,13 +277,13 @@ Configure the `model` name and `host` based on your deployment.
 
 ## Further Reading
 
-- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/guides/dynamo_deploy/create_deployment.md)
-- **Quickstart**: [Deployment Quickstart](../../../../docs/guides/dynamo_deploy/README.md)
-- **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/guides/dynamo_deploy/dynamo_cloud.md)
+- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/create_deployment.md)
+- **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
+- **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/kubernetes/installation_guide.md)
 - **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
 - **Architecture Docs**: [Disaggregated Serving](../../../../docs/architecture/disagg_serving.md), [KV-Aware Routing](../../../../docs/architecture/kv_cache_routing.md)
-- **Multinode Deployment**: [Multinode Examples](../multinode/multinode-examples.md)
-- **Speculative Decoding**: [Llama 4 + Eagle Guide](../llama4_plus_eagle.md)
+- **Multinode Deployment**: [Multinode Examples](../../../../docs/backends/trtllm/multinode/multinode-examples.md)
+- **Speculative Decoding**: [Llama 4 + Eagle Guide](../../../../docs/backends/trtllm/llama4_plus_eagle.md)
 - **Kubernetes CRDs**: [Custom Resources Documentation](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
 
 ## Troubleshooting
@@ -277,4 +298,4 @@ Common issues and solutions:
 6. **Git LFS issues**: Ensure git-lfs is installed before building containers
 7. **ARM deployment**: Use `--platform linux/arm64` when building on ARM machines
 
-For additional support, refer to the [deployment troubleshooting guide](../../../../docs/guides/dynamo_deploy/README.md).
+For additional support, refer to the [deployment troubleshooting guide](../../../../docs/kubernetes/README.md).

@@ -40,6 +40,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "aiconfigurator==0.2.0",
     "networkx",
     "pandas",
     "pydantic>=2",
@@ -58,6 +59,11 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [build-system]
 requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.uv]
+override-dependencies = [
+    "gradio==5.47.1"
+]
 
 [tool.setuptools]
 packages = ["prefix_data_generator"]

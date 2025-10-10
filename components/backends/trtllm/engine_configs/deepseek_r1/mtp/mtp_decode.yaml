@@ -54,4 +54,4 @@ cuda_graph_config:
 print_iter_log: true
 
 cache_transceiver_config:
-  backend: default
+  backend: DEFAULT

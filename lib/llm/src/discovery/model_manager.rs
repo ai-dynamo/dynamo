@@ -3,22 +3,26 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, RwLock},
+    sync::Arc,
 };
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 
 use dynamo_runtime::component::Component;
 use dynamo_runtime::prelude::DistributedRuntimeProvider;
 
-use crate::discovery::{KV_ROUTERS_ROOT_PATH, ModelEntry};
-use crate::kv_router::{KvRouterConfig, scheduler::DefaultWorkerSelector};
+use crate::{discovery::KV_ROUTERS_ROOT_PATH, model_card::ModelDeploymentCard};
 use crate::{
     kv_router::KvRouter,
+    types::generic::tensor::TensorStreamingEngine,
     types::openai::{
         chat_completions::OpenAIChatCompletionsStreamingEngine,
         completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
     },
+};
+use crate::{
+    kv_router::{KvRouterConfig, scheduler::DefaultWorkerSelector},
+    model_type::ModelType,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -36,9 +40,10 @@ pub struct ModelManager {
     completion_engines: RwLock<ModelEngines<OpenAICompletionsStreamingEngine>>,
     chat_completion_engines: RwLock<ModelEngines<OpenAIChatCompletionsStreamingEngine>>,
     embeddings_engines: RwLock<ModelEngines<OpenAIEmbeddingsStreamingEngine>>,
+    tensor_engines: RwLock<ModelEngines<TensorStreamingEngine>>,
 
-    // These two are Mutex because we read and write rarely and equally
-    entries: Mutex<HashMap<String, ModelEntry>>,
+    // These are Mutex because we read and write rarely and equally
+    cards: Mutex<HashMap<String, ModelDeploymentCard>>,
     kv_choosers: Mutex<HashMap<String, Arc<KvRouter>>>,
 }
 
@@ -54,18 +59,56 @@ impl ModelManager {
             completion_engines: RwLock::new(ModelEngines::default()),
             chat_completion_engines: RwLock::new(ModelEngines::default()),
             embeddings_engines: RwLock::new(ModelEngines::default()),
-            entries: Mutex::new(HashMap::new()),
+            tensor_engines: RwLock::new(ModelEngines::default()),
+            cards: Mutex::new(HashMap::new()),
             kv_choosers: Mutex::new(HashMap::new()),
         }
     }
 
-    pub fn get_model_entries(&self) -> Vec<ModelEntry> {
-        self.entries.lock().values().cloned().collect()
+    pub fn is_valid_checksum(
+        &self,
+        model_type: ModelType,
+        model_name: &str,
+        candidate_checksum: &str,
+    ) -> Option<bool> {
+        let mut results = vec![];
+        for unit in model_type.units() {
+            let maybe_valid_checksum = match unit {
+                ModelType::Chat => self.chat_completion_engines.read().checksum(model_name),
+                ModelType::Completions => self.completion_engines.read().checksum(model_name),
+                ModelType::Embedding => self.embeddings_engines.read().checksum(model_name),
+                ModelType::TensorBased => self.tensor_engines.read().checksum(model_name),
+                _ => {
+                    continue;
+                }
+            };
+            if let Some(is_valid) = maybe_valid_checksum.map(|valid_checksum| {
+                tracing::debug!(
+                    model_name,
+                    valid_checksum,
+                    candidate_checksum,
+                    "is_valid_checksum: check case"
+                );
+                valid_checksum == candidate_checksum
+            }) {
+                results.push(is_valid)
+            }
+        }
+        if results.is_empty() {
+            None
+        } else {
+            // The checksum is valid if it is correct for all the ModelType in the bitflag.
+            Some(results.into_iter().all(|x| x))
+        }
+    }
+
+    pub fn get_model_cards(&self) -> Vec<ModelDeploymentCard> {
+        self.cards.lock().values().cloned().collect()
     }
 
     pub fn has_model_any(&self, model: &str) -> bool {
-        self.chat_completion_engines.read().unwrap().contains(model)
-            || self.completion_engines.read().unwrap().contains(model)
+        self.chat_completion_engines.read().contains(model)
+            || self.completion_engines.read().contains(model)
     }
 
     pub fn model_display_names(&self) -> HashSet<String> {
@@ -73,60 +116,83 @@ impl ModelManager {
             .into_iter()
             .chain(self.list_completions_models())
             .chain(self.list_embeddings_models())
+            .chain(self.list_tensor_models())
             .collect()
     }
 
     pub fn list_chat_completions_models(&self) -> Vec<String> {
-        self.chat_completion_engines.read().unwrap().list()
+        self.chat_completion_engines.read().list()
     }
 
     pub fn list_completions_models(&self) -> Vec<String> {
-        self.completion_engines.read().unwrap().list()
+        self.completion_engines.read().list()
     }
 
     pub fn list_embeddings_models(&self) -> Vec<String> {
-        self.embeddings_engines.read().unwrap().list()
+        self.embeddings_engines.read().list()
+    }
+
+    pub fn list_tensor_models(&self) -> Vec<String> {
+        self.tensor_engines.read().list()
     }
 
     pub fn add_completions_model(
         &self,
         model: &str,
+        card_checksum: &str,
         engine: OpenAICompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
-        let mut clients = self.completion_engines.write().unwrap();
-        clients.add(model, engine)
+        let mut clients = self.completion_engines.write();
+        clients.add(model, card_checksum, engine)
     }
 
     pub fn add_chat_completions_model(
         &self,
         model: &str,
+        card_checksum: &str,
         engine: OpenAIChatCompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
-        let mut clients = self.chat_completion_engines.write().unwrap();
-        clients.add(model, engine)
+        let mut clients = self.chat_completion_engines.write();
+        clients.add(model, card_checksum, engine)
     }
 
     pub fn add_embeddings_model(
         &self,
         model: &str,
+        card_checksum: &str,
         engine: OpenAIEmbeddingsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
-        let mut clients = self.embeddings_engines.write().unwrap();
-        clients.add(model, engine)
+        let mut clients = self.embeddings_engines.write();
+        clients.add(model, card_checksum, engine)
+    }
+
+    pub fn add_tensor_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: TensorStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let mut clients = self.tensor_engines.write();
+        clients.add(model, card_checksum, engine)
     }
 
     pub fn remove_completions_model(&self, model: &str) -> Result<(), ModelManagerError> {
-        let mut clients = self.completion_engines.write().unwrap();
+        let mut clients = self.completion_engines.write();
         clients.remove(model)
     }
 
     pub fn remove_chat_completions_model(&self, model: &str) -> Result<(), ModelManagerError> {
-        let mut clients = self.chat_completion_engines.write().unwrap();
+        let mut clients = self.chat_completion_engines.write();
         clients.remove(model)
     }
 
     pub fn remove_embeddings_model(&self, model: &str) -> Result<(), ModelManagerError> {
-        let mut clients = self.embeddings_engines.write().unwrap();
+        let mut clients = self.embeddings_engines.write();
+        clients.remove(model)
+    }
+
+    pub fn remove_tensor_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let mut clients = self.tensor_engines.write();
         clients.remove(model)
     }
 
@@ -136,7 +202,6 @@ impl ModelManager {
     ) -> Result<OpenAIEmbeddingsStreamingEngine, ModelManagerError> {
         self.embeddings_engines
             .read()
-            .unwrap()
             .get(model)
             .cloned()
             .ok_or(ModelManagerError::ModelNotFound(model.to_string()))
@@ -148,7 +213,6 @@ impl ModelManager {
     ) -> Result<OpenAICompletionsStreamingEngine, ModelManagerError> {
         self.completion_engines
             .read()
-            .unwrap()
             .get(model)
             .cloned()
             .ok_or(ModelManagerError::ModelNotFound(model.to_string()))
@@ -160,21 +224,32 @@ impl ModelManager {
     ) -> Result<OpenAIChatCompletionsStreamingEngine, ModelManagerError> {
         self.chat_completion_engines
             .read()
-            .unwrap()
             .get(model)
             .cloned()
             .ok_or(ModelManagerError::ModelNotFound(model.to_string()))
     }
 
-    /// Save a ModelEntry under an instance's etcd `models/` key so we can fetch it later when the key is
-    /// deleted from etcd.
-    pub fn save_model_entry(&self, key: &str, entry: ModelEntry) {
-        self.entries.lock().insert(key.to_string(), entry);
+    pub fn get_tensor_engine(
+        &self,
+        model: &str,
+    ) -> Result<TensorStreamingEngine, ModelManagerError> {
+        self.tensor_engines
+            .read()
+            .get(model)
+            .cloned()
+            .ok_or(ModelManagerError::ModelNotFound(model.to_string()))
     }
 
-    /// Remove and return model entry for this instance's etcd key. We do this when the instance stops.
-    pub fn remove_model_entry(&self, key: &str) -> Option<ModelEntry> {
-        self.entries.lock().remove(key)
+    /// Save a ModelDeploymentCard from an instance's ModelDeploymentCard key so we can fetch it later when the key is
+    /// deleted.
+    pub fn save_model_card(&self, key: &str, card: ModelDeploymentCard) -> anyhow::Result<()> {
+        self.cards.lock().insert(key.to_string(), card);
+        Ok(())
+    }
+
+    /// Remove and return model card for this instance's etcd key. We do this when the instance stops.
+    pub fn remove_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
+        self.cards.lock().remove(key)
     }
 
     pub async fn kv_chooser_for(
@@ -197,22 +272,8 @@ impl ModelManager {
             }
             return Ok(kv_chooser);
         }
-        self.create_kv_chooser(model_name, component, kv_cache_block_size, kv_router_config)
-            .await
-    }
 
-    fn get_kv_chooser(&self, model_name: &str) -> Option<Arc<KvRouter>> {
-        self.kv_choosers.lock().get(model_name).cloned()
-    }
-
-    /// Create and return a KV chooser for this component and model
-    async fn create_kv_chooser(
-        &self,
-        model_name: &str,
-        component: &Component,
-        kv_cache_block_size: u32,
-        kv_router_config: Option<KvRouterConfig>,
-    ) -> anyhow::Result<Arc<KvRouter>> {
+        // Create new KV router with etcd registration
         let etcd_client = component
             .drt()
             .etcd_client()
@@ -248,14 +309,26 @@ impl ModelManager {
         Ok(new_kv_chooser)
     }
 
+    fn get_kv_chooser(&self, model_name: &str) -> Option<Arc<KvRouter>> {
+        self.kv_choosers.lock().get(model_name).cloned()
+    }
+
     pub fn get_model_tool_call_parser(&self, model: &str) -> Option<String> {
-        self.entries
+        self.cards
             .lock()
             .values()
-            .find(|entry| entry.name == model)
-            .and_then(|entry| entry.runtime_config.as_ref())
-            .and_then(|config| config.tool_call_parser.clone())
+            .find(|c| c.display_name == model)
+            .and_then(|c| c.runtime_config.tool_call_parser.as_ref())
             .map(|parser| parser.to_string())
+    }
+
+    /// Creates parsing options with tool call parser and reasoning parser for the specified model.
+    /// Currently reasoning parser is not implemented (returns None).
+    pub fn get_parsing_options(&self, model: &str) -> crate::protocols::openai::ParsingOptions {
+        let tool_call_parser = self.get_model_tool_call_parser(model);
+        let reasoning_parser = None; // TODO: Implement reasoning parser
+
+        crate::protocols::openai::ParsingOptions::new(tool_call_parser, reasoning_parser)
     }
 }
 
@@ -263,6 +336,9 @@ pub struct ModelEngines<E> {
     /// Optional default model name
     default: Option<String>,
     engines: HashMap<String, E>,
+    /// Key: Model name, value: Checksum of the ModelDeploymentCard. New instances must have the
+    /// same card.
+    checksums: HashMap<String, String>,
 }
 
 impl<E> Default for ModelEngines<E> {
@@ -270,6 +346,7 @@ impl<E> Default for ModelEngines<E> {
         Self {
             default: None,
             engines: HashMap::new(),
+            checksums: HashMap::new(),
         }
     }
 }
@@ -285,11 +362,13 @@ impl<E> ModelEngines<E> {
         self.default = None;
     }
 
-    fn add(&mut self, model: &str, engine: E) -> Result<(), ModelManagerError> {
+    fn add(&mut self, model: &str, checksum: &str, engine: E) -> Result<(), ModelManagerError> {
         if self.engines.contains_key(model) {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         self.engines.insert(model.to_string(), engine);
+        self.checksums
+            .insert(model.to_string(), checksum.to_string());
         Ok(())
     }
 
@@ -297,6 +376,7 @@ impl<E> ModelEngines<E> {
         if self.engines.remove(model).is_none() {
             return Err(ModelManagerError::ModelNotFound(model.to_string()));
         }
+        let _ = self.checksums.remove(model);
         Ok(())
     }
 
@@ -310,5 +390,11 @@ impl<E> ModelEngines<E> {
 
     pub fn list(&self) -> Vec<String> {
         self.engines.keys().map(|k| k.to_owned()).collect()
+    }
+
+    /// Returns a newly allocated String for called convenience. All the places I use
+    /// this I need a String.
+    pub fn checksum(&self, model: &str) -> Option<String> {
+        self.checksums.get(model).map(|s| s.to_string())
     }
 }

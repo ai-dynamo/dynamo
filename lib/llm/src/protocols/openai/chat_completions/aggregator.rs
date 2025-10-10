@@ -12,7 +12,6 @@ use crate::protocols::{
     openai::ParsingOptions,
 };
 
-use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate;
 use dynamo_runtime::engine::DataStream;
 
 /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
@@ -38,6 +37,7 @@ pub struct DeltaAggregator {
 }
 
 /// Represents the accumulated state of a single chat choice during streaming aggregation.
+#[derive(Debug)]
 struct DeltaChoice {
     /// The index of the choice in the completion.
     index: u32,
@@ -60,6 +60,28 @@ impl Default for DeltaAggregator {
     /// Provides a default implementation for `DeltaAggregator` by calling [`DeltaAggregator::new`].
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn convert_tool_chunk_to_message_tool_call(
+    chunk: &dynamo_async_openai::types::ChatCompletionMessageToolCallChunk,
+) -> Option<dynamo_async_openai::types::ChatCompletionMessageToolCall> {
+    // Convert ChatCompletionMessageToolCallChunk to ChatCompletionMessageToolCall
+    if let (Some(id), Some(r#type), Some(function)) = (&chunk.id, &chunk.r#type, &chunk.function) {
+        if let (Some(name), Some(arguments)) = (&function.name, &function.arguments) {
+            Some(dynamo_async_openai::types::ChatCompletionMessageToolCall {
+                id: id.clone(),
+                r#type: r#type.clone(),
+                function: dynamo_async_openai::types::FunctionCall {
+                    name: name.clone(),
+                    arguments: arguments.clone(),
+                },
+            })
+        } else {
+            None
+        }
+    } else {
+        None
     }
 }
 
@@ -89,7 +111,7 @@ impl DeltaAggregator {
     /// * `Err(String)` if an error occurs during processing.
     pub async fn apply(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
-        parsing_options: ParsingOptions,
+        _parsing_options: ParsingOptions,
     ) -> Result<NvCreateChatCompletionResponse, String> {
         let aggregator = stream
             .fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
@@ -129,14 +151,13 @@ impl DeltaAggregator {
                                     text: "".to_string(),
                                     role: choice.delta.role,
                                     finish_reason: None,
-                                    logprobs: choice.logprobs,
+                                    logprobs: None,
                                     tool_calls: None,
                                     reasoning_content: None,
                                 });
-
                         // Append content if available.
                         if let Some(content) = &choice.delta.content {
-                            state_choice.text.push_str(content);
+                            state_choice.text.push_str(content.trim_end());
                         }
 
                         if let Some(reasoning_content) = &choice.delta.reasoning_content {
@@ -146,9 +167,55 @@ impl DeltaAggregator {
                                 .push_str(reasoning_content);
                         }
 
+                        // Since one tool call is one chunk, we don't need to aggregate them
+                        // We just need to convert the ChatCompletionMessageToolCallChunk to ChatCompletionMessageToolCall and append to the state_choice.tool_calls
+                        if let Some(tool_calls) = &choice.delta.tool_calls
+                            && !tool_calls.is_empty()
+                        {
+                            // Convert ChatCompletionMessageToolCallChunk to ChatCompletionMessageToolCall
+                            let converted_tool_calls: Vec<
+                                dynamo_async_openai::types::ChatCompletionMessageToolCall,
+                            > = tool_calls
+                                .iter()
+                                .filter_map(convert_tool_chunk_to_message_tool_call)
+                                .collect();
+
+                            // Initialize and push the converted tool calls to state_choice.tool_calls
+                            // Only set tool_calls to Some if there are actual tool calls
+                            if !converted_tool_calls.is_empty() {
+                                if let Some(existing_tool_calls) = &mut state_choice.tool_calls {
+                                    existing_tool_calls.extend(converted_tool_calls);
+                                } else {
+                                    state_choice.tool_calls = Some(converted_tool_calls);
+                                }
+                            }
+                        }
+
                         // Update finish reason if provided.
                         if let Some(finish_reason) = choice.finish_reason {
                             state_choice.finish_reason = Some(finish_reason);
+                        }
+
+                        // Update logprobs
+                        if let Some(logprobs) = &choice.logprobs {
+                            let state_lps = state_choice.logprobs.get_or_insert(
+                                dynamo_async_openai::types::ChatChoiceLogprobs {
+                                    content: None,
+                                    refusal: None,
+                                },
+                            );
+                            if let Some(content_lps) = &logprobs.content {
+                                state_lps
+                                    .content
+                                    .get_or_insert(Vec::new())
+                                    .extend(content_lps.clone());
+                            }
+                            if let Some(refusal_lps) = &logprobs.refusal {
+                                state_lps
+                                    .refusal
+                                    .get_or_insert(Vec::new())
+                                    .extend(refusal_lps.clone());
+                            }
                         }
                     }
                 }
@@ -157,39 +224,8 @@ impl DeltaAggregator {
             .await;
 
         // Return early if an error was encountered.
-        let mut aggregator = if let Some(error) = aggregator.error {
+        if let Some(error) = aggregator.error {
             return Err(error);
-        } else {
-            aggregator
-        };
-
-        // After aggregation, inspect each choice's text for tool call syntax
-        for choice in aggregator.choices.values_mut() {
-            if choice.tool_calls.is_none()
-                && let Ok((tool_calls, normal_text)) = try_tool_call_parse_aggregate(
-                    &choice.text,
-                    parsing_options.tool_call_parser.as_deref(),
-                )
-            {
-                if tool_calls.is_empty() {
-                    continue;
-                }
-                for tool_call in &tool_calls {
-                    tracing::debug!(
-                        tool_call_id = %tool_call.id,
-                        function_name = %tool_call.function.name,
-                        arguments = %tool_call.function.arguments,
-                        "Parsed structured tool call from aggregated content"
-                    );
-                }
-                choice.tool_calls = Some(tool_calls);
-                choice.text.clear();
-                // If normal text is not empty, update the choice text
-                if let Some(normal_text) = normal_text.filter(|text| !text.is_empty()) {
-                    choice.text = normal_text;
-                }
-                choice.finish_reason = Some(dynamo_async_openai::types::FinishReason::ToolCalls);
-            }
         }
 
         // Extract aggregated choices and sort them by index.
@@ -224,6 +260,17 @@ impl From<DeltaChoice> for dynamo_async_openai::types::ChatChoice {
     /// # Note
     /// The `function_call` field is deprecated.
     fn from(delta: DeltaChoice) -> Self {
+        // If tool calls are present and non-empty, finish reason should be ToolCalls
+        let finish_reason = if delta
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+        {
+            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
+        } else {
+            delta.finish_reason
+        };
+
         dynamo_async_openai::types::ChatChoice {
             message: dynamo_async_openai::types::ChatCompletionResponseMessage {
                 role: delta.role.expect("delta should have a Role"),
@@ -239,7 +286,7 @@ impl From<DeltaChoice> for dynamo_async_openai::types::ChatChoice {
                 reasoning_content: delta.reasoning_content,
             },
             index: delta.index,
-            finish_reason: delta.finish_reason,
+            finish_reason,
             logprobs: delta.logprobs,
         }
     }
@@ -305,21 +352,54 @@ mod tests {
         text: &str,
         role: Option<dynamo_async_openai::types::Role>,
         finish_reason: Option<dynamo_async_openai::types::FinishReason>,
+        logprob: Option<f32>,
+        tool_calls: Option<&str>,
     ) -> Annotated<NvCreateChatCompletionStreamResponse> {
         // ALLOW: function_call is deprecated
+
+        let tool_calls: Option<serde_json::Value> =
+            tool_calls.map(|tool_calls| serde_json::from_str(tool_calls).unwrap());
+
+        let tool_call_chunks = if let Some(tool_calls) = tool_calls {
+            Some(vec![
+                dynamo_async_openai::types::ChatCompletionMessageToolCallChunk {
+                    index: 0,
+                    id: Some("test_id".to_string()),
+                    r#type: Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
+                    function: Some(dynamo_async_openai::types::FunctionCallStream {
+                        name: tool_calls["name"].as_str().map(|s| s.to_string()),
+                        arguments: Some(serde_json::to_string(&tool_calls["arguments"]).unwrap()),
+                    }),
+                },
+            ])
+        } else {
+            None
+        };
+
         let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
             content: Some(text.to_string()),
             function_call: None,
-            tool_calls: None,
+            tool_calls: tool_call_chunks,
             role,
             refusal: None,
             reasoning_content: None,
         };
+        let logprobs = logprob.map(|lp| dynamo_async_openai::types::ChatChoiceLogprobs {
+            content: Some(vec![
+                dynamo_async_openai::types::ChatCompletionTokenLogprob {
+                    token: text.to_string(),
+                    logprob: lp,
+                    bytes: None,
+                    top_logprobs: vec![],
+                },
+            ]),
+            refusal: None,
+        });
         let choice = dynamo_async_openai::types::ChatChoiceStream {
             index,
             delta,
             finish_reason,
-            logprobs: None,
+            logprobs,
         };
 
         let data = NvCreateChatCompletionStreamResponse {
@@ -372,6 +452,8 @@ mod tests {
             "Hello,",
             Some(dynamo_async_openai::types::Role::User),
             None,
+            None,
+            None,
         );
 
         // Create a stream
@@ -409,12 +491,16 @@ mod tests {
             "Hello,",
             Some(dynamo_async_openai::types::Role::User),
             None,
+            Some(-0.1),
+            None,
         );
         let annotated_delta2 = create_test_delta(
             0,
             " world!",
             None,
             Some(dynamo_async_openai::types::FinishReason::Stop),
+            Some(-0.2),
+            None,
         );
 
         // Create a stream
@@ -438,6 +524,25 @@ mod tests {
             Some(dynamo_async_openai::types::FinishReason::Stop)
         );
         assert_eq!(choice.message.role, dynamo_async_openai::types::Role::User);
+        assert_eq!(
+            choice
+                .logprobs
+                .as_ref()
+                .unwrap()
+                .content
+                .as_ref()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            choice.logprobs.as_ref().unwrap().content.as_ref().unwrap()[0].logprob,
+            -0.1
+        );
+        assert_eq!(
+            choice.logprobs.as_ref().unwrap().content.as_ref().unwrap()[1].logprob,
+            -0.2
+        );
     }
 
     #[allow(deprecated)]
@@ -528,6 +633,215 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_tool_calling_finish_reason_override_from_stop() {
+        // Test that when tool calls are present but finish reason is Stop, it gets overridden to ToolCalls
+        let tool_call_json =
+            r#"{"name": "get_weather", "arguments": {"location": "New York", "unit": "celsius"}}"#;
+
+        let annotated_delta = create_test_delta(
+            0,
+            "I'll check the weather for you.",
+            Some(dynamo_async_openai::types::Role::Assistant),
+            Some(dynamo_async_openai::types::FinishReason::Stop), // Original finish reason is Stop
+            None,
+            Some(tool_call_json),
+        );
+
+        let data = annotated_delta.data.unwrap();
+        let annotated_delta = Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+        };
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
+
+        // Verify tool calls are present
+        assert!(choice.message.tool_calls.is_some());
+        let tool_calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+
+        // Most importantly, verify that finish reason was overridden to ToolCalls despite original being Stop
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_calling_finish_reason_override_from_length() {
+        // Test that when tool calls are present but finish reason is Length, it gets overridden to ToolCalls
+        let tool_call_json = r#"{"name": "search", "arguments": {"query": "rust programming"}}"#;
+
+        let annotated_delta = create_test_delta(
+            0,
+            "Let me search for that.",
+            Some(dynamo_async_openai::types::Role::Assistant),
+            Some(dynamo_async_openai::types::FinishReason::Length), // Original finish reason is Length
+            None,
+            Some(tool_call_json),
+        );
+
+        let data = annotated_delta.data.unwrap();
+        let annotated_delta = Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+        };
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
+
+        // Verify tool calls are present
+        assert!(choice.message.tool_calls.is_some());
+        let tool_calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+
+        // Verify that finish reason was overridden to ToolCalls despite original being Length
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_calling_finish_reason_override_from_none() {
+        // Test that when tool calls are present but finish reason is None, it gets set to ToolCalls
+        let tool_call_json = r#"{"name": "calculate", "arguments": {"expression": "2+2"}}"#;
+
+        let annotated_delta = create_test_delta(
+            0,
+            "I'll calculate that for you.",
+            Some(dynamo_async_openai::types::Role::Assistant),
+            None, // Original finish reason is None
+            None,
+            Some(tool_call_json),
+        );
+
+        let data = annotated_delta.data.unwrap();
+        let annotated_delta = Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+        };
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
+
+        // Verify tool calls are present
+        assert!(choice.message.tool_calls.is_some());
+        let tool_calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+
+        // Verify that finish reason was set to ToolCalls despite original being None
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_tool_calling_preserves_original_finish_reason() {
+        // Test that when no tool calls are present, the original finish reason is preserved
+        let annotated_delta = create_test_delta(
+            0,
+            "This is a regular response without tool calls.",
+            Some(dynamo_async_openai::types::Role::Assistant),
+            Some(dynamo_async_openai::types::FinishReason::Stop),
+            None,
+            None, // No tool calls
+        );
+
+        let data = annotated_delta.data.unwrap();
+        let annotated_delta = Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+        };
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
+
+        // Verify no tool calls are present
+        assert!(choice.message.tool_calls.is_none());
+
+        // Verify that original finish reason (Stop) is preserved
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_async_openai::types::FinishReason::Stop)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_empty_tool_calls_preserves_original_finish_reason() {
+        // Test that when tool calls array is empty, the original finish reason is preserved
+        // Create a delta with empty tool calls by modifying the create_test_delta output
+        let mut annotated_delta = create_test_delta(
+            0,
+            "Response with empty tool calls array.",
+            Some(dynamo_async_openai::types::Role::Assistant),
+            Some(dynamo_async_openai::types::FinishReason::Length),
+            None,
+            None,
+        );
+
+        // Manually set empty tool calls array
+        if let Some(ref mut data) = annotated_delta.data {
+            data.choices[0].delta.tool_calls = Some(vec![]); // Empty tool calls array
+        }
+
+        let data = annotated_delta.data.unwrap();
+        let annotated_delta = Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+        };
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
+
+        // Verify tool calls array is empty
+        assert!(choice.message.tool_calls.is_none());
+
+        // Verify that original finish reason (Length) is preserved since tool calls are empty
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_async_openai::types::FinishReason::Length)
+        );
+    }
+
+    #[tokio::test]
     async fn test_tool_calling_output() {
         // Simulate a delta with a tool call in the content
         let tool_call_json = r#"{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}"#;
@@ -535,9 +849,11 @@ mod tests {
         // Use create_test_delta to generate the annotated delta, then extract the inner delta for the test
         let annotated_delta = create_test_delta(
             0,
-            tool_call_json,
+            "Hey Dude ! What's the weather in San Francisco in Fahrenheit?",
             Some(dynamo_async_openai::types::Role::Assistant),
             Some(dynamo_async_openai::types::FinishReason::ToolCalls),
+            None,
+            Some(tool_call_json),
         );
         let data = annotated_delta.data.unwrap();
 
@@ -573,8 +889,10 @@ mod tests {
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "fahrenheit");
 
-        // The content should be cleared (None) after tool call parsing
-        assert!(choice.message.content.is_none());
+        assert_eq!(
+            choice.message.content.as_ref().unwrap(),
+            "Hey Dude ! What's the weather in San Francisco in Fahrenheit?"
+        );
 
         // The finish_reason should be ToolCalls
         assert_eq!(
@@ -588,26 +906,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_calling_output_with_normal_text() {
-        // Simulate a delta with a tool call in the content
-        let tool_call_json = r#"Hey, I'm a normal text! {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}"#;
+    async fn test_tool_calling_finish_reason_override_from_stop_alternative() {
+        // Test that when tool calls are present but finish reason is Stop, it gets overridden to ToolCalls
+        let tool_call_json =
+            r#"{"name": "get_weather", "arguments": {"location": "New York", "unit": "celsius"}}"#;
 
-        // Use create_test_delta to generate the annotated delta, then extract the inner delta for the test
         let annotated_delta = create_test_delta(
             0,
-            tool_call_json,
+            "Getting weather for New York",
             Some(dynamo_async_openai::types::Role::Assistant),
-            Some(dynamo_async_openai::types::FinishReason::ToolCalls),
+            Some(dynamo_async_openai::types::FinishReason::Stop), // This should be overridden
+            None,
+            Some(tool_call_json),
         );
-        let data = annotated_delta.data.unwrap();
 
-        // Wrap it in Annotated and create a stream
-        let annotated_delta = Annotated {
-            data: Some(data),
-            id: Some("test_id".to_string()),
-            event: None,
-            comment: None,
-        };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
         // Call DeltaAggregator::apply
@@ -621,33 +933,16 @@ mod tests {
         assert_eq!(response.choices.len(), 1);
         let choice = &response.choices[0];
 
-        // The tool_calls field should be present and parsed
-        assert!(choice.message.tool_calls.is_some());
-        let tool_calls = choice.message.tool_calls.as_ref().unwrap();
-        assert_eq!(tool_calls.len(), 1);
-
-        let tool_call = &tool_calls[0];
-        assert_eq!(tool_call.function.name, "get_weather");
-        // The arguments should be a JSON string containing the expected keys
-        let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments).unwrap();
-        assert_eq!(args["location"], "San Francisco, CA");
-        assert_eq!(args["unit"], "fahrenheit");
-
-        // The content should be the normal text
-        assert!(choice.message.content.is_some());
-        assert_eq!(
-            choice.message.content.as_ref().unwrap(),
-            "Hey, I'm a normal text!"
-        );
-
-        // The finish_reason should be ToolCalls
+        // The finish_reason should be ToolCalls, not Stop, because tool calls are present
         assert_eq!(
             choice.finish_reason,
             Some(dynamo_async_openai::types::FinishReason::ToolCalls)
         );
-        assert_eq!(
-            choice.message.role,
-            dynamo_async_openai::types::Role::Assistant
-        );
+
+        // Verify tool calls are present
+        assert!(choice.message.tool_calls.is_some());
+        let tool_calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "get_weather");
     }
 }
