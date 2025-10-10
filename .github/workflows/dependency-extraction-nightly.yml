@@ -80,24 +80,25 @@ jobs:
               removed_count=$(python3 -c "import json; print(json.load(open('.github/reports/removed_dependencies.json'))['count'])" 2>/dev/null || echo "0")
               
               # Format removed dependencies list for PR body (limit to first 10)
-              removed_list=$(python3 -c "
+              removed_list=$(python3 << 'PYTHON_SCRIPT'
 import json
 try:
     data = json.load(open('.github/reports/removed_dependencies.json'))
-    removed = data['removed'][:10]  # First 10
+    removed = data['removed'][:10]
     lines = []
     for dep in removed:
         critical = ' **[CRITICAL]**' if dep.get('Critical') == 'Yes' else ''
-        lines.append(f\"    • **{dep['Dependency Name']}** (was: \`{dep['Version']}\`){critical}\")
-        lines.append(f\"      _from {dep['Source File']}_\")
+        lines.append(f"    • **{dep['Dependency Name']}** (was: `{dep['Version']}`){critical}")
+        lines.append(f"      _from {dep['Source File']}_")
     
     if data['count'] > 10:
-        lines.append(f\"    _... and {data['count'] - 10} more (see CSV for full list)_\")
+        lines.append(f"    _... and {data['count'] - 10} more (see CSV for full list)_")
     
     print('\n'.join(lines))
 except:
     print('    _No removed dependencies_')
-" 2>/dev/null || echo "    _Unable to parse removed dependencies_")
+PYTHON_SCRIPT
+)
             else
               removed_count="0"
               removed_list="    _No removed dependencies_"
