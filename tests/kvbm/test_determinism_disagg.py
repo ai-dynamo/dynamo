@@ -15,6 +15,7 @@ Compared to aggregated mode, disaggregated mode has some known randomness.
 Example reference: https://github.com/vllm-project/vllm/issues/7779#issuecomment-2304967870
 """
 
+from copy import deepcopy
 import importlib.util
 import logging
 import os
@@ -23,13 +24,14 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, TextIO
+from typing import Optional, TextIO, Dict, Any
+import yaml
 
 import pytest
 import requests
 
-from .common import DeterminismTester, ServerType
-from .common import TestDeterminism as BaseTestDeterminism
+from common import DeterminismTester, ServerType
+from common import TestDeterminism as BaseTestDeterminism
 
 # Test markers to align with repository conventions
 # Todo: enable the rest when kvbm is built in the ci
@@ -104,6 +106,8 @@ class LLMServerManager:
 
         if self.server_type == ServerType.vllm:
             self._set_up_vllm_config(gpu_cache_blocks)
+        elif self.server_type == ServerType.trtllm:
+            self._set_up_trtllm_config(gpu_cache_blocks)
         else:
             raise ValueError(
                 f"{self.server_type} is not supported yet in the KVBM test suite"
@@ -163,6 +167,77 @@ class LLMServerManager:
             self.prefiller_cmd.extend(
                 ["--num-gpu-blocks-override", str(gpu_cache_blocks)]
             )
+    def _set_up_trtllm_config(self, gpu_cache_blocks):
+        # Mostly the same parameters here as in the 
+        prefill_config_path = os.environ.get(
+            "KVBM_TRTLLM_LLMAPI_PREFILL_CONFIG_PATH", "/tmp/kvbm_llm_api_prefill_config.yaml"
+        )
+
+        decode_config_path = os.environ.get(
+            "KVBM_TRTLLM_LLMAPI_DECODE_CONFIG_PATH", "/tmp/kvbm_llm_api_decode_config.yaml"
+        )
+
+        llm_api_config: Dict[str, Any] = {}
+        llm_api_config["kv_cache_config"] = {
+            "enable_partial_reuse": False,
+            "free_gpu_memory_fraction": 0.10,
+            "tokens_per_block": 16,
+        }
+        
+        # GPU blocks override
+        if gpu_cache_blocks is not None:
+            del llm_api_config["kv_cache_config"]["free_gpu_memory_fraction"]
+            llm_api_config["kv_cache_config"]["max_tokens"] = (
+                int(gpu_cache_blocks) * 32
+            )  # TRTLLM defaults 32 tokens per block
+
+        prefill_config = deepcopy(llm_api_config)
+        prefill_config["disable_overlap_scheduler"] = True
+        prefill_config["cache_transceiver_config"] = {
+            "backend": "DEFAULT",
+            "max_tokens_in_buffer": 16384,
+        }
+        prefill_config["cuda_graph_config"] = None
+
+        decode_config = deepcopy(llm_api_config)
+        decode_config["disable_overlap_scheduler"] = False
+        decode_config["cache_transceiver_config"] = {
+            "backend": "DEFAULT",
+            "max_tokens_in_buffer": 65536,
+        }
+
+        model = os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B")
+
+        cmd_root = [
+            "python3",
+            "-m",
+            "dynamo.trtllm",
+            "--model",
+            model,
+            "--kv-block-size",
+            "16",
+            "--max-num-tokens",
+            "8000"
+        ]
+
+        self.prefiller_cmd = cmd_root + [
+            "--extra-engine-args",
+            prefill_config_path,
+            "--disaggregation-mode",
+            "prefill",
+        ]
+
+        self.decoder_cmd = cmd_root + [
+            "--extra-engine-args",
+            decode_config_path,
+            "--disaggregation-mode",
+            "decode",
+        ]
+
+        with open(prefill_config_path, "w") as f:
+            yaml.dump(prefill_config, f, default_flow_style=False, sort_keys=False)
+        with open(decode_config_path, "w") as f:
+            yaml.dump(decode_config, f, default_flow_style=False, sort_keys=False)
 
     def start_server(self, timeout: int = 300) -> bool:
         """Start LLM server and wait for readiness."""
@@ -332,6 +407,7 @@ class LLMServerManager:
             # First check basic health
             response = requests.get(f"{self.base_url}/health", timeout=5)
             if response.status_code != 200:
+                print(f"Health check failed with status code: {response.status_code}")
                 return False
 
             # Then check if the model endpoint is ready with a simple test request
@@ -350,9 +426,12 @@ class LLMServerManager:
                 json=test_payload,
                 timeout=10,
             )
+            if response.status_code != 200:
+                print(f"Model endpoint test failed with status code: {response.status_code}")
             return response.status_code == 200
 
-        except requests.exceptions.RequestException:
+        except requests.exceptions.RequestException as e:
+            print(f"Error checking server status: {e}")
             return False
 
 
@@ -406,8 +485,10 @@ def llm_server(request, runtime_services):
 
     if importlib.util.find_spec("vllm") is not None:
         server_type = ServerType.vllm
+    elif importlib.util.find_spec("tensorrt_llm") is not None:
+        server_type = ServerType.trtllm
     else:
-        raise Exception("vllm module is not available in the current environment.")
+        raise Exception("Neither the vllm nor the tensorrt_llm module is available in the current environment.")
 
     server_manager = LLMServerManager(
         port=port,

@@ -62,6 +62,7 @@ class Config:
         self.tool_call_parser: Optional[str] = None
         self.dump_config_to: Optional[str] = None
         self.custom_jinja_template: Optional[str] = None
+        self.connector: Optional[str] = None
 
     def __str__(self) -> str:
         return (
@@ -301,6 +302,13 @@ def cmd_line_args():
         choices=get_reasoning_parser_names(),
         help="Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
     )
+    parser.add_argument(
+        "--connector",
+        type=str,
+        default=None,
+        choices=["kvbm"],
+        help="Connector to use for the model.",
+    )
     add_config_dump_args(parser)
     parser.add_argument(
         "--custom-jinja-template",
@@ -379,6 +387,7 @@ def cmd_line_args():
     config.reasoning_parser = args.dyn_reasoning_parser
     config.tool_call_parser = args.dyn_tool_call_parser
     config.dump_config_to = args.dump_config_to
+    config.connector = args.connector
 
     # Handle custom jinja template path expansion (environment variables and home directory)
     if args.custom_jinja_template:
