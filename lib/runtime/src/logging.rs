@@ -287,14 +287,6 @@ pub fn make_request_span<B>(req: &Request<B>) -> Span {
     // porentially we can preserve this API and make it a bridge to the propagation system
     let trace_parent = TraceParent::from_headers(req.headers());
 
-    // TODO: Remove later.
-    // Useful to verify that everything should be None, since this is the first span of the request
-    assert!(trace_parent.trace_id.is_none());
-    assert!(trace_parent.parent_id.is_none());
-    assert!(trace_parent.tracestate.is_none());
-    assert!(trace_parent.x_request_id.is_none());
-    assert!(trace_parent.x_dynamo_request_id.is_none());
-
     let span = tracing::info_span!(
         "http-request",
         method = %method,
@@ -394,27 +386,15 @@ pub fn create_handle_payload_span_from_nats_headers(
     namespace: &str,
     instance_id: i64,
 ) -> Span {
-    println!("[DEBUG] create_handle_payload_span_from_nats_headers: ENTRY");
-    println!("[DEBUG]   component={}, endpoint={}, namespace={}, instance_id={}", component, endpoint, namespace, instance_id);
     
     // Extract the trace context and individual IDs from headers
-    println!("[DEBUG] create_handle_payload_span_from_nats_headers: calling extract_otel_context_from_nats_headers");
     let (otel_context, trace_id, parent_span_id) = extract_otel_context_from_nats_headers(headers);
-    println!("[DEBUG] create_handle_payload_span_from_nats_headers: extracted context");
-    println!("[DEBUG]   otel_context present: {}", otel_context.is_some());
-    println!("[DEBUG]   trace_id: {:?}", trace_id);
-    println!("[DEBUG]   parent_span_id: {:?}", parent_span_id);
     
     // Parse the TraceParent struct to get all additional fields
     let trace_parent = TraceParent::from_headers(headers);
-    println!("[DEBUG] create_handle_payload_span_from_nats_headers: additional fields from TraceParent");
-    println!("[DEBUG]   x_request_id: {:?}", trace_parent.x_request_id);
-    println!("[DEBUG]   x_dynamo_request_id: {:?}", trace_parent.x_dynamo_request_id);
-    println!("[DEBUG]   tracestate: {:?}", trace_parent.tracestate);
     
     // Create the span with trace context fields for bootstrapping
     let span = if let (Some(trace_id), Some(parent_id)) = (trace_id.as_ref(), parent_span_id.as_ref()) {
-        println!("[DEBUG] create_handle_payload_span_from_nats_headers: Creating span WITH trace context");
         // Create span with trace_id and parent_id fields to bootstrap our distributed tracing layer
         // Include all additional fields from the TraceParent struct and context fields
         let span = tracing::info_span!(
@@ -432,12 +412,10 @@ pub fn create_handle_payload_span_from_nats_headers(
 
         // Set the extracted OpenTelemetry context as the parent if available
         if let Some(context) = otel_context {
-            println!("[DEBUG] create_handle_payload_span_from_nats_headers: Setting parent context on span");
             span.set_parent(context);
         }
         span
     } else {
-        println!("[DEBUG] create_handle_payload_span_from_nats_headers: Creating span WITHOUT trace context (new trace)");
         // No trace context found, create a regular span (this will generate new trace context)
         // Still include additional fields from TraceParent if they exist
         let span = tracing::info_span!(
@@ -453,7 +431,6 @@ pub fn create_handle_payload_span_from_nats_headers(
         span
     };
     
-    println!("[DEBUG] create_handle_payload_span_from_nats_headers: EXIT");
     span
 }
 
@@ -473,28 +450,21 @@ pub fn create_handle_payload_span_from_nats_headers(
 pub fn extract_otel_context_from_nats_headers(
     headers: &async_nats::HeaderMap,
 ) -> (Option<opentelemetry::Context>, Option<String>, Option<String>) {
-    println!("[DEBUG] extract_otel_context_from_nats_headers: ENTRY");
     
     // First check if traceparent header exists
     let traceparent_value = match headers.get("traceparent") {
         Some(value) => {
             let val_str = value.as_str();
-            println!("[DEBUG] extract_otel_context_from_nats_headers: traceparent header found: '{}'", val_str);
             val_str
         },
         None => {
-            println!("[DEBUG] extract_otel_context_from_nats_headers: No traceparent header found, returning None");
             // No traceparent header found, return None for all values
             return (None, None, None);
         }
     };
 
     // Parse the traceparent header to extract trace_id and span_id
-    println!("[DEBUG] extract_otel_context_from_nats_headers: Parsing traceparent");
     let (trace_id, parent_span_id) = parse_traceparent(traceparent_value);
-    println!("[DEBUG] extract_otel_context_from_nats_headers: Parsed traceparent");
-    println!("[DEBUG]   trace_id: {:?}", trace_id);
-    println!("[DEBUG]   parent_span_id: {:?}", parent_span_id);
 
     // Create an extractor that reads from the NATS headers map
     struct NatsHeaderExtractor<'a>(&'a async_nats::HeaderMap);
@@ -518,24 +488,16 @@ pub fn extract_otel_context_from_nats_headers(
     let extractor = NatsHeaderExtractor(headers);
     let propagator = opentelemetry::sdk::propagation::TraceContextPropagator::new();
     
-    println!("[DEBUG] extract_otel_context_from_nats_headers: Using propagator to extract context");
     // Extract the context from headers using the W3C Trace Context propagation standard
     let otel_context = propagator.extract(&extractor);
 
     // Check if we actually got a valid context (not just the default empty context)
     let context_with_trace = if otel_context.span().span_context().is_valid() {
-        println!("[DEBUG] extract_otel_context_from_nats_headers: Extracted context is VALID");
-        println!("[DEBUG]   span_context.trace_id: {}", otel_context.span().span_context().trace_id());
-        println!("[DEBUG]   span_context.span_id: {}", otel_context.span().span_context().span_id());
         Some(otel_context)
     } else {
-        println!("[DEBUG] extract_otel_context_from_nats_headers: Extracted context is INVALID (empty)");
         None
     };
 
-    println!("[DEBUG] extract_otel_context_from_nats_headers: EXIT");
-    println!("[DEBUG]   Returning: context_with_trace={}, trace_id={:?}, parent_span_id={:?}", 
-             context_with_trace.is_some(), trace_id, parent_span_id);
     (context_with_trace, trace_id, parent_span_id)
 }
 
@@ -576,32 +538,21 @@ pub fn inject_otel_context_into_nats_headers(
     headers: &mut async_nats::HeaderMap,
     context: Option<opentelemetry::Context>,
 ) {
-    println!("[DEBUG] inject_otel_context_into_nats_headers: ENTRY");
-    println!("[DEBUG]   Context provided: {}", context.is_some());
     
     // Get the context from parameter or derive from current span
     // Bug: We take the context from the current span
     let otel_context = context.unwrap_or_else(|| {
-        println!("[DEBUG] inject_otel_context_into_nats_headers: Deriving context from current span");
         let current_span = Span::current();
         let ctx = current_span.context();
-        println!("[DEBUG]   Current span ID: {:?}", current_span.id());
-        println!("[DEBUG]   Derived context span_id: {}", ctx.span().span_context().span_id());
-        println!("[DEBUG]   Derived context trace_id: {}", ctx.span().span_context().trace_id());
         ctx
     });
 
-    println!("[DEBUG] inject_otel_context_into_nats_headers: Context to inject:");
-    println!("[DEBUG]   trace_id: {}", otel_context.span().span_context().trace_id());
-    println!("[DEBUG]   span_id: {}", otel_context.span().span_context().span_id());
-    println!("[DEBUG]   is_valid: {}", otel_context.span().span_context().is_valid());
 
     // Create an injector that writes to the NATS headers map
     struct NatsHeaderInjector<'a>(&'a mut async_nats::HeaderMap);
 
     impl<'a> Injector for NatsHeaderInjector<'a> {
         fn set(&mut self, key: &str, value: String) {
-            println!("[DEBUG] inject_otel_context_into_nats_headers: INJECTOR WRITING to headers: {}={}", key, value);
             self.0.insert(key, value);
         }
     }
@@ -609,22 +560,8 @@ pub fn inject_otel_context_into_nats_headers(
     let mut injector = NatsHeaderInjector(headers);
     let propagator = opentelemetry::sdk::propagation::TraceContextPropagator::new();
     
-    println!("[DEBUG] inject_otel_context_into_nats_headers: Calling propagator.inject_context");
     // Inject the context into headers using the W3C Trace Context propagation standard
     propagator.inject_context(&otel_context, &mut injector);
-    
-    println!("[DEBUG] inject_otel_context_into_nats_headers: After injection, final headers:");
-    if let Some(traceparent) = headers.get("traceparent") {
-        println!("[DEBUG]   traceparent: {}", traceparent.as_str());
-    } else {
-        println!("[DEBUG]   traceparent: NOT SET");
-    }
-    if let Some(tracestate) = headers.get("tracestate") {
-        println!("[DEBUG]   tracestate: {}", tracestate.as_str());
-    } else {
-        println!("[DEBUG]   tracestate: NOT SET");
-    }
-    println!("[DEBUG] inject_otel_context_into_nats_headers: EXIT");
 }
 
 /// Convenience function to inject trace context from current span into NATS headers
@@ -654,19 +591,13 @@ pub fn create_client_request_span(
     trace_context: Option<&DistributedTraceContext>,
     instance_id: Option<&str>,
 ) -> Span {
-    println!("[DEBUG] create_client_request_span: ENTRY");
-    println!("[DEBUG]   operation={}, request_id={}, instance_id={:?}", operation, request_id, instance_id);
     
     // Create the span based on whether we have trace context and instance_id
     let span = if let Some(ctx) = trace_context {
-        println!("[DEBUG] create_client_request_span: Creating span WITH trace context");
-        println!("[DEBUG]   trace_id: {}", ctx.trace_id);
-        println!("[DEBUG]   span_id: {}", ctx.span_id);
         
         // Create a synthetic NATS header map with the traceparent from the context
         let mut headers = async_nats::HeaderMap::new();
         let traceparent = ctx.create_traceparent();
-        println!("[DEBUG] create_client_request_span: Created traceparent: {}", traceparent);
         headers.insert("traceparent", traceparent);
         
         // Also add tracestate if present
@@ -675,14 +606,9 @@ pub fn create_client_request_span(
         }
         
         // Extract the OpenTelemetry context using the extractor pattern
-        println!("[DEBUG] create_client_request_span: Extracting OTEL context from headers");
-        let (otel_context, extracted_trace_id, extracted_parent_span_id) = 
+        let (otel_context, _extracted_trace_id, _extracted_parent_span_id) = 
             extract_otel_context_from_nats_headers(&headers);
         
-        println!("[DEBUG] create_client_request_span: Extraction results:");
-        println!("[DEBUG]   otel_context present: {}", otel_context.is_some());
-        println!("[DEBUG]   extracted_trace_id: {:?}", extracted_trace_id);
-        println!("[DEBUG]   extracted_parent_span_id: {:?}", extracted_parent_span_id);
         
         // Create span with all trace context fields
         let span = if let Some(inst_id) = instance_id {
@@ -712,13 +638,11 @@ pub fn create_client_request_span(
         
         // Set the extracted OpenTelemetry context as the parent if available
         if let Some(context) = otel_context {
-            println!("[DEBUG] create_client_request_span: Setting parent context on span");
             span.set_parent(context);
         }
         
         span
     } else {
-        println!("[DEBUG] create_client_request_span: Creating span WITHOUT trace context");
         
         // Create span without trace context fields
         let span = if let Some(inst_id) = instance_id {
@@ -739,7 +663,6 @@ pub fn create_client_request_span(
         span
     };
     
-    println!("[DEBUG] create_client_request_span: EXIT");
     span
 }
 
@@ -768,9 +691,7 @@ where
     // Capture close span time
     // Currently not used but added for future use in timing
     fn on_close(&self, id: Id, ctx: Context<'_, S>) {
-        println!("[DEBUG] on_close: called for span id: {:?}", id);
         if let Some(span) = ctx.span(&id) {
-            println!("[DEBUG]   Span name: {}", span.name());
             let mut extensions = span.extensions_mut();
             if let Some(distributed_tracing_context) =
                 extensions.get_mut::<DistributedTraceContext>()
@@ -783,18 +704,6 @@ where
     // Adds W3C compliant span_id, trace_id, and parent_id if not already present
     // TODO: Change to on_enter
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
-        println!("[DEBUG] on_new_span: ENTRY");
-        println!("[DEBUG]   New span id: {:?}", id);
-        
-        // Log the current span context (the parent)
-        if let Some(current_span_id) = ctx.current_span().id() {
-            println!("[DEBUG]   Current span id (parent context): {:?}", current_span_id);
-            if let Some(current_span) = ctx.span(current_span_id) {
-                println!("[DEBUG]   Current span name: {}", current_span.name());
-            }
-        } else {
-            println!("[DEBUG]   Current span id (parent context): NONE (root span)");
-        }
         
         // Handling of trace_id:
         // 1. Check if passed in (first span across a network boundary)
@@ -803,7 +712,6 @@ where
 
         // span id on the other hand can always be reliably retrieved from the otel extensions
         if let Some(span) = ctx.span(id) {
-            println!("[DEBUG]   New span name: {}", span.name());
             let mut trace_id: Option<String> = None;
             let mut parent_id: Option<String> = None;
             let mut span_id: Option<String> = None;
@@ -817,7 +725,6 @@ where
                 if !is_valid_trace_id(trace_id_input) {
                     tracing::trace!("trace id  '{}' is not valid! Ignoring.", trace_id_input);
                 } else {
-                    println!("[DEBUG] on_new_span: trace id resolved from fields: {}", trace_id_input);
                     trace_id = Some(trace_id_input.to_string());
                 }
             }
@@ -855,16 +762,12 @@ where
                 && let Some(parent_span_id) = ctx.current_span().id()
                 && let Some(parent_span) = ctx.span(parent_span_id)
             {
-                println!("[DEBUG] on_new_span: Checking parent span for trace context");
                 let parent_ext = parent_span.extensions();
                 if let Some(parent_tracing_context) = parent_ext.get::<DistributedTraceContext>() {
-                    println!("[DEBUG] on_new_span: trace id resolved from parent span: {}", parent_tracing_context.trace_id);
-                    println!("[DEBUG]   parent span_id (becomes parent_id): {}", parent_tracing_context.span_id);
                     trace_id = Some(parent_tracing_context.trace_id.clone());
                     parent_id = Some(parent_tracing_context.span_id.clone());
                     tracestate = parent_tracing_context.tracestate.clone();
                 } else {
-                    println!("[DEBUG] on_new_span: Parent span has no DistributedTraceContext");
                 }
             }
 
@@ -877,19 +780,15 @@ where
 
             // Extract trace_id and span_id from OpenTelemetry extensions if not already set
             if trace_id.is_none() || span_id.is_none() {
-                println!("[DEBUG] on_new_span: Checking OTEL extensions for trace/span IDs");
                 let extensions = span.extensions();
                 if let Some(otel_data) = extensions.get::<tracing_opentelemetry::OtelData>() {
-                    println!("[DEBUG]   OTEL data found in extensions");
                     // Extract trace_id from OTEL data if not already set
                     if trace_id.is_none() {
                         if let Some(otel_trace_id) = otel_data.builder.trace_id {
                             let trace_id_str = format!("{}", otel_trace_id);
                             if is_valid_trace_id(&trace_id_str) {
-                                println!("[DEBUG] on_new_span: trace id resolved from OTEL data: {}", trace_id_str);
                                 trace_id = Some(trace_id_str);
                             } else {
-                                println!("[DEBUG]   Invalid trace_id from OTEL data: {}", trace_id_str);
                             }
                         }
                     }
@@ -899,32 +798,23 @@ where
                         if let Some(otel_span_id) = otel_data.builder.span_id {
                             let span_id_str = format!("{}", otel_span_id);
                             if is_valid_span_id(&span_id_str) {
-                                println!("[DEBUG] on_new_span: span_id resolved from OTEL data: {}", span_id_str);
                                 span_id = Some(span_id_str);
                             } else {
-                                println!("[DEBUG]   Invalid span_id from OTEL data: {}", span_id_str);
                             }
                         }
                     }
                 } else {
-                    println!("[DEBUG]   No OpenTelemetry data found in span extensions");
                 }
             }
 
             if trace_id.is_none() {
-                println!("[DEBUG] on_new_span: ERROR - trace id is not set");
                 panic!("trace id is not set");
             }
 
             if span_id.is_none() {
-                println!("[DEBUG] on_new_span: ERROR - span id is not set");
                 panic!("span id is not set");
             }
             
-            println!("[DEBUG] on_new_span: Final resolved IDs:");
-            println!("[DEBUG]   trace_id: {:?}", trace_id);
-            println!("[DEBUG]   span_id: {:?}", span_id);
-            println!("[DEBUG]   parent_id: {:?}", parent_id);
 
             let mut extensions = span.extensions_mut();
             extensions.insert(DistributedTraceContext {
@@ -985,8 +875,6 @@ pub fn lazy_init_otel() {
 /// Initialize the logger
 /// This should be called when Tokio runtime is available (e.g., in DistributedRuntime::new())
 pub fn init() {
-    println!("init called");
-    
     // Initialize logging (works for both JSONL and non-JSONL now)
     INIT.call_once(|| {
         if let Err(e) = setup_logging() {

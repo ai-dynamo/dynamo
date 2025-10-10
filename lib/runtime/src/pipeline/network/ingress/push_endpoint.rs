@@ -103,13 +103,11 @@ impl PushEndpoint {
                         instance_id,
                     )
                 } else {
-                    // tracing::info_span!("handle_payload");
-                    panic!("Headers were expected but not found");
+                    tracing::info_span!("handle_payload")
                 };
 
                 tokio::spawn(async move {
                     tracing::trace!(instance_id, "handling new request");
-                    
                     let result = ingress
                         .handle_payload(req.message.payload)
                         .instrument(span)

@@ -66,10 +66,6 @@ const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 
 // Helper to get appropriate span for instrumentation - always emit spans
 fn get_span_for_context(context: &context::Context, operation: &str) -> tracing::Span {
-    println!("[DEBUG] get_span_for_context: CALLED");
-    println!("[DEBUG]   operation={}, request_id={}", operation, context.inner().id());
-    println!("[DEBUG]   has_trace_context={}", context.trace_context().is_some());
-    
     logging::create_client_request_span(
         operation,
         context.inner().id(),
@@ -84,10 +80,6 @@ fn get_span_for_direct_context(
     operation: &str,
     instance_id: &str,
 ) -> tracing::Span {
-    println!("[DEBUG] get_span_for_direct_context: CALLED");
-    println!("[DEBUG]   operation={}, request_id={}, instance_id={}", operation, context.inner().id(), instance_id);
-    println!("[DEBUG]   has_trace_context={}", context.trace_context().is_some());
-    
     logging::create_client_request_span(
         operation,
         context.inner().id(),
@@ -101,7 +93,6 @@ fn get_span_for_direct_context(
 /// import the module.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // logging::init() moved to DistributedRuntime::new() where Tokio runtime is available
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
@@ -361,10 +352,9 @@ impl DistributedRuntime {
         .map_err(to_pyerr)?;
 
         let runtime = worker.runtime().clone();
-        // runtime.
         
-        // Initialize logging now that Tokio runtime is available
-        // Must be done in a block_on context so the runtime is active
+        // Initialize logging in context where tokio runtime is available
+        // otel exporter requires it
         runtime.secondary().block_on(async {
             rs::logging::init();
         });
