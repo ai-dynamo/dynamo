@@ -103,6 +103,7 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName
 			"--data-parallel-rpc-port", dataParallelRPCPort,
 			"--data-parallel-start-rank", startRank,
 		)
+		container.Args = []string{strings.Join(container.Args, " ")} // combine args for exec command
 	}
 }
 
