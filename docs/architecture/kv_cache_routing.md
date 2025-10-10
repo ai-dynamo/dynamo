@@ -328,9 +328,9 @@ The `KvPushRouter` provides the following methods:
 
 - **`get_potential_loads(token_ids)`**: Get detailed load information for all workers, including potential prefill tokens and active decode blocks. Returns a list of load dictionaries.
 
-- **`mark_prefill_complete(request_id)`**: Signal that a request has completed its prefill phase. Used for manual lifecycle management when routing outside of `generate()`.
+- **`mark_prefill_complete(request_id)`**: Signal that a request has completed its prefill phase. Only used for manual lifecycle management when using `best_worker_id()` for manual routing instead of `generate()`.
 
-- **`free(request_id)`**: Signal that a request has completed and its resources should be released. Used for manual lifecycle management when routing outside of `generate()`.
+- **`free(request_id)`**: Signal that a request has completed and its resources should be released. Only used for manual lifecycle management when using `best_worker_id()` for manual routing instead of `generate()`.
 
 - **`dump_events()`**: Dump all KV cache events from the router's indexer as a JSON string. Useful for debugging and analysis.
 
