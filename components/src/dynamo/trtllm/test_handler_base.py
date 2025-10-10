@@ -62,12 +62,19 @@ class Context:
         self._id = request_id
         self._cancelled: asyncio.Future[None] = asyncio.Future()
         self._cancelled.set_result(None)
+        # For async_killed_or_stopped - a future that never completes
+        self._killed_or_stopped: asyncio.Future[None] = asyncio.Future()
 
     def id(self) -> str:
         return self._id
 
     def cancelled(self) -> asyncio.Future[None]:
         return self._cancelled
+
+    async def async_killed_or_stopped(self) -> None:
+        # The hanging behavior ensures the cancellation monitor stays "dormant"
+        # and doesn't interfere with our test scenarios.
+        await self._killed_or_stopped
 
 
 sys.modules["dynamo._core"].Context = Context  # type: ignore[attr-defined]
