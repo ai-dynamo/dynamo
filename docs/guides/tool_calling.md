@@ -1,22 +1,28 @@
-# Function (Tool) Calling with dynamo
+# Tool Calling with Dynamo
 
-You can connect dynamo to external tools and services using function calling (also known as tool calling). By providing a list of available functions, dynamo can choose
+You can connect Dynamo to external tools and services using function calling (also known as tool calling). By providing a list of available functions, Dynamo can choose
 to output function arguments for the relevant function(s) which you can execute to augment the prompt with relevant external information.
 
-Function calling is controlled using the `tool_choice` and `tools` request parameters.
+Tool calling (AKA function calling) is controlled using the `tool_choice` and `tools` request parameters.
 
 
 ## Prerequisites
 
 To enable this feature, you should set the following flag while launching the backend worker
 
-- --dyn-tool-call-parser : select the parser from the available parsers list using the below command
+- `--dyn-tool-call-parser` : select the parser from the available parsers list using the below command
 
 ```bash
-python -m dynamo.<backend> --help | grep -B 2 "dyn-tool-call-parser"
+# <backend> can be vllm, sglang, trtllm, etc. based on your installation
+python -m dynamo.<backend> --help"
 ```
 
-Note: If no tool call parser is provided by the user, dynamo will try to use default tool call parsing based on `<TOOLCALL>` and `<|python_tag|>` tool tags,
+> [!NOTE]
+> If no tool call parser is provided by the user, Dynamo will try to use default tool call parsing based on `<TOOLCALL>` and `<|python_tag|>` tool tags.
+
+> [!TIP]
+> If your model's default chat template doesn't support tool calling, but the model itself does, you can specify a custom chat template per worker
+> with `python -m dynamo.<backend> --custom-jinja-template </path/to/template.jinja>`.
 
 
 Parser to Model Mapping
@@ -35,7 +41,7 @@ Parser to Model Mapping
 
 ## Examples
 
-### Launch dynamo frontend and backend
+### Launch Dynamo Frontend and Backend
 
 ```bash
 # launch backend worker
