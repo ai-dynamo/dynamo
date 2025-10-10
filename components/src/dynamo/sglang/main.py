@@ -100,12 +100,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
-    async def gated_generate(request):
-        """Queue requests until model registration completes"""
-        await ready_event.wait()  # Block until model is ready
-        async for response in handler.generate(request):
-            yield response
-
     handler = DecodeWorkerHandler(
         component, engine, config, publisher, prefill_client, prefill_router_client
     )
