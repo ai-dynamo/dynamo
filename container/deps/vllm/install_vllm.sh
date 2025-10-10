@@ -195,7 +195,7 @@ python setup.py install
 
 # Install Flash Infer
 if [ "$ARCH" = "arm64" ]; then
-    uv pip install flashinfer-python
+    uv pip install flashinfer-python==0.3.1.post1
 else
     cd $INSTALLATION_DIR
     git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
