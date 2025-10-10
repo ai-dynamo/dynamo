@@ -7,28 +7,28 @@
 //! the entire distributed system, complementing the component-specific
 //! instance listing in `component.rs`.
 
+use std::sync::Arc;
+
 use crate::component::{INSTANCE_ROOT_PATH, Instance};
+use crate::storage::key_value_store::KeyValueStore;
 use crate::transports::etcd::Client as EtcdClient;
 
-pub async fn list_all_instances(etcd_client: &EtcdClient) -> anyhow::Result<Vec<Instance>> {
-    let mut instances = Vec::new();
+pub async fn list_all_instances(client: Arc<dyn KeyValueStore>) -> anyhow::Result<Vec<Instance>> {
+    let Some(bucket) = client.get_bucket(INSTANCE_ROOT_PATH).await? else {
+        return Ok(vec![]);
+    };
 
-    for kv in etcd_client
-        .kv_get_prefix(format!("{}/", INSTANCE_ROOT_PATH))
-        .await?
-    {
-        match serde_json::from_slice::<Instance>(kv.value()) {
+    let entries = bucket.entries().await?;
+    let mut instances = Vec::with_capacity(entries.len());
+    for (name, bytes) in entries.into_iter() {
+        match serde_json::from_slice::<Instance>(&bytes) {
             Ok(instance) => instances.push(instance),
             Err(err) => {
-                tracing::warn!(
-                    "Failed to parse instance from etcd: {}. Key: {}, Value: {}",
-                    err,
-                    kv.key_str().unwrap_or("invalid_key"),
-                    kv.value_str().unwrap_or("invalid_value")
-                );
+                tracing::warn!(%err, key = name, "Failed to parse instance from storage");
             }
         }
     }
+    instances.sort();
 
     Ok(instances)
 }
