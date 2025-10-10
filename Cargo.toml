@@ -3,7 +3,6 @@
 
 [workspace]
 members = [
-    "components/metrics",
     "launch/dynamo-run",
     "lib/llm",
     "lib/runtime",
@@ -11,6 +10,7 @@ members = [
     "lib/async-openai",
     "lib/parsers",
     "lib/bindings/c",
+    "lib/bindings/python/codegen",
     "lib/engines/*",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
@@ -18,7 +18,6 @@ members = [
 # - launch/dynamo-run
 # - lib/engines/*
 default-members = [
-    "components/metrics",
     "lib/llm",
     "lib/runtime",
     "lib/tokens",

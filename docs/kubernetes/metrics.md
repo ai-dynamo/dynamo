@@ -64,7 +64,7 @@ This will create two components:
 - A Worker component exposing metrics on its system port
 
 Both components expose a `/metrics` endpoint following the OpenMetrics format, but with different metrics appropriate to their roles. For details about:
-- Deployment configuration: See the [vLLM README](/components/backends/vllm/README.md)
+- Deployment configuration: See the [vLLM README](/docs/backends/vllm/README.md)
 - Available metrics: See the [metrics guide](/docs/guides/metrics.md)
 
 ### Validate the Deployment
@@ -87,7 +87,7 @@ curl localhost:8000/v1/chat/completions \
   }'
 ```
 
-For more information about validating the deployment, see the [vLLM README](../../components/backends/vllm/README.md).
+For more information about validating the deployment, see the [vLLM README](../backends/vllm/README.md).
 
 ## Set Up Metrics Collection
 

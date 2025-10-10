@@ -26,6 +26,9 @@ impl LocalBlockDataFactories {
 
         let device_factory = if let Some(config) = resources.config.device_layout.take() {
             next_block_set_idx += 1;
+
+            let offload_filter = config.offload_filter.clone();
+
             tracing::debug!("Constructing device pool.");
             let layout = create_layout(
                 layout_builder.clone(),
@@ -37,6 +40,7 @@ impl LocalBlockDataFactories {
                 layout,
                 next_block_set_idx,
                 resources.worker_id,
+                offload_filter,
             ))
         } else {
             None
@@ -44,6 +48,9 @@ impl LocalBlockDataFactories {
 
         let host_factory = if let Some(config) = resources.config.host_layout.take() {
             next_block_set_idx += 1;
+
+            let offload_filter = config.offload_filter.clone();
+
             tracing::debug!("Constructing host pool.");
             let layout = create_layout(
                 layout_builder.clone(),
@@ -55,12 +62,15 @@ impl LocalBlockDataFactories {
                 layout,
                 next_block_set_idx,
                 resources.worker_id,
+                offload_filter,
             ))
         } else {
             None
         };
 
         let disk_factory = if let Some(config) = resources.config.disk_layout.take() {
+            let offload_filter = config.offload_filter.clone();
+
             if resources.nixl_agent.is_none() {
                 tracing::warn!("NIXL is disabled; will not allocate disk blocks.");
                 None
@@ -77,6 +87,7 @@ impl LocalBlockDataFactories {
                     layout,
                     next_block_set_idx,
                     resources.worker_id,
+                    offload_filter,
                 ))
             }
         } else {

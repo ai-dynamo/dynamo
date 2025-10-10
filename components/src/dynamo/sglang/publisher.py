@@ -9,7 +9,7 @@ from typing import List, Optional, Tuple
 import sglang as sgl
 import zmq
 import zmq.asyncio
-from sglang.srt.utils import get_ip, get_zmq_socket
+from sglang.srt.utils import get_local_ip_auto, get_zmq_socket
 
 from dynamo.llm import (
     ForwardPassMetrics,
@@ -116,7 +116,7 @@ class DynamoSglangPublisher:
         if self.server_args.kv_events_config:
             kv_events = json.loads(self.server_args.kv_events_config)
             ep = kv_events.get("endpoint")
-            zmq_ep = ep.replace("*", get_ip()) if ep else None
+            zmq_ep = ep.replace("*", get_local_ip_auto()) if ep else None
 
             lease_id = self.generate_endpoint.lease_id()
 

@@ -3,7 +3,7 @@
 
 //! Background processes for the KV Router including event consumption and snapshot uploads.
 
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use anyhow::Result;
 use dynamo_runtime::{
@@ -11,7 +11,7 @@ use dynamo_runtime::{
     prelude::*,
     traits::events::EventPublisher,
     transports::{
-        etcd::WatchEvent,
+        etcd::{Client as EtcdClient, WatchEvent},
         nats::{NatsQueue, Slug},
     },
 };
@@ -32,7 +32,7 @@ use crate::{
 struct SnapshotResources {
     nats_client: dynamo_runtime::transports::nats::Client,
     bucket_name: String,
-    etcd_client: dynamo_runtime::transports::etcd::Client,
+    etcd_client: EtcdClient,
     lock_name: String,
 }
 
@@ -91,7 +91,7 @@ pub async fn start_kv_router_background(
         stream_name.clone(),
         nats_server.clone(),
         std::time::Duration::from_secs(60), // 1 minute timeout
-        consumer_uuid,
+        consumer_uuid.clone(),
     );
     nats_queue.connect_with_reset(router_reset_states).await?;
 
@@ -150,6 +150,9 @@ pub async fn start_kv_router_background(
         .drt()
         .etcd_client()
         .ok_or_else(|| anyhow::anyhow!("etcd client not available"))?;
+
+    // Cleanup orphaned consumers on startup
+    cleanup_orphaned_consumers(&mut nats_queue, &etcd_client, &component, &consumer_uuid).await;
 
     // Watch for router deletions to clean up orphaned consumers
     let (_prefix_str, _watcher, mut router_replicas_rx) = etcd_client
@@ -300,7 +303,7 @@ pub async fn start_kv_router_background(
                     };
 
                     let key = String::from_utf8_lossy(kv.key());
-                    tracing::info!("Router deleted: {}", key);
+                    tracing::info!("Detected router replica deletion: {}", key);
 
                     // Only process deletions for routers on the same component
                     if !key.contains(component.path().as_str()) {
@@ -363,6 +366,44 @@ pub async fn start_kv_router_background(
     });
 
     Ok(())
+}
+
+/// Cleanup orphaned NATS consumers that no longer have corresponding etcd router entries
+async fn cleanup_orphaned_consumers(
+    nats_queue: &mut NatsQueue,
+    etcd_client: &EtcdClient,
+    component: &Component,
+    consumer_uuid: &str,
+) {
+    let Ok(consumers) = nats_queue.list_consumers().await else {
+        return;
+    };
+
+    let router_prefix = format!("{}/{}/", KV_ROUTERS_ROOT_PATH, component.path());
+    let Ok(router_entries) = etcd_client.kv_get_prefix(&router_prefix).await else {
+        return;
+    };
+
+    let active_uuids: HashSet<String> = router_entries
+        .iter()
+        .filter_map(|kv| {
+            String::from_utf8_lossy(kv.key())
+                .split('/')
+                .next_back()
+                .map(str::to_string)
+        })
+        .collect();
+
+    for consumer in consumers {
+        if consumer == consumer_uuid {
+            // Never delete myself (extra/redundant safeguard)
+            continue;
+        }
+        if !active_uuids.contains(&consumer) {
+            tracing::info!("Cleaning up orphaned consumer: {}", consumer);
+            let _ = nats_queue.shutdown(Some(consumer)).await;
+        }
+    }
 }
 
 /// Perform snapshot upload and purge operations

@@ -134,9 +134,11 @@ class StandaloneRouterHandler:
             logger.error("KvPushRouter not initialized - cannot get best worker")
             raise RuntimeError("Router not initialized")
 
-        return await self.kv_push_router.best_worker_id(
+        result = await self.kv_push_router.best_worker_id(
             token_ids, router_config_override
         )
+
+        yield result
 
 
 def parse_args():

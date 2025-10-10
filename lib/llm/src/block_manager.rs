@@ -33,7 +33,7 @@ pub use block::{
 pub use config::*;
 
 pub use layout::{LayoutConfig, LayoutConfigBuilder, LayoutError, LayoutType, nixl::NixlLayout};
-pub use offload::request::BlockResult;
+pub use offload::{filter::OffloadFilter, request::BlockResult};
 pub use pool::{BlockPool, ManagedBlockPool};
 pub use storage::{
     DeviceStorage, DiskStorage, PinnedStorage, Storage, StorageAllocator,

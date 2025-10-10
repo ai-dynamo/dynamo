@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Tuple
 
 import sglang as sgl
-from sglang.srt.utils import get_ip
+from sglang.srt.utils import get_local_ip_auto
 
 from dynamo._core import Client, Component
 from dynamo.sglang.args import Config
@@ -109,6 +109,6 @@ class BaseWorkerHandler(ABC):
                 inner_tm.server_args.dist_init_addr.split(":")[0]
             )
         else:
-            bootstrap_host = get_ip()
+            bootstrap_host = get_local_ip_auto()
 
         return bootstrap_host, bootstrap_port

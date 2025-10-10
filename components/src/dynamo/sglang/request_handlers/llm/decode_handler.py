@@ -24,6 +24,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         config: Config,
         publisher: DynamoSglangPublisher,
         prefill_client: Optional[Client] = None,
+        prefill_router_client: Optional[Client] = None,
     ) -> None:
         """Initialize decode worker handler.
 
@@ -33,6 +34,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             config: SGLang and Dynamo configuration.
             publisher: Metrics publisher for the worker.
             prefill_client: Optional client for prefill worker in disaggregated mode.
+            prefill_router_client: Optional client for prefill router in disaggregated mode.
 
         Raises:
             ValueError: If prefill_client is not provided in decode serving mode.
@@ -52,6 +54,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             self.prefill_client = prefill_client
             logging.info("Decode worker handler initialized")
 
+        self.prefill_router_client = prefill_router_client
         logging.info("Worker handler initialized")
 
     def cleanup(self) -> None:
@@ -111,12 +114,33 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         if self.serving_mode == DisaggregationMode.DECODE:
             # request the bootstrap info from the target prefill worker
-            prefill_stream = await self.prefill_client.generate(
-                DisaggPreprocessedRequest(
-                    request=request,
-                    sampling_params=sampling_params,
-                ).model_dump()
-            )
+            if (
+                self.prefill_router_client is not None
+                and self.prefill_router_client.instance_ids()
+            ):
+                token_ids = request["token_ids"]
+                stream = await self.prefill_router_client.generate(token_ids)
+                result = await anext(stream)
+                (
+                    worker_id,
+                    overlap,
+                ) = result.data()  # Returns tuple (worker_id, overlap_amount)
+                logging.info(f"Best prefill worker ID: {worker_id}, overlap: {overlap}")
+
+                prefill_stream = await self.prefill_client.direct(
+                    DisaggPreprocessedRequest(
+                        request=request,
+                        sampling_params=sampling_params,
+                    ).model_dump(),
+                    worker_id,
+                )
+            else:
+                prefill_stream = await self.prefill_client.generate(
+                    DisaggPreprocessedRequest(
+                        request=request,
+                        sampling_params=sampling_params,
+                    ).model_dump()
+                )
 
             bootstrap_info = None
             async for info in prefill_stream:
@@ -164,26 +188,24 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         Yields:
             Dict with token_ids and optional finish_reason.
-
-        Raises:
-            ValueError: If response missing output_ids.
         """
         num_output_tokens_so_far = 0
 
         async for res in stream_source:
+            out = {}
             finish_reason = res["meta_info"]["finish_reason"]
             if finish_reason:
-                out = {"token_ids": [], "finish_reason": finish_reason["type"]}
-            else:
-                try:
-                    next_total_toks = len(res["output_ids"])
-                except KeyError:
-                    raise ValueError(
-                        f"Missing 'output_ids' in response. Response keys: {list(res.keys())}"
-                    )
-                out = {"token_ids": res["output_ids"][num_output_tokens_so_far:]}
-                num_output_tokens_so_far = next_total_toks
+                out["finish_reason"] = finish_reason["type"]
 
+            output_ids = res.get("output_ids", [])
+            # If request is not finished yet, but there are no outputs, return an error.
+            if not output_ids and not finish_reason:
+                yield {"finish_reason": "error", "token_ids": []}
+                break
+
+            next_total_toks = len(output_ids)
+            out["token_ids"] = output_ids[num_output_tokens_so_far:]
+            num_output_tokens_so_far = next_total_toks
             yield out
 
     async def _process_text_stream(

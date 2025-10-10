@@ -224,6 +224,14 @@ If you see `ErrImagePull` or `ImagePullBackOff` errors with 401 unauthorized mes
 
 3. The service account should show `imagePullSecrets` containing `nvcr-imagepullsecret`.
 
+If it doesn't, create the secret
+
+```bash
+export NGC_API_KEY=<you-ngc-api-key-here>
+kubectl create secret docker-registry nvcr-imagepullsecret --docker-server=nvcr.io --docker-username='$oauthtoken' --docker-password=$NGC_API_KEY
+
+```
+
 
 ## Running the Profiling Script with AI Configurator
 

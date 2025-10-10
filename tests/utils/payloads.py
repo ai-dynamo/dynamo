@@ -20,7 +20,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
-from dynamo._core import prometheus_names
+from dynamo import prometheus_names
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +206,7 @@ class MetricsPayload(BasePayload):
         return response.text
 
     def validate(self, response: Any, content: str) -> None:
-        requests_total_name = prometheus_names.work_handler.requests_total
+        requests_total_name = prometheus_names.work_handler.REQUESTS_TOTAL
         pattern = (
             rf'{re.escape(requests_total_name)}\{{[^}}]*model="[^"]*"[^}}]*\}}\s+(\d+)'
         )
