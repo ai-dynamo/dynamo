@@ -128,4 +128,3 @@ python3 .github/workflows/extract_dependency_versions.py --help
 - ⚙️ [Configuration](../workflows/extract_dependency_versions_config.yaml)
 - 📋 [Nightly Workflow](../workflows/dependency-extraction-nightly.yml)
 - 📸 [Release Workflow](../workflows/dependency-extraction-release.yml)
-

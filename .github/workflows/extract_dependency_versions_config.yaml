@@ -170,4 +170,3 @@ extraction:
   
   go_mod:
     skip_indirect: false  # Set to true to skip indirect dependencies
-

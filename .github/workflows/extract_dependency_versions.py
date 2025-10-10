@@ -27,12 +27,12 @@ Output:
 
 import argparse
 import csv
-from datetime import datetime
 import glob as glob_module
 import json
 import re
+from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 try:
     import yaml
@@ -1758,4 +1758,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
