@@ -328,9 +328,9 @@ The `KvPushRouter` provides the following methods:
 
 - **`get_potential_loads(token_ids)`**: Get detailed load information for all workers, including potential prefill tokens and active decode blocks. Returns a list of load dictionaries.
 
-- **`mark_prefill_complete(request_id)`**: Signal that a request has completed its prefill phase. Only used for manual lifecycle management when using `best_worker_id()` for manual routing instead of `generate()`.
+- **`mark_prefill_complete(request_id)`**: Signal that a request has completed its prefill phase. Only used for [manual lifecycle management](#2-manual-state-management-advanced) when using `best_worker_id()` for manual routing instead of `generate()`.
 
-- **`free(request_id)`**: Signal that a request has completed and its resources should be released. Only used for manual lifecycle management when using `best_worker_id()` for manual routing instead of `generate()`.
+- **`free(request_id)`**: Signal that a request has completed and its resources should be released. Only used for [manual lifecycle management](#2-manual-state-management-advanced) when using `best_worker_id()` for manual routing instead of `generate()`.
 
 - **`dump_events()`**: Dump all KV cache events from the router's indexer as a JSON string. Useful for debugging and analysis.
 
@@ -411,8 +411,11 @@ stream = await router.generate(token_ids=tokens, model="model-name")
 Use `best_worker_id(request_id=...)` to select and track, then manage the request yourself:
 ```python
 worker_id, overlap = await router.best_worker_id(tokens, request_id="req-123")
-# Send request to worker_id using your own client
+response = await client.generate(tokens, request_id="req-123")
+# await anext(response)  # Get first token
 await router.mark_prefill_complete("req-123")  # After first token
+# async for _ in response:  # Continue generating
+#     ...
 await router.free("req-123")  # After completion
 ```
 - **Best for**: Custom request handling with router state tracking
