@@ -589,7 +589,6 @@ mod tests {
                 blocks,
                 global_registry,
                 async_runtime,
-                metrics,
                 default_duplication_setting,
             ) = args.dissolve();
 
@@ -599,7 +598,6 @@ mod tests {
                 blocks,
                 global_registry,
                 async_runtime,
-                metrics,
                 default_duplication_setting,
             );
 
