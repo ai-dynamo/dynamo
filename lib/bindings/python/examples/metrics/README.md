@@ -216,7 +216,7 @@ Method 2 supports all standard Prometheus metric types:
 - **CounterVec**: `CounterVec` (float with labels), `IntCounterVec` (integer with labels)
 - **Histograms**: `Histogram`
 
-All metrics are imported from `dynamo._prometheus_metrics`.
+All metrics are imported from `dynamo.prometheus_metrics`.
 
 #### Adding/Changing Metrics in Method 2
 

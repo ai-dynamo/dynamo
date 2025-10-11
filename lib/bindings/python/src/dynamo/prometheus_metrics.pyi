@@ -1,10 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# NOTE: This file defines Python type stubs for Prometheus metric types.
-# It should be kept in sync with:
-# - lib/bindings/python/rust/metrics.rs (Rust implementations)
-# - lib/runtime/src/metrics.rs (MetricsRegistry trait and Prometheus types)
+"""Type stubs for the official public API of prometheus metrics.
+
+This file defines Python type stubs for Prometheus metric types.
+It should be kept in sync with:
+- lib/bindings/python/rust/metrics.rs (Rust implementations)
+- lib/runtime/src/metrics.rs (MetricsRegistry trait and Prometheus types)
+"""
 
 from typing import Callable, Dict, List, Optional, Tuple
 
