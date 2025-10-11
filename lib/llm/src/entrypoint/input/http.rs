@@ -225,43 +225,54 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
 
     // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
     // Start custom backend metrics polling if configured
-    if let (Some(namespace_component_endpoint), Some(polling_interval), Some(registry)) = (
-        http_service
-            .custom_backend_namespace_component_endpoint
-            .as_ref(),
-        http_service.custom_backend_metrics_polling_interval,
-        http_service.custom_backend_registry.as_ref(),
-    ) {
-        // Create DistributedRuntime for polling, matching the engine's mode
-        // Check if we have etcd_client to determine if we're in dynamic or static mode
-        let drt = if http_service.state().etcd_client().is_some() {
-            // Dynamic mode: use from_settings() which respects environment (includes etcd)
-            DistributedRuntime::from_settings(runtime.clone()).await?
+    let polling_task =
+        if let (Some(namespace_component_endpoint), Some(polling_interval), Some(registry)) = (
+            http_service
+                .custom_backend_namespace_component_endpoint
+                .as_ref(),
+            http_service.custom_backend_metrics_polling_interval,
+            http_service.custom_backend_registry.as_ref(),
+        ) {
+            // Create DistributedRuntime for polling, matching the engine's mode
+            // Check if we have etcd_client to determine if we're in dynamic or static mode
+            let drt = if http_service.state().etcd_client().is_some() {
+                // Dynamic mode: use from_settings() which respects environment (includes etcd)
+                DistributedRuntime::from_settings(runtime.clone()).await?
+            } else {
+                // Static mode: no etcd
+                let dst_config =
+                    dynamo_runtime::distributed::DistributedConfig::from_settings(true);
+                DistributedRuntime::new(runtime.clone(), dst_config).await?
+            };
+
+            tracing::info!(
+                namespace_component_endpoint=%namespace_component_endpoint,
+                polling_interval_secs=polling_interval,
+                "Starting custom backend metrics polling task"
+            );
+            // Spawn the polling task and keep the JoinHandle alive so it can be aborted during
+            // shutdown. While graceful shutdown is not strictly necessary for this non-critical
+            // metrics polling, explicitly aborting it prevents the task from running during the
+            // shutdown phase.
+            Some(
+                crate::http::service::custom_backend_metrics::spawn_custom_backend_polling_task(
+                    drt,
+                    namespace_component_endpoint.clone(),
+                    polling_interval,
+                    registry.clone(),
+                ),
+            )
         } else {
-            // Static mode: no etcd
-            let dst_config = dynamo_runtime::distributed::DistributedConfig::from_settings(true);
-            DistributedRuntime::new(runtime.clone(), dst_config).await?
+            None
         };
 
-        tracing::info!(
-            namespace_component_endpoint=%namespace_component_endpoint,
-            polling_interval_secs=polling_interval,
-            "Starting custom backend metrics polling task"
-        );
-        // Spawn the polling task. The JoinHandle is immediately dropped (indicated by the `_`
-        // prefix), which allows the task to run independently in the background. The task will
-        // be terminated when the tokio runtime shuts down. No CancellationToken is passed
-        // because graceful shutdown is not necessary for this non-critical metrics polling.
-        let _polling_task =
-            crate::http::service::custom_backend_metrics::spawn_custom_backend_polling_task(
-                drt,
-                namespace_component_endpoint.clone(),
-                polling_interval,
-                registry.clone(),
-            );
+    http_service.run(runtime.primary_token()).await?;
+
+    // Abort the polling task if it was started
+    if let Some(task) = polling_task {
+        task.abort();
     }
 
-    http_service.run(runtime.primary_token()).await?;
     runtime.shutdown(); // Cancel primary token
     Ok(())
 }

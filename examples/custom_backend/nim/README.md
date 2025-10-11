@@ -23,7 +23,7 @@ python3 examples/custom_backend/nim/mock_nim_backend.py
 
 **Dynamic mode (with etcd for service discovery):**
 ```bash
-python3 examples/custom_backend/nim/mock_nim_backend.py --use-etcd
+python3 examples/custom_backend/nim/mock_nim_backend.py
 ```
 
 This starts a backend on `nim.backend.runtime_stats` (default) that returns incrementing metrics. You can customize with `--custom-backend-metrics-endpoint "namespace.component.endpoint"`.
