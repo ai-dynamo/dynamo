@@ -34,7 +34,12 @@ use super::RouteDoc;
 /// * `count` - Number of buckets to generate
 ///
 /// # Returns
-/// A vector of log-spaced values, always starting with 0.0 and ending with the rounded max value
+/// A vector of log-spaced values, always starting with 0.0 and ending with the rounded max value.
+/// Duplicates created by rounding are removed, so the final count may be less than requested.
+///
+/// # Note
+/// With 2 significant figures, there are roughly 90 unique values per order of magnitude.
+/// Requesting more buckets than can be uniquely represented will result in deduplication.
 fn generate_log_buckets(min: f64, max: f64, count: usize) -> Vec<f64> {
     if count == 0 {
         return vec![];
@@ -43,6 +48,7 @@ fn generate_log_buckets(min: f64, max: f64, count: usize) -> Vec<f64> {
         return vec![0.0];
     }
 
+    let requested_count = count;
     let mut buckets = Vec::with_capacity(count);
     buckets.push(0.0);
 
@@ -53,6 +59,23 @@ fn generate_log_buckets(min: f64, max: f64, count: usize) -> Vec<f64> {
         let log_value = log_min + (log_max - log_min) * (i as f64) / ((count - 1) as f64);
         let value = log_value.exp();
         buckets.push(round_to_sig_figs(value, 2));
+    }
+
+    // Remove consecutive duplicates (buckets are already sorted)
+    let original_len = buckets.len();
+    buckets.dedup();
+
+    // Warn if significant deduplication occurred
+    if buckets.len() < original_len && (original_len - buckets.len()) > original_len / 10 {
+        tracing::warn!(
+            requested = requested_count,
+            unique = buckets.len(),
+            duplicates = original_len - buckets.len(),
+            min = min,
+            max = max,
+            "Histogram bucket generation: Significant duplicate values after rounding to 2 sig figs. \
+             Consider reducing bucket count or increasing range."
+        );
     }
 
     buckets
@@ -1066,6 +1089,72 @@ mod tests {
                     value, min, max, count
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_sig_fig_limitation_with_many_buckets() {
+        // This test demonstrates that 2 sig figs limits the number of unique bucket values
+        // With 1000 requested buckets but only 2 sig figs, we'll get automatic deduplication
+        let buckets = generate_log_buckets(0.0001, 1.0, 1000);
+
+        println!(
+            "Requested 1000 buckets, got {} total values (including 0.0)",
+            buckets.len()
+        );
+
+        // With 2 sig figs across 4 orders of magnitude (0.0001 to 1.0),
+        // we can have roughly 90 unique values per order of magnitude
+        // So we expect around 360 unique values maximum
+        assert!(
+            buckets.len() < 500,
+            "Expected fewer than 500 unique buckets due to 2 sig fig limitation, got {}",
+            buckets.len()
+        );
+
+        // Verify all values are unique (no duplicates remain after deduplication)
+        let mut sorted_buckets = buckets.clone();
+        sorted_buckets.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_buckets.dedup();
+        assert_eq!(
+            buckets.len(),
+            sorted_buckets.len(),
+            "All buckets should be unique after deduplication"
+        );
+
+        // Verify first is still 0.0
+        assert_eq!(buckets[0], 0.0);
+
+        // Verify values are still in increasing order
+        for i in 1..buckets.len() {
+            assert!(
+                buckets[i] > buckets[i - 1],
+                "Buckets should be in increasing order"
+            );
+        }
+    }
+
+    #[test]
+    fn test_deduplication_preserves_order() {
+        // Test that deduplication maintains increasing order
+        let buckets = generate_log_buckets(0.01, 1.0, 50);
+
+        // Verify all values are unique
+        let mut unique_check = std::collections::HashSet::new();
+        for &bucket in &buckets {
+            assert!(
+                unique_check.insert(bucket.to_bits()),
+                "Duplicate value {} found after deduplication",
+                bucket
+            );
+        }
+
+        // Verify order is maintained
+        for i in 1..buckets.len() {
+            assert!(
+                buckets[i] > buckets[i - 1],
+                "Bucket values should be in increasing order after deduplication"
+            );
         }
     }
 }
