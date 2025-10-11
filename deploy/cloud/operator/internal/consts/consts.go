@@ -1,6 +1,7 @@
 package consts
 
 import (
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -80,6 +81,31 @@ const (
 
 	MainContainerName = "main"
 )
+
+// Enumerates allowed Custom GPU resource keys recognized by the operator.
+var CustomGPUList = []string{
+	"gpu.intel.com/xe",
+	"gpu.intel.com/i915",
+}
+
+// CustomGPUSet enables O(1) membership checks.
+var CustomGPUSet = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(CustomGPUList))
+	for _, k := range CustomGPUList {
+		m[strings.ToLower(k)] = struct{}{}
+	}
+	return m
+}()
+
+// IsCustomGPU returns true if key matches a known custom GPU resource name (case-insensitive, trimmed).
+func IsCustomGPU(key string) bool {
+	if key == "" {
+		return false
+	}
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	_, ok := CustomGPUSet[normalized]
+	return ok
+}
 
 type MultinodeDeploymentType string
 

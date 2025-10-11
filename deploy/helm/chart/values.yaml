@@ -18,3 +18,9 @@ imagePullSecrets:
 
 natsAddr: nats://dynamo-platform-nats:4222
 etcdAddr: dynamo-platform-etcd:2379
+
+# List of permitted GPU resource keys for custom GPU requests.
+# Keep consistent with CustomGPUList in operator const
+CustomGPUList:
+- gpu.intel.com/xe
+- gpu.intel.com/i915
