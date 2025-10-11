@@ -23,23 +23,23 @@ if [[ -z "${DYNAMO_DIR}" ]]; then
     exit 1
 fi
 
-if [[ -z "${EPP_DIR}" ]]; then
-    echo "EPP_DIR environment variable must be set"
-    echo "   Example: export EPP_DIR=/path/to/gateway-api-inference-extension-dynamo"
+if [[ -z "${GAIE_DIR}" ]]; then
+    echo "GAIE_DIR environment variable must be set"
+    echo "   Example: export GAIE_DIR=/path/to/gateway-api-inference-extension"
     exit 1
 fi
-DYNAMO_LIB_DIR="${EPP_DIR}/pkg/epp/scheduling/plugins/dynamo_kv_scorer/lib"
-DYNAMO_INCLUDE_DIR="${EPP_DIR}/pkg/epp/scheduling/plugins/dynamo_kv_scorer/include"
+DYNAMO_LIB_DIR="${GAIE_DIR}/pkg/epp/scheduling/plugins/dynamo_kv_scorer/lib"
+DYNAMO_INCLUDE_DIR="${GAIE_DIR}/pkg/epp/scheduling/plugins/dynamo_kv_scorer/include"
 
-echo "🏗️  Building Dynamo KV Router C Library..."
+echo "Building Dynamo KV Router C Library..."
 
 # Step 1: Build the static library
-echo "📦 Building static library..."
+echo "Building static library..."
 cd "${DYNAMO_DIR}"
 cargo build --release -p libdynamo_llm
 
 # Step 2: Generate header file (with fallback)
-echo "📝 Generating C header..."
+echo "Generating C header..."
 HEADER_OUTPUT="${DYNAMO_DIR}/lib/bindings/c/include/nvidia/dynamo_llm/llm_engine.h"
 
 if ! cbindgen --config lib/bindings/c/cbindgen.toml --crate libdynamo_llm --output "${HEADER_OUTPUT}"; then
@@ -47,15 +47,16 @@ if ! cbindgen --config lib/bindings/c/cbindgen.toml --crate libdynamo_llm --outp
     cp "${DYNAMO_DIR}/lib/bindings/c/src/fallback_header.h" "${HEADER_OUTPUT}"
 fi
 
-# Step 3: Ensure EPP directories exist
-echo "Preparing EPP directories..."
+# Step 3: Ensure directories exist
+echo "Preparing directories..."
 mkdir -p "${DYNAMO_LIB_DIR}"
 mkdir -p "${DYNAMO_INCLUDE_DIR}"
 
-# Step 4: Copy files to EPP
-echo "Copying files to EPP..."
+# Step 4: Copy files to GAIE project
+echo "Copying files to the GAIE project..."
 cp "${HEADER_OUTPUT}" "${DYNAMO_INCLUDE_DIR}/"
 cp "${DYNAMO_DIR}/target/release/libdynamo_llm_capi.a" "${DYNAMO_LIB_DIR}/"
+cp "${DYNAMO_DIR}/container/Dockerfile.epp" "${GAIE_DIR}/Dockerfile.dynamo"
 
 # Verify files were copied
 if [[ ! -f "${DYNAMO_INCLUDE_DIR}/llm_engine.h" ]]; then
@@ -68,13 +69,19 @@ if [[ ! -f "${DYNAMO_LIB_DIR}/libdynamo_llm_capi.a" ]]; then
     exit 1
 fi
 
+if [[ ! -f "${GAIE_DIR}/Dockerfile.epp" ]]; then
+    echo "Docker.epp file copy failed!"
+    exit 1
+fi
+
 echo "Files copied successfully:"
 echo "   Header: ${DYNAMO_INCLUDE_DIR}/llm_engine.h"
 echo "   Library: ${DYNAMO_LIB_DIR}/libdynamo_llm_capi.a"
+echo "   Docker: ${GAIE_DIR}/Dockerfile.epp"
 
 # Step 5: Apply Dynamo patch (if it exists)
-echo "🔧 Applying Dynamo patch..."
-cd "${EPP_DIR}"
+echo "Applying Dynamo patch..."
+cd "${GAIE_DIR}"
 
 PATCH_FILE="${DYNAMO_DIR}/deploy/inference-gateway/epp-patches/v0.5.1-2/epp-v0.5.1-dyn2.patch"
 if [[ -f "${PATCH_FILE}" ]]; then
@@ -89,7 +96,7 @@ else
 fi
 
 # Step 6: Build the EPP image
-echo "Building the EPP image..."
+echo "Building the custom EPP image for GAIE..."
 make dynamo-image-local-load
 
-echo "EPP with Dynamo KV routing built"
+echo "EPP image with Dynamo KV routing built"

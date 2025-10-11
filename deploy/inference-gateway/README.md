@@ -162,7 +162,7 @@ The script will apply a custom patch to the code with your GAIE repo and build t
 ```bash
 # Use your custom paths
 export DYNAMO_DIR=/path/to/dynamo
-export EPP_DIR=/path/to/gateway-api-inference-extension
+export GAIE_DIR=/path/to/gateway-api-inference-extension
 
 # Run the script
 cd deploy/inference-gateway
