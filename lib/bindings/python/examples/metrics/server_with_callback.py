@@ -10,6 +10,12 @@ This shows how Python code can:
 2. Register them with an endpoint
 3. Update their values using type-safe methods (set for gauges, inc for counters)
 4. The metrics are automatically served via the /metrics endpoint
+
+Usage:
+    DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 ./server_with_callback.py
+
+    # In another terminal, query the metrics:
+    curl http://localhost:8081/metrics
 """
 
 import asyncio
@@ -18,8 +24,8 @@ import uvloop
 
 # Note that these imports are for type hints only. They cannot be instantiated directly.
 # You can instantiate them using the endpoint.metrics.create_*() methods.
-from dynamo._prometheus_metrics import Gauge, IntCounter, IntGauge, IntGaugeVec
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.prometheus_metrics import Gauge, IntCounter, IntGauge, IntGaugeVec
+from dynamo.runtime import Component, DistributedRuntime, Endpoint, dynamo_worker
 
 
 @dynamo_worker()
@@ -29,10 +35,10 @@ async def worker(runtime: DistributedRuntime) -> None:
 
 async def init(runtime: DistributedRuntime):
     # Create component and endpoint
-    component = runtime.namespace("ns556").component("cp556")
+    component: Component = runtime.namespace("ns556").component("cp556")
     await component.create_service()
 
-    endpoint = component.endpoint("ep556")
+    endpoint: Endpoint = component.endpoint("ep556")
 
     # Step 1: Create metrics using the endpoint's metrics property
     print("[python] Creating metrics...")
@@ -59,11 +65,10 @@ async def init(runtime: DistributedRuntime):
         [("update_method", "callback")],
     )
 
-    print(f"[python] Created IntGauge: {request_total_slots.name}")
-    print(f"[python] Created Gauge: {gpu_cache_usage_perc.name}")
-    print(f"[python] Created IntGaugeVec: {worker_active_requests.name}")
-    print(f"[python] Created IntCounter with constant labels: {update_count.name}")
-    print(f"[python]   Const labels: {update_count.const_labels}")
+    print(f"[python] Created IntGauge: {request_total_slots.name()}")
+    print(f"[python] Created Gauge: {gpu_cache_usage_perc.name()}")
+    print(f"[python] Created IntGaugeVec: {worker_active_requests.name()}")
+    print(f"[python] Created IntCounter: {update_count.name()}")
     print("[python] Metrics automatically registered with endpoint!")
 
     # Step 2: Register a callback to update metrics on-demand
