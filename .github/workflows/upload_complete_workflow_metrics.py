@@ -1027,12 +1027,11 @@ class WorkflowMetricsUploader:
                     print(f"   Error: {test_data[FIELD_ERROR_MESSAGE][:100]}...")
                 print("   " + "-"*30)
                 
-                # Uncomment the lines below when ready to actually upload:
-                # try:
-                #     self.post_to_db(test_index, test_data)
-                #     print(f"✅ Individual test uploaded: {test_full_name}")
-                # except Exception as e:
-                #     print(f"❌ Failed to upload individual test {test_full_name}: {e}")
+                try:
+                    self.post_to_db(test_index, test_data)
+                    print(f"✅ Individual test uploaded: {test_full_name}")
+                except Exception as e:
+                    print(f"❌ Failed to upload individual test {test_full_name}: {e}")
             
             print(f"📊 Processed {len(individual_tests)} individual tests for {test_framework} {test_type}")
             print("   " + "="*50)
