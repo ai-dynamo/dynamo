@@ -69,6 +69,17 @@ use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::SpanData;
 use uuid::Uuid;
 
+use opentelemetry::global;
+use opentelemetry::trace::{TraceContextExt};
+use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
+use opentelemetry_otlp::WithExportConfig;
+
+use std::time::Duration;
+use tracing::{info, instrument};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+
 /// ENV used to set the log level
 const FILTER_ENV: &str = "DYN_LOG";
 
@@ -77,6 +88,21 @@ const DEFAULT_FILTER_LEVEL: &str = "info";
 
 /// ENV used to set the path to the logging configuration file
 const CONFIG_PATH_ENV: &str = "DYN_LOGGING_CONFIG_PATH";
+
+/// Enable OTLP trace exporting (OpenTelemetry standard)
+const OTEL_TRACES_EXPORTER: &str = "OTEL_TRACES_EXPORTER";
+
+/// OTEL exporter endpoint (OpenTelemetry standard)
+const OTEL_EXPORTER_OTLP_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
+
+/// Default OTLP endpoint
+const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
+
+/// Service name environment variable (for Kubernetes pod name)
+const POD_NAME_ENV: &str = "POD_NAME";
+
+/// Default service name
+const DEFAULT_SERVICE_NAME: &str = "dynamo";
 
 /// Once instance to ensure the logger is only initialized once
 static INIT: Once = Once::new();
@@ -105,6 +131,19 @@ impl Default for LoggingConfig {
             ]),
         }
     }
+}
+
+/// Check if OTLP trace exporting is enabled
+fn otlp_exporter_enabled() -> bool {
+    std::env::var(OTEL_TRACES_EXPORTER)
+        .map(|v| v.to_lowercase() == "otlp")
+        .unwrap_or(false)
+}
+
+/// Get the service name from environment or use default
+fn get_service_name() -> String {
+    std::env::var(POD_NAME_ENV)
+        .unwrap_or_else(|_| DEFAULT_SERVICE_NAME.to_string())
 }
 
 /// Generate a 32-character, lowercase hex trace ID (W3C-compliant)
@@ -205,9 +244,11 @@ impl TraceParent {
         let mut trace_id = None;
         let mut parent_id = None;
         let mut tracestate = None;
+
         let mut x_request_id = None;
         let mut x_dynamo_request_id = None;
 
+        // TODO: these should not be extracted from the headers but rather taken from the extractor/propagator
         if let Some(header_value) = headers.get("traceparent") {
             (trace_id, parent_id) = parse_traceparent(header_value);
         }
@@ -237,15 +278,17 @@ impl TraceParent {
     }
 }
 
+
 // Takes Axum request and returning a span
 pub fn make_request_span<B>(req: &Request<B>) -> Span {
     let method = req.method();
     let uri = req.uri();
     let version = format!("{:?}", req.version());
 
+    // porentially we can preserve this API and make it a bridge to the propagation system
     let trace_parent = TraceParent::from_headers(req.headers());
 
-    tracing::info_span!(
+    let span = tracing::info_span!(
         "http-request",
         method = %method,
         uri = %uri,
@@ -254,8 +297,191 @@ pub fn make_request_span<B>(req: &Request<B>) -> Span {
         parent_id = trace_parent.parent_id,
         x_request_id = trace_parent.x_request_id,
     x_dynamo_request_id = trace_parent.x_dynamo_request_id,
+    );
 
-    )
+    span
+}
+
+
+/// Create a handle_payload span from NATS headers with component context
+pub fn create_handle_payload_span_from_nats_headers(
+    headers: &async_nats::HeaderMap,
+    component: &str,
+    endpoint: &str,
+    namespace: &str,
+    instance_id: i64,
+)  -> Span {
+    let (otel_context, trace_id, parent_span_id) = extract_otel_context_from_nats_headers(headers);
+    let trace_parent = TraceParent::from_headers(headers);
+    
+    let span = if let (Some(trace_id), Some(parent_id)) = (trace_id.as_ref(), parent_span_id.as_ref()) {
+        let span = tracing::info_span!(
+            "handle_payload",
+            trace_id = trace_id.as_str(),
+            parent_id = parent_id.as_str(),
+            x_request_id = trace_parent.x_request_id,
+            x_dynamo_request_id = trace_parent.x_dynamo_request_id,
+            tracestate = trace_parent.tracestate,
+            component = component,
+            endpoint = endpoint,
+            namespace = namespace,
+            instance_id = instance_id,
+        );
+
+        if let Some(context) = otel_context {
+            span.set_parent(context);
+        }
+        span
+    } else {
+        let span = tracing::info_span!(
+            "handle_payload",
+            x_request_id = trace_parent.x_request_id,
+            x_dynamo_request_id = trace_parent.x_dynamo_request_id,
+            tracestate = trace_parent.tracestate,
+            component = component,
+            endpoint = endpoint,
+            namespace = namespace,
+            instance_id = instance_id,
+        );
+        span
+    };
+    
+    span
+}
+
+/// Extract OpenTelemetry trace context from NATS headers for distributed tracing
+pub fn extract_otel_context_from_nats_headers(
+    headers: &async_nats::HeaderMap,
+) -> (Option<opentelemetry::Context>, Option<String>, Option<String>) {
+    let traceparent_value = match headers.get("traceparent") {
+        Some(value) => value.as_str(),
+        None => return (None, None, None),
+    };
+
+    let (trace_id, parent_span_id) = parse_traceparent(traceparent_value);
+
+    struct NatsHeaderExtractor<'a>(&'a async_nats::HeaderMap);
+
+    impl<'a> Extractor for NatsHeaderExtractor<'a> {
+        fn get(&self, key: &str) -> Option<&str> {
+            self.0.get(key).map(|value| value.as_str())
+        }
+
+        fn keys(&self) -> Vec<&str> {
+            vec!["traceparent", "tracestate"]
+                .into_iter()
+                .filter(|&key| self.0.get(key).is_some())
+                .collect()
+        }
+    }
+
+    let extractor = NatsHeaderExtractor(headers);
+    let propagator = opentelemetry::sdk::propagation::TraceContextPropagator::new();
+    let otel_context = propagator.extract(&extractor);
+
+    let context_with_trace = if otel_context.span().span_context().is_valid() {
+        Some(otel_context)
+    } else {
+        None
+    };
+
+    (context_with_trace, trace_id, parent_span_id)
+}
+
+
+/// Inject OpenTelemetry trace context into NATS headers using W3C Trace Context propagation
+pub fn inject_otel_context_into_nats_headers(
+    headers: &mut async_nats::HeaderMap,
+    context: Option<opentelemetry::Context>,
+) {
+    let otel_context = context.unwrap_or_else(|| Span::current().context());
+
+    struct NatsHeaderInjector<'a>(&'a mut async_nats::HeaderMap);
+
+    impl<'a> Injector for NatsHeaderInjector<'a> {
+        fn set(&mut self, key: &str, value: String) {
+            self.0.insert(key, value);
+        }
+    }
+
+    let mut injector = NatsHeaderInjector(headers);
+    let propagator = opentelemetry::sdk::propagation::TraceContextPropagator::new();
+    propagator.inject_context(&otel_context, &mut injector);
+}
+
+/// Inject trace context from current span into NATS headers
+pub fn inject_current_trace_into_nats_headers(headers: &mut async_nats::HeaderMap) {
+    inject_otel_context_into_nats_headers(headers, None);
+}
+
+/// Create a client_request span linked to the parent trace context
+pub fn create_client_request_span(
+    operation: &str,
+    request_id: &str,
+    trace_context: Option<&DistributedTraceContext>,
+    instance_id: Option<&str>,
+) -> Span {
+    let span = if let Some(ctx) = trace_context {
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert("traceparent", ctx.create_traceparent());
+        
+        if let Some(ref tracestate) = ctx.tracestate {
+            headers.insert("tracestate", tracestate.as_str());
+        }
+        
+        let (otel_context, _extracted_trace_id, _extracted_parent_span_id) = 
+            extract_otel_context_from_nats_headers(&headers);
+        
+        let span = if let Some(inst_id) = instance_id {
+            tracing::info_span!(
+                "client_request",
+                operation = operation,
+                request_id = request_id,
+                instance_id = inst_id,
+                trace_id = ctx.trace_id.as_str(),
+                parent_id = ctx.span_id.as_str(),
+                x_request_id = ctx.x_request_id.as_deref(),
+                x_dynamo_request_id = ctx.x_dynamo_request_id.as_deref(),
+                // tracestate = ctx.tracestate.as_deref(),
+            )
+        } else {
+            tracing::info_span!(
+                "client_request",
+                operation = operation,
+                request_id = request_id,
+                trace_id = ctx.trace_id.as_str(),
+                parent_id = ctx.span_id.as_str(),
+                x_request_id = ctx.x_request_id.as_deref(),
+                x_dynamo_request_id = ctx.x_dynamo_request_id.as_deref(),
+                // tracestate = ctx.tracestate.as_deref(),
+            )
+        };
+        
+        if let Some(context) = otel_context {
+            span.set_parent(context);
+        }
+        
+        span
+    } else {
+        let span = if let Some(inst_id) = instance_id {
+            tracing::info_span!(
+                "client_request",
+                operation = operation,
+                request_id = request_id,
+                instance_id = inst_id,
+            )
+        } else {
+            tracing::info_span!(
+                "client_request",
+                operation = operation,
+                request_id = request_id,
+            )
+        };
+        
+        span
+    };
+    
+    span
 }
 
 #[derive(Debug, Default)]
@@ -274,6 +500,7 @@ impl Visit for FieldVisitor {
             .insert(field.name().to_string(), format!("{:?}", value).to_string());
     }
 }
+
 
 impl<S> Layer<S> for DistributedTraceIdLayer
 where
@@ -340,6 +567,7 @@ where
                 x_dynamo_request_id = Some(x_request_id_input.to_string());
             }
 
+            // TODO: verify that set_parent doesn't mean a parent span is set
             if parent_id.is_none()
                 && let Some(parent_span_id) = ctx.current_span().id()
                 && let Some(parent_span) = ctx.span(parent_span_id)
@@ -349,6 +577,7 @@ where
                     trace_id = Some(parent_tracing_context.trace_id.clone());
                     parent_id = Some(parent_tracing_context.span_id.clone());
                     tracestate = parent_tracing_context.tracestate.clone();
+                } else {
                 }
             }
 
@@ -359,12 +588,43 @@ where
                 span_id = None;
             }
 
+            // Extract trace_id and span_id from OpenTelemetry extensions if not already set
+            if trace_id.is_none() || span_id.is_none() {
+                let extensions = span.extensions();
+                if let Some(otel_data) = extensions.get::<tracing_opentelemetry::OtelData>() {
+                    // Extract trace_id from OTEL data if not already set
+                    if trace_id.is_none() {
+                        if let Some(otel_trace_id) = otel_data.builder.trace_id {
+                            let trace_id_str = format!("{}", otel_trace_id);
+                            if is_valid_trace_id(&trace_id_str) {
+                                trace_id = Some(trace_id_str);
+                            } else {
+                            }
+                        }
+                    }
+                    
+                    // Extract span_id from OTEL data if not already set
+                    if span_id.is_none() {
+                        if let Some(otel_span_id) = otel_data.builder.span_id {
+                            let span_id_str = format!("{}", otel_span_id);
+                            if is_valid_span_id(&span_id_str) {
+                                span_id = Some(span_id_str);
+                            } else {
+                            }
+                        }
+                    }
+                } else {
+                }
+            }
+
             if trace_id.is_none() {
-                trace_id = Some(generate_trace_id());
+                panic!("trace id is not set");
             }
+
             if span_id.is_none() {
-                span_id = Some(generate_span_id());
+                panic!("span id is not set");
             }
+            
 
             let mut extensions = span.extensions_mut();
             extensions.insert(DistributedTraceContext {
@@ -397,9 +657,15 @@ pub fn get_distributed_tracing_context() -> Option<DistributedTraceContext> {
         .flatten()
 }
 
-/// Initialize the logger
+/// Initialize the logger - must be called when Tokio runtime is available
 pub fn init() {
-    INIT.call_once(setup_logging);
+    // Initialize logging (works for both JSONL and non-JSONL now)
+    INIT.call_once(|| {
+        if let Err(e) = setup_logging() {
+            eprintln!("Failed to initialize logging: {}", e);
+            std::process::exit(1);
+        }
+    });
 }
 
 #[cfg(feature = "tokio-console")]
@@ -424,9 +690,10 @@ fn setup_logging() {
 }
 
 #[cfg(not(feature = "tokio-console"))]
-fn setup_logging() {
+fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let fmt_filter_layer = filters(load_config());
     let trace_filter_layer = filters(load_config());
+
     if jsonl_logging_enabled() {
         let l = fmt::layer()
             .with_ansi(false)
@@ -434,7 +701,52 @@ fn setup_logging() {
             .event_format(CustomJsonFormatter::new())
             .with_writer(std::io::stderr)
             .with_filter(fmt_filter_layer);
+
+        // Create OpenTelemetry tracer - either with OTLP export or no-op
+        let service_name = get_service_name();
+        
+        let tracer = if otlp_exporter_enabled() {
+            // Export enabled: create OTLP exporter with batch processor
+            let endpoint = std::env::var(OTEL_EXPORTER_OTLP_ENDPOINT)
+                .unwrap_or_else(|_| DEFAULT_OTLP_ENDPOINT.to_string());
+            
+            let otlp_exporter = opentelemetry_otlp::new_exporter()
+                .tonic()
+                .with_endpoint(endpoint)
+                .with_timeout(std::time::Duration::from_secs(2));
+            
+            opentelemetry_otlp::new_pipeline()
+                .tracing()
+                .with_exporter(otlp_exporter)
+                .with_trace_config(
+                    opentelemetry_sdk::trace::config()
+                        .with_resource(opentelemetry_sdk::Resource::new(vec![
+                            opentelemetry::KeyValue::new("service.name", service_name.clone()),
+                        ]))
+                )
+                .install_batch(opentelemetry_sdk::runtime::Tokio)
+                .map_err(|e| {
+                    eprintln!("Failed to initialize OTLP tracer: {}", e);
+                    e
+                })?
+        } else {
+            // Export disabled: create tracer with no span processor
+            use opentelemetry::trace::TracerProvider as _;
+            use opentelemetry_sdk::trace::TracerProvider;
+            
+            TracerProvider::builder()
+                .with_config(
+                    opentelemetry_sdk::trace::config()
+                        .with_resource(opentelemetry_sdk::Resource::new(vec![
+                            opentelemetry::KeyValue::new("service.name", service_name),
+                        ]))
+                )
+                .build()
+                .tracer("dynamo")
+        };
+
         tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(tracer))
             .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
             .with(l)
             .init();
@@ -444,9 +756,13 @@ fn setup_logging() {
             .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
             .with_writer(std::io::stderr)
             .with_filter(fmt_filter_layer);
+
         tracing_subscriber::registry().with(l).init();
     }
+
+    Ok(())
 }
+
 
 fn filters(config: LoggingConfig) -> EnvFilter {
     let mut filter_layer = EnvFilter::builder()
@@ -1095,4 +1411,7 @@ pub mod tests {
         .await;
         Ok(())
     }
+
+    // TODO: Add tests here
 }
+
