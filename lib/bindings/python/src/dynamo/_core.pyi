@@ -12,9 +12,10 @@ from typing import (
     Tuple,
 )
 
-# Import from specialized modules
-from ._prometheus_metrics import RuntimeMetrics
 from ._prometheus_names import prometheus_names
+
+# Import from specialized modules
+from .prometheus_metrics import RuntimeMetrics as PyRuntimeMetrics
 
 def log_message(level: str, message: str, module: str, file: str, line: int) -> None:
     """
@@ -91,12 +92,12 @@ class Namespace:
         ...
 
     @property
-    def metrics(self) -> RuntimeMetrics:
+    def metrics(self) -> PyRuntimeMetrics:
         """
-        Get a RuntimeMetrics helper for creating Prometheus metrics.
+        Get a PyRuntimeMetrics helper for creating Prometheus metrics.
 
         Returns:
-            A RuntimeMetrics object that provides create_* methods for different metric types
+            A PyRuntimeMetrics object that provides create_* methods for different metric types
         """
         ...
 
@@ -120,12 +121,12 @@ class Component:
         ...
 
     @property
-    def metrics(self) -> RuntimeMetrics:
+    def metrics(self) -> PyRuntimeMetrics:
         """
-        Get a RuntimeMetrics helper for creating Prometheus metrics.
+        Get a PyRuntimeMetrics helper for creating Prometheus metrics.
 
         Returns:
-            A RuntimeMetrics object that provides create_* methods for different metric types
+            A PyRuntimeMetrics object that provides create_* methods for different metric types
         """
         ...
 
@@ -163,12 +164,12 @@ class Endpoint:
         ...
 
     @property
-    def metrics(self) -> RuntimeMetrics:
+    def metrics(self) -> PyRuntimeMetrics:
         """
-        Get a RuntimeMetrics helper for creating Prometheus metrics.
+        Get a PyRuntimeMetrics helper for creating Prometheus metrics.
 
         Returns:
-            A RuntimeMetrics object that provides create_* methods for different metric types
+            A PyRuntimeMetrics object that provides create_* methods for different metric types
         """
         ...
 

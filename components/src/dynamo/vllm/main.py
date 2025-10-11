@@ -11,8 +11,10 @@ import uvloop
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
+from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
@@ -125,6 +127,11 @@ def setup_kv_event_publisher(
 
 
 def setup_vllm_engine(config, stat_logger=None):
+    setup_multiprocess_prometheus()
+    logger.debug(
+        f"Prometheus multiproc dir set to: {os.environ.get('PROMETHEUS_MULTIPROC_DIR')}"
+    )
+
     os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -161,6 +168,7 @@ def setup_vllm_engine(config, stat_logger=None):
         logger.info(f"VllmWorker for {config.model} has been initialized with LMCache")
     else:
         logger.info(f"VllmWorker for {config.model} has been initialized")
+
     return engine_client, vllm_config, default_sampling_params
 
 
@@ -271,6 +279,11 @@ async def init(runtime: DistributedRuntime, config: Config):
     )
     if kv_publisher:
         handler.kv_publisher = kv_publisher
+
+    if config.engine_args.disable_log_stats is False:
+        from prometheus_client import REGISTRY
+
+        register_engine_metrics_callback(generate_endpoint, REGISTRY, "vllm:", "vLLM")
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
         runtime_config = ModelRuntimeConfig()

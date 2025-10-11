@@ -868,6 +868,36 @@ mod tests {
     use dynamo_runtime::{DistributedRuntime, Runtime};
     use std::sync::Arc;
 
+    #[test]
+    fn test_active_sequences_shared_blocks() {
+        let block_size = 4;
+        let mut seq_manager = ActiveSequences::new(block_size);
+
+        seq_manager.add_request("request_1".to_string(), Some(vec![1, 2, 3]), 12, 0);
+        assert_eq!(seq_manager.active_blocks(), 3);
+        assert_eq!(seq_manager.active_tokens(), 12);
+
+        seq_manager.add_request("request_2".to_string(), Some(vec![4]), 4, 0);
+        assert_eq!(seq_manager.active_blocks(), 4);
+        assert_eq!(seq_manager.active_tokens(), 16);
+
+        seq_manager.add_request("request_3".to_string(), Some(vec![1, 2, 3, 4]), 16, 4);
+        assert_eq!(seq_manager.active_blocks(), 4);
+        assert_eq!(seq_manager.active_tokens(), 16);
+
+        seq_manager.free(&"request_2".to_string());
+        assert_eq!(seq_manager.active_blocks(), 4);
+        assert_eq!(seq_manager.active_tokens(), 12);
+
+        seq_manager.free(&"request_3".to_string());
+        assert_eq!(seq_manager.active_blocks(), 3);
+        assert_eq!(seq_manager.active_tokens(), 12);
+
+        seq_manager.free(&"request_1".to_string());
+        assert_eq!(seq_manager.active_blocks(), 0);
+        assert_eq!(seq_manager.active_tokens(), 0);
+    }
+
     #[tokio::test]
     #[ignore]
     async fn test_multi_worker_cross_instance_sync() -> Result<()> {
