@@ -70,6 +70,15 @@ Example:
 ./run.sh --model llama-3-70b --framework vllm --deployment-type agg
 ```
 
+## If deploying with Gateway API Inference extension GAIE
+
+```bash
+# Match the block size to the cli value  in your deployment file deploy.yaml: - "python3 -m dynamo.vllm ... --block-size 128"
+export DYNAMO_KV_BLOCK_SIZE=128
+export EPP_IMAGE=nvcr.io/you/epp:tag
+# Add --gaie argument to the script i.e.:
+./recipes/run.sh --model llama-3-70b --framework vllm --gaie agg
+```
 
 ## Dry run mode
 

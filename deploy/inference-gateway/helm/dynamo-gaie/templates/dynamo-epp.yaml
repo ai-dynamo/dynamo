@@ -70,6 +70,7 @@ spec:
         {{- $ns := required "set eppAware.dynamoNamespace via values" .Values.eppAware.dynamoNamespace -}}
         {{- $comp := default "backend" .Values.eppAware.dynamoComponent -}}
         {{- $kv := default "16" .Values.eppAware.dynamoKvBlockSize -}}
+        {{- $kv := tpl $kvTpl . | trim -}}
 
         {{- if .Values.eppAware.enabled }}
         volumeMounts:
