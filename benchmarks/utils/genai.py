@@ -33,7 +33,7 @@ def get_concurrency_levels() -> List[int]:
 CONCURRENCIES: List[int] = get_concurrency_levels()
 
 
-def run_genai_perf(
+def run_aiperf(
     service_url: str,
     model_name: str,
     isl: int,
@@ -44,7 +44,7 @@ def run_genai_perf(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
-        "genai-perf",
+        "aiperf",
         "profile",
         "-m",
         model_name,
@@ -76,28 +76,28 @@ def run_genai_perf(
         "--max-threads=300",
     ]
     print(
-        f"Running genai-perf with isl {isl}, osl {osl}, concurrency {concurrency}",
+        f"Running aiperf with isl {isl}, osl {osl}, concurrency {concurrency}",
         flush=True,
     )
 
-    gap_process = subprocess.Popen(
+    aip_process = subprocess.Popen(
         cmd,
         cwd=str(output_dir),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
-    stdout, stderr = gap_process.communicate()
-    if gap_process.returncode == 0:
-        print("Genai-perf profiling completed successfully", flush=True)
+    stdout, stderr = aip_process.communicate()
+    if aip_process.returncode == 0:
+        print("Aiperf profiling completed successfully", flush=True)
         if stdout:
             print(stdout)
     else:
-        print(f"Genai-perf failed with error code: {gap_process.returncode}")
+        print(f"Aiperf failed with error code: {aip_process.returncode}")
         if stderr:
             print(f"stderr: {stderr}")
         raise subprocess.CalledProcessError(
-            gap_process.returncode, cmd, output=stdout, stderr=stderr
+            aip_process.returncode, cmd, output=stdout, stderr=stderr
         )
 
 
@@ -113,6 +113,4 @@ def run_concurrency_sweep(
 
     for c in concurrency_levels:
         print(f"Starting concurrency level {c}", flush=True)
-        run_genai_perf(
-            service_url, model_name, isl, osl, stddev, c, output_dir / f"c{c}"
-        )
+        run_aiperf(service_url, model_name, isl, osl, stddev, c, output_dir / f"c{c}")

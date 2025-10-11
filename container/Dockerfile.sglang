@@ -64,6 +64,7 @@ RUN apt-get update -y \
         # Python runtime - CRITICAL for virtual environment to work
         python${PYTHON_VERSION}-dev \
         build-essential \
+        git \
         # SGLang build dependencies
         cmake \
         ibverbs-providers \
@@ -147,6 +148,7 @@ RUN apt-get update && \
         build-essential \
         # jq and curl for polling various endpoints and health checks
         jq \
+        git \
         curl \
         # Libraries required by UCX to find RDMA devices
         libibverbs1 rdma-core ibverbs-utils libibumad3 \
