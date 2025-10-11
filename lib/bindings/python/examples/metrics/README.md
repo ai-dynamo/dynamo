@@ -188,7 +188,7 @@ def update_metrics():
     request_slots.set(compute_current_slots())
     gpu_usage.set(get_gpu_usage())
 
-endpoint.metrics.register_update_callback(update_metrics)
+endpoint.metrics.register_callback(update_metrics)
 ```
 
 Both examples support vector metrics with labels:
@@ -355,7 +355,7 @@ graph TD
     MT -->|return to Python| PY
     PY -->|metric.set/get| MT
     MT -->|direct FFI call| PROM
-    PY -.->|endpoint.metrics.register_update_callback| PM
+    PY -.->|endpoint.metrics.register_callback| PM
     PM -.->|drt.register_metrics_callback| DRT
     SS ==>|execute_metrics_callbacks| DRT
     DRT -.->|invoke Python callback| PY

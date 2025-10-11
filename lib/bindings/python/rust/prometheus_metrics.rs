@@ -699,7 +699,9 @@ impl RuntimeMetrics {
         let hierarchy = registry_item.hierarchy();
 
         // Store the callback in the DRT's metrics callback registry using the registry_item's hierarchy
-        registry_item.drt().register_metrics_callback(
+        // TODO: rename this to register_callback, once we move the the MetricsRegistry trait
+        //       out of the runtime, and make it into a composed module.
+        registry_item.drt().register_prometheus_update_callback(
             vec![hierarchy.clone()],
             Arc::new(move || {
                 // Execute the Python callback in the Python event loop
@@ -720,8 +722,43 @@ impl RuntimeMetrics {
 impl RuntimeMetrics {
     /// Register a Python callback to be invoked before metrics are scraped
     /// This callback will be called for this endpoint's metrics hierarchy
-    fn register_update_callback(&self, callback: PyObject, _py: Python) -> PyResult<()> {
+    fn register_callback(&self, callback: PyObject, _py: Python) -> PyResult<()> {
         Self::register_callback_for(self.metricsregistry.as_ref(), callback)
+    }
+
+    /// Register a Python callback that returns Prometheus exposition text
+    /// The returned text will be appended to the /metrics endpoint output
+    /// The callback should return a string in Prometheus text exposition format
+    fn register_prometheus_expfmt_callback(&self, callback: PyObject, _py: Python) -> PyResult<()> {
+        let hierarchy = self.metricsregistry.hierarchy();
+
+        // Store the callback in the DRT's metrics exposition text callback registry
+        self.metricsregistry.drt().register_prometheus_expfmt_callback(
+            vec![hierarchy.clone()],
+            Arc::new(move || {
+                // Execute the Python callback in the Python event loop
+                Python::with_gil(|py| {
+                    match callback.call0(py) {
+                        Ok(result) => {
+                            // Try to extract a string from the result
+                            match result.extract::<String>(py) {
+                                Ok(text) => Ok(text),
+                                Err(e) => {
+                                    tracing::error!("Metrics exposition text callback must return a string: {}", e);
+                                    Ok(String::new())
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Metrics exposition text callback failed: {}", e);
+                            Ok(String::new())
+                        }
+                    }
+                })
+            }),
+        );
+
+        Ok(())
     }
 
     // NOTE: The order of create_* methods below matches lib/runtime/src/metrics.rs::MetricsRegistry trait

@@ -5,7 +5,7 @@ pub use crate::component::Component;
 use crate::storage::key_value_store::{EtcdStore, KeyValueStore, MemoryStore};
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
-    ErrorContext, RuntimeCallback,
+    ErrorContext, PrometheusUpdateCallback,
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
     discovery::DiscoveryClient,
     metrics::MetricsRegistry,
@@ -110,7 +110,8 @@ impl DistributedRuntime {
                 Ok(())
             }
         });
-        distributed_runtime.register_metrics_callback(drt_hierarchies, nats_client_callback);
+        distributed_runtime
+            .register_prometheus_update_callback(drt_hierarchies, nats_client_callback);
 
         // Initialize the uptime gauge in SystemHealth
         distributed_runtime
@@ -311,33 +312,52 @@ impl DistributedRuntime {
             .map_err(|e| e.into())
     }
 
-    /// Add a callback function to metrics registries for the given hierarchies
-    // TODO: Rename to register_metrics_update_callback for consistency with Python API.
-    //       Do this after we move the MetricsRegistry trait to composition pattern.
-    pub fn register_metrics_callback(&self, hierarchies: Vec<String>, callback: RuntimeCallback) {
+    /// Add a Prometheus update callback to the given hierarchies
+    /// TODO: rename this to register_callback, once we move the the MetricsRegistry trait
+    ///       out of the runtime, and make it into a composed module.
+    pub fn register_prometheus_update_callback(
+        &self,
+        hierarchies: Vec<String>,
+        callback: PrometheusUpdateCallback,
+    ) {
         let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
         for hierarchy in &hierarchies {
             registries
                 .entry(hierarchy.clone())
                 .or_default()
-                .add_callback(callback.clone());
+                .add_prometheus_update_callback(callback.clone());
         }
     }
 
-    /// Execute all callbacks for a given hierarchy key and return their results
-    pub fn execute_metrics_callbacks(&self, hierarchy: &str) -> Vec<anyhow::Result<()>> {
+    /// Execute all Prometheus update callbacks for a given hierarchy and return their results
+    pub fn execute_prometheus_update_callbacks(&self, hierarchy: &str) -> Vec<anyhow::Result<()>> {
         // Clone callbacks while holding read lock (fast operation)
         let callbacks = {
             let registries = self.hierarchy_to_metricsregistry.read().unwrap();
             registries
                 .get(hierarchy)
-                .map(|entry| entry.runtime_callbacks.clone())
+                .map(|entry| entry.prometheus_update_callbacks.clone())
         }; // Read lock released here
 
         // Execute callbacks without holding the lock
         match callbacks {
             Some(callbacks) => callbacks.iter().map(|callback| callback()).collect(),
             None => Vec::new(),
+        }
+    }
+
+    /// Add a Prometheus exposition text callback that returns Prometheus text for the given hierarchies
+    pub fn register_prometheus_expfmt_callback(
+        &self,
+        hierarchies: Vec<String>,
+        callback: crate::PrometheusExpositionFormatCallback,
+    ) {
+        let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
+        for hierarchy in &hierarchies {
+            registries
+                .entry(hierarchy.clone())
+                .or_default()
+                .add_prometheus_expfmt_callback(callback.clone());
         }
     }
 

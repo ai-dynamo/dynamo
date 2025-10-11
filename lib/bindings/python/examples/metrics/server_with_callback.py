@@ -83,7 +83,7 @@ async def init(runtime: DistributedRuntime):
         gpu_cache_usage_perc.set(0.01 + (count * 0.01))
         print(f"[python] Updated metrics (call #{count})")
 
-    endpoint.metrics.register_update_callback(update_metrics)
+    endpoint.metrics.register_callback(update_metrics)
     print("[python] update (metrics) callback registered!")
 
     # Step 3: Set initial values and test vector metrics
