@@ -75,9 +75,19 @@ spec:
             {{ if $serviceSpec.resources.memory }}
             memory: "{{ $serviceSpec.resources.memory }}"
             {{ end }}
-            {{ if $serviceSpec.resources.gpu }}
-            nvidia.com/gpu: "{{ $serviceSpec.resources.gpu }}"
-            {{ end }}
+            {{- if $serviceSpec.resources.gpu }}
+              {{- if $serviceSpec.resources.gpu_type }}
+                {{- if $serviceSpec.resources.gpu_type | eq "xe" }}
+                gpu.intel.com/xe: "{{ $serviceSpec.resources.gpu }}"
+                {{- else if $serviceSpec.resources.gpu_type | eq "i915" }}
+                gpu.intel.com/i915: "{{ $serviceSpec.resources.gpu }}"
+                {{- else }}
+                nvidia.com/gpu: "{{ $serviceSpec.resources.gpu }}"
+                {{- end }}
+              {{- else }}
+              nvidia.com/gpu: "{{ $serviceSpec.resources.gpu }}"
+              {{- end }}
+            {{- end }}
           limits:
             {{ if $serviceSpec.resources.cpu }}
             cpu: "{{ $serviceSpec.resources.cpu }}"
@@ -85,10 +95,20 @@ spec:
             {{ if $serviceSpec.resources.memory }}
             memory: "{{ $serviceSpec.resources.memory }}"
             {{ end }}
-            {{ if $serviceSpec.resources.gpu }}
-            nvidia.com/gpu: "{{ $serviceSpec.resources.gpu }}"
-            {{ end }}
-        {{ end }}
+            {{- if $serviceSpec.resources.gpu }}
+              {{- if $serviceSpec.resources.gpu_type }}
+                {{- if $serviceSpec.resources.gpu_type | eq "xe" }}
+                gpu.intel.com/xe: "{{ $serviceSpec.resources.gpu }}"
+                {{- else if $serviceSpec.resources.gpu_type | eq "i915" }}
+                gpu.intel.com/i915: "{{ $serviceSpec.resources.gpu }}"
+                {{- else }}
+                nvidia.com/gpu: "{{ $serviceSpec.resources.gpu }}"
+                {{- end }}
+              {{- else }}
+              nvidia.com/gpu: "{{ $serviceSpec.resources.gpu }}"
+              {{- end }}
+            {{- end }}
+        {{- end }}
         {{- if $serviceSpec.envFromSecret }}
         envFrom:
         - secretRef:

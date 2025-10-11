@@ -80,10 +80,15 @@ type ServiceConfig struct {
 }
 
 type Resources struct {
-	CPU    *string           `yaml:"cpu,omitempty" json:"cpu,omitempty"`
-	Memory *string           `yaml:"memory,omitempty" json:"memory,omitempty"`
-	GPU    *string           `yaml:"gpu,omitempty" json:"gpu,omitempty"`
-	Custom map[string]string `yaml:"custom,omitempty" json:"custom,omitempty"`
+	CPU     *string           `yaml:"cpu,omitempty" json:"cpu,omitempty"`
+	Memory  *string           `yaml:"memory,omitempty" json:"memory,omitempty"`
+	GPU     *string           `yaml:"gpu,omitempty" json:"gpu,omitempty"`
+        // Indicates the type of GPU resource to request.
+        // Valid values are "xe" for Intel Xe GPUs or "i915" for Intel i915 GPUs.
+        // If not specified, defaults to NVIDIA GPUs.
+	// +kubebuilder:validation:Enum=xe;i915
+	GPUType *string           `yaml:"gpu_type,omitempty" json:"gpu_type,omitempty"`
+	Custom  map[string]string `yaml:"custom,omitempty" json:"custom,omitempty"`
 }
 
 type DynDeploymentConfig = map[string]*DynDeploymentServiceConfig

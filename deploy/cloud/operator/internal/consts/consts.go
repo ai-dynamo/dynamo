@@ -44,7 +44,12 @@ const (
 
 	KubeLabelDynamoComponentPod = "nvidia.com/dynamo-component-pod"
 
+	// KubeResourceGPUNvidia is the Kubernetes resource name for NVIDIA GPUs.
 	KubeResourceGPUNvidia = "nvidia.com/gpu"
+	// KubeResourceGPUXeIntel is the Kubernetes resource name for Intel Xe GPUs.
+	KubeResourceGPUXeIntel = "gpu.intel.com/xe"
+	// KubeResourceGPUi915Intel is the Kubernetes resource name for Intel i915 GPUs.
+	KubeResourceGPUi915Intel = "gpu.intel.com/i915"
 
 	DynamoDeploymentConfigEnvVar = "DYN_DEPLOYMENT_CONFIG"
 
