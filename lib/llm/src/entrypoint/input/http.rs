@@ -248,6 +248,10 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             polling_interval_secs=polling_interval,
             "Starting custom backend metrics polling task"
         );
+        // Spawn the polling task. The JoinHandle is immediately dropped (indicated by the `_`
+        // prefix), which allows the task to run independently in the background. The task will
+        // be terminated when the tokio runtime shuts down. No CancellationToken is passed
+        // because graceful shutdown is not necessary for this non-critical metrics polling.
         let _polling_task =
             crate::http::service::custom_backend_metrics::spawn_custom_backend_polling_task(
                 drt,

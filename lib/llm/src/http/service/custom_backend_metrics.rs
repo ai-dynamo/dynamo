@@ -101,6 +101,11 @@ struct CustomBackendMetrics {
 /// All metrics collected from the backend will be prefixed according to the registry's prefix
 /// (typically `dynamo_component_`). For example, a backend gauge `kv_cache_usage_perc` will
 /// appear as `dynamo_component_kv_cache_usage_perc` in Prometheus.
+///
+/// This task does not use a CancellationToken for graceful shutdown. When the executable exits,
+/// the task is abruptly terminated by the tokio runtime shutdown. This is acceptable because
+/// metrics polling is non-critical with no risk of data corruption or resource leaks, typical
+/// polling intervals are short, and the Worker already has a graceful shutdown timeout mechanism.
 pub fn spawn_custom_backend_polling_task(
     drt: dynamo_runtime::DistributedRuntime,
     namespace_component_endpoint: String,
