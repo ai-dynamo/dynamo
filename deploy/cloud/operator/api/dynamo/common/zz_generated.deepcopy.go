@@ -54,6 +54,11 @@ func (in *DeploymentTargetHPAConf) DeepCopyInto(out *DeploymentTargetHPAConf) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.GPUType != nil {
+		in, out := &in.GPUType, &out.GPUType
+		*out = new(string)
+		**out = **in
+	}
 	if in.Memory != nil {
 		in, out := &in.Memory, &out.Memory
 		*out = new(string)

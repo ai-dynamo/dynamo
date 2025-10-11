@@ -10320,6 +10320,15 @@ spec:
                                   Indicates the number of GPUs to request.
                                   total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
                                 type: string
+                              gpu_type:
+                                description: |-
+                                  Indicates the type of GPU resource to request.
+                                  Valid values are "xe" for Intel Xe GPUs or "i915" for Intel i915 GPUs.
+                                  If not specified, defaults to NVIDIA GPUs.
+                                enum:
+                                  - xe
+                                  - i915
+                                type: string
                               memory:
                                 type: string
                             type: object
@@ -10335,6 +10344,15 @@ spec:
                                 description: |-
                                   Indicates the number of GPUs to request.
                                   total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
+                                type: string
+                              gpu_type:
+                                description: |-
+                                  Indicates the type of GPU resource to request.
+                                  Valid values are "xe" for Intel Xe GPUs or "i915" for Intel i915 GPUs.
+                                  If not specified, defaults to NVIDIA GPUs.
+                                enum:
+                                  - xe
+                                  - i915
                                 type: string
                               memory:
                                 type: string
