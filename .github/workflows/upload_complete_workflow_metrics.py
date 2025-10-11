@@ -69,6 +69,8 @@ FIELD_BUILD_SIZE_BYTES = "l_build_size_bytes"
 # Test Info
 FIELD_FRAMEWORK = "s_framework"  # Framework name
 FIELD_ERROR_MESSAGE = "s_error_message"  # Error message if any
+FIELD_TEST_NAME = "s_test_name"  # Test name (e.g., test_sglang_deployment[aggregated])
+FIELD_TEST_CLASSNAME = "s_test_classname"  # Test class name (e.g., tests.serve.test_sglang)
 FIELD_TEST_MARKERS = "s_test_markers"  # Comma-separated list of marker names
 FIELD_TEST_MARKERS_DETAIL = "s_test_markers_detail"  # JSON string of detailed marker info
 
@@ -521,7 +523,7 @@ class WorkflowMetricsUploader:
             if not workflow_data:
                 print("Could not fetch workflow data from GitHub API")
                 return
-                
+            
             jobs_data = self.get_github_api_data(
                 f"/repos/{self.repo}/actions/runs/{self.run_id}/jobs"
             )
@@ -962,6 +964,8 @@ class WorkflowMetricsUploader:
 
                 # Test Info - using your specified fields
                 test_data[FIELD_FRAMEWORK] = test_framework
+                test_data[FIELD_TEST_NAME] = test_name
+                test_data[FIELD_TEST_CLASSNAME] = test_classname
                 
                 # Add error message if test failed or had error
                 error_msg = ""
@@ -1008,6 +1012,8 @@ class WorkflowMetricsUploader:
                 print(f"   ID: {test_data[FIELD_ID]}")
                 print(f"   Status: {test_data[FIELD_STATUS]}")
                 print(f"   Framework: {test_data[FIELD_FRAMEWORK]}")
+                print(f"   Test Name: {test_data[FIELD_TEST_NAME]}")
+                print(f"   Test Class: {test_data[FIELD_TEST_CLASSNAME]}")
                 print(f"   Duration: {individual_test.get('time', 0):.3f}s")
                 print(f"   Step ID: {test_data[FIELD_STEP_ID]}")
                 print(f"   Job ID: {test_data[FIELD_JOB_ID]}")
@@ -1021,12 +1027,12 @@ class WorkflowMetricsUploader:
                     print(f"   Error: {test_data[FIELD_ERROR_MESSAGE][:100]}...")
                 print("   " + "-"*30)
                 
-                # Upload individual test to the test index
-                try:
-                    self.post_to_db(test_index, test_data)
-                    print(f"✅ Individual test uploaded: {test_full_name}")
-                except Exception as e:
-                    print(f"❌ Failed to upload individual test {test_full_name}: {e}")
+                # Uncomment the lines below when ready to actually upload:
+                # try:
+                #     self.post_to_db(test_index, test_data)
+                #     print(f"✅ Individual test uploaded: {test_full_name}")
+                # except Exception as e:
+                #     print(f"❌ Failed to upload individual test {test_full_name}: {e}")
             
             print(f"📊 Processed {len(individual_tests)} individual tests for {test_framework} {test_type}")
             print("   " + "="*50)
