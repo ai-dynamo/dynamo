@@ -8,15 +8,15 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-from typing import Any, Dict, Sequence, Union
+from typing import Any, Dict
 
 import pytest
 import requests
 
+from tests.conftest import EtcdServer, NatsServer
 from tests.utils.constants import GPT_OSS
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
-from tests.conftest import NatsServer, EtcdServer
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +109,6 @@ class GPTOSSWorkerProcess(ManagedProcess):
         return is_ready
 
 
-
 def _send_completion_request(
     payload: Dict[str, Any],
     timeout: int = 180,
@@ -145,14 +144,14 @@ def start_services(request, runtime_services, predownload_models):
             yield
 
 
-@pytest.mark.usefixtures('start_services')
+@pytest.mark.usefixtures("start_services")
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(REASONING_TEST_MODEL)
 def test_completion_single_element_array_prompt() -> None:
     """Exercise completions with reasoning effort and prompt."""
-    reasoning_effort = 'low'
+    reasoning_effort = "low"
 
     payload: Dict[str, Any] = {
         "model": REASONING_TEST_MODEL,
@@ -169,14 +168,14 @@ def test_completion_single_element_array_prompt() -> None:
     )
 
 
-@pytest.mark.usefixtures('start_services')
+@pytest.mark.usefixtures("start_services")
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(REASONING_TEST_MODEL)
 def test_completion_multi_string_prompt() -> None:
     """Exercise completions with reasoning effort and prompt."""
-    reasoning_effort = 'low'
+    reasoning_effort = "low"
 
     payload: Dict[str, Any] = {
         "model": REASONING_TEST_MODEL,
@@ -192,14 +191,15 @@ def test_completion_multi_string_prompt() -> None:
         f"{response.status_code}: {response.text}"
     )
 
-@pytest.mark.usefixtures('start_services')
+
+@pytest.mark.usefixtures("start_services")
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(REASONING_TEST_MODEL)
 def test_completion_multi_element_array_prompt() -> None:
     """Exercise completions with reasoning effort and prompt."""
-    reasoning_effort = 'low'
+    reasoning_effort = "low"
 
     payload: Dict[str, Any] = {
         "model": REASONING_TEST_MODEL,
@@ -211,6 +211,6 @@ def test_completion_multi_element_array_prompt() -> None:
     response = _send_completion_request(payload)
 
     # request should fail because we are sending multiple prompts
-    assert response.status_code == 500, (
-        f"Request should fail with code 500; response:{response.text}"
-    )
+    assert (
+        response.status_code == 500
+    ), f"Request should fail with code 500; response:{response.text}"
