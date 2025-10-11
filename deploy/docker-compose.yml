@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# IMPORT NOTE: Make sure this is in sync with lib/runtime/docker-compose.yml
 networks:
   server:
     driver: bridge
