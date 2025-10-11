@@ -58,6 +58,8 @@ pub struct LocalModelBuilder {
     user_data: Option<serde_json::Value>,
     custom_template_path: Option<PathBuf>,
     namespace: Option<String>,
+    custom_backend_metrics_endpoint: Option<String>,
+    custom_backend_metrics_polling_interval: Option<f64>,
 }
 
 impl Default for LocalModelBuilder {
@@ -81,6 +83,8 @@ impl Default for LocalModelBuilder {
             user_data: Default::default(),
             custom_template_path: Default::default(),
             namespace: Default::default(),
+            custom_backend_metrics_endpoint: Default::default(),
+            custom_backend_metrics_polling_interval: Default::default(),
         }
     }
 }
@@ -177,6 +181,16 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn custom_backend_metrics_endpoint(&mut self, endpoint: Option<String>) -> &mut Self {
+        self.custom_backend_metrics_endpoint = endpoint;
+        self
+    }
+
+    pub fn custom_backend_metrics_polling_interval(&mut self, interval: Option<f64>) -> &mut Self {
+        self.custom_backend_metrics_polling_interval = interval;
+        self
+    }
+
     /// Make an LLM ready for use:
     /// - Download it from Hugging Face (and NGC in future) if necessary
     /// - Resolve the path
@@ -221,6 +235,9 @@ impl LocalModelBuilder {
                 router_config: self.router_config.take().unwrap_or_default(),
                 runtime_config: self.runtime_config.clone(),
                 namespace: self.namespace.clone(),
+                custom_backend_metrics_endpoint: self.custom_backend_metrics_endpoint.clone(),
+                custom_backend_metrics_polling_interval: self
+                    .custom_backend_metrics_polling_interval,
             });
         }
 
@@ -296,6 +313,8 @@ impl LocalModelBuilder {
             router_config: self.router_config.take().unwrap_or_default(),
             runtime_config: self.runtime_config.clone(),
             namespace: self.namespace.clone(),
+            custom_backend_metrics_endpoint: self.custom_backend_metrics_endpoint.clone(),
+            custom_backend_metrics_polling_interval: self.custom_backend_metrics_polling_interval,
         })
     }
 }
@@ -313,6 +332,8 @@ pub struct LocalModel {
     router_config: RouterConfig,
     runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
+    custom_backend_metrics_endpoint: Option<String>,
+    custom_backend_metrics_polling_interval: Option<f64>,
 }
 
 impl LocalModel {
@@ -365,6 +386,20 @@ impl LocalModel {
 
     pub fn namespace(&self) -> Option<&str> {
         self.namespace.as_deref()
+    }
+
+    pub fn custom_backend_metrics_endpoint(&self) -> Option<&str> {
+        self.custom_backend_metrics_endpoint.as_deref()
+    }
+
+    pub fn custom_backend_metrics_polling_interval(&self) -> Option<f64> {
+        self.custom_backend_metrics_polling_interval
+    }
+
+    pub fn is_gguf(&self) -> bool {
+        // GGUF is the only file (not-folder) we accept, so we don't need to check the extension
+        // We will error when we come to parse it
+        self.full_path.is_file()
     }
 
     /// An endpoint to identify this model by.
