@@ -23,12 +23,17 @@ import (
 )
 
 type ResourceItem struct {
-	CPU    string `json:"cpu,omitempty"`
-	Memory string `json:"memory,omitempty"`
+	CPU      string            `json:"cpu,omitempty"`
+	Memory   string            `json:"memory,omitempty"`
 	// Indicates the number of GPUs to request.
 	// total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
-	GPU    string            `json:"gpu,omitempty"`
-	Custom map[string]string `json:"custom,omitempty"`
+	GPU      string            `json:"gpu,omitempty"`
+	// Indicates the type of GPU resource to request.
+	// Valid values are "xe" for Intel Xe GPUs or "i915" for Intel i915 GPUs.
+	// If not specified, defaults to NVIDIA GPUs.
+	// +kubebuilder:validation:Enum=xe;i915
+	GPUType  string            `json:"gpu_type,omitempty"`
+	Custom   map[string]string `json:"custom,omitempty"`
 }
 
 type Resources struct {
@@ -39,6 +44,11 @@ type Resources struct {
 type DeploymentTargetHPAConf struct {
 	CPU         *int32  `json:"cpu,omitempty"`
 	GPU         *int32  `json:"gpu,omitempty"`
+        // Indicates the type of GPU resource to request.
+        // Valid values are "xe" for Intel Xe GPUs or "i915" for Intel i915 GPUs.
+        // If not specified, defaults to NVIDIA GPUs.
+	// +kubebuilder:validation:Enum=xe;i915
+	GPUType     *string `json:"gpu_type,omitempty"`
 	Memory      *string `json:"memory,omitempty"`
 	QPS         *int64  `json:"qps,omitempty"`
 	MinReplicas *int32  `json:"min_replicas,omitempty"`
