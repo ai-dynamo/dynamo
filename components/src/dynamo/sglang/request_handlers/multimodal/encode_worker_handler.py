@@ -9,7 +9,7 @@ from sglang.srt.parser.conversation import chat_templates
 from transformers import AutoImageProcessor, AutoModel, AutoTokenizer
 
 import dynamo.nixl_connect as connect
-from dynamo._core import Client, Component
+from dynamo._core import Client, Component, Context
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.multimodal_utils import ImageLoader, encode_image_embeddings
@@ -90,7 +90,16 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
     def cleanup(self):
         pass
 
-    async def generate(self, request: SglangMultimodalRequest) -> AsyncIterator[str]:
+    async def generate(
+        self, request: SglangMultimodalRequest, context: Context
+    ) -> AsyncIterator[str]:
+        """
+        Generate precomputed embeddings for multimodal input.
+
+        Args:
+            request: Multimodal request with image/video data.
+            context: Context object for cancellation handling.
+        """
         if not isinstance(request, SglangMultimodalRequest):
             if isinstance(request, str):
                 request = SglangMultimodalRequest.model_validate_json(request)

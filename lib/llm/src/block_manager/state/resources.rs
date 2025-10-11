@@ -18,8 +18,6 @@ impl Resources {
 
         let global_registry = GlobalRegistry::default();
 
-        let metrics = BlockManagerMetrics::new(&config.runtime.metrics_registry)?;
-
         let event_manager = config
             .event_manager
             .clone()
@@ -75,7 +73,6 @@ impl Resources {
             nixl_backends,
             global_registry,
             event_manager,
-            metrics,
             config,
         })
     }

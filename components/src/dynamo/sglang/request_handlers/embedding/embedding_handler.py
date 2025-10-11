@@ -6,7 +6,7 @@ from typing import Optional
 
 import sglang as sgl
 
-from dynamo._core import Component
+from dynamo._core import Component, Context
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import EmbeddingRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -29,7 +29,14 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         logging.info("Engine shutdown")
         super().cleanup()
 
-    async def generate(self, request: dict):
+    async def generate(self, request: dict, context: Context):
+        """
+        Generate embeddings for the given input.
+
+        Args:
+            request: Embedding request dictionary.
+            context: Context object for cancellation handling.
+        """
         logging.debug(f"Embedding request: {request}")
 
         # Parse the embedding request - should only receive EmbeddingRequest format

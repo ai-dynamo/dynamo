@@ -316,6 +316,24 @@ To manage stream growth, when the message count exceeds `--router-snapshot-thres
 
 Instead of launching the KV Router via command line, you can create a `KvPushRouter` object directly in Python. This allows per-request routing configuration overrides.
 
+### Methods
+
+The `KvPushRouter` provides the following methods:
+
+- **`generate(token_ids, model, ...)`**: Route and execute a request, returning an async stream of responses. Automatically handles worker selection, state tracking, and lifecycle management.
+
+- **`best_worker_id(token_ids, router_config_override=None, request_id=None)`**: Query which worker would be selected for given tokens. Returns `(worker_id, overlap_blocks)`.
+  - Without `request_id`: Query-only, doesn't update router state
+  - With `request_id`: Updates router state to track the request. **Note**: If used with `request_id`, you must call `mark_prefill_complete()` and `free()` at the appropriate lifecycle points to maintain accurate load tracking
+
+- **`get_potential_loads(token_ids)`**: Get detailed load information for all workers, including potential prefill tokens and active decode blocks. Returns a list of load dictionaries.
+
+- **`mark_prefill_complete(request_id)`**: Signal that a request has completed its prefill phase. Only used for [manual lifecycle management](#2-manual-state-management-advanced) when using `best_worker_id()` for manual routing instead of `generate()`.
+
+- **`free(request_id)`**: Signal that a request has completed and its resources should be released. Only used for [manual lifecycle management](#2-manual-state-management-advanced) when using `best_worker_id()` for manual routing instead of `generate()`.
+
+- **`dump_events()`**: Dump all KV cache events from the router's indexer as a JSON string. Useful for debugging and analysis.
+
 ### Setup
 
 First, launch your backend engines:
@@ -377,15 +395,60 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-### Additional Routing Features
+### Routing Patterns
 
-The `KvPushRouter` provides additional methods for fine-grained control:
+The `KvPushRouter` supports multiple usage patterns depending on your control requirements:
 
-- **`best_worker_id()`**: Query which worker would be selected for given tokens without actually routing the request. Returns `(worker_id, overlap_blocks)`.
-- **`get_potential_loads()`**: Get detailed load information for all workers including potential prefill tokens and active decode blocks.
-- **`worker_id` parameter in `generate()`**: Force routing to a specific worker by passing `worker_id=<id>` to bypass the automatic KV-aware selection.
+#### 1. Automatic Routing (Recommended)
+Call `generate()` directly and let the router handle everything:
+```python
+stream = await router.generate(token_ids=tokens, model="model-name")
+```
+- **Best for**: Most use cases
+- **Router automatically**: Selects best worker, updates state, routes request, tracks lifecycle
 
-The `router_config_override` parameter allows you to adjust routing behavior per request without recreating the router. This is useful for implementing different routing strategies based on request characteristics.
+#### 2. Manual State Management (Advanced)
+Use `best_worker_id(request_id=...)` to select and track, then manage the request yourself:
+```python
+worker_id, overlap = await router.best_worker_id(tokens, request_id="req-123")
+response = await client.generate(tokens, request_id="req-123")
+# await anext(response)  # Get first token
+await router.mark_prefill_complete("req-123")  # After first token
+# async for _ in response:  # Continue generating
+#     ...
+await router.free("req-123")  # After completion
+```
+- **Best for**: Custom request handling with router state tracking
+- **Requires**: Calling `mark_prefill_complete()` and `free()` at correct lifecycle points
+- **Caution**: Incorrect lifecycle management degrades load balancing accuracy
+
+#### 3. Hierarchical Router Probing
+Query without state updates, then route through a chosen router:
+```python
+# Probe multiple routers without updating state
+worker_id_1, overlap_1 = await router_1.best_worker_id(tokens)  # No request_id
+worker_id_2, overlap_2 = await router_2.best_worker_id(tokens)
+
+# Pick the best router based on results
+chosen_router = router_1 if overlap_1 > overlap_2 else router_2
+stream = await chosen_router.generate(tokens, model="model-name", worker_id=worker_id)
+```
+- **Best for**: Multi-tier deployments (e.g., Envoy Gateway routing to multiple router groups)
+- **Advantage**: Query multiple routers before committing to one
+
+#### 4. Custom Load-Based Routing
+Use `get_potential_loads()` to implement custom routing logic:
+```python
+loads = await router.get_potential_loads(tokens)
+# Apply custom logic (e.g., weighted scoring, constraints)
+best_worker = min(loads, key=lambda x: custom_cost_fn(x))
+stream = await router.generate(tokens, model="model-name", worker_id=best_worker['worker_id'])
+```
+- **Best for**: Custom optimization strategies beyond the built-in cost function
+- **Advantage**: Full control over worker selection logic
+- **See also**: Detailed example below in "Custom Routing Example: Minimizing TTFT"
+
+All patterns support `router_config_override` to adjust routing behavior per-request without recreating the router.
 
 ### Custom Routing Example: Minimizing TTFT
 

@@ -156,32 +156,24 @@ fn test_chat_completions_guided_decoding_from_common() {
 }
 
 #[test]
-fn test_chat_completions_common_overrides_nvext() {
-    // Test that root-level ignore_eos overrides nvext ignore_eos
+fn test_chat_completions_common_values() {
+    // Test that ignore_eos and guided_regex are read from common (root level)
     let json_str = r#"{
         "model": "test-model",
         "messages": [{"role": "user", "content": "Hello"}],
         "ignore_eos": false,
         "guided_regex": ".*",
-        "min_tokens": 50,
-        "nvext": {
-            "ignore_eos": true,
-            "guided_regex": "./*"
-        }
+        "min_tokens": 50
     }"#;
 
     let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
 
     assert_eq!(request.common.ignore_eos, Some(false));
     assert_eq!(request.common.guided_regex, Some(".*".to_string()));
-    assert_eq!(
-        request.nvext.as_ref().and_then(|nv| nv.ignore_eos),
-        Some(true)
-    );
-    assert_eq!(request.get_guided_regex(), Some(".*".to_string())); // common value takes precedence
-    // Verify precedence through stop conditions extraction
+    assert_eq!(request.get_guided_regex(), Some(".*".to_string()));
+    // Verify extraction through stop conditions
     let stop_conditions = request.extract_stop_conditions().unwrap();
-    assert_eq!(stop_conditions.ignore_eos, Some(false)); // common value takes precedence
+    assert_eq!(stop_conditions.ignore_eos, Some(false));
     assert_eq!(stop_conditions.min_tokens, Some(50));
 }
 
@@ -220,39 +212,21 @@ fn test_max_thinking_tokens_extraction() {
 }
 
 #[test]
-fn test_chat_completions_backward_compatibility() {
-    // Test backward compatibility - ignore_eos and guided_json only in nvext
+fn test_chat_completions_no_common_values() {
+    // Test that when no common values are set, we get None
     let json_str = r#"{
         "model": "test-model",
-        "messages": [{"role": "user", "content": "Hello"}],
-        "nvext": {
-            "ignore_eos": true,
-            "guided_json": {"key": "value"}
-        }
+        "messages": [{"role": "user", "content": "Hello"}]
     }"#;
 
     let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
 
     assert_eq!(request.common.ignore_eos, None);
     assert_eq!(request.common.guided_json, None);
-    assert_eq!(
-        request.nvext.as_ref().and_then(|nv| nv.ignore_eos),
-        Some(true)
-    );
-    assert_eq!(
-        request
-            .nvext
-            .as_ref()
-            .and_then(|nv| nv.guided_json.as_ref()),
-        Some(&serde_json::json!({"key": "value"}))
-    );
-    assert_eq!(
-        request.get_guided_json(),
-        Some(&serde_json::json!({"key": "value"}))
-    );
+    assert_eq!(request.get_guided_json(), None);
     // Verify through stop conditions extraction
     let stop_conditions = request.extract_stop_conditions().unwrap();
-    assert_eq!(stop_conditions.ignore_eos, Some(true));
+    assert_eq!(stop_conditions.ignore_eos, None);
     assert_eq!(stop_conditions.min_tokens, None);
 }
 
@@ -278,28 +252,21 @@ fn test_completions_ignore_eos_from_common() {
 }
 
 #[test]
-fn test_completions_common_overrides_nvext() {
-    // Test that root-level ignore_eos overrides nvext ignore_eos for completions
+fn test_completions_common_values() {
+    // Test that root-level ignore_eos is read from common for completions
     let json_str = r#"{
         "model": "test-model",
         "prompt": "Hello world",
         "ignore_eos": false,
-        "min_tokens": 75,
-        "nvext": {
-            "ignore_eos": true
-        }
+        "min_tokens": 75
     }"#;
 
     let request: NvCreateCompletionRequest = serde_json::from_str(json_str).unwrap();
 
     assert_eq!(request.common.ignore_eos, Some(false));
-    assert_eq!(
-        request.nvext.as_ref().and_then(|nv| nv.ignore_eos),
-        Some(true)
-    );
-    // Verify precedence through stop conditions extraction
+    // Verify extraction through stop conditions
     let stop_conditions = request.extract_stop_conditions().unwrap();
-    assert_eq!(stop_conditions.ignore_eos, Some(false)); // common value takes precedence
+    assert_eq!(stop_conditions.ignore_eos, Some(false));
     assert_eq!(stop_conditions.min_tokens, Some(75));
 }
 
@@ -325,7 +292,7 @@ fn test_serialization_preserves_structure() {
             ..Default::default()
         },
         nvext: Some(NvExt {
-            ignore_eos: Some(false),
+            greed_sampling: Some(false),
             ..Default::default()
         }),
         chat_template_args: None,
@@ -337,11 +304,11 @@ fn test_serialization_preserves_structure() {
     assert_eq!(json["model"], "test-model");
     assert_eq!(json["ignore_eos"], true); // From common (flattened)
     assert_eq!(json["min_tokens"], 100); // From common (flattened)
-    assert_eq!(json["nvext"]["ignore_eos"], false); // From nvext
+    assert_eq!(json["nvext"]["greed_sampling"], false); // From nvext
 
-    // Verify precedence through stop conditions extraction
+    // Verify extraction through stop conditions
     let stop_conditions = request.extract_stop_conditions().unwrap();
-    assert_eq!(stop_conditions.ignore_eos, Some(true)); // common overrides nvext
+    assert_eq!(stop_conditions.ignore_eos, Some(true));
     assert_eq!(stop_conditions.min_tokens, Some(100));
 }
 

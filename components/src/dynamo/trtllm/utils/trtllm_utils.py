@@ -385,6 +385,11 @@ def cmd_line_args():
         expanded_template_path = os.path.expandvars(
             os.path.expanduser(args.custom_jinja_template)
         )
+        # Validate custom Jinja template file exists
+        if not os.path.isfile(expanded_template_path):
+            raise FileNotFoundError(
+                f"Custom Jinja template file not found: {expanded_template_path}"
+            )
         config.custom_jinja_template = expanded_template_path
     else:
         config.custom_jinja_template = None

@@ -1277,11 +1277,6 @@ async fn process_offload_request(
     leader: &Arc<KvbmLeader>,
     kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
-    kvbm_metrics.offload_requests.inc();
-    kvbm_metrics
-        .offload_blocks_d2h
-        .inc_by(offload_req.block_ids.len() as u64);
-
     let request_id = &offload_req.request_id;
     let operation_id = &offload_req.operation_id;
 
@@ -1368,6 +1363,10 @@ async fn process_offload_request(
         "offload - stage 4 complete"
     );
 
+    kvbm_metrics
+        .offload_blocks_d2h
+        .inc_by(blocks_to_register.len() as u64);
+
     // 5. Register the mutable blocks
     let immutable_blocks = block_manager
         .host()
@@ -1389,7 +1388,6 @@ async fn process_onboard_request(
     leader: &Arc<KvbmLeader>,
     kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
-    kvbm_metrics.onboard_requests.inc();
     if onboard_req.src_blocks.storage_pool() == BlockTransferPool::Host {
         kvbm_metrics
             .onboard_blocks_h2d

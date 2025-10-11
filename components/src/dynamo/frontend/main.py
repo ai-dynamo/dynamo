@@ -41,6 +41,10 @@ from dynamo.runtime import DistributedRuntime
 from . import __version__
 
 DYN_NAMESPACE_ENV_VAR = "DYN_NAMESPACE"
+CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR = (
+    "CUSTOM_BACKEND_METRICS_POLLING_INTERVAL"
+)
+CUSTOM_BACKEND_ENDPOINT_ENV_VAR = "CUSTOM_BACKEND_ENDPOINT"
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +209,22 @@ def parse_args():
         help="Start KServe gRPC server.",
     )
     add_config_dump_args(parser)
+    parser.add_argument(
+        "--custom-backend-metrics-endpoint",
+        type=str,
+        default=os.environ.get(
+            CUSTOM_BACKEND_ENDPOINT_ENV_VAR, "nim.backend.runtime_stats"
+        ),
+        help=f"Custom backend endpoint to poll for metrics in format 'namespace.component.endpoint' (default: 'nim.backend.runtime_stats'). Required if --custom-backend-metrics-polling-interval is specified. All metrics will be prefixed with 'dynamo_component_' in Prometheus. Can be set via {CUSTOM_BACKEND_ENDPOINT_ENV_VAR} env var.",
+    )
+    parser.add_argument(
+        "--custom-backend-metrics-polling-interval",
+        type=float,
+        default=float(
+            os.environ.get(CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR, "0")
+        ),
+        help=f"Interval in seconds for polling custom backend metrics. Set to > 0 to enable polling (default: 0=disabled, suggested: 9.2s which is less than typical Prometheus scrape interval). Can be set via {CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR} env var.",
+    )
 
     flags = parser.parse_args()
 
@@ -212,6 +232,10 @@ def parse_args():
         parser.error("--static-endpoint requires both --model-name and --model-path")
     if bool(flags.tls_cert_path) ^ bool(flags.tls_key_path):  # ^ is XOR
         parser.error("--tls-cert-path and --tls-key-path must be provided together")
+    if flags.custom_backend_metrics_polling_interval < 0:
+        parser.error(
+            "--custom-backend-metrics-polling-interval must be >= 0 (0=disabled)"
+        )
 
     return flags
 
@@ -277,6 +301,14 @@ async def async_main():
         kwargs["tls_key_path"] = flags.tls_key_path
     if flags.namespace:
         kwargs["namespace"] = flags.namespace
+    if flags.custom_backend_metrics_endpoint:
+        kwargs[
+            "custom_backend_metrics_endpoint"
+        ] = flags.custom_backend_metrics_endpoint
+    if flags.custom_backend_metrics_polling_interval:
+        kwargs[
+            "custom_backend_metrics_polling_interval"
+        ] = flags.custom_backend_metrics_polling_interval
 
     if is_static:
         # out=dyn://<static_endpoint>

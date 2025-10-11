@@ -108,7 +108,7 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     try:
         # Start endpoint immediately and register model concurrently
-        # Requests queue until ready_event is set
+        # Requests queue until ready_event is set (TODO: Part of new PR)
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,

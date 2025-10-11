@@ -15,7 +15,6 @@ pub mod connector;
 pub mod distributed;
 pub mod events;
 pub mod layout;
-pub mod metrics;
 pub mod metrics_kvbm;
 pub mod offload;
 pub mod pool;
@@ -33,7 +32,7 @@ pub use block::{
 pub use config::*;
 
 pub use layout::{LayoutConfig, LayoutConfigBuilder, LayoutError, LayoutType, nixl::NixlLayout};
-pub use offload::request::BlockResult;
+pub use offload::{filter::OffloadFilter, request::BlockResult};
 pub use pool::{BlockPool, ManagedBlockPool};
 pub use storage::{
     DeviceStorage, DiskStorage, PinnedStorage, Storage, StorageAllocator,

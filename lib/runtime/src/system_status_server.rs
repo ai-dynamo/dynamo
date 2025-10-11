@@ -200,7 +200,7 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     };
 
     for hierarchy in &all_hierarchies {
-        let callback_results = state.drt().execute_metrics_callbacks(hierarchy);
+        let callback_results = state.drt().execute_prometheus_update_callbacks(hierarchy);
         for result in callback_results {
             if let Err(e) = result {
                 tracing::error!(
@@ -213,16 +213,37 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     }
 
     // Get all metrics from DistributedRuntime (top-level)
-    match state.drt().prometheus_metrics_fmt() {
-        Ok(response) => (StatusCode::OK, response),
+    let mut response = match state.drt().prometheus_expfmt() {
+        Ok(r) => r,
         Err(e) => {
             tracing::error!("Failed to get metrics from registry: {}", e);
-            (
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to get metrics".to_string(),
-            )
+            );
+        }
+    };
+
+    // Collect and append Prometheus exposition text from all hierarchies
+    for hierarchy in &all_hierarchies {
+        let expfmt = {
+            let registries = state.drt().hierarchy_to_metricsregistry.read().unwrap();
+            if let Some(entry) = registries.get(hierarchy) {
+                entry.execute_prometheus_expfmt_callbacks()
+            } else {
+                String::new()
+            }
+        };
+
+        if !expfmt.is_empty() {
+            if !response.ends_with('\n') {
+                response.push('\n');
+            }
+            response.push_str(&expfmt);
         }
     }
+
+    (StatusCode::OK, response)
 }
 
 // Regular tests: cargo test system_status_server --lib
@@ -301,7 +322,7 @@ mod integration_tests {
             // so we don't need to create it again here
 
             // The uptime_seconds metric should already be registered and available
-            let response = drt.prometheus_metrics_fmt().unwrap();
+            let response = drt.prometheus_expfmt().unwrap();
             println!("Full metrics response:\n{}", response);
 
             // Filter out NATS client metrics for comparison

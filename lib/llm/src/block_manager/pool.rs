@@ -15,7 +15,6 @@ use super::block::{
     private, registry::BlockRegistry,
 };
 use super::events::{EventManager, NullEventManager};
-use super::metrics::{BlockManagerMetrics, PoolMetrics};
 use super::storage::Storage;
 
 use crate::block_manager::CacheLevel;
@@ -23,7 +22,6 @@ use crate::block_manager::block::locality::LocalityProvider;
 use crate::tokens::{SequenceHash, TokenBlock};
 
 use async_trait::async_trait;
-use prometheus::Registry;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},

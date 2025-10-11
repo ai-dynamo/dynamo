@@ -18,6 +18,37 @@ use std::sync::Arc;
 
 use crate::rs;
 
+/// Helper function to order label values according to variable_labels declaration.
+/// This ensures labels are passed to with_label_values() in the correct order.
+///
+/// # Arguments
+/// * `variable_labels` - The ordered list of label names as declared in the metric
+/// * `labels` - The HashMap of label name-value pairs from Python
+///
+/// # Returns
+/// * `Ok(Vec<&str>)` - Ordered vector of label values matching variable_labels order
+/// * `Err(PyErr)` - If a required label is missing
+fn collect_ordered_label_values<'a>(
+    variable_labels: &[String],
+    labels: &'a HashMap<String, String>,
+) -> PyResult<Vec<&'a str>> {
+    let mut ordered_values = Vec::with_capacity(variable_labels.len());
+    for label_name in variable_labels {
+        match labels.get(label_name) {
+            Some(value) => ordered_values.push(value.as_str()),
+            None => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Missing required label '{}'. Expected labels: {:?}, Got: {:?}",
+                    label_name,
+                    variable_labels,
+                    labels.keys().collect::<Vec<_>>()
+                )));
+            }
+        }
+    }
+    Ok(ordered_values)
+}
+
 // Python wrappers for Prometheus metric types.
 //
 // These wrapper structs are necessary because Prometheus types from the external `prometheus` crate
@@ -205,21 +236,24 @@ impl CounterVec {
 
     /// Increment counter by 1 with labels
     fn inc(&self, labels: HashMap<String, String>) -> PyResult<()> {
-        let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
+        let desc = self.counter.desc();
+        let label_values = collect_ordered_label_values(&desc[0].variable_labels, &labels)?;
         self.counter.with_label_values(&label_values).inc();
         Ok(())
     }
 
     /// Increment counter by value with labels
     fn inc_by(&self, labels: HashMap<String, String>, value: f64) -> PyResult<()> {
-        let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
+        let desc = self.counter.desc();
+        let label_values = collect_ordered_label_values(&desc[0].variable_labels, &labels)?;
         self.counter.with_label_values(&label_values).inc_by(value);
         Ok(())
     }
 
     /// Get counter value with labels
     fn get(&self, labels: HashMap<String, String>) -> PyResult<f64> {
-        let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
+        let desc = self.counter.desc();
+        let label_values = collect_ordered_label_values(&desc[0].variable_labels, &labels)?;
         Ok(self.counter.with_label_values(&label_values).get())
     }
 }
@@ -257,21 +291,24 @@ impl IntCounterVec {
 
     /// Increment counter by 1 with labels
     fn inc(&self, labels: HashMap<String, String>) -> PyResult<()> {
-        let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
+        let desc = self.counter.desc();
+        let label_values = collect_ordered_label_values(&desc[0].variable_labels, &labels)?;
         self.counter.with_label_values(&label_values).inc();
         Ok(())
     }
 
     /// Increment counter by value with labels
     fn inc_by(&self, labels: HashMap<String, String>, value: u64) -> PyResult<()> {
-        let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
+        let desc = self.counter.desc();
+        let label_values = collect_ordered_label_values(&desc[0].variable_labels, &labels)?;
         self.counter.with_label_values(&label_values).inc_by(value);
         Ok(())
     }
 
     /// Get counter value with labels
     fn get(&self, labels: HashMap<String, String>) -> PyResult<u64> {
-        let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
+        let desc = self.counter.desc();
+        let label_values = collect_ordered_label_values(&desc[0].variable_labels, &labels)?;
         Ok(self.counter.with_label_values(&label_values).get())
     }
 }
@@ -443,41 +480,47 @@ impl GaugeVec {
 
     /// Set gauge value with labels
     fn set(&self, value: f64, labels: HashMap<String, String>) -> PyResult<()> {
-        let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
+        let desc = self.gauge.desc();
+        let label_values = collect_ordered_label_values(&desc[0].variable_labels, &labels)?;
         self.gauge.with_label_values(&label_values).set(value);
         Ok(())
     }
 
     /// Get gauge value with labels
     fn get(&self, labels: HashMap<String, String>) -> PyResult<f64> {
-        let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
+        let desc = self.gauge.desc();
+        let label_values = collect_ordered_label_values(&desc[0].variable_labels, &labels)?;
         Ok(self.gauge.with_label_values(&label_values).get())
     }
 
     /// Increment gauge by 1 with labels
     fn inc(&self, labels: HashMap<String, String>) -> PyResult<()> {
-        let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
+        let desc = self.gauge.desc();
+        let label_values = collect_ordered_label_values(&desc[0].variable_labels, &labels)?;
         self.gauge.with_label_values(&label_values).inc();
         Ok(())
     }
 
     /// Decrement gauge by 1 with labels
     fn dec(&self, labels: HashMap<String, String>) -> PyResult<()> {
-        let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
+        let desc = self.gauge.desc();
+        let label_values = collect_ordered_label_values(&desc[0].variable_labels, &labels)?;
         self.gauge.with_label_values(&label_values).dec();
         Ok(())
     }
 
     /// Add value to gauge with labels
     fn add(&self, labels: HashMap<String, String>, value: f64) -> PyResult<()> {
-        let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
+        let desc = self.gauge.desc();
+        let label_values = collect_ordered_label_values(&desc[0].variable_labels, &labels)?;
         self.gauge.with_label_values(&label_values).add(value);
         Ok(())
     }
 
     /// Subtract value from gauge with labels
     fn sub(&self, labels: HashMap<String, String>, value: f64) -> PyResult<()> {
-        let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
+        let desc = self.gauge.desc();
+        let label_values = collect_ordered_label_values(&desc[0].variable_labels, &labels)?;
         self.gauge.with_label_values(&label_values).sub(value);
         Ok(())
     }
@@ -516,41 +559,47 @@ impl IntGaugeVec {
 
     /// Set gauge value with labels
     fn set(&self, value: i64, labels: HashMap<String, String>) -> PyResult<()> {
-        let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
+        let desc = self.gauge.desc();
+        let label_values = collect_ordered_label_values(&desc[0].variable_labels, &labels)?;
         self.gauge.with_label_values(&label_values).set(value);
         Ok(())
     }
 
     /// Get gauge value with labels
     fn get(&self, labels: HashMap<String, String>) -> PyResult<i64> {
-        let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
+        let desc = self.gauge.desc();
+        let label_values = collect_ordered_label_values(&desc[0].variable_labels, &labels)?;
         Ok(self.gauge.with_label_values(&label_values).get())
     }
 
     /// Increment gauge by 1 with labels
     fn inc(&self, labels: HashMap<String, String>) -> PyResult<()> {
-        let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
+        let desc = self.gauge.desc();
+        let label_values = collect_ordered_label_values(&desc[0].variable_labels, &labels)?;
         self.gauge.with_label_values(&label_values).inc();
         Ok(())
     }
 
     /// Decrement gauge by 1 with labels
     fn dec(&self, labels: HashMap<String, String>) -> PyResult<()> {
-        let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
+        let desc = self.gauge.desc();
+        let label_values = collect_ordered_label_values(&desc[0].variable_labels, &labels)?;
         self.gauge.with_label_values(&label_values).dec();
         Ok(())
     }
 
     /// Add value to gauge with labels
     fn add(&self, labels: HashMap<String, String>, value: i64) -> PyResult<()> {
-        let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
+        let desc = self.gauge.desc();
+        let label_values = collect_ordered_label_values(&desc[0].variable_labels, &labels)?;
         self.gauge.with_label_values(&label_values).add(value);
         Ok(())
     }
 
     /// Subtract value from gauge with labels
     fn sub(&self, labels: HashMap<String, String>, value: i64) -> PyResult<()> {
-        let label_values: Vec<&str> = labels.values().map(|s| s.as_str()).collect();
+        let desc = self.gauge.desc();
+        let label_values = collect_ordered_label_values(&desc[0].variable_labels, &labels)?;
         self.gauge.with_label_values(&label_values).sub(value);
         Ok(())
     }
@@ -598,15 +647,15 @@ impl Histogram {
 /// and utilities for registering metrics callbacks.
 /// Exposed as endpoint.metrics, component.metrics, and namespace.metrics in Python.
 ///
-/// NOTE: The create_* methods in PyRuntimeMetrics must stay in sync with the MetricsRegistry trait
+/// NOTE: The create_* methods in RuntimeMetrics must stay in sync with the MetricsRegistry trait
 /// in lib/runtime/src/metrics.rs. When adding new metric types, update both locations.
 #[pyclass]
 #[derive(Clone)]
-pub struct PyRuntimeMetrics {
+pub struct RuntimeMetrics {
     metricsregistry: Arc<dyn rs::metrics::MetricsRegistry>,
 }
 
-impl PyRuntimeMetrics {
+impl RuntimeMetrics {
     /// Create from Endpoint
     pub fn from_endpoint(endpoint: dynamo_runtime::component::Endpoint) -> Self {
         Self {
@@ -650,7 +699,9 @@ impl PyRuntimeMetrics {
         let hierarchy = registry_item.hierarchy();
 
         // Store the callback in the DRT's metrics callback registry using the registry_item's hierarchy
-        registry_item.drt().register_metrics_callback(
+        // TODO: rename this to register_callback, once we move the the MetricsRegistry trait
+        //       out of the runtime, and make it into a composed module.
+        registry_item.drt().register_prometheus_update_callback(
             vec![hierarchy.clone()],
             Arc::new(move || {
                 // Execute the Python callback in the Python event loop
@@ -668,11 +719,46 @@ impl PyRuntimeMetrics {
 }
 
 #[pymethods]
-impl PyRuntimeMetrics {
+impl RuntimeMetrics {
     /// Register a Python callback to be invoked before metrics are scraped
     /// This callback will be called for this endpoint's metrics hierarchy
-    fn register_update_callback(&self, callback: PyObject, _py: Python) -> PyResult<()> {
+    fn register_callback(&self, callback: PyObject, _py: Python) -> PyResult<()> {
         Self::register_callback_for(self.metricsregistry.as_ref(), callback)
+    }
+
+    /// Register a Python callback that returns Prometheus exposition text
+    /// The returned text will be appended to the /metrics endpoint output
+    /// The callback should return a string in Prometheus text exposition format
+    fn register_prometheus_expfmt_callback(&self, callback: PyObject, _py: Python) -> PyResult<()> {
+        let hierarchy = self.metricsregistry.hierarchy();
+
+        // Store the callback in the DRT's metrics exposition text callback registry
+        self.metricsregistry.drt().register_prometheus_expfmt_callback(
+            vec![hierarchy.clone()],
+            Arc::new(move || {
+                // Execute the Python callback in the Python event loop
+                Python::with_gil(|py| {
+                    match callback.call0(py) {
+                        Ok(result) => {
+                            // Try to extract a string from the result
+                            match result.extract::<String>(py) {
+                                Ok(text) => Ok(text),
+                                Err(e) => {
+                                    tracing::error!("Metrics exposition text callback must return a string: {}", e);
+                                    Ok(String::new())
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Metrics exposition text callback failed: {}", e);
+                            Ok(String::new())
+                        }
+                    }
+                })
+            }),
+        );
+
+        Ok(())
     }
 
     // NOTE: The order of create_* methods below matches lib/runtime/src/metrics.rs::MetricsRegistry trait

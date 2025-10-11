@@ -26,6 +26,11 @@ pub use prometheus::Registry;
 
 use super::RouteDoc;
 
+/// State for metrics handler with custom backend support
+struct MetricsHandlerState {
+    registry: Arc<Registry>,
+}
+
 pub struct Metrics {
     request_counter: IntCounterVec,
     inflight_gauge: IntGaugeVec,
@@ -825,21 +830,28 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     Ok(event)
 }
 
-/// Create a new router with the given path
+/// Create a new router with optional custom backend metrics support
 pub fn router(registry: Registry, path: Option<String>) -> (Vec<RouteDoc>, Router) {
-    let registry = Arc::new(registry);
     let path = path.unwrap_or_else(|| "/metrics".to_string());
     let doc = RouteDoc::new(axum::http::Method::GET, &path);
+
+    let metrics_state = MetricsHandlerState {
+        registry: Arc::new(registry),
+    };
+
     let route = Router::new()
         .route(&path, get(handler_metrics))
-        .with_state(registry);
+        .with_state(Arc::new(metrics_state));
     (vec![doc], route)
 }
 
-/// Metrics Handler
-async fn handler_metrics(State(registry): State<Arc<Registry>>) -> impl IntoResponse {
+/// Unified metrics handler
+async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl IntoResponse {
+    // Gather and encode metrics
+    // Note: If nim_on_demand is enabled, the NimMetricsCollector registered with the registry
+    // will automatically call poll_nim_backend_stats when gather() is invoked
     let encoder = prometheus::TextEncoder::new();
-    let metric_families = registry.gather();
+    let metric_families = state.registry.gather();
     let mut buffer = vec![];
     if encoder.encode(&metric_families, &mut buffer).is_err() {
         return (

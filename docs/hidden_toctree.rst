@@ -36,6 +36,7 @@
    guides/metrics.md
    guides/run_kvbm_in_vllm.md
    guides/run_kvbm_in_trtllm.md
+   guides/tool_calling.md
 
    architecture/kv_cache_routing.md
    architecture/load_planner.md

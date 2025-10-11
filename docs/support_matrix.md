@@ -58,14 +58,14 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | :----------------- | :---------- | :------------------------------------ | :----------- |
 | ai-dynamo          | 0.5.1       | >=2.28                                |              |
 | ai-dynamo-runtime  | 0.5.1       | >=2.28 (Python 3.12 has known issues) |              |
-| NIXL               | 0.4.1       | >=2.27                                | >=11.8       |
+| NIXL               | 0.6.0       | >=2.27                                | >=11.8       |
 
 ### Build Dependency
 
 | **Build Dependency** | **Version**                                                                      |
 | :------------------- | :------------------------------------------------------------------------------- |
 | **TensorRT-LLM**     | 1.1.0rc5                                                                         |
-| **NIXL**             | 0.4.1                                                                            |
+| **NIXL**             | 0.6.0                                                                            |
 | **vLLM**             | 0.10.1.1                                                                         |
 | **SGLang**           | 0.5.3rc0                                                                         |
 
