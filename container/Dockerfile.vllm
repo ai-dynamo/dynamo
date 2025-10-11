@@ -15,9 +15,9 @@ ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 ARG CUDA_VERSION="12.8"
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG VLLM_REF="v0.10.2"
+ARG VLLM_REF="v0.11.0"
 # FlashInfer only respected when building vLLM from source, ie when VLLM_REF does not start with 'v' or for arm64 builds
-ARG FLASHINF_REF="v0.3.0"
+ARG FLASHINF_REF="v0.3.1"
 ARG TORCH_BACKEND="cu128"
 
 # If left blank, then we will fallback to vLLM defaults
