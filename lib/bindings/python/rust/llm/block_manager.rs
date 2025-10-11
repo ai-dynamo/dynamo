@@ -13,6 +13,34 @@ use pyo3::PyResult;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+/// Creates a disk offload filter based on environment configuration.
+/// Returns `Ok(None)` if the filter is disabled via `DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER`,
+/// otherwise constructs a `FrequencyFilter` with standard parameters.
+fn create_disk_offload_filter(
+    cancel_token: &CancellationToken,
+    runtime: &tokio::runtime::Handle,
+) -> Result<Option<Arc<FrequencyFilter>>> {
+    // Check if disk offload filter is disabled via environment variable
+    let disable_filter = std::env::var("DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
+    if disable_filter {
+        return Ok(None);
+    }
+
+    // TODO: These values seem plausible for most use cases, but we need to figure out a better way to configure them.
+    let frequency_filter = FrequencyFilter::new(
+        2,
+        Duration::from_secs(600),
+        1_000_000,
+        cancel_token.child_token(),
+        runtime.clone(),
+    )?;
+
+    Ok(Some(Arc::new(frequency_filter)))
+}
+
 mod controller;
 mod distributed;
 
@@ -104,23 +132,11 @@ impl BlockManager {
                         .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded));
 
                 if leader.num_disk_blocks() > 0 {
-                    // Check if disk offload filter is disabled via environment variable
-                    let disable_filter = std::env::var("DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER")
-                        .map(|v| v == "true" || v == "1")
-                        .unwrap_or(false);
-
-                    if !disable_filter {
-                        // TODO: These values seem plausible for most use cases, but we need to figure out a better way to configure them.
-                        let frequency_filter = FrequencyFilter::new(
-                            2,
-                            Duration::from_secs(600),
-                            1e6 as usize,
-                            cancel_token.child_token(),
-                            rt.inner().runtime().primary().clone(),
-                        )
-                        .map_err(to_pyerr)?;
-                        host_layout_config =
-                            host_layout_config.offload_filter(Some(Arc::new(frequency_filter)));
+                    if let Some(filter) =
+                        create_disk_offload_filter(&cancel_token, &rt.inner().runtime().primary())
+                            .map_err(to_pyerr)?
+                    {
+                        host_layout_config = host_layout_config.offload_filter(Some(filter));
                     }
                 }
 
@@ -316,12 +332,20 @@ impl BlockManagerBuilder {
         }
 
         if leader_inner.num_host_blocks() > 0 {
-            config = config.host_layout(
+            let mut host_layout_config =
                 dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
                     .num_blocks(leader_inner.num_host_blocks())
-                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
-                    .build()?,
-            );
+                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded));
+
+            if leader_inner.num_disk_blocks() > 0 {
+                if let Some(filter) =
+                    create_disk_offload_filter(&cancel_token, &drt.inner().runtime().primary())?
+                {
+                    host_layout_config = host_layout_config.offload_filter(Some(filter));
+                }
+            }
+
+            config = config.host_layout(host_layout_config.build()?);
         }
 
         if leader_inner.num_disk_blocks() > 0 {

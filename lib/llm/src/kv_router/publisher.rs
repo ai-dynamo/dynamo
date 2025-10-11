@@ -1438,8 +1438,8 @@ mod test_integration_publisher {
         assert_eq!(hit_rate_gauge.get(), 0.75);
 
         // Test 4: Verify metrics are properly registered in the component's registry
-        // Component implements MetricsRegistry trait which provides prometheus_metrics_fmt()
-        let prometheus_output = component.prometheus_metrics_fmt().unwrap();
+        // Component implements MetricsRegistry trait which provides prometheus_expfmt()
+        let prometheus_output = component.prometheus_expfmt().unwrap();
 
         // Verify metric names are present
         assert!(prometheus_output.contains(kvstats::ACTIVE_BLOCKS));

@@ -973,6 +973,12 @@ impl KvIndexerInterface for KvIndexer {
     }
 }
 
+impl Drop for KvIndexer {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ShardedMatchRequest {
     sequence: Vec<LocalBlockHash>,
@@ -1246,6 +1252,12 @@ impl KvIndexerInterface for KvIndexerSharded {
         }
 
         Ok(all_events)
+    }
+}
+
+impl Drop for KvIndexerSharded {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
