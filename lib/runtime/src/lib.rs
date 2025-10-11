@@ -190,6 +190,7 @@ pub struct DistributedRuntime {
     nats_client: Option<transports::nats::Client>,
     store: Arc<dyn KeyValueStore>,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
+    http_server: Arc<OnceCell<Arc<pipeline::network::ingress::http_endpoint::SharedHttpServer>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
 
     // local registry for components

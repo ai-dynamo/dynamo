@@ -85,6 +85,7 @@ impl DistributedRuntime {
             store,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
+            http_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             component_registry: component::Registry::new(),
             is_static,
@@ -260,6 +261,42 @@ impl DistributedRuntime {
             })
             .await?
             .clone())
+    }
+
+    pub async fn http_server(&self) -> Result<Arc<pipeline::network::ingress::http_endpoint::SharedHttpServer>> {
+        let http_host = std::env::var("DYN_HTTP_RPC_HOST")
+            .unwrap_or_else(|_| "0.0.0.0".to_string());
+        let http_port = std::env::var("DYN_HTTP_RPC_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(8081);
+        let bind_addr: std::net::SocketAddr = format!("{}:{}", http_host, http_port)
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid HTTP bind address: {}", e))?;
+
+        let cancel_token = self.child_token();
+
+        let server = self
+            .http_server
+            .get_or_try_init(async move {
+                let server = pipeline::network::ingress::http_endpoint::SharedHttpServer::new(
+                    bind_addr,
+                    cancel_token.clone(),
+                );
+
+                // Spawn the server in the background
+                let server_clone = server.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = server_clone.start().await {
+                        tracing::error!("Shared HTTP server error: {}", e);
+                    }
+                });
+
+                OK(server)
+            })
+            .await?;
+
+        Ok(server.clone())
     }
 
     pub fn nats_client(&self) -> Option<&nats::Client> {

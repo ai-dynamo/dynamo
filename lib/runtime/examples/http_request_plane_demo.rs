@@ -185,7 +185,7 @@ async fn client_app(runtime: Runtime) -> Result<()> {
     // Wait for worker instances to be available
     tracing::info!("Waiting for worker instances...");
     client.wait_for_instances().await?;
-    tracing::info!("✓ Worker instances available");
+    tracing::info!("Worker instances available");
 
     // Create router
     let router =
@@ -193,7 +193,7 @@ async fn client_app(runtime: Runtime) -> Result<()> {
             .await?;
 
     // Send multiple requests
-    tracing::info!("\n🚀 Sending requests...\n");
+    tracing::info!("\nSending requests...\n");
 
     for i in 0..5 {
         let request = EchoRequest {
@@ -214,7 +214,7 @@ async fn client_app(runtime: Runtime) -> Result<()> {
         }
     }
 
-    tracing::info!("\n✅ All requests completed successfully!\n");
+    tracing::info!("\nAll requests completed successfully!\n");
 
     // Shutdown
     runtime.shutdown();

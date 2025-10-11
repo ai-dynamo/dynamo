@@ -32,6 +32,187 @@ const DEFAULT_RPC_ROOT_PATH: &str = "/v1/dynamo";
 /// version of crate
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Shared HTTP server that handles multiple endpoints on a single port
+pub struct SharedHttpServer {
+    handlers: Arc<tokio::sync::RwLock<HashMap<String, Arc<EndpointHandler>>>>,
+    bind_addr: SocketAddr,
+    cancellation_token: CancellationToken,
+}
+
+/// Handler for a specific endpoint
+struct EndpointHandler {
+    service_handler: Arc<dyn PushWorkHandler>,
+    instance_id: i64,
+    namespace: Arc<String>,
+    component_name: Arc<String>,
+    endpoint_name: Arc<String>,
+    system_health: Arc<Mutex<SystemHealth>>,
+    inflight: Arc<AtomicU64>,
+    notify: Arc<Notify>,
+}
+
+impl SharedHttpServer {
+    pub fn new(bind_addr: SocketAddr, cancellation_token: CancellationToken) -> Arc<Self> {
+        Arc::new(Self {
+            handlers: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            bind_addr,
+            cancellation_token,
+        })
+    }
+
+    /// Register an endpoint handler with this server
+    pub async fn register_endpoint(
+        &self,
+        subject: String,
+        service_handler: Arc<dyn PushWorkHandler>,
+        instance_id: i64,
+        namespace: String,
+        component_name: String,
+        endpoint_name: String,
+        system_health: Arc<Mutex<SystemHealth>>,
+    ) -> Result<()> {
+        let handler = Arc::new(EndpointHandler {
+            service_handler,
+            instance_id,
+            namespace: Arc::new(namespace),
+            component_name: Arc::new(component_name),
+            endpoint_name: Arc::new(endpoint_name.clone()),
+            system_health: system_health.clone(),
+            inflight: Arc::new(AtomicU64::new(0)),
+            notify: Arc::new(Notify::new()),
+        });
+
+        // Set health status
+        system_health
+            .lock()
+            .unwrap()
+            .set_endpoint_health_status(&endpoint_name, HealthStatus::Ready);
+
+        self.handlers.write().await.insert(subject, handler);
+        tracing::debug!("Registered endpoint handler for subject: {}", subject);
+        Ok(())
+    }
+
+    /// Unregister an endpoint handler
+    pub async fn unregister_endpoint(&self, subject: &str, endpoint_name: &str) {
+        if let Some(handler) = self.handlers.write().await.remove(subject) {
+            handler
+                .system_health
+                .lock()
+                .unwrap()
+                .set_endpoint_health_status(endpoint_name, HealthStatus::NotReady);
+            tracing::debug!("Unregistered endpoint handler for subject: {}", subject);
+        }
+    }
+
+    /// Start the shared HTTP server
+    pub async fn start(self: Arc<Self>) -> Result<()> {
+        let rpc_root_path = std::env::var("DYN_HTTP_RPC_ROOT_PATH")
+            .unwrap_or_else(|_| DEFAULT_RPC_ROOT_PATH.to_string());
+        let route_pattern = format!("{}/{{*endpoint}}", rpc_root_path);
+
+        let app = Router::new()
+            .route(&route_pattern, post(handle_shared_request))
+            .layer(TraceLayer::new_for_http())
+            .with_state(self.clone());
+
+        tracing::info!(
+            "Starting shared HTTP endpoint server on {} at path {}/:endpoint",
+            self.bind_addr,
+            rpc_root_path
+        );
+
+        let listener = tokio::net::TcpListener::bind(&self.bind_addr).await?;
+        let server = axum::serve(listener, app.into_make_service());
+
+        tokio::select! {
+            result = server => result.map_err(|e| anyhow::anyhow!("HTTP server error: {}", e)),
+            _ = self.cancellation_token.cancelled() => {
+                tracing::info!("SharedHttpServer received cancellation signal, shutting down");
+                Ok(())
+            },
+        }
+    }
+
+    /// Wait for all inflight requests across all endpoints
+    pub async fn wait_for_inflight(&self) {
+        let handlers = self.handlers.read().await;
+        for handler in handlers.values() {
+            while handler.inflight.load(Ordering::SeqCst) > 0 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+/// HTTP handler for the shared server
+async fn handle_shared_request(
+    AxumState(server): AxumState<Arc<SharedHttpServer>>,
+    Path(endpoint_path): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    // Look up the handler for this endpoint
+    let handlers = server.handlers.read().await;
+    let handler = match handlers.get(&endpoint_path) {
+        Some(h) => h.clone(),
+        None => {
+            tracing::warn!("No handler found for endpoint: {}", endpoint_path);
+            return (StatusCode::NOT_FOUND, "Endpoint not found");
+        }
+    };
+    drop(handlers);
+
+    // Increment inflight counter
+    handler.inflight.fetch_add(1, Ordering::SeqCst);
+
+    // Extract tracing headers
+    let traceparent = TraceParent::from_axum_headers(&headers);
+
+    // Spawn async handler
+    let service_handler = handler.service_handler.clone();
+    let inflight = handler.inflight.clone();
+    let notify = handler.notify.clone();
+    let namespace = handler.namespace.clone();
+    let component_name = handler.component_name.clone();
+    let endpoint_name = handler.endpoint_name.clone();
+    let instance_id = handler.instance_id;
+
+    tokio::spawn(async move {
+        tracing::trace!(instance_id, "handling new HTTP request");
+        let result = service_handler
+            .handle_payload(body)
+            .instrument(tracing::info_span!(
+                "handle_payload",
+                component = component_name.as_ref(),
+                endpoint = endpoint_name.as_ref(),
+                namespace = namespace.as_ref(),
+                instance_id = instance_id,
+                trace_id = traceparent.trace_id,
+                parent_id = traceparent.parent_id,
+                x_request_id = traceparent.x_request_id,
+                x_dynamo_request_id = traceparent.x_dynamo_request_id,
+                tracestate = traceparent.tracestate
+            ))
+            .await;
+        match result {
+            Ok(_) => {
+                tracing::trace!(instance_id, "request handled successfully");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to handle request: {}", e.to_string());
+            }
+        }
+
+        // Decrease inflight counter
+        inflight.fetch_sub(1, Ordering::SeqCst);
+        notify.notify_one();
+    });
+
+    // Return 202 Accepted immediately (like NATS ack)
+    (StatusCode::ACCEPTED, "")
+}
+
 /// Shared state for HTTP endpoint handler
 #[derive(Clone)]
 struct HttpEndpointState {

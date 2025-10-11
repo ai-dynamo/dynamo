@@ -231,37 +231,32 @@ impl EndpointConfigBuilder {
         let endpoint_name_for_task = endpoint_name.clone();
 
         let task = if request_plane_mode.is_http() {
-            // HTTP mode - use HttpEndpoint
-            use crate::pipeline::network::ingress::http_endpoint::HttpEndpoint;
+            // HTTP mode - use SharedHttpServer
+            let http_server = endpoint.drt().http_server().await?;
 
-            let http_host =
-                std::env::var("DYN_HTTP_RPC_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-            let http_port = std::env::var("DYN_HTTP_RPC_PORT")
-                .ok()
-                .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(8081);
-            let bind_addr: std::net::SocketAddr = format!("{}:{}", http_host, http_port)
-                .parse()
-                .map_err(|e| anyhow::anyhow!("Invalid HTTP bind address: {}", e))?;
+            // Register this endpoint with the shared server
+            http_server
+                .register_endpoint(
+                    subject.clone(),
+                    handler,
+                    lease_id,
+                    namespace_name_for_task.clone(),
+                    component_name_for_task.clone(),
+                    endpoint_name_for_task.clone(),
+                    system_health.clone(),
+                )
+                .await?;
 
-            let http_endpoint = HttpEndpoint::builder()
-                .service_handler(handler)
-                .cancellation_token(cancel_token.clone())
-                .graceful_shutdown(graceful_shutdown)
-                .build()
-                .map_err(|e| anyhow::anyhow!("Failed to build HTTP endpoint: {e}"))?;
+            // Create a task that waits for cancellation and then unregisters
+            let subject_for_cleanup = subject.clone();
+            let endpoint_name_for_cleanup = endpoint_name_for_task.clone();
+            let http_server_for_cleanup = http_server.clone();
 
             tokio::spawn(async move {
-                let result = http_endpoint
-                    .start(
-                        bind_addr,
-                        namespace_name_for_task,
-                        component_name_for_task,
-                        endpoint_name_for_task,
-                        lease_id,
-                        system_health,
-                    )
-                    .await;
+                cancel_token.cancelled().await;
+
+                tracing::debug!("Unregistering endpoint from shared HTTP server");
+                http_server_for_cleanup.unregister_endpoint(&subject_for_cleanup, &endpoint_name_for_cleanup).await;
 
                 // Unregister from graceful shutdown tracker
                 if let Some(tracker) = tracker_clone {
@@ -269,7 +264,7 @@ impl EndpointConfigBuilder {
                     tracker.unregister_endpoint();
                 }
 
-                result
+                Ok(())
             })
         } else {
             // NATS mode - use PushEndpoint

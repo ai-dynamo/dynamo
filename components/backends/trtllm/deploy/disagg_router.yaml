@@ -7,8 +7,11 @@ metadata:
   name: trtllm-v1-disagg-router
 spec:
   services:
-    Frontend:
-      dynamoNamespace: trtllm-v1-disagg-router
+    Planner:
+      componentType: planner
+    Router:
+      componentType: router
+    Frontend: # dgd-name.component-name
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -17,11 +20,40 @@ spec:
       envs:
         - name: DYN_ROUTER_MODE
           value: kv
-    TRTLLMPrefillWorker:
+    Prefill-High: # dgd-name.component-name
+      componentType: worker/prefill
+      envFromSecret: hf-token-secret
+      replicas: 5
+      gpuSelector: "GB200"
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/trtllm-runtime:my-tag
+          workingDir: /workspace/components/backends/trtllm
+          command:
+          - python3
+          - -m
+          - dynamo.trtllm
+          args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --extra-engine-args
+            - engine_configs/prefill.yaml
+            - --disaggregation-mode
+            - prefill
+            - --disaggregation-strategy
+            - prefill_first
+            - --publish-events-and-metrics
+    Prefill-Low:
       dynamoNamespace: trtllm-v1-disagg-router
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 2
+      gpuSelector: "H200"
       resources:
         limits:
           gpu: "1"
