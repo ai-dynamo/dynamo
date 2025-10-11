@@ -1,0 +1,111 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-disagg
+spec:
+  backendFramework: sglang
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      dynamoNamespace: sglang-disagg
+      pvc:
+        create: false
+        name: model-cache
+        mountPoint: /root/.cache/huggingface
+      resources:
+        requests:
+          cpu: "5"
+          memory: "25Gi"
+        limits:
+          cpu: "5"
+          memory: "25Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.5.0
+          workingDir: /workspace/components/backends/sglang
+          command: ["sh", "-c"]
+          args:
+            - "python3 -m dynamo.sglang.utils.clear_namespace --namespace sglang-disagg && python3 -m dynamo.frontend --http-port=8000"
+    SGLangDecodeWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: sglang-disagg
+      pvc:
+        create: false
+        name: model-cache
+        mountPoint: /root/.cache/huggingface
+      componentType: worker
+      replicas: 1
+      resources:
+        requests:
+          cpu: "10"
+          memory: "200Gi"
+          gpu: "4"
+        limits:
+          cpu: "10"
+          memory: "200Gi"
+          gpu: "4"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.5.0
+          workingDir: /workspace/components/backends/sglang
+          command: ["/bin/bash", "-c"]
+          stdin: true
+          tty: true
+          args:
+            - |
+              set -e
+              exec python3 -m dynamo.sglang \
+                --model-path RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic \
+                --served-model-name RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic \
+                --tp 4 \
+                --trust-remote-code \
+                --skip-tokenizer-init \
+                --disaggregation-mode decode \
+                --disaggregation-transfer-backend nixl \
+                --disaggregation-bootstrap-port 30001 \
+                --host 0.0.0.0 \
+                --port 8000 \
+                --mem-fraction-static 0.82
+    SGLangPrefillWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: sglang-disagg
+      pvc:
+        create: false
+        name: model-cache
+        mountPoint: /root/.cache/huggingface
+      componentType: worker
+      replicas: 1
+      resources:
+        requests:
+          cpu: "10"
+          memory: "200Gi"
+          gpu: "4"
+        limits:
+          cpu: "10"
+          memory: "200Gi"
+          gpu: "4"
+      extraPodSpec:
+        mainContainer:
+          stdin: true
+          tty: true
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.5.0
+          workingDir: /workspace/components/backends/sglang
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              exec python3 -m dynamo.sglang \
+                --model-path RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic \
+                --served-model-name RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic \
+                --tp 4 \
+                --trust-remote-code \
+                --skip-tokenizer-init \
+                --disaggregation-mode prefill \
+                --disaggregation-transfer-backend nixl \
+                --disaggregation-bootstrap-port 30001 \
+                --host 0.0.0.0 \
+                --port 8000 \
+                --mem-fraction-static 0.82
