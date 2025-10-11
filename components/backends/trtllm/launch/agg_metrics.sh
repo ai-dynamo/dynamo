@@ -7,6 +7,7 @@ export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-0.6B"}
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"Qwen/Qwen3-0.6B"}
 export AGG_ENGINE_ARGS=${AGG_ENGINE_ARGS:-"engine_configs/agg.yaml"}
 export MODALITY=${MODALITY:-"text"}
+export MPI_CMD=${MPI_CMD:-""}
 
 # Setup cleanup trap
 cleanup() {
@@ -23,7 +24,7 @@ DYNAMO_PID=$!
 
 # Run worker
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
-python3 -m dynamo.trtllm \
+$MPI_CMD python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --modality "$MODALITY" \
