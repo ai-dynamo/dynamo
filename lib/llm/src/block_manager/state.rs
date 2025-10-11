@@ -16,7 +16,6 @@ use super::{
     config::NixlOptions,
     events::{EventManager, NullEventManager},
     locality::LogicalResources,
-    metrics::BlockManagerMetrics,
     offload::{
         OffloadFilters, OffloadManager, OffloadManagerConfig, filter::OffloadFilter,
         request::BlockResult,
@@ -42,9 +41,6 @@ pub(crate) struct Resources {
 
     // event manager for block manager events
     pub event_manager: Arc<dyn EventManager>,
-
-    // metrics for the block manager
-    pub metrics: Arc<BlockManagerMetrics>,
 
     // config for the block manager
     pub config: KvBlockManagerConfig,
@@ -155,7 +151,6 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
         let offload_config = OffloadManagerConfig {
             nixl_agent: resources.nixl_agent.clone(),
             async_rt_handle: resources.async_rt_handle.clone(),
-            metrics: resources.metrics.clone(),
             cancellation_token: resources.cancellation_token.clone(),
             model_config,
             kvbm_metrics: resources.config.kvbm_metrics.clone(),
@@ -278,7 +273,6 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
         let offload_config = OffloadManagerConfig {
             nixl_agent: resources.nixl_agent.clone(),
             async_rt_handle: resources.async_rt_handle.clone(),
-            metrics: resources.metrics.clone(),
             cancellation_token: resources.cancellation_token.clone(),
             model_config,
             kvbm_metrics: resources.config.kvbm_metrics.clone(),
@@ -521,7 +515,7 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> std::fmt::Debug
 pub(crate) fn create_block_pool<S: Storage, L: LocalityProvider, M: BlockMetadata>(
     factory: impl IntoBlocks<S, L>,
     resources: &Resources,
-    pool_name: &str,
+    _pool_name: &str,
 ) -> Result<(
     Arc<dyn BlockPool<S, L, M>>,
     Vec<Block<S, L, M>>,
@@ -532,7 +526,6 @@ pub(crate) fn create_block_pool<S: Storage, L: LocalityProvider, M: BlockMetadat
         .global_registry(resources.global_registry.clone())
         .async_runtime(resources.async_rt_handle.clone())
         .event_manager(resources.event_manager.clone())
-        .pool_metrics(resources.metrics.pool(pool_name))
         .build()?;
 
     let offload_filter = factory.offload_filter();
