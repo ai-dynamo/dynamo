@@ -1221,13 +1221,17 @@ class KvPushRouter:
         self,
         token_ids: List[int],
         router_config_override: Optional[JsonLike] = None,
+        request_id: Optional[str] = None,
     ) -> Tuple[int, int]:
         """
-        Find the best matching worker for the given tokens without updating states.
+        Find the best matching worker for the given tokens.
 
         Args:
             token_ids: List of token IDs to find matches for
             router_config_override: Optional router configuration override
+            request_id: Optional request ID. If provided, router states will be updated
+                       to track this request (active blocks, lifecycle events). If not
+                       provided, this is a query-only operation that doesn't affect state.
 
         Returns:
             A tuple of (worker_id, overlap_blocks) where:
@@ -1260,6 +1264,40 @@ class KvPushRouter:
 
         Returns:
             A JSON string containing all indexer events
+        """
+        ...
+
+    async def mark_prefill_complete(self, request_id: str) -> None:
+        """
+        Mark prefill as completed for a request.
+
+        This signals that the request has finished its prefill phase and is now
+        in the decode phase. Used to update router state for accurate load tracking.
+
+        Args:
+            request_id: The ID of the request that completed prefill
+
+        Note:
+            This is typically called automatically by the router when using the
+            `generate()` method. Only call this manually if you're using
+            `best_worker_id()` with `request_id` for custom routing.
+        """
+        ...
+
+    async def free(self, request_id: str) -> None:
+        """
+        Free a request by its ID, signaling the router to release resources.
+
+        This should be called when a request completes to update the router's
+        tracking of active blocks and ensure accurate load balancing.
+
+        Args:
+            request_id: The ID of the request to free
+
+        Note:
+            This is typically called automatically by the router when using the
+            `generate()` method. Only call this manually if you're using
+            `best_worker_id()` with `request_id` for custom routing.
         """
         ...
 
