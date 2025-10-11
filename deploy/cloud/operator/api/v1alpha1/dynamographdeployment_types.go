@@ -29,20 +29,14 @@ import (
 
 // DynamoGraphDeploymentSpec defines the desired state of DynamoGraphDeployment.
 type DynamoGraphDeploymentSpec struct {
-	// DynamoGraph selects the graph (workflow/topology) to deploy. This must match
-	// a graph name packaged with the Dynamo archive.
-	DynamoGraph string `json:"dynamoGraph,omitempty"`
 	// PVCs defines a list of persistent volume claims that can be referenced by components.
 	// Each PVC must have a unique name that can be referenced in component specifications.
 	// +kubebuilder:validation:Optional
 	PVCs []PVC `json:"pvcs,omitempty"`
-	// Services allows per-service overrides of the component deployment settings.
-	// - key: name of the service defined by the DynamoComponent
-	// - value: overrides for that service
-	// If not set for a service, the default DynamoComponentDeployment values are used.
+	// Services are the services to deploy as part of this deployment.
 	// +kubebuilder:validation:Optional
-	Services map[string]*DynamoComponentDeploymentOverridesSpec `json:"services,omitempty"`
-	// Envs are environment variables applied to all services in the graph unless
+	Services map[string]*DynamoComponentDeploymentSharedSpec `json:"services,omitempty"`
+	// Envs are environment variables applied to all services in the deployment unless
 	// overridden by service-specific configuration.
 	// +kubebuilder:validation:Optional
 	Envs []corev1.EnvVar `json:"envs,omitempty"`

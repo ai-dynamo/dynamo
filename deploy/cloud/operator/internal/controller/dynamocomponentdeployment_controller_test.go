@@ -688,8 +688,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 							},
 						},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
-							DynamoComponent:  "test-lws-component",
-							DynamoTag:        "test-tag",
 							BackendFramework: string(dynamo.BackendFrameworkVLLM),
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								Envs: []corev1.EnvVar{
@@ -990,7 +988,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
 						ObjectMeta: metav1.ObjectMeta{Name: "test-lws-nil-id", Namespace: "default"},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
-							DynamoComponent: "test-comp", DynamoTag: "test",
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
@@ -1034,7 +1031,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
 						ObjectMeta: metav1.ObjectMeta{Name: "test-lws-leader-err", Namespace: "default"},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
-							DynamoComponent: "test-comp", DynamoTag: "test",
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
