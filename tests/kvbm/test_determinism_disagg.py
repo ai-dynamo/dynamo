@@ -225,6 +225,8 @@ class LLMServerManager:
             prefill_config_path,
             "--disaggregation-mode",
             "prefill",
+            "--connector",
+            "kvbm"
         ]
 
         self.decoder_cmd = cmd_root + [
