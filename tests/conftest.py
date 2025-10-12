@@ -40,8 +40,8 @@ logging.basicConfig(
 )
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _set_global_ucx_env():
+@pytest.fixture()
+def set_ucx_tls_no_mm():
     """Set UCX env defaults for all tests."""
     mp = pytest.MonkeyPatch()
     # CI note:
