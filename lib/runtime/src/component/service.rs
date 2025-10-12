@@ -9,7 +9,12 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+<<<<<<< HEAD
 use crate::component::Component;
+=======
+use super::*;
+use crate::config::request_plane::RequestPlaneMode;
+>>>>>>> 5da9f9a28 (no metrics)
 
 pub use super::endpoint::EndpointStats;
 
@@ -57,4 +62,10 @@ pub async fn build_nats_service(
         .map_err(|e| anyhow::anyhow!("Failed to start NATS service: {e}"))?;
 
     Ok((nats_service, stats_handler_registry_clone))
+}
+
+impl ServiceConfigBuilder {
+    pub(crate) fn from_component(component: Component) -> Self {
+        Self::default().component(component)
+    }
 }

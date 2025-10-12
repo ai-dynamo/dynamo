@@ -263,7 +263,9 @@ impl DistributedRuntime {
             .clone())
     }
 
-    pub async fn http_server(&self) -> Result<Arc<pipeline::network::ingress::http_endpoint::SharedHttpServer>> {
+    pub async fn http_server(&self) -> Result<Arc<crate::pipeline::network::ingress::http_endpoint::SharedHttpServer>> {
+        use crate::pipeline::network::ingress::http_endpoint::SharedHttpServer;
+
         let http_host = std::env::var("DYN_HTTP_RPC_HOST")
             .unwrap_or_else(|_| "0.0.0.0".to_string());
         let http_port = std::env::var("DYN_HTTP_RPC_PORT")
@@ -279,7 +281,7 @@ impl DistributedRuntime {
         let server = self
             .http_server
             .get_or_try_init(async move {
-                let server = pipeline::network::ingress::http_endpoint::SharedHttpServer::new(
+                let server = SharedHttpServer::new(
                     bind_addr,
                     cancel_token.clone(),
                 );

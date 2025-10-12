@@ -251,9 +251,10 @@ impl EndpointConfigBuilder {
             let subject_for_cleanup = subject.clone();
             let endpoint_name_for_cleanup = endpoint_name_for_task.clone();
             let http_server_for_cleanup = http_server.clone();
+            let cancel_token_for_cleanup = cancel_token.clone();
 
             tokio::spawn(async move {
-                cancel_token.cancelled().await;
+                cancel_token_for_cleanup.cancelled().await;
 
                 tracing::debug!("Unregistering endpoint from shared HTTP server");
                 http_server_for_cleanup.unregister_endpoint(&subject_for_cleanup, &endpoint_name_for_cleanup).await;

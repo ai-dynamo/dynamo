@@ -413,8 +413,22 @@ impl Component {
         }
 
         // Register metrics callback. CRITICAL: Never fail service creation for metrics issues.
-        if let Err(err) = self.start_scraping_nats_service_component_metrics() {
-            tracing::debug!(service_name, error = %err, "Metrics registration failed");
+        // Only enable NATS service metrics collection when using NATS request plane mode
+        let request_plane_mode = RequestPlaneMode::from_env();
+        if request_plane_mode.is_nats() {
+            if let Err(err) = component.start_scraping_nats_service_component_metrics() {
+                tracing::debug!(
+                    "Metrics registration failed for '{}': {}",
+                    component.service_name(),
+                    err
+                );
+            }
+        } else {
+            tracing::debug!(
+                "Skipping NATS service metrics collection for '{}' - request plane mode is '{}'",
+                component.service_name(),
+                request_plane_mode
+            );
         }
         Ok(())
     }
