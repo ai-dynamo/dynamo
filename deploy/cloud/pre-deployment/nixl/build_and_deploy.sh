@@ -8,6 +8,129 @@ set -e
 NIXL_VERSION="0.6.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Function to check if a command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Function to check Docker daemon status
+check_docker_daemon() {
+    if ! docker info >/dev/null 2>&1; then
+        return 1
+    fi
+    return 0
+}
+
+# Function to check all required dependencies
+check_dependencies() {
+    echo "Checking required dependencies..."
+    local missing_deps=()
+    local warnings=()
+
+    # Check wget
+    if ! command_exists wget; then
+        missing_deps+=("wget")
+    else
+        echo "✅ wget is available"
+    fi
+
+    # Check unzip
+    if ! command_exists unzip; then
+        missing_deps+=("unzip")
+    else
+        echo "✅ unzip is available"
+    fi
+
+    # Check kubectl
+    if ! command_exists kubectl; then
+        missing_deps+=("kubectl")
+    else
+        echo "✅ kubectl is available"
+        # Test kubectl connectivity
+        if ! kubectl cluster-info >/dev/null 2>&1; then
+            warnings+=("kubectl is installed but cannot connect to cluster")
+        else
+            echo "✅ kubectl can connect to cluster"
+        fi
+    fi
+
+    # Check Docker
+    if ! command_exists docker; then
+        missing_deps+=("docker")
+    else
+        echo "✅ docker is available"
+        # Check Docker daemon
+        if ! check_docker_daemon; then
+            warnings+=("Docker is installed but daemon is not running or accessible")
+        else
+            echo "✅ Docker daemon is running"
+
+            # Additional Docker toolchain checks
+            if ! docker ps >/dev/null 2>&1; then
+                warnings+=("Docker requires sudo or user is not in docker group - consider adding user to docker group")
+            fi
+
+            if ! docker buildx version >/dev/null 2>&1; then
+                warnings+=("Docker buildx not available (may affect multi-architecture builds)")
+            fi
+        fi
+    fi
+
+    # Report missing dependencies
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        echo
+        echo "❌ Missing required dependencies:"
+        for dep in "${missing_deps[@]}"; do
+            echo "  - $dep"
+        done
+        echo
+        echo "Please install the missing dependencies and try again."
+        echo
+        echo "Installation suggestions:"
+        for dep in "${missing_deps[@]}"; do
+            case "$dep" in
+                wget)
+                    echo "  wget: sudo apt-get install wget (Ubuntu/Debian) or yum install wget (RHEL/CentOS)"
+                    ;;
+                unzip)
+                    echo "  unzip: sudo apt-get install unzip (Ubuntu/Debian) or yum install unzip (RHEL/CentOS)"
+                    ;;
+                kubectl)
+                    echo "  kubectl: https://kubernetes.io/docs/tasks/tools/install-kubectl/"
+                    ;;
+                docker)
+                    echo "  docker: https://docs.docker.com/get-docker/"
+                    ;;
+            esac
+        done
+        return 1
+    fi
+
+    # Report warnings
+    if [ ${#warnings[@]} -gt 0 ]; then
+        echo
+        echo "⚠️  Warnings:"
+        for warning in "${warnings[@]}"; do
+            echo "  - $warning"
+        done
+        echo
+        printf "Do you want to continue despite these warnings? (y/N): "
+        read continue_with_warnings
+        case "$continue_with_warnings" in
+            [Yy]|[Yy][Ee][Ss])
+                echo "Continuing with warnings..."
+                ;;
+            *)
+                echo "Please resolve the warnings and try again."
+                return 1
+                ;;
+        esac
+    fi
+
+    echo "✅ All required dependencies are available"
+    return 0
+}
+
 # Function to display available architectures
 show_architectures() {
     echo "Available architectures:"
@@ -158,6 +281,12 @@ deploy_to_k8s() {
 main() {
     echo "NIXL Benchmark Build and Deploy Script"
     echo "======================================"
+    echo
+
+    # Check dependencies first
+    if ! check_dependencies; then
+        exit 1
+    fi
     echo
 
     # Show available architectures
