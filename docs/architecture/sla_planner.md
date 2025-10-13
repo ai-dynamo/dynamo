@@ -21,7 +21,7 @@ The SLA (Service Level Agreement)-based planner is an intelligent autoscaling sy
 - **Planner**: Queries Prometheus and adjusts worker scaling every adjustment interval
 - **Workers**: prefill and backend workers handle inference
 
-The adjustment interval can be defined in the planner manifest as an argument. The default interval value can be found in this [file](/components/planner/src/dynamo/planner/defaults.py).
+The adjustment interval can be defined in the planner manifest as an argument. The default interval value can be found in this [file](/components/src/dynamo/planner/defaults.py).
 
 ```mermaid
 flowchart LR
