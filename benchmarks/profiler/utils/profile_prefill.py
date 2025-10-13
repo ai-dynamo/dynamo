@@ -81,16 +81,16 @@ def profile_prefill(
     interpolation_granularity,
 ):
     def get_ttft(isl):
-        genai_perf_artifact_dir = f"{work_dir}/gap_isl{isl}"
-        gap_result = benchmark_prefill(
+        ai_perf_artifact_dir = f"{work_dir}/aiperf_isl{isl}"
+        aiperf_result = benchmark_prefill(
             isl,
-            genai_perf_artifact_dir,
+            ai_perf_artifact_dir,
             model_name,
             tokenizer,
             base_url=url,
         )
-        if gap_result is not None:
-            return gap_result["time_to_first_token"]["avg"]
+        if aiperf_result is not None:
+            return aiperf_result["records"]["ttft"]["avg"]
         return None
 
     return _profile_prefill_helper(
