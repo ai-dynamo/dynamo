@@ -12,8 +12,6 @@ ARG BASE_IMAGE=ubuntu:22.04
 FROM ${BUILDER_IMAGE} AS builder
 
 ENV CGO_ENABLED=1
-ENV GOOS=linux
-ENV GOARCH=amd64
 # be explicit; helps cgo when linking libstdc++
 ENV CC=gcc
 ENV CXX=g++
