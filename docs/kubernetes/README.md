@@ -19,6 +19,11 @@ limitations under the License.
 
 High-level guide to Dynamo Kubernetes deployments. Start here, then dive into specific guides.
 
+## Pre-deployment Checks
+
+Before deploying the platform, it is recommended to run the pre-deployment checks to ensure the cluster is ready for deployment. Please refer to the [pre-deployment checks](/deploy/cloud/pre-deployment/README.md) for more details.
+
+
 ## 1. Install Platform First
 
 ```bash
