@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""End-to-end tests covering reasoning effort behaviour."""
 
 from __future__ import annotations
 
@@ -14,14 +13,13 @@ import pytest
 import requests
 
 from tests.conftest import EtcdServer, NatsServer
-from tests.utils.constants import GPT_OSS
+from tests.utils.constants import QWEN
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
-
+import time
 logger = logging.getLogger(__name__)
 
-REASONING_TEST_MODEL = GPT_OSS
-
+TEST_MODEL = QWEN
 
 class DynamoFrontendProcess(ManagedProcess):
     """Process manager for Dynamo frontend"""
@@ -47,23 +45,19 @@ class DynamoFrontendProcess(ManagedProcess):
         )
 
 
-class GPTOSSWorkerProcess(ManagedProcess):
-    """Worker process for GPT-OSS model."""
+class MockWorkerProcess(ManagedProcess):
 
-    def __init__(self, request, worker_id: str = "reasoning-worker"):
+    def __init__(self, request, worker_id: str = "mocker-worker"):
         self.worker_id = worker_id
 
         command = [
             "python3",
             "-m",
-            "dynamo.vllm",
-            "--model",
-            REASONING_TEST_MODEL,
-            "--enforce-eager",
-            "--dyn-tool-call-parser",
-            "harmony",
-            "--dyn-reasoning-parser",
-            "gpt_oss",
+            "dynamo.mocker",
+            "--model-path",
+            TEST_MODEL,
+            "--speedup-ratio",
+            "100"
         ]
 
         env = os.environ.copy()
@@ -90,7 +84,7 @@ class GPTOSSWorkerProcess(ManagedProcess):
             display_output=True,
             terminate_existing=False,
             stragglers=["VLLM::EngineCore"],
-            straggler_commands=["-m dynamo.vllm"],
+            straggler_commands=["-m dynamo.mocker"],
             log_dir=log_dir,
         )
 
@@ -116,6 +110,7 @@ def _send_completion_request(
     """Send a text completion request"""
 
     headers = {"Content-Type": "application/json"}
+    print(f"Sending request: {time.time()}")
 
     response = requests.post(
         "http://localhost:8000/v1/completions",
@@ -135,77 +130,61 @@ def runtime_services(request):
 
 
 @pytest.fixture(scope="module")
-def start_services(request, runtime_services, predownload_models):
+def start_services(request, runtime_services):
     """Start frontend and worker processes once for this module's tests."""
     with DynamoFrontendProcess(request):
         logger.info("Frontend started for tests")
-        with GPTOSSWorkerProcess(request):
+        with MockWorkerProcess(request):
             logger.info("Worker started for tests")
             yield
 
 
 @pytest.mark.usefixtures("start_services")
-@pytest.mark.vllm
-@pytest.mark.gpu_1
 @pytest.mark.e2e
-@pytest.mark.model(REASONING_TEST_MODEL)
-def test_completion_single_element_array_prompt() -> None:
-    """Exercise completions with reasoning effort and prompt."""
-    reasoning_effort = "low"
+@pytest.mark.model(TEST_MODEL)
+def test_completion_string_prompt() -> None:
 
     payload: Dict[str, Any] = {
-        "model": REASONING_TEST_MODEL,
-        "prompt": ["Tell me about Mars"],
-        "max_tokens": 2000,
-        "chat_template_args": {"reasoning_effort": reasoning_effort},
-    }
-
-    response = _send_completion_request(payload)
-
-    assert response.status_code == 200, (
-        f"Completion request ({reasoning_effort}) failed with status "
-        f"{response.status_code}: {response.text}"
-    )
-
-
-@pytest.mark.usefixtures("start_services")
-@pytest.mark.vllm
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(REASONING_TEST_MODEL)
-def test_completion_multi_string_prompt() -> None:
-    """Exercise completions with reasoning effort and prompt."""
-    reasoning_effort = "low"
-
-    payload: Dict[str, Any] = {
-        "model": REASONING_TEST_MODEL,
+        "model": TEST_MODEL,
         "prompt": "Tell me about Mars",
         "max_tokens": 2000,
-        "chat_template_args": {"reasoning_effort": reasoning_effort},
     }
 
     response = _send_completion_request(payload)
 
     assert response.status_code == 200, (
-        f"Completion request ({reasoning_effort}) failed with status "
+        f"Completion request failed with status "
+        f"{response.status_code}: {response.text}"
+    )
+
+@pytest.mark.usefixtures("start_services")
+@pytest.mark.e2e
+@pytest.mark.model(TEST_MODEL)
+def test_completion_single_element_array_prompt() -> None:
+
+    payload: Dict[str, Any] = {
+        "model": TEST_MODEL,
+        "prompt": ["Tell me about Mars"],
+        "max_tokens": 2000,
+    }
+
+    response = _send_completion_request(payload)
+
+    assert response.status_code == 200, (
+        f"Completion request failed with status "
         f"{response.status_code}: {response.text}"
     )
 
 
 @pytest.mark.usefixtures("start_services")
-@pytest.mark.vllm
-@pytest.mark.gpu_1
 @pytest.mark.e2e
-@pytest.mark.model(REASONING_TEST_MODEL)
+@pytest.mark.model(TEST_MODEL)
 def test_completion_multi_element_array_prompt() -> None:
-    """Exercise completions with reasoning effort and prompt."""
-    reasoning_effort = "low"
 
     payload: Dict[str, Any] = {
-        "model": REASONING_TEST_MODEL,
+        "model": TEST_MODEL,
         "prompt": ["Tell me about Mars", "Tell me about Ceres"],
         "max_tokens": 2000,
-        "chat_template_args": {"reasoning_effort": reasoning_effort},
     }
 
     response = _send_completion_request(payload)
