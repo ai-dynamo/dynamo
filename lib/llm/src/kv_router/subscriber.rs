@@ -8,6 +8,7 @@ use std::{collections::HashSet, time::Duration};
 use anyhow::Result;
 use dynamo_runtime::{
     component::Component,
+    config::request_plane::RequestPlaneMode,
     prelude::*,
     traits::events::EventPublisher,
     transports::{
@@ -137,6 +138,68 @@ impl SnapshotResources {
     }
 }
 
+/// Start a minimal background task for HTTP mode that only handles etcd-based operations
+/// This avoids all NATS connections while maintaining essential functionality
+async fn start_http_mode_background(
+    component: Component,
+    remove_worker_tx: mpsc::Sender<crate::kv_router::indexer::WorkerId>,
+    cancellation_token: CancellationToken,
+) -> Result<()> {
+    // Get etcd client for instance watching
+    let etcd_client = component
+        .drt()
+        .etcd_client()
+        .ok_or_else(|| anyhow::anyhow!("etcd client not available"))?;
+
+    // Get the generate endpoint and watch for instance deletions
+    let generate_endpoint = component.endpoint("generate");
+    let (_instance_prefix, _instance_watcher, mut instance_event_rx) = etcd_client
+        .kv_get_and_watch_prefix(generate_endpoint.etcd_root())
+        .await?
+        .dissolve();
+
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+
+                _ = cancellation_token.cancelled() => {
+                    tracing::debug!("KV Router HTTP mode background task received cancellation signal");
+                    break;
+                }
+
+                // Handle generate endpoint instance deletion events
+                Some(event) = instance_event_rx.recv() => {
+                    let WatchEvent::Delete(kv) = event else {
+                        continue;
+                    };
+
+                    let key = String::from_utf8_lossy(kv.key());
+
+                    // Extract the hex worker ID after the colon (e.g., "generate:694d99badb9f7c07" -> "694d99badb9f7c07")
+                    let Some(worker_id_str) = key.split(':').next_back() else {
+                        tracing::warn!("Could not extract worker ID from instance key: {}", key);
+                        continue;
+                    };
+
+                    // Parse as hexadecimal (base 16)
+                    let Ok(worker_id) = i64::from_str_radix(worker_id_str, 16) else {
+                        tracing::warn!("Could not parse worker ID from instance key: {}", key);
+                        continue;
+                    };
+
+                    tracing::info!("Generate endpoint instance deleted, removing worker {} (HTTP mode)", worker_id);
+                    if let Err(e) = remove_worker_tx.send(worker_id).await {
+                        tracing::warn!("Failed to send worker removal for worker {}: {}", worker_id, e);
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
 /// Start a unified background task for event consumption and optional snapshot management
 #[allow(clippy::too_many_arguments)]
 pub async fn start_kv_router_background(
@@ -150,6 +213,22 @@ pub async fn start_kv_router_background(
     router_snapshot_threshold: Option<u32>,
     router_reset_states: bool,
 ) -> Result<()> {
+    // Check request plane mode - skip NATS operations in HTTP mode
+    let request_plane_mode = RequestPlaneMode::from_env();
+    if request_plane_mode.is_http() {
+        tracing::debug!(
+            "Skipping KV router NATS background task - request plane mode is '{}' (component: {})",
+            request_plane_mode,
+            component.subject()
+        );
+
+        // Start a minimal background task that only handles etcd-based operations
+        return start_http_mode_background(
+            component,
+            remove_worker_tx,
+            cancellation_token,
+        ).await;
+    }
     // Set up NATS connections
     let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
         .to_string()

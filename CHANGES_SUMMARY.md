@@ -75,6 +75,37 @@ if request_plane_mode.is_nats() {
 }
 ```
 
+### 3. `lib/llm/src/kv_router/subscriber.rs`
+
+**What Changed:**
+- Added import for `RequestPlaneMode`
+- Modified `start_kv_router_background` function to check request plane mode
+- Added new `start_http_mode_background` function for HTTP mode
+- Conditionally skip all NATS connections (NatsQueue, NATS client, object store) in HTTP mode
+
+**Code Change:**
+```rust
+// Import added
+use dynamo_runtime::config::request_plane::RequestPlaneMode;
+
+// Modified logic (lines 83-98)
+let request_plane_mode = RequestPlaneMode::from_env();
+if request_plane_mode.is_http() {
+    tracing::debug!(
+        "Skipping KV router NATS background task - request plane mode is '{}' (component: {})",
+        request_plane_mode,
+        component.subject()
+    );
+
+    // Start a minimal background task that only handles etcd-based operations
+    return start_http_mode_background(
+        component,
+        remove_worker_tx,
+        cancellation_token,
+    ).await;
+}
+```
+
 ## Behavior Changes
 
 ### NATS Mode (`DYN_REQUEST_PLANE=nats` or unset - default)
@@ -87,7 +118,7 @@ if request_plane_mode.is_nats() {
 
 **Before:** ✅ NATS stats enabled, ✅ KV metrics published (unnecessary)
 **After:** 🚫 NATS stats disabled, 🚫 KV metrics disabled
-**Result:** Clean HTTP mode - no NATS traffic except keep-alive
+**Result:** Clean HTTP mode - no NATS traffic at all
 
 ## NATS Traffic Comparison
 
@@ -105,8 +136,7 @@ if request_plane_mode.is_nats() {
 
 ### After Changes (HTTP mode)
 ```
-[TRC] - [PING]
-[TRC] - [PONG]
+# No NATS traffic at all - completely eliminated
 ```
 
 ## What Still Works in HTTP Mode

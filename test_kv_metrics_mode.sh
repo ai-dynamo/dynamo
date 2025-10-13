@@ -65,7 +65,7 @@ echo "   - PUB namespace.dynamo.kv_metrics"
 echo "   - PUB namespace-dynamo-component-backend-kv-events.queue"
 echo "   - SUB _INBOX.*"
 echo ""
-echo "4. You WILL still see PING/PONG (keep-alive)"
+echo "4. You should see NO NATS traffic at all (completely eliminated)"
 echo ""
 
 echo "=== Code Changes ==="

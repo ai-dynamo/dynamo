@@ -39,6 +39,21 @@ When `DYN_REQUEST_PLANE=http` is set, the KV event publishing to NATS is also di
 
 Instead of publishing to NATS, KV events are consumed by a dummy processor that discards them.
 
+### 4. KV Router Background Task Disabled
+
+**File:** `/home/ubuntu/dynamo/lib/llm/src/kv_router/subscriber.rs`
+
+When `DYN_REQUEST_PLANE=http` is set, the KV router background task that establishes NATS connections for event consumption and state management is completely disabled. This eliminates all remaining NATS traffic including:
+
+```
+[NATS connection establishment]
+[NATS queue creation and consumption]
+[NATS object store operations]
+[PING/PONG keep-alive messages]
+```
+
+Instead, a minimal HTTP-mode background task is started that only handles etcd-based operations like worker instance monitoring.
+
 ## Behavior by Mode
 
 ### NATS Mode (default: `DYN_REQUEST_PLANE=nats` or unset)
@@ -69,8 +84,7 @@ Instead of publishing to NATS, KV events are consumed by a dummy processor that 
 
 **NATS Traffic:**
 ```
-[TRC] - [PING]    # Minimal keep-alive only
-[TRC] - [PONG]
+# No NATS traffic at all - completely eliminated
 ```
 
 ## What Still Works in HTTP Mode
@@ -167,11 +181,10 @@ Look for these log messages when starting your service:
 
 ### NATS Server Logs
 
-In HTTP mode, you should only see minimal NATS traffic (PING/PONG keep-alive):
+In HTTP mode, you should see no NATS traffic at all:
 
 ```
-[TRC] 172.21.0.1:35294 - cid:147 - <<- [PING]
-[TRC] 172.21.0.1:35294 - cid:147 - ->> [PONG]
+# No NATS traffic - completely eliminated
 ```
 
 No `PUB $SRV.STATS.*` or `PUB namespace.dynamo.kv_metrics` messages should appear.
