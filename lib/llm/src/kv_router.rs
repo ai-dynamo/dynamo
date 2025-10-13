@@ -294,6 +294,9 @@ impl KvRouter {
                 kv_indexer.remove_worker_sender(),
                 kv_router_config
                     .router_snapshot_threshold
+                    .map(|_| kv_indexer.get_workers_sender()),
+                kv_router_config
+                    .router_snapshot_threshold
                     .map(|_| kv_indexer.snapshot_event_sender()),
                 cancellation_token.clone(),
                 kv_router_config.router_snapshot_threshold,
