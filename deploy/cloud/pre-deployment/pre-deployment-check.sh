@@ -5,6 +5,12 @@
 # Pre-deployment check script for Dynamo
 # This script verifies that the Kubernetes cluster has the necessary prerequisites
 # before deploying Dynamo platform.
+#
+# Checks performed:
+# 1. kubectl connectivity - Verifies kubectl is installed and can connect to cluster
+# 2. Default StorageClass - Ensures a default StorageClass is configured
+# 3. Cluster GPU Resources - Validates GPU nodes are available
+# 4. GPU Operator - Confirms GPU operator is installed and running
 
 set -e
 
@@ -114,21 +120,60 @@ check_default_storage_class() {
 }
 
 check_cluster_resources() {
-    print_section "Checking cluster gpu resources"
+    print_section "Checking cluster GPU resources"
 
     local node_count
     node_count=$(kubectl get nodes -l nvidia.com/gpu.present=true -o name 2>/dev/null | wc -l || echo "0")
 
     if [[ $node_count -eq 0 ]]; then
-        print_status $RED "❌ No nodes found in the cluster"
+        print_status $RED "❌ No GPU nodes found in the cluster"
+        print_status $YELLOW "Dynamo requires nodes with nvidia.com/gpu.present=true label."
+        print_status $BLUE "Please ensure your cluster has GPU-enabled nodes properly labeled."
         return 1
     else
-        print_status $GREEN "✅ Found ${node_count} gpu node(s) in the cluster"
+        print_status $GREEN "✅ Found ${node_count} GPU node(s) in the cluster"
+        return 0
     fi
 
-    # Show basic node information
-    # print_status $BLUE "Node information:"
+    # Show basic node information (commented out for cleaner output)
+    # print_status $BLUE "GPU Node information:"
     # kubectl get nodes -l nvidia.com/gpu.present=true -o custom-columns=NAME:.metadata.name,STATUS:.status.conditions[-1].type,ROLES:.metadata.labels.'node-role\.kubernetes\.io/.*',VERSION:.status.nodeInfo.kubeletVersion 2>/dev/null || true
+}
+
+check_gpu_operator() {
+    print_section "Checking GPU operator"
+
+    # Check if GPU operator pods exist and are running
+    local gpu_operator_pods
+    gpu_operator_pods=$(kubectl get pods -A -lapp=gpu-operator --no-headers 2>/dev/null || echo "")
+
+    if [[ -z "$gpu_operator_pods" ]]; then
+        print_status $RED "❌ GPU operator not found in the cluster"
+        print_status $YELLOW "Dynamo requires GPU operator to be installed and running."
+        print_status $BLUE "Please install GPU operator before proceeding with deployment."
+        return 1
+    fi
+
+    # Check if any GPU operator pods are running
+    local running_pods
+    running_pods=$(echo "$gpu_operator_pods" | grep -c "Running" || echo "0")
+    local total_pods
+    total_pods=$(echo "$gpu_operator_pods" | wc -l)
+
+    if [[ $running_pods -eq 0 ]]; then
+        print_status $RED "❌ GPU operator pods are not running"
+        print_status $YELLOW "Found $total_pods GPU operator pod(s) but none are in Running state:"
+        echo "$gpu_operator_pods"
+        return 1
+    elif [[ $running_pods -lt $total_pods ]]; then
+        print_status $YELLOW "⚠️  GPU operator partially running: $running_pods/$total_pods pods running"
+        echo "$gpu_operator_pods"
+        print_status $GREEN "✅ GPU operator is available (with warnings)"
+        return 0
+    else
+        print_status $GREEN "✅ GPU operator is running ($running_pods/$total_pods pods)"
+        return 0
+    fi
 }
 
 # Global variables to track check results
@@ -200,6 +245,13 @@ main() {
         record_check_result "Cluster GPU Resources" "PASS"
     else
         record_check_result "Cluster GPU Resources" "FAIL"
+        overall_exit_code=1
+    fi
+
+    if check_gpu_operator; then
+        record_check_result "GPU Operator" "PASS"
+    else
+        record_check_result "GPU Operator" "FAIL"
         overall_exit_code=1
     fi
 
