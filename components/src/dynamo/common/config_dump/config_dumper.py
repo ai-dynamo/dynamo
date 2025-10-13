@@ -187,6 +187,20 @@ def add_config_dump_args(parser: argparse.ArgumentParser):
     )
 
 
+try:
+    # trtllm uses pydantic, but it's not a hard dependency
+    import pydantic
+
+    def try_process_pydantic(obj: Any) -> Optional[dict]:
+        if isinstance(obj, pydantic.BaseModel):
+            return obj.model_dump()
+
+except ImportError:
+
+    def try_process_pydantic(obj: Any) -> Optional[dict]:
+        return None
+
+
 @functools.singledispatch
 def _preprocess_for_encode(obj: object) -> object:
     """
@@ -197,6 +211,10 @@ def _preprocess_for_encode(obj: object) -> object:
     """
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         return dataclasses.asdict(obj)
+
+    if (result := try_process_pydantic(obj)) is not None:
+        return result
+
     logger.warning(f"Unknown type {type(obj)}, using __dict__ or str(obj)")
     if hasattr(obj, "__dict__"):
         return obj.__dict__
