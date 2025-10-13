@@ -27,7 +27,7 @@ func isPythonCommand(cmd string) bool {
 	return matched
 }
 
-func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// Check for volumeMounts with useAsCompilationCache=true
 	for _, volumeMount := range component.VolumeMounts {
 		if volumeMount.UseAsCompilationCache {
@@ -112,7 +112,7 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	}
 }
 
-func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string) {
+func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string) {
 	// do nothing
 }
 

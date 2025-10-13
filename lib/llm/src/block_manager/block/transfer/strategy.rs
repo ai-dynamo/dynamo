@@ -93,7 +93,7 @@ impl WriteToStrategy<DeviceStorage> for PinnedStorage {
 impl WriteToStrategy<DiskStorage> for DeviceStorage {
     #[inline(always)]
     fn write_to_strategy() -> TransferStrategy {
-        TransferStrategy::Nixl(NixlTransfer::Read)
+        TransferStrategy::Nixl(NixlTransfer::Write)
     }
 }
 
