@@ -105,6 +105,10 @@ tracing-subscriber = { version = "0.3", features = [
     "local-time",
     "json",
 ] }
+tracing-opentelemetry = { version = "0.32.0" }
+opentelemetry = { version = "0.31.0", features = ["trace"] }
+opentelemetry_sdk = { version = "0.31.0", features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.31.0", features = ["trace", "grpc-tonic"] }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1.17", features = ["v4", "serde"] }
 url = { version = "2.5", features = ["serde"] }
