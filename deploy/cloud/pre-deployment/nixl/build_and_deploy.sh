@@ -177,17 +177,17 @@ build_nixlbench() {
     echo "Registry: $registry"
 
     NIXL_BUILD_DIR="/tmp/nixlbench-${NIXL_VERSION}"
-    rm -rf ${NIXL_BUILD_DIR}
-    mkdir -p ${NIXL_BUILD_DIR}
-    cd ${NIXL_BUILD_DIR}
+    rm -rf "${NIXL_BUILD_DIR}"
+    mkdir -p "${NIXL_BUILD_DIR}"
+    cd "${NIXL_BUILD_DIR}"
 
     echo "Downloading NIXL source..."
     wget https://github.com/ai-dynamo/nixl/archive/refs/tags/${NIXL_VERSION}.zip
-    unzip ${NIXL_VERSION}.zip
-    cd nixl-${NIXL_VERSION}/benchmark/nixlbench/contrib
+    unzip "${NIXL_VERSION}.zip"
+    cd "nixl-${NIXL_VERSION}/benchmark/nixlbench/contrib"
     read -p "Press Enter to continue"
     echo "Building Docker image..."
-    ./build.sh --tag ${registry}/nixlbench:${NIXL_VERSION}-${arch} --arch ${arch}
+    ./build.sh --tag "${registry}/nixlbench:${NIXL_VERSION}-${arch}" --arch "${arch}"
 
     echo "Build completed successfully!"
     echo "Image: ${registry}/nixlbench:${NIXL_VERSION}-${arch}"
