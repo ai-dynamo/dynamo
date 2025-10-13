@@ -189,7 +189,6 @@ pub fn make_engine<'p>(
 ) -> PyResult<Bound<'p, PyAny>> {
     let mut builder = LocalModelBuilder::default();
     builder
-        .model_path(args.model_path.clone())
         .model_name(args.model_name.clone())
         .endpoint_id(args.endpoint_id.clone())
         .context_length(args.context_length)
@@ -205,6 +204,9 @@ pub fn make_engine<'p>(
         .namespace(args.namespace.clone())
         .custom_backend_metrics_endpoint(args.custom_backend_metrics_endpoint.clone())
         .custom_backend_metrics_polling_interval(args.custom_backend_metrics_polling_interval);
+    if let Some(model_path) = args.model_path.clone() {
+        builder.model_path(model_path);
+    }
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let local_model = builder.build().await.map_err(to_pyerr)?;
         let inner = select_engine(distributed_runtime, args, local_model)
