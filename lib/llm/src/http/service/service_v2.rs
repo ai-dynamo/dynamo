@@ -274,11 +274,19 @@ impl HttpService {
                     error = %e,
                     "Failed to bind server to address"
                 );
-                anyhow::anyhow!(
-                    "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
-                    protocol,
-                    self.port
-                )
+                match e.kind() {
+                    std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
+                        "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
+                        protocol,
+                        self.port
+                    ),
+                    _ => anyhow::anyhow!(
+                        "Failed to start {} server on {}: {}",
+                        protocol,
+                        address,
+                        e
+                    ),
+                }
             })?;
 
             axum::serve(listener, router)
