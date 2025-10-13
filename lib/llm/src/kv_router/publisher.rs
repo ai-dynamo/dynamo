@@ -7,6 +7,8 @@ use crate::kv_router::{
     protocols::*,
     scoring::LoadEvent,
 };
+use async_trait::async_trait;
+use dynamo_runtime::config::request_plane::RequestPlaneMode;
 use dynamo_runtime::metrics::{MetricsRegistry, prometheus_names::kvstats};
 use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
 use dynamo_runtime::{
@@ -117,27 +119,45 @@ impl KvEventPublisher {
             )?);
         }
 
-        let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
-            .to_string()
-            .replace("_", "-");
-        let nats_server =
-            std::env::var("NATS_SERVER").unwrap_or_else(|_| "nats://localhost:4222".to_string());
-        // Create NatsQueue without consumer since we're only publishing
-        let mut nats_queue = NatsQueue::new_without_consumer(
-            stream_name,
-            nats_server,
-            std::time::Duration::from_secs(60), // 1 minute timeout
-        );
+        // Only start NATS event publishing if we're using NATS request plane mode
+        let request_plane_mode = RequestPlaneMode::from_env();
+        if request_plane_mode.is_nats() {
+            tracing::debug!("Starting NATS KV event publishing (worker_id: {})", worker_id);
 
-        // Connect the NatsQueue before passing it to the event processor
-        let cancellation_token_clone = cancellation_token.clone();
-        component.drt().runtime().secondary().spawn(async move {
-            if let Err(e) = nats_queue.connect().await {
-                tracing::error!("Failed to connect NatsQueue: {}", e);
-                return;
-            }
-            start_event_processor(nats_queue, worker_id, cancellation_token_clone, rx).await
-        });
+            let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
+                .to_string()
+                .replace("_", "-");
+            let nats_server =
+                std::env::var("NATS_SERVER").unwrap_or_else(|_| "nats://localhost:4222".to_string());
+            // Create NatsQueue without consumer since we're only publishing
+            let mut nats_queue = NatsQueue::new_without_consumer(
+                stream_name,
+                nats_server,
+                std::time::Duration::from_secs(60), // 1 minute timeout
+            );
+
+            // Connect the NatsQueue before passing it to the event processor
+            let cancellation_token_clone = cancellation_token.clone();
+            component.drt().runtime().secondary().spawn(async move {
+                if let Err(e) = nats_queue.connect().await {
+                    tracing::error!("Failed to connect NatsQueue: {}", e);
+                    return;
+                }
+                start_event_processor(nats_queue, worker_id, cancellation_token_clone, rx).await
+            });
+        } else {
+            tracing::debug!(
+                "Skipping NATS KV event publishing - request plane mode is '{}' (worker_id: {})",
+                request_plane_mode,
+                worker_id
+            );
+
+            // Start a dummy event processor that just consumes events without publishing
+            let cancellation_token_clone = cancellation_token.clone();
+            component.drt().runtime().secondary().spawn(async move {
+                start_dummy_event_processor(worker_id, cancellation_token_clone, rx).await
+            });
+        }
 
         Ok(Self {
             kv_block_size,
@@ -199,6 +219,36 @@ async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
             }
         }
     }
+}
+
+/// Dummy event processor that consumes KV events without publishing them to NATS
+/// Used in HTTP mode to prevent NATS traffic while still allowing the KV event system to function
+async fn start_dummy_event_processor(
+    worker_id: i64,
+    cancellation_token: CancellationToken,
+    mut rx: mpsc::UnboundedReceiver<KvCacheEvent>,
+) {
+    tracing::debug!("Starting dummy KV event processor for worker_id {} (HTTP mode)", worker_id);
+
+    loop {
+        tokio::select! {
+            _ = cancellation_token.cancelled() => {
+                tracing::debug!("Dummy KV event processor received cancellation signal for worker_id {}", worker_id);
+                break;
+            }
+            event = rx.recv() => {
+                let Some(event) = event else {
+                    tracing::debug!("Dummy event processor channel closed for worker_id {}", worker_id);
+                    break;
+                };
+
+                // Just log and discard the event (no NATS publishing in HTTP mode)
+                tracing::trace!("Dummy event processor for worker_id {} discarding event: {:?}", worker_id, event.data);
+            }
+        }
+    }
+
+    tracing::debug!("Dummy KV event processor stopped for worker_id {}", worker_id);
 }
 
 // Error handling configuration for ZMQ operations
@@ -792,8 +842,18 @@ impl WorkerMetricsPublisher {
                 tracing::warn!("Component is static, assuming worker_id of 0");
                 0
             });
-
-        self.start_nats_metrics_publishing(component.namespace().clone(), worker_id);
+        // Only start NATS metrics publishing if we're using NATS request plane mode
+        let request_plane_mode = RequestPlaneMode::from_env();
+        if request_plane_mode.is_nats() {
+            tracing::debug!("Starting NATS metrics publishing for KV metrics (worker_id: {})", worker_id);
+            self.start_nats_metrics_publishing(component.namespace().clone(), worker_id);
+        } else {
+            tracing::debug!(
+                "Skipping NATS metrics publishing for KV metrics - request plane mode is '{}' (worker_id: {})",
+                request_plane_mode,
+                worker_id
+            );
+        }
         Ok(())
     }
 
