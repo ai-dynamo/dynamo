@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import time
 from typing import Any, Dict
 
 import pytest
@@ -16,10 +17,11 @@ from tests.conftest import EtcdServer, NatsServer
 from tests.utils.constants import QWEN
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
-import time
+
 logger = logging.getLogger(__name__)
 
 TEST_MODEL = QWEN
+
 
 class DynamoFrontendProcess(ManagedProcess):
     """Process manager for Dynamo frontend"""
@@ -46,7 +48,6 @@ class DynamoFrontendProcess(ManagedProcess):
 
 
 class MockWorkerProcess(ManagedProcess):
-
     def __init__(self, request, worker_id: str = "mocker-worker"):
         self.worker_id = worker_id
 
@@ -57,7 +58,7 @@ class MockWorkerProcess(ManagedProcess):
             "--model-path",
             TEST_MODEL,
             "--speedup-ratio",
-            "100"
+            "100",
         ]
 
         env = os.environ.copy()
@@ -143,7 +144,6 @@ def start_services(request, runtime_services):
 @pytest.mark.e2e
 @pytest.mark.model(TEST_MODEL)
 def test_completion_string_prompt() -> None:
-
     payload: Dict[str, Any] = {
         "model": TEST_MODEL,
         "prompt": "Tell me about Mars",
@@ -157,11 +157,11 @@ def test_completion_string_prompt() -> None:
         f"{response.status_code}: {response.text}"
     )
 
+
 @pytest.mark.usefixtures("start_services")
 @pytest.mark.e2e
 @pytest.mark.model(TEST_MODEL)
 def test_completion_single_element_array_prompt() -> None:
-
     payload: Dict[str, Any] = {
         "model": TEST_MODEL,
         "prompt": ["Tell me about Mars"],
@@ -180,7 +180,6 @@ def test_completion_single_element_array_prompt() -> None:
 @pytest.mark.e2e
 @pytest.mark.model(TEST_MODEL)
 def test_completion_multi_element_array_prompt() -> None:
-
     payload: Dict[str, Any] = {
         "model": TEST_MODEL,
         "prompt": ["Tell me about Mars", "Tell me about Ceres"],
