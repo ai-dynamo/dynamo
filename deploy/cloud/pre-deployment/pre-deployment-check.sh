@@ -1,8 +1,10 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 # Pre-deployment check script for Dynamo
 # This script verifies that the Kubernetes cluster has the necessary prerequisites
-# before deploying Dynamo components.
+# before deploying Dynamo platform.
 
 set -e
 
@@ -61,7 +63,7 @@ check_default_storage_class() {
     if [[ -z "$default_storage_classes" ]]; then
         print_status $RED "❌ No default StorageClass found"
         print_status $YELLOW "\nDynamo requires a default StorageClass for persistent volume provisioning."
-        print_status $YELLOW "Please configure a default StorageClass before proceeding with deployment.\n"
+        print_status $BLUE "Please follow the instructions below to configure a default StorageClass before proceeding with deployment.\n"
 
         # Show available storage classes
         print_status $BLUE "Available StorageClasses in your cluster:"
