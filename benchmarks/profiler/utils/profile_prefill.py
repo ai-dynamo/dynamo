@@ -6,8 +6,8 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from benchmarks.profiler.utils.aiperf import benchmark_prefill
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
-from benchmarks.profiler.utils.genai_perf import benchmark_prefill
 from benchmarks.profiler.utils.plot import plot_prefill_interpolation
 
 logger = logging.getLogger(__name__)

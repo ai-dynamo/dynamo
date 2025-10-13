@@ -6,9 +6,9 @@ from typing import Callable, Optional, Tuple
 
 import numpy as np
 
+from benchmarks.profiler.utils.aiperf import benchmark_decode
 from benchmarks.profiler.utils.defaults import DECODE_MAX_CONCURRENCY
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
-from benchmarks.profiler.utils.genai_perf import benchmark_decode
 from benchmarks.profiler.utils.plot import plot_decode_3d_surface
 
 logger = logging.getLogger(__name__)
