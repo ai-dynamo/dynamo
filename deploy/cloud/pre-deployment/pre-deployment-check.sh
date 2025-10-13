@@ -197,9 +197,9 @@ main() {
     fi
 
     if check_cluster_resources; then
-        record_check_result "Cluster Resources" "PASS"
+        record_check_result "Cluster GPU Resources" "PASS"
     else
-        record_check_result "Cluster Resources" "FAIL"
+        record_check_result "Cluster GPU Resources" "FAIL"
         overall_exit_code=1
     fi
 
