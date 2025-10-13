@@ -56,13 +56,13 @@ class DependencyExtractor:
         self.github_repo = github_repo
         self.github_branch = github_branch
         self.baseline_count = 251  # Baseline dependency count for warnings
-        
+
         # Error tracking
         self.missing_files: List[Dict[str, str]] = []
         self.processed_files: Set[str] = set()
         self.failed_files: List[Dict[str, str]] = []
         self.warnings: List[str] = []
-        
+
         # Previous dependencies for comparison (latest nightly and release)
         self.previous_latest_dependencies: Dict[str, Dict[str, str]] = {}
         self.previous_release_dependencies: Dict[str, Dict[str, str]] = {}
@@ -71,7 +71,7 @@ class DependencyExtractor:
             self.load_previous_csv(previous_latest_csv, "latest")
         if previous_release_csv:
             self.load_previous_csv(previous_release_csv, "release")
-        
+
         # Load configuration
         self.config = self.load_config(config_path)
 
@@ -224,7 +224,7 @@ class DependencyExtractor:
         if not csv_path.exists():
             self.warnings.append(f"Previous {csv_type} CSV not found: {csv_path}")
             return
-        
+
         # Select the appropriate storage dict
         target_dict = (
             self.previous_latest_dependencies
@@ -256,27 +256,27 @@ class DependencyExtractor:
                 )
         except Exception as e:
             self.warnings.append(f"Error loading previous {csv_type} CSV: {e}")
-    
+
     def load_config(self, config_path: Optional[Path] = None) -> dict:
         """Load configuration from YAML or JSON file."""
         if config_path is None:
             # Default to extract_dependency_versions_config.yaml in same directory as script
             script_dir = Path(__file__).parent
             config_path = script_dir / "extract_dependency_versions_config.yaml"
-        
+
         if not config_path.exists():
             self.warnings.append(
                 f"Config file not found: {config_path}. Using defaults."
             )
             return self._get_default_config()
-        
+
         try:
             with open(config_path) as f:
                 if HAS_YAML and (config_path.suffix in [".yaml", ".yml"]):
                     config = yaml.safe_load(f)
                 else:
                     config = json.load(f)
-            
+
             # Update settings from config
             if "github" in config:
                 self.github_repo = config["github"].get("repo", self.github_repo)
@@ -286,12 +286,12 @@ class DependencyExtractor:
                 self.baseline_count = config["baseline"].get(
                     "dependency_count", self.baseline_count
                 )
-            
+
             return config
         except Exception as e:
             self.warnings.append(f"Error loading config: {e}. Using defaults.")
             return self._get_default_config()
-    
+
     def _get_default_config(self) -> dict:
         """Return default configuration if config file is not available."""
         return {
@@ -326,29 +326,29 @@ class DependencyExtractor:
                 },
             }
         }
-    
+
     def discover_files(self, patterns: List[str]) -> List[Path]:
         """Find files matching patterns with fallback locations."""
         found_files = []
-        
+
         for pattern in patterns:
             # Try direct path first
             file_path = self.repo_root / pattern
             if file_path.exists() and file_path.is_file():
                 found_files.append(file_path)
                 continue
-            
+
             # Try glob pattern
             glob_results = list(self.repo_root.glob(pattern))
             if glob_results:
                 found_files.extend([p for p in glob_results if p.is_file()])
-        
+
         return found_files
-    
+
     def discover_requirements_files(self, req_config: List) -> List[Path]:
         """Discover requirements files using patterns and exclusions."""
         found_files = []
-        
+
         for item in req_config:
             if isinstance(item, dict):
                 pattern = item.get("pattern", "")
@@ -356,10 +356,10 @@ class DependencyExtractor:
             else:
                 pattern = item
                 exclude = []
-            
+
             # Find files matching pattern
             matches = list(self.repo_root.glob(pattern))
-            
+
             # Filter out exclusions
             for match in matches:
                 if match.is_file():
@@ -370,19 +370,19 @@ class DependencyExtractor:
                             break
                     if not excluded:
                         found_files.append(match)
-        
+
         return found_files
-    
+
     def validate_critical_files(self, strict_mode: bool = False) -> bool:
         """Validate that critical files exist."""
         all_valid = True
-        
+
         if "components" not in self.config:
             return True
-        
+
         for component_name, component_config in self.config["components"].items():
             is_required = component_config.get("required", False)
-            
+
             # Check dockerfiles
             dockerfiles = component_config.get("dockerfiles", [])
             if dockerfiles:
@@ -398,24 +398,24 @@ class DependencyExtractor:
                     )
                     if strict_mode:
                         all_valid = False
-        
+
         return all_valid
 
     def _make_github_url(self, file_path: str, line_number: str) -> str:
         """Generate GitHub URL for a specific file and line number."""
         if file_path == "N/A" or line_number == "N/A":
             return "N/A"
-        
+
         # Clean the file path
         file_path = file_path.replace("\\", "/")
-        
+
         # Create GitHub URL
         url = f"https://github.com/{self.github_repo}/blob/{self.github_branch}/{file_path}"
-        
+
         # Add line number if available
         if line_number and line_number.isdigit():
             url += f"#L{line_number}"
-        
+
         return url
 
     def _format_dependency_name(self, name: str, category: str, version: str) -> str:
@@ -648,7 +648,7 @@ class DependencyExtractor:
     ):
         """Add a dependency entry to the list."""
         github_url = self._make_github_url(source_file, line_ref)
-        
+
         # Format the dependency name for human readability
         formatted_name = self._format_dependency_name(name, category, version)
 
@@ -712,14 +712,14 @@ class DependencyExtractor:
 
         self.dependencies.append(
             {
-            "Component": component,
-            "Category": category,
+                "Component": component,
+                "Category": category,
                 "Dependency Name": formatted_name,
-            "Version": version,
-            "Source File": source_file,
-            "GitHub URL": github_url,
+                "Version": version,
+                "Source File": source_file,
+                "GitHub URL": github_url,
                 "Package Source URL": package_source_url,
-            "Status": status,
+                "Status": status,
                 "Diff from Latest": diff_from_latest,
                 "Diff from Release": diff_from_release,
                 "Critical": "Yes" if is_critical else "No",
@@ -739,44 +739,44 @@ class DependencyExtractor:
                 }
             )
             return
-        
+
         try:
             self.processed_files.add(str(dockerfile_path.relative_to(self.repo_root)))
-            
+
             with open(dockerfile_path) as f:
                 lines = f.readlines()
-            
+
             # Build a dictionary of ARG values for variable substitution
             arg_values = {}
-            
+
             # Combine multiline RUN commands (lines ending with \)
             combined_lines = []
             i = 0
             while i < len(lines):
                 line = lines[i]
                 line_num = i + 1
-                
+
                 # Check if this is a continuation line
-                if line.rstrip().endswith('\\'):
+                if line.rstrip().endswith("\\"):
                     # Collect all continuation lines
                     combined = line.rstrip()[:-1]  # Remove the backslash
                     start_line = line_num
                     i += 1
-                    while i < len(lines) and lines[i-1].rstrip().endswith('\\'):
-                        combined += ' ' + lines[i].strip().rstrip('\\')
+                    while i < len(lines) and lines[i - 1].rstrip().endswith("\\"):
+                        combined += " " + lines[i].strip().rstrip("\\")
                         i += 1
                     # Add the final line
                     if i < len(lines):
-                        combined += ' ' + lines[i].strip()
+                        combined += " " + lines[i].strip()
                         i += 1
                     combined_lines.append((start_line, combined))
                 else:
                     combined_lines.append((line_num, line))
                     i += 1
-            
+
             for i, line in combined_lines:
                 line = line.strip()
-                
+
                 # Collect ARG values
                 if line.startswith("ARG ") and "=" in line:
                     arg_line = line[4:].strip()
@@ -785,7 +785,7 @@ class DependencyExtractor:
                         key = key.strip()
                         value = value.strip().strip('"')
                         arg_values[key] = value
-                        
+
                         # Extract version-related ARGs
                         version_keywords = ["VERSION", "REF", "TAG", "_VER"]
                         if any(kw in key for kw in version_keywords):
@@ -805,18 +805,18 @@ class DependencyExtractor:
                                 str(i),
                                 f"ARG: {key}",
                             )
-                
+
                 # Extract base images with variable resolution
                 if line.startswith("FROM ") and "AS" in line:
                     parts = line.split()
                     image = parts[1]
                     if ":" in image:
                         img_name, tag = image.rsplit(":", 1)
-                        
+
                         # Resolve variables in image name and tag
                         img_name = self._resolve_dockerfile_vars(img_name, arg_values)
                         tag = self._resolve_dockerfile_vars(tag, arg_values)
-                        
+
                         # Only add if not just variable names
                         if not (img_name.startswith("${") or tag.startswith("${")):
                             self.add_dependency(
@@ -828,22 +828,22 @@ class DependencyExtractor:
                                 str(i),
                                 "Build/Runtime base image",
                             )
-                
+
                 # Extract versions from wget/curl GitHub releases
                 # Pattern: RUN wget/curl https://github.com/org/repo/releases/download/vX.Y.Z/...
                 if line.startswith("RUN ") and ("wget" in line or "curl" in line):
                     if "github.com" in line and "/releases/download/" in line:
                         # Extract version from GitHub release URL
-                        url_pattern = r'github\.com/([^/]+)/([^/]+)/releases/download/(v?[\d.]+[^/\s]*)'
+                        url_pattern = r"github\.com/([^/]+)/([^/]+)/releases/download/(v?[\d.]+[^/\s]*)"
                         url_match = re.search(url_pattern, line)
                         if url_match:
                             org = url_match.group(1)
                             repo = url_match.group(2)
                             version = url_match.group(3)
-                            
+
                             # Create a readable name from the repo
                             pkg_name = repo.replace("-", " ").title()
-                            
+
                             self.add_dependency(
                                 component,
                                 "Binary Package",
@@ -861,28 +861,28 @@ class DependencyExtractor:
                     "reason": f"Extraction error: {str(e)}",
                 }
             )
-    
+
     def _resolve_dockerfile_vars(self, text: str, arg_values: dict) -> str:
         """Resolve Dockerfile variables like ${VAR} or $VAR to their values."""
         if not text or "$" not in text:
             return text
-        
+
         # Handle ${VAR} syntax
         import re
 
         def replace_var(match):
             var_name = match.group(1)
             return arg_values.get(var_name, match.group(0))
-        
+
         text = re.sub(r"\$\{([A-Z_][A-Z0-9_]*)\}", replace_var, text)
-        
+
         # Handle $VAR syntax (without braces)
         def replace_simple_var(match):
             var_name = match.group(1)
             return arg_values.get(var_name, match.group(0))
-        
+
         text = re.sub(r"\$([A-Z_][A-Z0-9_]*)", replace_simple_var, text)
-        
+
         return text
 
     def extract_requirements_file(
@@ -898,28 +898,28 @@ class DependencyExtractor:
                 }
             )
             return
-        
+
         try:
             self.processed_files.add(str(req_file.relative_to(self.repo_root)))
-            
+
             with open(req_file) as f:
                 lines = f.readlines()
-            
+
             for i, line in enumerate(lines, 1):
                 line = line.strip()
-                
+
                 # Skip comments and empty lines
                 if not line or line.startswith("#"):
                     continue
-                
+
                 # Remove inline comments
                 if "#" in line:
                     line = line.split("#")[0].strip()
-                
+
                 # Skip lines with just flags/options
                 if line.startswith(("-", "--")):
                     continue
-                
+
                 # Enhanced parsing for multiple version specifier formats
                 # Supports: ==, >=, <=, >, <, ~=, !=, @, [extras]
                 # Examples: package==1.0, package>=1.0,<2.0, package[extra]==1.0, package @ url
@@ -931,12 +931,12 @@ class DependencyExtractor:
                     extras = match.group(2) or ""
                     operator = match.group(3) or ""
                     version_part = match.group(4).strip() if match.group(4) else ""
-                    
+
                     # Build full package name with extras
                     full_package_name = (
                         package_name + extras if extras else package_name
                     )
-                    
+
                     # Determine version
                     if operator and version_part:
                         # Handle special cases
@@ -954,7 +954,7 @@ class DependencyExtractor:
                             version = f"{operator}{version_part}"
                     else:
                         version = "unspecified"
-                    
+
                     self.add_dependency(
                         component,
                         category,
@@ -984,22 +984,22 @@ class DependencyExtractor:
                 }
             )
             return
-        
+
         try:
             self.processed_files.add(str(pyproject_path.relative_to(self.repo_root)))
-            
+
             with open(pyproject_path) as f:
                 content = f.read()
                 lines = content.split("\n")
-            
+
             in_dependencies = False
             in_optional = False
             current_optional = None
             in_tool_section = False  # Track if we're in a [tool.*] section
-            
+
             for i, line in enumerate(lines, 1):
                 stripped = line.strip()
-                
+
                 # Track if we enter a [tool.*] section (like [tool.pytest.ini_options])
                 if stripped.startswith("[tool."):
                     in_tool_section = True
@@ -1014,7 +1014,7 @@ class DependencyExtractor:
                 # Skip everything in tool sections
                 if in_tool_section:
                     continue
-                
+
                 # Extract project version
                 if stripped.startswith("version = "):
                     version = stripped.split("=", 1)[1].strip().strip('"')
@@ -1032,7 +1032,7 @@ class DependencyExtractor:
                                 "Project version",
                             )
                             break
-                
+
                 # Track sections
                 if stripped == "dependencies = [":
                     in_dependencies = True
@@ -1044,13 +1044,13 @@ class DependencyExtractor:
                     in_dependencies = False
                 elif stripped == "]" and in_dependencies:
                     in_dependencies = False
-                
+
                 # Extract optional dependency group names
                 if in_optional and "= [" in stripped:
                     current_optional = stripped.split("=")[0].strip()
                 elif stripped == "]" and in_optional and current_optional:
                     current_optional = None
-                
+
                 # Extract dependency specs - enhanced version detection
                 if (in_dependencies or current_optional) and stripped.startswith('"'):
                     # Parse "package==version" or "package>=version"
@@ -1064,12 +1064,12 @@ class DependencyExtractor:
                         extras = match.group(2) or ""
                         operator = match.group(3) or ""
                         version_part = match.group(4) if match.group(4) else ""
-                        
+
                         # Build full package name with extras
                         full_package_name = (
                             package_name + extras if extras else package_name
                         )
-                        
+
                         # Determine version with enhanced handling
                         if operator and version_part:
                             if operator == "@":
@@ -1084,7 +1084,7 @@ class DependencyExtractor:
                                 version = f"{operator}{version_part}"
                         else:
                             version = "unspecified"
-                        
+
                         category = (
                             f"Python Package ({current_optional})"
                             if current_optional
@@ -1371,15 +1371,15 @@ class DependencyExtractor:
         if not go_mod_path.exists():
             print(f"Warning: {go_mod_path} not found")
             return
-        
+
         with open(go_mod_path) as f:
             lines = f.readlines()
-        
+
         in_require = False
-        
+
         for i, line in enumerate(lines, 1):
             stripped = line.strip()
-            
+
             # Extract Go version
             if stripped.startswith("go "):
                 version = stripped.split()[1]
@@ -1392,7 +1392,7 @@ class DependencyExtractor:
                     str(i),
                     "Go version",
                 )
-            
+
             # Extract toolchain
             if stripped.startswith("toolchain "):
                 version = stripped.split()[1]
@@ -1405,7 +1405,7 @@ class DependencyExtractor:
                     str(i),
                     "Go toolchain version",
                 )
-            
+
             # Track require block
             if stripped.startswith("require ("):
                 in_require = True
@@ -1413,22 +1413,22 @@ class DependencyExtractor:
             elif stripped == ")" and in_require:
                 in_require = False
                 continue
-            
+
             # Extract dependencies
             if in_require or (stripped.startswith("require ") and "(" not in stripped):
                 # Handle single-line require
                 if stripped.startswith("require "):
                     stripped = stripped[8:].strip()
-                
+
                 parts = stripped.split()
                 if len(parts) >= 2:
                     module = parts[0]
                     version = parts[1]
-                    
+
                     # Skip indirect dependencies for cleaner output (optional)
                     # if '// indirect' in line:
                     #     continue
-                    
+
                     self.add_dependency(
                         component,
                         "Go Module",
@@ -1446,10 +1446,10 @@ class DependencyExtractor:
         if not script_path.exists():
             print(f"Warning: {script_path} not found")
             return
-        
+
         with open(script_path) as f:
             lines = f.readlines()
-        
+
         for i, line in enumerate(lines, 1):
             # Skip lines with command substitution (runtime-determined versions)
             if "$(" in line or "`" in line:
@@ -1457,18 +1457,24 @@ class DependencyExtractor:
 
             # Look for wget/curl GitHub releases with versions in URLs
             # Pattern: wget/curl https://github.com/org/repo/releases/download/vX.Y.Z/...
-            if ("wget" in line or "curl" in line) and "github.com" in line and "/releases/download/" in line:
+            if (
+                ("wget" in line or "curl" in line)
+                and "github.com" in line
+                and "/releases/download/" in line
+            ):
                 # Extract version from GitHub release URL
-                url_pattern = r'github\.com/([^/]+)/([^/]+)/releases/download/(v?[\d.]+[^/\s]*)'
+                url_pattern = (
+                    r"github\.com/([^/]+)/([^/]+)/releases/download/(v?[\d.]+[^/\s]*)"
+                )
                 url_match = re.search(url_pattern, line)
                 if url_match:
                     org = url_match.group(1)
                     repo = url_match.group(2)
                     version = url_match.group(3)
-                    
+
                     # Create a readable name from the repo
                     pkg_name = repo.replace("-", " ").title()
-                    
+
                     self.add_dependency(
                         component,
                         "Binary Package",
@@ -1484,14 +1490,13 @@ class DependencyExtractor:
             if "install" in line and "==" in line:
                 # Extract all package==version patterns from the line
                 install_patterns = re.findall(
-                    r'([a-zA-Z0-9_-]+)==([a-zA-Z0-9._+\-]+)',
-                    line
+                    r"([a-zA-Z0-9_-]+)==([a-zA-Z0-9._+\-]+)", line
                 )
                 for pkg_name, pkg_version in install_patterns:
                     # Skip common shell variables that might match pattern
                     if pkg_name.isupper():
                         continue
-                    
+
                     self.add_dependency(
                         component,
                         "Python Package",
@@ -1511,7 +1516,7 @@ class DependencyExtractor:
                 if match:
                     var_name = match.group(1)
                     value = match.group(2)
-                    
+
                     # Skip variables that are just defaults or empty
                     if value and value not in ['""', "''", "$2"]:
                         self.add_dependency(
@@ -1527,16 +1532,16 @@ class DependencyExtractor:
     def extract_all(self) -> None:
         """Extract all dependencies from all sources using configuration."""
         print("Extracting dependencies...")
-        
+
         if "components" not in self.config:
             print("Warning: No components defined in config. Using hardcoded paths.")
             self._extract_all_legacy()
             return
-        
+
         # Process each component from config
         for component_name, component_config in self.config["components"].items():
             print(f"  - Processing {component_name}...")
-            
+
             # Extract from Dockerfiles
             dockerfiles = component_config.get("dockerfiles", [])
             if dockerfiles:
@@ -1548,21 +1553,21 @@ class DependencyExtractor:
                     self.warnings.append(
                         f"No Dockerfiles found for {component_name}: {dockerfiles}"
                     )
-            
+
             # Extract from installation scripts
             scripts = component_config.get("scripts", [])
             if scripts:
                 found_scripts = self.discover_files(scripts)
                 for script in found_scripts:
                     self.extract_install_script(script, component_name)
-            
+
             # Extract from Go modules
             go_modules = component_config.get("go_modules", [])
             if go_modules:
                 found_go_mods = self.discover_files(go_modules)
                 for go_mod in found_go_mods:
                     self.extract_go_mod(go_mod, component_name)
-            
+
             # Extract from requirements files
             requirements = component_config.get("requirements", [])
             if requirements:
@@ -1579,14 +1584,14 @@ class DependencyExtractor:
                     else:
                         category = "Python Package"
                     self.extract_requirements_file(req_file, component_name, category)
-            
+
             # Extract from pyproject.toml files
             pyproject = component_config.get("pyproject", [])
             if pyproject:
                 found_pyprojects = self.discover_files(pyproject)
                 for pyproject_file in found_pyprojects:
                     self.extract_pyproject_toml(pyproject_file, component_name)
-        
+
             # Extract from docker-compose.yml files
             docker_compose = component_config.get("docker_compose", [])
             if docker_compose:
@@ -1623,7 +1628,7 @@ class DependencyExtractor:
                 )  # Use pattern-aware discovery
                 for recipe_file in found_recipes:
                     self.extract_k8s_recipe_yaml(recipe_file, component_name)
-        
+
         # Add note about transitive dependencies
         self.add_dependency(
             "shared",
@@ -1635,9 +1640,9 @@ class DependencyExtractor:
             "Transitive dependencies from vLLM, SGLang, and TensorRT-LLM are NOT captured in this CSV. "
             "These frameworks have their own dependency trees that would need to be extracted separately.",
         )
-        
+
         print(f"✓ Extracted {len(self.dependencies)} dependencies")
-    
+
     def _extract_all_legacy(self) -> None:
         """Legacy extraction method (fallback when config unavailable)."""
         # TRT-LLM
@@ -1645,7 +1650,7 @@ class DependencyExtractor:
         self.extract_dockerfile_args(
             self.repo_root / "container/Dockerfile.trtllm", "trtllm"
         )
-        
+
         # vLLM
         print("  - vLLM Dockerfile...")
         self.extract_dockerfile_args(
@@ -1654,24 +1659,24 @@ class DependencyExtractor:
         self.extract_install_script(
             self.repo_root / "container/deps/vllm/install_vllm.sh", "vllm"
         )
-        
+
         # SGLang
         print("  - SGLang Dockerfile...")
         self.extract_dockerfile_args(
             self.repo_root / "container/Dockerfile.sglang", "sglang"
         )
-        
+
         # Operator
         print("  - Operator Dockerfile...")
         self.extract_dockerfile_args(
             self.repo_root / "deploy/cloud/operator/Dockerfile", "operator"
         )
         self.extract_go_mod(self.repo_root / "deploy/cloud/operator/go.mod", "operator")
-        
+
         # Base Dockerfile (shared)
         print("  - Base Dockerfile...")
         self.extract_dockerfile_args(self.repo_root / "container/Dockerfile", "shared")
-        
+
         # Python requirements files
         print("  - Requirements files...")
         for req_file in [
@@ -1692,7 +1697,7 @@ class DependencyExtractor:
                     else "Python Package"
                 )
                 self.extract_requirements_file(path, "shared", category)
-        
+
         # PyProject files
         print("  - PyProject files...")
         self.extract_pyproject_toml(self.repo_root / "pyproject.toml", "shared")
@@ -1703,7 +1708,7 @@ class DependencyExtractor:
     def write_csv(self, output_path: Path) -> None:
         """Write dependencies to CSV file."""
         print(f"Writing to {output_path}...")
-        
+
         # Sort dependencies: First by Component, then Critical (Yes before No), then by name
         def sort_key(dep):
             component_order = {
@@ -1741,7 +1746,7 @@ class DependencyExtractor:
             )
             writer.writeheader()
             writer.writerows(sorted_dependencies)
-        
+
         # Print change summary if comparing with previous
         if self.previous_latest_dependencies or self.previous_release_dependencies:
             new_count = sum(1 for d in self.dependencies if d["Status"] == "New")
@@ -1752,7 +1757,7 @@ class DependencyExtractor:
                 1 for d in self.dependencies if d["Status"] == "Unchanged"
             )
             removed = self.get_removed_dependencies()
-            
+
             print(f"✓ Written {len(self.dependencies)} dependencies to {output_path}")
             print("  Changes since previous version:")
             print(f"    New: {new_count}")
@@ -1811,13 +1816,13 @@ class DependencyExtractor:
             for dep in self.dependencies
             if dep["Version"] in ["unspecified", "N/A", "", "latest"]
         ]
-        
+
         if not unversioned:
             print("✓ No unversioned dependencies to report")
             return
-        
+
         print(f"Writing unversioned dependencies report to {output_path}...")
-        
+
         with open(output_path, "w", newline="") as f:
             writer = csv.DictWriter(
                 f,
@@ -1833,14 +1838,14 @@ class DependencyExtractor:
                 ],
             )
             writer.writeheader()
-            
+
             for dep in unversioned:
                 dep_copy = dep.copy()
                 dep_copy[
                     "Recommendation"
                 ] = "Pin to specific version for reproducible builds"
                 writer.writerows([dep_copy])
-        
+
         print(f"✓ Written {len(unversioned)} unversioned dependencies to {output_path}")
 
     def print_summary(self) -> None:
@@ -1848,63 +1853,63 @@ class DependencyExtractor:
         components = {}
         unversioned = []
         unversioned_by_component = {}
-        
+
         for dep in self.dependencies:
             comp = dep["Component"]
             components[comp] = components.get(comp, 0) + 1
-            
+
             # Track unversioned dependencies
             if dep["Version"] in ["unspecified", "N/A", "", "latest"]:
                 unversioned.append(dep)
                 if comp not in unversioned_by_component:
                     unversioned_by_component[comp] = []
                 unversioned_by_component[comp].append(dep)
-        
+
         total_deps = len(self.dependencies)
-        
+
         # Print extraction summary
         print("\n" + "=" * 60)
         print("EXTRACTION SUMMARY")
         print("=" * 60)
-        
+
         print(f"\nFiles Processed: {len(self.processed_files)}")
         if self.processed_files:
             for file in sorted(self.processed_files)[:10]:
                 print(f"  ✓ {file}")
             if len(self.processed_files) > 10:
                 print(f"  ... and {len(self.processed_files) - 10} more")
-        
+
         if self.failed_files:
             print(f"\nFiles Failed: {len(self.failed_files)}")
             for failed in self.failed_files:
                 print(
                     f"  ✗ {failed['file']} ({failed['component']}): {failed['reason']}"
                 )
-        
+
         if self.missing_files:
             print(f"\nFiles Missing: {len(self.missing_files)}")
             for missing in self.missing_files:
                 req_str = "REQUIRED" if missing.get("required") else "optional"
                 print(f"  - {missing['component']}/{missing['type']} ({req_str})")
                 print(f"    Tried: {missing['patterns']}")
-        
+
         if self.warnings:
             print(f"\nWarnings: {len(self.warnings)}")
             for warning in self.warnings[:5]:
                 print(f"  ⚠ {warning}")
             if len(self.warnings) > 5:
                 print(f"  ... and {len(self.warnings) - 5} more warnings")
-        
+
         print("\n" + "=" * 60)
         print("DEPENDENCY SUMMARY")
         print("=" * 60)
-        
+
         print("\nSummary by component:")
         for comp, count in sorted(components.items()):
             print(f"  {comp:15s}: {count:3d} dependencies")
-        
+
         print(f"\nTotal dependencies: {total_deps}")
-        
+
         # Check for unversioned dependencies
         if unversioned:
             print(
@@ -1918,7 +1923,7 @@ class DependencyExtractor:
                     print(f"    - {dep['Dependency Name']:30s} ({dep['Category']})")
                 if len(deps) > 10:
                     print(f"    ... and {len(deps) - 10} more")
-            
+
             print("\n  💡 Tip: Unversioned dependencies can lead to:")
             print("     - Non-reproducible builds")
             print("     - Unexpected breaking changes")
@@ -1928,7 +1933,7 @@ class DependencyExtractor:
             )
         else:
             print("\n✓ All dependencies have version specifiers")
-        
+
         # Check against baseline and warn if exceeded
         if total_deps > self.baseline_count:
             increase = total_deps - self.baseline_count
@@ -1952,11 +1957,11 @@ def main():
     parser = argparse.ArgumentParser(
         description="Extract dependency versions from Dynamo Dockerfiles and requirements"
     )
-    
+
     # Generate default output filename with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     default_output = f"dependency_versions_{timestamp}.csv"
-    
+
     parser.add_argument(
         "--output",
         "-o",
@@ -2026,9 +2031,9 @@ def main():
         action="store_true",
         help="Show what files would be processed without extracting",
     )
-    
+
     args = parser.parse_args()
-    
+
     # Auto-detect repo root
     if args.repo_root is None:
         script_path = Path(__file__).resolve()
@@ -2036,11 +2041,11 @@ def main():
         repo_root = script_path.parent.parent.parent
     else:
         repo_root = args.repo_root
-    
+
     output_path = Path(args.output)
     if not output_path.is_absolute():
         output_path = repo_root / output_path
-    
+
     # Auto-detect latest nightly CSV if not specified
     latest_csv = args.latest_csv
     if latest_csv is None:
@@ -2067,7 +2072,7 @@ def main():
                 print(
                     f"Auto-detected latest release CSV: {release_csv.relative_to(repo_root)}"
                 )
-    
+
     print(f"Repository root: {repo_root}")
     print(f"Output file: {output_path}")
     print(f"GitHub repo: {args.github_repo}")
@@ -2080,7 +2085,7 @@ def main():
     if release_csv:
         print(f"Latest release CSV: {release_csv}")
     print()
-    
+
     # Initialize extractor
     extractor = DependencyExtractor(
         repo_root,
@@ -2091,7 +2096,7 @@ def main():
         release_csv,
     )
     extractor.baseline_count = args.baseline
-    
+
     # Validate mode - check config and files without extracting
     if args.validate:
         print("Running validation...")
@@ -2100,33 +2105,33 @@ def main():
             print("\nConfiguration warnings:")
             for warning in extractor.warnings:
                 print(f"  ⚠ {warning}")
-        
+
         is_valid = extractor.validate_critical_files(strict_mode=args.strict)
-        
+
         if extractor.missing_files:
             print("\nMissing files detected:")
             for missing in extractor.missing_files:
                 req_str = "REQUIRED" if missing.get("required") else "optional"
                 print(f"  - {missing['component']}/{missing['type']} ({req_str})")
                 print(f"    Patterns: {missing['patterns']}")
-        
+
         if is_valid:
             print("\n✓ Validation passed")
             return
         else:
             print("\n✗ Validation failed")
             exit(1)
-    
+
     # Dry-run mode - show what would be processed
     if args.dry_run:
         print("Dry-run mode: showing files that would be processed...\n")
-        
+
         if "components" in extractor.config:
             for component_name, component_config in extractor.config[
                 "components"
             ].items():
                 print(f"{component_name}:")
-                
+
                 dockerfiles = component_config.get("dockerfiles", [])
                 if dockerfiles:
                     found = extractor.discover_files(dockerfiles)
@@ -2136,7 +2141,7 @@ def main():
                         )
                     else:
                         print(f"  Dockerfiles: None found (patterns: {dockerfiles})")
-                
+
                 scripts = component_config.get("scripts", [])
                 if scripts:
                     found = extractor.discover_files(scripts)
@@ -2144,7 +2149,7 @@ def main():
                         print(
                             f"  Scripts: {[str(f.relative_to(repo_root)) for f in found]}"
                         )
-                
+
                 go_modules = component_config.get("go_modules", [])
                 if go_modules:
                     found = extractor.discover_files(go_modules)
@@ -2152,7 +2157,7 @@ def main():
                         print(
                             f"  Go modules: {[str(f.relative_to(repo_root)) for f in found]}"
                         )
-                
+
                 requirements = component_config.get("requirements", [])
                 if requirements:
                     found = extractor.discover_requirements_files(requirements)
@@ -2160,7 +2165,7 @@ def main():
                         print(
                             f"  Requirements: {[str(f.relative_to(repo_root)) for f in found]}"
                         )
-                
+
                 pyproject = component_config.get("pyproject", [])
                 if pyproject:
                     found = extractor.discover_files(pyproject)
@@ -2168,31 +2173,31 @@ def main():
                         print(
                             f"  PyProject: {[str(f.relative_to(repo_root)) for f in found]}"
                         )
-                
+
                 print()
-        
+
         print("✓ Dry-run complete")
         return
-    
+
     # Normal extraction mode
     extractor.extract_all()
-    
+
     # Check if strict mode and there are failures
     if args.strict and (extractor.failed_files or extractor.missing_files):
         print("\n✗ Extraction failed in strict mode due to missing/failed files")
         extractor.print_summary()
         exit(1)
-    
+
     # Write CSV
     extractor.write_csv(output_path)
-    
+
     # Write unversioned report if requested
     if args.report_unversioned:
         unversioned_path = (
             output_path.parent / f"{output_path.stem}_unversioned{output_path.suffix}"
         )
         extractor.write_unversioned_report(unversioned_path)
-    
+
     # Write removed dependencies report if requested
     if args.report_removed:
         removed_deps = extractor.get_removed_dependencies()
@@ -2202,10 +2207,10 @@ def main():
                 {"count": len(removed_deps), "removed": removed_deps}, f, indent=2
             )
         print(f"✓ Written {len(removed_deps)} removed dependencies to {removed_path}")
-    
+
     # Print summary
     extractor.print_summary()
-    
+
     print("\n✓ Done!")
 
 
