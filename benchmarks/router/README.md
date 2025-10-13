@@ -1,17 +1,5 @@
 <!-- # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License. -->
+# SPDX-License-Identifier: Apache-2.0 -->
 
 # Router Benchmarking Guide
 
@@ -20,12 +8,14 @@ This directory contains scripts for benchmarking the Dynamo router with prefix c
 ## Prerequisites
 
 - NVIDIA GPUs (8 GPUs for default configuration)
+- (optional) H100 GPUs or later for gpt-oss-120b examples
 - CUDA environment properly configured
 - etcd and NATS running (required for Dynamo coordination)
 - Required Python packages:
   - `dynamo` package (with vllm and frontend modules)
   - `genai-perf` for benchmarking
   - `matplotlib` for plotting results
+  - `data-generator` package (install with `pip install -e ./benchmarks` from repo root)
 
 ### Setting up etcd and NATS
 
@@ -43,25 +33,51 @@ This will start both etcd and NATS with the required configurations in the backg
 - **`run_engines.sh`** - Launches multiple vLLM worker instances
 - **`ping.sh`** - Simple test script to verify the setup is working
 - **`prefix_ratio_benchmark.py`** - Main benchmarking script that sweeps prefix ratios
+- **`real_data_benchmark.py`** - Benchmarking script that uses real mooncake-style trace data
 - **`plot_prefix_ratio_comparison.py`** - Generates comparison plots from benchmark results
 
 ## Usage Instructions
 
-### Step 1: Launch vLLM Workers
+### Step 1: Launch Workers
 
-First, start the vLLM worker engines in a terminal.
+Make sure you have 8 GPUs for these examples, unless you are using mockers (see below). First, start the worker engines in a terminal.
+
+The script supports three modes:
+- **`agg` (default)**: Aggregated/monolithic workers that handle both prefill and decode
+- **`decode`**: Workers dedicated to decode (token generation) phase
+- **`prefill`**: Workers dedicated to prefill (prompt processing) phase
 
 ```bash
-# Default: 8 vLLM workers with DeepSeek model (explicitly sets --block-size 64)
+# Default: 8 aggregated workers with DeepSeek model (handles both prefill and decode)
 ./run_engines.sh \
     --num-workers 8 \
     --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 
-# Example: 4 vLLM workers with larger model using tensor parallelism (2 GPUs per worker)
+# Example: 4 workers with larger model using tensor parallelism (2 GPUs per worker)
+# NOTE: this requires having Hopper or later GPU SKUs to support MXFP4 precision.
 ./run_engines.sh \
     --num-workers 4 \
     --model-path openai/gpt-oss-120b \
     --tensor-parallel-size 2
+```
+
+#### Disaggregated Serving (Decode + Prefill Workers)
+
+You can launch separate decode and prefill workers for disaggregated serving. This allows you to dedicate specific GPUs to prefill (prompt processing) and decode (token generation) tasks:
+
+```bash
+# Launch 4 decode workers (GPUs 0-3)
+./run_engines.sh \
+    --decode \
+    --num-workers 4 \
+    --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+
+# Launch 4 prefill workers (GPUs 4-7)
+./run_engines.sh \
+    --prefill \
+    --num-workers 4 \
+    --base-gpu-offset 4 \
+    --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 ```
 
 #### Alternative: Launch vLLM Mock Workers
@@ -86,14 +102,12 @@ In a **new terminal**, launch the Dynamo router using the Python CLI:
 ```bash
 python -m dynamo.frontend \
     --router-mode kv \
-    --kv-cache-block-size 64 \
     --router-reset-states \
     --http-port 8000
 ```
 
 This starts the router with:
 - KV cache routing mode
-- Block size of 64 (**Important:** This should match the `--block-size` used by your engines)
 - `--router-reset-states` flag to clear the event cache (JetStream) from previous runs (useful for single router benchmarking)
 - HTTP port 8000
 
@@ -104,12 +118,33 @@ python -m dynamo.frontend --help
 
 For detailed explanations of router arguments (especially KV cache routing parameters), see the [KV Cache Routing documentation](../../docs/architecture/kv_cache_routing.md).
 
+#### Launching a Standalone Router for Prefill Workers (Optional)
+
+If you're using disaggregated serving with separate prefill and decode workers, you should also launch a standalone router for prefill workers. This router handles routing prefill requests to dedicated prefill workers. When using a standalone prefill router, it's recommended to start the frontend (decode router) with `--kv-overlap-score-weight 0` for pure load balancing (as prefix-aware routing is now handled by the standalone router):
+
+```bash
+# Start the decode router with pure load balancing
+python -m dynamo.frontend \
+    --router-mode kv \
+    --router-reset-states \
+    --http-port 8000 \
+    --kv-overlap-score-weight 0
+
+# In another terminal, start the standalone router for prefill workers
+python -m dynamo.router \
+    --endpoint dynamo.prefill.generate \
+    --block-size 64 \
+    --router-reset-states \
+    --no-track-active-blocks
+```
+
+The `--router-reset-states` flag clears any previous state, and `--no-track-active-blocks` disables active block tracking (suitable for prefill-only routing where decode load is not relevant).
+
 **Note**: If you're unsure whether your backend engines correctly emit KV events for certain models (e.g., hybrid models like gpt-oss or nemotron nano 2), use the `--no-kv-events` flag to disable KV event tracking and use approximate KV indexing instead:
 
 ```bash
 python -m dynamo.frontend \
     --router-mode kv \
-    --kv-cache-block-size 64 \
     --http-port 8000 \
     --no-kv-events
 ```
@@ -160,20 +195,46 @@ python prefix_ratio_benchmark.py --url http://localhost:8000 http://localhost:80
 python prefix_ratio_benchmark.py --output-dir results/experiment1
 ```
 
-### Benchmark Output
+### Step 4 (Alternative): Run Benchmarks with Real Trace Data
 
-The benchmark script generates:
+Instead of synthetic benchmarks with controlled prefix ratios, you can benchmark using real trace data in [mooncake-style format](https://github.com/kvcache-ai/Mooncake/blob/d21da178bae8db9651cf18a76824c084145fc725/mooncake_trace.jsonl). This approach uses actual request patterns from production traces, potentially modified with synthesis parameters.
 
-1. **Performance plots** (`prefix_ratio_performance.png`):
-   - TTFT (Time to First Token) vs Prefix Ratio
-   - Throughput (tokens/s) vs Prefix Ratio
+```bash
+python real_data_benchmark.py --input-dataset mooncake_trace.jsonl
+```
 
-2. **Results summary** (`results_summary.json`):
-   - Raw data for all prefix ratios tested
-   - Configuration parameters used
+The script can apply various modifications on top of the original trace dataset to simulate different scenarios and workload conditions. This script accepts the same synthesis parameters as the [prefix data generator](../prefix_data_generator/README.md):
 
-3. **Detailed artifacts** (in subdirectories):
-   - Full genai-perf profiling data for each run
+**Key parameters:**
+- `--num-requests`: Number of requests to synthesize from the trace (default: use all)
+- `--speedup-ratio`: Speed up request arrival times (e.g., 2.0 makes requests arrive 2x faster)
+- `--prefix-len-multiplier`: Scale the length of shared prefixes (e.g., 2.0 doubles prefix lengths)
+- `--prefix-root-multiplier`: Replicate the prefix tree structure N times with different roots
+- `--prompt-len-multiplier`: Scale the length of unique user prompts (e.g., 0.5 for shorter prompts)
+- `--max-isl`: Filter out requests exceeding this input sequence length
+
+Examples:
+
+```bash
+# Use original trace dataset as-is (no synthesis parameters specified)
+python real_data_benchmark.py --input-dataset trace.jsonl
+
+# Speed up request rate by 2x and use only first 1000 requests
+python real_data_benchmark.py --input-dataset trace.jsonl --num-requests 1000 --speedup-ratio 2.0
+
+# Double prefix lengths to test cache efficiency with longer shared contexts
+python real_data_benchmark.py --input-dataset trace.jsonl --prefix-len-multiplier 2.0
+
+# Create more diverse workload by replicating prefix tree 3 times
+python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multiplier 3
+```
+
+> [!Note]
+> At the time of writing this documentation, you may need to install the latest genai-perf from the main source branch to loadgen on the trace files:
+> ```bash
+> pip install git+https://github.com/triton-inference-server/perf_analyzer.git#subdirectory=genai-perf
+> ```
+> However, by the time of release, the genai-perf version included in the vLLM runtime container should be up to date enough to use as-is.
 
 ## Troubleshooting
 

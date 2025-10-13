@@ -6,6 +6,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -14,7 +15,7 @@ const (
 
 type VLLMBackend struct{}
 
-func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	isMultinode := numberOfNodes > 1
 
 	if isMultinode {
@@ -28,9 +29,38 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 			container.StartupProbe = nil
 		}
 	}
+
+	// Set compilation cache environment variables for VLLM
+	cacheDir := ""
+
+	// Check for volumeMounts with useAsCompilationCache=true
+	for _, volumeMount := range component.VolumeMounts {
+		if volumeMount.UseAsCompilationCache {
+			cacheDir = volumeMount.MountPoint
+			break
+		}
+	}
+
+	if cacheDir != "" {
+		// Set VLLM cache directory using the environment variable
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "VLLM_CACHE_ROOT",
+			Value: cacheDir,
+		})
+
+		// Log confirmation that compilation cache is configured for VLLM
+		logger := log.Log.WithName("vllm-backend")
+		logger.Info("Compilation cache configured and enabled for VLLM backend",
+			"backend", "vllm",
+			"status", "fully-supported",
+			"cache-dir", cacheDir,
+			"use-as-compilation-cache", true,
+			"env-vars-set", true,
+			"env-vars", "VLLM_CACHE_ROOT")
+	}
 }
 
-func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string) {
+func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string) {
 	// do nothing
 }
 

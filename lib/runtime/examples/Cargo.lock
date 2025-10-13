@@ -657,7 +657,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -687,12 +687,14 @@ dependencies = [
  "once_cell",
  "prometheus",
  "rand 0.9.1",
+ "rayon",
  "regex",
  "serde",
  "serde_json",
  "socket2",
  "thiserror 2.0.12",
  "tokio",
+ "tokio-rayon",
  "tokio-stream",
  "tokio-util",
  "tower-http",
@@ -1030,7 +1032,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hello_world"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "dynamo-runtime",
 ]
@@ -2502,7 +2504,7 @@ dependencies = [
 
 [[package]]
 name = "service_metrics"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "dynamo-runtime",
  "futures",
@@ -2678,7 +2680,7 @@ dependencies = [
 
 [[package]]
 name = "system_metrics"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "dynamo-runtime",
@@ -2846,6 +2848,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.100",
+]
+
+[[package]]
+name = "tokio-rayon"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cf33a76e0b1dd03b778f83244137bd59887abf25c0e87bc3e7071105f457693"
+dependencies = [
+ "rayon",
+ "tokio",
 ]
 
 [[package]]

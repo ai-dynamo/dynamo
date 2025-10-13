@@ -66,7 +66,7 @@ data:
               },
               "direction": "backward",
               "editorMode": "builder",
-              "expr": "{namespace=~\"$namespace\", nvidia_com_dynamo_graph_deployment_name=~\"$dynamographdeployment\", nvidia_com_dynamo_component_type=~\"$component\"} |~ \"(?i)$search\" |~ \"(?i)$trace_id\"",
+              "expr": "{namespace=~\"$namespace\", nvidia_com_dynamo_graph_deployment_name=~\"$dynamographdeployment\", nvidia_com_dynamo_component_type=~\"$component\"} |= \"$search\" |= \"$trace_id\"",
               "queryType": "range",
               "refId": "A"
             }
@@ -100,6 +100,7 @@ data:
             "type": "datasource"
           },
           {
+            "allValue": ".+",
             "current": {
               "selected": true,
               "text": ["All"],
@@ -124,6 +125,7 @@ data:
             "type": "query"
           },
           {
+            "allValue": ".+",
             "current": {
               "selected": true,
               "text": ["All"],
@@ -148,6 +150,7 @@ data:
             "type": "query"
           },
           {
+            "allValue": ".+",
             "current": {
               "selected": true,
               "text": ["All"],

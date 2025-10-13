@@ -3,7 +3,7 @@
     "containerDefinitions": [
         {
             "name": "etcd",
-            "image": "bitnami/etcd",
+            "image": "bitnamilegacy/etcd",
             "cpu": 0,
             "portMappings": [
                 {

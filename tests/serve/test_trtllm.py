@@ -59,7 +59,6 @@ trtllm_configs = {
         request_payloads=[
             chat_payload_default(
                 expected_log=[
-                    r"ZMQ listener .* received batch with \d+ events \(seq=\d+\)",
                     r"Event processor for worker_id \d+ processing event: Stored\(",
                     r"Selected worker: \d+, logit: ",
                 ]
@@ -123,7 +122,7 @@ def test_chat_only_aggregated_with_test_logits_processor(
         script_name=base.script_name,  # agg.sh
         marks=[],  # not used by this direct test
         request_payloads=[
-            chat_payload_default(),
+            chat_payload_default(expected_response=["Hello world!"]),
         ],
         model="Qwen/Qwen3-0.6B",
         delayed_start=base.delayed_start,

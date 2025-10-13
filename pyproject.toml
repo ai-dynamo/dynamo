@@ -3,7 +3,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "0.5.0"
+version = "0.5.1"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -13,7 +13,7 @@ license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
-    "ai-dynamo-runtime==0.5.0",
+    "ai-dynamo-runtime==0.5.1",
     "pytest>=8.3.4",
     "types-psutil>=7.0.0.20250218",
     "kubernetes>=32.0.1,<33.0.0",
@@ -48,24 +48,40 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.1.0rc3",
+    "tensorrt-llm==1.1.0rc5",
 ]
 
 vllm = [
     "uvloop",
-    "nixl<=0.4.1",
-    "vllm[flashinfer]==0.10.1.1",
+    "nixl<=0.6.0",
+    "vllm[flashinfer]==0.10.2",
 ]
 
 sglang = [
     "uvloop",
-    "nixl<=0.4.1",
-    "sglang[all]==0.5.0rc2",
+    "nixl<=0.6.0",
+    "sglang[all]==0.5.3",
 ]
 
-llama_cpp = [
-    "uvloop",
-    "llama-cpp-python",
+[dependency-groups]
+docs = [
+    # Core Sphinx
+    "sphinx>=8.1",
+    "nvidia-sphinx-theme>=0.0.8",
+    # Sphinx extensions
+    "ablog>=0.11",
+    "sphinx-copybutton>=0.5",
+    "sphinx-design>=0.6",
+    "sphinx-prompt>=1.9",
+    "sphinx-sitemap>=2.6",
+    "sphinx-tabs>=3.4",
+    "sphinx-book-theme>=1.1",
+    "sphinxcontrib-mermaid>=1.0",
+    "sphinxcontrib-bibtex>=2.6",
+    # Markdown and notebook support
+    "myst-parser>=4.0",
+    "myst-nb>=1.2",
+    "nbsphinx>=0.9",
 ]
 
 [build-system]
@@ -77,13 +93,7 @@ path = "hatch_build.py"
 
 [tool.hatch.build.targets.wheel]
 packages = [
-    "components/frontend/src/dynamo",
-    "components/planner/src/dynamo",
-    "components/backends/llama_cpp/src/dynamo",
-    "components/backends/mocker/src/dynamo",
-    "components/backends/trtllm/src/dynamo",
-    "components/backends/sglang/src/dynamo",
-    "components/backends/vllm/src/dynamo"
+    "components/src/dynamo",
 ]
 
 [tool.hatch.metadata]
@@ -138,7 +148,8 @@ addopts = [
     "--ignore-glob=*_inc.py",
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
-    "--ignore-glob=components/backends/sglang/src/dynamo/sglang/request_handlers/*",
+    "--ignore-glob=components/src/dynamo/sglang/request_handlers/*",
+    "--ignore-glob=components/src/dynamo/sglang/multimodal_utils/*",
     "--ignore-glob=components/backends/sglang/slurm_jobs/*",
     # FIXME: Get relative/generic blob paths to work here
 ]
@@ -155,6 +166,10 @@ filterwarnings = [
     "ignore:.*unclosed event loop.*:ResourceWarning", # Ignore unclosed event loop warnings
     "ignore:.*Exception ignored in.*:pytest.PytestUnraisableExceptionWarning", # Ignore unraisable exception warnings
     "ignore:The pynvml package is deprecated.*:FutureWarning", # Ignore pynvml deprecation warning, temporary until upstream library updates to nvidia-ml-py
+    # Pydantic V2 deprecation warnings from TRTLLM dependencies (raised at import time during collection)
+    "ignore:Support for class-based `config`.*:pydantic.warnings.PydanticDeprecatedSince20",
+    "ignore:Using extra keyword arguments on `Field`.*:pydantic.warnings.PydanticDeprecatedSince20",
+    "ignore:The `schema` method is deprecated.*:pydantic.warnings.PydanticDeprecatedSince20",
 ]
 
 

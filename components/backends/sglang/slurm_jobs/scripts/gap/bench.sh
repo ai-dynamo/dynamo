@@ -4,10 +4,11 @@
 
 prefill_workers=$1
 decode_workers=$2
+total_gpus=$3
 
-chosen_isl=$3
-chosen_osl=$4
-chosen_concurrencies=$5
+chosen_isl=$4
+chosen_osl=$5
+chosen_concurrencies=$6
 
 echo "Profiling for model with PrefillDP=${prefill_workers}, DecodeDP=${decode_workers}"
 
@@ -23,7 +24,7 @@ echo "Chosen random seed ${random_seed}"
 
 source /scripts/benchmark_utils.sh
 
-wait_for_model $head_node $head_port 5 2400 60
+wait_for_model $head_node $head_port $prefill_workers $decode_workers 5 900 60
 
 set -e
 warmup_model $head_node $head_port $SERVED_MODEL_NAME $MODEL_PATH "${chosen_isl}x${chosen_osl}x10000x10000x250"

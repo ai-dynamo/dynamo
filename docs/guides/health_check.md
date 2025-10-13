@@ -18,13 +18,13 @@ the service is running.
 
 > **Note**: Frontend liveness doesn't depend on worker health or liveness only on the Frontend service itself.
 
-#### Example Request
+### Example Request
 
 ```
 curl -s localhost:8080/live -q | jq
 ```
 
-#### Example Response
+### Example Response
 
 ```
 {
@@ -41,13 +41,13 @@ the service is running.  Once workers have been registered, the
 
 > **Note**: Frontend liveness doesn't depend on worker health or liveness only on the Frontend service itself.
 
-#### Example Request
+### Example Request
 
 ```
 curl -v localhost:8080/health -q | jq
 ```
 
-#### Example Response
+### Example Response
 
 Before workers are registered:
 

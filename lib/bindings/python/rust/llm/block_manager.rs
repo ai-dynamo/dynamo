@@ -1,26 +1,45 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use super::*;
 use anyhow::Result;
 use dynamo_llm::block_manager::block::{
     data::logical::distributed_leader_worker::DistributedLeaderWorkerResources, locality::Logical,
 };
+use dynamo_llm::block_manager::offload::filter::FrequencyFilter;
 use dynamo_llm::block_manager::{BasicMetadata, BlockParallelismStrategy};
+
 use pyo3::PyResult;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+/// Creates a disk offload filter based on environment configuration.
+/// Returns `Ok(None)` if the filter is disabled via `DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER`,
+/// otherwise constructs a `FrequencyFilter` with standard parameters.
+fn create_disk_offload_filter(
+    cancel_token: &CancellationToken,
+    runtime: &tokio::runtime::Handle,
+) -> Result<Option<Arc<FrequencyFilter>>> {
+    // Check if disk offload filter is disabled via environment variable
+    let disable_filter = std::env::var("DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
+    if disable_filter {
+        return Ok(None);
+    }
+
+    // TODO: These values seem plausible for most use cases, but we need to figure out a better way to configure them.
+    let frequency_filter = FrequencyFilter::new(
+        2,
+        Duration::from_secs(600),
+        1_000_000,
+        cancel_token.child_token(),
+        runtime.clone(),
+    )?;
+
+    Ok(Some(Arc::new(frequency_filter)))
+}
 
 mod controller;
 mod distributed;
@@ -106,13 +125,22 @@ impl BlockManager {
 
             if leader.num_host_blocks() > 0 {
                 tracing::info!("Using {} host blocks", leader.num_host_blocks());
-                config = config.host_layout(
+
+                let mut host_layout_config =
                     dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
                         .num_blocks(leader.num_host_blocks())
-                        .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
-                        .build()
-                        .map_err(to_pyerr)?,
-                );
+                        .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded));
+
+                if leader.num_disk_blocks() > 0 {
+                    if let Some(filter) =
+                        create_disk_offload_filter(&cancel_token, &rt.inner().runtime().primary())
+                            .map_err(to_pyerr)?
+                    {
+                        host_layout_config = host_layout_config.offload_filter(Some(filter));
+                    }
+                }
+
+                config = config.host_layout(host_layout_config.build().map_err(to_pyerr)?);
             }
 
             if leader.num_disk_blocks() > 0 {
@@ -228,6 +256,7 @@ pub struct BlockManagerBuilder {
     leader: Option<distributed::KvbmLeader>,
     page_size: usize,
     disable_device_pool: bool,
+    kvbm_metrics: Option<dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics>,
 }
 
 impl BlockManagerBuilder {
@@ -252,6 +281,13 @@ impl BlockManagerBuilder {
     }
     pub fn disable_device_pool(mut self, yes: bool) -> Self {
         self.disable_device_pool = yes;
+        self
+    }
+    pub fn kvbm_metrics(
+        mut self,
+        metrics: dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics,
+    ) -> Self {
+        self.kvbm_metrics = Some(metrics);
         self
     }
 
@@ -296,12 +332,20 @@ impl BlockManagerBuilder {
         }
 
         if leader_inner.num_host_blocks() > 0 {
-            config = config.host_layout(
+            let mut host_layout_config =
                 dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
                     .num_blocks(leader_inner.num_host_blocks())
-                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
-                    .build()?,
-            );
+                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded));
+
+            if leader_inner.num_disk_blocks() > 0 {
+                if let Some(filter) =
+                    create_disk_offload_filter(&cancel_token, &drt.inner().runtime().primary())?
+                {
+                    host_layout_config = host_layout_config.offload_filter(Some(filter));
+                }
+            }
+
+            config = config.host_layout(host_layout_config.build()?);
         }
 
         if leader_inner.num_disk_blocks() > 0 {
@@ -313,7 +357,11 @@ impl BlockManagerBuilder {
             );
         }
 
-        let config = config.build()?;
+        let mut config_builder = config;
+        if let Some(kvbm_metrics) = self.kvbm_metrics {
+            config_builder = config_builder.kvbm_metrics(Some(kvbm_metrics));
+        }
+        let config = config_builder.build()?;
 
         let resources =
             DistributedLeaderWorkerResources::new(Some(leader_inner), cancel_token.child_token())?;

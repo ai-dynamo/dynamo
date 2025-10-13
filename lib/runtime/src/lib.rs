@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! Dynamo
 
@@ -21,7 +9,6 @@
 use std::{
     collections::HashMap,
     sync::{Arc, OnceLock, Weak},
-    time::Instant,
 };
 
 pub use anyhow::{
@@ -34,8 +21,10 @@ mod config;
 pub use config::RuntimeConfig;
 
 pub mod component;
+pub mod compute;
 pub mod discovery;
 pub mod engine;
+pub mod health_check;
 pub mod system_status_server;
 pub use system_status_server::SystemStatusServerInfo;
 pub mod instances;
@@ -49,6 +38,7 @@ pub mod runtime;
 pub mod service;
 pub mod slug;
 pub mod storage;
+pub mod system_health;
 pub mod traits;
 pub mod transports;
 pub mod utils;
@@ -57,10 +47,13 @@ pub mod worker;
 pub mod distributed;
 pub use distributed::distributed_test_utils;
 pub use futures::stream;
+pub use system_health::{HealthCheckTarget, SystemHealth};
 pub use tokio_util::sync::CancellationToken;
 pub use worker::Worker;
 
-use crate::metrics::prometheus_names::distributed_runtime;
+use crate::{
+    metrics::prometheus_names::distributed_runtime, storage::key_value_store::KeyValueStore,
+};
 
 use component::{Endpoint, InstanceSource};
 use utils::GracefulShutdownTracker;
@@ -83,106 +76,8 @@ pub struct Runtime {
     cancellation_token: CancellationToken,
     endpoint_shutdown_token: CancellationToken,
     graceful_shutdown_tracker: Arc<GracefulShutdownTracker>,
-}
-
-/// Current Health Status
-/// If use_endpoint_health_status is set then
-/// initialize the endpoint_health hashmap to the
-/// starting health status
-#[derive(Clone)]
-pub struct SystemHealth {
-    system_health: HealthStatus,
-    endpoint_health: HashMap<String, HealthStatus>,
-    use_endpoint_health_status: Vec<String>,
-    health_path: String,
-    live_path: String,
-    start_time: Instant,
-    uptime_gauge: OnceLock<prometheus::Gauge>,
-}
-
-impl SystemHealth {
-    pub fn new(
-        starting_health_status: HealthStatus,
-        use_endpoint_health_status: Vec<String>,
-        health_path: String,
-        live_path: String,
-    ) -> Self {
-        let mut endpoint_health = HashMap::new();
-        for endpoint in &use_endpoint_health_status {
-            endpoint_health.insert(endpoint.clone(), starting_health_status.clone());
-        }
-        SystemHealth {
-            system_health: starting_health_status,
-            endpoint_health,
-            use_endpoint_health_status,
-            health_path,
-            live_path,
-            start_time: Instant::now(),
-            uptime_gauge: OnceLock::new(),
-        }
-    }
-    pub fn set_health_status(&mut self, status: HealthStatus) {
-        self.system_health = status;
-    }
-
-    pub fn set_endpoint_health_status(&mut self, endpoint: &str, status: HealthStatus) {
-        self.endpoint_health.insert(endpoint.to_string(), status);
-    }
-
-    /// Returns the overall health status and endpoint health statuses
-    pub fn get_health_status(&self) -> (bool, HashMap<String, String>) {
-        let mut endpoints: HashMap<String, String> = HashMap::new();
-        for (endpoint, ready) in &self.endpoint_health {
-            endpoints.insert(
-                endpoint.clone(),
-                if *ready == HealthStatus::Ready {
-                    "ready".to_string()
-                } else {
-                    "notready".to_string()
-                },
-            );
-        }
-
-        let healthy = if !self.use_endpoint_health_status.is_empty() {
-            self.use_endpoint_health_status.iter().all(|endpoint| {
-                self.endpoint_health
-                    .get(endpoint)
-                    .is_some_and(|status| *status == HealthStatus::Ready)
-            })
-        } else {
-            self.system_health == HealthStatus::Ready
-        };
-
-        (healthy, endpoints)
-    }
-
-    /// Initialize the uptime gauge using the provided metrics registry
-    pub fn initialize_uptime_gauge<T: crate::metrics::MetricsRegistry>(
-        &self,
-        registry: &T,
-    ) -> anyhow::Result<()> {
-        let gauge = registry.create_gauge(
-            distributed_runtime::UPTIME_SECONDS,
-            "Total uptime of the DistributedRuntime in seconds",
-            &[],
-        )?;
-        self.uptime_gauge
-            .set(gauge)
-            .map_err(|_| anyhow::anyhow!("uptime_gauge already initialized"))?;
-        Ok(())
-    }
-
-    /// Get the current uptime as a Duration
-    pub fn uptime(&self) -> std::time::Duration {
-        self.start_time.elapsed()
-    }
-
-    /// Update the uptime gauge with the current uptime value
-    pub fn update_uptime_gauge(&self) {
-        if let Some(gauge) = self.uptime_gauge.get() {
-            gauge.set(self.uptime().as_secs_f64());
-        }
-    }
+    compute_pool: Option<Arc<compute::ComputePool>>,
+    block_in_place_permits: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 /// Type alias for runtime callback functions to reduce complexity
@@ -193,14 +88,20 @@ impl SystemHealth {
 /// - Used in generic contexts requiring 'static lifetime
 ///
 /// The Arc wrapper is included in the type to make sharing explicit.
-type RuntimeCallback = Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync + 'static>;
+type PrometheusUpdateCallback = Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync + 'static>;
+
+/// Type alias for exposition text callback functions that return Prometheus text
+type PrometheusExpositionFormatCallback =
+    Arc<dyn Fn() -> anyhow::Result<String> + Send + Sync + 'static>;
 
 /// Structure to hold Prometheus registries and associated callbacks for a given hierarchy
 pub struct MetricsRegistryEntry {
     /// The Prometheus registry for this prefix
     pub prometheus_registry: prometheus::Registry,
-    /// List of function callbacks that receive a reference to any MetricsRegistry
-    pub runtime_callbacks: Vec<RuntimeCallback>,
+    /// List of update callbacks invoked before metrics are scraped
+    pub prometheus_update_callbacks: Vec<PrometheusUpdateCallback>,
+    /// List of callbacks that return Prometheus exposition text to be appended to metrics output
+    pub prometheus_expfmt_callbacks: Vec<PrometheusExpositionFormatCallback>,
 }
 
 impl MetricsRegistryEntry {
@@ -208,21 +109,48 @@ impl MetricsRegistryEntry {
     pub fn new() -> Self {
         Self {
             prometheus_registry: prometheus::Registry::new(),
-            runtime_callbacks: Vec::new(),
+            prometheus_update_callbacks: Vec::new(),
+            prometheus_expfmt_callbacks: Vec::new(),
         }
     }
 
     /// Add a callback function that receives a reference to any MetricsRegistry
-    pub fn add_callback(&mut self, callback: RuntimeCallback) {
-        self.runtime_callbacks.push(callback);
+    pub fn add_prometheus_update_callback(&mut self, callback: PrometheusUpdateCallback) {
+        self.prometheus_update_callbacks.push(callback);
     }
 
-    /// Execute all runtime callbacks and return their results
-    pub fn execute_callbacks(&self) -> Vec<anyhow::Result<()>> {
-        self.runtime_callbacks
+    /// Add an exposition text callback that returns Prometheus text
+    pub fn add_prometheus_expfmt_callback(&mut self, callback: PrometheusExpositionFormatCallback) {
+        self.prometheus_expfmt_callbacks.push(callback);
+    }
+
+    /// Execute all update callbacks and return their results
+    pub fn execute_prometheus_update_callbacks(&self) -> Vec<anyhow::Result<()>> {
+        self.prometheus_update_callbacks
             .iter()
             .map(|callback| callback())
             .collect()
+    }
+
+    /// Execute all exposition text callbacks and return their concatenated text
+    pub fn execute_prometheus_expfmt_callbacks(&self) -> String {
+        let mut result = String::new();
+        for callback in &self.prometheus_expfmt_callbacks {
+            match callback() {
+                Ok(text) => {
+                    if !text.is_empty() {
+                        if !result.is_empty() && !result.ends_with('\n') {
+                            result.push('\n');
+                        }
+                        result.push_str(&text);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Error executing exposition text callback: {}", e);
+                }
+            }
+        }
+        result
     }
 
     /// Returns true if a metric with the given name already exists in the Prometheus registry
@@ -244,7 +172,8 @@ impl Clone for MetricsRegistryEntry {
     fn clone(&self) -> Self {
         Self {
             prometheus_registry: self.prometheus_registry.clone(),
-            runtime_callbacks: Vec::new(), // Callbacks cannot be cloned, so we start with an empty list
+            prometheus_update_callbacks: Vec::new(), // Callbacks cannot be cloned, so we start with an empty list
+            prometheus_expfmt_callbacks: Vec::new(), // Callbacks cannot be cloned, so we start with an empty list
         }
     }
 }
@@ -259,6 +188,7 @@ pub struct DistributedRuntime {
     // we might consider a unifed transport manager here
     etcd_client: Option<transports::etcd::Client>,
     nats_client: transports::nats::Client,
+    store: Arc<dyn KeyValueStore>,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
 

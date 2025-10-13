@@ -23,15 +23,15 @@ This directory contains the core components that make up the Dynamo inference fr
 
 Dynamo supports multiple inference engines (with a focus on SGLang, vLLM, and TensorRT-LLM), each with their own deployment configurations and capabilities:
 
-- **[vLLM](backends/vllm/README.md)** - High-performance LLM inference with native KV cache events and NIXL-based transfer mechanisms
-- **[SGLang](backends/sglang/README.md)** - Structured generation language framework with ZMQ-based communication
-- **[TensorRT-LLM](backends/trtllm/README.md)** - NVIDIA's optimized LLM inference engine with TensorRT acceleration
+- **[vLLM](/docs/backends/vllm/README.md)** - High-performance LLM inference with native KV cache events and NIXL-based transfer mechanisms
+- **[SGLang](/docs/backends/sglang/README.md)** - Structured generation language framework with ZMQ-based communication
+- **[TensorRT-LLM](/docs/backends/trtllm/README.md)** - NVIDIA's optimized LLM inference engine with TensorRT acceleration
 
 Each engine provides launch scripts for different deployment patterns in their respective `/launch` & `/deploy` directories.
 
 ## Core Components
 
-### [Backends](backends/)
+### [Backends](src/dynamo/)
 
 The backends directory contains inference engine integrations and implementations, with a key focus on:
 
@@ -40,7 +40,7 @@ The backends directory contains inference engine integrations and implementation
 - **TensorRT-LLM** - TensorRT-LLM integration with disaggregated serving capabilities
 
 
-### [Frontend](frontend/)
+### [Frontend](src/dynamo/frontend/)
 
 The frontend component provides the HTTP API layer and request processing:
 
@@ -49,7 +49,7 @@ The frontend component provides the HTTP API layer and request processing:
 - **Router** - Routes requests to appropriate workers based on load and KV cache state
 - **Auto-discovery** - Automatically discovers and registers available workers
 
-### [Planner](planner/)
+### [Planner](src/dynamo/planner/)
 
 The planner component monitors system state and dynamically adjusts worker allocation:
 

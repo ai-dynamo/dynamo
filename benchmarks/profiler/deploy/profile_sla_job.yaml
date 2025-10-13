@@ -29,7 +29,7 @@ spec:
         command: ["python", "-m", "benchmarks.profiler.profile_sla"]
         args:
           - --config
-          - /data/configs/disagg.yaml
+          - ${DGD_CONFIG_FILE}
           - --output-dir
           - /data/profiling_results
           - --namespace

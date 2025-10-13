@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! Metrics registry trait and implementation for Prometheus metrics
 //!
@@ -122,6 +110,21 @@ impl PrometheusMetric for prometheus::Gauge {
 impl PrometheusMetric for prometheus::IntGauge {
     fn with_opts(opts: prometheus::Opts) -> Result<Self, prometheus::Error> {
         prometheus::IntGauge::with_opts(opts)
+    }
+}
+
+impl PrometheusMetric for prometheus::GaugeVec {
+    fn with_opts(_opts: prometheus::Opts) -> Result<Self, prometheus::Error> {
+        Err(prometheus::Error::Msg(
+            "GaugeVec requires label names, use with_opts_and_label_names instead".to_string(),
+        ))
+    }
+
+    fn with_opts_and_label_names(
+        opts: prometheus::Opts,
+        label_names: &[&str],
+    ) -> Result<Self, prometheus::Error> {
+        prometheus::GaugeVec::new(opts, label_names)
     }
 }
 
@@ -264,21 +267,8 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
 
     // Handle different metric types
     let prometheus_metric = if std::any::TypeId::of::<T>()
-        == std::any::TypeId::of::<prometheus::Histogram>()
+        == std::any::TypeId::of::<prometheus::CounterVec>()
     {
-        // Special handling for Histogram with custom buckets
-        // buckets parameter is valid for Histogram, const_labels is not used
-        if const_labels.is_some() {
-            return Err(anyhow::anyhow!(
-                "const_labels parameter is not valid for Histogram"
-            ));
-        }
-        let mut opts = prometheus::HistogramOpts::new(&metric_name, metric_desc);
-        for (key, value) in &updated_labels {
-            opts = opts.const_label(key.clone(), value.clone());
-        }
-        T::with_histogram_opts_and_buckets(opts, buckets)?
-    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::CounterVec>() {
         // Special handling for CounterVec with label names
         // const_labels parameter is required for CounterVec
         if buckets.is_some() {
@@ -292,6 +282,49 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         }
         let label_names = const_labels
             .ok_or_else(|| anyhow::anyhow!("CounterVec requires const_labels parameter"))?;
+        T::with_opts_and_label_names(opts, label_names)?
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::GaugeVec>() {
+        // Special handling for GaugeVec with label names
+        // const_labels parameter is required for GaugeVec
+        if buckets.is_some() {
+            return Err(anyhow::anyhow!(
+                "buckets parameter is not valid for GaugeVec"
+            ));
+        }
+        let mut opts = prometheus::Opts::new(&metric_name, metric_desc);
+        for (key, value) in &updated_labels {
+            opts = opts.const_label(key.clone(), value.clone());
+        }
+        let label_names = const_labels
+            .ok_or_else(|| anyhow::anyhow!("GaugeVec requires const_labels parameter"))?;
+        T::with_opts_and_label_names(opts, label_names)?
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::Histogram>() {
+        // Special handling for Histogram with custom buckets
+        // buckets parameter is valid for Histogram, const_labels is not used
+        if const_labels.is_some() {
+            return Err(anyhow::anyhow!(
+                "const_labels parameter is not valid for Histogram"
+            ));
+        }
+        let mut opts = prometheus::HistogramOpts::new(&metric_name, metric_desc);
+        for (key, value) in &updated_labels {
+            opts = opts.const_label(key.clone(), value.clone());
+        }
+        T::with_histogram_opts_and_buckets(opts, buckets)?
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::IntCounterVec>() {
+        // Special handling for IntCounterVec with label names
+        // const_labels parameter is required for IntCounterVec
+        if buckets.is_some() {
+            return Err(anyhow::anyhow!(
+                "buckets parameter is not valid for IntCounterVec"
+            ));
+        }
+        let mut opts = prometheus::Opts::new(&metric_name, metric_desc);
+        for (key, value) in &updated_labels {
+            opts = opts.const_label(key.clone(), value.clone());
+        }
+        let label_names = const_labels
+            .ok_or_else(|| anyhow::anyhow!("IntCounterVec requires const_labels parameter"))?;
         T::with_opts_and_label_names(opts, label_names)?
     } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::IntGaugeVec>() {
         // Special handling for IntGaugeVec with label names
@@ -307,21 +340,6 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         }
         let label_names = const_labels
             .ok_or_else(|| anyhow::anyhow!("IntGaugeVec requires const_labels parameter"))?;
-        T::with_opts_and_label_names(opts, label_names)?
-    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::IntCounterVec>() {
-        // Special handling for IntCounterVec with label names
-        // const_labels parameter is required for IntCounterVec
-        if buckets.is_some() {
-            return Err(anyhow::anyhow!(
-                "buckets parameter is not valid for IntCounterVec"
-            ));
-        }
-        let mut opts = prometheus::Opts::new(&metric_name, metric_desc);
-        for (key, value) in &updated_labels {
-            opts = opts.const_label(key.clone(), value.clone());
-        }
-        let label_names = const_labels
-            .ok_or_else(|| anyhow::anyhow!("IntCounterVec requires const_labels parameter"))?;
         T::with_opts_and_label_names(opts, label_names)?
     } else {
         // Standard handling for Counter, IntCounter, Gauge, IntGauge
@@ -408,6 +426,9 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
     // - Summary: create_summary() - for quantiles and sum/count metrics
     // - SummaryVec: create_summary_vec() - for labeled summaries
     // - Untyped: create_untyped() - for untyped metrics
+    //
+    // NOTE: The order of create_* methods below is mirrored in lib/bindings/python/rust/lib.rs::Metrics
+    // Keep them synchronized when adding new metric types
 
     /// Create a Counter metric
     fn create_counter(
@@ -445,6 +466,24 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
         labels: &[(&str, &str)],
     ) -> anyhow::Result<prometheus::Gauge> {
         create_metric(self, name, description, labels, None, None)
+    }
+
+    /// Create a GaugeVec metric with label names (for dynamic labels)
+    fn create_gaugevec(
+        &self,
+        name: &str,
+        description: &str,
+        const_labels: &[&str],
+        const_label_values: &[(&str, &str)],
+    ) -> anyhow::Result<prometheus::GaugeVec> {
+        create_metric(
+            self,
+            name,
+            description,
+            const_label_values,
+            None,
+            Some(const_labels),
+        )
     }
 
     /// Create a Histogram metric with custom buckets
@@ -515,9 +554,11 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
     }
 
     /// Get metrics in Prometheus text format
-    fn prometheus_metrics_fmt(&self) -> anyhow::Result<String> {
+    fn prometheus_expfmt(&self) -> anyhow::Result<String> {
         // Execute callbacks first to ensure any new metrics are added to the registry
-        let callback_results = self.drt().execute_metrics_callbacks(&self.hierarchy());
+        let callback_results = self
+            .drt()
+            .execute_prometheus_update_callbacks(&self.hierarchy());
 
         // Log any callback errors but continue
         for result in callback_results {
@@ -526,20 +567,31 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
             }
         }
 
-        // Get the Prometheus registry for this hierarchy
-        let prometheus_registry = {
+        // Get the Prometheus registry for this hierarchy and execute exposition text callbacks
+        let (prometheus_registry, expfmt) = {
             let mut registry_entry = self.drt().hierarchy_to_metricsregistry.write().unwrap();
-            registry_entry
-                .entry(self.hierarchy())
-                .or_default()
-                .prometheus_registry
-                .clone()
+            let entry = registry_entry.entry(self.hierarchy()).or_default();
+            let registry = entry.prometheus_registry.clone();
+            let text = entry.execute_prometheus_expfmt_callbacks();
+            (registry, text)
         };
+
+        // Encode metrics from the registry
         let metric_families = prometheus_registry.gather();
         let encoder = prometheus::TextEncoder::new();
         let mut buffer = Vec::new();
         encoder.encode(&metric_families, &mut buffer)?;
-        Ok(String::from_utf8(buffer)?)
+        let mut result = String::from_utf8(buffer)?;
+
+        // Append exposition text callback results if any
+        if !expfmt.is_empty() {
+            if !result.ends_with('\n') {
+                result.push('\n');
+            }
+            result.push_str(&expfmt);
+        }
+
+        Ok(result)
     }
 }
 
@@ -730,7 +782,7 @@ mod test_metricsregistry_units {
             // Add callbacks with different increment values
             for increment in [1, 10, 100] {
                 let counter_clone = counter.clone();
-                entry.add_callback(Arc::new(move || {
+                entry.add_prometheus_update_callback(Arc::new(move || {
                     counter_clone.fetch_add(increment, Ordering::SeqCst);
                     Ok(())
                 }));
@@ -740,23 +792,23 @@ mod test_metricsregistry_units {
             assert_eq!(counter.load(Ordering::SeqCst), 0);
 
             // First execution
-            let results = entry.execute_callbacks();
+            let results = entry.execute_prometheus_update_callbacks();
             assert_eq!(results.len(), 3);
             assert!(results.iter().all(|r| r.is_ok()));
             assert_eq!(counter.load(Ordering::SeqCst), 111); // 1 + 10 + 100
 
             // Second execution - callbacks should be reusable
-            let results = entry.execute_callbacks();
+            let results = entry.execute_prometheus_update_callbacks();
             assert_eq!(results.len(), 3);
             assert_eq!(counter.load(Ordering::SeqCst), 222); // 111 + 111
 
             // Test cloning - cloned entry should have no callbacks
             let cloned = entry.clone();
-            assert_eq!(cloned.execute_callbacks().len(), 0);
+            assert_eq!(cloned.execute_prometheus_update_callbacks().len(), 0);
             assert_eq!(counter.load(Ordering::SeqCst), 222); // No change
 
             // Original still has callbacks
-            entry.execute_callbacks();
+            entry.execute_prometheus_update_callbacks();
             assert_eq!(counter.load(Ordering::SeqCst), 333); // 222 + 111
         }
 
@@ -767,23 +819,25 @@ mod test_metricsregistry_units {
 
             // Successful callback
             let counter_clone = counter.clone();
-            entry.add_callback(Arc::new(move || {
+            entry.add_prometheus_update_callback(Arc::new(move || {
                 counter_clone.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }));
 
             // Error callback
-            entry.add_callback(Arc::new(|| Err(anyhow::anyhow!("Simulated error"))));
+            entry.add_prometheus_update_callback(Arc::new(|| {
+                Err(anyhow::anyhow!("Simulated error"))
+            }));
 
             // Another successful callback
             let counter_clone = counter.clone();
-            entry.add_callback(Arc::new(move || {
+            entry.add_prometheus_update_callback(Arc::new(move || {
                 counter_clone.fetch_add(10, Ordering::SeqCst);
                 Ok(())
             }));
 
             // Execute and verify mixed results
-            let results = entry.execute_callbacks();
+            let results = entry.execute_prometheus_update_callbacks();
             assert_eq!(results.len(), 3);
             assert!(results[0].is_ok());
             assert!(results[1].is_err());
@@ -799,7 +853,7 @@ mod test_metricsregistry_units {
             assert_eq!(counter.load(Ordering::SeqCst), 11); // 1 + 10
 
             // Execute again - errors should be consistent
-            let results = entry.execute_callbacks();
+            let results = entry.execute_prometheus_update_callbacks();
             assert!(results[1].is_err());
             assert_eq!(counter.load(Ordering::SeqCst), 22); // 11 + 11
         }
@@ -807,7 +861,7 @@ mod test_metricsregistry_units {
         // Test 3: Empty registry
         {
             let entry = MetricsRegistryEntry::new();
-            let results = entry.execute_callbacks();
+            let results = entry.execute_prometheus_update_callbacks();
             assert_eq!(results.len(), 0);
         }
     }
@@ -984,7 +1038,7 @@ mod test_metricsregistry_prometheus_fmt_outputs {
         let epsilon = 0.01;
         assert!((counter.get() - 123.456789).abs() < epsilon);
 
-        let endpoint_output_raw = endpoint.prometheus_metrics_fmt().unwrap();
+        let endpoint_output_raw = endpoint.prometheus_expfmt().unwrap();
         println!("Endpoint output:");
         println!("{}", endpoint_output_raw);
 
@@ -1013,7 +1067,7 @@ dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",
         assert_eq!(gauge.get(), 50000.0);
 
         // Test Prometheus format output for Component (gauge + histogram)
-        let component_output_raw = component.prometheus_metrics_fmt().unwrap();
+        let component_output_raw = component.prometheus_expfmt().unwrap();
         println!("Component output:");
         println!("{}", component_output_raw);
 
@@ -1044,7 +1098,7 @@ dynamo_component_testgauge{dynamo_component="comp345",dynamo_namespace="ns345"} 
         assert_eq!(intcounter.get(), 12345);
 
         // Test Prometheus format output for Namespace (int_counter + gauge + histogram)
-        let namespace_output_raw = namespace.prometheus_metrics_fmt().unwrap();
+        let namespace_output_raw = namespace.prometheus_expfmt().unwrap();
         println!("Namespace output:");
         println!("{}", namespace_output_raw);
 
@@ -1115,7 +1169,7 @@ dynamo_component_testintcounter{dynamo_namespace="ns345"} 12345"#.to_string();
         histogram.observe(4.0);
 
         // Test Prometheus format output for DRT (all metrics combined)
-        let drt_output_raw = drt.prometheus_metrics_fmt().unwrap();
+        let drt_output_raw = drt.prometheus_expfmt().unwrap();
         println!("DRT output:");
         println!("{}", drt_output_raw);
 
@@ -1188,8 +1242,8 @@ dynamo_component_nats_client_connection_state 1
 # TYPE dynamo_component_latency histogram
 dynamo_component_latency_bucket{le="0.1"} 10
 dynamo_component_latency_bucket{le="0.5"} 25
-dynamo_component_nats_service_total_requests 100
-dynamo_component_nats_service_total_errors 5"#;
+dynamo_component_nats_service_requests_total 100
+dynamo_component_nats_service_errors_total 5"#;
 
         // Test remove_nats_lines (excludes NATS lines but keeps help/type)
         let filtered_out = super::test_helpers::remove_nats_lines(test_input);
@@ -1231,7 +1285,7 @@ mod test_metricsregistry_nats {
         let drt = create_test_drt_async().await;
 
         // Get DRT output which should include NATS client metrics
-        let drt_output = drt.prometheus_metrics_fmt().unwrap();
+        let drt_output = drt.prometheus_expfmt().unwrap();
         println!("DRT output with NATS metrics:");
         println!("{}", drt_output);
 
@@ -1303,7 +1357,7 @@ mod test_metricsregistry_nats {
         // Get components output which should include NATS client metrics
         // Additional checks for NATS client metrics (without checking specific values)
         let component_nats_metrics =
-            super::test_helpers::extract_nats_lines(&components.prometheus_metrics_fmt().unwrap());
+            super::test_helpers::extract_nats_lines(&components.prometheus_expfmt().unwrap());
         println!(
             "Component NATS metrics count: {}",
             component_nats_metrics.len()
@@ -1317,7 +1371,7 @@ mod test_metricsregistry_nats {
 
         // Check for specific NATS client metric names (without values)
         let component_metrics =
-            super::test_helpers::extract_metrics(&components.prometheus_metrics_fmt().unwrap());
+            super::test_helpers::extract_metrics(&components.prometheus_expfmt().unwrap());
         let actual_component_nats_metrics_sorted: Vec<&str> = component_metrics
             .iter()
             .map(|line| {
@@ -1353,7 +1407,7 @@ mod test_metricsregistry_nats {
         );
 
         // Get both DRT and component output and filter for NATS metrics only
-        let drt_output = drt.prometheus_metrics_fmt().unwrap();
+        let drt_output = drt.prometheus_expfmt().unwrap();
         let drt_nats_lines = super::test_helpers::extract_nats_lines(&drt_output);
         let drt_and_component_nats_metrics =
             super::test_helpers::extract_metrics(&drt_nats_lines.join("\n"));
@@ -1415,7 +1469,7 @@ mod test_metricsregistry_nats {
         sleep(Duration::from_millis(500)).await;
         println!("✓ Launched endpoint service in background successfully");
 
-        let drt_output = drt.prometheus_metrics_fmt().unwrap();
+        let drt_output = drt.prometheus_expfmt().unwrap();
         let parsed_metrics: Vec<_> = drt_output
             .lines()
             .filter_map(super::test_helpers::parse_prometheus_metric)
@@ -1433,7 +1487,11 @@ mod test_metricsregistry_nats {
                 1.0,
                 1.0,
             ), // Should be connected
-            (build_component_metric_name(nats_client::CONNECTS), 1.0, 1.0), // Should have 1 connection
+            (
+                build_component_metric_name(nats_client::CURRENT_CONNECTIONS),
+                1.0,
+                1.0,
+            ), // Should have 1 connection
             (
                 build_component_metric_name(nats_client::IN_TOTAL_BYTES),
                 800.0,
@@ -1456,22 +1514,22 @@ mod test_metricsregistry_nats {
             ), // Wide range around 2
             // Component NATS metrics (ordered to match COMPONENT_NATS_METRICS)
             (
-                build_component_metric_name(nats_service::AVG_PROCESSING_MS),
+                build_component_metric_name(nats_service::PROCESSING_MS_AVG),
                 0.0,
                 0.0,
             ), // No processing yet
             (
-                build_component_metric_name(nats_service::TOTAL_ERRORS),
+                build_component_metric_name(nats_service::ERRORS_TOTAL),
                 0.0,
                 0.0,
             ), // No errors yet
             (
-                build_component_metric_name(nats_service::TOTAL_REQUESTS),
+                build_component_metric_name(nats_service::REQUESTS_TOTAL),
                 0.0,
                 0.0,
             ), // No requests yet
             (
-                build_component_metric_name(nats_service::TOTAL_PROCESSING_MS),
+                build_component_metric_name(nats_service::PROCESSING_MS_TOTAL),
                 0.0,
                 0.0,
             ), // No processing yet
@@ -1540,7 +1598,7 @@ mod test_metricsregistry_nats {
         sleep(Duration::from_millis(500)).await;
         println!("✓ Wait complete, getting final metrics...");
 
-        let final_drt_output = drt.prometheus_metrics_fmt().unwrap();
+        let final_drt_output = drt.prometheus_expfmt().unwrap();
         println!("\n=== Final Prometheus DRT output ===");
         println!("{}", final_drt_output);
 
@@ -1562,7 +1620,11 @@ mod test_metricsregistry_nats {
                 1.0,
                 1.0,
             ), // Connected
-            (build_component_metric_name(nats_client::CONNECTS), 1.0, 1.0), // 1 connection
+            (
+                build_component_metric_name(nats_client::CURRENT_CONNECTIONS),
+                1.0,
+                1.0,
+            ), // 1 connection
             (
                 build_component_metric_name(nats_client::IN_TOTAL_BYTES),
                 20000.0,
@@ -1585,22 +1647,22 @@ mod test_metricsregistry_nats {
             ), // Wide range around 16
             // Component NATS metrics
             (
-                build_component_metric_name(nats_service::AVG_PROCESSING_MS),
+                build_component_metric_name(nats_service::PROCESSING_MS_AVG),
                 0.0,
                 1.0,
             ), // Low processing time
             (
-                build_component_metric_name(nats_service::TOTAL_ERRORS),
+                build_component_metric_name(nats_service::ERRORS_TOTAL),
                 0.0,
                 0.0,
             ), // No errors
             (
-                build_component_metric_name(nats_service::TOTAL_REQUESTS),
+                build_component_metric_name(nats_service::REQUESTS_TOTAL),
                 0.0,
-                0.0,
-            ), // No work handler requests
+                10.0,
+            ), // NATS service stats requests (may differ from work handler count)
             (
-                build_component_metric_name(nats_service::TOTAL_PROCESSING_MS),
+                build_component_metric_name(nats_service::PROCESSING_MS_TOTAL),
                 0.0,
                 5.0,
             ), // Low total processing time

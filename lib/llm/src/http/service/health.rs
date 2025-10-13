@@ -52,23 +52,20 @@ async fn live_handler(
 async fn health_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
-    let model_entries = state.manager().get_model_entries();
-    let instances = if let Some(etcd_client) = state.etcd_client() {
-        match list_all_instances(etcd_client).await {
-            Ok(instances) => instances,
-            Err(err) => {
-                tracing::warn!("Failed to fetch instances from etcd: {}", err);
-                vec![]
-            }
+    let instances = match list_all_instances(state.store()).await {
+        Ok(instances) => instances,
+        Err(err) => {
+            tracing::warn!(%err, "Failed to fetch instances from store");
+            vec![]
         }
-    } else {
-        vec![]
     };
 
-    let endpoints: Vec<String> = model_entries
+    let mut endpoints: Vec<String> = instances
         .iter()
-        .map(|entry| entry.endpoint_id.as_url())
+        .map(|instance| instance.endpoint_id().as_url())
         .collect();
+    endpoints.sort();
+    endpoints.dedup();
     (
         StatusCode::OK,
         Json(json!({

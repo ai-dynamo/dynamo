@@ -208,10 +208,15 @@ impl ApproxKvIndexer {
                     };
 
                     tokio::select! {
-                        Some(request) = match_rx.recv() => {
-                            let scores = trie.find_matches(request.sequence, false);
-                            request.resp.send(scores).unwrap();
+                        _ = cancel_clone.cancelled() => {
+                            tracing::debug!("Approximate Indexer progress loop shutting down");
+                            return;
                         }
+
+                        Some(worker) = remove_worker_rx.recv() => {
+                            trie.remove_worker(worker);
+                        }
+
                         Some(result) = route_rx.recv() => {
                             let hashes = result.local_hashes.iter().zip(result.sequence_hashes.iter());
 
@@ -239,12 +244,15 @@ impl ApproxKvIndexer {
                                 worker: result.worker_id,
                             }).collect());
                         }
-                        Some(worker) = remove_worker_rx.recv() => {
-                            trie.remove_worker(worker);
-                        }
+
                         Some(dump_req) = dump_rx.recv() => {
                             let events = trie.dump_tree_as_events();
                             let _ = dump_req.resp.send(events);
+                        }
+
+                        Some(request) = match_rx.recv() => {
+                            let scores = trie.find_matches(request.sequence, false);
+                            request.resp.send(scores).unwrap();
                         }
 
                         _ = expiry_fut => {
@@ -265,11 +273,6 @@ impl ApproxKvIndexer {
 
                                 let _ = trie.apply_event(event);
                             });
-                        }
-
-                        _ = cancel_clone.cancelled() => {
-                            tracing::debug!("Approximate Indexer progress loop shutting down");
-                            return;
                         }
                     }
                 }

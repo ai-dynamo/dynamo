@@ -38,7 +38,7 @@ spec:
           memory: "100Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0825-01
+          image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -76,10 +76,10 @@ spec:
       envs:
         - name: DYN_SYSTEM_ENABLED
           value: "true"
-        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-          value: "[\"generate\"]"
         - name: DYN_SYSTEM_PORT
           value: "9090"
+        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+          value: "[\"generate\"]"
       extraPodSpec:
         mainContainer:
           startupProbe:
@@ -88,7 +88,7 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0825-01
+          image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh

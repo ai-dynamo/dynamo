@@ -20,6 +20,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
+from dynamo import prometheus_names
+
 logger = logging.getLogger(__name__)
 
 
@@ -148,6 +150,47 @@ class CompletionPayload(BasePayload):
 
 
 @dataclass
+class EmbeddingPayload(BasePayload):
+    """Payload for embeddings endpoint."""
+
+    endpoint: str = "/v1/embeddings"
+
+    @staticmethod
+    def extract_embeddings(response):
+        """
+        Process embeddings API responses.
+        """
+        response.raise_for_status()
+        result = response.json()
+        assert "object" in result, "Missing 'object' in response"
+        assert (
+            result["object"] == "list"
+        ), f"Expected object='list', got {result['object']}"
+        assert "data" in result, "Missing 'data' in response"
+        assert len(result["data"]) > 0, "Empty data in response"
+
+        # Extract embedding vectors and validate structure
+        embeddings = []
+        for item in result["data"]:
+            assert "object" in item, "Missing 'object' in embedding item"
+            assert (
+                item["object"] == "embedding"
+            ), f"Expected object='embedding', got {item['object']}"
+            assert "embedding" in item, "Missing 'embedding' vector in item"
+            assert isinstance(
+                item["embedding"], list
+            ), "Embedding should be a list of floats"
+            assert len(item["embedding"]) > 0, "Embedding vector should not be empty"
+            embeddings.append(item["embedding"])
+
+        # Return a summary string for validation
+        return f"Generated {len(embeddings)} embeddings with dimension {len(embeddings[0])}"
+
+    def response_handler(self, response: Any) -> str:
+        return EmbeddingPayload.extract_embeddings(response)
+
+
+@dataclass
 class MetricsPayload(BasePayload):
     endpoint: str = "/metrics"
     method: str = "GET"
@@ -163,23 +206,26 @@ class MetricsPayload(BasePayload):
         return response.text
 
     def validate(self, response: Any, content: str) -> None:
-        pattern = r'dynamo_component_requests_total\{[^}]*model="[^"]*"[^}]*\}\s+(\d+)'
+        requests_total_name = prometheus_names.work_handler.REQUESTS_TOTAL
+        pattern = (
+            rf'{re.escape(requests_total_name)}\{{[^}}]*model="[^"]*"[^}}]*\}}\s+(\d+)'
+        )
         matches = re.findall(pattern, content)
         if not matches:
             raise AssertionError(
-                "Metric 'dynamo_component_requests_total' with model label not found in metrics output"
+                f"Metric '{requests_total_name}' with model label not found in metrics output"
             )
 
         for match in matches:
             request_count = int(match)
             if request_count >= self.min_num_requests:
                 logger.info(
-                    f"SUCCESS: Found dynamo_component_requests_total with count: {request_count}"
+                    f"SUCCESS: Found {requests_total_name} with count: {request_count}"
                 )
                 return
 
         raise AssertionError(
-            f"dynamo_component_requests_total exists but has count {request_count} which is less than required {self.min_num_requests}"
+            f"{requests_total_name} exists but has count {request_count} which is less than required {self.min_num_requests}"
         )
 
 

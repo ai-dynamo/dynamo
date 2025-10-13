@@ -33,7 +33,7 @@ import (
 type GroveConfig struct {
 	// Enabled is automatically determined by checking if Grove CRDs are installed in the cluster
 	Enabled bool
-	// TerminationDelay configures the termination delay for Grove PodGangSets
+	// TerminationDelay configures the termination delay for Grove PodCliqueSets
 	TerminationDelay time.Duration
 }
 
@@ -45,6 +45,11 @@ type LWSConfig struct {
 type KaiSchedulerConfig struct {
 	// Enabled is automatically determined by checking if Kai-scheduler CRDs are installed in the cluster
 	Enabled bool
+}
+
+type MpiRunConfig struct {
+	// SecretName is the name of the secret containing the SSH key for MPI Run
+	SecretName string
 }
 
 type Config struct {
@@ -60,6 +65,15 @@ type Config struct {
 	ModelExpressURL string
 	// PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics
 	PrometheusEndpoint string
+	MpiRun             MpiRunConfig
+	// RBAC configuration for cross-namespace resource management
+	RBAC RBACConfig
+}
+
+// RBACConfig holds configuration for RBAC management
+type RBACConfig struct {
+	// PlannerClusterRoleName is the name of the ClusterRole for planner (cluster-wide mode only)
+	PlannerClusterRoleName string
 }
 
 type IngressConfig struct {

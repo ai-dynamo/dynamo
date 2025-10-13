@@ -5,10 +5,10 @@ use std::{any::Any, sync::Arc};
 
 use dynamo_llm::{
     block_manager::{
-        block::{locality::LocalityProvider, BlockMetadata},
+        Storage,
+        block::{BlockMetadata, locality::LocalityProvider},
         connector::protocol::{LeaderTransferRequest, RequestType, TransferType},
         distributed::{BlockTransferPool, BlockTransferRequest, KvbmLeader},
-        Storage,
     },
     tokens::TokenBlock,
 };
@@ -115,6 +115,7 @@ pub trait Slot: std::fmt::Debug {
         tokens: &[u32],
         block_ids: &[usize],
         computed_position: usize,
+        is_new_request: bool,
     ) -> Result<(), SlotError>;
 
     fn record_start_iteration(&mut self, iteration: u64) -> Result<(), SlotError>;
@@ -398,7 +399,11 @@ impl VllmConnectorSlot {
             SlotState::SkippedPrefill => Ok(()), // already skipped
             SlotState::SkippedDecode => Ok(()),  // already skipped
             _ => {
-                tracing::warn!("slot is in the {:?} state; will not explicitly mark as skipped, request_id: {}", self.state, self.request_id);
+                tracing::debug!(
+                    "slot is in the {:?} state; will not explicitly mark as skipped, request_id: {}",
+                    self.state,
+                    self.request_id
+                );
                 Ok(())
             }
         }
@@ -588,13 +593,15 @@ impl Slot for VllmConnectorSlot {
         tokens: &[u32],
         block_ids: &[usize],
         computed_position: usize,
+        is_new_request: bool,
     ) -> Result<(), SlotError> {
         // TRTLLM's KV Connector Manager will have (computed_position - external matches)
         // in onborading case
         if computed_position < self.current_position {
             tracing::debug!(
                 "computed_position={} < current_position={}, so we are onboarding during prefilling phase",
-                computed_position, self.current_position
+                computed_position,
+                self.current_position
             );
             return Ok(());
         }
@@ -625,10 +632,21 @@ impl Slot for VllmConnectorSlot {
             self.device_blocks.extend(block_ids);
         }
 
-        let num_candidate_blocks =
-            ((computed_position + 1) / self.block_size) - self.evaluated_blocks;
+        // This approach is fragile, but it’s the only way currently to skip evaluating
+        // the device matched blocks and to avoid offloading them again.
+        // TODO: Consider adding an indicator in the scheduler output to distinguish between
+        // matched and unmatched device blocks/tokens from the scheduler.
+        let maybe_have_device_matched_blocks =
+            is_new_request && computed_position > 0 && self.evaluated_blocks == 0;
 
-        if num_candidate_blocks != 0 {
+        if maybe_have_device_matched_blocks {
+            self.evaluated_blocks = (computed_position + 1) / self.block_size;
+        }
+
+        let num_candidate_blocks =
+            ((computed_position + 1) / self.block_size).saturating_sub(self.evaluated_blocks);
+
+        if num_candidate_blocks > 0 {
             // do we have a mechanism for skipping gpu cache hit blocks?  not sure yet.
             // for now, offload all the blocks to the host
             let offload_block_ids: Vec<usize> = self
@@ -916,7 +934,8 @@ impl ExternallyManagedDeviceSlot for VllmConnectorSlot {
         if self.current_position + num_tokens > self.sequence().total_tokens() {
             return Err(SlotError::InvalidOperation(format!(
                 "cannot advance computed position from {} by {num_tokens} tokens, total tokens is {}",
-                self.current_position, self.sequence().total_tokens()
+                self.current_position,
+                self.sequence().total_tokens()
             )));
         }
 
@@ -1258,11 +1277,6 @@ async fn process_offload_request(
     leader: &Arc<KvbmLeader>,
     kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
-    kvbm_metrics.offload_requests.inc();
-    kvbm_metrics
-        .offload_blocks_d2h
-        .inc_by(offload_req.block_ids.len() as u64);
-
     let request_id = &offload_req.request_id;
     let operation_id = &offload_req.operation_id;
 
@@ -1349,6 +1363,10 @@ async fn process_offload_request(
         "offload - stage 4 complete"
     );
 
+    kvbm_metrics
+        .offload_blocks_d2h
+        .inc_by(blocks_to_register.len() as u64);
+
     // 5. Register the mutable blocks
     let immutable_blocks = block_manager
         .host()
@@ -1370,7 +1388,6 @@ async fn process_onboard_request(
     leader: &Arc<KvbmLeader>,
     kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
-    kvbm_metrics.onboard_requests.inc();
     if onboard_req.src_blocks.storage_pool() == BlockTransferPool::Host {
         kvbm_metrics
             .onboard_blocks_h2d

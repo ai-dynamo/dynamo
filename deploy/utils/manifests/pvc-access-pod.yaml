@@ -8,7 +8,6 @@ metadata:
   labels:
     app: pvc-access
 spec:
-  activeDeadlineSeconds: 3000  # Auto-terminate after ~50 minutes; Pod will be Failed (not auto-deleted)
   securityContext:
     runAsNonRoot: true
     runAsUser: 1000

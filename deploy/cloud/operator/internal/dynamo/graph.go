@@ -125,7 +125,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 	}
 	for componentName, component := range parentDynamoGraphDeployment.Spec.Services {
 		deployment := &v1alpha1.DynamoComponentDeployment{}
-		deployment.Spec.DynamoComponentDeploymentSharedSpec = component.DynamoComponentDeploymentSharedSpec
+		deployment.Spec.DynamoComponentDeploymentSharedSpec = *component
 		deployment.Name = GetDynamoComponentName(parentDynamoGraphDeployment, componentName)
 		deployment.Spec.BackendFramework = parentDynamoGraphDeployment.Spec.BackendFramework
 		deployment.Namespace = parentDynamoGraphDeployment.Namespace
@@ -333,25 +333,25 @@ type SecretsRetriever interface {
 	GetSecrets(namespace, registry string) ([]string, error)
 }
 
-// applyCliqueStartupDependencies configures StartsAfter dependencies for cliques in a PodGangSet
+// applyCliqueStartupDependencies configures StartsAfter dependencies for cliques in a PodCliqueSet
 // based on the backend framework and multinode deployment patterns.
 //
 // Rules:
 // - For VLLM and SGLang: worker cliques start after leader clique
 // - For TRTLLM: leader clique starts after worker cliques
 // - Only applies to multinode deployments (numberOfNodes > 1)
-// - Sets the PodGangSet StartupType to Explicit if any dependencies are configured
+// - Sets the PodCliqueSet StartupType to Explicit if any dependencies are configured
 func applyCliqueStartupDependencies(
-	gangSet *grovev1alpha1.PodGangSet,
+	gangSet *grovev1alpha1.PodCliqueSet,
 	roles []ServiceRole,
 	backendFramework BackendFramework,
 	numberOfNodes int32,
 ) {
-	// deactivated for now.
-	// TODO: reactivate this when we have a better way to handle the readiness probe for the leader.
-	deactivated := true
+	// enabled for TRTLLM multinode deployments only
+	// TODO: reactivate for all backends when we have a better way to handle the readiness probe for the leader.
+	enabled := backendFramework == BackendFrameworkTRTLLM && numberOfNodes > 1
 
-	if deactivated || numberOfNodes <= 1 {
+	if !enabled {
 		return // No dependencies for single-node deployments
 	}
 
@@ -569,14 +569,6 @@ func GenerateDefaultIngressSpec(dynamoDeployment *v1alpha1.DynamoGraphDeployment
 	return res
 }
 
-// Helper: mergeContainerCommand returns userCmd if specified, else defaultCmd
-func mergeContainerCommand(defaultCmd, userCmd []string) []string {
-	if len(userCmd) > 0 {
-		return userCmd
-	}
-	return defaultCmd
-}
-
 // Define Role enum for leader/worker/main
 // Use this type everywhere instead of string for role
 
@@ -621,36 +613,38 @@ const (
 // Backend interface for modular backend logic
 // Each backend (SGLang, VLLM, etc.) implements this interface
 type Backend interface {
-	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string, multinodeDeployer MultinodeDeployer)
-	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string)
+	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer)
+	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string)
 }
 
 // NoopBackend does no processing - used for non-worker components like frontend, planner, router
 type NoopBackend struct{}
 
-func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// No-op: frontend, planner, router, etc. don't need backend-specific processing
 }
 
-func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string) {
+func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string) {
 	// No-op: frontend, planner, router, etc. don't need backend-specific processing
 }
 
 type MultinodeDeployer interface {
 	GetLeaderHostname(serviceName string) string
 	GetHostNames(serviceName string, numberOfNodes int32) []string
-	GetNodeRank() string
+	GetNodeRank() (string, bool) // returns (rank, needsShellInterpretation)
 }
 
 // BackendFactory creates backend instances based on the framework type
-func BackendFactory(backendFramework BackendFramework) Backend {
+func BackendFactory(backendFramework BackendFramework, controllerConfig controller_common.Config) Backend {
 	switch backendFramework {
 	case BackendFrameworkSGLang:
 		return &SGLangBackend{}
 	case BackendFrameworkVLLM:
 		return &VLLMBackend{}
 	case BackendFrameworkTRTLLM:
-		return &TRTLLMBackend{}
+		return &TRTLLMBackend{
+			MpiRunSecretName: controllerConfig.MpiRun.SecretName,
+		}
 	case BackendFrameworkNoop:
 		return &NoopBackend{}
 	default:
@@ -713,7 +707,7 @@ func addStandardEnvVars(container *corev1.Container, controllerConfig controller
 //
 //nolint:gocyclo
 func GenerateBasePodSpec(
-	component *v1alpha1.DynamoComponentDeploymentOverridesSpec,
+	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
 	backendFramework BackendFramework,
 	secretsRetriever SecretsRetriever,
 	parentGraphDeploymentName string,
@@ -751,7 +745,7 @@ func GenerateBasePodSpec(
 			}
 		}
 	}
-	container.Env = MergeEnvs(component.Envs, container.Env)
+	container.Env = MergeEnvs(container.Env, component.Envs)
 
 	// Merge probes entirely if they are passed (no partial merge)
 	if component.LivenessProbe != nil {
@@ -781,8 +775,10 @@ func GenerateBasePodSpec(
 		maps.Copy(container.Resources.Limits, overrideResources.Limits)
 	}
 
+	shouldDisableImagePullSecret := component.Annotations[commonconsts.KubeAnnotationDisableImagePullSecretDiscovery] == commonconsts.KubeLabelValueTrue
+
 	imagePullSecrets := []corev1.LocalObjectReference{}
-	if secretsRetriever != nil && component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil && component.ExtraPodSpec.MainContainer.Image != "" {
+	if !shouldDisableImagePullSecret && secretsRetriever != nil && component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil && component.ExtraPodSpec.MainContainer.Image != "" {
 		secretsName, err := secretsRetriever.GetSecrets(namespace, component.ExtraPodSpec.MainContainer.Image)
 		if err == nil {
 			for _, secretName := range secretsName {
@@ -800,19 +796,38 @@ func GenerateBasePodSpec(
 
 	addStandardEnvVars(&container, controllerConfig)
 
-	var volumes []corev1.Volume
-	if component.PVC != nil {
+	volumes := make([]corev1.Volume, 0, len(component.VolumeMounts)+1) // +1 for shared memory volume
+
+	for _, volumeMount := range component.VolumeMounts {
+		if volumeMount.Name == "" {
+			return nil, fmt.Errorf("volumeMount.name is required when volumeMounts is set")
+		}
+
+		// Determine mount point
+		mountPoint := volumeMount.MountPoint
+		if volumeMount.UseAsCompilationCache && mountPoint == "" {
+			// Use backend-specific default for compilation cache
+			defaultMountPoint := getDefaultCompilationCacheMountPoint(backendFramework)
+			if defaultMountPoint == "" {
+				return nil, fmt.Errorf("volumeMount with useAsCompilationCache=true requires an explicit mountPoint for backend framework %s (no default available)", backendFramework)
+			}
+			mountPoint = defaultMountPoint
+		} else if !volumeMount.UseAsCompilationCache && mountPoint == "" {
+			return nil, fmt.Errorf("volumeMount.mountPoint is required when useAsCompilationCache is false")
+		}
+
 		volumes = append(volumes, corev1.Volume{
-			Name: *component.PVC.Name,
+			Name: volumeMount.Name,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: *component.PVC.Name,
+					ClaimName: volumeMount.Name,
 				},
 			},
 		})
+
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-			Name:      *component.PVC.Name,
-			MountPath: *component.PVC.MountPoint,
+			Name:      volumeMount.Name,
+			MountPath: mountPoint,
 		})
 	}
 	if shmVol, shmMount := generateSharedMemoryVolumeAndMount(component.SharedMemory); shmVol != nil && shmMount != nil {
@@ -825,7 +840,7 @@ func GenerateBasePodSpec(
 	if multinodeDeployer == nil {
 		return nil, fmt.Errorf("unsupported multinode deployment type: %s", multinodeDeploymentType)
 	}
-	backend := BackendFactory(backendFramework)
+	backend := BackendFactory(backendFramework, controllerConfig)
 	if backend == nil {
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
@@ -862,7 +877,7 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 	labels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
 }
 
-func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentOverridesSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32) ComponentContext {
+func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32) ComponentContext {
 	componentContext := ComponentContext{
 		numberOfNodes:                  numberOfNodes,
 		ParentGraphDeploymentName:      parentGraphDeploymentName,
@@ -876,7 +891,7 @@ func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentOverr
 
 // GeneratePodSpecForComponent creates a PodSpec for Grove deployments (simplified wrapper)
 func GeneratePodSpecForComponent(
-	component *v1alpha1.DynamoComponentDeploymentOverridesSpec,
+	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
 	backendFramework BackendFramework,
 	secretsRetriever SecretsRetriever,
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
@@ -896,14 +911,14 @@ func GeneratePodSpecForComponent(
 	return podSpec, nil
 }
 
-// GenerateGrovePodGangSet generates a Grove PodGangSet for the given deployment, supporting both single-node and multinode cases.
-func GenerateGrovePodGangSet(
+// GenerateGrovePodCliqueSet generates a Grove PodCliqueSet for the given deployment, supporting both single-node and multinode cases.
+func GenerateGrovePodCliqueSet(
 	ctx context.Context,
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
 	controllerConfig controller_common.Config,
 	secretsRetriever SecretsRetriever,
-) (*grovev1alpha1.PodGangSet, error) {
-	gangSet := &grovev1alpha1.PodGangSet{}
+) (*grovev1alpha1.PodCliqueSet, error) {
+	gangSet := &grovev1alpha1.PodCliqueSet{}
 	gangSet.Name = dynamoDeployment.Name
 	gangSet.Namespace = dynamoDeployment.Namespace
 	gangSet.Spec.Replicas = 1
@@ -1002,15 +1017,21 @@ func GenerateGrovePodGangSet(
 		gangSet.Spec.Template.PodCliqueScalingGroupConfigs = scalingGroups
 	}
 
-	return controller_common.CanonicalizePodGangSet(gangSet), nil
+	return controller_common.CanonicalizePodCliqueSet(gangSet), nil
 }
 
-func generateLabels(component *v1alpha1.DynamoComponentDeploymentOverridesSpec, dynamoDeployment *v1alpha1.DynamoGraphDeployment, componentName string) (map[string]string, error) {
+func generateLabels(component *v1alpha1.DynamoComponentDeploymentSharedSpec, dynamoDeployment *v1alpha1.DynamoGraphDeployment, componentName string) (map[string]string, error) {
 	labels := make(map[string]string)
 	labels[commonconsts.KubeLabelDynamoSelector] = GetDynamoComponentName(dynamoDeployment, componentName)
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
+	if component.DynamoNamespace != nil {
+		labels[commonconsts.KubeLabelDynamoNamespace] = *component.DynamoNamespace
+	}
 	if component.ComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoComponentType] = component.ComponentType
+	}
+	if component.SubComponentType != "" {
+		labels[commonconsts.KubeLabelDynamoSubComponentType] = component.SubComponentType
 	}
 	setMetricsLabels(labels, dynamoDeployment)
 	if component.Labels != nil {
@@ -1028,7 +1049,7 @@ func generateLabels(component *v1alpha1.DynamoComponentDeploymentOverridesSpec, 
 	return labels, nil
 }
 
-func generateAnnotations(component *v1alpha1.DynamoComponentDeploymentOverridesSpec) (map[string]string, error) {
+func generateAnnotations(component *v1alpha1.DynamoComponentDeploymentSharedSpec) (map[string]string, error) {
 	annotations := make(map[string]string)
 	if component.Annotations != nil {
 		err := mergo.Merge(&annotations, component.Annotations, mergo.WithOverride)
@@ -1142,7 +1163,7 @@ func determineBackendFramework(
 // 3. Return error if worker has neither detection nor explicit config
 // Also validates consistency between detected and explicit if both exist
 func getBackendFrameworkFromComponent(
-	component *v1alpha1.DynamoComponentDeploymentOverridesSpec,
+	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
 ) (BackendFramework, error) {
 	// Extract command/args from component
@@ -1165,14 +1186,12 @@ func getBackendFrameworkFromComponent(
 
 // ConvertDynamoComponentDeploymentToSpec converts a DynamoComponentDeployment to our component spec interface
 // This is a helper for the controller to use our backend logic
-func ConvertDynamoComponentDeploymentToSpec(dynComponent *v1alpha1.DynamoComponentDeployment) *v1alpha1.DynamoComponentDeploymentOverridesSpec {
-	return &v1alpha1.DynamoComponentDeploymentOverridesSpec{
-		DynamoComponentDeploymentSharedSpec: *dynComponent.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy(),
-	}
+func ConvertDynamoComponentDeploymentToSpec(dynComponent *v1alpha1.DynamoComponentDeployment) *v1alpha1.DynamoComponentDeploymentSharedSpec {
+	return dynComponent.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy()
 }
 
-// getBackendFrameworkFromDynamoComponent determines backend framework for a DynamoComponentDeployment
-func getBackendFrameworkFromDynamoComponent(dynComponent *v1alpha1.DynamoComponentDeployment) (BackendFramework, error) {
+// GetBackendFrameworkFromDynamoComponent determines backend framework for a DynamoComponentDeployment
+func GetBackendFrameworkFromDynamoComponent(dynComponent *v1alpha1.DynamoComponentDeployment) (BackendFramework, error) {
 	// Extract command/args from component
 	var command, args []string
 	if dynComponent.Spec.ExtraPodSpec != nil && dynComponent.Spec.ExtraPodSpec.MainContainer != nil {
@@ -1206,7 +1225,7 @@ func GenerateBasePodSpecForController(
 	numberOfNodes := componentSpec.GetNumberOfNodes()
 
 	// Determine backend framework using hybrid approach
-	backendFramework, err := getBackendFrameworkFromDynamoComponent(dynComponent)
+	backendFramework, err := GetBackendFrameworkFromDynamoComponent(dynComponent)
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine backend framework: %w", err)
 	}
@@ -1231,6 +1250,21 @@ func GenerateBasePodSpecForController(
 	}
 
 	return podSpec, nil
+}
+
+// getDefaultCompilationCacheMountPoint returns the default mount point for compilation cache based on backend framework
+func getDefaultCompilationCacheMountPoint(backendFramework BackendFramework) string {
+	switch backendFramework {
+	case BackendFrameworkVLLM:
+		return commonconsts.DefaultVLLMCacheMountPoint
+	case BackendFrameworkSGLang, BackendFrameworkTRTLLM:
+		// SGLang and TensorRT-LLM don't currently support compilation caches
+		// Return empty string as these should not be used
+		return ""
+	default:
+		// For unknown backends, don't assume compilation cache support
+		return ""
+	}
 }
 
 func generateSharedMemoryVolumeAndMount(spec *v1alpha1.SharedMemorySpec) (*corev1.Volume, *corev1.VolumeMount) {

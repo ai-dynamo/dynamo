@@ -9,4 +9,4 @@ mod worker;
 
 pub use leader::KvbmLeader;
 pub use utils::get_barrier_id_prefix;
-pub use worker::{KvbmWorker, VllmTensor};
+pub use worker::{KvbmWorker, PyLayoutType, VllmTensor};

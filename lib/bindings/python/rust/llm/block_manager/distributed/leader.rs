@@ -86,6 +86,8 @@ impl KvbmLeader {
             .build()
             .map_err(to_pyerr)?;
 
+        config.sanity_check().map_err(to_pyerr)?;
+
         let rt = drt.inner().runtime().primary();
 
         let leader =

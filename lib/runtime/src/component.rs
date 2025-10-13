@@ -29,12 +29,14 @@
 //!
 //! TODO: Top-level Overview of Endpoints/Functions
 
+use std::fmt;
+
 use crate::{
     config::HealthStatus,
     discovery::Lease,
     metrics::{MetricsRegistry, prometheus_names},
     service::ServiceSet,
-    transports::etcd::EtcdPath,
+    transports::etcd::{ETCD_ROOT_PATH, EtcdPath},
 };
 
 use super::{
@@ -70,12 +72,9 @@ pub mod service;
 
 pub use client::{Client, InstanceSource};
 
-/// The root etcd path where each instance registers itself in etcd.
+/// The root key-value path where each instance registers itself in.
 /// An instance is namespace+component+endpoint+lease_id and must be unique.
-pub const INSTANCE_ROOT_PATH: &str = "instances";
-
-/// The root etcd path where each namespace is registered in etcd.
-pub const ETCD_ROOT_PATH: &str = "dynamo://";
+pub const INSTANCE_ROOT_PATH: &str = "v1/instances";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -94,7 +93,7 @@ pub struct Registry {
     inner: Arc<tokio::sync::Mutex<RegistryInner>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Instance {
     pub component: String,
     pub endpoint: String,
@@ -106,6 +105,37 @@ pub struct Instance {
 impl Instance {
     pub fn id(&self) -> i64 {
         self.instance_id
+    }
+    pub fn endpoint_id(&self) -> EndpointId {
+        EndpointId {
+            namespace: self.namespace.clone(),
+            component: self.component.clone(),
+            name: self.endpoint.clone(),
+        }
+    }
+}
+
+impl fmt::Display for Instance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}/{}/{}/{}",
+            self.namespace, self.component, self.endpoint, self.instance_id
+        )
+    }
+}
+
+/// Sort by string name
+impl std::cmp::Ord for Instance {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.to_string().cmp(&other.to_string())
+    }
+}
+
+impl PartialOrd for Instance {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // Since Ord is fully implemented, the comparison is always total.
+        Some(self.cmp(other))
     }
 }
 
@@ -193,8 +223,8 @@ impl MetricsRegistry for Component {
 }
 
 impl Component {
-    /// The component part of an instance path in etcd.
-    pub fn etcd_root(&self) -> String {
+    /// The component part of an instance path in key-value store.
+    pub fn instance_root(&self) -> String {
         let ns = self.namespace.name();
         let cp = &self.name;
         format!("{INSTANCE_ROOT_PATH}/{ns}/{cp}")
@@ -218,8 +248,8 @@ impl Component {
         &self.namespace
     }
 
-    pub fn name(&self) -> String {
-        self.name.clone()
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     pub fn labels(&self) -> &[(String, String)] {
@@ -236,27 +266,23 @@ impl Component {
     }
 
     pub async fn list_instances(&self) -> anyhow::Result<Vec<Instance>> {
-        let Some(etcd_client) = self.drt.etcd_client() else {
+        let client = self.drt.store();
+        let Some(bucket) = client.get_bucket(&self.instance_root()).await? else {
             return Ok(vec![]);
         };
-        let mut out = vec![];
-        // The extra slash is important to only list exact component matches, not substrings.
-        for kv in etcd_client
-            .kv_get_prefix(format!("{}/", self.etcd_root()))
-            .await?
-        {
-            let val = match serde_json::from_slice::<Instance>(kv.value()) {
+        let entries = bucket.entries().await?;
+        let mut instances = Vec::with_capacity(entries.len());
+        for (name, bytes) in entries.into_iter() {
+            let val = match serde_json::from_slice::<Instance>(&bytes) {
                 Ok(val) => val,
                 Err(err) => {
-                    anyhow::bail!(
-                        "Error converting etcd response to Instance: {err}. {}",
-                        kv.value_str()?
-                    );
+                    anyhow::bail!("Error converting storage response to Instance: {err}. {name}",);
                 }
             };
-            out.push(val);
+            instances.push(val);
         }
-        Ok(out)
+        instances.sort();
+        Ok(instances)
     }
 
     /// Scrape ServiceSet, which contains NATS stats as well as user defined stats
@@ -441,7 +467,7 @@ impl Endpoint {
 
     /// The endpoint part of an instance path in etcd
     pub fn etcd_root(&self) -> String {
-        let component_path = self.component.etcd_root();
+        let component_path = self.component.instance_root();
         let endpoint_name = &self.name;
         format!("{component_path}/{endpoint_name}")
     }
@@ -450,7 +476,7 @@ impl Endpoint {
     pub fn etcd_path(&self) -> EtcdPath {
         EtcdPath::new_endpoint(
             &self.component.namespace().name(),
-            &self.component.name(),
+            self.component.name(),
             &self.name,
         )
         .expect("Endpoint name and component name should be valid")
@@ -458,12 +484,15 @@ impl Endpoint {
 
     /// The fully path of an instance in etcd
     pub fn etcd_path_with_lease_id(&self, lease_id: i64) -> String {
-        let endpoint_root = self.etcd_root();
-        if self.is_static {
-            endpoint_root
-        } else {
-            format!("{endpoint_root}:{lease_id:x}")
-        }
+        format!("{INSTANCE_ROOT_PATH}/{}", self.unique_path(lease_id))
+    }
+
+    /// Full path of this endpoint with forward slash separators, including lease id
+    pub fn unique_path(&self, lease_id: i64) -> String {
+        let ns = self.component.namespace().name();
+        let cp = self.component.name();
+        let ep = self.name();
+        format!("{ns}/{cp}/{ep}/{lease_id:x}")
     }
 
     /// The endpoint as an EtcdPath object with lease ID
@@ -473,7 +502,7 @@ impl Endpoint {
         } else {
             EtcdPath::new_endpoint_with_lease(
                 &self.component.namespace().name(),
-                &self.component.name(),
+                self.component.name(),
                 &self.name,
                 lease_id,
             )
@@ -591,7 +620,7 @@ impl Namespace {
     }
 
     pub fn etcd_path(&self) -> String {
-        format!("{}{}", ETCD_ROOT_PATH, self.name())
+        format!("{ETCD_ROOT_PATH}{}", self.name())
     }
 
     pub fn name(&self) -> String {

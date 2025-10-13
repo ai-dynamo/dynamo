@@ -4,12 +4,13 @@
 use std::sync::Arc;
 
 use crate::{
-    discovery::{MODEL_ROOT_PATH, ModelManager, ModelUpdate, ModelWatcher},
+    discovery::{ModelManager, ModelUpdate, ModelWatcher},
     endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
     entrypoint::{self, EngineConfig, input::common},
     http::service::service_v2::{self, HttpService},
     kv_router::KvRouterConfig,
+    model_card,
     namespace::is_global_namespace,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -51,6 +52,15 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
     http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());
 
+    // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
+    // Pass the custom backend metrics endpoint as-is (already in namespace.component.endpoint format)
+    http_service_builder = http_service_builder.with_custom_backend_config(
+        local_model
+            .custom_backend_metrics_endpoint()
+            .map(|s| s.to_string()),
+        local_model.custom_backend_metrics_polling_interval(),
+    );
+
     let http_service = match engine_config {
         EngineConfig::Dynamic(_) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
@@ -74,12 +84,13 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                         distributed_runtime,
                         http_service.state().manager_clone(),
                         etcd_client.clone(),
-                        MODEL_ROOT_PATH,
+                        model_card::ROOT_PATH,
                         router_config.router_mode,
                         Some(router_config.kv_router_config),
                         router_config.busy_threshold,
                         target_namespace,
                         Arc::new(http_service.clone()),
+                        http_service.state().metrics_clone(),
                     )
                     .await?;
                 }
@@ -91,6 +102,8 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
         }
         EngineConfig::StaticRemote(local_model) => {
             let card = local_model.card();
+            let checksum = card.mdcsum();
+
             let router_mode = local_model.router_config().router_mode;
 
             let dst_config = DistributedConfig::from_settings(true); // true means static
@@ -132,7 +145,11 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 tokenizer_hf.clone(),
             )
             .await?;
-            manager.add_chat_completions_model(local_model.display_name(), chat_engine)?;
+            manager.add_chat_completions_model(
+                local_model.display_name(),
+                checksum,
+                chat_engine,
+            )?;
 
             let completions_engine =
                 entrypoint::build_routed_pipeline::<
@@ -140,7 +157,11 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                     NvCreateCompletionResponse,
                 >(card, &client, router_mode, None, kv_chooser, tokenizer_hf)
                 .await?;
-            manager.add_completions_model(local_model.display_name(), completions_engine)?;
+            manager.add_completions_model(
+                local_model.display_name(),
+                checksum,
+                completions_engine,
+            )?;
 
             for endpoint_type in EndpointType::all() {
                 http_service.enable_model_endpoint(endpoint_type, true);
@@ -152,8 +173,9 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             let http_service = http_service_builder.build()?;
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let manager = http_service.model_manager();
-            manager.add_completions_model(model.service_name(), engine.clone())?;
-            manager.add_chat_completions_model(model.service_name(), engine)?;
+            let checksum = model.card().mdcsum();
+            manager.add_completions_model(model.service_name(), checksum, engine.clone())?;
+            manager.add_chat_completions_model(model.service_name(), checksum, engine)?;
 
             // Enable all endpoints
             for endpoint_type in EndpointType::all() {
@@ -168,6 +190,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
         } => {
             let http_service = http_service_builder.build()?;
             let manager = http_service.model_manager();
+            let checksum = model.card().mdcsum();
 
             let tokenizer_hf = model.card().tokenizer_hf()?;
             let chat_pipeline =
@@ -176,14 +199,14 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                     NvCreateChatCompletionStreamResponse,
                 >(model.card(), inner_engine.clone(), tokenizer_hf.clone())
                 .await?;
-            manager.add_chat_completions_model(model.service_name(), chat_pipeline)?;
+            manager.add_chat_completions_model(model.service_name(), checksum, chat_pipeline)?;
 
             let cmpl_pipeline = common::build_pipeline::<
                 NvCreateCompletionRequest,
                 NvCreateCompletionResponse,
             >(model.card(), inner_engine, tokenizer_hf)
             .await?;
-            manager.add_completions_model(model.service_name(), cmpl_pipeline)?;
+            manager.add_completions_model(model.service_name(), checksum, cmpl_pipeline)?;
             // Enable all endpoints
             for endpoint_type in EndpointType::all() {
                 http_service.enable_model_endpoint(endpoint_type, true);
@@ -199,7 +222,57 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             .map(|rd| rd.to_string())
             .collect::<Vec<String>>()
     );
+
+    // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
+    // Start custom backend metrics polling if configured
+    let polling_task =
+        if let (Some(namespace_component_endpoint), Some(polling_interval), Some(registry)) = (
+            http_service
+                .custom_backend_namespace_component_endpoint
+                .as_ref(),
+            http_service.custom_backend_metrics_polling_interval,
+            http_service.custom_backend_registry.as_ref(),
+        ) {
+            // Create DistributedRuntime for polling, matching the engine's mode
+            // Check if we have etcd_client to determine if we're in dynamic or static mode
+            let drt = if http_service.state().etcd_client().is_some() {
+                // Dynamic mode: use from_settings() which respects environment (includes etcd)
+                DistributedRuntime::from_settings(runtime.clone()).await?
+            } else {
+                // Static mode: no etcd
+                let dst_config =
+                    dynamo_runtime::distributed::DistributedConfig::from_settings(true);
+                DistributedRuntime::new(runtime.clone(), dst_config).await?
+            };
+
+            tracing::info!(
+                namespace_component_endpoint=%namespace_component_endpoint,
+                polling_interval_secs=polling_interval,
+                "Starting custom backend metrics polling task"
+            );
+            // Spawn the polling task and keep the JoinHandle alive so it can be aborted during
+            // shutdown. While graceful shutdown is not strictly necessary for this non-critical
+            // metrics polling, explicitly aborting it prevents the task from running during the
+            // shutdown phase.
+            Some(
+                crate::http::service::custom_backend_metrics::spawn_custom_backend_polling_task(
+                    drt,
+                    namespace_component_endpoint.clone(),
+                    polling_interval,
+                    registry.clone(),
+                ),
+            )
+        } else {
+            None
+        };
+
     http_service.run(runtime.primary_token()).await?;
+
+    // Abort the polling task if it was started
+    if let Some(task) = polling_task {
+        task.abort();
+    }
+
     runtime.shutdown(); // Cancel primary token
     Ok(())
 }
@@ -217,6 +290,7 @@ async fn run_watcher(
     busy_threshold: Option<f64>,
     target_namespace: Option<String>,
     http_service: Arc<HttpService>,
+    metrics: Arc<crate::http::service::metrics::Metrics>,
 ) -> anyhow::Result<()> {
     let mut watch_obj = ModelWatcher::new(
         runtime,
@@ -234,11 +308,11 @@ async fn run_watcher(
 
     watch_obj.set_notify_on_model_update(tx);
 
-    // Spawn a task to watch for model type changes and update HTTP service endpoints
+    // Spawn a task to watch for model type changes and update HTTP service endpoints and metrics
     let _endpoint_enabler_task = tokio::spawn(async move {
-        while let Some(model_type) = rx.recv().await {
-            tracing::debug!("Received model type update: {:?}", model_type);
-            update_http_endpoints(http_service.clone(), model_type);
+        while let Some(model_update) = rx.recv().await {
+            update_http_endpoints(http_service.clone(), model_update.clone());
+            update_model_metrics(model_update, metrics.clone());
         }
     });
 
@@ -257,17 +331,37 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
         model_type
     );
     match model_type {
-        ModelUpdate::Added(model_type) => {
+        ModelUpdate::Added(card) => {
             // Handle all supported endpoint types, not just the first one
-            for endpoint_type in model_type.as_endpoint_types() {
+            for endpoint_type in card.model_type.as_endpoint_types() {
                 service.enable_model_endpoint(endpoint_type, true);
             }
         }
-        ModelUpdate::Removed(model_type) => {
+        ModelUpdate::Removed(card) => {
             // Handle all supported endpoint types, not just the first one
-            for endpoint_type in model_type.as_endpoint_types() {
+            for endpoint_type in card.model_type.as_endpoint_types() {
                 service.enable_model_endpoint(endpoint_type, false);
             }
+        }
+    }
+}
+
+/// Updates metrics for model type changes
+fn update_model_metrics(
+    model_type: ModelUpdate,
+    metrics: Arc<crate::http::service::metrics::Metrics>,
+) {
+    match model_type {
+        ModelUpdate::Added(card) => {
+            tracing::debug!("Updating metrics for added model: {}", card.display_name);
+            if let Err(err) = metrics.update_metrics_from_mdc(&card) {
+                tracing::warn!(%err, model_name=card.display_name, "update_metrics_from_mdc failed");
+            }
+        }
+        ModelUpdate::Removed(card) => {
+            tracing::debug!(model_name = card.display_name, "Model removed");
+            // Note: Metrics are typically not removed to preserve historical data
+            // This matches the behavior in the polling task
         }
     }
 }

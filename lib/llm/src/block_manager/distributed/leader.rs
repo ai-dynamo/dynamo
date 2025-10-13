@@ -77,6 +77,35 @@ impl KvbmLeaderConfig {
     pub fn builder() -> KvbmLeaderConfigBuilder {
         KvbmLeaderConfigBuilder::default()
     }
+
+    pub fn sanity_check(&self) -> anyhow::Result<()> {
+        let cpu = &self.host_blocks_config;
+        let disk = &self.disk_blocks_config;
+        if cpu.num_blocks_overriden == 0 && cpu.cache_size_in_gb == 0.0 {
+            if disk.num_blocks_overriden == 0 && disk.cache_size_in_gb == 0.0 {
+                panic!(
+                    "KVBM Configuration Error: No CPU memory configured.\n\
+                    \n\
+                    To fix this, set one of the following environment variables:\n\
+                    • DYN_KVBM_CPU_CACHE_GB=<size_in_gb>     (e.g., DYN_KVBM_CPU_CACHE_GB=4)\n\
+                    • DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS=<num_blocks>  (e.g., DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS=1000)\n\
+                    \n\
+                    Example: export DYN_KVBM_CPU_CACHE_GB=4"
+                );
+            } else {
+                panic!(
+                    "KVBM Configuration Error: CPU memory must be configured before disk memory.\n\
+                    \n\
+                    To fix this, set one of the following environment variables:\n\
+                    • DYN_KVBM_CPU_CACHE_GB=<size_in_gb>     (e.g., DYN_KVBM_CPU_CACHE_GB=4)\n\
+                    • DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS=<num_blocks>  (e.g., DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS=1000)\n\
+                    \n\
+                    Example: export DYN_KVBM_CPU_CACHE_GB=4"
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]

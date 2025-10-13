@@ -23,18 +23,34 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
+// +kubebuilder:validation:XValidation:rule="!has(self.create) || self.create == false || (has(self.size) && has(self.storageClass) && has(self.volumeAccessMode))",message="When create is true, size, storageClass, and volumeAccessMode are required"
 type PVC struct {
 	// Create indicates to create a new PVC
 	Create *bool `json:"create,omitempty"`
 	// Name is the name of the PVC
+	// +kubebuilder:validation:Required
 	Name *string `json:"name,omitempty"`
-	// StorageClass to be used for PVC creation. Leave it as empty if the PVC is already created.
+	// StorageClass to be used for PVC creation. Required when create is true.
 	StorageClass string `json:"storageClass,omitempty"`
-	// Size of the NIM cache in Gi, used during PVC creation
+	// Size of the volume in Gi, used during PVC creation. Required when create is true.
 	Size resource.Quantity `json:"size,omitempty"`
-	// VolumeAccessMode is the volume access mode of the PVC
+	// VolumeAccessMode is the volume access mode of the PVC. Required when create is true.
 	VolumeAccessMode corev1.PersistentVolumeAccessMode `json:"volumeAccessMode,omitempty"`
-	MountPoint       *string                           `json:"mountPoint,omitempty"`
+}
+
+// VolumeMount references a PVC defined at the top level for volumes to be mounted by the component
+type VolumeMount struct {
+	// Name references a PVC name defined in the top-level PVCs map
+	// +kubebuilder:validation:Required
+	Name string `json:"name,omitempty"`
+	// MountPoint specifies where to mount the volume.
+	// If useAsCompilationCache is true and mountPoint is not specified,
+	// a backend-specific default will be used.
+	MountPoint string `json:"mountPoint,omitempty"`
+	// UseAsCompilationCache indicates this volume should be used as a compilation cache.
+	// When true, backend-specific environment variables will be set and default mount points may be used.
+	// +kubebuilder:default=false
+	UseAsCompilationCache bool `json:"useAsCompilationCache,omitempty"`
 }
 
 type Autoscaling struct {

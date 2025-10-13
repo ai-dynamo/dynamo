@@ -28,9 +28,6 @@ if TYPE_CHECKING:
 #     KvConnectorWorker as RustKvConnectorWorker,
 # )
 
-from dynamo.llm.vllm_integration.kv_cache_utils import (
-    find_and_set_available_port_from_env,
-)
 from dynamo.llm.vllm_integration.rust import KvConnectorWorker as RustKvConnectorWorker
 from dynamo.runtime import DistributedRuntime
 
@@ -45,8 +42,6 @@ class KvConnectorWorker:
     def __init__(self, vllm_config: "VllmConfig", engine_id: str, **kwargs):
         drt = kwargs.get("drt", None)
         if drt is None:
-            # this is needed to avoid metrics port conflict with KVBM leader side DRT if metrics is enabled
-            find_and_set_available_port_from_env("DYN_SYSTEM_PORT")
             self.drt = DistributedRuntime.detached()
         else:
             self.drt = drt
@@ -64,9 +59,7 @@ class KvConnectorWorker:
         Args: kv_caches:
             dictionary of layer names, kv cache
         """
-        print(
-            f"KvConnectorWorker.register_kv_caches called with {len(kv_caches)} kv_caches"
-        )
+
         cache_config = self.vllm_config.cache_config
 
         # Create ordered list of (layer_name, tensor) tuples sorted by layer index

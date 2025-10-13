@@ -32,8 +32,8 @@ echo "Mode: $mode"
 echo "Command: dynamo"
 
 # Check if required environment variables are set
-if [ -z "$HOST_IP" ]; then
-    echo "Error: HOST_IP environment variable is not set"
+if [ -z "$HOST_IP_MACHINE" ]; then
+    echo "Error: HOST_IP_MACHINE environment variable is not set"
     exit 1
 fi
 
@@ -67,6 +67,9 @@ if [ "$mode" = "prefill" ]; then
     # GB200 dynamo prefill command
     set -x
     # SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=2048 \
+    # timeouts and kernel cache
+    export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
+    export SGL_DG_CACHE_DIR="/configs/dgcache/3p1dcache"
 
     if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix="--init-expert-location /configs/prefill_dsr1-0528_in1000out1000_num40000.json"; fi
 
@@ -80,15 +83,15 @@ if [ "$mode" = "prefill" ]; then
     NCCL_MNNVL_ENABLE=1 \
     NCCL_CUMEM_ENABLE=1 \
     SGLANG_USE_MESSAGE_QUEUE_BROADCASTER=0 \
-    SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
+    SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
     PYTHONUNBUFFERED=1 \
-    python3 -m dynamo.sglang.worker \
+    python3 -m dynamo.sglang \
         --served-model-name deepseek-ai/DeepSeek-R1 \
         --model-path /model/ \
         --skip-tokenizer-init \
         --trust-remote-code \
         --disaggregation-mode prefill \
-        --dist-init-addr "$HOST_IP:$PORT" \
+        --dist-init-addr "$HOST_IP_MACHINE:$PORT" \
         --disaggregation-bootstrap-port 30001 \
         --nnodes "$TOTAL_NODES" \
         --node-rank "$RANK" \
@@ -100,7 +103,8 @@ if [ "$mode" = "prefill" ]; then
         --max-running-requests 12288 \
         --context-length 9600 \
         --disable-radix-cache \
-        --enable-deepep-moe \
+        --moe-a2a-backend deepep \
+        --load-balance-method round_robin \
         --deepep-mode normal \
         --ep-dispatch-algorithm dynamic \
         --moe-dense-tp-size 1 \
@@ -122,6 +126,10 @@ elif [ "$mode" = "decode" ]; then
     command_suffix=""
     if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix="--init-expert-location /configs/decode_dsr1-0528_loadgen_in1024out1024_num2000_2p12d.json"; fi
 
+    # timeouts and kernel cache
+    export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
+    export SGL_DG_CACHE_DIR="/configs/dgcache/3p1dcache"
+
     # GB200 dynamo decode command
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
     SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=512 \
@@ -135,15 +143,15 @@ elif [ "$mode" = "decode" ]; then
     MC_FORCE_MNNVL=1 \
     NCCL_CUMEM_ENABLE=1 \
     SGLANG_USE_MESSAGE_QUEUE_BROADCASTER=0 \
-    SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
+    SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
     PYTHONUNBUFFERED=1 \
-    python3 -m dynamo.sglang.decode_worker \
+    python3 -m dynamo.sglang \
         --served-model-name deepseek-ai/DeepSeek-R1 \
         --model-path /model/ \
         --skip-tokenizer-init \
         --trust-remote-code \
         --disaggregation-mode decode \
-        --dist-init-addr "$HOST_IP:$PORT" \
+        --dist-init-addr "$HOST_IP_MACHINE:$PORT" \
         --disaggregation-bootstrap-port 30001 \
         --nnodes "$TOTAL_NODES" \
         --node-rank "$RANK" \
@@ -155,7 +163,8 @@ elif [ "$mode" = "decode" ]; then
         --max-running-requests 36864 \
         --context-length 9600 \
         --disable-radix-cache \
-        --enable-deepep-moe \
+        --moe-a2a-backend deepep \
+        --prefill-round-robin-balance \
         --deepep-mode low_latency \
         --moe-dense-tp-size 1 \
         --enable-dp-lm-head \

@@ -29,9 +29,6 @@ if TYPE_CHECKING:
 # from dynamo.llm.vllm_integration.rust import SchedulerOutput as RustSchedulerOutput
 
 from dynamo.llm import KvbmLeader
-from dynamo.llm.vllm_integration.kv_cache_utils import (
-    find_and_set_available_port_from_env,
-)
 from dynamo.llm.vllm_integration.rust import KvbmRequest
 from dynamo.llm.vllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
 from dynamo.llm.vllm_integration.rust import SchedulerOutput as RustSchedulerOutput
@@ -56,7 +53,6 @@ class KvConnectorLeader:
     def __init__(self, vllm_config: "VllmConfig", engine_id: str, **kwargs):
         drt = kwargs.get("drt", None)
         if drt is None:
-            find_and_set_available_port_from_env("DYN_SYSTEM_PORT")
             self.drt = DistributedRuntime.detached()
         else:
             self.drt = drt
@@ -142,13 +138,22 @@ class KvConnectorLeader:
             scheduler_output.scheduled_cached_reqs.new_block_ids,
             scheduler_output.scheduled_cached_reqs.num_computed_tokens,
         ):
-            output.add_cached_request(
-                request_id=req_id,
-                resumed_from_preemption=resumed_from_preemption,
-                new_token_ids=new_token_ids,
-                new_block_ids=new_block_ids[0],
-                num_computed_tokens=num_computed_tokens,
-            )
+            if new_block_ids is not None:
+                output.add_cached_request(
+                    request_id=req_id,
+                    resumed_from_preemption=resumed_from_preemption,
+                    new_token_ids=new_token_ids,
+                    new_block_ids=new_block_ids[0],
+                    num_computed_tokens=num_computed_tokens,
+                )
+            else:
+                output.add_cached_request(
+                    request_id=req_id,
+                    resumed_from_preemption=resumed_from_preemption,
+                    new_token_ids=new_token_ids,
+                    new_block_ids=[],
+                    num_computed_tokens=num_computed_tokens,
+                )
 
         output.add_num_scheduled_tokens(scheduler_output.num_scheduled_tokens)
 
@@ -187,7 +192,9 @@ class KvConnectorLeader:
         if self._connector.has_slot(request.request_id):
             return None
 
-        if bool(request.mm_positions):
+        if bool(getattr(request, "mm_features", None)) or bool(
+            getattr(request, "mm_positions", None)
+        ):
             raise ValueError("Unsupported request - requires mm extra keys")
 
         all_token_ids = request.all_token_ids

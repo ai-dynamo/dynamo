@@ -39,16 +39,12 @@ class MiddleServer:
         stream = await self.backend_client.generate(request, context=context)
 
         # Stream responses back to client
-        try:
-            async for response in stream:
-                data = response.data()
-                print(f"Middle server: Forwarding response {data}")
-                yield data
+        async for response in stream:
+            data = response.data()
+            print(f"Middle server: Forwarding response {data}")
+            yield data
 
-        except ValueError as e:
-            if str(e) != "Stream ended before generation completed":
-                raise
-            print("Middle server: Backend stream ended early due to cancellation")
+        print("Middle server: Backend stream ended")
 
 
 async def main():

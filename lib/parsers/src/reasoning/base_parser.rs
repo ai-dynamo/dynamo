@@ -119,7 +119,7 @@ impl ReasoningParser for BasicReasoningParser {
             };
             return ParserResult {
                 normal_text: normal_text.to_string(),
-                reasoning_text: reasoning_text.trim().to_string(),
+                reasoning_text: reasoning_text.to_string(),
             };
         }
         // Continue with reasoning content

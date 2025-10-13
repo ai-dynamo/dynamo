@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use crate::block_manager::{
     block::{BlockState, PrivateBlockExt, registry::BlockRegistrationError},
@@ -29,7 +17,6 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, L, M>>,
         global_registry: GlobalRegistry,
         async_runtime: Handle,
-        metrics: Arc<PoolMetrics>,
     ) -> Self {
         Self {
             active: ActiveBlockPool::new(),
@@ -37,7 +24,6 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
             registry: BlockRegistry::new(event_manager.clone(), global_registry, async_runtime),
             return_tx,
             event_manager,
-            metrics,
         }
     }
 
@@ -171,10 +157,6 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
             }
         }
 
-        self.metrics
-            .counter("blocks_allocated")
-            .inc_by(count as u64);
-
         Ok(blocks)
     }
 
@@ -283,10 +265,6 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
 
         assert_eq!(immutable_blocks.len(), expected_len);
 
-        self.metrics
-            .counter("blocks_registered")
-            .inc_by(immutable_blocks.len() as u64);
-
         Ok(immutable_blocks)
     }
 
@@ -331,13 +309,6 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
 
             immutable_blocks.push(immutable);
         }
-
-        self.metrics
-            .counter("cache_hits")
-            .inc_by(immutable_blocks.len() as u64);
-        self.metrics
-            .counter("cache_misses")
-            .inc_by(sequence_hashes.len() as u64 - immutable_blocks.len() as u64);
 
         immutable_blocks
     }

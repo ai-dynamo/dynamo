@@ -688,8 +688,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 							},
 						},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
-							DynamoComponent:  "test-lws-component",
-							DynamoTag:        "test-tag",
 							BackendFramework: string(dynamo.BackendFrameworkVLLM),
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								Envs: []corev1.EnvVar{
@@ -698,9 +696,10 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Value: "test_value_from_dynamo_component_deployment_spec",
 									},
 								},
-								ComponentType:   string(commonconsts.ComponentTypeWorker),
-								ServiceName:     "test-lws-deploy-service",
-								DynamoNamespace: &[]string{"default"}[0],
+								ComponentType:    string(commonconsts.ComponentTypeWorker),
+								SubComponentType: "test-sub-component",
+								ServiceName:      "test-lws-deploy-service",
+								DynamoNamespace:  &[]string{"default"}[0],
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
 								},
@@ -726,6 +725,11 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								ExtraPodSpec: &dynamoCommon.ExtraPodSpec{
 									PodSpec: &corev1.PodSpec{
 										TerminationGracePeriodSeconds: ptr.To(int64(10)),
+										Containers: []corev1.Container{
+											{
+												Image: "another-image:latest",
+											},
+										},
 									},
 									MainContainer: &corev1.Container{
 										Image: "test-image:latest",
@@ -783,6 +787,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									"role":                               "leader",
 									"nvidia.com/label1":                  "label1",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+									commonconsts.KubeLabelDynamoSubComponentType:    "test-sub-component",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "",
 								},
 								Annotations: map[string]string{
@@ -807,7 +812,10 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								RestartPolicy: corev1.RestartPolicyAlways,
 								Containers: []corev1.Container{
 									{
-										Name:    "main",
+										Image: "another-image:latest",
+									},
+									{
+										Name:    commonconsts.MainContainerName,
 										Image:   "test-image:latest",
 										Command: []string{"sh", "-c"},
 										Args:    []string{"ray start --head --port=6379 && some dynamo command"},
@@ -817,7 +825,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
 											{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
 											{Name: "DYN_SYSTEM_PORT", Value: "9090"},
-											{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: `["generate"]`},
+											{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "[\"generate\"]"},
 											{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"},
 											{Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"},
 										},
@@ -877,7 +885,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											TimeoutSeconds:   5,
 											PeriodSeconds:    10,
 											SuccessThreshold: 0,
-											FailureThreshold: 60,
+											FailureThreshold: 720,
 										},
 									},
 								},
@@ -893,6 +901,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									"role":                               "worker",
 									"nvidia.com/label1":                  "label1",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+									commonconsts.KubeLabelDynamoSubComponentType:    "test-sub-component",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "",
 								},
 								Annotations: map[string]string{
@@ -917,17 +926,20 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								RestartPolicy: corev1.RestartPolicyAlways,
 								Containers: []corev1.Container{
 									{
-										Name:    "main",
+										Image: "another-image:latest",
+									},
+									{
+										Name:    commonconsts.MainContainerName,
 										Image:   "test-image:latest",
 										Command: []string{"sh", "-c"},
-										Args:    []string{"ray start --address=${LWS_LEADER_ADDRESS}:6379 --block"},
+										Args:    []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
 										Env: []corev1.EnvVar{
 											{Name: "DYN_NAMESPACE", Value: "default"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
 											{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
 											{Name: "DYN_SYSTEM_PORT", Value: "9090"},
-											{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: `["generate"]`},
+											{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "[\"generate\"]"},
 											{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"},
 											{Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"},
 										},
@@ -976,7 +988,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
 						ObjectMeta: metav1.ObjectMeta{Name: "test-lws-nil-id", Namespace: "default"},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
-							DynamoComponent: "test-comp", DynamoTag: "test",
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
@@ -1020,7 +1031,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
 						ObjectMeta: metav1.ObjectMeta{Name: "test-lws-leader-err", Namespace: "default"},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
-							DynamoComponent: "test-comp", DynamoTag: "test",
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,

@@ -250,7 +250,12 @@ class Synthesizer:
         return path + unique_user_prompt, True, context_len
 
     def synthesize_requests(
-        self, num_requests: int, input_len_filter: Optional[int] = None
+        self,
+        num_requests: int,
+        max_isl: Optional[int] = None,
+        min_isl: Optional[int] = None,
+        min_osl: Optional[int] = None,
+        max_osl: Optional[int] = None,
     ) -> list[dict[str, Any]]:
         timestamp = 0
 
@@ -270,8 +275,17 @@ class Synthesizer:
                     input_len = len(path) * self.block_size
                 output_len = self.output_lens_sampler.sample()
 
-                if input_len_filter is not None and input_len > input_len_filter:
+                # Apply filtering for ISL
+                if max_isl is not None and input_len > max_isl:
                     continue
+                if min_isl is not None and input_len < min_isl:
+                    continue
+
+                # Apply clipping for OSL (not filtering)
+                if min_osl is not None and output_len < min_osl:
+                    output_len = min_osl
+                if max_osl is not None and output_len > max_osl:
+                    output_len = max_osl
                 requests.append(
                     {
                         "timestamp": int(timestamp),
@@ -380,6 +394,24 @@ def main():
         help="Maximum input sequence length to include in output (default: None, no filtering)",
     )
     parser.add_argument(
+        "--min-isl",
+        type=int,
+        default=None,
+        help="Minimum input sequence length to include in output (default: None, no filtering)",
+    )
+    parser.add_argument(
+        "--min-osl",
+        type=int,
+        default=None,
+        help="Minimum output sequence length - clips values below this threshold (default: None, no clipping)",
+    )
+    parser.add_argument(
+        "--max-osl",
+        type=int,
+        default=None,
+        help="Maximum output sequence length - clips values above this threshold (default: None, no clipping)",
+    )
+    parser.add_argument(
         "--block-size",
         type=int,
         default=512,
@@ -395,12 +427,20 @@ def main():
 
     dataset_file = Path(args.input_file).resolve()
     if args.output_file is None:
-        output_file = dataset_file.with_stem(
-            f"{dataset_file.stem}_synth"
-            + f"_{int(args.prefix_len_multiplier)}x{args.prefix_root_multiplier}+{args.prompt_len_multiplier}"
-            + f"_speedup{args.speedup_ratio}"
-            + f"_maxisl{args.max_isl}"
-        )
+        suffix_parts = [
+            f"{dataset_file.stem}_synth",
+            f"{int(args.prefix_len_multiplier)}x{args.prefix_root_multiplier}+{args.prompt_len_multiplier}",
+            f"speedup{args.speedup_ratio}",
+        ]
+        if args.max_isl is not None:
+            suffix_parts.append(f"maxisl{args.max_isl}")
+        if args.min_isl is not None:
+            suffix_parts.append(f"minisl{args.min_isl}")
+        if args.min_osl is not None:
+            suffix_parts.append(f"minosl{args.min_osl}")
+        if args.max_osl is not None:
+            suffix_parts.append(f"maxosl{args.max_osl}")
+        output_file = dataset_file.with_stem("_".join(suffix_parts))
     else:
         output_file = Path(args.output_file).resolve()
 
@@ -415,7 +455,13 @@ def main():
     )
 
     print("synthesizing requests...", flush=True)
-    requests = synthesizer.synthesize_requests(args.num_requests, args.max_isl)
+    requests = synthesizer.synthesize_requests(
+        args.num_requests,
+        max_isl=args.max_isl,
+        min_isl=args.min_isl,
+        min_osl=args.min_osl,
+        max_osl=args.max_osl,
+    )
     print(f"synthesized {len(requests)} requests")
 
     # Print statistics in a single table with metrics as rows and statistics as columns

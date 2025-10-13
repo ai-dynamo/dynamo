@@ -8,21 +8,19 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
+use dynamo_runtime::storage::key_value_store::Key;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{
     component::Endpoint,
-    storage::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager},
+    storage::key_value_store::{EtcdStore, KeyValueStore, KeyValueStoreManager},
 };
 
-use crate::discovery::ModelEntry;
 use crate::entrypoint::RouterConfig;
 use crate::mocker::protocols::MockEngineArgs;
 use crate::model_card::{self, ModelDeploymentCard};
 use crate::model_type::{ModelInput, ModelType};
 use crate::request_template::RequestTemplate;
 
-mod network_name;
-pub use network_name::ModelNetworkName;
 pub mod runtime_config;
 
 use runtime_config::ModelRuntimeConfig;
@@ -44,7 +42,6 @@ pub const DEFAULT_HTTP_PORT: u16 = 8080;
 pub struct LocalModelBuilder {
     model_path: Option<PathBuf>,
     model_name: Option<String>,
-    model_config: Option<PathBuf>,
     endpoint_id: Option<EndpointId>,
     context_length: Option<u32>,
     template_file: Option<PathBuf>,
@@ -61,6 +58,8 @@ pub struct LocalModelBuilder {
     user_data: Option<serde_json::Value>,
     custom_template_path: Option<PathBuf>,
     namespace: Option<String>,
+    custom_backend_metrics_endpoint: Option<String>,
+    custom_backend_metrics_polling_interval: Option<f64>,
 }
 
 impl Default for LocalModelBuilder {
@@ -73,7 +72,6 @@ impl Default for LocalModelBuilder {
             tls_key_path: Default::default(),
             model_path: Default::default(),
             model_name: Default::default(),
-            model_config: Default::default(),
             endpoint_id: Default::default(),
             context_length: Default::default(),
             template_file: Default::default(),
@@ -85,6 +83,8 @@ impl Default for LocalModelBuilder {
             user_data: Default::default(),
             custom_template_path: Default::default(),
             namespace: Default::default(),
+            custom_backend_metrics_endpoint: Default::default(),
+            custom_backend_metrics_polling_interval: Default::default(),
         }
     }
 }
@@ -97,11 +97,6 @@ impl LocalModelBuilder {
 
     pub fn model_name(&mut self, model_name: Option<String>) -> &mut Self {
         self.model_name = model_name;
-        self
-    }
-
-    pub fn model_config(&mut self, model_config: Option<PathBuf>) -> &mut Self {
-        self.model_config = model_config;
         self
     }
 
@@ -186,6 +181,16 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn custom_backend_metrics_endpoint(&mut self, endpoint: Option<String>) -> &mut Self {
+        self.custom_backend_metrics_endpoint = endpoint;
+        self
+    }
+
+    pub fn custom_backend_metrics_polling_interval(&mut self, interval: Option<f64>) -> &mut Self {
+        self.custom_backend_metrics_polling_interval = interval;
+        self
+    }
+
     /// Make an LLM ready for use:
     /// - Download it from Hugging Face (and NGC in future) if necessary
     /// - Resolve the path
@@ -194,7 +199,6 @@ impl LocalModelBuilder {
     ///
     /// The model name will depend on what "model_path" is:
     /// - A folder: The last part of the folder name: "/data/llms/Qwen2.5-3B-Instruct" -> "Qwen2.5-3B-Instruct"
-    /// - A file: The GGUF filename: "/data/llms/Qwen2.5-3B-Instruct-Q6_K.gguf" -> "Qwen2.5-3B-Instruct-Q6_K.gguf"
     /// - An HF repo: The HF repo name: "Qwen/Qwen3-0.6B" stays the same
     pub async fn build(&mut self) -> anyhow::Result<LocalModel> {
         // Generate an endpoint ID for this model if the user didn't provide one.
@@ -210,7 +214,7 @@ impl LocalModelBuilder {
             .map(RequestTemplate::load)
             .transpose()?;
 
-        // echo_full engine doesn't need a path. It's an edge case, move it out of the way.
+        // echo engine doesn't need a path. It's an edge case, move it out of the way.
         if self.model_path.is_none() {
             let mut card = ModelDeploymentCard::with_name_only(
                 self.model_name.as_deref().unwrap_or(DEFAULT_NAME),
@@ -231,6 +235,9 @@ impl LocalModelBuilder {
                 router_config: self.router_config.take().unwrap_or_default(),
                 runtime_config: self.runtime_config.clone(),
                 namespace: self.namespace.clone(),
+                custom_backend_metrics_endpoint: self.custom_backend_metrics_endpoint.clone(),
+                custom_backend_metrics_polling_interval: self
+                    .custom_backend_metrics_polling_interval,
             });
         }
 
@@ -249,11 +256,9 @@ impl LocalModelBuilder {
         } else {
             fs::canonicalize(relative_path)?
         };
-        // --model-config takes precedence over --model-path
-        let model_config_path = self.model_config.as_ref().unwrap_or(&full_path);
 
         let mut card =
-            ModelDeploymentCard::load(model_config_path, self.custom_template_path.as_deref())?;
+            ModelDeploymentCard::load_from_disk(&full_path, self.custom_template_path.as_deref())?;
 
         // Usually we infer from the path, self.model_name is user override
         let model_name = self.model_name.take().unwrap_or_else(|| {
@@ -308,6 +313,8 @@ impl LocalModelBuilder {
             router_config: self.router_config.take().unwrap_or_default(),
             runtime_config: self.runtime_config.clone(),
             namespace: self.namespace.clone(),
+            custom_backend_metrics_endpoint: self.custom_backend_metrics_endpoint.clone(),
+            custom_backend_metrics_polling_interval: self.custom_backend_metrics_polling_interval,
         })
     }
 }
@@ -325,6 +332,8 @@ pub struct LocalModel {
     router_config: RouterConfig,
     runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
+    custom_backend_metrics_endpoint: Option<String>,
+    custom_backend_metrics_polling_interval: Option<f64>,
 }
 
 impl LocalModel {
@@ -379,6 +388,14 @@ impl LocalModel {
         self.namespace.as_deref()
     }
 
+    pub fn custom_backend_metrics_endpoint(&self) -> Option<&str> {
+        self.custom_backend_metrics_endpoint.as_deref()
+    }
+
+    pub fn custom_backend_metrics_polling_interval(&self) -> Option<f64> {
+        self.custom_backend_metrics_polling_interval
+    }
+
     pub fn is_gguf(&self) -> bool {
         // GGUF is the only file (not-folder) we accept, so we don't need to check the extension
         // We will error when we come to parse it
@@ -408,38 +425,23 @@ impl LocalModel {
         let Some(etcd_client) = endpoint.drt().etcd_client() else {
             anyhow::bail!("Cannot attach to static endpoint");
         };
+        self.card.model_type = model_type;
+        self.card.model_input = model_input;
 
         // Store model config files in NATS object store
         let nats_client = endpoint.drt().nats_client();
         self.card.move_to_nats(nats_client.clone()).await?;
 
-        // Publish the Model Deployment Card to etcd
-        let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
+        // Publish the Model Deployment Card to KV store
+        let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStore::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
-        let key = self.card.slug().to_string();
+        let lease_id = endpoint.drt().primary_lease().map(|l| l.id()).unwrap_or(0);
+        let key = Key::from_raw(endpoint.unique_path(lease_id));
 
-        card_store
+        let _outcome = card_store
             .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
             .await?;
-
-        // Publish our ModelEntry to etcd. This allows ingress to find the model card.
-        // (Why don't we put the model card directly under this key?)
-        let network_name = ModelNetworkName::new();
-        tracing::debug!("Registering with etcd as {network_name}");
-        let model_registration = ModelEntry {
-            name: self.display_name().to_string(),
-            endpoint_id: endpoint.id(),
-            model_type,
-            runtime_config: Some(self.runtime_config.clone()),
-            model_input,
-        };
-        etcd_client
-            .kv_create(
-                &network_name,
-                serde_json::to_vec_pretty(&model_registration)?,
-                None, // use primary lease
-            )
-            .await
+        Ok(())
     }
 }
 

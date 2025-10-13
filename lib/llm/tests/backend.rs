@@ -6,7 +6,8 @@ use dynamo_llm::model_card::ModelDeploymentCard;
 
 #[test]
 fn test_sequence_factory() {
-    let mdc = ModelDeploymentCard::load("tests/data/sample-models/TinyLlama_v1.1", None).unwrap();
+    let mdc = ModelDeploymentCard::load_from_disk("tests/data/sample-models/TinyLlama_v1.1", None)
+        .unwrap();
 
     let operator = Backend::from_mdc(&mdc);
 

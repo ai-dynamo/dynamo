@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{AsyncEngineContextProvider, ResponseStream};
+use super::{AsyncEngineContextProvider, ResponseStream, STREAM_ERR_MSG};
 use crate::utils::worker_monitor::WorkerMonitor;
 use crate::{
     component::{Client, Endpoint, InstanceSource},
@@ -231,11 +231,14 @@ where
                 let engine_ctx = stream.context();
                 let client = self.client.clone();
                 let stream = stream.map(move |res| {
-                    if let Some(err) = res.err() {
-                        const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
-                        if format!("{:?}", err) == STREAM_ERR_MSG {
-                            client.report_instance_down(instance_id);
-                        }
+                    // TODO: Standardize error type to avoid using string matching DIS-364
+                    if let Some(err) = res.err()
+                        && format!("{:?}", err) == STREAM_ERR_MSG
+                    {
+                        tracing::debug!(
+                            "Reporting instance {instance_id} down due to stream error: {err}"
+                        );
+                        client.report_instance_down(instance_id);
                     }
                     res
                 });
@@ -245,6 +248,9 @@ where
                 if let Some(req_err) = err.downcast_ref::<NatsRequestError>()
                     && matches!(req_err.kind(), NatsNoResponders)
                 {
+                    tracing::debug!(
+                        "Reporting instance {instance_id} down due to request error: {req_err}"
+                    );
                     self.client.report_instance_down(instance_id);
                 }
                 Err(err)

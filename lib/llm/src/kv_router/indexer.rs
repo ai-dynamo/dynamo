@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! KV RadixTree
 //!
@@ -53,7 +41,7 @@ use prometheus::{IntCounterVec, Opts};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     iter,
     rc::Rc,
     sync::{Arc, OnceLock},
@@ -212,8 +200,9 @@ impl RouterEvent {
 struct RadixBlock {
     /// A map of child blocks, keyed by their local block hash.
     children: HashMap<LocalBlockHash, SharedRadixBlock>,
-    /// A set of worker IDs associated with this block.
-    workers: HashSet<WorkerId>,
+    /// A map of worker IDs to their external sequence block hash for this block.
+    /// The external hash is preserved to speed up snapshotting.
+    workers: HashMap<WorkerId, ExternalSequenceBlockHash>,
     /// A buffer of times that this block was last traversed
     recent_uses: VecDeque<Instant>,
 }
@@ -227,7 +216,7 @@ impl RadixBlock {
     pub fn new() -> Self {
         Self {
             children: HashMap::new(),
-            workers: HashSet::new(),
+            workers: HashMap::new(),
             recent_uses: VecDeque::new(),
         }
     }
@@ -289,13 +278,19 @@ impl RadixTree {
         let mut scores = OverlapScores::new();
         let mut current = self.root.clone();
         let now = Instant::now();
-        for block_hash in sequence {
+
+        tracing::trace!(
+            "RadixTree::find_matches: looking for sequence={:?}",
+            sequence.iter().map(|h| h.0).collect::<Vec<_>>()
+        );
+
+        for (idx, block_hash) in sequence.iter().enumerate() {
             let next_block = {
                 let current_borrow = current.borrow();
-                current_borrow.children.get(&block_hash).cloned()
+                current_borrow.children.get(block_hash).cloned()
             };
             if let Some(block) = next_block {
-                scores.update_scores(&block.borrow().workers);
+                scores.update_scores(block.borrow().workers.keys());
 
                 if let Some(expiration_duration) = self.expiration_duration {
                     let mut block_mut = block.borrow_mut();
@@ -317,9 +312,16 @@ impl RadixTree {
 
                 current = block;
             } else {
+                tracing::trace!(
+                    "RadixTree::find_matches: block not found at index {} for hash {}",
+                    idx,
+                    block_hash.0
+                );
                 break;
             }
         }
+
+        tracing::trace!("RadixTree::find_matches: final scores={:?}", scores.scores);
 
         scores
     }
@@ -332,7 +334,7 @@ impl RadixTree {
     pub fn apply_event(&mut self, event: RouterEvent) -> Result<(), KvCacheEventError> {
         let (worker_id, event) = (event.worker_id, event.event);
         let (id, op) = (event.event_id, event.data);
-        tracing::trace!(id, "Store operation: {:?}", op);
+        tracing::trace!(id, "RadixTree::apply_event: Store operation: {:?}", op);
 
         let worker_lookup = self.lookup.entry(worker_id).or_default();
 
@@ -379,8 +381,11 @@ impl RadixTree {
                         }
                     };
 
-                    // add our worker_id to the block
-                    block.borrow_mut().workers.insert(worker_id);
+                    // add our worker_id to the block with its external hash
+                    block
+                        .borrow_mut()
+                        .workers
+                        .insert(worker_id, block_id.block_hash);
 
                     // add the block to the worker_id lookup table
                     worker_lookup.insert(block_id.block_hash, block.clone());
@@ -416,7 +421,7 @@ impl RadixTree {
                     let mut guard = entry.borrow_mut();
                     guard.workers.remove(&worker_id);
                     if guard.workers.is_empty() {
-                        // if no worker are using this block, that is true for all children
+                        // if no workers are using this block, that is true for all children
                         guard.children.clear();
                     }
                     // remove the block from the lookup table
@@ -435,6 +440,10 @@ impl RadixTree {
         if let Some((_, blocks)) = self.lookup.remove_entry(&worker) {
             blocks.iter().for_each(|(_, block)| {
                 block.borrow_mut().workers.remove(&worker);
+                // If no workers are using this block, that is true for all children
+                if block.borrow().workers.is_empty() {
+                    block.borrow_mut().children.clear();
+                }
             });
         }
     }
@@ -444,14 +453,18 @@ impl RadixTree {
         if let Some(blocks) = self.lookup.get(&worker) {
             let blocks_to_clear: Vec<_> = blocks.values().collect();
 
-            // Remove the worker from each block's workers set
+            // Remove the worker from each block's workers map
             blocks_to_clear.iter().for_each(|block| {
                 block.borrow_mut().workers.remove(&worker);
+                // If no workers are using this block, that is true for all children
+                if block.borrow().workers.is_empty() {
+                    block.borrow_mut().children.clear();
+                }
             });
 
             // Clear the worker's blocks
-            if let Some(worker_blocks) = self.lookup.get_mut(&worker) {
-                worker_blocks.clear();
+            if let Some(worker_lookup) = self.lookup.get_mut(&worker) {
+                worker_lookup.clear();
             }
         }
     }
@@ -460,71 +473,68 @@ impl RadixTree {
     /// Uses BFS traversal to ensure that the tree reconstruction is unique,
     /// though the exact event ordering will be lost.
     pub fn dump_tree_as_events(&self) -> Vec<RouterEvent> {
+        tracing::debug!(
+            "Dumping radix tree as events (contains information about {:?} workers)",
+            self.lookup.len()
+        );
+
         let mut events = Vec::new();
         let mut event_id = 0u64;
 
-        // BFS queue: (current_block, parent_external_hash, tokens_hash)
-        let mut queue = VecDeque::new();
+        // BFS queue: (current_block, parent_hashes_per_worker, tokens_hash)
+        // parent_hashes_per_worker maps WorkerId -> ExternalSequenceBlockHash
+        let mut queue: VecDeque<(
+            SharedRadixBlock,
+            HashMap<WorkerId, ExternalSequenceBlockHash>,
+            LocalBlockHash,
+        )> = VecDeque::new();
 
         // Process root's children first
         let root_borrow = self.root.borrow();
         for (tokens_hash, child_block) in &root_borrow.children {
-            queue.push_back((child_block.clone(), None, *tokens_hash));
+            queue.push_back((child_block.clone(), HashMap::new(), *tokens_hash));
         }
         drop(root_borrow);
 
-        while let Some((current_block, parent_external_hash, tokens_hash)) = queue.pop_front() {
+        while let Some((current_block, parent_hashes, tokens_hash)) = queue.pop_front() {
             let current_borrow = current_block.borrow();
 
-            // Closure to find external hash for a block in a worker's lookup
-            let find_external_hash = |worker_id: &WorkerId| {
-                self.lookup.get(worker_id).and_then(|worker_blocks| {
-                    worker_blocks
-                        .iter()
-                        .find(|(_, block)| Rc::ptr_eq(block, &current_block))
-                        .map(|(hash, _)| *hash)
-                })
-            };
+            // Map of this block's external hashes per worker (for children to use as parent)
+            let mut current_external_hashes = HashMap::new();
 
             // For each worker that has this block
-            for worker_id in &current_borrow.workers {
-                // Find the external hash for this block from the worker's lookup
-                let external_hash = find_external_hash(worker_id);
+            for (worker_id, external_hash) in &current_borrow.workers {
+                // Get the correct parent hash for this worker
+                let parent_hash = parent_hashes.get(worker_id).copied();
 
-                if let Some(block_hash) = external_hash {
-                    // Create a store event for this worker
-                    let event = RouterEvent {
-                        worker_id: *worker_id,
-                        event: KvCacheEvent {
-                            event_id,
-                            data: KvCacheEventData::Stored(KvCacheStoreData {
-                                parent_hash: parent_external_hash,
-                                blocks: vec![KvCacheStoredBlockData {
-                                    block_hash,
-                                    tokens_hash,
-                                }],
-                            }),
-                        },
-                    };
-                    events.push(event);
-                    event_id += 1;
-                }
+                // Create a store event for this worker
+                let event = RouterEvent {
+                    worker_id: *worker_id,
+                    event: KvCacheEvent {
+                        event_id,
+                        data: KvCacheEventData::Stored(KvCacheStoreData {
+                            parent_hash,
+                            blocks: vec![KvCacheStoredBlockData {
+                                block_hash: *external_hash,
+                                tokens_hash,
+                            }],
+                        }),
+                    },
+                };
+                events.push(event);
+                event_id += 1;
+
+                // Track this block's external hash for this worker
+                current_external_hashes.insert(*worker_id, *external_hash);
             }
 
-            // Add children to queue for BFS traversal
-            // We need to find any external hash for this block to use as parent
-            let any_external_hash = if !current_borrow.workers.is_empty() {
-                current_borrow
-                    .workers
-                    .iter()
-                    .next()
-                    .and_then(find_external_hash)
-            } else {
-                None
-            };
-
+            // Enqueue children with per-worker parent hashes
             for (child_tokens_hash, child_block) in &current_borrow.children {
-                queue.push_back((child_block.clone(), any_external_hash, *child_tokens_hash));
+                queue.push_back((
+                    child_block.clone(),
+                    current_external_hashes.clone(),
+                    *child_tokens_hash,
+                ));
             }
         }
 
@@ -656,8 +666,11 @@ impl OverlapScores {
     ///
     /// ### Arguments
     ///
-    /// * `workers` - A reference to a `HashSet` of `WorkerId`s.
-    pub fn update_scores(&mut self, workers: &HashSet<WorkerId>) {
+    /// * `workers` - An iterator over `WorkerId` references.
+    pub fn update_scores<'a, I>(&mut self, workers: I)
+    where
+        I: IntoIterator<Item = &'a WorkerId>,
+    {
         for worker in workers {
             let score = self.scores.entry(*worker).or_insert(0);
             *score += 1;
@@ -788,57 +801,50 @@ impl KvIndexer {
         let cancel_clone = token.clone();
 
         let task = std::thread::spawn(move || {
-            // create a new tokio runtime which will only perform work on a single thread
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1) // Single-threaded environment
+            // Create a single-threaded tokio runtime
+            let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
 
-            let local_set = tokio::task::LocalSet::new();
+            runtime.block_on(async move {
+                let cancel = cancel_clone;
+                let mut match_rx = match_rx;
+                let mut event_rx = event_rx;
+                let mut remove_worker_rx = remove_worker_rx;
+                let mut dump_rx = dump_rx;
+                let mut trie = RadixTree::new_with_frequency(expiration_duration);
+                loop {
+                    tokio::select! {
+                        biased;
 
-            runtime.block_on(local_set.run_until(async move {
-                tokio::task::spawn_local(async move {
-                    let cancel = cancel_clone;
-                    let mut match_rx = match_rx;
-                    let mut event_rx = event_rx;
-                    let mut remove_worker_rx = remove_worker_rx;
-                    let mut dump_rx = dump_rx;
-                    let mut trie = RadixTree::new_with_frequency(expiration_duration);
-                    loop {
-                        tokio::select! {
-                            biased;
+                        _ = cancel.cancelled() => {
+                            tracing::debug!("KvCacheIndexer progress loop shutting down");
+                            return;
+                        }
 
-                            Some(worker) = remove_worker_rx.recv() => {
-                                trie.remove_worker(worker);
-                            }
+                        Some(worker) = remove_worker_rx.recv() => {
+                            trie.remove_worker(worker);
+                        }
 
-                            Some(req) = match_rx.recv() => {
-                                let matches = trie.find_matches(req.sequence, req.early_exit);
-                                let _ = req.resp.send(matches);
-                            }
+                        Some(event) = event_rx.recv() => {
+                            let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
+                            let result = trie.apply_event(event);
+                            metrics.increment_event_applied(event_type, result);
+                        }
 
-                            Some(dump_req) = dump_rx.recv() => {
-                                let events = trie.dump_tree_as_events();
-                                let _ = dump_req.resp.send(events);
-                            }
+                        Some(dump_req) = dump_rx.recv() => {
+                            let events = trie.dump_tree_as_events();
+                            let _ = dump_req.resp.send(events);
+                        }
 
-                            _ = cancel.cancelled() => {
-                                tracing::debug!("KvCacheIndexer progress loop shutting down");
-                                return;
-                            }
-
-                            Some(event) = event_rx.recv() => {
-                                let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
-                                let result = trie.apply_event(event);
-                                metrics.increment_event_applied(event_type, result);
-                            }
+                        Some(req) = match_rx.recv() => {
+                            let matches = trie.find_matches(req.sequence, req.early_exit);
+                            let _ = req.resp.send(matches);
                         }
                     }
-                })
-                .await
-                .unwrap()
-            }));
+                }
+            });
 
             tracing::debug!("KvCacheIndexer task completed");
         });
@@ -885,6 +891,15 @@ impl KvIndexer {
     /// A `mpsc::Sender` for `DumpRequest`s.
     pub fn snapshot_event_sender(&self) -> mpsc::Sender<DumpRequest> {
         self.dump_tx.clone()
+    }
+
+    /// Get a sender for worker removal requests.
+    ///
+    /// ### Returns
+    ///
+    /// A `mpsc::Sender` for `WorkerId`s.
+    pub fn remove_worker_sender(&self) -> mpsc::Sender<WorkerId> {
+        self.remove_worker_tx.clone()
     }
 }
 
@@ -955,6 +970,12 @@ impl KvIndexerInterface for KvIndexer {
         resp_rx
             .await
             .map_err(|_| KvRouterError::IndexerDroppedRequest)
+    }
+}
+
+impl Drop for KvIndexer {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -1036,54 +1057,47 @@ impl KvIndexerSharded {
             remove_worker_tx.push(shard_remove_worker_tx);
             dump_tx.push(shard_dump_tx); // Store dump sender
 
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
+            let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
 
             tasks.push(std::thread::spawn(move || {
-                let local_set = tokio::task::LocalSet::new();
+                runtime.block_on(async move {
+                    let mut trie = RadixTree::new_with_frequency(expiration_duration);
+                    loop {
+                        tokio::select! {
+                            biased;
 
-                runtime.block_on(local_set.run_until(async move {
-                    tokio::task::spawn_local(async move {
-                        let mut trie = RadixTree::new_with_frequency(expiration_duration);
-                        loop {
-                            tokio::select! {
-                                biased;
+                            _ = cancel.cancelled() => {
+                                tracing::trace!("KvCacheIndexer progress loop shutting down");
+                                return;
+                            }
 
-                                Some(worker) = shard_remove_worker_rx.recv() => {
-                                    trie.remove_worker(worker);
-                                }
+                            Some(worker) = shard_remove_worker_rx.recv() => {
+                                trie.remove_worker(worker);
+                            }
 
-                                Ok(req) = shard_broadcast_rx.recv() => {
-                                    let matches = trie.find_matches(req.sequence, req.early_exit);
-                                    if let Err(e) = req.resp.send(matches).await {
-                                        tracing::trace!("Failed to send match response: {:?}", e);
-                                    }
-                                }
+                            Some(event) = shard_event_rx.recv() => {
+                                let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
+                                let result = trie.apply_event(event);
+                                metrics.increment_event_applied(event_type, result);
+                            }
 
-                                Some(dump_req) = shard_dump_rx.recv() => {
-                                    let events = trie.dump_tree_as_events();
-                                    let _ = dump_req.resp.send(events);
-                                }
+                            Some(dump_req) = shard_dump_rx.recv() => {
+                                let events = trie.dump_tree_as_events();
+                                let _ = dump_req.resp.send(events);
+                            }
 
-                                _ = cancel.cancelled() => {
-                                    tracing::trace!("KvCacheIndexer progress loop shutting down");
-                                    return;
-                                }
-
-                                Some(event) = shard_event_rx.recv() => {
-                                    let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
-                                    let result = trie.apply_event(event);
-                                    metrics.increment_event_applied(event_type, result);
+                            Ok(req) = shard_broadcast_rx.recv() => {
+                                let matches = trie.find_matches(req.sequence, req.early_exit);
+                                if let Err(e) = req.resp.send(matches).await {
+                                    tracing::trace!("Failed to send match response: {:?}", e);
                                 }
                             }
                         }
-                    })
-                    .await
-                    .unwrap()
-                }));
+                    }
+                });
 
                 tracing::debug!("KvCacheIndexer task completed");
             }));
@@ -1238,6 +1252,12 @@ impl KvIndexerInterface for KvIndexerSharded {
         }
 
         Ok(all_events)
+    }
+}
+
+impl Drop for KvIndexerSharded {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -2160,5 +2180,80 @@ mod tests {
                 .get(),
             1
         );
+    }
+
+    #[test]
+    fn test_remove_worker_verifies_hash_removal() {
+        setup();
+        let mut trie = RadixTree::new();
+
+        let worker_0 = 0;
+        let worker_1 = 1;
+        let worker_2 = 2;
+
+        // Add blocks for multiple workers
+        trie.apply_event(create_store_event(worker_0, 0, vec![1, 2, 3], None))
+            .unwrap();
+        trie.apply_event(create_store_event(worker_1, 0, vec![1, 2, 3], None))
+            .unwrap();
+        trie.apply_event(create_store_event(worker_2, 0, vec![1, 4, 5], None))
+            .unwrap();
+
+        // Verify worker_0 has 3 blocks in lookup
+        assert_eq!(trie.lookup.get(&worker_0).unwrap().len(), 3);
+
+        // Verify that blocks have the correct workers
+        let block_1 = trie
+            .lookup
+            .get(&worker_0)
+            .unwrap()
+            .get(&ExternalSequenceBlockHash(100))
+            .unwrap();
+        assert_eq!(block_1.borrow().workers.len(), 3); // worker_0, worker_1, and worker_2 (all have hash 1)
+        assert!(block_1.borrow().workers.contains_key(&worker_0));
+        assert!(block_1.borrow().workers.contains_key(&worker_1));
+        assert!(block_1.borrow().workers.contains_key(&worker_2));
+
+        // Remove worker_0
+        trie.remove_worker(worker_0);
+
+        // Verify worker_0 is completely removed from lookup table
+        assert!(!trie.lookup.contains_key(&worker_0));
+        assert_eq!(trie.lookup.len(), 2);
+
+        // Verify that worker_0's hash is removed from the workers set
+        let block_1 = trie
+            .lookup
+            .get(&worker_1)
+            .unwrap()
+            .get(&ExternalSequenceBlockHash(100))
+            .unwrap();
+        assert_eq!(block_1.borrow().workers.len(), 2); // worker_1 and worker_2 remain
+        assert!(!block_1.borrow().workers.contains_key(&worker_0));
+        assert!(block_1.borrow().workers.contains_key(&worker_1));
+        assert!(block_1.borrow().workers.contains_key(&worker_2));
+
+        // Verify that blocks with no remaining workers have their children cleared
+        // This tests the optimization where empty blocks clear their children
+        let block_2 = trie
+            .lookup
+            .get(&worker_1)
+            .unwrap()
+            .get(&ExternalSequenceBlockHash(200))
+            .unwrap();
+        assert_eq!(block_2.borrow().workers.len(), 1); // only worker_1
+        assert!(block_2.borrow().workers.contains_key(&worker_1));
+
+        // Verify match results no longer include worker_0
+        let result = trie
+            .find_matches(
+                vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
+                false,
+            )
+            .scores;
+        assert_eq!(result.len(), 2);
+        assert!(!result.contains_key(&worker_0));
+        assert!(result.contains_key(&worker_1));
+        assert!(result.contains_key(&worker_2));
     }
 }

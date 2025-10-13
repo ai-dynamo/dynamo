@@ -5,12 +5,12 @@ use std::pin::Pin;
 
 use crate::{
     backend::{Backend, ExecutionContext},
-    discovery::{MODEL_ROOT_PATH, ModelManager, ModelWatcher},
+    discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::{self, EngineConfig},
     kv_router::{KvPushRouter, KvRouter},
     migration::Migration,
-    model_card::ModelDeploymentCard,
+    model_card::{self, ModelDeploymentCard},
     preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
@@ -73,7 +73,9 @@ pub async fn prepare_engine(
                 None,
                 None,
             ));
-            let models_watcher = etcd_client.kv_get_and_watch_prefix(MODEL_ROOT_PATH).await?;
+            let models_watcher = etcd_client
+                .kv_get_and_watch_prefix(model_card::ROOT_PATH)
+                .await?;
             let (_prefix, _watcher, receiver) = models_watcher.dissolve();
 
             let inner_watch_obj = watch_obj.clone();
@@ -309,57 +311,4 @@ where
         .link(preprocessor_op.backward_edge())?
         .link(frontend)?;
     Ok(engine)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::openai::{
-        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-        completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
-    };
-
-    const HF_PATH: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/data/sample-models/mock-llama-3.1-8b-instruct"
-    );
-
-    #[tokio::test]
-    async fn test_build_chat_completions_pipeline_core_engine_succeeds() -> anyhow::Result<()> {
-        // Create test model card
-        let card = ModelDeploymentCard::load(HF_PATH, None)?;
-        let engine = crate::engines::make_engine_core();
-
-        // Build pipeline for chat completions
-        let pipeline = build_pipeline::<
-            NvCreateChatCompletionRequest,
-            NvCreateChatCompletionStreamResponse,
-        >(&card, engine, card.tokenizer_hf()?)
-        .await?;
-
-        // Verify pipeline was created
-        assert!(Arc::strong_count(&pipeline) >= 1);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_build_completions_pipeline_core_engine_succeeds() -> anyhow::Result<()> {
-        // Create test model card
-        let card = ModelDeploymentCard::load(HF_PATH, None)?;
-        let engine = crate::engines::make_engine_core();
-
-        // Build pipeline for completions
-        let pipeline = build_pipeline::<NvCreateCompletionRequest, NvCreateCompletionResponse>(
-            &card,
-            engine,
-            card.tokenizer_hf()?,
-        )
-        .await?;
-
-        // Verify pipeline was created
-        assert!(Arc::strong_count(&pipeline) >= 1);
-
-        Ok(())
-    }
 }

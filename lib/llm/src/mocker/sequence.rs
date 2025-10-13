@@ -28,7 +28,7 @@ fn create_unique_blocks_from_sequence(
         .collect();
 
     // Only push the partial block if tokens count isn't a multiple of block_size
-    if tokens.total_tokens() % block_size != 0 {
+    if !tokens.total_tokens().is_multiple_of(block_size) {
         unique_blocks.push(match uuid {
             Some(uuid) => UniqueBlock::PartialBlock(uuid),
             None => UniqueBlock::default(),
@@ -258,7 +258,7 @@ impl ActiveSequence {
         self.generated_tokens = self.generated_tokens.saturating_sub(1);
 
         // Reverts to the last full block
-        if self.tokens.total_tokens() % self.block_size == 0 {
+        if self.tokens.total_tokens().is_multiple_of(self.block_size) {
             self.unique_blocks.pop();
         }
     }
