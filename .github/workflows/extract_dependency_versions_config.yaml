@@ -103,7 +103,9 @@ components:
     dockerfiles:
       - "container/Dockerfile.trtllm"
       - "containers/Dockerfile.trtllm"  # fallback if moved
-    scripts: []
+    scripts:
+      - "container/deps/trtllm/install_nixl.sh"
+      - "container/dependencies/trtllm/install_nixl.sh"  # fallback
     required: true
 
   vllm:
