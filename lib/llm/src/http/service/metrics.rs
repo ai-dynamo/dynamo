@@ -92,6 +92,17 @@ fn round_to_sig_figs(value: f64, sig_figs: u32) -> f64 {
     (value * scale).round() / scale
 }
 
+const MAX_BUCKET_COUNT: usize = 512;
+
+fn validate_bucket_config(min: f64, max: f64, count: usize) -> bool {
+    return min.is_finite()
+        && max.is_finite()
+        && min > 0.0
+        && min < max
+        && count > 0
+        && count <= MAX_BUCKET_COUNT;
+}
+
 /// Parse histogram bucket configuration from environment variables
 /// Returns (min, max, count) with defaults if not specified
 fn parse_bucket_config(
@@ -100,20 +111,39 @@ fn parse_bucket_config(
     default_max: f64,
     default_count: usize,
 ) -> (f64, f64, usize) {
-    let min = std::env::var(format!("{}_MIN", env_prefix))
+    if !validate_bucket_config(default_min, default_max, default_count) {
+        tracing::error!(
+            default_min=%default_min,
+            default_max=%default_max,
+            default_count=%default_count,
+            "Invalid default histogram configuration"
+        );
+        return (1.0, 10.0, 10);
+    }
+    let mut min = std::env::var(format!("{}_MIN", env_prefix))
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(default_min);
-
-    let max = std::env::var(format!("{}_MAX", env_prefix))
+    let mut max = std::env::var(format!("{}_MAX", env_prefix))
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(default_max);
-
-    let count = std::env::var(format!("{}_COUNT", env_prefix))
+    let mut count = std::env::var(format!("{}_COUNT", env_prefix))
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(default_count);
+
+    if !validate_bucket_config(min, max, count) {
+        tracing::warn!(
+            min=%min,
+            max=%max,
+            count=%count,
+            "Invalid histogram configuration given, using defaults"
+        );
+        min = default_min;
+        max = default_max;
+        count = default_count;
+    }
 
     (min, max, count)
 }
