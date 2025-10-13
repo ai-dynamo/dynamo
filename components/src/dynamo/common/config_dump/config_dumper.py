@@ -98,9 +98,9 @@ def dump_config(dump_config_to: Optional[str], config: Any) -> None:
     Raises:
         Logs errors but does not raise exceptions to ensure graceful degradation.
     """
-    config_dump_payload = get_config_dump(config)
 
     if dump_config_to:
+        config_dump_payload = get_config_dump(config)
         try:
             dump_path = pathlib.Path(dump_config_to)
             dump_path.parent.mkdir(parents=True, exist_ok=True)
@@ -108,13 +108,17 @@ def dump_config(dump_config_to: Optional[str], config: Any) -> None:
                 f.write(config_dump_payload)
             logger.info(f"Dumped config to {dump_path.resolve()}")
         except (OSError, IOError):
-            logger.exception(f"Failed to dump config to {dump_config_to}")
+            logger.exception(
+                f"Failed to dump config to {dump_config_to}, dropping to stdout"
+            )
             logger.info(f"CONFIG_DUMP: {config_dump_payload}")
         except Exception:
-            logger.exception("Unexpected error dumping config")
+            logger.exception("Unexpected error dumping config, dropping to stdout")
             logger.info(f"CONFIG_DUMP: {config_dump_payload}")
-    else:
-        logger.info(f"CONFIG_DUMP: {config_dump_payload}")
+    elif logger.getEffectiveLevel() <= logging.DEBUG:
+        # only collect/dump config if the logger is at DEBUG level or lower
+        config_dump_payload = get_config_dump(config)
+        logger.debug(f"CONFIG_DUMP: {config_dump_payload}")
 
 
 def get_config_dump(config: Any, extra_info: Optional[Dict[str, Any]] = None) -> str:
