@@ -2065,7 +2065,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-async-openai"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "async-openai-macros",
  "backoff",
@@ -2103,7 +2103,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-mistralrs"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2121,7 +2121,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "ahash",
  "aho-corasick",
@@ -2215,7 +2215,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "dynamo-async-openai",
@@ -2234,7 +2234,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-run"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2262,7 +2262,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2327,7 +2327,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "bytemuck",
  "derive-getters",
@@ -4192,7 +4192,7 @@ checksum = "58f929b4d672ea937a23a1ab494143d968337a5f47e56d0815df1e0890ddf174"
 
 [[package]]
 name = "libdynamo_llm"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -4877,8 +4877,9 @@ dependencies = [
 
 [[package]]
 name = "modelexpress-client"
-version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/modelexpress.git?rev=a232220bf268a475d293914d407f4ae186f443e3#a232220bf268a475d293914d407f4ae186f443e3"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9462ec6cd8b3d6beaa262ad0907a8ba297c7e3a220c11e4159742d8c275588eb"
 dependencies = [
  "anyhow",
  "clap 4.5.48",
@@ -4898,8 +4899,9 @@ dependencies = [
 
 [[package]]
 name = "modelexpress-common"
-version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/modelexpress.git?rev=a232220bf268a475d293914d407f4ae186f443e3#a232220bf268a475d293914d407f4ae186f443e3"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cd921793901b2a39105accab89a953d96661cc0eebfecfda307bec266edafbb"
 dependencies = [
  "anyhow",
  "async-trait",
