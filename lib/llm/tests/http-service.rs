@@ -386,7 +386,6 @@ async fn test_http_service() {
     let mut found = false;
     let mut expected_count = 0;
     for bucket_idx in 1..buckets.len() {
-        println!("Bucket {}, upper bound: {}, cumulative count: {}", bucket_idx, buckets[bucket_idx].upper_bound.unwrap(), buckets[bucket_idx].cumulative_count.unwrap());
         if buckets[bucket_idx].get_upper_bound() >= 2.5
             && buckets[bucket_idx - 1].get_upper_bound() < 2.5
         {
