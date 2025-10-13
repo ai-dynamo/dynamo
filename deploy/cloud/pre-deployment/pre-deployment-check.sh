@@ -117,7 +117,7 @@ check_cluster_resources() {
     print_section "Checking cluster gpu resources"
 
     local node_count
-    node_count=$(kubectl get nodes -l nvidia.com/gpu.present=true 2>/dev/null | wc -l || echo "0")
+    node_count=$(kubectl get nodes -l nvidia.com/gpu.present=true -o name 2>/dev/null | wc -l || echo "0")
 
     if [[ $node_count -eq 0 ]]; then
         print_status $RED "❌ No nodes found in the cluster"
