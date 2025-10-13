@@ -19,6 +19,10 @@ limitations under the License.
 
 This directory contains a pre-deployment check script that verifies your Kubernetes cluster meets the requirements for deploying Dynamo.
 
+- For NCCL tests, please refer to the [NCCL tests](https://docs.nebius.com/kubernetes/gpu/nccl-test#run-tests) for more details.
+
+- For NIXL benchmark, please refer to the [NIXL benchmark pre-deployment checks](/deploy/cloud/pre-deployment/nixl/README.md) for more details.
+
 ## Usage
 
 Run the pre-deployment check before deploying Dynamo:
