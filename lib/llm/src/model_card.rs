@@ -770,7 +770,7 @@ impl ModelInfoType {
     pub fn from_disk(directory: &Path) -> Result<Self> {
         let f = CheckedFile::from_disk(directory.join("config.json")).with_context(|| {
             format!(
-                "unable to extract config.json from repo {}",
+                "unable to extract config.json from directory {}",
                 directory.display()
             )
         })?;
@@ -783,7 +783,7 @@ impl GenerationConfig {
         let f = CheckedFile::from_disk(directory.join("generation_config.json")).with_context(
             || {
                 format!(
-                    "unable to extract generation_config from repo {}",
+                    "unable to extract generation_config from directory {}",
                     directory.display()
                 )
             },
@@ -814,7 +814,7 @@ impl TokenizerKind {
     pub fn from_disk(directory: &Path) -> Result<Self> {
         let f = CheckedFile::from_disk(directory.join("tokenizer.json")).with_context(|| {
             format!(
-                "unable to extract tokenizer kind from repo {}",
+                "unable to extract tokenizer kind from directory {}",
                 directory.display()
             )
         })?;

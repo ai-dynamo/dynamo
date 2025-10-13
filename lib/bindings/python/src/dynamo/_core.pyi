@@ -895,7 +895,7 @@ async def register_llm(
 async def fetch_llm(remote_name: str) -> str:
     """
     Download a model from Hugging Face, returning it's local path.
-    Example: `model_path = await fetch_llm("Qwen/Qwen3-0.6B")
+    Example: `model_path = await fetch_llm("Qwen/Qwen3-0.6B")`
     """
     ...
 

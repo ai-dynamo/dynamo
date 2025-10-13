@@ -28,7 +28,7 @@ pub async fn run(
     let maybe_remote_repo = flags
         .model_path_pos
         .clone()
-        .or(flags.model_path_flag.clone());
+        .or_else(|| flags.model_path_flag.clone());
     let model_path = match maybe_remote_repo {
         None => None,
         Some(p) if p.exists() => {

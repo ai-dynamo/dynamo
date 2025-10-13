@@ -86,25 +86,14 @@ impl Default for LocalModelBuilder {
 }
 
 impl LocalModelBuilder {
-    ///
     /// The path must exist
     pub fn model_path(&mut self, model_path: PathBuf) -> &mut Self {
-        // The served model name defaults to the full model path.
-        // This matches what vllm and sglang do.
-        if self.model_name.is_none() {
-            self.model_name = Some(model_path.display().to_string());
-        }
         self.model_path = Some(model_path);
         self
     }
 
     pub fn model_name(&mut self, model_name: Option<String>) -> &mut Self {
-        // Don't overwrite the name set by model_path if we pass None.
-        // That means the model_name can't be reset to None, but for backends the name is not
-        // optional, so there's no need to do that.
-        if model_name.is_some() {
-            self.model_name = model_name;
-        }
+        self.model_name = model_name;
         self
     }
 
@@ -250,19 +239,25 @@ impl LocalModelBuilder {
         }
 
         // Main logic. We are running a model.
-        let model_path = fs::canonicalize(self.model_path.take().unwrap())?;
+        let model_path = self.model_path.take().unwrap();
         if !model_path.exists() {
             anyhow::bail!(
                 "Path does not exist: '{}'. Use LocalModel::fetch to download it.",
                 model_path.display(),
             );
         }
+        let model_path = fs::canonicalize(model_path)?;
 
         let mut card =
             ModelDeploymentCard::load_from_disk(&model_path, self.custom_template_path.as_deref())?;
-        if let Some(model_name) = &self.model_name {
-            card.set_name(model_name);
-        }
+        // The served model name defaults to the full model path.
+        // This matches what vllm and sglang do.
+        card.set_name(
+            &self
+                .model_name
+                .clone()
+                .unwrap_or_else(|| model_path.display().to_string()),
+        );
 
         card.kv_cache_block_size = self.kv_cache_block_size;
 
