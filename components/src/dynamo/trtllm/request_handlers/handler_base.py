@@ -342,7 +342,7 @@ class HandlerBase:
         # 2. Per-request errors - send to client, don't shutdown
         except RequestError as e:
             logging.warning(f"Request {request_id} error: {e}")
-            yield {"finish_reason": "error", "error": str(e), "token_ids": []}
+            yield {"finish_reason": "error", "token_ids": []}
 
         # 3. ALL OTHER ERRORS - graceful shutdown
         except Exception as e:
@@ -357,7 +357,6 @@ class HandlerBase:
             try:
                 yield {
                     "finish_reason": "error",
-                    "error": "Internal error - service restarting",
                     "token_ids": [],
                 }
             except Exception:
