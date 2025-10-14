@@ -1,9 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0   
+# SPDX-License-Identifier: Apache-2.0
 
 import argparse
 import ast
-import sys
 from typing import Any, Dict
 
 import yaml
@@ -13,23 +12,23 @@ from benchmarks.profiler.utils.planner_utils import add_planner_arguments_to_par
 
 def parse_config_string(config_str: str) -> Dict[str, Any]:
     """Parse configuration string as Python dict literal, YAML, or JSON.
-    
+
     Supports multiple input formats:
     1. Python dict literal: "{'engine': {'backend': 'vllm'}, 'sla': {'isl': 3000}}"
     2. YAML string: "engine:\n  backend: vllm\nsla:\n  isl: 3000"
     3. JSON string: '{"engine": {"backend": "vllm"}, "sla": {"isl": 3000}}'
-    
+
     Args:
         config_str: Configuration string in one of the supported formats
-        
+
     Returns:
         Dictionary containing the configuration
-        
+
     Raises:
         ValueError: If config cannot be parsed or is not a dictionary
     """
     config = None
-    
+
     # Try 1: Parse as Python dict literal (most direct for CLI)
     try:
         config = ast.literal_eval(config_str)
@@ -37,7 +36,7 @@ def parse_config_string(config_str: str) -> Dict[str, Any]:
             return config
     except (ValueError, SyntaxError):
         pass
-    
+
     # Try 2: Parse as YAML/JSON (for K8s ConfigMaps and files)
     try:
         config = yaml.safe_load(config_str)
@@ -45,21 +44,21 @@ def parse_config_string(config_str: str) -> Dict[str, Any]:
             return config
     except yaml.YAMLError:
         pass
-    
+
     # If we got here, parsing failed
     raise ValueError(
         "Failed to parse config string. Expected Python dict literal, YAML, or JSON format. "
         f"Examples:\n"
         f"  Python dict: \"{'engine': {'backend': 'vllm'}}\"\n"
-        f"  YAML: \"engine:\\n  backend: vllm\"\n"
-        f"  JSON: '{{\"engine\": {{\"backend\": \"vllm\"}}}}'"
+        f'  YAML: "engine:\\n  backend: vllm"\n'
+        f'  JSON: \'{{"engine": {{"backend": "vllm"}}}}\''
     )
 
 
 def create_profiler_parser() -> argparse.Namespace:
     """
     Create argument parser with support for YAML config string.
-    
+
     Config structure:
         output_dir: String (path to the output results directory, default: profiling_results)
         deployment:
@@ -97,22 +96,22 @@ def create_profiler_parser() -> argparse.Namespace:
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument("--profile-config", type=str)
     pre_args, _ = pre_parser.parse_known_args()
-    
-    # Step 2: Parse config if provided 
+
+    # Step 2: Parse config if provided
     config = {}
     if pre_args.profile_config:
         config = parse_config_string(pre_args.profile_config)
-    
+
     # Step 3: Create main parser with config-aware defaults
     parser = argparse.ArgumentParser(
         description="Profile the TTFT and ITL of the Prefill and Decode engine with different parallelization mapping. When profiling prefill we mock/fix decode,when profiling decode we mock/fix prefill."
     )
-    
+
     parser.add_argument(
-        "--profile-config", 
-        type=str, 
+        "--profile-config",
+        type=str,
         help="Configuration as Python dict literal, YAML, or JSON string. CLI args override config values. "
-             "Example: \"{'engine': {'backend': 'vllm', 'config': '/path'}, 'sla': {'isl': 3000}}\""
+        "Example: \"{'engine': {'backend': 'vllm', 'config': '/path'}, 'sla': {'isl': 3000}}\"",
     )
 
     # CLI arguments with config-aware defaults (using nested .get() for cleaner code)
@@ -170,25 +169,25 @@ def create_profiler_parser() -> argparse.Namespace:
         "--isl",
         type=int,
         default=config.get("sla", {}).get("isl", 3000),
-        help="target input sequence length"
+        help="target input sequence length",
     )
     parser.add_argument(
         "--osl",
         type=int,
         default=config.get("sla", {}).get("osl", 500),
-        help="target output sequence length"
+        help="target output sequence length",
     )
     parser.add_argument(
         "--ttft",
         type=int,
         default=config.get("sla", {}).get("ttft", 50),
-        help="target Time To First Token in ms"
+        help="target Time To First Token in ms",
     )
     parser.add_argument(
         "--itl",
         type=int,
         default=config.get("sla", {}).get("itl", 10),
-        help="target Inter Token Latency in ms"
+        help="target Inter Token Latency in ms",
     )
 
     # arguments used for interpolating TTFT and ITL under different ISL/OSL
@@ -244,8 +243,7 @@ def create_profiler_parser() -> argparse.Namespace:
     if planner_config:
         # Convert hyphens to underscores to match argparse's internal naming
         normalized_planner_config = {
-            key.replace("-", "_"): value 
-            for key, value in planner_config.items()
+            key.replace("-", "_"): value for key, value in planner_config.items()
         }
         parser.set_defaults(**normalized_planner_config)
 
@@ -280,14 +278,14 @@ def create_profiler_parser() -> argparse.Namespace:
         default=config.get("sweep", {}).get("aic_backend_version"),
         help="Specify backend version when using aiconfigurator to estimate perf.",
     )
-    
+
     # Parse arguments
     args = parser.parse_args()
-    
+
     # remove --profile-config from args
-    if hasattr(args, 'profile_config'):
-        delattr(args, 'profile_config')
-        
+    if hasattr(args, "profile_config"):
+        delattr(args, "profile_config")
+
     # Validate required arguments
     if not args.config:
         parser.error("--config is required (either via CLI or profile-config)")
