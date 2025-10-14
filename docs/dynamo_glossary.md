@@ -44,7 +44,7 @@
 
 
 ## M
-**Model Deployment Card (MDC)** - A configuration structure containing all information needed for distributed model serving. When a worker loads a model, it creates an MDC containing references to the tokenizer, templates, runtime config, etc. Workers publish their MDC to make the model discoverable to frontends. Frontends use the MDC to configure request preprocessing (tokenization, prompt formatting).
+**Model Deployment Card (MDC)** - A configuration structure containing all information required for distributed model serving. When a worker loads a model, it creates an MDC containing references to components such as the tokenizer, templates, runtime config. Workers publish their MDC to make the model discoverable to frontends. Frontends use the MDC to configure request preprocessing (tokenization, prompt formatting).
 
 ## N
 **Namespace** - Dynamo's logical grouping mechanism for related components. Similar to directories in a file system, they prevent collisions between different deployments.
