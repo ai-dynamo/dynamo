@@ -122,7 +122,7 @@ python3 .github/workflows/extract_dependency_versions.py --validate
 python3 .github/workflows/extract_dependency_versions.py --help
 ```
 
-## Files
+## Links
 
 - 🤖 [Extraction Script](../workflows/extract_dependency_versions.py)
 - ⚙️ [Configuration](../workflows/extract_dependency_versions_config.yaml)

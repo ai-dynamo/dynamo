@@ -33,12 +33,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-try:
-    import yaml
-
-    HAS_YAML = True
-except ImportError:
-    HAS_YAML = False
+import yaml
 
 
 class DependencyExtractor:
@@ -97,9 +92,10 @@ class DependencyExtractor:
         """Generate source URL for package/dependency based on type and name."""
         dep_lower = dep_name.lower()
 
-        # Docker images from NVIDIA NGC Catalog
-        if category == "Base Image" or category == "Docker Compose Service":
-            if "nvcr.io" in source_file or "nvidia" in dep_lower:
+        # Docker images
+        if category in ("Base Image", "Docker Compose Service"):
+            dep_str = dep_name.lower()
+            if "nvcr.io" in dep_str or "nvidia" in dep_str:
                 # Extract image name for NGC
                 image_slug = dep_name.split("/")[-1].lower()
                 return f"https://catalog.ngc.nvidia.com/orgs/nvidia/containers/{image_slug}"
@@ -127,9 +123,8 @@ class DependencyExtractor:
         if category == "Rust Crate":
             return f"https://crates.io/crates/{dep_name}"
 
-        # Git dependencies already have repo URLs - extract repo URL
-        if "Git" in category and "github.com" in source_file:
-            # Try to extract from notes or return GitHub search
+        # Git dependencies: provide a GitHub search fallback
+        if "Git" in category:
             return f"https://github.com/search?q={dep_name}&type=repositories"
 
         # Framework/System packages
@@ -258,7 +253,7 @@ class DependencyExtractor:
             self.warnings.append(f"Error loading previous {csv_type} CSV: {e}")
 
     def load_config(self, config_path: Optional[Path] = None) -> dict:
-        """Load configuration from YAML or JSON file."""
+        """Load configuration from YAML file."""
         if config_path is None:
             # Default to extract_dependency_versions_config.yaml in same directory as script
             script_dir = Path(__file__).parent
@@ -272,10 +267,7 @@ class DependencyExtractor:
 
         try:
             with open(config_path) as f:
-                if HAS_YAML and (config_path.suffix in [".yaml", ".yml"]):
-                    config = yaml.safe_load(f)
-                else:
-                    config = json.load(f)
+                config = yaml.safe_load(f)
 
             # Update settings from config
             if "github" in config:
@@ -806,19 +798,20 @@ class DependencyExtractor:
                                 f"ARG: {key}",
                             )
 
-                # Extract base images with variable resolution
-                if line.startswith("FROM ") and "AS" in line:
+                # Extract base images (support with/without AS, and no explicit tag)
+                if line.startswith("FROM "):
                     parts = line.split()
-                    image = parts[1]
-                    if ":" in image:
-                        img_name, tag = image.rsplit(":", 1)
-
+                    if len(parts) >= 2:
+                        image = parts[1]
+                        if ":" in image:
+                            img_name, tag = image.rsplit(":", 1)
+                        else:
+                            img_name, tag = image, "latest"
                         # Resolve variables in image name and tag
                         img_name = self._resolve_dockerfile_vars(img_name, arg_values)
                         tag = self._resolve_dockerfile_vars(tag, arg_values)
-
-                        # Only add if not just variable names
-                        if not (img_name.startswith("${") or tag.startswith("${")):
+                        # Skip unresolved variable-only entries
+                        if "$" not in img_name and "$" not in tag:
                             self.add_dependency(
                                 component,
                                 "Base Image",
@@ -1124,14 +1117,7 @@ class DependencyExtractor:
             self.processed_files.add(str(compose_path.relative_to(self.repo_root)))
 
             with open(compose_path) as f:
-                if HAS_YAML:
-                    compose_data = yaml.safe_load(f)
-                else:
-                    # Skip if no YAML support
-                    self.warnings.append(
-                        f"Skipping {compose_path}: PyYAML not available"
-                    )
-                    return
+                compose_data = yaml.safe_load(f)
 
             services = compose_data.get("services", {})
             for service_name, service_config in services.items():
@@ -1173,12 +1159,7 @@ class DependencyExtractor:
             self.processed_files.add(str(chart_path.relative_to(self.repo_root)))
 
             with open(chart_path) as f:
-                if HAS_YAML:
-                    chart_data = yaml.safe_load(f)
-                else:
-                    # Skip if no YAML support
-                    self.warnings.append(f"Skipping {chart_path}: PyYAML not available")
-                    return
+                chart_data = yaml.safe_load(f)
 
             # Extract chart version
             if "version" in chart_data:
