@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -176,16 +176,29 @@ check_gpu_operator() {
     fi
 }
 
-# Global variables to track check results
-declare -A CHECK_RESULTS
-declare -a CHECK_ORDER
+# Global variables to track check results (using simple arrays for compatibility)
+CHECK_RESULTS=""
+CHECK_ORDER=""
 
 # Function to record check result
 record_check_result() {
     local check_name="$1"
     local status="$2"
-    CHECK_RESULTS["$check_name"]="$status"
-    CHECK_ORDER+=("$check_name")
+
+    # Append to results string with delimiter
+    if [[ -z "$CHECK_RESULTS" ]]; then
+        CHECK_RESULTS="${check_name}:${status}"
+        CHECK_ORDER="${check_name}"
+    else
+        CHECK_RESULTS="${CHECK_RESULTS}|${check_name}:${status}"
+        CHECK_ORDER="${CHECK_ORDER}|${check_name}"
+    fi
+}
+
+# Function to get check result by name
+get_check_result() {
+    local check_name="$1"
+    echo "$CHECK_RESULTS" | tr '|' '\n' | grep "^${check_name}:" | cut -d':' -f2
 }
 
 # Function to display check summary
@@ -195,8 +208,10 @@ display_check_summary() {
     local passed=0
     local failed=0
 
-    for check_name in "${CHECK_ORDER[@]}"; do
-        local status="${CHECK_RESULTS[$check_name]}"
+    # Split CHECK_ORDER by delimiter and iterate
+    IFS='|' read -ra CHECKS <<< "$CHECK_ORDER"
+    for check_name in "${CHECKS[@]}"; do
+        local status=$(get_check_result "$check_name")
         if [[ "$status" == "PASS" ]]; then
             print_status $GREEN "✅ $check_name: PASSED"
             ((passed++))
