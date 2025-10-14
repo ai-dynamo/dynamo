@@ -23,12 +23,12 @@ use async_nats::connection::State;
 use async_nats::{Subscriber, client, jetstream};
 use async_trait::async_trait;
 use bytes::Bytes;
+use core::num;
 use derive_builder::Builder;
 use futures::{StreamExt, TryStreamExt};
 use prometheus::{Counter, Gauge, Histogram, HistogramOpts, IntCounter, IntGauge, Opts, Registry};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use core::num;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use tokio::fs::File as TokioFile;
@@ -294,14 +294,13 @@ fn default_server() -> Vec<String> {
 
 fn validate_nats_server(servers: &Vec<String>) -> Result<(), ValidationError> {
     for server in servers {
-        if !is_nats_url(&server) {
+        if !is_nats_url(server) {
             return Err(ValidationError::new("server {} must start with 'nats://'"));
         }
     }
 
     Ok(())
 }
-
 
 // TODO(jthomson04): We really shouldn't be hardcoding this.
 const NATS_WORKER_THREADS: usize = 4;
@@ -449,7 +448,11 @@ pub struct NatsQueue {
 
 impl NatsQueue {
     /// Create a new NatsQueue with the default "worker-group" consumer
-    pub fn new(stream_name: String, nats_servers: Vec<String>, dequeue_timeout: time::Duration) -> Self {
+    pub fn new(
+        stream_name: String,
+        nats_servers: Vec<String>,
+        dequeue_timeout: time::Duration,
+    ) -> Self {
         // Sanitize stream name to remove path separators (like in Python version)
         // rupei: are we sure NATs stream name accepts '_'?
         let sanitized_stream_name = Slug::slugify(&stream_name).to_string();
@@ -517,7 +520,9 @@ impl NatsQueue {
     pub async fn connect_with_reset(&mut self, reset_stream: bool) -> Result<()> {
         if self.client.is_none() {
             // Create a new client
-            let client_options = Client::builder().servers(self.nats_servers.clone()).build()?;
+            let client_options = Client::builder()
+                .servers(self.nats_servers.clone())
+                .build()?;
 
             let client = client_options.connect().await?;
 
