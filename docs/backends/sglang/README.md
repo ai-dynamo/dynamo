@@ -154,8 +154,6 @@ Start using [Docker Compose](../../../deploy/docker-compose.yml)
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-## Run Single Node Examples
-
 > [!IMPORTANT]
 > Each example corresponds to a simple bash script that runs the OpenAI compatible server, processor, and optional router (written in Rust) and LLM engine (written in Python) in a single terminal. You can easily take each command and run them in separate terminals.
 >
@@ -185,7 +183,8 @@ cd $DYNAMO_HOME/components/backends/sglang
 ./launch/agg_embed.sh
 ```
 
-Send the following request to verify your deployment:
+<details>
+<summary>Send the following request to verify your deployment:</summary>
 
 ```bash
 curl localhost:8000/v1/embeddings \
@@ -196,25 +195,23 @@ curl localhost:8000/v1/embeddings \
   }'
 ```
 
+</details>
+
 ### Disaggregated serving
 
-<details>
-<summary>Under the hood: SGLang Load Balancer vs Dynamo Discovery</summary>
+See [SGLang Disaggregation](sglang-disaggregation.md) to learn more about how sglang and dynamo handle disaggregated serving.
 
-SGLang uses a mini load balancer to route requests to handle disaggregated serving. The load balancer functions as follows:
-
-1. The load balancer receives a request from the client
-2. A random `(prefill, decode)` pair is selected from the pool of available workers
-3. Request is sent to both `prefill` and `decode` workers via asyncio tasks
-4. Internally disaggregation is done from prefill -> decode
-
-Because Dynamo has a discovery mechanism, we do not use a load balancer. Instead, we first route to a decode worker, choose a prefill worker via round-robin or KV aware selection, and send the request to both. Internally, SGLang's bootstrap server (which is a part of the `tokenizer_manager`) is used in conjuction with NIXL to handle the kv transfer.
-
-</details>
 
 ```bash
 cd $DYNAMO_HOME/components/backends/sglang
 ./launch/disagg.sh
+```
+
+### Disaggregated Serving with KV Aware Prefill Routing
+
+```bash
+cd $DYNAMO_HOME/components/backends/sglang
+./launch/disagg_router.sh
 ```
 
 ### Disaggregated Serving with Mixture-of-Experts (MoE) models and DP attention
