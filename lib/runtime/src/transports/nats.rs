@@ -326,7 +326,7 @@ impl ClientOptions {
                 client
                     .connect(self.server)
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}"))
+                    .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}. Verify NATS server is running and accessible."))
             },
             NATS_WORKER_THREADS,
         )
