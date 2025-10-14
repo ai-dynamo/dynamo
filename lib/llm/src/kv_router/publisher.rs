@@ -127,8 +127,8 @@ impl KvEventPublisher {
         let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
             .to_string()
             .replace("_", "-");
-        let nats_servers =
-            std::env::var("NATS_SERVERS").unwrap_or_else(|_| "nats://localhost:4222".to_string())
+        let nats_servers = std::env::var("NATS_SERVERS")
+            .unwrap_or_else(|_| "nats://localhost:4222".to_string())
             .split(',')
             .map(|s| s.to_owned())
             .collect();
