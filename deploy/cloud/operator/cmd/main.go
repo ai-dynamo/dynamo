@@ -186,11 +186,6 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
-	if restrictedNamespace == "" && plannerClusterRoleName == "" {
-		setupLog.Error(nil, "planner-cluster-role-name is required in cluster-wide mode")
-		os.Exit(1)
-	}
-
 	// Validate modelExpressURL if provided
 	if modelExpressURL != "" {
 		if _, err := url.Parse(modelExpressURL); err != nil {
