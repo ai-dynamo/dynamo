@@ -24,7 +24,7 @@ RUN if [ "$BRANCH_TYPE" = "local" ]; then \
     fi
 
 # SGLang does not use a venv in their container
-RUN if [ "$BRANCH_TYPE" = "local" ] || [ "$BRANCH_TYPE" = "remote" ]; then \
+RUN if [ "$BRANCH_TYPE" = "local" ]; then \
     cd dynamo/lib/bindings/python && \
     pip install --break-system-packages maturin && \
     maturin build --release && \
@@ -32,6 +32,14 @@ RUN if [ "$BRANCH_TYPE" = "local" ] || [ "$BRANCH_TYPE" = "remote" ]; then \
     cd /sgl-workspace/dynamo && \
     pip install --break-system-packages -e . && \
     pip install --break-system-packages --requirement /tmp/local_src/container/deps/requirements.txt ; \
+  elif [ "$BRANCH_TYPE" = "remote" ]; then \
+    cd dynamo/lib/bindings/python && \
+    pip install --break-system-packages maturin && \
+    maturin build --release && \
+    pip install --break-system-packages target/wheels/*.whl && \
+    cd /sgl-workspace/dynamo && \
+    pip install --break-system-packages -e . && \
+    pip install --break-system-packages --requirement /sgl-workspace/dynamo/container/deps/requirements.txt ; \
   else \
     pip install --break-system-packages ai-dynamo ; \
   fi \
