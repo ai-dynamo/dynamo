@@ -21,6 +21,7 @@ EXCLUDED_JOB_NAMES = [
     "Upload Workflow Metrics",  # Avoid infinite loops
     # Add other job names to exclude here as needed
 ]
+FRAMEWORK_IMAGE_BUILD_JOBS = ["vllm", "sglang", "trtllm"]
 
 # NEW STANDARDIZED FIELD SCHEMA - Using consistent prefixes for OpenSearch mapping
 # Using prefixes: s_ for strings, l_ for longs, ts_ for timestamps
@@ -56,6 +57,150 @@ FIELD_STEP_ID = "s_step_id"
 FIELD_NAME = "s_step_name"
 FIELD_STEP_NUMBER = "l_step_number"
 FIELD_COMMAND = "s_command"
+
+# Container-specific fields (for CONTAINER_INDEX)
+FIELD_BUILD_DURATION_SEC = "l_build_duration_sec"
+FIELD_BUILD_START_TIME = "ts_build_start_time"
+FIELD_BUILD_END_TIME = "ts_build_end_time"
+FIELD_BUILD_TARGET = "s_build_target"
+FIELD_BUILD_FRAMEWORK = "s_build_framework"
+FIELD_BUILD_SIZE_BYTES = "l_build_size_bytes"
+
+
+class BuildMetricsReader:
+    """Reader for build metrics from environment variables and artifacts"""
+
+    @staticmethod
+    def _process_artifact_metrics(artifact_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Process and clean up artifact metrics data"""
+        # Convert types (same as in get_build_metrics)
+        if "build_duration_sec" in artifact_metrics:
+            try:
+                artifact_metrics["build_duration_sec"] = int(
+                    artifact_metrics["build_duration_sec"]
+                )
+            except (ValueError, TypeError):
+                artifact_metrics["build_duration_sec"] = 0
+
+        if "image_size_bytes" in artifact_metrics:
+            try:
+                artifact_metrics["image_size_bytes"] = int(
+                    artifact_metrics["image_size_bytes"]
+                )
+            except (ValueError, TypeError):
+                artifact_metrics["image_size_bytes"] = 0
+
+        # Convert Unix timestamps to ISO format if needed
+        for time_field in ["build_start_time", "build_end_time"]:
+            if time_field in artifact_metrics and artifact_metrics[time_field]:
+                time_value = artifact_metrics[time_field]
+                if isinstance(time_value, (int, float)) or (
+                    isinstance(time_value, str) and time_value.isdigit()
+                ):
+                    try:
+                        timestamp = float(time_value)
+                        artifact_metrics[time_field] = datetime.fromtimestamp(
+                            timestamp, tz=timezone.utc
+                        ).isoformat()
+                    except (ValueError, OSError):
+                        pass  # Keep original value if conversion fails
+
+        return artifact_metrics
+
+    @staticmethod
+    def get_build_metrics_for_job(job_name: str) -> Optional[Dict[str, Any]]:
+        """Get build metrics for a specific job by looking for framework-specific artifacts"""
+
+        # Determine framework from job name
+        framework = None
+        job_name_lower = job_name.lower()
+        if "vllm" in job_name_lower:
+            framework = "vllm"
+        elif "sglang" in job_name_lower:
+            framework = "sglang"
+        elif "trtllm" in job_name_lower:
+            framework = "trtllm"
+
+        if not framework:
+            print(f"⚠️  Could not determine framework from job name: {job_name}")
+            return None
+
+        # Determine architecture preference from job name
+        preferred_arch = "amd64"  # default
+        if "arm64" in job_name_lower:
+            preferred_arch = "arm64"
+
+        # Try to read consolidated metrics file first
+        consolidated_path = "build-metrics/consolidated-metrics.json"
+        if os.path.exists(consolidated_path):
+            try:
+                with open(consolidated_path, "r") as f:
+                    all_metrics = json.load(f)
+
+                # Look for job-specific metrics
+                # Try preferred architecture first
+                job_key = f"{framework}-{preferred_arch}"
+                if job_key in all_metrics:
+                    return BuildMetricsReader._process_artifact_metrics(
+                        all_metrics[job_key]
+                    )
+
+                # Try other architecture
+                other_arch = "arm64" if preferred_arch == "amd64" else "amd64"
+                job_key = f"{framework}-{other_arch}"
+                if job_key in all_metrics:
+                    return BuildMetricsReader._process_artifact_metrics(
+                        all_metrics[job_key]
+                    )
+
+                # Try just framework name (backward compatibility)
+                if framework in all_metrics:
+                    return BuildMetricsReader._process_artifact_metrics(
+                        all_metrics[framework]
+                    )
+
+                print(
+                    f"⚠️  No metrics found for {framework} in consolidated file. Available keys: {list(all_metrics.keys())}"
+                )
+
+            except Exception as e:
+                print(f"❌ Error reading consolidated build metrics: {e}")
+
+        # Fallback to individual file approach for backward compatibility
+        # Try framework-specific artifact (direct path)
+        artifact_path = f"build-metrics/metrics-{framework}-{preferred_arch}.json"
+        if not os.path.exists(artifact_path):
+            # Try the other architecture (direct path)
+            other_arch = "arm64" if preferred_arch == "amd64" else "amd64"
+            artifact_path = f"build-metrics/metrics-{framework}-{other_arch}.json"
+        if not os.path.exists(artifact_path):
+            # Try artifact subdirectory structure (new format)
+            artifact_path = f"build-metrics/build-metrics-{framework}-{preferred_arch}/metrics-{framework}-{preferred_arch}.json"
+        if not os.path.exists(artifact_path):
+            # Try other architecture in subdirectory
+            other_arch = "arm64" if preferred_arch == "amd64" else "amd64"
+            artifact_path = f"build-metrics/build-metrics-{framework}-{other_arch}/metrics-{framework}-{other_arch}.json"
+        if not os.path.exists(artifact_path):
+            # Try old naming convention (backward compatibility)
+            artifact_path = f"build-metrics/metrics-{framework}.json"
+        if not os.path.exists(artifact_path):
+            # Try alternative path (old format)
+            artifact_path = f"build-metrics/build-metrics-{framework}/metrics.json"
+
+        if os.path.exists(artifact_path):
+            try:
+                with open(artifact_path, "r") as f:
+                    artifact_metrics = json.load(f)
+                    return BuildMetricsReader._process_artifact_metrics(
+                        artifact_metrics
+                    )
+            except Exception as e:
+                print(
+                    f"⚠️  Could not read {framework} build metrics from {artifact_path}: {e}"
+                )
+
+        print(f"⚠️  No build metrics artifact found for {framework} at {artifact_path}")
+        return None
 
 
 class TimingProcessor:
@@ -477,6 +622,15 @@ class WorkflowMetricsUploader:
         self.post_to_db(self.jobs_index, db_data)
         print(f"Uploaded metrics for job: {job_name}")
 
+        # Upload container metrics if this is a build job and metrics are available
+        # Check if this is one of our framework build jobs
+        is_framework_job = any(
+            framework in job_name.lower() for framework in FRAMEWORK_IMAGE_BUILD_JOBS
+        )
+
+        if is_framework_job:
+            self._upload_container_metrics(job_data)
+
     def _upload_job_step_metrics(self, job_data: Dict[str, Any]) -> int:
         """Extract and post metrics for all steps in a job"""
         job_name = job_data["name"]
@@ -557,6 +711,95 @@ class WorkflowMetricsUploader:
         # Post to database
         self.post_to_db(self.steps_index, db_data)
         print(f"Uploaded metrics for step: {step_name} (step {step_number})")
+
+    def _upload_container_metrics(
+        self, job_data: Dict[str, Any], build_metrics: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Upload container-specific metrics to CONTAINER_INDEX"""
+        container_index = os.getenv("CONTAINER_INDEX")
+        if not container_index:
+            print(
+                "⚠️  CONTAINER_INDEX not configured, skipping container metrics upload"
+            )
+            return
+
+        # Get build metrics if not provided
+        if build_metrics is None:
+            # Try to get framework-specific build metrics based on job name
+            job_name = job_data.get("name", "")
+            build_metrics = BuildMetricsReader.get_build_metrics_for_job(job_name)
+
+        if not build_metrics:
+            print(
+                f"⚠️  No build metrics available for container upload for job: {job_data.get('name', 'unknown')}"
+            )
+            return
+
+        print(f"📦 Uploading container metrics to {container_index}")
+
+        # Create container metrics payload
+        container_data = {}
+
+        # Identity & Context - container-specific fields only
+        job_id = str(job_data["id"])
+        job_name = job_data["name"]
+        container_data[
+            FIELD_ID
+        ] = f"github-container-{job_id}-{build_metrics.get('framework', 'unknown')}"
+        container_data[FIELD_JOB_NAME] = str(job_name)
+        container_data[FIELD_JOB_ID] = job_id
+
+        # Find the "Build Container" step ID
+        build_step_id = None
+        steps = job_data.get("steps", [])
+        for step in steps:
+            if (
+                "build" in step.get("name", "").lower()
+                and "container" in step.get("name", "").lower()
+            ):
+                build_step_id = f"{job_id}_{step.get('number', 1)}"
+                break
+
+        container_data[FIELD_STEP_ID] = build_step_id or f"{job_id}_build"
+
+        # Status - container-specific
+        container_data[FIELD_STATUS] = str(
+            job_data.get("conclusion") or job_data.get("status", "unknown")
+        )
+
+        # Container Info (only truly container-specific fields)
+        container_data[FIELD_BUILD_FRAMEWORK] = build_metrics.get(
+            "framework", "unknown"
+        )
+        container_data[FIELD_BUILD_SIZE_BYTES] = build_metrics.get(
+            "image_size_bytes", 0
+        )
+
+        # Timing (reusing existing build timing fields)
+        if "build_start_time" in build_metrics:
+            container_data[FIELD_BUILD_START_TIME] = build_metrics["build_start_time"]
+        if "build_end_time" in build_metrics:
+            container_data[FIELD_BUILD_END_TIME] = build_metrics["build_end_time"]
+        container_data[FIELD_BUILD_DURATION_SEC] = build_metrics.get(
+            "build_duration_sec", 0
+        )
+
+        # Add @timestamp for time-series data
+        container_data["@timestamp"] = build_metrics.get(
+            "build_end_time", datetime.now(timezone.utc).isoformat()
+        )
+
+        # Add common context fields
+        self.add_common_context_fields(container_data)
+
+        # Upload to container index
+        try:
+            self.post_to_db(container_index, container_data)
+            print(
+                f"✅ Container metrics uploaded for {build_metrics.get('framework', 'unknown')} framework"
+            )
+        except Exception as e:
+            print(f"❌ Failed to upload container metrics: {e}")
 
 
 def main():

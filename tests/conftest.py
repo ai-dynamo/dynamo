@@ -40,6 +40,21 @@ logging.basicConfig(
 )
 
 
+@pytest.fixture()
+def set_ucx_tls_no_mm():
+    """Set UCX env defaults for all tests."""
+    mp = pytest.MonkeyPatch()
+    # CI note:
+    # - Affected test: tests/fault_tolerance/cancellation/test_vllm.py::test_request_cancellation_vllm_decode_cancel
+    # - Symptom on L40 CI: UCX/NIXL mm transport assertion during worker init
+    #   (uct_mem.c:482: mem.memh != UCT_MEM_HANDLE_NULL) when two workers
+    #   start on the same node (maybe a shared-memory segment collision/limits).
+    # - Mitigation: disable UCX "mm" shared-memory transport globally for tests
+    mp.setenv("UCX_TLS", "^mm")
+    yield
+    mp.undo()
+
+
 def download_models(model_list=None, ignore_weights=False):
     """Download models - can be called directly or via fixture
 

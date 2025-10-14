@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 accelerate==1.6.0
+aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@e46d9089ffe4f5dd62c46914489c55b6dfdbc903
 aiofiles
+aiperf @ git+https://github.com/ai-dynamo/aiperf.git@e8f69abf180ff9ea96de9f9a8c955df8c024625b
 av==15.0.0
 fastapi==0.115.12
 ftfy
@@ -15,7 +17,6 @@ kubernetes_asyncio
 matplotlib
 msgspec
 mypy
-numpy==1.26.4 # pmdarima is not compatible with numpy 2
 nvidia-ml-py==13.580.65
 opentelemetry-api
 opentelemetry-sdk
@@ -26,7 +27,7 @@ prometheus-api-client
 prometheus_client
 prophet
 protobuf==5.29.5
-pydantic==2.10.6
+pydantic>=2.10.6
 pyright
 PyYAML
 scikit-learn

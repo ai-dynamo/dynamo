@@ -32,6 +32,9 @@ distributed tracing.
 | `DYN_LOG_USE_LOCAL_TZ`             | Use local timezone for logging timestamps (default: UTC)         | `DYN_LOG_USE_LOCAL_TZ=1`                       |
 | `DYN_LOG`                          | Log levels per target `<default_level>,<module_path>=<level>,<module_path>=<level>`             | `DYN_LOG=info,dynamo_runtime::system_status_server:trace`  |
 | `DYN_LOGGING_CONFIG_PATH`          | Path to custom TOML logging configuration file            | `DYN_LOGGING_CONFIG_PATH=/path/to/config.toml`|
+| `OTEL_SERVICE_NAME`                | Service name for OpenTelemetry traces (default: `dynamo`) | `OTEL_SERVICE_NAME=dynamo-frontend` |
+| `OTEL_EXPORT_ENABLED`              | Enable OTLP trace exporting (set to `1` to enable) | `OTEL_EXPORT_ENABLED=1` |
+| `OTEL_EXPORT_ENDPOINT`             | OTLP exporter endpoint (default: http://localhost:4317) | `OTEL_EXPORT_ENDPOINT=http://tempo:4317` |
 
 
 ## Available Logging Levels
@@ -82,10 +85,49 @@ Resulting Log format:
 {"time":"2025-09-02T15:53:31.943747Z","level":"INFO","target":"log","message":"Scheduler config values: {'max_num_seqs': 256, 'max_num_batched_tokens': 2048}","log.file":"/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/main.py","log.line":268,"log.target":"main.get_engine_cache_info"}
 ```
 
+## OpenTelemetry Distributed Tracing
+
+When `DYN_LOGGING_JSONL` is enabled, Dynamo uses OpenTelemetry for distributed tracing. All logs include `trace_id` and `span_id` fields, and spans are automatically created for requests. By default, traces are **not exported**. To export traces to an observability backend (like Tempo, Jaeger, or Zipkin), set `OTEL_EXPORT_ENABLED=1`.
+
+### Behavior
+
+- **With `DYN_LOGGING_JSONL=true` only**: OpenTelemetry layer is active, generating trace context and span IDs for all requests. Traces appear in logs but are not exported anywhere.
+- **With `OTEL_EXPORT_ENABLED=1` and `DYN_LOGGING_JSONL=true`**: Same as above, plus traces are exported to an OTLP collector for visualization.
+
+### Configuration
+
+To enable OTLP trace exporting:
+
+1. Set `OTEL_EXPORT_ENABLED=1` to enable trace export
+2. Optionally configure the endpoint using `OTEL_EXPORT_ENDPOINT` (default: `http://localhost:4317`)
+3. Optionally set `OTEL_SERVICE_NAME` to identify the service (useful in Kubernetes, default: `dynamo`)
+
+**Export Settings:**
+- **Protocol**: gRPC (Tonic)
+- **Service Name**: Value of `OTEL_SERVICE_NAME` env var, or `dynamo` if not set
+- **Endpoint**: Value of `OTEL_EXPORT_ENDPOINT` env var, or `http://localhost:4317` if not set
+
+### Example: JSONL Logging Only (No Export)
+
+```bash
+export DYN_LOGGING_JSONL=true
+# OpenTelemetry is active, traces appear in logs, but nothing is exported
+```
+
+### Example: JSONL Logging + Trace Export to Tempo
+
+```bash
+export DYN_LOGGING_JSONL=true
+export OTEL_EXPORT_ENABLED=1
+export OTEL_EXPORT_ENDPOINT=http://tempo:4317
+export OTEL_SERVICE_NAME=dynamo-frontend
+# OpenTelemetry is active, traces appear in logs AND are exported to Tempo
+```
+
 ## Trace and Span information
 
 When `DYN_LOGGING_JSONL` is enabled with `DYN_LOG` set to greater than or equal to
-`info` level trace information is added to all logged spans along with
+`info` level, trace information is added to all logged spans along with
 `SPAN_CREATED` and `SPAN_CLOSED` events.
 
 ### Example Request
