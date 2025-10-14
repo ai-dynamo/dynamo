@@ -194,6 +194,7 @@ try:
     def try_process_pydantic(obj: Any) -> Optional[dict]:
         if isinstance(obj, pydantic.BaseModel):
             return obj.model_dump()
+        return None
 
 except ImportError:
 
