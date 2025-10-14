@@ -61,7 +61,7 @@ spec:
           image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           command:
-          - python3E
+          - python3
           - -m
           - dynamo.sglang
           args:

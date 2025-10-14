@@ -267,9 +267,27 @@ impl HttpService {
                 }
             }
         } else {
-            let listener = tokio::net::TcpListener::bind(addr)
-                .await
-                .unwrap_or_else(|_| panic!("could not bind to address: {address}"));
+            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                tracing::error!(
+                    protocol = %protocol,
+                    address = %address,
+                    error = %e,
+                    "Failed to bind server to address"
+                );
+                match e.kind() {
+                    std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
+                        "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
+                        protocol,
+                        self.port
+                    ),
+                    _ => anyhow::anyhow!(
+                        "Failed to start {} server on {}: {}",
+                        protocol,
+                        address,
+                        e
+                    ),
+                }
+            })?;
 
             axum::serve(listener, router)
                 .with_graceful_shutdown(observer.cancelled_owned())
