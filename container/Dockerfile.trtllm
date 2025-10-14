@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
-ARG BASE_IMAGE_TAG="25.09-py3"
+ARG BASE_IMAGE_TAG="25.08-py3"
 ARG RELEASE_BUILD
 ARG ENABLE_KVBM=false
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
-ARG RUNTIME_IMAGE_TAG="13.0.1-runtime-ubuntu24.04"
+ARG RUNTIME_IMAGE_TAG="13.0.0-runtime-ubuntu24.04"
 
 # TensorRT-LLM specific configuration
 ARG HAS_TRTLLM_CONTEXT=0
