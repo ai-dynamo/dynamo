@@ -24,7 +24,7 @@ Dynamo supports SGLang's GB200 implementation of wide expert parallelism and lar
 1. Build the Dynamo container using the latest published dynamo version and stable sglang version. If you want to build from a local dynamo repo, you can add `--build-arg BRANCH_TYPE=local` to the build command. If you want to build from a remote dynamo repo, you can add `--build-arg BRANCH_TYPE=remote` to the build command. If you want to use a specific tag for the default sglang version, you can add `--build-arg SGLANG_IMAGE_TAG=<tag>` to the build command.
 
 > [!Note]
-> Please ensure that you are building this on an ARM64 machine since GB200 is ARM64 only. The correct SGLang image will automatically be pulled for you since they ship a manifest with both x86_64 and ARM64 images.
+> Please ensure that you are building this on an ARM64 machine. The correct SGLang image will be selected automatically via the multi-arch manifest.
 
 ```bash
 cd $DYNAMO_ROOT
