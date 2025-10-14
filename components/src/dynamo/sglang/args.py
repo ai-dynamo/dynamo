@@ -16,8 +16,8 @@ from sglang.srt.server_args import ServerArgs
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import register_encoder
-from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.llm import fetch_llm
+from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang import __version__
 
 configure_dynamo_logging()

@@ -5,7 +5,6 @@ import asyncio
 import logging
 import signal
 import sys
-import os
 
 import sglang as sgl
 import uvloop
