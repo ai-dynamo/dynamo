@@ -42,7 +42,7 @@ export HF_TOKEN=<INSERT_TOKEN_HERE>
 
 pip install -U "huggingface_hub[cli]"
 
-huggingface-cli download openai/gpt-oss-120b --exclude "original/*" --exclude "metal/*" --local-dir $MODEL_PATH
+huggingface-cli download openai/gpt-oss-120b --exclude "original/*" "metal/*" --local-dir $MODEL_PATH
 ```
 
 ### 2. Run the Container
