@@ -206,7 +206,7 @@ fn register_llm<'p>(
     let model_type_obj = model_type.inner;
 
     let inner_path = model_path.to_string();
-    let model_name = model_name.map(|n| n.to_string());
+    let mut model_name = model_name.map(|n| n.to_string());
     let router_mode = router_mode.unwrap_or(RouterMode::RoundRobin);
     let router_config = RouterConfig::new(router_mode.into(), KvRouterConfig::default());
 
@@ -234,6 +234,10 @@ fn register_llm<'p>(
         let model_path = if fs::exists(&inner_path)? {
             PathBuf::from(inner_path)
         } else {
+            // Preserve the model name
+            if model_name.is_none() {
+                model_name = Some(inner_path.clone());
+            }
             // Likely it's a Hugging Face repo, download it
             LocalModel::fetch(&inner_path, false)
                 .await
