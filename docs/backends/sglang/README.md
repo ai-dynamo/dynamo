@@ -66,7 +66,8 @@ Dynamo SGLang uses SGLang's native argument parser, so **most SGLang engine argu
 - **Default (`--use-sglang-tokenizer` not set)**: Dynamo handles tokenization/detokenization via our blazing fast frontend and passes `input_ids` to SGLang
 - **With `--use-sglang-tokenizer`**: SGLang handles tokenization/detokenization, Dynamo passes raw prompts
 
-> [!note] When using `--use-sglang-tokenizer`, only `v1/chat/completions` is available through Dynamo's frontend.
+> [!NOTE]
+> When using `--use-sglang-tokenizer`, only `v1/chat/completions` is available through Dynamo's frontend.
 
 ## Installation
 
