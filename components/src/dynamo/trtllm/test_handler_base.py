@@ -6,6 +6,18 @@ Test runner for handler_base error handling.
 Run with: python test_handler_base.py
 
 This script mocks heavy dependencies before importing handler_base to test error handling.
+
+MOCK LIFECYCLE EXPLANATION:
+1. Module-level mocking: Required to successfully import handler_base
+   which has dependencies on tensorrt_llm, torch, etc.
+2. Import handler_base: Imports work because of the mocks
+3. Immediate cleanup: Removes mocks from sys.modules to prevent
+   interference with pytest's test collection (prevents "tensorrt_llm.__spec__ is not set")
+4. setup_method: Re-establishes mocks before each test runs
+5. teardown_method: Cleans up after each test
+
+This dual approach allows us to import handler_base (which needs mocks) while
+preventing our mocks from breaking pytest's collection of other test files.
 """
 # type: ignore  # This file uses dynamic mocking which confuses mypy
 
@@ -50,6 +62,11 @@ for module_name in modules_to_mock:
         original_modules[module_name] = sys.modules[module_name]
 
 # Mock all heavy dependencies BEFORE importing handler_base
+# WHY WE NEED THIS: handler_base.py imports tensorrt_llm, torch, etc.
+# Without these mocks, the import on line 114-119 would fail because these
+# packages aren't installed in the test environment.
+# This is DIFFERENT from the mocking in setup_method - this enables the import,
+# while setup_method re-establishes mocks for test execution after cleanup.
 sys.modules["torch"] = MagicMock()
 sys.modules["tensorrt_llm"] = MagicMock()
 sys.modules["tensorrt_llm.executor"] = MagicMock()
@@ -135,9 +152,69 @@ def cleanup_modules():
 # Register cleanup to run at exit
 atexit.register(cleanup_modules)
 
+# IMPORTANT: Clean up immediately after imports are done
+# WHY WE CLEAN UP HERE: When pytest collects tests, it imports all test files.
+# If we leave tensorrt_llm mocked in sys.modules, when pytest tries to check
+# if tensorrt_llm is available for test_trtllm_unit.py (via conftest.py),
+# it finds our MagicMock which doesn't have __spec__, causing:
+# "ValueError: tensorrt_llm.__spec__ is not set"
+# By cleaning up here, we prevent our mocks from interfering with pytest collection.
+# The mocks will be re-established when tests actually run via setup_method.
+cleanup_modules()
+
 
 class TestHandlerBase:
     """Tests for HandlerBase error handling"""
+
+    def setup_method(self):
+        """Re-establish mocks before each test method runs.
+
+        WHY WE NEED THIS: After cleanup_modules() removed all mocks to prevent
+        pytest collection issues, we need to put them back when tests actually run.
+        The HandlerBase code that was imported earlier expects these modules to be
+        mocked when it executes during the test.
+        """
+        # Put mocks back for test execution
+        sys.modules["torch"] = MagicMock()
+        sys.modules["tensorrt_llm"] = MagicMock()
+        sys.modules["tensorrt_llm.executor"] = MagicMock()
+        sys.modules["tensorrt_llm.executor.result"] = MagicMock()
+        sys.modules["tensorrt_llm.executor.utils"] = MagicMock()
+        sys.modules["tensorrt_llm.llmapi"] = MagicMock()
+        sys.modules["tensorrt_llm.llmapi.llm"] = MagicMock()
+
+        # Re-create RequestError
+        class RequestError(Exception):
+            pass
+
+        sys.modules["tensorrt_llm.executor.utils"].RequestError = RequestError
+
+        # Re-mock dynamo modules
+        sys.modules["dynamo._core"] = MagicMock()
+        sys.modules["dynamo.logits_processing"] = MagicMock()
+        sys.modules["dynamo.logits_processing.examples"] = MagicMock()
+        sys.modules["dynamo.nixl_connect"] = MagicMock()
+        sys.modules["dynamo.runtime"] = MagicMock()
+        sys.modules["dynamo.runtime.logging"] = MagicMock()
+        sys.modules["dynamo.trtllm.engine"] = MagicMock()
+        sys.modules["dynamo.trtllm.logits_processing"] = MagicMock()
+        sys.modules["dynamo.trtllm.logits_processing.adapter"] = MagicMock()
+        sys.modules["dynamo.trtllm.multimodal_processor"] = MagicMock()
+        sys.modules["dynamo.trtllm.publisher"] = MagicMock()
+        sys.modules["dynamo.trtllm.utils"] = MagicMock()
+        sys.modules["dynamo.trtllm.utils.disagg_utils"] = MagicMock()
+
+        # Re-establish Context if needed
+        sys.modules["dynamo._core"].Context = Context
+
+    def teardown_method(self):
+        """Clean up mocks after each test method.
+
+        WHY WE NEED THIS: Ensures clean state between tests and prevents
+        any lingering mocked modules from affecting subsequent tests or
+        pytest operations.
+        """
+        cleanup_modules()
 
     def create_mock_config(self, with_runtime=True):
         """Helper to create a mock RequestHandlerConfig"""
