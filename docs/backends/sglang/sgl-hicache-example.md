@@ -55,7 +55,7 @@ curl localhost:8000/v1/chat/completions \
 
 Run the perf script:
 ```bash
-bash -x /workspace/benchmarks/llm/perf.sh \
+bash -x $DYNAMO_ROOT/benchmarks/llm/perf.sh \
   --model Qwen/Qwen3-0.6B \
   --tensor-parallelism 1 \
   --data-parallelism 1 \
