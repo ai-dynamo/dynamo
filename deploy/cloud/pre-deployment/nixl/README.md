@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # NIXL Benchmark Documentation
 
 This guide describes how to build and deploy the NIXL benchmark using the provided scripts on a Kubernetes (K8s) cluster.
