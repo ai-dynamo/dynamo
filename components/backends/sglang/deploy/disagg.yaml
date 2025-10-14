@@ -61,7 +61,7 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.0
           workingDir: /workspace/components/backends/sglang
           command:
-          - python3E
+          - python3
           - -m
           - dynamo.sglang
           args:
