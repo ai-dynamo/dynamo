@@ -83,6 +83,8 @@ uv venv --python 3.12 --seed
 uv pip install "ai-dynamo[sglang]"
 ```
 
+</details>
+
 ### Install editable version for development
 
 <details>
@@ -154,7 +156,7 @@ Start using [Docker Compose](../../../deploy/docker-compose.yml)
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-> [!IMPORTANT]
+> [!TIP]
 > Each example corresponds to a simple bash script that runs the OpenAI compatible server, processor, and optional router (written in Rust) and LLM engine (written in Python) in a single terminal. You can easily take each command and run them in separate terminals.
 >
 > Additionally - because we use sglang's argument parser, you can pass in any argument that sglang supports to the worker!

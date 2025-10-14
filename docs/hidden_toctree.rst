@@ -59,6 +59,7 @@
    backends/sglang/gpt-oss.md
    backends/sglang/multimodal_epd.md
    backends/sglang/sgl-hicache-example.md
+   backends/sglang/sglang-disaggregation.md
 
    examples/README.md
    examples/runtime/hello_world/README.md
