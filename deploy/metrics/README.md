@@ -163,8 +163,6 @@ $ python -m dynamo.vllm --model Qwen/Qwen3-0.6B  \
 - **HTTP Queue**: Measures queuing time before processing begins (including prefill time)
 - **HTTP Queue ≤ Inflight** (HTTP queue is a subset of inflight time)
 
-¹ **TODO**: Implement the "actual" HTTP queue metric that tracks from request start until first token generation begins, rather than the current implementation that tracks until first token is received by the frontend
-
 ### Required Files
 
 The following configuration files should be present in this directory:

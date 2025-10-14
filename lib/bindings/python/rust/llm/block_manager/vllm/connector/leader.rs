@@ -129,6 +129,7 @@ impl KvConnectorLeader {
                     .leader(leader_py)
                     .page_size(page_size)
                     .disable_device_pool(false)
+                    .kvbm_metrics(kvbm_metrics_clone.clone())
                     .build()
                     .await
                 {

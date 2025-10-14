@@ -316,6 +316,11 @@ def parse_args(args: list[str]) -> Config:
         expanded_template_path = os.path.expandvars(
             os.path.expanduser(parsed_args.custom_jinja_template)
         )
+        # Validate custom Jinja template file exists
+        if not os.path.isfile(expanded_template_path):
+            raise FileNotFoundError(
+                f"Custom Jinja template file not found: {expanded_template_path}"
+            )
 
     dynamo_args = DynamoArgs(
         namespace=parsed_namespace,

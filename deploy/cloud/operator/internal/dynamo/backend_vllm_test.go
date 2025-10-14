@@ -16,7 +16,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 		name                  string
 		numberOfNodes         int32
 		role                  Role
-		component             *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		component             *v1alpha1.DynamoComponentDeploymentSharedSpec
 		multinodeDeployer     MultinodeDeployer
 		initialArgs           []string
 		initialLivenessProbe  *corev1.Probe
@@ -31,7 +31,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			name:              "single node does not modify args",
 			numberOfNodes:     1,
 			role:              RoleMain,
-			component:         &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
+			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialArgs:       []string{"python3", "-m", "dynamo.vllm"},
 			expectNotModified: true,
@@ -40,7 +40,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			name:                "multinode leader prepends ray start --head",
 			numberOfNodes:       3,
 			role:                RoleLeader,
-			component:           &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
+			component:           &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer:   &GroveMultinodeDeployer{},
 			initialArgs:         []string{"python3", "-m", "dynamo.vllm", "--model", "test"},
 			expectContains:      []string{"ray start --head --port=6379 &&", "python3", "-m", "dynamo.vllm", "--model", "test"},
@@ -50,7 +50,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			name:                "multinode worker replaces args with ray start --block",
 			numberOfNodes:       3,
 			role:                RoleWorker,
-			component:           &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
+			component:           &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer:   &GroveMultinodeDeployer{},
 			initialArgs:         []string{"python3", "-m", "dynamo.vllm", "--model", "test"},
 			expectedArgs:        []string{"ray start --address=$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):6379 --block"},
@@ -60,7 +60,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			name:                "multinode worker with LWS deployment type",
 			numberOfNodes:       2,
 			role:                RoleWorker,
-			component:           &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
+			component:           &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer:   &LWSMultinodeDeployer{},
 			initialArgs:         []string{"python3", "-m", "dynamo.vllm"},
 			expectedArgs:        []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
@@ -70,7 +70,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			name:              "multinode leader with no initial args",
 			numberOfNodes:     2,
 			role:              RoleLeader,
-			component:         &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
+			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialArgs:       []string{},
 			expectNotModified: true, // Should not modify empty args
@@ -79,7 +79,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			name:              "multinode main role (non-leader/worker) does not modify args",
 			numberOfNodes:     3,
 			role:              RoleMain,
-			component:         &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
+			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialArgs:       []string{"python3", "-m", "dynamo.frontend"},
 			expectNotModified: true,
@@ -131,7 +131,7 @@ func TestVLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 
 	tests := []struct {
 		name                  string
-		component             *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		component             *v1alpha1.DynamoComponentDeploymentSharedSpec
 		volumeMounts          []corev1.VolumeMount
 		expectCacheEnvVar     bool
 		expectCacheEnvVarName string
@@ -139,14 +139,12 @@ func TestVLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 	}{
 		{
 			name: "VLLM backend with useAsCompilationCache volume mount",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
-				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					VolumeMounts: []v1alpha1.VolumeMount{
-						{
-							Name:                  "vllm-cache",
-							MountPoint:            "/root/.cache/vllm",
-							UseAsCompilationCache: true,
-						},
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				VolumeMounts: []v1alpha1.VolumeMount{
+					{
+						Name:                  "vllm-cache",
+						MountPoint:            "/root/.cache/vllm",
+						UseAsCompilationCache: true,
 					},
 				},
 			},
@@ -157,14 +155,12 @@ func TestVLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 		},
 		{
 			name: "VLLM backend with useAsCompilationCache at custom mount point",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
-				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					VolumeMounts: []v1alpha1.VolumeMount{
-						{
-							Name:                  "custom-cache",
-							MountPoint:            "/custom/cache/path",
-							UseAsCompilationCache: true,
-						},
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				VolumeMounts: []v1alpha1.VolumeMount{
+					{
+						Name:                  "custom-cache",
+						MountPoint:            "/custom/cache/path",
+						UseAsCompilationCache: true,
 					},
 				},
 			},
@@ -175,13 +171,11 @@ func TestVLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 		},
 		{
 			name: "VLLM backend without useAsCompilationCache",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
-				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					VolumeMounts: []v1alpha1.VolumeMount{
-						{
-							Name:       "regular-volume",
-							MountPoint: "/data",
-						},
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				VolumeMounts: []v1alpha1.VolumeMount{
+					{
+						Name:       "regular-volume",
+						MountPoint: "/data",
 					},
 				},
 			},
@@ -190,10 +184,8 @@ func TestVLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 		},
 		{
 			name: "VLLM backend with no volume mounts",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
-				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					VolumeMounts: nil,
-				},
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				VolumeMounts: nil,
 			},
 			volumeMounts:      []corev1.VolumeMount{},
 			expectCacheEnvVar: false,

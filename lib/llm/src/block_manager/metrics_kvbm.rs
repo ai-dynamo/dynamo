@@ -4,8 +4,8 @@
 use axum::Router;
 use dynamo_runtime::metrics::prometheus_names::{
     kvbm::{
-        MATCHED_TOKENS, OFFLOAD_BLOCKS_D2H, OFFLOAD_REQUESTS, ONBOARD_BLOCKS_D2D,
-        ONBOARD_BLOCKS_H2D, ONBOARD_REQUESTS,
+        MATCHED_TOKENS, OFFLOAD_BLOCKS_D2H, OFFLOAD_BLOCKS_H2D, ONBOARD_BLOCKS_D2D,
+        ONBOARD_BLOCKS_H2D,
     },
     sanitize_prometheus_name,
 };
@@ -17,14 +17,11 @@ use crate::http::service::{RouteDoc, metrics::router};
 
 #[derive(Clone, Debug)]
 pub struct KvbmMetrics {
-    // number of offload requests
-    pub offload_requests: IntCounter,
-
     // number of blocks offloaded from device to host
     pub offload_blocks_d2h: IntCounter,
 
-    // number of onboard requests
-    pub onboard_requests: IntCounter,
+    // number of blocks offloaded from host to disk
+    pub offload_blocks_h2d: IntCounter,
 
     // number of blocks onboarded from host to device
     pub onboard_blocks_h2d: IntCounter,
@@ -43,9 +40,6 @@ impl KvbmMetrics {
     /// Non-blocking: the HTTP server runs on a background task.
     pub fn new(mr: &KvbmMetricsRegistry, create_endpoint: bool, metrics_port: u16) -> Self {
         // 1) register kvbm metrics
-        let offload_requests = mr
-            .create_intcounter(OFFLOAD_REQUESTS, "The number of offload requests", &[])
-            .unwrap();
         let offload_blocks_d2h = mr
             .create_intcounter(
                 OFFLOAD_BLOCKS_D2H,
@@ -53,8 +47,12 @@ impl KvbmMetrics {
                 &[],
             )
             .unwrap();
-        let onboard_requests = mr
-            .create_intcounter(ONBOARD_REQUESTS, "The number of onboard requests", &[])
+        let offload_blocks_h2d = mr
+            .create_intcounter(
+                OFFLOAD_BLOCKS_H2D,
+                "The number of offload blocks from host to disk",
+                &[],
+            )
             .unwrap();
         let onboard_blocks_h2d = mr
             .create_intcounter(
@@ -77,9 +75,8 @@ impl KvbmMetrics {
         // early return if no endpoint is needed
         if !create_endpoint {
             return Self {
-                offload_requests,
                 offload_blocks_d2h,
-                onboard_requests,
+                offload_blocks_h2d,
                 onboard_blocks_h2d,
                 onboard_blocks_d2d,
                 matched_tokens,
@@ -131,9 +128,8 @@ impl KvbmMetrics {
         }
 
         Self {
-            offload_requests,
             offload_blocks_d2h,
-            onboard_requests,
+            offload_blocks_h2d,
             onboard_blocks_h2d,
             onboard_blocks_d2d,
             matched_tokens,

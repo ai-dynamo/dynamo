@@ -192,7 +192,9 @@ class KvConnectorLeader:
         if self._connector.has_slot(request.request_id):
             return None
 
-        if bool(request.mm_positions):
+        if bool(getattr(request, "mm_features", None)) or bool(
+            getattr(request, "mm_positions", None)
+        ):
             raise ValueError("Unsupported request - requires mm extra keys")
 
         all_token_ids = request.all_token_ids

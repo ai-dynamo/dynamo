@@ -76,6 +76,10 @@ runs:
           IMAGE_TAG="${{ inputs.framework }}:latest"
         fi
 
+        BUILD_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        echo "🕐 Build started at: ${BUILD_START_TIME}"
+        echo "BUILD_START_TIME=${BUILD_START_TIME}" >> $GITHUB_ENV
+
         echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
         ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \
@@ -85,3 +89,81 @@ runs:
           --use-sccache \
           --sccache-bucket "$SCCACHE_S3_BUCKET" \
           --sccache-region "$AWS_DEFAULT_REGION"
+
+        BUILD_END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        echo "🕐 Build ended at: ${BUILD_END_TIME}"
+        echo "BUILD_END_TIME=${BUILD_END_TIME}" >> $GITHUB_ENV
+
+    - name: Capture Build Metrics
+      id: metrics
+      shell: bash
+      run: |
+        echo "📊 Capturing build metrics for ${{ inputs.framework }}..."
+
+        # Create metrics directory
+        mkdir -p build-metrics
+
+        # Get accurate build timing
+        BUILD_START_TIME="${{ env.BUILD_START_TIME }}"
+        BUILD_END_TIME="${{ env.BUILD_END_TIME }}"
+
+        # Calculate duration
+        START_EPOCH=$(date -d "$BUILD_START_TIME" +%s)
+        END_EPOCH=$(date -d "$BUILD_END_TIME" +%s)
+        BUILD_DURATION_SEC=$((END_EPOCH - START_EPOCH))
+
+        echo "🕐 Build timing:"
+        echo "  Start: ${BUILD_START_TIME}"
+        echo "  End: ${BUILD_END_TIME}"
+        echo "  Duration: ${BUILD_DURATION_SEC} seconds"
+
+        # Get image size using docker inspect
+        IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
+        if [ -n "$IMAGE_TAG" ]; then
+          IMAGE_SIZE_BYTES=$(docker image inspect "$IMAGE_TAG" --format='{{.Size}}' 2>/dev/null || echo "0")
+          echo "📦 Image size: ${IMAGE_SIZE_BYTES} bytes"
+        else
+          IMAGE_SIZE_BYTES=0
+          echo "⚠️  No image tag available"
+        fi
+
+        echo "📊 Final metrics captured"
+
+        # Create consolidated metrics JSON file
+        echo "🔍 Debug: inputs.platform = '${{ inputs.platform }}'"
+        PLATFORM_ARCH=$(echo "${{ inputs.platform }}" | sed 's/linux\///')
+        echo "🔍 Debug: PLATFORM_ARCH = '${PLATFORM_ARCH}'"
+        echo "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV
+        JOB_KEY="${{ inputs.framework }}-${PLATFORM_ARCH}"
+        echo "🔍 Debug: JOB_KEY = '${JOB_KEY}'"
+
+        # Create job-specific metrics file
+        mkdir -p build-metrics
+        METRICS_FILE="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}.json"
+
+        # Create the job metrics file directly
+        cat > "$METRICS_FILE" << EOF
+        {
+          "framework": "${{ inputs.framework }}",
+          "target": "${{ inputs.target }}",
+          "platform": "${{ inputs.platform }}",
+          "platform_arch": "${PLATFORM_ARCH}",
+          "image_size_bytes": ${IMAGE_SIZE_BYTES},
+          "build_start_time": "${BUILD_START_TIME}",
+          "build_end_time": "${BUILD_END_TIME}",
+          "build_duration_sec": ${BUILD_DURATION_SEC}
+        }
+        EOF
+
+        echo "📁 Created build metrics file for ${JOB_KEY}:"
+        cat "$METRICS_FILE"
+
+        # Metrics captured and saved to JSON file
+
+    # Upload job-specific build metrics as artifact
+    - name: Upload Build Metrics
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}
+        path: build-metrics/metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}.json
+        retention-days: 7
