@@ -56,7 +56,7 @@ def parse_config_string(config_str: str) -> Dict[str, Any]:
     )
 
 
-def create_profiler_parser() -> argparse.ArgumentParser:
+def create_profiler_parser() -> argparse.Namespace:
     """
     Create argument parser with support for YAML config string.
     
