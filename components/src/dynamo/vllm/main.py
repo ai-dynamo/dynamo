@@ -219,7 +219,8 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
-                metrics_labels=[("model", config.served_model_name)],
+                # In practice config.served_model_name is always set, but mypy needs the "or" here.
+                metrics_labels=[("model", config.served_model_name or config.model)],
                 health_check_payload=health_check_payload,
             ),
             clear_endpoint.serve_endpoint(
@@ -264,7 +265,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     factory = StatLoggerFactory(
         component,
         config.engine_args.data_parallel_rank or 0,
-        metrics_labels=[("model", config.served_model_name)],
+        metrics_labels=[("model", config.served_model_name or config.model)],
     )
     engine_client, vllm_config, default_sampling_params = setup_vllm_engine(
         config, factory
@@ -332,12 +333,12 @@ async def init(runtime: DistributedRuntime, config: Config):
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=config.migration_limit <= 0,
-                metrics_labels=[("model", config.served_model_name)],
+                metrics_labels=[("model", config.served_model_name or config.model)],
                 health_check_payload=health_check_payload,
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks,
-                metrics_labels=[("model", config.served_model_name)],
+                metrics_labels=[("model", config.served_model_name or config.model)],
             ),
         )
         logger.debug("serve_endpoint completed for decode worker")
