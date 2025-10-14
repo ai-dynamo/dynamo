@@ -12,9 +12,9 @@ FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG}
 WORKDIR /sgl-workspace
 
 # Install dynamo
-# Providing --build-arg BRANCH_TYPE=local will install the local dynamo repo
-# Providing --build-arg BRANCH_TYPE=remote will install the remote dynamo repo
-# Both will install editable builds of the dynamo repo
+# Providing --build-arg BRANCH_TYPE=local will editable install the local dynamo repo
+# Providing --build-arg BRANCH_TYPE=remote will editable install the remote dynamo repo
+# Default is to install the latest published dynamo version
 ARG BRANCH_TYPE
 COPY --from=local_src /src /tmp/local_src
 RUN if [ "$BRANCH_TYPE" = "local" ]; then \
