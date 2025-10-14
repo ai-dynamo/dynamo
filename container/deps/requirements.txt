@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 accelerate==1.6.0
-aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@120720f0791ad8e1e131bf53a5f7e84f2248db2b
+aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@e46d9089ffe4f5dd62c46914489c55b6dfdbc903
 aiofiles
-aiperf @ git+https://github.com/ai-dynamo/aiperf.git@f23b9117f3a33731ebede2d6d338ba24ea4e5e18
+aiperf @ git+https://github.com/ai-dynamo/aiperf.git@14b542ad951c09123ef4298c26e8f6203b596975
 av==15.0.0
 fastapi==0.115.12
 ftfy
