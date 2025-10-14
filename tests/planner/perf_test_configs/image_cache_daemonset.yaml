@@ -20,7 +20,7 @@ spec:
       - name: nvcr-imagepullsecret
       containers:
       - name: image-cache
-        image: my-registry/vllm-runtime:my-tag
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
         command:
         - /bin/sh
         - -c

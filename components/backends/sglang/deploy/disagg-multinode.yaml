@@ -22,7 +22,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.0
     decode:
       multinode:
         nodeCount: 2
@@ -35,7 +35,7 @@ spec:
           gpu: "4"
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.0
           workingDir: /workspace/components/backends/sglang
           command:
           - python3
@@ -70,7 +70,7 @@ spec:
           gpu: "4"
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.0
           workingDir: /workspace/components/backends/sglang
           command:
           - python3

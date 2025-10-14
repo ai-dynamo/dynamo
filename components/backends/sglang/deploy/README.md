@@ -61,7 +61,7 @@ resources:
 ```yaml
 extraPodSpec:
   mainContainer:
-    image: my-registry/sglang-runtime:my-tag
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.0
     workingDir: /workspace/components/backends/sglang
     args:
       - "python3"
@@ -92,7 +92,7 @@ Edit the template to match your environment:
 
 ```yaml
 # Update image registry and tag
-image: my-registry/sglang-runtime:my-tag
+image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.0
 
 # Configure your model
 args:

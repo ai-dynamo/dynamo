@@ -109,7 +109,7 @@ To automatically deploy the optimized DGD with planner after profiling, add `--d
 Set the container image and config path:
 
 ```bash
-export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
 export DGD_CONFIG_FILE=/data/configs/disagg.yaml
 ```
 

@@ -69,7 +69,7 @@ resources:
 ```yaml
 extraPodSpec:
   mainContainer:
-    image: my-registry/vllm-runtime:my-tag
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
     workingDir: /workspace/components/backends/vllm
     args:
       - "python3"
@@ -116,7 +116,7 @@ Edit the template to match your environment:
 
 ```yaml
 # Update image registry and tag
-image: my-registry/vllm-runtime:my-tag
+image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
 
 # Configure your model
 args:

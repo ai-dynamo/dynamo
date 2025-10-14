@@ -3,7 +3,7 @@
     "containerDefinitions": [
         {
             "name": "dynamo-prefill",
-            "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag",
+            "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0",
             "repositoryCredentials": {
                 "credentialsParameter": "arn:aws:secretsmanager:AWS_REGION:AWS_ID:secret:ngc_access"
             },

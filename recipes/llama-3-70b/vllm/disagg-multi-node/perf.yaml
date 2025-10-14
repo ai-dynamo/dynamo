@@ -16,7 +16,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: perf
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
         workingDir: /workspace/components/backends/vllm
         command:
         - /bin/sh

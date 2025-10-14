@@ -14,7 +14,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
     EncodeWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: agg-qwen
@@ -25,7 +25,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
           workingDir: /workspace/examples/multimodal
           command:
             - /bin/sh
@@ -42,7 +42,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
           workingDir: /workspace/examples/multimodal
           command:
             - /bin/sh
@@ -59,7 +59,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
           workingDir: /workspace/examples/multimodal
           command:
             - /bin/sh

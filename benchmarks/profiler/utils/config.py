@@ -111,7 +111,7 @@ class DgdPlannerServiceConfig(BaseModel):
     volumeMounts: list[VolumeMount] = [VolumeMount()]
     extraPodSpec: PodSpec = PodSpec(
         mainContainer=Container(
-            image="my-registry/dynamo-runtime:my-tag",  # placeholder
+            image="nvcr.io/nvidia/ai-dynamo/dynamo-runtime:0.6.0",  # placeholder
             workingDir="/workspace/components/src/dynamo/planner",
             command=["python3", "-m", "planner_sla"],
             args=[],

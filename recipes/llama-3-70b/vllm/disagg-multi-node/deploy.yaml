@@ -18,7 +18,7 @@ spec:
           mountPoint: /root/.cache/huggingface
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
           workingDir: /workspace/components/backends/vllm
       replicas: 1
     VllmPrefillWorker:
@@ -37,7 +37,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
           workingDir: /workspace/components/backends/vllm
       replicas: 1
       resources:
@@ -61,7 +61,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
           workingDir: /workspace/components/backends/vllm
       replicas: 1
       resources:

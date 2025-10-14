@@ -30,7 +30,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: my-registry/trtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/trtllm-runtime:0.6.0
       pvc:
         create: false
         mountPoint: /model-store
@@ -69,7 +69,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: my-registry/trtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/trtllm-runtime:0.6.0
           env:
           - name: TRTLLM_ENABLE_PDL
             value: "1"
