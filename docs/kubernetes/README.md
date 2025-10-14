@@ -21,7 +21,7 @@ High-level guide to Dynamo Kubernetes deployments. Start here, then dive into sp
 
 ## Pre-deployment Checks
 
-Before deploying the platform, it is recommended to run the pre-deployment checks to ensure the cluster is ready for deployment. Please refer to the [pre-deployment checks](/deploy/cloud/pre-deployment/README.md) for more details.
+Before deploying the platform, it is recommended to run the pre-deployment checks to ensure the cluster is ready for deployment. Please refer to the [pre-deployment checks](../../deploy/cloud/pre-deployment/README.md) for more details.
 
 
 ## 1. Install Platform First
@@ -40,7 +40,7 @@ helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
 ```
 
-For more details or customization options (including multinode deployments), see **[Installation Guide for Dynamo Kubernetes Platform](/docs/kubernetes/installation_guide.md)**.
+For more details or customization options (including multinode deployments), see **[Installation Guide for Dynamo Kubernetes Platform](installation_guide.md)**.
 
 ## 2. Choose Your Backend
 
@@ -48,9 +48,9 @@ Each backend has deployment examples and configuration options:
 
 | Backend | Available Configurations |
 |---------|--------------------------|
-| **[vLLM](/components/backends/vllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router, Disaggregated + Planner, Disaggregated Multi-node |
-| **[SGLang](/components/backends/sglang/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Planner, Disaggregated Multi-node |
-| **[TensorRT-LLM](/components/backends/trtllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router, Disaggregated Multi-node |
+| **[vLLM](../../components/backends/vllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router, Disaggregated + Planner, Disaggregated Multi-node |
+| **[SGLang](../../components/backends/sglang/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Planner, Disaggregated Multi-node |
+| **[TensorRT-LLM](../../components/backends/trtllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router, Disaggregated Multi-node |
 
 ## 3. Deploy Your First Model
 
@@ -83,15 +83,15 @@ It's a Kubernetes Custom Resource that defines your inference pipeline:
 - Scaling policies
 - Frontend/backend connections
 
-Refer to the [API Reference and Documentation](/docs/kubernetes/api_reference.md) for more details.
+Refer to the [API Reference and Documentation](api_reference.md) for more details.
 
 ## 📖 API Reference & Documentation
 
 For detailed technical specifications of Dynamo's Kubernetes resources:
 
-- **[API Reference](/docs/kubernetes/api_reference.md)** - Complete CRD field specifications for `DynamoGraphDeployment` and `DynamoComponentDeployment`
-- **[Operator Guide](/docs/kubernetes/dynamo_operator.md)** - Dynamo operator configuration and management
-- **[Create Deployment](/docs/kubernetes/create_deployment.md)** - Step-by-step deployment creation examples
+- **[API Reference](api_reference.md)** - Complete CRD field specifications for `DynamoGraphDeployment` and `DynamoComponentDeployment`
+- **[Operator Guide](dynamo_operator.md)** - Dynamo operator configuration and management
+- **[Create Deployment](create_deployment.md)** - Step-by-step deployment creation examples
 
 ### Choosing Your Architecture Pattern
 
@@ -174,13 +174,13 @@ Key customization points include:
 
 ## Additional Resources
 
-- **[Examples](/examples/README.md)** - Complete working examples
-- **[Create Custom Deployments](/docs/kubernetes/create_deployment.md)** - Build your own CRDs
-- **[Operator Documentation](/docs/kubernetes/dynamo_operator.md)** - How the platform works
-- **[Helm Charts](/deploy/helm/README.md)** - For advanced users
-- **[GitOps Deployment with FluxCD](/docs/kubernetes/fluxcd.md)** - For advanced users
-- **[Logging](/docs/kubernetes/logging.md)** - For logging setup
-- **[Multinode Deployment](/docs/kubernetes/multinode-deployment.md)** - For multinode deployment
-- **[Grove](/docs/kubernetes/grove.md)** - For grove details and custom installation
-- **[Monitoring](/docs/kubernetes/metrics.md)** - For monitoring setup
-- **[Model Caching with Fluid](/docs/kubernetes/model_caching_with_fluid.md)** - For model caching with Fluid
+- **[Examples](../../examples/README.md)** - Complete working examples
+- **[Create Custom Deployments](create_deployment.md)** - Build your own CRDs
+- **[Operator Documentation](dynamo_operator.md)** - How the platform works
+- **[Helm Charts](../../deploy/helm/README.md)** - For advanced users
+- **[GitOps Deployment with FluxCD](fluxcd.md)** - For advanced users
+- **[Logging](logging.md)** - For logging setup
+- **[Multinode Deployment](multinode-deployment.md)** - For multinode deployment
+- **[Grove](grove.md)** - For grove details and custom installation
+- **[Monitoring](metrics.md)** - For monitoring setup
+- **[Model Caching with Fluid](model_caching_with_fluid.md)** - For model caching with Fluid
