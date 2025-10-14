@@ -30,7 +30,7 @@ High-throughput, low-latency inference framework designed for serving generative
 
 ## Latest News
 
-- [08/05] Deploy `openai/gpt-oss-120b` with disaggregated serving on NVIDIA Blackwell GPUs using Dynamo [➡️ link](./components/backends/trtllm/gpt-oss.md)
+- [08/05] Deploy `openai/gpt-oss-120b` with disaggregated serving on NVIDIA Blackwell GPUs using Dynamo [➡️ link](./docs/backends/trtllm/gpt-oss.md)
 
 ## The Era of Multi-GPU, Multi-Node
 
@@ -65,9 +65,9 @@ Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLa
 
 To learn more about each framework and their capabilities, check out each framework's README!
 
-- **[vLLM](components/backends/vllm/README.md)**
-- **[SGLang](components/backends/sglang/README.md)**
-- **[TensorRT-LLM](components/backends/trtllm/README.md)**
+- **[vLLM](docs/backends/vllm/README.md)**
+- **[SGLang](docs/backends/sglang/README.md)**
+- **[TensorRT-LLM](docs/backends/trtllm/README.md)**
 
 Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, OSS (Open Source Software) first development approach.
 
@@ -82,6 +82,14 @@ The Dynamo team recommends the `uv` Python package manager, although any way wor
 
 ```
 curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+### Install Python development headers
+
+Backend engines require Python development headers for JIT compilation. Install them with:
+
+```bash
+sudo apt install python3-dev
 ```
 
 ### Install etcd and NATS (required)

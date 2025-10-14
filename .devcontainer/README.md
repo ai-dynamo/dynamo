@@ -426,7 +426,8 @@ If you see errors like "container is not running" or "An error occurred setting 
    # If missing, build the dev image first, then build local-dev
    export FRAMEWORK=VLLM  # Replace with VLLM, SGLANG, or TRTLLM
    ./container/build.sh --framework $FRAMEWORK
-   ./container/build.sh --dev-image dynamo:latest-${FRAMEWORK,,} --framework $FRAMEWORK
+   # change to lower case portable way across shells
+   ./container/build.sh --dev-image dynamo:latest-$(echo "$FRAMEWORK" | tr '[:upper:]' '[:lower:]') --framework "$FRAMEWORK"
    # Now you have dynamo:latest-vllm-local-dev
    ```
 

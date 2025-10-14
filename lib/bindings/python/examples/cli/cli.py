@@ -62,10 +62,6 @@ def parse_args():
 
     # model_name: Option<String>
     parser.add_argument("--model-name", type=str, help="Name of the model to load.")
-    # model_config: Option<PathBuf>
-    parser.add_argument(
-        "--model-config", type=Path, help="Path to the model configuration file."
-    )
     # context_length: Option<u32>
     parser.add_argument(
         "--context-length", type=int, help="Maximum context length for the model (u32)."
@@ -139,8 +135,6 @@ async def run():
     flags = args["flags"]
     if flags.model_name is not None:
         entrypoint_kwargs["model_name"] = flags.model_name
-    if flags.model_config is not None:
-        entrypoint_kwargs["model_config"] = flags.model_config
     if flags.context_length is not None:
         entrypoint_kwargs["context_length"] = flags.context_length
     if flags.template_file is not None:

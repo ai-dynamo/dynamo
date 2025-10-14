@@ -37,8 +37,8 @@ docker compose -f deploy/metrics/docker-compose.yml up -d
 ## Components
 
 - [Frontend](/components/src/dynamo/frontend/README.md) - HTTP API endpoint that receives requests and forwards them to the decode worker
-- [vLLM Prefill Worker](/components/backends/vllm/README.md) - Specialized worker for prefill phase execution
-- [vLLM Decode Worker](/components/backends/vllm/README.md) - Specialized worker that handles requests and decides between local/remote prefill
+- [vLLM Prefill Worker](/docs/backends/vllm/README.md) - Specialized worker for prefill phase execution
+- [vLLM Decode Worker](/docs/backends/vllm/README.md) - Specialized worker that handles requests and decides between local/remote prefill
 
 ```mermaid
 ---
