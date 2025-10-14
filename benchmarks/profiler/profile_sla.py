@@ -22,13 +22,13 @@ import os
 import numpy as np
 import yaml
 
+from benchmarks.profiler.utils.aiperf import benchmark_decode, benchmark_prefill
 from benchmarks.profiler.utils.config import (
     CONFIG_MODIFIERS,
     WORKER_COMPONENT_NAMES,
     generate_dgd_config_with_planner,
 )
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
-from benchmarks.profiler.utils.genai_perf import benchmark_decode, benchmark_prefill
 from benchmarks.profiler.utils.planner_utils import add_planner_arguments_to_parser
 from benchmarks.profiler.utils.plot import (
     plot_decode_performance,
@@ -245,18 +245,18 @@ async def run_profile(args):
                     f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
                 )
 
-                # run genai-perf
+                # run ai-perf
                 base_url = client.get_service_url()
-                genai_perf_artifact_dir = f"{work_dir}/gap_isl{args.isl}"
-                gap_result = benchmark_prefill(
+                ai_perf_artifact_dir = f"{work_dir}/aiperf_isl{args.isl}"
+                aiperf_result = benchmark_prefill(
                     args.isl,
-                    genai_perf_artifact_dir,
+                    ai_perf_artifact_dir,
                     model_name,
                     model_name,
                     base_url=base_url,
                 )
-                if gap_result is not None:
-                    ttft = gap_result["time_to_first_token"]["avg"]
+                if aiperf_result is not None:
+                    ttft = aiperf_result["records"]["ttft"]["avg"]
 
                 logger.info("Cleaning up deployment...")
                 await client.delete_deployment()
@@ -424,20 +424,23 @@ async def run_profile(args):
                         )
                     else:
                         base_url = client.get_service_url()
-                        genai_perf_artifact_dir = f"{work_dir}/gap_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}"
-                        gap_result = benchmark_decode(
+                        ai_perf_artifact_dir = f"{work_dir}/aiperf_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}"
+                        aiperf_result = benchmark_decode(
                             args.isl,
                             args.osl,
                             num_request,
-                            genai_perf_artifact_dir,
+                            ai_perf_artifact_dir,
                             model_name,
                             model_name,
                             base_url=base_url,
                         )
-                        if gap_result is not None:
-                            itl = gap_result["inter_token_latency"]["avg"]
+                        if aiperf_result is not None:
+                            itl = aiperf_result["records"]["inter_token_latency"]["avg"]
                             thpt_per_gpu = (
-                                gap_result["output_token_throughput"]["avg"] / num_gpus
+                                aiperf_result["records"]["output_token_throughput"][
+                                    "avg"
+                                ]
+                                / num_gpus
                             )
 
                     if itl is not None and thpt_per_gpu is not None:
