@@ -15,7 +15,7 @@ ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 ARG CUDA_VERSION="12.8"
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG VLLM_REF="v0.11.0"
+ARG VLLM_REF="gluo/mla_tp_nixl"
 # FlashInfer only respected when building vLLM from source, ie when VLLM_REF does not start with 'v' or for arm64 builds
 ARG FLASHINF_REF="v0.3.1"
 ARG TORCH_BACKEND="cu128"
@@ -103,7 +103,7 @@ ARG ARCH
 # Install vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
 ARG VLLM_REF
-ARG VLLM_GIT_URL
+ARG VLLM_GIT_URL="https://github.com/GuanLuo/vllm.git"
 ARG DEEPGEMM_REF
 ARG FLASHINF_REF
 ARG TORCH_BACKEND
@@ -140,7 +140,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
         cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
         chmod +x /tmp/install_vllm.sh && \
-        /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} --torch-backend $TORCH_BACKEND --cuda-version $CUDA_VERSION && \
+        /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --vllm-git-url $VLLM_GIT_URL --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} --torch-backend $TORCH_BACKEND --cuda-version $CUDA_VERSION && \
         /tmp/use-sccache.sh show-stats "vLLM";
 
 ENV LD_LIBRARY_PATH=\

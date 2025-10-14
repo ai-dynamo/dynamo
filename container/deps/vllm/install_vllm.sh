@@ -196,10 +196,6 @@ else
     else
         echo "Building vLLM from source for AMD64 architecture..."
 
-        # When updating above VLLM_REF make sure precompiled wheel file URL is correct. Run this command:
-        # aws s3 ls s3://vllm-wheels/${VLLM_REF}/ --region us-west-2 --no-sign-request
-        export VLLM_PRECOMPILED_WHEEL_LOCATION="https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_REF}/vllm-0.10.2-cp38-abi3-manylinux1_x86_64.whl"
-
         if [ "$EDITABLE" = "true" ]; then
             uv pip install -e . --torch-backend=$TORCH_BACKEND
         else
