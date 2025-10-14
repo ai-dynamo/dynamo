@@ -303,4 +303,3 @@ class SGLangConfigModifier:
         except Exception as e:
             logger.warning(f"Failed to parse KV cache size from log file. Error: {e}")
         return 0
-

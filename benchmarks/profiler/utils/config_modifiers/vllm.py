@@ -259,4 +259,3 @@ class VllmV1ConfigModifier:
                 f"Failed to parse KV cache size from line: {line}. Error: {e}"
             )
         return 0
-

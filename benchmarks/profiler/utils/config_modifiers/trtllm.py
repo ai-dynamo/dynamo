@@ -298,4 +298,3 @@ class TrtllmConfigModifier:
             "Could not find KV cache size in TRT-LLM logs, using default value of 100000"
         )
         return 100000  # Default fallback value for TRT-LLM
-

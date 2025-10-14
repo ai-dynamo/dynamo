@@ -22,9 +22,9 @@ import os
 import numpy as np
 import yaml
 
+from benchmarks.profiler.utils.aiperf import benchmark_decode, benchmark_prefill
 from benchmarks.profiler.utils.config import generate_dgd_config_with_planner
 from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
-from benchmarks.profiler.utils.aiperf import benchmark_decode, benchmark_prefill
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from benchmarks.profiler.utils.planner_utils import add_planner_arguments_to_parser
 from benchmarks.profiler.utils.plot import (
