@@ -28,7 +28,7 @@ default-members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.5.1"
+version = "0.6.0"
 edition = "2024"
 description = "Dynamo Inference Framework"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
@@ -39,15 +39,14 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime", version = "0.5.1" }
-dynamo-llm = { path = "lib/llm", version = "0.5.1" }
-dynamo-tokens = { path = "lib/tokens", version = "0.5.1" }
-dynamo-async-openai = { path = "lib/async-openai", version = "0.5.1", features = [
+dynamo-runtime = { path = "lib/runtime", version = "0.6.0" }
+dynamo-llm = { path = "lib/llm", version = "0.6.0" }
+dynamo-tokens = { path = "lib/tokens", version = "0.6.0" }
+dynamo-async-openai = { path = "lib/async-openai", version = "0.6.0", features = [
     "byot",
     "rustls",
 ] }
-dynamo-parsers = { path = "lib/parsers", version = "0.5.1" }
-
+dynamo-parsers = { path = "lib/parsers", version = "0.6.0" }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -76,8 +75,8 @@ hf-hub = { version = "0.4.2", default-features = false, features = [
 ] }
 
 # ModelExpress for model downloading
-modelexpress-client = { git = "https://github.com/ai-dynamo/modelexpress.git", rev = "a232220bf268a475d293914d407f4ae186f443e3", package = "modelexpress-client" }
-modelexpress-common = { git = "https://github.com/ai-dynamo/modelexpress.git", rev = "a232220bf268a475d293914d407f4ae186f443e3", package = "modelexpress-common" }
+modelexpress-client = { version = "0.2.0" }
+modelexpress-common = { version = "0.2.0" }
 
 humantime = { version = "2.2.0" }
 libc = { version = "0.2" }
