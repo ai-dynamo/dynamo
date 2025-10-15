@@ -20,7 +20,8 @@ import requests
 
 # FILTERING CONFIGURATION - Process all jobs except excluded ones
 EXCLUDED_JOB_NAMES = [
-    "Upload Workflow Metrics",  # Avoid infinite loops
+    "Upload Workflow Metrics",  # Avoid infinite loops (reusable workflow display name)
+    "upload-workflow-metrics",  # Avoid infinite loops (job ID variant)
     # Add other job names to exclude here as needed
 ]
 FRAMEWORK_IMAGE_BUILD_JOBS = ["vllm", "sglang", "trtllm"]
@@ -279,6 +280,18 @@ def mask_sensitive_urls(error_msg: str, url: str) -> str:
     return error_msg
 
 
+def should_exclude_job(job_name: str, excluded_names: list) -> bool:
+    """Check if a job should be excluded based on name matching.
+    
+    Checks both exact match and case-insensitive substring match to handle
+    various job name formats from GitHub API.
+    """
+    return (
+        job_name in excluded_names or
+        any(excluded.lower() in job_name.lower() for excluded in excluded_names)
+    )
+
+
 class WorkflowMetricsUploader:
     def __init__(self):
         self.headers = {"Content-Type": "application/json", "Accept-Charset": "UTF-8"}
@@ -466,7 +479,7 @@ class WorkflowMetricsUploader:
             jobs_to_process = [
                 job
                 for job in jobs_data.get("jobs", [])
-                if job.get("name") not in EXCLUDED_JOB_NAMES
+                if not should_exclude_job(job.get("name", ""), EXCLUDED_JOB_NAMES)
             ]
 
             if not jobs_to_process:
@@ -571,7 +584,7 @@ class WorkflowMetricsUploader:
                 job_name = job.get("name", "")
 
                 # FILTER: Skip excluded jobs to avoid infinite loops and other unwanted jobs
-                if job_name in EXCLUDED_JOB_NAMES:
+                if should_exclude_job(job_name, EXCLUDED_JOB_NAMES):
                     print(f"⏭️  Skipping excluded job '{job_name}'")
                     continue
 
