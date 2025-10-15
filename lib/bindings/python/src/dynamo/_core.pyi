@@ -892,6 +892,13 @@ async def register_llm(
     """Attach the model at path to the given endpoint, and advertise it as model_type"""
     ...
 
+async def fetch_llm(remote_name: str) -> str:
+    """
+    Download a model from Hugging Face, returning it's local path.
+    Example: `model_path = await fetch_llm("Qwen/Qwen3-0.6B")`
+    """
+    ...
+
 class EngineConfig:
     """Holds internal configuration for a Dynamo engine."""
     ...

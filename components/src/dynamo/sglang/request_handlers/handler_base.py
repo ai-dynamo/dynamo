@@ -189,7 +189,7 @@ class BaseWorkerHandler(ABC):
         Yields:
             asyncio.Task: The cancellation monitoring task being managed
         """
-        logging.info(f"Creating cancellation monitor task for Context: {context.id()}")
+        logging.debug(f"Creating cancellation monitor task for Context: {context.id()}")
 
         # Start the cancellation monitoring task
         cancellation_task = asyncio.create_task(

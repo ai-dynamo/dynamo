@@ -21,6 +21,7 @@ from dynamo.llm import (
     ModelType,
     ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
+    fetch_llm,
     register_llm,
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
@@ -82,6 +83,15 @@ async def worker(runtime: DistributedRuntime):
     logging.debug("Signal handlers set up for graceful shutdown")
 
     dump_config(config.dump_config_to, config)
+
+    # Download the model if necessary.
+    # register_llm would do this for us, but we want it on disk before we start vllm.
+    # Ensure the original HF name (e.g. "Qwen/Qwen3-0.6B") is used as the served_model_name.
+    if not config.served_model_name:
+        config.served_model_name = config.engine_args.served_model_name = config.model
+    if not os.path.exists(config.model):
+        config.model = config.engine_args.model = await fetch_llm(config.model)
+
     if config.is_prefill_worker:
         await init_prefill(runtime, config)
         logger.debug("init_prefill completed")
@@ -165,9 +175,11 @@ def setup_vllm_engine(config, stat_logger=None):
         disable_log_stats=engine_args.disable_log_stats,
     )
     if ENABLE_LMCACHE:
-        logger.info(f"VllmWorker for {config.model} has been initialized with LMCache")
+        logger.info(
+            f"VllmWorker for {config.served_model_name} has been initialized with LMCache"
+        )
     else:
-        logger.info(f"VllmWorker for {config.model} has been initialized")
+        logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
 
     return engine_client, vllm_config, default_sampling_params
 
@@ -207,11 +219,13 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
-                metrics_labels=[("model", config.model)],
+                # In practice config.served_model_name is always set, but mypy needs the "or" here.
+                metrics_labels=[("model", config.served_model_name or config.model)],
                 health_check_payload=health_check_payload,
             ),
             clear_endpoint.serve_endpoint(
-                handler.clear_kv_blocks, metrics_labels=[("model", config.model)]
+                handler.clear_kv_blocks,
+                metrics_labels=[("model", config.served_model_name)],
             ),
         )
         logger.debug("serve_endpoint completed for prefill worker")
@@ -251,7 +265,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     factory = StatLoggerFactory(
         component,
         config.engine_args.data_parallel_rank or 0,
-        metrics_labels=[("model", config.model)],
+        metrics_labels=[("model", config.served_model_name or config.model)],
     )
     engine_client, vllm_config, default_sampling_params = setup_vllm_engine(
         config, factory
@@ -261,8 +275,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
     factory.set_request_total_slots_all(vllm_config.scheduler_config.max_num_seqs)
     factory.init_publish()
-
-    logger.info(f"VllmWorker for {config.model} has been initialized")
 
     handler = DecodeWorkerHandler(
         runtime,
@@ -321,11 +333,12 @@ async def init(runtime: DistributedRuntime, config: Config):
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=config.migration_limit <= 0,
-                metrics_labels=[("model", config.model)],
+                metrics_labels=[("model", config.served_model_name or config.model)],
                 health_check_payload=health_check_payload,
             ),
             clear_endpoint.serve_endpoint(
-                handler.clear_kv_blocks, metrics_labels=[("model", config.model)]
+                handler.clear_kv_blocks,
+                metrics_labels=[("model", config.served_model_name or config.model)],
             ),
         )
         logger.debug("serve_endpoint completed for decode worker")
