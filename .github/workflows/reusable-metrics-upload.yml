@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Upload Workflow Metrics (Reusable)
+
+on:
+  workflow_call:
+    secrets:
+      WORKFLOW_INDEX:
+        required: true
+      JOB_INDEX:
+        required: true
+      STEPS_INDEX:
+        required: true
+      CONTAINER_INDEX:
+        required: false
+
+jobs:
+  upload-workflow-metrics:
+    name: Upload Workflow Metrics
+    runs-on: gitlab
+    if: always()  # Always run, even if other jobs fail
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Download build metrics
+        uses: actions/download-artifact@v4
+        with:
+          pattern: build-metrics-*
+          path: build-metrics/
+          merge-multiple: true
+        continue-on-error: true  # Don't fail if artifacts don't exist
+
+      - name: Upload Complete Workflow Metrics
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKFLOW_INDEX: ${{ secrets.WORKFLOW_INDEX }}
+          JOB_INDEX: ${{ secrets.JOB_INDEX }}
+          STEPS_INDEX: ${{ secrets.STEPS_INDEX }}
+          CONTAINER_INDEX: ${{ secrets.CONTAINER_INDEX }}
+        run: |
+          python3 .github/workflows/upload_complete_workflow_metrics.py
+

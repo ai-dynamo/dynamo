@@ -294,9 +294,6 @@ jobs:
 
   # Upload metrics for this workflow and all its jobs
   upload-workflow-metrics:
-    name: Upload Workflow Metrics
-    runs-on: gitlab
-    if: always()  # Always run, even if other jobs fail
     needs: [backend-status-check]  # Wait for the status check which waits for all build jobs
 
     steps:

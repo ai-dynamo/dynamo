@@ -117,3 +117,9 @@ jobs:
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
 
+  # Upload metrics for this workflow and all its jobs
+  upload-workflow-metrics:
+    needs: [tests, clippy]  # Wait for all jobs to complete
+    if: always()  # Always run, even if other jobs fail
+    uses: ./.github/workflows/reusable-metrics-upload.yml
+    secrets: inherit

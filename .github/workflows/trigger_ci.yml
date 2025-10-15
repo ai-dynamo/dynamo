@@ -110,9 +110,16 @@ jobs:
         else
           REF="${{ github.ref }}"
         fi
-        curl --fail-with-body \
+          curl --fail-with-body \
           --request POST \
           --form token=${{ secrets.PIPELINE_TOKEN }} \
           --form ref=${REF} \
           $ci_args \
           "${{ secrets.PIPELINE_URL }}"
+
+  # Upload metrics for this workflow and all its jobs
+  upload-workflow-metrics:
+    needs: [mirror_repo, trigger-ci]  # Wait for all jobs to complete
+    if: always()  # Always run, even if other jobs fail
+    uses: ./.github/workflows/reusable-metrics-upload.yml
+    secrets: inherit
