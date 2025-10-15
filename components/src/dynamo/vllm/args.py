@@ -64,6 +64,11 @@ class Config:
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
 
+    # multimodal options
+    multimodal_processor: bool = False
+    multimodal_encode_worker: bool = False
+    multimodal_worker: bool = False
+
     # dump config to file
     dump_config_to: Optional[str] = None
 
@@ -131,6 +136,21 @@ def parse_args() -> Config:
         default=None,
         help="Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
     )
+    parser.add_argument(
+        "--multimodal-processor",
+        action="store_true",
+        help="Run as multimodal processor component for handling multimodal requests",
+    )
+    parser.add_argument(
+        "--multimodal-encode-worker",
+        action="store_true",
+        help="Run as multimodal encode worker component for processing images/videos",
+    )
+    parser.add_argument(
+        "--multimodal-worker",
+        action="store_true",
+        help="Run as multimodal worker component for LLM inference with multimodal data",
+    )
     add_config_dump_args(parser)
 
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -155,8 +175,24 @@ def parse_args() -> Config:
         config.served_model_name = None
 
     config.namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
-    config.component = "prefill" if args.is_prefill_worker else "backend"
-    config.endpoint = "generate"
+    
+    # Set component and endpoint based on worker type
+    if args.multimodal_processor:
+        config.component = "processor"
+        config.endpoint = "generate"
+    elif args.multimodal_encode_worker:
+        config.component = "encoder"
+        config.endpoint = "generate"
+    elif args.multimodal_worker and args.is_prefill_worker:
+        config.component = "prefill"
+        config.endpoint = "generate"
+    elif args.is_prefill_worker:
+        config.component = "prefill"
+        config.endpoint = "generate"
+    else:
+        config.component = "backend"
+        config.endpoint = "generate"
+    
     config.engine_args = engine_args
     config.is_prefill_worker = args.is_prefill_worker
     config.migration_limit = args.migration_limit
@@ -166,6 +202,9 @@ def parse_args() -> Config:
     config.tool_call_parser = args.dyn_tool_call_parser
     config.reasoning_parser = args.dyn_reasoning_parser
     config.custom_jinja_template = args.custom_jinja_template
+    config.multimodal_processor = args.multimodal_processor
+    config.multimodal_encode_worker = args.multimodal_encode_worker
+    config.multimodal_worker = args.multimodal_worker
 
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:

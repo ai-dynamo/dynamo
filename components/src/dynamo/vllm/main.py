@@ -82,7 +82,18 @@ async def worker(runtime: DistributedRuntime):
     logging.debug("Signal handlers set up for graceful shutdown")
 
     dump_config(config.dump_config_to, config)
-    if config.is_prefill_worker:
+    
+    # Route to appropriate initialization based on config flags
+    if config.multimodal_processor:
+        await init_multimodal_processor(runtime, config)
+        logger.debug("init_multimodal_processor completed")
+    elif config.multimodal_encode_worker:
+        await init_multimodal_encode_worker(runtime, config)
+        logger.debug("init_multimodal_encode_worker completed")
+    elif config.multimodal_worker:
+        await init_multimodal_worker(runtime, config)
+        logger.debug("init_multimodal_worker completed")
+    elif config.is_prefill_worker:
         await init_prefill(runtime, config)
         logger.debug("init_prefill completed")
     else:
@@ -362,6 +373,165 @@ def get_engine_cache_info(engine: AsyncLLM):
     except Exception as e:
         logging.error(f"Failed to get configuration values from vLLM config: {e}")
         raise
+
+
+async def init_multimodal_processor(runtime: DistributedRuntime, config: Config):
+    """Initialize multimodal processor component"""
+    from dynamo.llm import ModelInput, ModelType, register_llm
+    from dynamo.vllm.multimodal_handlers import ProcessorHandler
+
+    component = runtime.namespace(config.namespace).component(config.component)
+    await component.create_service()
+
+    generate_endpoint = component.endpoint(config.endpoint)
+
+    # Get encode worker client
+    encode_worker_client = (
+        await runtime.namespace(config.namespace)
+        .component("encoder")
+        .endpoint("generate")
+        .client()
+    )
+
+    # Get prompt template from args (must be passed via environment or command line)
+    prompt_template = os.environ.get("MULTIMODAL_PROMPT_TEMPLATE", "USER: <image>\n<prompt> ASSISTANT:")
+    
+    handler = ProcessorHandler(
+        config.engine_args,
+        encode_worker_client,
+        prompt_template,
+    )
+
+    logger.info("Waiting for Encoder Worker Instances ...")
+    await encode_worker_client.wait_for_instances()
+
+    # Register the endpoint as entrypoint to a model
+    await register_llm(
+        ModelInput.Text,  # Custom processor is used and this type bypasses SDK processor
+        ModelType.Chat,
+        generate_endpoint,
+        config.model,
+        config.served_model_name,
+        kv_cache_block_size=config.engine_args.block_size,
+    )
+
+    logger.info(f"Starting to serve the processor endpoint...")
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate, metrics_labels=[("model", config.model)]
+            ),
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve endpoints: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
+async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Config):
+    """Initialize multimodal encode worker component"""
+    from dynamo.vllm.multimodal_handlers import EncodeWorkerHandler
+
+    component = runtime.namespace(config.namespace).component(config.component)
+    await component.create_service()
+
+    generate_endpoint = component.endpoint(config.endpoint)
+
+    # Get PD worker client
+    pd_worker_client = (
+        await runtime.namespace(config.namespace)
+        .component("backend" if not config.is_prefill_worker else "prefill")
+        .endpoint("generate")
+        .client()
+    )
+
+    handler = EncodeWorkerHandler(
+        config.engine_args,
+        pd_worker_client,
+    )
+    await handler.async_init(runtime)
+
+    logger.info("Waiting for PD Worker Instances ...")
+    await pd_worker_client.wait_for_instances()
+
+    logger.info(f"Starting to serve the encode worker endpoint...")
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate, metrics_labels=[("model", config.model)]
+            ),
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve endpoints: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
+async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
+    """Initialize multimodal worker component for aggregated or disaggregated mode"""
+    from dynamo.vllm.multimodal_handlers import (
+        MultimodalDecodeWorkerHandler,
+        MultimodalPDWorkerHandler,
+    )
+
+    component = runtime.namespace(config.namespace).component(config.component)
+    await component.create_service()
+
+    generate_endpoint = component.endpoint(config.endpoint)
+    clear_endpoint = component.endpoint("clear_kv_blocks")
+
+    engine_client, vllm_config, default_sampling_params = setup_vllm_engine(config)
+
+    decode_worker_client = None
+    
+    # If this is a prefill worker in disaggregated mode, get decode worker client
+    if config.is_prefill_worker:
+        decode_worker_client = (
+            await runtime.namespace(config.namespace)
+            .component("backend")  # decode workers use backend component
+            .endpoint("generate")
+            .client()
+        )
+        handler = MultimodalPDWorkerHandler(
+            component, generate_endpoint, engine_client, config, decode_worker_client
+        )
+    else:
+        # This is a decode worker
+        handler = MultimodalDecodeWorkerHandler(
+            component, generate_endpoint, engine_client, config
+        )
+
+    await handler.async_init(runtime)
+
+    # Set up KV event publisher for prefix caching if enabled
+    kv_publisher = setup_kv_event_publisher(
+        config, component, generate_endpoint, vllm_config
+    )
+    if kv_publisher:
+        handler.kv_publisher = kv_publisher
+
+    logger.info(f"Starting to serve the multimodal worker endpoint...")
+
+    metrics_labels = [("model", config.model)]
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate, metrics_labels=metrics_labels
+            ),
+            clear_endpoint.serve_endpoint(
+                handler.clear_kv_blocks, metrics_labels=metrics_labels
+            ),
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve endpoints: {e}")
+        raise
+    finally:
+        handler.cleanup()
 
 
 def main():
