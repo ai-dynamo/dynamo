@@ -5,8 +5,6 @@ SPDX-License-Identifier: Apache-2.0
 
 # Running SGLang with Dynamo
 
-This directory contains an SGLang component for Dynamo and reference implementations for deploying Large Language Models (LLMs) in various configurations using SGLang. SGLang internally uses ZMQ to communicate between the ingress and the engine processes. For Dynamo, we leverage the runtime to communicate directly with the engine processes and handle ingress and pre/post processing on our end.
-
 ## Use the Latest Release
 
 We recommend using the latest stable release of dynamo to avoid breaking changes:
@@ -24,6 +22,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 ## Table of Contents
 - [Feature Support Matrix](#feature-support-matrix)
 - [Dynamo SGLang Integration](#dynamo-sglang-integration)
+- [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Single Node Examples](#run-single-node-examples)
 - [Multi-Node and Advanced Examples](#advanced-examples)
@@ -40,16 +39,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**KV-Aware Routing**](../../architecture/kv_cache_routing.md) | ✅ |  |
 | [**SLA-Based Planner**](../../architecture/sla_planner.md) | ✅ |  |
 | [**Multimodal EPD Disaggregation**](multimodal_epd.md) | ✅ |  |
-| [**Load Based Planner**](../../architecture/load_planner.md) | ❌ | Planned |
 | [**KVBM**](../../architecture/kvbm_architecture.md) | ❌ | Planned |
-
-### Large Scale P/D and WideEP Features
-
-| Feature             | SGLang | Notes                                                        |
-|---------------------|--------|--------------------------------------------------------------|
-| **WideEP**          | ✅     | Full support on H100s/GB200                                  |
-| **DP Rank Routing** | 🚧     | Direct routing supported. Dynamo KV router does not router to DP worker |
-| **GB200 Support**   | ✅     |                                                              |
 
 
 ## Dynamo SGLang Integration
@@ -65,7 +55,7 @@ Dynamo SGLang uses SGLang's native argument parser, so **most SGLang engine argu
 | Argument | Description | Default | SGLang Equivalent |
 |----------|-------------|---------|-------------------|
 | `--endpoint` | Dynamo endpoint in `dyn://namespace.component.endpoint` format | Auto-generated based on mode | N/A |
-| `--migration-limit` | Max times a request can migrate between workers | `0` (disabled) | N/A |
+| `--migration-limit` | Max times a request can migrate between workers for fault tolerance. See [Request Migration Architecture](../../../docs/architecture/request_migration.md). | `0` (disabled) | N/A |
 | `--dyn-tool-call-parser` | Tool call parser for structured outputs (takes precedence over `--tool-call-parser`) | `None` | `--tool-call-parser` |
 | `--dyn-reasoning-parser` | Reasoning parser for CoT models (takes precedence over `--reasoning-parser`) | `None` | `--reasoning-parser` |
 | `--use-sglang-tokenizer` | Use SGLang's tokenizer instead of Dynamo's | `False` | N/A |
@@ -73,39 +63,33 @@ Dynamo SGLang uses SGLang's native argument parser, so **most SGLang engine argu
 
 #### Tokenizer Behavior
 
-- **Default (`--use-sglang-tokenizer` not set)**: Dynamo handles tokenization and passes `input_ids` to SGLang
-- **With `--use-sglang-tokenizer`**: SGLang handles tokenization, Dynamo passes raw prompts
+- **Default (`--use-sglang-tokenizer` not set)**: Dynamo handles tokenization/detokenization via our blazing fast frontend and passes `input_ids` to SGLang
+- **With `--use-sglang-tokenizer`**: SGLang handles tokenization/detokenization, Dynamo passes raw prompts
 
-> **Note**: When using `--use-sglang-tokenizer`, only `v1/chat/completions` endpoints are available through Dynamo's frontend.
+> [!NOTE]
+> When using `--use-sglang-tokenizer`, only `v1/chat/completions` is available through Dynamo's frontend.
 
-## SGLang Quick Start
+## Installation
 
-Below we provide a guide that lets you run all of our common deployment patterns on a single node.
-
-### Start NATS and ETCD in the background
-
-Start using [Docker Compose](../../../deploy/docker-compose.yml)
-
-```bash
-docker compose -f deploy/docker-compose.yml up -d
-```
-
-### Install `ai-dynamo[sglang]`
-
-#### Install latest release
+### Install latest release
 We suggest using uv to install the latest release of ai-dynamo[sglang]. You can install it with `curl -LsSf https://astral.sh/uv/install.sh | sh`
+
+<details>
+<summary>Expand for instructions</summary>
 
 ```bash
 # create a virtual env
 uv venv --python 3.12 --seed
-# install the latest release
+# install the latest release (which comes bundled with a stable sglang version)
 uv pip install "ai-dynamo[sglang]"
 ```
 
-#### Installing editable version for development
+</details>
+
+### Install editable version for development
 
 <details>
-<summary>Instructions</summary>
+<summary>Expand for instructions</summary>
 
 This requires having rust installed. We also recommend having a proper installation of the cuda toolkit as sglang requires `nvcc` to be available.
 
@@ -119,40 +103,61 @@ maturin develop --uv
 cd $DYNAMO_HOME
 # installs sglang supported version along with dynamo
 # include the prerelease flag to install flashinfer rc versions
-uv pip install --prerelease=allow -e .[sglang]
+uv pip install -e .
+# install any sglang version >= 0.5.3
+uv pip install "sglang[all]==0.5.3.post1"
 ```
 
 </details>
 
-#### Using prebuilt docker containers
+### Using docker containers
 
 <details>
-<summary>Instructions</summary>
+<summary>Expand for instructions</summary>
+
+We are in the process of shipping pre-built docker containers that contain installations of DeepEP, DeepGEMM, and NVSHMEM in order to support WideEP and P/D. For now, you can quickly build the container from source with the following command.
 
 ```bash
-docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:my-tag
+cd $DYNAMO_ROOT
+docker build \
+  -f container/Dockerfile.sglang-wideep \
+  -t dynamo-sglang \
+  --no-cache \
+  .
+```
+
+And then run it using
+
+```bash
+docker run \
+    --gpus all \
+    -it \
+    --rm \
+    --network host \
+    --shm-size=10G \
+    --ulimit memlock=-1 \
+    --ulimit stack=67108864 \
+    --ulimit nofile=65536:65536 \
+    --cap-add CAP_SYS_PTRACE \
+    --ipc host \
+    dynamo-sglang:latest
 ```
 
 </details>
 
-#### Building docker container from source
+## Quick Start
 
-<details>
-<summary>Instructions</summary>
+Below we provide a guide that lets you run all of our common deployment patterns on a single node.
+
+### Start NATS and ETCD in the background
+
+Start using [Docker Compose](../../../deploy/docker-compose.yml)
 
 ```bash
-./container/build.sh --framework sglang
-# run container using prebuild wheel
-./container/run.sh --framework sglang -it
-# mount workspace for development
-./container/run.sh --framework sglang --mount-workspace
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
-</details>
-
-## Run Single Node Examples
-
-> [!IMPORTANT]
+> [!TIP]
 > Each example corresponds to a simple bash script that runs the OpenAI compatible server, processor, and optional router (written in Rust) and LLM engine (written in Python) in a single terminal. You can easily take each command and run them in separate terminals.
 >
 > Additionally - because we use sglang's argument parser, you can pass in any argument that sglang supports to the worker!
@@ -167,15 +172,12 @@ cd $DYNAMO_HOME/components/backends/sglang
 
 ### Aggregated Serving with KV Routing
 
-> [!NOTE]
-> Until sglang releases a version > v0.5.0rc0, you will have to install from source to use kv_routing. You can do this by running `git clone https://github.com/sgl-project/sglang.git && cd sglang && uv pip install -e "python[all]"`. We will update this section once sglang releases a newer version.
-
 ```bash
 cd $DYNAMO_HOME/components/backends/sglang
 ./launch/agg_router.sh
 ```
 
-### Aggregated Serving with Embeddings
+### Aggregated Serving for Embedding Models
 
 Here's an example that uses the [Qwen/Qwen3-Embedding-4B](https://huggingface.co/Qwen/Qwen3-Embedding-4B) model.
 
@@ -184,7 +186,8 @@ cd $DYNAMO_HOME/components/backends/sglang
 ./launch/agg_embed.sh
 ```
 
-Send the following request to verify your deployment:
+<details>
+<summary>Send the following request to verify your deployment:</summary>
 
 ```bash
 curl localhost:8000/v1/embeddings \
@@ -195,28 +198,23 @@ curl localhost:8000/v1/embeddings \
   }'
 ```
 
-### Disaggregated serving
-
-<details>
-<summary>Under the hood: SGLang Load Balancer vs Dynamo Discovery</summary>
-
-SGLang uses a mini load balancer to route requests to handle disaggregated serving. The load balancer functions as follows:
-
-1. The load balancer receives a request from the client
-2. A random `(prefill, decode)` pair is selected from the pool of available workers
-3. Request is sent to both `prefill` and `decode` workers via asyncio tasks
-4. Internally disaggregation is done from prefill -> decode
-
-Because Dynamo has a discovery mechanism, we do not use a load balancer. Instead, we first route to a random prefill worker, select a random decode worker, and then send the request to both. Internally, SGLang's bootstrap server (which is a part of the `tokenizer_manager`) is used in conjuction with NIXL to handle the kv transfer.
-
 </details>
 
-> [!IMPORTANT]
-> Disaggregated serving in SGLang currently requires each worker to have the same tensor parallel size [unless you are using an MLA based model](https://github.com/sgl-project/sglang/pull/5922)
+### Disaggregated serving
+
+See [SGLang Disaggregation](sglang-disaggregation.md) to learn more about how sglang and dynamo handle disaggregated serving.
+
 
 ```bash
 cd $DYNAMO_HOME/components/backends/sglang
 ./launch/disagg.sh
+```
+
+### Disaggregated Serving with KV Aware Prefill Routing
+
+```bash
+cd $DYNAMO_HOME/components/backends/sglang
+./launch/disagg_router.sh
 ```
 
 ### Disaggregated Serving with Mixture-of-Experts (MoE) models and DP attention
@@ -228,8 +226,6 @@ You can use this configuration to test out disaggregated serving with dp attenti
 cd $DYNAMO_HOME/components/backends/sglang
 ./launch/disagg_dp_attn.sh
 ```
-
-When using MoE models, you can also use the our implementation of the native SGLang endpoints to record expert distribution data. The `disagg_dp_attn.sh` script automatically sets up the SGLang HTTP server, the environment variable that controls the expert distribution recording directory, and sets up the expert distribution recording mode to `stat`. You can learn more about expert parallelism load balancing [here](expert-distribution-eplb.md).
 
 ### Testing the Deployment
 
@@ -251,16 +247,6 @@ curl localhost:8000/v1/chat/completions \
   }'
 ```
 
-## Request Migration
-
-You can enable [request migration](../../../docs/architecture/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
-
-```bash
-python3 -m dynamo.sglang ... --migration-limit=3
-```
-
-This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../../../docs/architecture/request_migration.md) documentation for details on how this works.
-
 ## Advanced Examples
 
 Below we provide a selected list of advanced examples. Please open up an issue if you'd like to see a specific example!
@@ -269,7 +255,7 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 - **[Run a multi-node model](multinode-examples.md)**
 
 ### Large scale P/D disaggregation with WideEP
-- **[Run DeepSeek-R1 on 104+ H100s](dsr1-wideep-h100.md)**
+- **[Run DeepSeek-R1-FP8 on H100s](dsr1-wideep-h100.md)**
 - **[Run DeepSeek-R1-FP8 on GB200s](dsr1-wideep-gb200.md)**
 
 ### Hierarchical Cache (HiCache)
