@@ -11,7 +11,7 @@ use dynamo_runtime::{
     prelude::*,
     traits::events::EventPublisher,
     transports::{
-        etcd::{Client as EtcdClient, WatchEvent},
+        etcd::{Client as EtcdClient, DistributedRWLock, WatchEvent},
         nats::{NatsQueue, Slug},
     },
 };
@@ -32,47 +32,27 @@ use crate::{
 struct SnapshotResources {
     nats_client: dynamo_runtime::transports::nats::Client,
     bucket_name: String,
-    lock_name: String,
+    rwlock: DistributedRWLock,
     instances_rx: tokio::sync::watch::Receiver<Vec<dynamo_runtime::component::Instance>>,
     get_workers_tx: mpsc::Sender<GetWorkersRequest>,
     snapshot_tx: mpsc::Sender<DumpRequest>,
 }
 
 impl SnapshotResources {
-    /// Try to acquire distributed lock for snapshot operations
-    /// Returns Some(lock_response) if lock acquired, None if another instance holds it
-    async fn lock(&self, etcd_client: &EtcdClient) -> Option<etcd_client::LockResponse> {
-        match etcd_client
-            .lock(self.lock_name.clone(), Some(etcd_client.lease_id()))
-            .await
-        {
-            Ok(response) => {
-                tracing::debug!(
-                    "Successfully acquired snapshot lock with key: {:?}",
-                    response.key()
-                );
-                Some(response)
-            }
-            Err(e) => {
-                tracing::debug!("Another instance already holds the snapshot lock: {e:?}");
-                None
-            }
-        }
-    }
-
-    /// Release the distributed lock
-    async fn unlock(&self, etcd_client: &EtcdClient, lock_response: etcd_client::LockResponse) {
-        if let Err(e) = etcd_client.unlock(lock_response.key()).await {
-            tracing::warn!("Failed to release snapshot lock: {e:?}");
-        }
-    }
-
-    /// Perform snapshot upload and purge operations
+    /// Perform snapshot upload and purge operations with write lock
     async fn purge_then_snapshot(
         &self,
+        etcd_client: &EtcdClient,
         nats_queue: &mut NatsQueue,
         remove_worker_tx: &mpsc::Sender<WorkerId>,
     ) -> anyhow::Result<()> {
+        // Try to acquire write lock (non-blocking)
+        let Some(write_lock) = self.rwlock.try_write_lock(etcd_client).await else {
+            tracing::debug!(
+                "Could not acquire write lock for snapshot (readers active or lock held)"
+            );
+            anyhow::bail!("Write lock unavailable");
+        };
         // Purge before snapshot ensures new/warm-restarted routers won't replay already-acknowledged messages.
         // Since KV events are idempotent, this ordering reduces unnecessary reprocessing while maintaining
         // at-least-once delivery guarantees. The snapshot will capture the clean state after purge.
@@ -154,6 +134,9 @@ impl SnapshotResources {
             start_time.elapsed().as_millis()
         );
 
+        // Release write lock
+        self.rwlock.unlock_write(etcd_client, write_lock).await;
+
         Ok(())
     }
 }
@@ -193,10 +176,20 @@ pub async fn start_kv_router_background(
         .build()?;
     let nats_client = client_options.connect().await?;
 
+    // Get etcd client (needed for both snapshots and router watching)
+    let etcd_client = component
+        .drt()
+        .etcd_client()
+        .ok_or_else(|| anyhow::anyhow!("etcd client not available"))?;
+
     // Create bucket name for snapshots/state
     let bucket_name = Slug::slugify(&format!("{}-{RADIX_STATE_BUCKET}", component.subject()))
         .to_string()
         .replace("_", "-");
+
+    // Create RWLock for snapshot coordination
+    let lock_prefix = format!("{}/{}", ROUTER_SNAPSHOT_LOCK, component.subject());
+    let snapshot_rwlock = DistributedRWLock::new(lock_prefix);
 
     // Handle initial state based on router_reset_states flag
     if router_reset_states {
@@ -206,42 +199,55 @@ pub async fn start_kv_router_background(
             tracing::warn!("Failed to delete bucket (may not exist): {e:?}");
         }
     } else {
-        // Try to download initial state from object store
+        // Try to download initial state from object store with read lock
         let url = url::Url::parse(&format!(
             "nats://{}/{bucket_name}/{RADIX_STATE_FILE}",
             nats_client.addr()
         ))?;
 
-        match nats_client
-            .object_store_download_data::<Vec<RouterEvent>>(&url)
+        // Acquire read lock with default timeout
+        match snapshot_rwlock
+            .read_lock_with_wait(&etcd_client, &consumer_uuid, None)
             .await
         {
-            Ok(events) => {
-                tracing::info!(
-                    "Successfully downloaded {} events from object store",
-                    events.len()
-                );
-                // Send all events to the indexer
-                for event in events {
-                    if let Err(e) = kv_events_tx.send(event).await {
-                        tracing::warn!("Failed to send initial event to indexer: {e:?}");
+            Ok(reader_key) => {
+                tracing::debug!("Acquired read lock for snapshot download");
+
+                // Download snapshot while holding read lock
+                match nats_client
+                    .object_store_download_data::<Vec<RouterEvent>>(&url)
+                    .await
+                {
+                    Ok(events) => {
+                        tracing::info!(
+                            "Successfully downloaded {} events from object store",
+                            events.len()
+                        );
+                        // Send all events to the indexer
+                        for event in events {
+                            if let Err(e) = kv_events_tx.send(event).await {
+                                tracing::warn!("Failed to send initial event to indexer: {e:?}");
+                            }
+                        }
+                        tracing::info!("Successfully sent all initial events to indexer");
+                    }
+                    Err(e) => {
+                        tracing::info!(
+                            "Did not initialize radix state from NATS object store (likely no snapshots yet): {e:?}"
+                        );
                     }
                 }
-                tracing::info!("Successfully sent all initial events to indexer");
+
+                // Release read lock
+                snapshot_rwlock.unlock_read(&etcd_client, reader_key).await;
             }
             Err(e) => {
-                tracing::info!(
-                    "Did not initialize radix state from NATs object store (likely no snapshots yet): {e:?}"
+                tracing::error!(
+                    "Could not acquire read lock for snapshot download (timeout or error): {e:?}"
                 );
             }
         }
     }
-
-    // Get etcd client (needed for both snapshots and router watching)
-    let etcd_client = component
-        .drt()
-        .etcd_client()
-        .ok_or_else(|| anyhow::anyhow!("etcd client not available"))?;
 
     // Cleanup orphaned consumers on startup
     cleanup_orphaned_consumers(&mut nats_queue, &etcd_client, &component, &consumer_uuid).await;
@@ -275,12 +281,10 @@ pub async fn start_kv_router_background(
         maybe_snapshot_tx,
         router_snapshot_threshold,
     ) {
-        let lock_name = format!("{}/{}", ROUTER_SNAPSHOT_LOCK, component.subject());
-
         Some(SnapshotResources {
             nats_client,
             bucket_name,
-            lock_name,
+            rwlock: snapshot_rwlock.clone(),
             instances_rx,
             get_workers_tx,
             snapshot_tx,
@@ -381,24 +385,17 @@ pub async fn start_kv_router_background(
                         continue;
                     }
 
-                    tracing::info!("Stream has {message_count} messages, attempting to acquire lock for purge and snapshot");
+                    tracing::info!("Stream has {message_count} messages, attempting to acquire write lock for purge and snapshot");
 
-                    // Try to acquire distributed lock
-                    let Some(lock_response) = resources.lock(&etcd_client).await else {
-                        continue;
-                    };
-
-                    // Perform snapshot upload and purge
+                    // Perform snapshot upload and purge (acquires write lock internally)
                     match resources.purge_then_snapshot(
+                        &etcd_client,
                         &mut nats_queue,
                         &remove_worker_tx,
                     ).await {
                         Ok(_) => tracing::info!("Successfully performed purge and snapshot"),
-                        Err(e) => tracing::error!("Failed to perform purge and snapshot: {e:?}"),
+                        Err(e) => tracing::debug!("Could not perform purge and snapshot: {e:?}"),
                     }
-
-                    // Release the lock
-                    resources.unlock(&etcd_client, lock_response).await;
                 }
 
                 // Handle router deletion events
