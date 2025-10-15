@@ -39,7 +39,8 @@ flowchart TD
 Before deploying the SLA planner, ensure:
 - **Dynamo platform installed** (see [Installation Guide](/docs/kubernetes/installation_guide.md))
 - **[kube-prometheus-stack](/docs/kubernetes/metrics.md) installed and running.** By default, the prometheus server is not deployed in the `monitoring` namespace. If it is deployed to a different namespace, set `dynamo-operator.dynamo.metrics.prometheusEndpoint="http://prometheus-kube-prometheus-prometheus.<namespace>.svc.cluster.local:9090"`.
-- **Benchmarking resources setup** (see [Kubernetes utilities for Dynamo Benchmarking and Profiling](../../deploy/utils/README.md)) The script will create a `dynamo-pvc` with `ReadWriteMany` access, if your cluster's default storageClassName does not allow `ReadWriteMany`, you need to specify a different storageClassName in `pvc.yaml`.
+- **Benchmarking resources setup** (see [Kubernetes utilities for Dynamo Benchmarking and Profiling](../../deploy/utils/README.md)) The script will create a `dynamo-pvc` with `ReadWriteMany` access, if your cluster's default storageClassName does not allow `ReadWriteMany`, you need to specify a different storageClassName in `deploy/utils/manifests/pvc.yaml` which does support `ReadWriteMany`.
+
 
 ## Pre-Deployment Profiling
 
@@ -96,12 +97,9 @@ spec:
             - "20" # target ITL is 20ms
             - --backend
             - <vllm/sglang>
-            - --deploy-after-profile
 ```
 
 For MoE models, edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_moe_job.yaml` instead.
-
-To automatically deploy the optimized DGD with planner after profiling, add `--deploy-after-profile` to the profiling job. It will deploy the DGD with the engine of the optimized parallelization mapping found for the SLA targets.
 
 ### Step 1.4: Run Profiling
 
@@ -135,7 +133,7 @@ kubectl logs job/profile-sla -n $NAMESPACE
 > [!NOTE]
 > **Time Investment**: This profiling process is comprehensive and typically takes **2-4 hours** to complete. The script systematically tests multiple tensor parallelism configurations and load conditions to find optimal performance settings.
 
-### Step 1.6: Download Profiling Results (Optional)
+### Step 1.6: Download Profiling Results
 
 If you want to view the profiling results and performance plots:
 
@@ -155,7 +153,13 @@ Final DGD config with planner: {...}
 Deploying the optimized DGD with planner...
 ```
 
-### Step 1.7: Wait for Deployment to be Ready
+### Step 1.7: Deploy the DGD with Planner
+
+```bash
+kubectl apply -f ./results/config_with_planner.yaml
+```
+
+### Step 1.8: Wait for Deployment to be Ready
 
 ```bash
 kubectl get pods -n $NAMESPACE
@@ -169,7 +173,7 @@ vllm-disagg-planner-backend-*             1/1 Running
 vllm-disagg-planner-prefill-*             1/1 Running
 ```
 
-### Step 1.8: Test the System
+### Step 1.9: Test the System
 
 ```bash
 # Port forward to frontend
@@ -191,7 +195,7 @@ curl -N http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-### Step 1.9: Monitor Scaling
+### Step 1.10: Monitor Scaling
 
 ```bash
 # Check planner logs for scaling decisions

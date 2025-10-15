@@ -45,8 +45,9 @@ async def worker(runtime: DistributedRuntime):
 
     logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
 
-    config = parse_args(sys.argv[1:])
+    config = await parse_args(sys.argv[1:])
     dump_config(config.dynamo_args.dump_config_to, config)
+
     if config.dynamo_args.embedding_worker:
         await init_embedding(runtime, config)
     elif config.dynamo_args.multimodal_processor:
@@ -77,8 +78,14 @@ async def init(runtime: DistributedRuntime, config: Config):
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
     prefill_client = None
+    prefill_router_client = None
     if config.serving_mode == DisaggregationMode.DECODE:
-        logging.info("Initializing prefill client")
+        prefill_router_client = (
+            await runtime.namespace(dynamo_args.namespace)
+            .component("router")
+            .endpoint("best_worker_id")
+            .client()
+        )
         prefill_client = (
             await runtime.namespace(dynamo_args.namespace)
             .component("prefill")
@@ -94,13 +101,15 @@ async def init(runtime: DistributedRuntime, config: Config):
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
-    handler = DecodeWorkerHandler(component, engine, config, publisher, prefill_client)
+    handler = DecodeWorkerHandler(
+        component, engine, config, publisher, prefill_client, prefill_router_client
+    )
 
     health_check_payload = SglangHealthCheckPayload(engine).to_dict()
 
     try:
         # Start endpoint immediately and register model concurrently
-        # Requests queue until ready_event is set
+        # Requests queue until ready_event is set (TODO: Part of new PR)
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
@@ -141,7 +150,12 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
-    handler = PrefillWorkerHandler(component, engine, config)
+    # publisher instantiates the metrics and kv event publishers
+    publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
+        engine, config, component, generate_endpoint
+    )
+
+    handler = PrefillWorkerHandler(component, engine, config, publisher)
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 
@@ -149,7 +163,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         generate_endpoint.serve_endpoint(
             handler.generate,
             graceful_shutdown=True,
-            metrics_labels=[("model", server_args.served_model_name)],
+            metrics_labels=metrics_labels,
             health_check_payload=health_check_payload,
         )
     ]
@@ -160,6 +174,12 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         logging.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
+        metrics_task.cancel()
+        try:
+            await metrics_task
+        except asyncio.CancelledError:
+            logging.info("Metrics task successfully cancelled")
+            pass
         handler.cleanup()
 
 

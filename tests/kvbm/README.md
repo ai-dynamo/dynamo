@@ -31,10 +31,13 @@ Run all kvbm tests:
 pytest -v -m "kvbm" -s
 ```
 
-Run the determinism test file directly:
+Run the determinism test file directly inside dynamo repo:
 
 ```bash
-pytest -v dynamo/tests/kvbm/test_determinism.py -s
+pytest -v tests/kvbm/test_determinism_agg.py -s
+
+# disagg needs 2 GPUs to run
+pytest -v tests/kvbm/test_determinism_disagg.py -s
 ```
 
 ## Configuration

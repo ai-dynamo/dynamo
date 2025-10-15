@@ -18,10 +18,6 @@ pub struct PreprocessedRequest {
     /// Type of prompt
     pub token_ids: Vec<TokenIdType>,
 
-    /// Batch Token Ids = for batch completion requests (i.e using ArrayOfIntegerArray type from OpenAI /completions)
-    #[builder(default)]
-    pub batch_token_ids: Option<Vec<Vec<TokenIdType>>>,
-
     /// StopConditions are conditions that the inference engine will use to stop generation.
     pub stop_conditions: StopConditions,
 
@@ -59,6 +55,11 @@ pub struct PreprocessedRequest {
     /// Router configuration overrides for this specific request
     #[builder(default)]
     pub router_config_override: Option<RouterConfigOverride>,
+
+    /// Disaggregated execution parameters (for prefill/decode separation)
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disaggregated_params: Option<serde_json::Value>,
 
     /// Additional arguments for extensibility
     #[builder(default)]

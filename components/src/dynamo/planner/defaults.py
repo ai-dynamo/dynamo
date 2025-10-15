@@ -84,7 +84,7 @@ def _get_default_prometheus_endpoint(port: str, namespace: str):
 
 class SLAPlannerDefaults(BasePlannerDefaults):
     port = os.environ.get("PROMETHEUS_PORT", "9090")
-    namespace = os.environ.get("DYNAMO_NAMESPACE", "vllm-disagg-planner")
+    namespace = os.environ.get("DYN_NAMESPACE", "vllm-disagg-planner")
     prometheus_endpoint = _get_default_prometheus_endpoint(port, namespace)
     profile_results_dir = "profiling_results"
     isl = 3000  # in number of tokens

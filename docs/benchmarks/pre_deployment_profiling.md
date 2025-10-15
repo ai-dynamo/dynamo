@@ -128,8 +128,6 @@ spec:
 
 **For MoE models**, use `profile_sla_moe_job.yaml` with TEP/DEP configuration instead.
 
-If you want to automatically deploy the optimized DGD with planner after profiling, add `--deploy-after-profile` to the profiling job. It will deploy the DGD with the engine of the optimized parallelization mapping found for the SLA targets.
-
 ### Advanced Configuration
 
 - **Model caching**: For large models, create a multi-attach PVC to cache the model. See [recipes](../../recipes/README.md) for details.
@@ -223,6 +221,14 @@ If you see `ErrImagePull` or `ImagePullBackOff` errors with 401 unauthorized mes
    ```
 
 3. The service account should show `imagePullSecrets` containing `nvcr-imagepullsecret`.
+
+If it doesn't, create the secret
+
+```bash
+export NGC_API_KEY=<you-ngc-api-key-here>
+kubectl create secret docker-registry nvcr-imagepullsecret --docker-server=nvcr.io --docker-username='$oauthtoken' --docker-password=$NGC_API_KEY
+
+```
 
 
 ## Running the Profiling Script with AI Configurator

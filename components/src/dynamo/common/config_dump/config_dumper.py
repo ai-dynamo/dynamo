@@ -10,8 +10,6 @@ import pathlib
 from enum import Enum
 from typing import Any, Dict, Optional
 
-from dynamo.common._version import __version__
-
 from .environment import get_environment_vars
 from .system_info import (
     get_gpu_info,
@@ -77,6 +75,16 @@ def _get_vllm_version() -> Optional[str]:
         return None
 
 
+def _get_dynamo_version() -> str:
+    """Get Dynamo version."""
+    try:
+        from dynamo.common import __version__
+    except Exception:
+        __version__ = "0.0.0+unknown"
+
+    return __version__
+
+
 def dump_config(dump_config_to: Optional[str], config: Any) -> None:
     """
     Dump the configuration to a file or stdout.
@@ -90,9 +98,9 @@ def dump_config(dump_config_to: Optional[str], config: Any) -> None:
     Raises:
         Logs errors but does not raise exceptions to ensure graceful degradation.
     """
-    config_dump_payload = get_config_dump(config)
 
     if dump_config_to:
+        config_dump_payload = get_config_dump(config)
         try:
             dump_path = pathlib.Path(dump_config_to)
             dump_path.parent.mkdir(parents=True, exist_ok=True)
@@ -100,13 +108,17 @@ def dump_config(dump_config_to: Optional[str], config: Any) -> None:
                 f.write(config_dump_payload)
             logger.info(f"Dumped config to {dump_path.resolve()}")
         except (OSError, IOError):
-            logger.exception(f"Failed to dump config to {dump_config_to}")
+            logger.exception(
+                f"Failed to dump config to {dump_config_to}, dropping to stdout"
+            )
             logger.info(f"CONFIG_DUMP: {config_dump_payload}")
         except Exception:
-            logger.exception("Unexpected error dumping config")
+            logger.exception("Unexpected error dumping config, dropping to stdout")
             logger.info(f"CONFIG_DUMP: {config_dump_payload}")
-    else:
-        logger.info(f"CONFIG_DUMP: {config_dump_payload}")
+    elif logger.getEffectiveLevel() <= logging.DEBUG:
+        # only collect/dump config if the logger is at DEBUG level or lower
+        config_dump_payload = get_config_dump(config)
+        logger.debug(f"CONFIG_DUMP: {config_dump_payload}")
 
 
 def get_config_dump(config: Any, extra_info: Optional[Dict[str, Any]] = None) -> str:
@@ -131,7 +143,7 @@ def get_config_dump(config: Any, extra_info: Optional[Dict[str, Any]] = None) ->
             "environment": get_environment_vars(),
             "config": config,
             "runtime_info": get_runtime_info(),
-            "dynamo_version": __version__,
+            "dynamo_version": _get_dynamo_version(),
             "gpu_info": get_gpu_info(),
             "installed_packages": get_package_info(),
         }
@@ -175,6 +187,21 @@ def add_config_dump_args(parser: argparse.ArgumentParser):
     )
 
 
+try:
+    # trtllm uses pydantic, but it's not a hard dependency
+    import pydantic
+
+    def try_process_pydantic(obj: Any) -> Optional[dict]:
+        if isinstance(obj, pydantic.BaseModel):
+            return obj.model_dump()
+        return None
+
+except ImportError:
+
+    def try_process_pydantic(obj: Any) -> Optional[dict]:
+        return None
+
+
 @functools.singledispatch
 def _preprocess_for_encode(obj: object) -> object:
     """
@@ -185,6 +212,10 @@ def _preprocess_for_encode(obj: object) -> object:
     """
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         return dataclasses.asdict(obj)
+
+    if (result := try_process_pydantic(obj)) is not None:
+        return result
+
     logger.warning(f"Unknown type {type(obj)}, using __dict__ or str(obj)")
     if hasattr(obj, "__dict__"):
         return obj.__dict__

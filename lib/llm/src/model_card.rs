@@ -13,7 +13,7 @@
 //! - Prompt formatter settings (PromptFormatterArtifact)
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use crate::common::checked_file::CheckedFile;
@@ -23,7 +23,7 @@ use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::storage::key_value_store::{
-    EtcdStorage, Key, KeyValueStore, KeyValueStoreManager,
+    EtcdStore, Key, KeyValueStore, KeyValueStoreManager,
 };
 use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned, transports::nats};
 use serde::{Deserialize, Serialize};
@@ -457,7 +457,7 @@ impl ModelDeploymentCard {
             // Should be impossible because we only get here on an etcd event
             anyhow::bail!("Missing etcd_client");
         };
-        let store: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client));
+        let store: Box<dyn KeyValueStore> = Box::new(EtcdStore::new(etcd_client));
         let card_store = Arc::new(KeyValueStoreManager::new(store));
         let Some(mut card) = card_store
             .load::<ModelDeploymentCard>(ROOT_PATH, mdc_key)
@@ -485,43 +485,31 @@ impl ModelDeploymentCard {
     /// - The path contains invalid Unicode characters
     /// - Required model files are missing or invalid
     fn from_local_path(
-        local_root_dir: impl AsRef<Path>,
+        local_path: impl AsRef<Path>,
         custom_template_path: Option<&Path>,
     ) -> anyhow::Result<Self> {
-        let local_root_dir = local_root_dir.as_ref();
-        check_valid_local_repo_path(local_root_dir)?;
-        let repo_id = local_root_dir
-            .canonicalize()?
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Path contains invalid Unicode"))?
-            .to_string();
-        let model_name = local_root_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| anyhow::anyhow!("Invalid model directory name"))?;
-
-        Self::from_repo(&repo_id, model_name, custom_template_path)
+        check_valid_local_repo_path(&local_path)?;
+        Self::from_repo_checkout(&local_path, custom_template_path)
     }
 
-    fn from_repo(
-        repo_id: &str,
-        model_name: &str,
+    fn from_repo_checkout(
+        local_path: impl AsRef<Path>,
         custom_template_path: Option<&Path>,
     ) -> anyhow::Result<Self> {
+        let local_path = local_path.as_ref();
+
         // This is usually the right choice
-        let context_length = crate::file_json_field(
-            &PathBuf::from(repo_id).join("config.json"),
-            "max_position_embeddings",
-        )
-        // But sometimes this is
-        .or_else(|_| {
-            crate::file_json_field(
-                &PathBuf::from(repo_id).join("tokenizer_config.json"),
-                "model_max_length",
-            )
-        })
-        // If neither of those are present let the engine default it
-        .unwrap_or(0);
+        let context_length =
+            crate::file_json_field(&local_path.join("config.json"), "max_position_embeddings")
+                // But sometimes this is
+                .or_else(|_| {
+                    crate::file_json_field(
+                        &local_path.join("tokenizer_config.json"),
+                        "model_max_length",
+                    )
+                })
+                // If neither of those are present let the engine default it
+                .unwrap_or(0);
 
         // Load chat template - either custom or from repo
         let chat_template_file = if let Some(template_path) = custom_template_path {
@@ -544,16 +532,17 @@ impl ModelDeploymentCard {
                 CheckedFile::from_disk(template_path)?,
             ))
         } else {
-            PromptFormatterArtifact::chat_template_from_repo(repo_id)?
+            PromptFormatterArtifact::chat_template_from_disk(local_path)?
         };
 
+        let display_name = local_path.display().to_string();
         Ok(Self {
-            display_name: model_name.to_string(),
-            slug: Slug::from_string(model_name),
-            model_info: Some(ModelInfoType::from_repo(repo_id)?),
-            tokenizer: Some(TokenizerKind::from_repo(repo_id)?),
-            gen_config: GenerationConfig::from_repo(repo_id).ok(), // optional
-            prompt_formatter: PromptFormatterArtifact::from_repo(repo_id)?,
+            slug: Slug::from_string(&display_name),
+            display_name,
+            model_info: Some(ModelInfoType::from_disk(local_path)?),
+            tokenizer: Some(TokenizerKind::from_disk(local_path)?),
+            gen_config: GenerationConfig::from_disk(local_path).ok(), // optional
+            prompt_formatter: PromptFormatterArtifact::from_disk(local_path)?,
             chat_template_file,
             prompt_context: None, // TODO - auto-detect prompt context
             context_length,
@@ -778,33 +767,43 @@ impl ModelInfo for HFConfig {
 }
 
 impl ModelInfoType {
-    pub fn from_repo(repo_id: &str) -> Result<Self> {
-        let f = CheckedFile::from_disk(PathBuf::from(repo_id).join("config.json"))
-            .with_context(|| format!("unable to extract config.json from repo {repo_id}"))?;
+    pub fn from_disk(directory: &Path) -> Result<Self> {
+        let f = CheckedFile::from_disk(directory.join("config.json")).with_context(|| {
+            format!(
+                "unable to extract config.json from directory {}",
+                directory.display()
+            )
+        })?;
         Ok(Self::HfConfigJson(f))
     }
 }
 
 impl GenerationConfig {
-    pub fn from_repo(repo_id: &str) -> Result<Self> {
-        let f = CheckedFile::from_disk(PathBuf::from(repo_id).join("generation_config.json"))
-            .with_context(|| format!("unable to extract generation_config from repo {repo_id}"))?;
+    pub fn from_disk(directory: &Path) -> Result<Self> {
+        let f = CheckedFile::from_disk(directory.join("generation_config.json")).with_context(
+            || {
+                format!(
+                    "unable to extract generation_config from directory {}",
+                    directory.display()
+                )
+            },
+        )?;
         Ok(Self::HfGenerationConfigJson(f))
     }
 }
 
 impl PromptFormatterArtifact {
-    pub fn from_repo(repo_id: &str) -> Result<Option<Self>> {
+    pub fn from_disk(directory: &Path) -> Result<Option<Self>> {
         // we should only error if we expect a prompt formatter and it's not found
         // right now, we don't know when to expect it, so we just return Ok(Some/None)
-        match CheckedFile::from_disk(PathBuf::from(repo_id).join("tokenizer_config.json")) {
+        match CheckedFile::from_disk(directory.join("tokenizer_config.json")) {
             Ok(f) => Ok(Some(Self::HfTokenizerConfigJson(f))),
             Err(_) => Ok(None),
         }
     }
 
-    pub fn chat_template_from_repo(repo_id: &str) -> Result<Option<Self>> {
-        match CheckedFile::from_disk(PathBuf::from(repo_id).join("chat_template.jinja")) {
+    pub fn chat_template_from_disk(directory: &Path) -> Result<Option<Self>> {
+        match CheckedFile::from_disk(directory.join("chat_template.jinja")) {
             Ok(f) => Ok(Some(Self::HfChatTemplate(f))),
             Err(_) => Ok(None),
         }
@@ -812,9 +811,13 @@ impl PromptFormatterArtifact {
 }
 
 impl TokenizerKind {
-    pub fn from_repo(repo_id: &str) -> Result<Self> {
-        let f = CheckedFile::from_disk(PathBuf::from(repo_id).join("tokenizer.json"))
-            .with_context(|| format!("unable to extract tokenizer kind from repo {repo_id}"))?;
+    pub fn from_disk(directory: &Path) -> Result<Self> {
+        let f = CheckedFile::from_disk(directory.join("tokenizer.json")).with_context(|| {
+            format!(
+                "unable to extract tokenizer kind from directory {}",
+                directory.display()
+            )
+        })?;
         Ok(Self::HfTokenizerJson(f))
     }
 }

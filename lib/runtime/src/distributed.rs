@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub use crate::component::Component;
+use crate::storage::key_value_store::{EtcdStore, KeyValueStore, MemoryStore};
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
-    ErrorContext, RuntimeCallback,
+    ErrorContext, PrometheusUpdateCallback,
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
     discovery::DiscoveryClient,
     metrics::MetricsRegistry,
@@ -44,10 +45,14 @@ impl DistributedRuntime {
 
         let runtime_clone = runtime.clone();
 
-        let etcd_client = if is_static {
-            None
+        let (etcd_client, store) = if is_static {
+            let store: Arc<dyn KeyValueStore> = Arc::new(MemoryStore::new());
+            (None, store)
         } else {
-            Some(etcd::Client::new(etcd_config.clone(), runtime_clone).await?)
+            let etcd_client = etcd::Client::new(etcd_config.clone(), runtime_clone).await?;
+            let store: Arc<dyn KeyValueStore> = Arc::new(EtcdStore::new(etcd_client.clone()));
+
+            (Some(etcd_client), store)
         };
 
         let nats_client = nats_config.clone().connect().await?;
@@ -77,6 +82,7 @@ impl DistributedRuntime {
         let distributed_runtime = Self {
             runtime,
             etcd_client,
+            store,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
@@ -104,7 +110,8 @@ impl DistributedRuntime {
                 Ok(())
             }
         });
-        distributed_runtime.register_metrics_callback(drt_hierarchies, nats_client_callback);
+        distributed_runtime
+            .register_prometheus_update_callback(drt_hierarchies, nats_client_callback);
 
         // Initialize the uptime gauge in SystemHealth
         distributed_runtime
@@ -270,6 +277,12 @@ impl DistributedRuntime {
         self.etcd_client.clone()
     }
 
+    /// An interface to store things. Will eventually replace `etcd_client`.
+    /// Currently does key-value, but will grow to include whatever we need to store.
+    pub fn store(&self) -> Arc<dyn KeyValueStore> {
+        self.store.clone()
+    }
+
     pub fn child_token(&self) -> CancellationToken {
         self.runtime.child_token()
     }
@@ -299,27 +312,31 @@ impl DistributedRuntime {
             .map_err(|e| e.into())
     }
 
-    /// Add a callback function to metrics registries for the given hierarchies
-    // TODO: Rename to register_metrics_update_callback for consistency with Python API.
-    //       Do this after we move the MetricsRegistry trait to composition pattern.
-    pub fn register_metrics_callback(&self, hierarchies: Vec<String>, callback: RuntimeCallback) {
+    /// Add a Prometheus update callback to the given hierarchies
+    /// TODO: rename this to register_callback, once we move the the MetricsRegistry trait
+    ///       out of the runtime, and make it into a composed module.
+    pub fn register_prometheus_update_callback(
+        &self,
+        hierarchies: Vec<String>,
+        callback: PrometheusUpdateCallback,
+    ) {
         let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
         for hierarchy in &hierarchies {
             registries
                 .entry(hierarchy.clone())
                 .or_default()
-                .add_callback(callback.clone());
+                .add_prometheus_update_callback(callback.clone());
         }
     }
 
-    /// Execute all callbacks for a given hierarchy key and return their results
-    pub fn execute_metrics_callbacks(&self, hierarchy: &str) -> Vec<anyhow::Result<()>> {
+    /// Execute all Prometheus update callbacks for a given hierarchy and return their results
+    pub fn execute_prometheus_update_callbacks(&self, hierarchy: &str) -> Vec<anyhow::Result<()>> {
         // Clone callbacks while holding read lock (fast operation)
         let callbacks = {
             let registries = self.hierarchy_to_metricsregistry.read().unwrap();
             registries
                 .get(hierarchy)
-                .map(|entry| entry.runtime_callbacks.clone())
+                .map(|entry| entry.prometheus_update_callbacks.clone())
         }; // Read lock released here
 
         // Execute callbacks without holding the lock
@@ -329,17 +346,19 @@ impl DistributedRuntime {
         }
     }
 
-    /// Clear everything in etcd under a key.
-    /// todo: Remove as soon as we auto-delete the MDC.
-    pub async fn temp_clear_namespace(&self, name: &str) -> anyhow::Result<()> {
-        let Some(etcd_client) = self.etcd_client() else {
-            return Ok(()); // no etcd, nothing to clear
-        };
-        let kvs = etcd_client.kv_get_prefix(name).await?;
-        for kv in kvs {
-            etcd_client.kv_delete(kv.key(), None).await?;
+    /// Add a Prometheus exposition text callback that returns Prometheus text for the given hierarchies
+    pub fn register_prometheus_expfmt_callback(
+        &self,
+        hierarchies: Vec<String>,
+        callback: crate::PrometheusExpositionFormatCallback,
+    ) {
+        let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
+        for hierarchy in &hierarchies {
+            registries
+                .entry(hierarchy.clone())
+                .or_default()
+                .add_prometheus_expfmt_callback(callback.clone());
         }
-        Ok(())
     }
 
     /// Get all registered hierarchy keys. Private because it is only used for testing.

@@ -11,8 +11,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# run clear_namespace
-python3 -m dynamo.sglang.utils.clear_namespace --namespace dynamo
 
 # run ingress
 python3 -m dynamo.frontend --http-port=8000 &

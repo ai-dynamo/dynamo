@@ -51,7 +51,9 @@ pub use system_health::{HealthCheckTarget, SystemHealth};
 pub use tokio_util::sync::CancellationToken;
 pub use worker::Worker;
 
-use crate::metrics::prometheus_names::distributed_runtime;
+use crate::{
+    metrics::prometheus_names::distributed_runtime, storage::key_value_store::KeyValueStore,
+};
 
 use component::{Endpoint, InstanceSource};
 use utils::GracefulShutdownTracker;
@@ -86,14 +88,20 @@ pub struct Runtime {
 /// - Used in generic contexts requiring 'static lifetime
 ///
 /// The Arc wrapper is included in the type to make sharing explicit.
-type RuntimeCallback = Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync + 'static>;
+type PrometheusUpdateCallback = Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync + 'static>;
+
+/// Type alias for exposition text callback functions that return Prometheus text
+type PrometheusExpositionFormatCallback =
+    Arc<dyn Fn() -> anyhow::Result<String> + Send + Sync + 'static>;
 
 /// Structure to hold Prometheus registries and associated callbacks for a given hierarchy
 pub struct MetricsRegistryEntry {
     /// The Prometheus registry for this prefix
     pub prometheus_registry: prometheus::Registry,
-    /// List of function callbacks that receive a reference to any MetricsRegistry
-    pub runtime_callbacks: Vec<RuntimeCallback>,
+    /// List of update callbacks invoked before metrics are scraped
+    pub prometheus_update_callbacks: Vec<PrometheusUpdateCallback>,
+    /// List of callbacks that return Prometheus exposition text to be appended to metrics output
+    pub prometheus_expfmt_callbacks: Vec<PrometheusExpositionFormatCallback>,
 }
 
 impl MetricsRegistryEntry {
@@ -101,21 +109,48 @@ impl MetricsRegistryEntry {
     pub fn new() -> Self {
         Self {
             prometheus_registry: prometheus::Registry::new(),
-            runtime_callbacks: Vec::new(),
+            prometheus_update_callbacks: Vec::new(),
+            prometheus_expfmt_callbacks: Vec::new(),
         }
     }
 
     /// Add a callback function that receives a reference to any MetricsRegistry
-    pub fn add_callback(&mut self, callback: RuntimeCallback) {
-        self.runtime_callbacks.push(callback);
+    pub fn add_prometheus_update_callback(&mut self, callback: PrometheusUpdateCallback) {
+        self.prometheus_update_callbacks.push(callback);
     }
 
-    /// Execute all runtime callbacks and return their results
-    pub fn execute_callbacks(&self) -> Vec<anyhow::Result<()>> {
-        self.runtime_callbacks
+    /// Add an exposition text callback that returns Prometheus text
+    pub fn add_prometheus_expfmt_callback(&mut self, callback: PrometheusExpositionFormatCallback) {
+        self.prometheus_expfmt_callbacks.push(callback);
+    }
+
+    /// Execute all update callbacks and return their results
+    pub fn execute_prometheus_update_callbacks(&self) -> Vec<anyhow::Result<()>> {
+        self.prometheus_update_callbacks
             .iter()
             .map(|callback| callback())
             .collect()
+    }
+
+    /// Execute all exposition text callbacks and return their concatenated text
+    pub fn execute_prometheus_expfmt_callbacks(&self) -> String {
+        let mut result = String::new();
+        for callback in &self.prometheus_expfmt_callbacks {
+            match callback() {
+                Ok(text) => {
+                    if !text.is_empty() {
+                        if !result.is_empty() && !result.ends_with('\n') {
+                            result.push('\n');
+                        }
+                        result.push_str(&text);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Error executing exposition text callback: {}", e);
+                }
+            }
+        }
+        result
     }
 
     /// Returns true if a metric with the given name already exists in the Prometheus registry
@@ -137,7 +172,8 @@ impl Clone for MetricsRegistryEntry {
     fn clone(&self) -> Self {
         Self {
             prometheus_registry: self.prometheus_registry.clone(),
-            runtime_callbacks: Vec::new(), // Callbacks cannot be cloned, so we start with an empty list
+            prometheus_update_callbacks: Vec::new(), // Callbacks cannot be cloned, so we start with an empty list
+            prometheus_expfmt_callbacks: Vec::new(), // Callbacks cannot be cloned, so we start with an empty list
         }
     }
 }
@@ -152,6 +188,7 @@ pub struct DistributedRuntime {
     // we might consider a unifed transport manager here
     etcd_client: Option<transports::etcd::Client>,
     nats_client: transports::nats::Client,
+    store: Arc<dyn KeyValueStore>,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
 

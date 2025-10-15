@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-VLLM_REF="v0.10.2"
+VLLM_REF="v0.11.0"
 
 # Basic Configurations
 ARCH=$(uname -m)
@@ -29,7 +29,7 @@ CUDA_VERSION="12.8" # For DEEPGEMM
 # These flags are applicable when installing vLLM from source code
 EDITABLE=true
 VLLM_GIT_URL="https://github.com/vllm-project/vllm.git"
-FLASHINF_REF="v0.3.0"
+FLASHINF_REF="v0.3.1"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -131,10 +131,8 @@ git clone $VLLM_GIT_URL vllm
 cd vllm
 git checkout $VLLM_REF
 
-# TODO remove in future vLLM release, re-instate ignore torch script
-# https://github.com/vllm-project/vllm/pull/24729
-GIT_COMMITTER_NAME="Container Build" GIT_COMMITTER_EMAIL="container@buildkitsandbox.local" git cherry-pick 740f064
-
+# TODO leave this here in case we need to do cherry-picks in future
+# GIT_COMMITTER_NAME="Container Build" GIT_COMMITTER_EMAIL="container@buildkitsandbox.local" git cherry-pick 740f064
 
 echo "\n=== Installing vLLM & FlashInfer ==="
 
@@ -223,7 +221,7 @@ if [ "$ARCH" = "amd64" ]; then
     # TODO: Re-enable for arm64 after verifying lmcache compatibility and resolving the build issue.
 
     # Alec: Likely lmcache was compiled witha different version of torch and need to install it from source for arm64
-    uv pip install lmcache==0.3.3
+    uv pip install lmcache==0.3.7
     echo "✓ LMCache installed"
 else
     echo "⚠ Skipping LMCache on ARM64 (compatibility issues)"

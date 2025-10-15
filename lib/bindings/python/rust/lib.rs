@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_llm::local_model::LocalModel;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
@@ -9,12 +10,13 @@ use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
 use rand::seq::IteratorRandom as _;
 use rs::pipeline::network::Ingress;
+use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::time::Duration;
 use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
-use tracing::{Instrument, info_span};
+use tracing::Instrument;
 
 use dynamo_runtime::{
     self as rs, logging,
@@ -56,7 +58,6 @@ mod llm;
 mod parsers;
 mod planner;
 mod prometheus_metrics;
-mod prometheus_names;
 
 type JsonServerStreamingIngress =
     Ingress<SingleIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
@@ -65,35 +66,14 @@ static INIT: OnceCell<()> = OnceCell::new();
 
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 
-// Helper to create client span - always emit spans for consistency
-fn create_client_span(
-    operation: &str,
-    request_id: &str,
-    trace_context: Option<&dynamo_runtime::logging::DistributedTraceContext>,
-) -> tracing::Span {
-    if let Some(ctx) = trace_context {
-        info_span!(
-            "client_request",
-            operation = operation,
-            request_id = request_id,
-            trace_id = ctx.trace_id.as_str(),
-            parent_id = ctx.span_id.as_str(),
-            x_request_id = ctx.x_request_id.as_deref().unwrap_or(""),
-            x_dynamo_request_id = ctx.x_dynamo_request_id.as_deref().unwrap_or(""),
-            tracestate = ctx.tracestate.as_deref().unwrap_or("")
-        )
-    } else {
-        info_span!(
-            "client_request",
-            operation = operation,
-            request_id = request_id,
-        )
-    }
-}
-
 // Helper to get appropriate span for instrumentation - always emit spans
 fn get_span_for_context(context: &context::Context, operation: &str) -> tracing::Span {
-    create_client_span(operation, context.inner().id(), context.trace_context())
+    logging::make_client_request_span(
+        operation,
+        context.inner().id(),
+        context.trace_context(),
+        None,
+    )
 }
 
 // Helper to create span for direct method with instance_id
@@ -102,26 +82,12 @@ fn get_span_for_direct_context(
     operation: &str,
     instance_id: &str,
 ) -> tracing::Span {
-    if let Some(trace_ctx) = context.trace_context() {
-        info_span!(
-            "client_request",
-            operation = operation,
-            request_id = context.inner().id(),
-            instance_id = instance_id,
-            trace_id = trace_ctx.trace_id.as_str(),
-            parent_id = trace_ctx.span_id.as_str(),
-            x_request_id = trace_ctx.x_request_id.as_deref().unwrap_or(""),
-            x_dynamo_request_id = trace_ctx.x_dynamo_request_id.as_deref().unwrap_or(""),
-            tracestate = trace_ctx.tracestate.as_deref().unwrap_or("")
-        )
-    } else {
-        info_span!(
-            "client_request",
-            operation = operation,
-            request_id = context.inner().id(),
-            instance_id = instance_id,
-        )
-    }
+    logging::make_client_request_span(
+        operation,
+        context.inner().id(),
+        context.trace_context(),
+        Some(instance_id),
+    )
 }
 
 /// A Python module implemented in Rust. The name of this function must match
@@ -129,10 +95,10 @@ fn get_span_for_direct_context(
 /// import the module.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    logging::init();
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
+    m.add_function(wrap_pyfunction!(fetch_llm, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
 
@@ -185,9 +151,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     engine::add_to_module(m)?;
     parsers::add_to_module(m)?;
-    prometheus_names::add_to_module(m)?;
 
-    m.add_class::<prometheus_metrics::PyRuntimeMetrics>()?;
+    m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
     let prometheus_metrics = PyModule::new(m.py(), "prometheus_metrics")?;
     prometheus_metrics::add_to_module(&prometheus_metrics)?;
     m.add_submodule(&prometheus_metrics)?;
@@ -212,6 +177,8 @@ fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) 
     logging::log_message(level, message, module, file, line);
 }
 
+/// Create an engine and attach it to an endpoint to make it visible to the frontend.
+/// This is the main way you create a Dynamo worker / backend.
 #[pyfunction]
 #[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None))]
 #[allow(clippy::too_many_arguments)]
@@ -239,7 +206,7 @@ fn register_llm<'p>(
     let model_type_obj = model_type.inner;
 
     let inner_path = model_path.to_string();
-    let model_name = model_name.map(|n| n.to_string());
+    let mut model_name = model_name.map(|n| n.to_string());
     let router_mode = router_mode.unwrap_or(RouterMode::RoundRobin);
     let router_config = RouterConfig::new(router_mode.into(), KvRouterConfig::default());
 
@@ -264,9 +231,22 @@ fn register_llm<'p>(
         })?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let model_path = if fs::exists(&inner_path)? {
+            PathBuf::from(inner_path)
+        } else {
+            // Preserve the model name
+            if model_name.is_none() {
+                model_name = Some(inner_path.clone());
+            }
+            // Likely it's a Hugging Face repo, download it
+            LocalModel::fetch(&inner_path, false)
+                .await
+                .map_err(to_pyerr)?
+        };
+
         let mut builder = dynamo_llm::local_model::LocalModelBuilder::default();
         builder
-            .model_path(Some(PathBuf::from(inner_path)))
+            .model_path(model_path)
             .model_name(model_name)
             .context_length(context_length)
             .kv_cache_block_size(kv_cache_block_size)
@@ -275,7 +255,7 @@ fn register_llm<'p>(
             .runtime_config(runtime_config.unwrap_or_default().inner)
             .user_data(user_data_json)
             .custom_template_path(custom_template_path_owned);
-        // Download from HF, load the ModelDeploymentCard
+        // Load the ModelDeploymentCard
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
         // Advertise ourself on etcd so ingress can find us
         local_model
@@ -284,6 +264,17 @@ fn register_llm<'p>(
             .map_err(to_pyerr)?;
 
         Ok(())
+    })
+}
+
+/// Download a model from Hugging Face, returning it's local path
+/// Example: `model_path = await fetch_llm("Qwen/Qwen3-0.6B")`
+#[pyfunction]
+#[pyo3(signature = (remote_name))]
+fn fetch_llm<'p>(py: Python<'p>, remote_name: &str) -> PyResult<Bound<'p, PyAny>> {
+    let repo = remote_name.to_string();
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        LocalModel::fetch(&repo, false).await.map_err(to_pyerr)
     })
 }
 
@@ -394,6 +385,12 @@ impl DistributedRuntime {
 
         let runtime = worker.runtime().clone();
 
+        // Initialize logging in context where tokio runtime is available
+        // otel exporter requires it
+        runtime.secondary().block_on(async {
+            rs::logging::init();
+        });
+
         let inner =
             if is_static {
                 runtime.secondary().block_on(
@@ -421,15 +418,6 @@ impl DistributedRuntime {
         Ok(DistributedRuntime {
             inner,
             event_loop: py.None(),
-        })
-    }
-
-    /// Remove everything in an etcd namespace.
-    /// Will be removed once we can clear the MDC automatically.
-    fn temp_clear_namespace<'p>(&self, py: Python<'p>, name: String) -> PyResult<Bound<'p, PyAny>> {
-        let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.temp_clear_namespace(&name).await.map_err(to_pyerr)
         })
     }
 
@@ -648,8 +636,8 @@ impl Component {
 
     /// Get a RuntimeMetrics helper for creating Prometheus metrics
     #[getter]
-    fn metrics(&self) -> prometheus_metrics::PyRuntimeMetrics {
-        prometheus_metrics::PyRuntimeMetrics::from_component(self.inner.clone())
+    fn metrics(&self) -> prometheus_metrics::RuntimeMetrics {
+        prometheus_metrics::RuntimeMetrics::from_component(self.inner.clone())
     }
 }
 
@@ -737,8 +725,8 @@ impl Endpoint {
 
     /// Get a RuntimeMetrics helper for creating Prometheus metrics
     #[getter]
-    fn metrics(&self) -> prometheus_metrics::PyRuntimeMetrics {
-        prometheus_metrics::PyRuntimeMetrics::from_endpoint(self.inner.clone())
+    fn metrics(&self) -> prometheus_metrics::RuntimeMetrics {
+        prometheus_metrics::RuntimeMetrics::from_endpoint(self.inner.clone())
     }
 }
 
@@ -754,8 +742,8 @@ impl Namespace {
 
     /// Get a RuntimeMetrics helper for creating Prometheus metrics
     #[getter]
-    fn metrics(&self) -> prometheus_metrics::PyRuntimeMetrics {
-        prometheus_metrics::PyRuntimeMetrics::from_namespace(self.inner.clone())
+    fn metrics(&self) -> prometheus_metrics::RuntimeMetrics {
+        prometheus_metrics::RuntimeMetrics::from_namespace(self.inner.clone())
     }
 }
 

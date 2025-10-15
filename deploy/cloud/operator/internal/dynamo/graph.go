@@ -125,7 +125,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 	}
 	for componentName, component := range parentDynamoGraphDeployment.Spec.Services {
 		deployment := &v1alpha1.DynamoComponentDeployment{}
-		deployment.Spec.DynamoComponentDeploymentSharedSpec = component.DynamoComponentDeploymentSharedSpec
+		deployment.Spec.DynamoComponentDeploymentSharedSpec = *component
 		deployment.Name = GetDynamoComponentName(parentDynamoGraphDeployment, componentName)
 		deployment.Spec.BackendFramework = parentDynamoGraphDeployment.Spec.BackendFramework
 		deployment.Namespace = parentDynamoGraphDeployment.Namespace
@@ -597,18 +597,18 @@ const (
 // Backend interface for modular backend logic
 // Each backend (SGLang, VLLM, etc.) implements this interface
 type Backend interface {
-	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string, multinodeDeployer MultinodeDeployer)
-	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string)
+	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer)
+	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string)
 }
 
 // NoopBackend does no processing - used for non-worker components like frontend, planner, router
 type NoopBackend struct{}
 
-func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// No-op: frontend, planner, router, etc. don't need backend-specific processing
 }
 
-func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string) {
+func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string) {
 	// No-op: frontend, planner, router, etc. don't need backend-specific processing
 }
 
@@ -691,7 +691,7 @@ func addStandardEnvVars(container *corev1.Container, controllerConfig controller
 //
 //nolint:gocyclo
 func GenerateBasePodSpec(
-	component *v1alpha1.DynamoComponentDeploymentOverridesSpec,
+	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
 	backendFramework BackendFramework,
 	secretsRetriever SecretsRetriever,
 	parentGraphDeploymentName string,
@@ -861,7 +861,7 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 	labels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
 }
 
-func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentOverridesSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32) ComponentContext {
+func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32) ComponentContext {
 	componentContext := ComponentContext{
 		numberOfNodes:                  numberOfNodes,
 		ParentGraphDeploymentName:      parentGraphDeploymentName,
@@ -875,7 +875,7 @@ func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentOverr
 
 // GeneratePodSpecForComponent creates a PodSpec for Grove deployments (simplified wrapper)
 func GeneratePodSpecForComponent(
-	component *v1alpha1.DynamoComponentDeploymentOverridesSpec,
+	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
 	backendFramework BackendFramework,
 	secretsRetriever SecretsRetriever,
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
@@ -1004,7 +1004,7 @@ func GenerateGrovePodCliqueSet(
 	return controller_common.CanonicalizePodCliqueSet(gangSet), nil
 }
 
-func generateLabels(component *v1alpha1.DynamoComponentDeploymentOverridesSpec, dynamoDeployment *v1alpha1.DynamoGraphDeployment, componentName string) (map[string]string, error) {
+func generateLabels(component *v1alpha1.DynamoComponentDeploymentSharedSpec, dynamoDeployment *v1alpha1.DynamoGraphDeployment, componentName string) (map[string]string, error) {
 	labels := make(map[string]string)
 	labels[commonconsts.KubeLabelDynamoSelector] = GetDynamoComponentName(dynamoDeployment, componentName)
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
@@ -1033,7 +1033,7 @@ func generateLabels(component *v1alpha1.DynamoComponentDeploymentOverridesSpec, 
 	return labels, nil
 }
 
-func generateAnnotations(component *v1alpha1.DynamoComponentDeploymentOverridesSpec) (map[string]string, error) {
+func generateAnnotations(component *v1alpha1.DynamoComponentDeploymentSharedSpec) (map[string]string, error) {
 	annotations := make(map[string]string)
 	if component.Annotations != nil {
 		err := mergo.Merge(&annotations, component.Annotations, mergo.WithOverride)
@@ -1147,7 +1147,7 @@ func determineBackendFramework(
 // 3. Return error if worker has neither detection nor explicit config
 // Also validates consistency between detected and explicit if both exist
 func getBackendFrameworkFromComponent(
-	component *v1alpha1.DynamoComponentDeploymentOverridesSpec,
+	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
 ) (BackendFramework, error) {
 	// Extract command/args from component
@@ -1170,10 +1170,8 @@ func getBackendFrameworkFromComponent(
 
 // ConvertDynamoComponentDeploymentToSpec converts a DynamoComponentDeployment to our component spec interface
 // This is a helper for the controller to use our backend logic
-func ConvertDynamoComponentDeploymentToSpec(dynComponent *v1alpha1.DynamoComponentDeployment) *v1alpha1.DynamoComponentDeploymentOverridesSpec {
-	return &v1alpha1.DynamoComponentDeploymentOverridesSpec{
-		DynamoComponentDeploymentSharedSpec: *dynComponent.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy(),
-	}
+func ConvertDynamoComponentDeploymentToSpec(dynComponent *v1alpha1.DynamoComponentDeployment) *v1alpha1.DynamoComponentDeploymentSharedSpec {
+	return dynComponent.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy()
 }
 
 // GetBackendFrameworkFromDynamoComponent determines backend framework for a DynamoComponentDeployment

@@ -162,7 +162,7 @@ The script will apply a custom patch to the code with your GAIE repo and build t
 ```bash
 # Use your custom paths
 export DYNAMO_DIR=/path/to/dynamo
-export EPP_DIR=/path/to/gateway-api-inference-extension
+export GAIE_DIR=/path/to/gateway-api-inference-extension
 
 # Run the script
 cd deploy/inference-gateway
@@ -191,7 +191,7 @@ export EPP_IMAGE=<the-epp-image-you-built>
 
 **Configuration**
 You can configure the plugin by setting environment vars in your [values-epp-aware.yaml].
-- Overwrite the `DYNAMO_NAMESPACE` env var if needed to match your model's dynamo namespace.
+- Overwrite the `DYN_NAMESPACE` env var if needed to match your model's dynamo namespace.
 - Set `DYNAMO_BUSY_THRESHOLD` to configure the upper bound on how “full” a worker can be (often derived from kv_active_blocks or other load metrics) before the router skips it. If the selected worker exceeds this value, routing falls back to the next best candidate. By default the value is negative meaning this is not enabled.
 - Set `DYNAMO_ROUTER_REPLICA_SYNC=true` to enable a background watcher to keep multiple router instances in sync (important if you run more than one KV router per component).
 - By default the Dynamo plugin uses KV routing. You can expose `DYNAMO_USE_KV_ROUTING=false`  in your [values-epp-aware.yaml] if you prefer to route in the round-robin fashion.

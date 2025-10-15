@@ -163,8 +163,6 @@ $ python -m dynamo.vllm --model Qwen/Qwen3-0.6B  \
 - **HTTP Queue**: Measures queuing time before processing begins (including prefill time)
 - **HTTP Queue ≤ Inflight** (HTTP queue is a subset of inflight time)
 
-¹ **TODO**: Implement the "actual" HTTP queue metric that tracks from request start until first token generation begins, rather than the current implementation that tracks until first token is received by the frontend
-
 ### Required Files
 
 The following configuration files should be present in this directory:
@@ -174,7 +172,7 @@ The following configuration files should be present in this directory:
 - [grafana_dashboards/grafana-dashboard-providers.yml](./grafana_dashboards/grafana-dashboard-providers.yml): Contains Grafana dashboard provider configuration
 - [grafana_dashboards/grafana-dynamo-dashboard.json](./grafana_dashboards/grafana-dynamo-dashboard.json): A general Dynamo Dashboard for both SW and HW metrics.
 - [grafana_dashboards/grafana-dcgm-metrics.json](./grafana_dashboards/grafana-dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
-- [grafana_dashboards/grafana-llm-metrics.json](./grafana_dashboards/grafana-llm-metrics.json): This file, which is being phased out, contains the Grafana dashboard configuration for LLM-specific metrics. It requires an additional `metrics` component to operate concurrently. A new version is under development.
+- [grafana_dashboards/grafana-kvbm-dashboard.json](./grafana_dashboards/grafana-kvbm-dashboard.json): Contains Grafana dashboard configuration for KVBM metrics
 
 ### Metric Name Constants
 
@@ -237,8 +235,6 @@ This centralized approach ensures all Dynamo components use consistent, valid Pr
    - DCGM Exporter: `http://localhost:9401/metrics`
 
 
-   - Start the [components/metrics](../../components/metrics/README.md) application to begin monitoring for metric events from dynamo workers and aggregating them on a Prometheus metrics endpoint: `http://localhost:9091/metrics`.
-   - Uncomment the appropriate lines in prometheus.yml to poll port 9091.
    - Start worker(s) that publishes KV Cache metrics: [lib/runtime/examples/service_metrics/README.md](../../lib/runtime/examples/service_metrics/README.md) can populate dummy KV Cache metrics.
 
 ### Configuration
@@ -275,7 +271,7 @@ Grafana is pre-configured with:
   docker compose logs grafana
   ```
 
-3. For issues with the legacy metrics component (being phased out), see [components/metrics/README.md](../../components/metrics/README.md) for details on the exposed metrics and troubleshooting steps.
+3. Check Prometheus targets at `http://localhost:9090/targets` to verify metric collection.
 
 ## Developer Guide
 
@@ -477,21 +473,6 @@ let requests_total = namespace.create_counter(
 )?;
 ```
 
-## Running the deprecated `components/metrics` program
-
-⚠️ **DEPRECATION NOTICE** ⚠️
-
-When you run the example [components/metrics](../../components/metrics/README.md) program, it exposes a Prometheus /metrics endpoint with the following metrics (defined in [components/metrics/src/lib.rs](../../components/metrics/src/lib.rs)):
-
-**⚠️ The following `llm_kv_*` metrics are deprecated:**
-
-- `llm_requests_active_slots`: Active request slots per worker
-- `llm_requests_total_slots`: Total available request slots per worker
-- `llm_kv_blocks_active`: Active KV blocks per worker
-- `llm_kv_blocks_total`: Total KV blocks available per worker
-- `llm_kv_hit_rate_percent`: KV Cache hit percent per worker
-- `llm_load_avg`: Average load across workers
-- `llm_load_std`: Load standard deviation across workers
 
 ## Troubleshooting
 
@@ -506,4 +487,4 @@ When you run the example [components/metrics](../../components/metrics/README.md
   docker compose logs grafana
   ```
 
-3. For issues with the legacy metrics component (being phased out), see [components/metrics/README.md](../../components/metrics/README.md) for details on the exposed metrics and troubleshooting steps.
+3. Check Prometheus targets at `http://localhost:9090/targets` to verify metric collection.

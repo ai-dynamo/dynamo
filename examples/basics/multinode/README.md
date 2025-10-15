@@ -88,7 +88,7 @@ Install Dynamo with [SGLang](https://docs.sglang.ai/) support:
 pip install ai-dynamo[sglang]
 ```
 
-For more information about the SGLang backend and its integration with Dynamo, see the [SGLang Backend Documentation](../../../components/backends/sglang/README.md).
+For more information about the SGLang backend and its integration with Dynamo, see the [SGLang Backend Documentation](../../../docs/backends/sglang/README.md).
 
 ### 3. Network Requirements
 

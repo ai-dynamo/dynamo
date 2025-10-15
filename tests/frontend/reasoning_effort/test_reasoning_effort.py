@@ -58,6 +58,8 @@ class GPTOSSWorkerProcess(ManagedProcess):
             "dynamo.vllm",
             "--model",
             REASONING_TEST_MODEL,
+            "--connector",
+            "none",  # skip nixl registration, noticing long startup times in CI. Potentially a bug...
             "--enforce-eager",
             "--dyn-tool-call-parser",
             "harmony",
@@ -85,7 +87,7 @@ class GPTOSSWorkerProcess(ManagedProcess):
                 ("http://localhost:8000/v1/models", check_models_api),
                 ("http://localhost:8083/health", self.is_ready),
             ],
-            timeout=300,
+            timeout=500,
             display_output=True,
             terminate_existing=False,
             stragglers=["VLLM::EngineCore"],

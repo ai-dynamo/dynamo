@@ -2004,7 +2004,7 @@ class DynamoFrameworkInfo(NodeInfo):
 
         Returns:
             List of framework component module names
-            Example: ['dynamo.frontend', 'dynamo.planner', 'dynamo.vllm', 'dynamo.sglang', 'dynamo.llama_cpp']
+            Example: ['dynamo.frontend', 'dynamo.planner', 'dynamo.vllm', 'dynamo.sglang']
 
         Note: Scans components/src/dynamo/... directory for modules with __init__.py files.
         """

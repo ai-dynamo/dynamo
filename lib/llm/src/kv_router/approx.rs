@@ -184,6 +184,8 @@ impl ApproxKvIndexer {
         let (match_tx, mut match_rx) = mpsc::channel::<MatchRequest>(2048);
         let (route_tx, mut route_rx) = mpsc::channel::<RouterResult>(2048);
         let (remove_worker_tx, mut remove_worker_rx) = mpsc::channel::<WorkerId>(16);
+        let (_get_workers_tx, mut get_workers_rx) =
+            mpsc::channel::<super::indexer::GetWorkersRequest>(16);
         let (dump_tx, mut dump_rx) = mpsc::channel::<DumpRequest>(16);
         let cancel_clone = token.clone();
         let task = std::thread::spawn(move || {
@@ -215,6 +217,11 @@ impl ApproxKvIndexer {
 
                         Some(worker) = remove_worker_rx.recv() => {
                             trie.remove_worker(worker);
+                        }
+
+                        Some(get_workers_req) = get_workers_rx.recv() => {
+                            let workers = trie.get_workers();
+                            let _ = get_workers_req.resp.send(workers);
                         }
 
                         Some(result) = route_rx.recv() => {

@@ -336,6 +336,15 @@ class PodProcess:
                 signal = "SIGINT"
             else:
                 signal = "SIGKILL"
+        # Python processes need signal handlers for graceful shutdown
+        if self.pid == 1 and signal == "SIGKILL" and "python" in self.command.lower():
+            logging.info(
+                f"PID 1 is a Python process ({self.command[:50]}...), "
+                "changing SIGKILL to SIGINT for graceful shutdown"
+            )
+            signal = "SIGINT"
+
+        logging.info("Killing PID %s with %s", self.pid, signal)
 
         return self._pod.exec(["kill", f"-{signal}", str(self.pid)])
 

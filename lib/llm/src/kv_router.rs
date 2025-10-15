@@ -294,6 +294,9 @@ impl KvRouter {
                 kv_indexer.remove_worker_sender(),
                 kv_router_config
                     .router_snapshot_threshold
+                    .map(|_| kv_indexer.get_workers_sender()),
+                kv_router_config
+                    .router_snapshot_threshold
                     .map(|_| kv_indexer.snapshot_event_sender()),
                 cancellation_token.clone(),
                 kv_router_config.router_snapshot_threshold,
@@ -472,7 +475,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
 
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-    chooser: Arc<KvRouter>,
+    pub chooser: Arc<KvRouter>,
 }
 
 impl KvPushRouter {
@@ -481,27 +484,6 @@ impl KvPushRouter {
         chooser: Arc<KvRouter>,
     ) -> Self {
         KvPushRouter { inner, chooser }
-    }
-
-    /// Find the best matching worker for the given tokens without updating states
-    pub async fn find_best_match(
-        &self,
-        tokens: &[u32],
-        router_config_override: Option<&RouterConfigOverride>,
-    ) -> Result<(i64, u32)> {
-        self.chooser
-            .find_best_match(None, tokens, router_config_override, false)
-            .await
-    }
-
-    /// Get potential prefill and decode loads for all workers
-    pub async fn get_potential_loads(&self, tokens: &[u32]) -> Result<Vec<PotentialLoad>> {
-        self.chooser.get_potential_loads(tokens).await
-    }
-
-    /// Dump all events from the KV router's indexer
-    pub async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
-        self.chooser.dump_events().await
     }
 }
 
@@ -587,17 +569,34 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
                 let stream_context = response_stream.context();
                 let chooser = self.chooser.clone();
+                let context_for_monitoring = stream_context.clone();
 
                 let wrapped_stream = Box::pin(async_stream::stream! {
-                    if let Some(first_item) = response_stream.next().await {
-                        if let Err(e) = chooser.mark_prefill_completed(&context_id).await {
-                            tracing::warn!("Failed to mark prefill completed for request {context_id}: {e:?}");
-                        }
-                        yield first_item;
-                    }
+                    let mut prefill_marked = false;
 
-                    while let Some(item) = response_stream.next().await {
-                        yield item;
+                    loop {
+                        tokio::select! {
+                            biased;
+
+                            _ = context_for_monitoring.stopped() => {
+                                tracing::debug!("Request {context_id} cancelled, ending stream");
+                                break;
+                            }
+
+                            item = response_stream.next() => {
+                                let Some(item) = item else {
+                                    break;
+                                };
+
+                                if !prefill_marked {
+                                    if let Err(e) = chooser.mark_prefill_completed(&context_id).await {
+                                        tracing::warn!("Failed to mark prefill completed for request {context_id}: {e:?}");
+                                    }
+                                    prefill_marked = true;
+                                }
+                                yield item;
+                            }
+                        }
                     }
 
                     if let Err(e) = chooser.free(&context_id).await {
