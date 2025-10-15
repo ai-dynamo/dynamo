@@ -194,14 +194,35 @@ class DecodeHandler(HandlerBase):
         """
         Send request to prefill. Try router first if available, fallback to direct worker.
         """
+        # Check if any prefill workers are available
+        has_router_instances = (
+            self.next_router_client is not None
+            and self.next_router_client.instance_ids()
+        )
+        has_worker_instances = (
+            self.next_client is not None and self.next_client.instance_ids()
+        )
+
+        if not has_router_instances and not has_worker_instances:
+            # No prefill workers found - provide helpful error message
+            logging.error(
+                f"No prefill worker instances found for request {context.id()}. "
+                "In disaggregated TensorRT-LLM mode, ensure:\n"
+                "1. Prefill workers are running with --is-prefill-worker flag\n"
+                "2. Prefill workers can connect to ETCD (check ETCD_ENDPOINT environment variable)\n"
+                "3. Network connectivity exists between decode and prefill workers\n"
+                "4. Prefill workers started successfully without errors"
+            )
+            raise RuntimeError(
+                "No prefill worker instances available for TensorRT-LLM disaggregated mode. "
+                "Check that prefill workers are running with --is-prefill-worker flag and can connect to ETCD."
+            )
+
         # Format request in PreprocessedRequest format with extra_args
         prefill_request = copy.deepcopy(request)
 
         # Try router first if available, fallback to worker
-        if (
-            self.next_router_client is not None
-            and self.next_router_client.instance_ids()
-        ):
+        if has_router_instances:
             try:
                 # Call router's generate endpoint which returns LLMEngineOutput
                 async for res in await self.next_router_client.generate(
@@ -210,16 +231,44 @@ class DecodeHandler(HandlerBase):
                     yield res
                 return
             except Exception as e:
-                logging.warning(
-                    f"Prefill router call failed: {e}. Falling back to direct worker."
-                )
+                error_str = str(e)
+                if "no instances found" in error_str and "prefill" in error_str.lower():
+                    logging.error(
+                        f"Failed to connect to prefill router for request {context.id()}. "
+                        "This indicates prefill workers are not available. "
+                        "In disaggregated TensorRT-LLM mode, ensure:\n"
+                        "1. Prefill workers are running with --is-prefill-worker flag\n"
+                        "2. Prefill workers can connect to ETCD (check ETCD_ENDPOINT environment variable)\n"
+                        "3. Network connectivity exists between decode and prefill workers\n"
+                        "4. Prefill workers started successfully without errors\n"
+                        f"Original error: {e}"
+                    )
+                else:
+                    logging.warning(
+                        f"Prefill router call failed: {e}. Falling back to direct worker."
+                    )
 
         # Fallback to direct worker
-        if self.next_client is not None:
-            async for res in await self.next_client.round_robin(
-                prefill_request, context=context
-            ):
-                yield res
+        if has_worker_instances:
+            try:
+                async for res in await self.next_client.round_robin(
+                    prefill_request, context=context
+                ):
+                    yield res
+            except Exception as e:
+                error_str = str(e)
+                if "no instances found" in error_str and "prefill" in error_str.lower():
+                    logging.error(
+                        f"Failed to connect to prefill workers for request {context.id()}. "
+                        "This indicates prefill workers are not available. "
+                        "In disaggregated TensorRT-LLM mode, ensure:\n"
+                        "1. Prefill workers are running with --is-prefill-worker flag\n"
+                        "2. Prefill workers can connect to ETCD (check ETCD_ENDPOINT environment variable)\n"
+                        "3. Network connectivity exists between decode and prefill workers\n"
+                        "4. Prefill workers started successfully without errors\n"
+                        f"Original error: {e}"
+                    )
+                raise
         else:
             raise ValueError("No prefill router or worker available")
 

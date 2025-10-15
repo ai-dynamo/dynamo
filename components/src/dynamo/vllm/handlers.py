@@ -152,6 +152,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             self.prefill_worker_client is not None
         ) and self.prefill_worker_client.instance_ids()
 
+        if not can_prefill and self.prefill_worker_client is not None:
+            # Prefill worker client exists but no instances are available
+            logger.warning(
+                "No prefill worker instances found. In disaggregated mode, ensure prefill workers are running with "
+                "--is-prefill-worker flag and can connect to ETCD. Check ETCD connectivity and verify prefill "
+                "workers are registered at endpoint: %s",
+                self.prefill_worker_client.endpoint.etcd_root()
+                if hasattr(self.prefill_worker_client, "endpoint")
+                else "unknown",
+            )
+
         if can_prefill:
             # Create prefill sampling params with modifications
             prefill_sampling_params = deepcopy(sampling_params)
@@ -209,7 +220,22 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if context.is_stopped() or context.is_killed():
                     logger.debug(f"Aborted Remote Prefill Request ID: {request_id}")
                     return
-                logger.warning(f"Prefill error: {e}, falling back to local prefill")
+
+                # Check if this is the "no instances found" error for prefill workers
+                error_str = str(e)
+                if "no instances found" in error_str and "prefill" in error_str.lower():
+                    logger.error(
+                        f"Failed to find prefill workers for request {request_id}. "
+                        "This indicates that no prefill workers are available. "
+                        "In disaggregated mode, ensure:\n"
+                        "1. Prefill workers are running with --is-prefill-worker flag\n"
+                        "2. Prefill workers can connect to ETCD (check ETCD_ENDPOINT environment variable)\n"
+                        "3. Network connectivity exists between decode and prefill workers\n"
+                        "4. Prefill workers started successfully without errors\n"
+                        f"Original error: {e}"
+                    )
+                else:
+                    logger.warning(f"Prefill error: {e}, falling back to local prefill")
 
         async with self._abort_monitor(context, request_id):
             try:

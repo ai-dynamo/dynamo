@@ -9,7 +9,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 import sglang as sgl
 
 from dynamo._core import Client, Component, Context
-from dynamo.sglang.args import Config, DisaggregationMode
+from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import DisaggPreprocessedRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -47,13 +47,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             publisher,
             prefill_client,
         )
-        if self.serving_mode == DisaggregationMode.DECODE:
-            if self.prefill_client is None:
-                raise ValueError(
-                    "prefill_client must be provided when serving_mode is decode"
-                )
-            self.prefill_client = prefill_client
-            logging.info("Decode worker handler initialized")
+        # In decode mode, prefill_client is required
+        if self.serving_mode.name == "DECODE" and self.prefill_client is None:
+            raise ValueError(
+                "prefill_client must be provided for decode worker handler"
+            )
+        self.prefill_client = prefill_client
 
         self.prefill_router_client = prefill_router_client
         logging.info("Worker handler initialized")
@@ -109,18 +108,48 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             Response dicts with token_ids or OpenAI-formatted chunks.
 
         Raises:
-            RuntimeError: If no bootstrap info received from prefill worker.
+            RuntimeError: If no bootstrap info received from prefill worker in decode mode.
         """
         logging.debug(f"New Request ID: {context.id()}")
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
 
-        if self.serving_mode == DisaggregationMode.DECODE:
-            # request the bootstrap info from the target prefill worker
-            if (
-                self.prefill_router_client is not None
-                and self.prefill_router_client.instance_ids()
-            ):
+        # Handle aggregated mode directly
+        if self.serving_mode.name != "DECODE":
+            agg = await self.engine.async_generate(
+                **input_param,
+                sampling_params=sampling_params,
+                stream=True,
+            )
+
+            if self.skip_tokenizer_init:
+                async for out in self._process_token_stream(agg, context):
+                    yield out
+            else:
+                async for out in self._process_text_stream(agg, context):
+                    yield out
+            return
+
+        # Handle decode mode - check if prefill workers are available
+        has_prefill_router = (
+            self.prefill_router_client is not None
+            and self.prefill_router_client.instance_ids()
+        )
+        has_prefill_client = (
+            self.prefill_client is not None and self.prefill_client.instance_ids()
+        )
+
+        if not has_prefill_router and not has_prefill_client:
+            error_msg = (
+                f"No prefill worker instances found for request {context.id()}. "
+                "Check prefill workers are running with --is-prefill-worker flag and connected to ETCD."
+            )
+            logging.error(error_msg)
+            raise RuntimeError(error_msg)
+
+        # request the bootstrap info from the target prefill worker
+        try:
+            if has_prefill_router:
                 token_ids = request["token_ids"]
                 stream = await self.prefill_router_client.generate(token_ids)
                 result = await anext(stream)
@@ -154,33 +183,31 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             if not bootstrap_info:
                 raise RuntimeError("No bootstrap info received from prefill worker")
 
-            decode = await self.engine.async_generate(
-                **input_param,
-                sampling_params=sampling_params,
-                stream=True,
-                bootstrap_host=bootstrap_info["bootstrap_host"],
-                bootstrap_port=bootstrap_info["bootstrap_port"],
-                bootstrap_room=bootstrap_info["bootstrap_room"],
-            )
+        except Exception as e:
+            error_str = str(e)
+            if "no instances found" in error_str and "prefill" in error_str.lower():
+                error_msg = (
+                    f"Failed to connect to prefill workers for request {context.id()}. "
+                    "Check prefill workers are running with --is-prefill-worker flag and connected to ETCD."
+                )
+                logging.error(error_msg)
+            raise
 
-            if self.skip_tokenizer_init:
-                async for out in self._process_token_stream(decode, context):
-                    yield out
-            else:
-                async for out in self._process_text_stream(decode, context):
-                    yield out
+        decode = await self.engine.async_generate(
+            **input_param,
+            sampling_params=sampling_params,
+            stream=True,
+            bootstrap_host=bootstrap_info["bootstrap_host"],
+            bootstrap_port=bootstrap_info["bootstrap_port"],
+            bootstrap_room=bootstrap_info["bootstrap_room"],
+        )
+
+        if self.skip_tokenizer_init:
+            async for out in self._process_token_stream(decode, context):
+                yield out
         else:
-            agg = await self.engine.async_generate(
-                **input_param,
-                sampling_params=sampling_params,
-                stream=True,
-            )
-            if self.skip_tokenizer_init:
-                async for out in self._process_token_stream(agg, context):
-                    yield out
-            else:
-                async for out in self._process_text_stream(agg, context):
-                    yield out
+            async for out in self._process_text_stream(decode, context):
+                yield out
 
     async def _process_token_stream(
         self,
