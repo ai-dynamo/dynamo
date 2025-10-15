@@ -458,101 +458,75 @@ jobs:
         set -euo pipefail
         export KUBECONFIG="${PWD}/${KUBECONFIG_PATH}"
 
-        echo "Finding frontend pod..."
-        FRONTEND_POD=$(kubectl get pods -n "${NAMESPACE}" -l app=frontend --no-headers | sort -k1 | tail -n1 | awk '{print $1}')
+        # Debug: Show final pod statuses for the deployment
+        echo "=== FINAL POD STATUSES ==="
+        kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n $NAMESPACE -o wide
+        echo ""
 
-        if [ -z "${FRONTEND_POD}" ]; then
-          echo "ERROR: Frontend pod not found"
-          kubectl get pods -n "${NAMESPACE}"
-          exit 1
-        fi
-
-        echo "Frontend pod: ${FRONTEND_POD}"
-
-        CONTAINER_PORT=$(kubectl get pod "${FRONTEND_POD}" -n "${NAMESPACE}" \
-          -o jsonpath='{.spec.containers[0].ports[?(@.name=="http")].containerPort}')
-        echo "Container port: ${CONTAINER_PORT}"
-
-        echo "Setting up port forwarding..."
-        kubectl port-forward "pod/${FRONTEND_POD}" "8000:${CONTAINER_PORT}" -n "${NAMESPACE}" &
-        PORT_FORWARD_PID=$!
-
-        sleep "${PORT_FORWARD_WAIT}"
-
-        LLM_URL="http://localhost:8000"
+        kubectl get all -n $NAMESPACE
+        export FRONTEND_POD=$(kubectl get pods -n ${NAMESPACE} | grep "frontend" | sort -k1 | tail -n1 | awk '{print $1}')
+        export CONTAINER_PORT=$(kubectl get pod $FRONTEND_POD -n ${NAMESPACE} -o jsonpath='{.spec.containers[0].ports[?(@.name=="http")].containerPort}')
+        echo "Container port is ${CONTAINER_PORT}"
+        kubectl port-forward pod/$FRONTEND_POD 8000:${CONTAINER_PORT} -n ${NAMESPACE} &
+        export LLM_URL="http://localhost:8000"
+        sleep 10  # Give port-forward time to establish the connection
         echo "LLM URL: ${LLM_URL}"
-        echo "Model Name: ${MODEL_NAME}"
-
-        # Wait for model to be available
-        echo "Waiting for model ${MODEL_NAME} to be available..."
+        echo "MODEL NAME: ${MODEL_NAME}"
+        # Wait until the model is available in the /v1/models response
+        MAX_ATTEMPTS=30
         ATTEMPT=1
-        while [ ${ATTEMPT} -le ${MODEL_WAIT_MAX_ATTEMPTS} ]; do
-          MODELS_RESPONSE=$(curl -s --retry 5 --retry-delay 2 --retry-connrefused "${LLM_URL}/v1/models" || echo "{}")
-
-          if echo "${MODELS_RESPONSE}" | jq -e --arg MODEL_NAME "${MODEL_NAME}" '.data[]?.id == $MODEL_NAME' >/dev/null 2>&1; then
-            echo "✓ Model ${MODEL_NAME} is available"
+        while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+          MODELS_RESPONSE=$(curl -s --retry 5 --retry-delay 2 --retry-connrefused "${LLM_URL}/v1/models")
+          if echo "$MODELS_RESPONSE" | jq -e --arg MODEL_NAME "$MODEL_NAME" '.data[]?.id == $MODEL_NAME' >/dev/null 2>&1; then
+            echo "Model $MODEL_NAME is available in /v1/models"
             break
           fi
-
-          echo "Waiting for model ${MODEL_NAME}... (attempt ${ATTEMPT}/${MODEL_WAIT_MAX_ATTEMPTS})"
-          sleep "${MODEL_WAIT_INTERVAL}"
+          echo "Waiting for model $MODEL_NAME to be available in /v1/models... (attempt $ATTEMPT/$MAX_ATTEMPTS)"
+          sleep 5
           ATTEMPT=$((ATTEMPT + 1))
         done
-
-        if [ ${ATTEMPT} -gt ${MODEL_WAIT_MAX_ATTEMPTS} ]; then
-          echo "ERROR: Model ${MODEL_NAME} not found after ${MODEL_WAIT_MAX_ATTEMPTS} attempts"
-          echo "Last response: ${MODELS_RESPONSE}"
-          kill ${PORT_FORWARD_PID} 2>/dev/null || true
+        if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+          echo "Model $MODEL_NAME not found in /v1/models after $MAX_ATTEMPTS attempts"
+          echo "Last response: $MODELS_RESPONSE"
           exit 1
         fi
-
-        # Test inference
-        echo "Testing inference..."
-        RESPONSE=$(curl -s -N --no-buffer --retry 10 --retry-delay 5 --retry-connrefused \
-          -X POST "${LLM_URL}/v1/chat/completions" \
+        RESPONSE=$(curl -s -N --no-buffer --retry 10 --retry-delay 5 --retry-connrefused -X POST "${LLM_URL}/v1/chat/completions" \
           -H 'accept: text/event-stream' \
           -H 'Content-Type: application/json' \
           -d '{
             "model": "'"${MODEL_NAME:-Qwen/Qwen3-0.6B}"'",
-            "messages": [{
-              "role": "user",
-              "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
-            }],
-            "stream": false,
+            "messages": [
+            {
+                "role": "user",
+                "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
+            }
+            ],
+            "stream":false,
             "max_tokens": 30,
             "temperature": 0.0
           }' 2>&1)
-
-        # Cleanup port forward
-        kill ${PORT_FORWARD_PID} 2>/dev/null || true
-
-        echo "=== Response ==="
-        echo "${RESPONSE}"
-        echo "================"
-
-        # Validate response
+        echo "Response: $RESPONSE"
         TEST_RESULT=0
-
-        if ! echo "${RESPONSE}" | jq -e . >/dev/null 2>&1; then
-          echo "✗ Test failed: Response is not valid JSON"
+        if ! echo "$RESPONSE" | jq -e . >/dev/null 2>&1; then
+          echo "Test failed: Response is not valid JSON"
+          echo "Got: $RESPONSE"
           TEST_RESULT=1
-        elif ! echo "${RESPONSE}" | jq -e '.choices[0].message.role == "assistant"' >/dev/null 2>&1; then
-          echo "✗ Test failed: Message role is not 'assistant'"
-          echo "Got: $(echo "${RESPONSE}" | jq -r '.choices[0].message.role')"
+        elif ! echo "$RESPONSE" | jq -e '.choices[0].message.role == "assistant"' >/dev/null 2>&1; then
+          echo "Test failed: Message role is not 'assistant'"
+          echo "Got: $(echo "$RESPONSE" | jq '.choices[0].message.role')"
           TEST_RESULT=1
-        elif ! echo "${RESPONSE}" | jq -e '.model == "'"${MODEL_NAME}"'"' >/dev/null 2>&1; then
-          echo "✗ Test failed: Model name is incorrect"
-          echo "Got: $(echo "${RESPONSE}" | jq -r '.model')"
+        elif ! echo "$RESPONSE" | jq -e '.model == "'"${MODEL_NAME}"'"' >/dev/null 2>&1; then
+          echo "Test failed: Model name is incorrect"
+          echo "Got: $(echo "$RESPONSE" | jq '.model')"
           TEST_RESULT=1
-        elif ! echo "${RESPONSE}" | jq -e '.choices[0].message.content | length > 100' >/dev/null 2>&1; then
-          echo "✗ Test failed: Response content length is not greater than 100 characters"
-          echo "Got length: $(echo "${RESPONSE}" | jq -r '.choices[0].message.content | length')"
+        elif ! echo "$RESPONSE" | jq -e '.choices[0].message.content | length > 100' >/dev/null 2>&1; then
+          echo "Test failed: Response content length is not greater than 100 characters"
+          echo "Got length: $(echo "$RESPONSE" | jq '.choices[0].message.content | length')"
           TEST_RESULT=1
         else
-          echo "✓ All tests passed: Response matches expected format and content"
+          echo "Test passed: Response matches expected format and content"
         fi
-
-        exit ${TEST_RESULT}
+        exit $TEST_RESULT
 
     - name: Cleanup
       if: always()
