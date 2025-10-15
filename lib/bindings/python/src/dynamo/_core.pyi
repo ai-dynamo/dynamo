@@ -1248,6 +1248,30 @@ class KvPushRouter:
         """
         ...
 
+    async def best_worker(
+        self,
+        token_ids: List[int],
+        router_config_override: Optional[JsonLike] = None,
+        request_id: Optional[str] = None,
+    ) -> Tuple[int, int, int]:
+        """
+        Find the best matching worker for the given tokens.
+
+        Args:
+            token_ids: List of token IDs to find matches for
+            router_config_override: Optional router configuration override
+            request_id: Optional request ID. If provided, router states will be updated
+                       to track this request (active blocks, lifecycle events). If not
+                       provided, this is a query-only operation that doesn't affect state.
+
+        Returns:
+            A tuple of (worker_id, dp_rank, overlap_blocks) where:
+                - worker_id: The ID of the best matching worker
+                - dp_rank: The data parallel rank of the selected worker
+                - overlap_blocks: The number of overlapping blocks found
+        """
+        ...
+
     async def best_worker_id(
         self,
         token_ids: List[int],
@@ -1255,6 +1279,8 @@ class KvPushRouter:
         request_id: Optional[str] = None,
     ) -> Tuple[int, int]:
         """
+        [DEPRECATED] Use best_worker() instead which returns (worker_id, dp_rank, overlap_blocks).
+
         Find the best matching worker for the given tokens.
 
         Args:
@@ -1268,6 +1294,9 @@ class KvPushRouter:
             A tuple of (worker_id, overlap_blocks) where:
                 - worker_id: The ID of the best matching worker
                 - overlap_blocks: The number of overlapping blocks found
+
+        .. deprecated::
+            Use :meth:`best_worker` instead which also returns dp_rank.
         """
         ...
 
@@ -1284,8 +1313,13 @@ class KvPushRouter:
         Returns:
             A list of dictionaries, each containing:
                 - worker_id: The worker ID
+                - dp_rank: The data parallel rank
                 - potential_prefill_tokens: Number of tokens that would need prefill
                 - potential_decode_blocks: Number of blocks currently in decode phase
+
+        Note:
+            Each (worker_id, dp_rank) pair is returned as a separate entry.
+            If you need aggregated loads per worker_id, sum the values manually.
         """
         ...
 
@@ -1311,7 +1345,7 @@ class KvPushRouter:
         Note:
             This is typically called automatically by the router when using the
             `generate()` method. Only call this manually if you're using
-            `best_worker_id()` with `request_id` for custom routing.
+            `best_worker()` with `request_id` for custom routing.
         """
         ...
 
@@ -1328,7 +1362,7 @@ class KvPushRouter:
         Note:
             This is typically called automatically by the router when using the
             `generate()` method. Only call this manually if you're using
-            `best_worker_id()` with `request_id` for custom routing.
+            `best_worker()` with `request_id` for custom routing.
         """
         ...
 

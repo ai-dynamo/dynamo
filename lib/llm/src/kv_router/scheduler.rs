@@ -34,7 +34,8 @@ pub struct KVHitRateEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PotentialLoad {
-    pub worker: WorkerWithDpRank,
+    pub worker_id: WorkerId,
+    pub dp_rank: DpRank,
     pub potential_prefill_tokens: usize,
     pub potential_decode_blocks: usize,
 }
@@ -370,7 +371,8 @@ impl KvScheduler {
         let mut loads = Vec::new();
         for worker in workers {
             loads.push(PotentialLoad {
-                worker,
+                worker_id: worker.worker_id,
+                dp_rank: worker.dp_rank,
                 potential_prefill_tokens: prefill_tokens
                     .get(&worker)
                     .copied()

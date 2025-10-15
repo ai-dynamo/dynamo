@@ -1074,7 +1074,7 @@ impl KvPushRouter {
     }
 
     #[pyo3(signature = (token_ids, router_config_override=None, request_id=None))]
-    fn best_worker_id<'p>(
+    fn best_worker<'p>(
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
@@ -1105,9 +1105,54 @@ impl KvPushRouter {
                 .await
                 .map_err(to_pyerr)?;
 
-            // TODO: We do not return dp_rank for now to not break API expectations.
-            // Need to work on this shortly - should return (worker_id, dp_rank, overlap_blocks)
-            // or a dict to maintain backward compatibility while adding dp_rank.
+            Ok((best_worker.worker_id, best_worker.dp_rank, overlap_blocks))
+        })
+    }
+
+    /// Deprecated: Use `best_worker()` instead which returns (worker_id, dp_rank, overlap_blocks)
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None))]
+    fn best_worker_id<'p>(
+        &self,
+        py: Python<'p>,
+        token_ids: Vec<u32>,
+        router_config_override: Option<PyObject>,
+        request_id: Option<String>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        // Issue deprecation warning
+        let warnings = py.import("warnings")?;
+        warnings.call_method1(
+            "warn",
+            (
+                "best_worker_id() is deprecated. Use best_worker() instead which returns (worker_id, dp_rank, overlap_blocks)",
+                py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
+            ),
+        )?;
+
+        let router_config_override = if let Some(obj) = router_config_override {
+            Python::with_gil(|py| {
+                let override_config: llm_rs::kv_router::RouterConfigOverride =
+                    depythonize(obj.bind(py)).map_err(to_pyerr)?;
+                Ok::<_, PyErr>(Some(override_config))
+            })?
+        } else {
+            None
+        };
+
+        let chooser = self.inner.chooser.clone();
+        let update_states = request_id.is_some();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let (best_worker, overlap_blocks) = chooser
+                .find_best_match(
+                    request_id.as_deref(),
+                    &token_ids,
+                    router_config_override.as_ref(),
+                    update_states,
+                )
+                .await
+                .map_err(to_pyerr)?;
+
+            // Return only worker_id and overlap_blocks for backward compatibility
             Ok((best_worker.worker_id, overlap_blocks))
         })
     }
@@ -1152,24 +1197,10 @@ impl KvPushRouter {
                 .await
                 .map_err(to_pyerr)?;
 
-            // Aggregate loads over dp_ranks - sum up loads for the same worker_id
-            let mut aggregated: HashMap<i64, llm_rs::kv_router::scheduler::PotentialLoad> =
-                HashMap::new();
-            for load in loads {
-                aggregated
-                    .entry(load.worker.worker_id)
-                    .and_modify(|e| {
-                        e.potential_prefill_tokens += load.potential_prefill_tokens;
-                        e.potential_decode_blocks += load.potential_decode_blocks;
-                    })
-                    .or_insert(load);
-            }
-
-            let aggregated_loads: Vec<_> = aggregated.into_values().collect();
-
+            // Return loads without aggregation - each (worker_id, dp_rank) pair is a separate entry
             // Use pythonize to convert Vec<PotentialLoad> to Python list of dicts
             Python::with_gil(|py| {
-                pythonize(py, &aggregated_loads)
+                pythonize(py, &loads)
                     .map(|obj| obj.unbind())
                     .map_err(to_pyerr)
             })
