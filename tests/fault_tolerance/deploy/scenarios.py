@@ -288,13 +288,6 @@ def _create_backend_failures(backend, deploy_type="disagg"):
         failures["sglang_prefill_detokenizer"] = [
             Failure(30, prefill_worker, "sglang::detokenizer", "SIGKILL")
         ]
-    elif backend == "trtllm":
-        failures["trtllm_decode_engine_core"] = [
-            Failure(30, decode_worker, "TRTLLM::EngineCore", "SIGKILL")
-        ]
-        failures["trtllm_prefill_engine_core"] = [
-            Failure(30, prefill_worker, "TRTLLM::EngineCore", "SIGKILL")
-        ]
 
     return failures
 
