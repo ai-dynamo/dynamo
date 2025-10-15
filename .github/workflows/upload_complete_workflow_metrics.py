@@ -321,9 +321,18 @@ class WorkflowMetricsUploader:
         if not self.repo or not self.run_id:
             raise ValueError("Missing required GitHub environment variables")
 
-        print(
-            f"Uploading metrics for workflow '{self.workflow_name}' (run {self.run_id}) in {self.repo}"
-        )
+        print("=" * 80)
+        print("📊 WORKFLOW METRICS UPLOAD - INITIALIZATION")
+        print("=" * 80)
+        print(f"Repository: {self.repo}")
+        print(f"Run ID: {self.run_id}")
+        print(f"Workflow Name: {self.workflow_name}")
+        print(f"Actor: {self.actor}")
+        print(f"Event: {self.event_name}")
+        print(f"Ref: {self.ref}")
+        print(f"Ref Name: {self.ref_name}")
+        print(f"SHA: {self.sha}")
+        print("=" * 80)
 
     def handle_upload_error(self, error: Exception, operation: str) -> str:
         """Centralized error handling with URL masking for all upload operations
@@ -476,9 +485,21 @@ class WorkflowMetricsUploader:
 
             # Count jobs to process (exclude specified jobs)
             workflow_name = workflow_data.get("name", "")
+            
+            # Log all jobs found by GitHub API
+            all_jobs = jobs_data.get("jobs", [])
+            print(f"📋 Found {len(all_jobs)} total jobs from GitHub API:")
+            for job in all_jobs:
+                job_name = job.get("name", "")
+                job_status = job.get("status", "")
+                job_conclusion = job.get("conclusion", "N/A")
+                is_excluded = should_exclude_job(job_name, EXCLUDED_JOB_NAMES)
+                status_marker = "⏭️ EXCLUDED" if is_excluded else "✓ INCLUDED"
+                print(f"   {status_marker}: '{job_name}' (status: {job_status}, conclusion: {job_conclusion})")
+            
             jobs_to_process = [
                 job
-                for job in jobs_data.get("jobs", [])
+                for job in all_jobs
                 if not should_exclude_job(job.get("name", ""), EXCLUDED_JOB_NAMES)
             ]
 
@@ -487,11 +508,11 @@ class WorkflowMetricsUploader:
                     f"❌ No jobs to process after excluding jobs: {EXCLUDED_JOB_NAMES}"
                 )
                 print(
-                    f"   Available jobs: {[job.get('name') for job in jobs_data.get('jobs', [])]}"
+                    f"   Available jobs: {[job.get('name') for job in all_jobs]}"
                 )
                 return
 
-            print("✅ Processing workflow metrics - proceeding with upload")
+            print(f"\n✅ Processing workflow metrics - proceeding with upload")
             print(f"   Workflow: '{workflow_name}'")
             print(
                 f"   Jobs to process: {len(jobs_to_process)} (excluding {EXCLUDED_JOB_NAMES})"
@@ -529,13 +550,17 @@ class WorkflowMetricsUploader:
 
         # Upload all job and step metrics
         try:
-            print(f"Processing {len(jobs_data['jobs'])} jobs and their steps...")
+            total_jobs = len(jobs_data.get('jobs', []))
+            print(f"\n📊 Starting to process {total_jobs} jobs and their steps...")
             jobs_processed, steps_processed = self._upload_all_job_and_step_metrics(
                 jobs_data
             )
             print(
-                f"Successfully uploaded {jobs_processed} job metrics and {steps_processed} step metrics"
+                f"\n✅ Successfully uploaded {jobs_processed} job metrics and {steps_processed} step metrics"
             )
+            if jobs_processed < total_jobs:
+                excluded_count = total_jobs - jobs_processed
+                print(f"   ℹ️  Note: {excluded_count} job(s) were excluded (likely the metrics upload job itself)")
         except Exception as e:
             sanitized_error = self.handle_upload_error(e, "job/step metrics upload")
             print(sanitized_error)
