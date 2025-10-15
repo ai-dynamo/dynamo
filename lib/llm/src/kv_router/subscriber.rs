@@ -47,12 +47,12 @@ impl SnapshotResources {
         remove_worker_tx: &mpsc::Sender<WorkerId>,
     ) -> anyhow::Result<()> {
         // Try to acquire write lock (non-blocking)
-        if !self.rwlock.try_write_lock(etcd_client).await {
+        let Some(_write_guard) = self.rwlock.try_write_lock(etcd_client).await else {
             tracing::debug!(
                 "Could not acquire write lock for snapshot (readers active or lock held)"
             );
             anyhow::bail!("Write lock unavailable");
-        }
+        };
         // Purge before snapshot ensures new/warm-restarted routers won't replay already-acknowledged messages.
         // Since KV events are idempotent, this ordering reduces unnecessary reprocessing while maintaining
         // at-least-once delivery guarantees. The snapshot will capture the clean state after purge.
@@ -134,9 +134,6 @@ impl SnapshotResources {
             start_time.elapsed().as_millis()
         );
 
-        // Release write lock
-        self.rwlock.unlock_write(etcd_client).await;
-
         Ok(())
     }
 }
@@ -206,7 +203,7 @@ pub async fn start_kv_router_background(
         ))?;
 
         // Acquire read lock with default timeout
-        if let Ok(()) = snapshot_rwlock
+        if let Ok(_read_guard) = snapshot_rwlock
             .read_lock_with_wait(&etcd_client, &consumer_uuid, None)
             .await
         {
@@ -236,11 +233,6 @@ pub async fn start_kv_router_background(
                     );
                 }
             }
-
-            // Release read lock
-            snapshot_rwlock
-                .unlock_read(&etcd_client, &consumer_uuid)
-                .await;
         } else {
             tracing::warn!("Could not acquire read lock for snapshot download (timeout or error)");
         }
@@ -255,6 +247,7 @@ pub async fn start_kv_router_background(
         .await?
         .dissolve();
     let cleanup_lock_name = format!("{}/{}", ROUTER_CLEANUP_LOCK, component.subject());
+    let cleanup_rwlock = DistributedRWLock::new(cleanup_lock_name.clone());
 
     // Get the generate endpoint and watch for instance deletions
     let generate_endpoint = component.endpoint("generate");
@@ -425,35 +418,26 @@ pub async fn start_kv_router_background(
 
                     tracing::info!("Attempting to delete orphaned consumer: {}", consumer_to_delete);
 
-                    // Try to acquire cleanup lock before deleting consumer
-                    match etcd_client
-                        .lock(cleanup_lock_name.clone(), Some(etcd_client.lease_id()))
-                        .await
-                    {
-                        Ok(lock_response) => {
-                            tracing::debug!(
-                                "Acquired cleanup lock for deleting consumer: {}",
-                                consumer_to_delete
-                            );
+                    // Try to acquire cleanup write lock (non-blocking) before deleting consumer
+                    if let Some(_cleanup_guard) = cleanup_rwlock.try_write_lock(&etcd_client).await {
+                        tracing::debug!(
+                            "Acquired cleanup lock for deleting consumer: {}",
+                            consumer_to_delete
+                        );
 
-                            // Delete the consumer
-                            if let Err(e) = nats_queue.shutdown(Some(consumer_to_delete.clone())).await {
-                                tracing::warn!("Failed to delete consumer {}: {}", consumer_to_delete, e);
-                            } else {
-                                tracing::info!("Successfully deleted orphaned consumer: {}", consumer_to_delete);
-                            }
+                        // Delete the consumer
+                        if let Err(e) = nats_queue.shutdown(Some(consumer_to_delete.clone())).await {
+                            tracing::warn!("Failed to delete consumer {}: {}", consumer_to_delete, e);
+                        } else {
+                            tracing::info!("Successfully deleted orphaned consumer: {}", consumer_to_delete);
+                        }
 
-                            // Release the lock
-                            if let Err(e) = etcd_client.unlock(lock_response.key()).await {
-                                tracing::warn!("Failed to release cleanup lock: {e:?}");
-                            }
-                        }
-                        Err(e) => {
-                            tracing::debug!(
-                                "Could not acquire cleanup lock for consumer {}: {e:?}",
-                                consumer_to_delete
-                            );
-                        }
+                        // Cleanup lock is automatically released when _cleanup_guard goes out of scope
+                    } else {
+                        tracing::debug!(
+                            "Could not acquire cleanup lock for consumer {}",
+                            consumer_to_delete
+                        );
                     }
                 }
             }
