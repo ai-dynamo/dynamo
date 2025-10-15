@@ -31,7 +31,7 @@ Conventional systems either lack dynamic feedback mechanisms or require deep int
 
 ## Benefits of KV Cache offloading
 
-With KV Cache offloading, inference service providers can support models with longer context windows without limiting prompt size. Offloading reduces GPU memory usage, allowing clusters to handle more users at the same time and improving overall concurrency. This lowers infrastructure costs by reducing the need for additional GPUs, which can be passed on to end users as discounts for prompts that include cached input tokens. KV Cache offloading also avoids expensive KV Cache recomputation, resulting in faster response times and a better user experience. In the end, providers benefit from higher throughput and lower cost per token, making their inference services more scalable and efficient.
+KV Cache offloading avoids expensive KV Cache recomputation, resulting in faster response times and a better user experience. In the end, providers benefit from higher throughput and lower cost per token, making their inference services more scalable and efficient.
 
 ## When to offload KV Cache for reuse
 
