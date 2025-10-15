@@ -433,7 +433,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `configMapRef` _[ConfigMapKeySelector](#configmapkeyselector)_ | ConfigMapRef is a reference to a ConfigMap containing the profiling configuration.<br />The ConfigMap should contain a key (default: "disagg.yaml") with the configuration file.<br />This is only used for online profiling. |  | Optional: {} <br /> |
+| `configMapRef` _[ConfigMapKeySelector](#configmapkeyselector)_ | ConfigMapRef is a reference to a ConfigMap containing the profiling configuration.<br />The ConfigMap should contain a key (default: "disagg.yaml") with the configuration file.<br />Can be used for both online and offline (AIC) profiling. |  | Optional: {} <br /> |
 
 
 #### SLASpec
