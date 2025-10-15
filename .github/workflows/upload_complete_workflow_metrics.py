@@ -73,6 +73,8 @@ FIELD_TEST_NAME = "s_test_name"  # Test name (e.g., test_sglang_deployment[aggre
 FIELD_TEST_CLASSNAME = "s_test_classname"  # Test class name (e.g., tests.serve.test_sglang)
 FIELD_TEST_MARKERS = "s_test_markers"  # Comma-separated list of marker names
 FIELD_TEST_MARKERS_DETAIL = "s_test_markers_detail"  # JSON string of detailed marker info
+FIELD_TEST_DURATION = "l_test_duration_ms"  # Test duration in milliseconds
+FIELD_TEST_STATUS = "s_test_status"  # Test status (passed, failed, error, skipped)
 
 
 class BuildMetricsReader:
@@ -211,78 +213,6 @@ class BuildMetricsReader:
         return None
 
 
-class TestMetricsReader:
-    """Reader for test metrics from JSON artifacts"""
-
-    @staticmethod
-    def _process_test_artifact_metrics(artifact_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        """Process and clean up test artifact metrics data"""
-        # Convert numeric types
-        for field in ["test_duration_sec", "test_exit_code", "total_tests", "passed_tests", 
-                     "failed_tests", "error_tests", "skipped_tests"]:
-            if field in artifact_metrics:
-                try:
-                    artifact_metrics[field] = int(artifact_metrics[field])
-                except (ValueError, TypeError):
-                    artifact_metrics[field] = 0
-
-        return artifact_metrics
-
-    @staticmethod
-    def get_test_metrics_for_job(job_name: str) -> list:
-        """Get all test metrics for a given job from test-metrics artifacts"""
-        test_metrics_list = []
-        
-        # Determine framework from job name
-        framework = "unknown"
-        for fw in ["vllm", "sglang", "trtllm"]:
-            if fw in job_name.lower():
-                framework = fw
-                break
-        
-        # Determine preferred architecture from job name
-        preferred_arch = "amd64"  # Default
-        if "arm64" in job_name.lower():
-            preferred_arch = "arm64"
-        
-        print(f"🔍 Looking for test metrics for job '{job_name}' (framework: {framework}, arch: {preferred_arch})")
-        
-        # Look for test metrics files in test-metrics directory
-        test_metrics_dir = "test-metrics"
-        if not os.path.exists(test_metrics_dir):
-            print(f"⚠️  Test metrics directory not found: {test_metrics_dir}")
-            return test_metrics_list
-        
-        # Find all test metrics files for this framework and architecture
-        import glob
-        pattern = f"{test_metrics_dir}/test-metrics-{framework}-*-{preferred_arch}.json"
-        matching_files = glob.glob(pattern)
-        
-        # Also try the other architecture if no files found
-        if not matching_files:
-            other_arch = 'arm64' if preferred_arch == 'amd64' else 'amd64'
-            pattern = f"{test_metrics_dir}/test-metrics-{framework}-*-{other_arch}.json"
-            matching_files = glob.glob(pattern)
-        
-        # Also try without architecture suffix for backward compatibility
-        if not matching_files:
-            pattern = f"{test_metrics_dir}/test-metrics-{framework}-*.json"
-            matching_files = glob.glob(pattern)
-        
-        for test_file in matching_files:
-            try:
-                with open(test_file, 'r') as f:
-                    test_metrics = json.load(f)
-                processed_metrics = TestMetricsReader._process_test_artifact_metrics(test_metrics)
-                test_metrics_list.append(processed_metrics)
-                print(f"✅ Loaded test metrics from {test_file}")
-            except Exception as e:
-                print(f"⚠️  Could not read test metrics from {test_file}: {e}")
-        
-        if not test_metrics_list:
-            print(f"⚠️  No test metrics artifacts found for {framework}")
-        
-        return test_metrics_list
 
 
 class TimingProcessor:
@@ -886,155 +816,132 @@ class WorkflowMetricsUploader:
             print(f"❌ Failed to upload container metrics: {e}")
 
     def _upload_test_metrics(self, job_data: Dict[str, Any]) -> None:
-        """Upload test-specific metrics to TEST_INDEX"""
+        """Upload individual test metrics by parsing JUnit XML directly from test-results"""
         test_index = os.getenv("TEST_INDEX")
         if not test_index:
             print("⚠️  TEST_INDEX not configured, skipping test metrics upload")
             return
 
-        # Get test metrics for this job
         job_name = job_data.get("name", "")
-        test_metrics_list = TestMetricsReader.get_test_metrics_for_job(job_name)
-
-        if not test_metrics_list:
-            print(f"⚠️  No test metrics available for job: {job_name}")
+        job_id = str(job_data["id"])
+        
+        # Determine framework from job name
+        framework = "unknown"
+        for fw in ["vllm", "sglang", "trtllm"]:
+            if fw in job_name.lower():
+                framework = fw
+                break
+        
+        print(f"🧪 Looking for JUnit XML files for job '{job_name}' (framework: {framework})")
+        
+        # Look for JUnit XML files in test-results directory
+        test_results_dir = "test-results"
+        if not os.path.exists(test_results_dir):
+            print(f"⚠️  Test results directory not found: {test_results_dir}")
             return
-
-        print(f"🧪 Uploading individual test metrics")
-
-        # Upload each test metrics entry (there can be multiple test types per job)
-        for i, test_metrics in enumerate(test_metrics_list):
-            job_id = str(job_data["id"])
-            test_framework = test_metrics.get("framework", "unknown")
-            test_type = test_metrics.get("test_type", "unknown")
-            platform_arch = test_metrics.get("platform_arch", "amd64")
-            
-            # Find the test step ID
-            test_step_id = None
-            steps = job_data.get("steps", [])
-            for step in steps:
-                step_name = step.get("name", "").lower()
-                if ("test" in step_name and test_type in step_name) or (test_type == "unit" and "unit" in step_name) or (test_type == "e2e" and "e2e" in step_name):
-                    test_step_id = f"{job_id}_{step.get('number', 1)}"
-                    break
-            
-            # Fallback: look for any test step
-            if not test_step_id:
-                for step in steps:
-                    if "test" in step.get("name", "").lower():
-                        test_step_id = f"{job_id}_{step.get('number', 1)}"
-                        break
-
-            test_step_id = test_step_id or f"{job_id}_test"
-
-            # Get individual tests from the metrics
-            individual_tests = test_metrics.get("individual_tests", [])
-            summary = test_metrics.get("summary", {})
-            
-            print(f"📋 Test suite summary for {test_framework} {test_type}:")
-            print(f"   Framework: {test_framework}")
-            print(f"   Test Type: {test_type}")
-            print(f"   Platform: {platform_arch}")
-            print(f"   Suite Status: {test_metrics.get('test_status', 'unknown')}")
-            print(f"   Suite Duration: {test_metrics.get('test_duration_sec', 0)}s")
-            print(f"   Total Tests: {summary.get('total_tests', 0)}")
-            print(f"   Passed: {summary.get('passed_tests', 0)}")
-            print(f"   Failed: {summary.get('failed_tests', 0)}")
-            print(f"   Errors: {summary.get('error_tests', 0)}")
-            print(f"   Skipped: {summary.get('skipped_tests', 0)}")
-            print(f"   Individual Tests Found: {len(individual_tests)}")
-            print("   " + "="*50)
-            
-            # Upload individual test cases using your specified schema
-            for test_idx, individual_test in enumerate(individual_tests):
-                # Create individual test data payload
-                test_data = {}
+        
+        # Find JUnit XML files
+        import glob
+        xml_files = glob.glob(f"{test_results_dir}/*.xml")
+        
+        if not xml_files:
+            print(f"⚠️  No JUnit XML files found in {test_results_dir}")
+            return
+        
+        print(f"📄 Found {len(xml_files)} JUnit XML files: {xml_files}")
+        
+        # Find the test step ID
+        test_step_id = None
+        steps = job_data.get("steps", [])
+        for step in steps:
+            step_name = step.get("name", "").lower()
+            if "test" in step_name:
+                test_step_id = f"{job_id}_{step.get('number', 1)}"
+                break
+        
+        test_step_id = test_step_id or f"{job_id}_test"
+        
+        total_tests_processed = 0
+        
+        # Process each XML file
+        for xml_file in xml_files:
+            try:
+                print(f"📋 Processing JUnit XML: {xml_file}")
                 
-                # Identity & Context - using your specified fields
-                test_classname = individual_test.get("classname", "")
-                test_name = individual_test.get("name", "")
-                test_full_name = f"{test_classname}::{test_name}" if test_classname else test_name
+                # Parse JUnit XML using xml.etree.ElementTree
+                import xml.etree.ElementTree as ET
+                tree = ET.parse(xml_file)
+                root = tree.getroot()
                 
-                test_data[FIELD_ID] = f"github-test-{job_id}-{test_name}"
-                test_data[FIELD_STEP_ID] = test_step_id
-                test_data[FIELD_JOB_ID] = job_id
-
-                # Status & Events - using your specified fields
-                test_data[FIELD_STATUS] = individual_test.get("status", "unknown")
-
-                # Test Info - using your specified fields
-                test_data[FIELD_FRAMEWORK] = test_framework
-                test_data[FIELD_TEST_NAME] = test_name
-                test_data[FIELD_TEST_CLASSNAME] = test_classname
-                
-                # Add error message if test failed or had error
-                error_msg = ""
-                if individual_test.get("status") == "failed":
-                    error_msg = individual_test.get("failure_message", "") or individual_test.get("failure_text", "")
-                elif individual_test.get("status") == "error":
-                    error_msg = individual_test.get("error_message", "") or individual_test.get("error_text", "")
-                elif individual_test.get("status") == "skipped":
-                    error_msg = individual_test.get("skip_reason", "")
-                
-                if error_msg:
-                    test_data[FIELD_ERROR_MESSAGE] = error_msg
-                
-                # Add marker information if available
-                marker_names = individual_test.get("marker_names", [])
-                markers_detail = individual_test.get("markers", [])
-                
-                if marker_names:
-                    test_data[FIELD_TEST_MARKERS] = ",".join(marker_names)
-                
-                if markers_detail:
-                    try:
-                        test_data[FIELD_TEST_MARKERS_DETAIL] = json.dumps(markers_detail)
-                    except Exception as e:
-                        print(f"⚠️  Failed to serialize markers detail: {e}")
-
-                # Timing - using your specified fields (build timing for test context)
-                if "test_start_time" in test_metrics:
-                    test_data[FIELD_BUILD_START_TIME] = test_metrics["test_start_time"]
-                if "test_end_time" in test_metrics:
-                    test_data[FIELD_BUILD_END_TIME] = test_metrics["test_end_time"]
-                test_data[FIELD_BUILD_DURATION_SEC] = test_metrics.get("test_duration_sec", 0)
-
-                # Add @timestamp for time-series data
-                test_data["@timestamp"] = test_metrics.get(
-                    "test_end_time", datetime.now(timezone.utc).isoformat()
-                )
-
-                # Add common context fields (repo, branch, pr_id, etc.)
-                self.add_common_context_fields(test_data)
-
-                # Print individual test metrics instead of uploading for now
-                print(f"🧪 Individual test: {test_full_name}")
-                print(f"   ID: {test_data[FIELD_ID]}")
-                print(f"   Status: {test_data[FIELD_STATUS]}")
-                print(f"   Framework: {test_data[FIELD_FRAMEWORK]}")
-                print(f"   Test Name: {test_data[FIELD_TEST_NAME]}")
-                print(f"   Test Class: {test_data[FIELD_TEST_CLASSNAME]}")
-                print(f"   Duration: {individual_test.get('time', 0):.3f}s")
-                print(f"   Step ID: {test_data[FIELD_STEP_ID]}")
-                print(f"   Job ID: {test_data[FIELD_JOB_ID]}")
-                print(f"   Workflow ID: {test_data[FIELD_WORKFLOW_ID]}")
-                print(f"   Repo: {test_data[FIELD_REPO]}")
-                print(f"   Branch: {test_data[FIELD_BRANCH]}")
-                print(f"   PR ID: {test_data[FIELD_PR_ID]}")
-                if FIELD_TEST_MARKERS in test_data:
-                    print(f"   Markers: {test_data[FIELD_TEST_MARKERS]}")
-                if FIELD_ERROR_MESSAGE in test_data:
-                    print(f"   Error: {test_data[FIELD_ERROR_MESSAGE][:100]}...")
-                print("   " + "-"*30)
-                
-                try:
-                    self.post_to_db(test_index, test_data)
-                    print(f"✅ Individual test uploaded: {test_full_name}")
-                except Exception as e:
-                    print(f"❌ Failed to upload individual test {test_full_name}: {e}")
-            
-            print(f"📊 Processed {len(individual_tests)} individual tests for {test_framework} {test_type}")
-            print("   " + "="*50)
+                # Process each test case
+                for testsuite in root.findall('.//testsuite'):
+                    for testcase in testsuite.findall('testcase'):
+                        # Extract test case information
+                        test_classname = testcase.get('classname', '')
+                        test_name = testcase.get('name', '')
+                        test_time = float(testcase.get('time', 0))
+                        test_status = "passed"  # Default status
+                        
+                        # Create individual test data payload
+                        test_data = {}
+                        
+                        # Identity & Context
+                        test_full_name = f"{test_classname}::{test_name}" if test_classname else test_name
+                        test_data[FIELD_ID] = f"github-test-{job_id}-{hash(test_full_name) & 0x7FFFFFFF}"  # Use hash for unique ID
+                        test_data[FIELD_STEP_ID] = test_step_id
+                        test_data[FIELD_JOB_ID] = job_id
+                        
+                        # Test Info
+                        test_data[FIELD_FRAMEWORK] = framework
+                        test_data[FIELD_TEST_NAME] = test_name
+                        test_data[FIELD_TEST_CLASSNAME] = test_classname
+                        test_data[FIELD_TEST_DURATION] = int(test_time * 1000)  # Convert to milliseconds
+                        
+                        # Check for failure, error, or skipped elements
+                        error_msg = ""
+                        if testcase.find('failure') is not None:
+                            test_status = "failed"
+                            failure_elem = testcase.find('failure')
+                            error_msg = failure_elem.get('message', '') if failure_elem is not None else ''
+                            if not error_msg and failure_elem is not None and failure_elem.text:
+                                error_msg = failure_elem.text
+                        elif testcase.find('error') is not None:
+                            test_status = "error"
+                            error_elem = testcase.find('error')
+                            error_msg = error_elem.get('message', '') if error_elem is not None else ''
+                            if not error_msg and error_elem is not None and error_elem.text:
+                                error_msg = error_elem.text
+                        elif testcase.find('skipped') is not None:
+                            test_status = "skipped"
+                            skipped_elem = testcase.find('skipped')
+                            error_msg = skipped_elem.get('message', '') if skipped_elem is not None else ''
+                        
+                        test_data[FIELD_TEST_STATUS] = test_status
+                        test_data[FIELD_STATUS] = test_status  # Also set general status field
+                        
+                        if error_msg:
+                            test_data[FIELD_ERROR_MESSAGE] = error_msg[:1000]  # Limit error message length
+                        
+                        # Add timing (use current time as test end time)
+                        current_time = datetime.now(timezone.utc).isoformat()
+                        test_data["@timestamp"] = current_time
+                        
+                        # Add common context fields (repo, branch, pr_id, etc.)
+                        self.add_common_context_fields(test_data)
+                        
+                        # Upload individual test
+                        try:
+                            self.post_to_db(test_index, test_data)
+                            print(f"✅ Uploaded test: {test_full_name} ({test_status}, {test_time:.3f}s)")
+                            total_tests_processed += 1
+                        except Exception as e:
+                            print(f"❌ Failed to upload test {test_full_name}: {e}")
+                            
+            except Exception as e:
+                print(f"❌ Failed to process XML file {xml_file}: {e}")
+        
+        print(f"📊 Processed {total_tests_processed} individual tests for {framework}")
+        print("   " + "="*50)
 
 
 def main():

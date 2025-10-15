@@ -34,7 +34,7 @@ runs:
         echo "🕐 Test started at: ${TEST_START_TIME}"
         
         # Setup test directories
-        mkdir -p test-results test-metrics
+        mkdir -p test-results
         
         # Extract platform architecture from job context
         PLATFORM_ARCH="amd64"  # Default
@@ -157,165 +157,20 @@ runs:
           TEST_STATUS="failure"
         fi
         
-        # Create test metrics JSON with individual test cases
-        JOB_KEY="${{ inputs.framework }}-${{ inputs.test_type }}-${PLATFORM_ARCH}"
-        METRICS_FILE="test-metrics/test-metrics-${JOB_KEY}.json"
+        echo "📊 Test Results Summary:"
+        echo "   Total: ${TOTAL_TESTS}"
+        echo "   Passed: ${PASSED_TESTS}"
+        echo "   Failed: ${FAILED_TESTS}"
+        echo "   Errors: ${ERROR_TESTS}"
+        echo "   Skipped: ${SKIPPED_TESTS}"
+        echo "   Status: ${TEST_STATUS}"
+        echo "   Duration: ${TEST_DURATION_SEC}s"
         
-        # Start building the JSON structure
-        cat > "$METRICS_FILE" << EOF
-        {
-          "framework": "${{ inputs.framework }}",
-          "test_type": "${{ inputs.test_type }}",
-          "platform_arch": "${PLATFORM_ARCH}",
-          "pytest_marks": "${{ inputs.pytest_marks }}",
-          "test_start_time": "${TEST_START_TIME}",
-          "test_end_time": "${TEST_END_TIME}",
-          "test_duration_sec": ${TEST_DURATION_SEC},
-          "test_status": "${TEST_STATUS}",
-          "test_exit_code": ${TEST_EXIT_CODE},
-          "summary": {
-            "total_tests": ${TOTAL_TESTS},
-            "passed_tests": ${PASSED_TESTS},
-            "failed_tests": ${FAILED_TESTS},
-            "error_tests": ${ERROR_TESTS},
-            "skipped_tests": ${SKIPPED_TESTS}
-          },
-          "individual_tests": [
-        EOF
-        
-        # Parse individual test cases from JUnit XML if file exists
-        if [[ -f "$JUNIT_FILE" ]]; then
-          echo "🔍 Parsing individual test cases from JUnit XML..."
-          
-          # Use Python to parse XML and markers, then merge the data
-          python3 << 'PYTHON_EOF' >> "$METRICS_FILE"
-        import xml.etree.ElementTree as ET
-        import json
-        import sys
-        import os
-        
-        try:
-            # Parse the JUnit XML file
-            tree = ET.parse('test-results/pytest_test_report.xml')
-            root = tree.getroot()
-            
-            # TODO: Marker loading temporarily disabled
-            # Load markers data if available
-            markers_data = {}
-            # markers_file = 'test-results/pytest_markers.json'
-            # if os.path.exists(markers_file):
-            #     try:
-            #         with open(markers_file, 'r') as f:
-            #             markers_data = json.load(f)
-            #         print(f"            // Loaded markers for {len(markers_data)} tests", file=sys.stderr)
-            #     except Exception as e:
-            #         print(f"            // Failed to load markers: {e}", file=sys.stderr)
-            # else:
-            #     print(f"            // No markers file found at {markers_file}", file=sys.stderr)
-            
-            test_cases = []
-            
-            # Find all testcase elements
-            for testsuite in root.findall('.//testsuite'):
-                for testcase in testsuite.findall('testcase'):
-                    # Extract test case information
-                    classname = testcase.get('classname', '')
-                    name = testcase.get('name', '')
-                    
-                    test_info = {
-                        "classname": classname,
-                        "name": name,
-                        "time": float(testcase.get('time', 0)),
-                        "status": "passed"  # Default status
-                    }
-                    
-                    # Check for failure, error, or skipped elements
-                    if testcase.find('failure') is not None:
-                        test_info["status"] = "failed"
-                        failure_elem = testcase.find('failure')
-                        test_info["failure_message"] = failure_elem.get('message', '') if failure_elem is not None else ''
-                        test_info["failure_text"] = failure_elem.text if failure_elem is not None and failure_elem.text else ''
-                    elif testcase.find('error') is not None:
-                        test_info["status"] = "error"
-                        error_elem = testcase.find('error')
-                        test_info["error_message"] = error_elem.get('message', '') if error_elem is not None else ''
-                        test_info["error_text"] = error_elem.text if error_elem is not None and error_elem.text else ''
-                    elif testcase.find('skipped') is not None:
-                        test_info["status"] = "skipped"
-                        skipped_elem = testcase.find('skipped')
-                        test_info["skip_reason"] = skipped_elem.get('message', '') if skipped_elem is not None else ''
-                    
-                    # TODO: Marker matching temporarily disabled
-                    # Try to find matching markers data
-                    # Look for test by various possible node IDs
-                    # test_markers = None
-                    # possible_ids = [
-                    #     f"{classname}::{name}",
-                    #     f"{classname.replace('.', '/')}.py::{name}",
-                    #     name
-                    # ]
-                    # 
-                    # for test_id in possible_ids:
-                    #     if test_id in markers_data:
-                    #         test_markers = markers_data[test_id]
-                    #         break
-                    #     # Also try partial matches
-                    #     for marker_id in markers_data:
-                    #         if marker_id.endswith(f"::{name}") and classname in marker_id:
-                    #             test_markers = markers_data[marker_id]
-                    #             break
-                    #     if test_markers:
-                    #         break
-                    # 
-                    # # Add markers information if found
-                    # if test_markers:
-                    #     test_info["markers"] = test_markers.get("markers", [])
-                    #     test_info["marker_names"] = test_markers.get("marker_names", [])
-                    # else:
-                    #     test_info["markers"] = []
-                    #     test_info["marker_names"] = []
-                    
-                    # Set empty markers for now
-                    test_info["markers"] = []
-                    test_info["marker_names"] = []
-                    
-                    test_cases.append(test_info)
-            
-            # Output JSON array elements (without the surrounding brackets)
-            for i, test_case in enumerate(test_cases):
-                if i > 0:
-                    print(",")
-                print("            " + json.dumps(test_case, separators=(',', ':')), end='')
-            
-        except Exception as e:
-            print(f'            // Error parsing XML/markers: {str(e)}', file=sys.stderr)
-        
-        PYTHON_EOF
-        
-        else
-          echo "            // No JUnit XML file found for individual test parsing" >> "$METRICS_FILE"
-        fi
-        
-        # Close the JSON structure
-        cat >> "$METRICS_FILE" << EOF
-
-          ]
-        }
-        EOF
-        
-        echo "📁 Created test metrics file for ${JOB_KEY} with individual test cases:"
-        cat "$METRICS_FILE"
+        # Individual test data is now handled directly by the upload script parsing JUnit XML
+        echo "✅ Test metrics collection completed - JUnit XML will be processed by upload script"
         
         # Exit with original test result to maintain workflow behavior
         exit ${TEST_EXIT_CODE}
-
-    - name: Upload Test Metrics
-      uses: actions/upload-artifact@v4
-      if: always()  # Always upload metrics, even if tests failed
-      with:
-        name: test-metrics-${{ inputs.framework }}-${{ inputs.test_type }}-${{ env.PLATFORM_ARCH }}
-        path: test-metrics/test-metrics-${{ inputs.framework }}-${{ inputs.test_type }}-${{ env.PLATFORM_ARCH }}.json
-        retention-days: 7
 
     - name: Upload Test Results
       uses: actions/upload-artifact@v4
