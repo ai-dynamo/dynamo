@@ -283,11 +283,20 @@ jobs:
     needs: [build-operator, vllm]
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        profile:
+          - agg
+          - agg_router
+          - disagg
+          - disagg_router
+    name: deploy-test-vllm (${{ matrix.profile }})
     env:
       FRAMEWORK: vllm
-      NAMESPACE: gh-job-id-${{ github.run_id }}-vllm
+      NAMESPACE: gh-job-id-${{ github.run_id }}-vllm-${{ matrix.profile }}
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
-      DEPLOYMENT_FILE: "deploy/disagg.yaml"
+      DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
       MODEL_NAME: "Qwen/Qwen3-0.6B"
     steps: &deploy-test-steps
     - uses: actions/checkout@v4
@@ -473,8 +482,8 @@ jobs:
         # For debugging purposes, list all the resources before we uninstall
         kubectl get all
 
-        echo "Starting cleanup... after 300 seconds"
-        sleep 300
+        echo "Starting cleanup... after 3600 seconds (1 hour)"
+        sleep 3600
 
         echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
         kubectl delete dynamographdeployments --all -n $NAMESPACE || true
@@ -492,11 +501,19 @@ jobs:
     needs: [build-operator, sglang]
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        profile:
+          - agg
+          - agg_router
+          - disagg
+    name: deploy-test-sglang (${{ matrix.profile }})
     env:
       FRAMEWORK: sglang
-      NAMESPACE: gh-job-id-${{ github.run_id }}-sglang
+      NAMESPACE: gh-job-id-${{ github.run_id }}-sglang-${{ matrix.profile }}
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
-      DEPLOYMENT_FILE: "deploy/disagg.yaml"
+      DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
       MODEL_NAME: "Qwen/Qwen3-0.6B"
     steps: *deploy-test-steps
 
@@ -505,10 +522,19 @@ jobs:
     needs: [build-operator, trtllm]
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        profile:
+          - agg
+          - agg_router
+          - disagg
+          - disagg_router
+    name: deploy-test-trtllm (${{ matrix.profile }})
     env:
       FRAMEWORK: trtllm
-      NAMESPACE: gh-job-id-${{ github.run_id }}-trtllm
+      NAMESPACE: gh-job-id-${{ github.run_id }}-trtllm-${{ matrix.profile }}
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
-      DEPLOYMENT_FILE: "deploy/disagg.yaml"
+      DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
       MODEL_NAME: "Qwen/Qwen3-0.6B"
     steps: *deploy-test-steps
