@@ -61,9 +61,7 @@ imagePullSecrets:
 epp:
   imagePullPolicy: IfNotPresent
   # Add env in name/value pairs
-  extraEnv:
-    - name: USE_STREAMING
-      value: "true"
+  extraEnv: []
   # If you ever want to completely override args, supply a list here.
   # When empty, chart will render sane defaults
   argsOverride: []
