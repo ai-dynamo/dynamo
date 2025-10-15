@@ -281,309 +281,207 @@ jobs:
   deploy-test:
     runs-on: cpu-amd-m5-2xlarge
     needs: [build-operator]
-    permissions:
-      contents: read
     env:
       NAMESPACE: gh-job-id-${{ github.run_id }}
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
       DEPLOYMENT_FILE: "deploy/disagg.yaml"
       MODEL_NAME: "Qwen/Qwen3-0.6B"
-      KUBECONFIG_PATH: .kubeconfig
-      POD_READY_TIMEOUT: 1000s
-      DEPLOYMENT_READY_TIMEOUT: 300s
-      MODEL_WAIT_MAX_ATTEMPTS: 30
-      MODEL_WAIT_INTERVAL: 5
-      PORT_FORWARD_WAIT: 10
-      NAMESPACE_CLEANUP_DELAY: 30
+    permissions:
+      contents: read
     steps:
     - uses: actions/checkout@v4
-
     - name: Install dependencies
       run: |
-        set -euo pipefail
-
-        echo "Installing system dependencies..."
+        set -x
+        # Install dependencies
         sudo apt-get update && sudo apt-get install -y curl bash openssl gettext git jq
 
+        # Install yq
         echo "Installing yq..."
-        curl -fsSL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
-        sudo install -m 755 yq /usr/local/bin/yq
-        rm yq
-
+        curl -L https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+        sudo chmod 755 yq
+        sudo mv yq /usr/local/bin/
+        # Install Helm
         echo "Installing Helm..."
-        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        sudo chmod 700 get_helm.sh
+        sudo ./get_helm.sh
+        # Install kubectl
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        sudo chmod 755 kubectl
+        sudo mv kubectl /usr/local/bin/
 
-        echo "Installing kubectl..."
-        KUBECTL_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
-        curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" -o kubectl
-        sudo install -m 755 kubectl /usr/local/bin/kubectl
-        rm kubectl
-
-        echo "Verifying installations..."
-        yq --version
-        helm version
-        kubectl version --client
-
-    - name: Setup Kubernetes config
-      run: |
-        set -euo pipefail
-
-        echo "Setting up kubeconfig..."
-        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > "${KUBECONFIG_PATH}"
-        chmod 600 "${KUBECONFIG_PATH}"
-
-        export KUBECONFIG="${PWD}/${KUBECONFIG_PATH}"
-        kubectl config set-context --current --namespace="${NAMESPACE}"
-
-        echo "Current context:"
+        # Setup kubeconfig
+        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+        chmod 600 .kubeconfig
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
         kubectl config current-context
-        kubectl cluster-info
-
-    - name: Create namespace and setup cluster
+    - name: Deploy Operator
       run: |
-        set -euo pipefail
-        export KUBECONFIG="${PWD}/${KUBECONFIG_PATH}"
+        set -x
+        export KUBECONFIG=$(pwd)/.kubeconfig
 
-        echo "Creating ephemeral namespace: ${NAMESPACE}..."
-        kubectl delete namespace "${NAMESPACE}" --ignore-not-found=true --timeout=60s
-        kubectl create namespace "${NAMESPACE}"
+        # Create a namespace for this job
+        echo "Creating an ephemeral namespace..."
+        kubectl delete namespace $NAMESPACE || true
+        kubectl create namespace $NAMESPACE || true
+        echo "Attaching the labels for secrets and cleanup"
+        kubectl label namespaces ${NAMESPACE} nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
 
-        echo "Applying namespace labels..."
-        kubectl label namespace "${NAMESPACE}" \
-          nscleanup/enabled=true \
-          nscleanup/ttl=7200 \
-          gitlab-imagepull=enabled \
-          ngc-api=enabled \
-          nvcr-imagepull=enabled \
-          --overwrite=true
+        # Set the namespace as default
+        kubectl config set-context --current --namespace=$NAMESPACE
 
-        kubectl config set-context --current --namespace="${NAMESPACE}"
-
-        echo "Verifying cluster prerequisites..."
+        # Check if Istio is installed
         kubectl get pods -n istio-system
+        # Check if default storage class exists
         kubectl get storageclass
 
-    - name: Create secrets
-      run: |
-        set -euo pipefail
-        export KUBECONFIG="${PWD}/${KUBECONFIG_PATH}"
+        # Install Helm chart
+        export IMAGE_TAG=$(cat build.env)
+        echo $IMAGE_TAG
+        export VIRTUAL_ENV=/opt/dynamo/venv
+        export KUBE_NS=$NAMESPACE
+        export ISTIO_ENABLED=true
+        export ISTIO_GATEWAY=istio-system/ingress-alb
+        export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
+        export DYNAMO_CLOUD=https://${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
 
-        echo "Creating HuggingFace token secret..."
-        kubectl create secret generic hf-token-secret \
-          --from-literal=HF_TOKEN="${{ secrets.HF_TOKEN }}" \
-          -n "${NAMESPACE}" \
-          --dry-run=client -o yaml | kubectl apply -f -
-
-        echo "Creating Docker registry secret..."
-        kubectl create secret docker-registry docker-imagepullsecret \
-          --docker-server="${{ secrets.AZURE_ACR_HOSTNAME }}" \
-          --docker-username="${{ secrets.AZURE_ACR_USER }}" \
-          --docker-password="${{ secrets.AZURE_ACR_PASSWORD }}" \
-          --namespace="${NAMESPACE}" \
-          --dry-run=client -o yaml | kubectl apply -f -
-
-    - name: Deploy Dynamo Platform
-      run: |
-        set -euo pipefail
-        export KUBECONFIG="${PWD}/${KUBECONFIG_PATH}"
-
-        IMAGE_TAG=$(cat build.env)
-        echo "Deploying with image tag: ${IMAGE_TAG}"
-
-        echo "Adding Helm repositories..."
+        # Install dynamo env secrets
+        kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
+        # Create docker pull secret for operator image
+        kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
+        # Install helm dependencies
         helm repo add bitnami https://charts.bitnami.com/bitnami
-        helm repo update
-
-        echo "Building Helm dependencies..."
         cd deploy/cloud/helm/platform/
-        helm dependency build .
-
-        echo "Installing Dynamo Platform..."
-        helm upgrade --install dynamo-platform . \
-          --namespace "${NAMESPACE}" \
+        helm dep build .
+        # Install platform with namespace restriction for single profile testing
+        helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
           --set dynamo-operator.namespaceRestriction.enabled=true \
-          --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]="${NAMESPACE}" \
-          --set dynamo-operator.controllerManager.manager.image.repository="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo" \
-          --set dynamo-operator.controllerManager.manager.image.tag="${{ github.sha }}-operator-amd64" \
-          --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret \
-          --wait \
-          --timeout=10m
-
+          --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
+          --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
+          --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
+          --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
+        # Wait for all deployments to be ready
+        timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
         cd -
 
-        echo "Waiting for platform deployments to be ready..."
-        timeout "${DEPLOYMENT_READY_TIMEOUT}" kubectl rollout status deployment -n "${NAMESPACE}" --watch
-
-        echo "Platform deployment complete. Current resources:"
-        kubectl get all -n "${NAMESPACE}"
-
-    - name: Deploy backend service
-      run: |
-        set -euo pipefail
-        export KUBECONFIG="${PWD}/${KUBECONFIG_PATH}"
-
-        FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:f0d1f14651c94d1134f568ccfd24a7d09369226e-vllm-amd64"
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE
 
         cd components/backends/vllm
-
-        GRAPH_NAME=$(yq e '.metadata.name' "${DEPLOYMENT_FILE}")
-        echo "Deploying backend service: ${GRAPH_NAME}"
-        echo "Using image: ${FRAMEWORK_RUNTIME_IMAGE}"
-
-        # Update deployment file with runtime image
-        yq eval -i ".spec.services.[].extraPodSpec.mainContainer.image = \"${FRAMEWORK_RUNTIME_IMAGE}\"" "${DEPLOYMENT_FILE}"
-
-        echo "=== Updated Deployment File ==="
-        cat "${DEPLOYMENT_FILE}"
-        echo "==============================="
-
-        echo "Applying deployment..."
-        kubectl apply -n "${NAMESPACE}" -f "${DEPLOYMENT_FILE}"
-
-        echo "Waiting for pods to initialize..."
+        export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:f0d1f14651c94d1134f568ccfd24a7d09369226e-vllm-amd64"
+        export KUBE_NS=$NAMESPACE
+        export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
+        # Update the deployment file in-place
+        yq -i '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE
+        
+        # Debug: Show updated deployment file
+        echo "=== UPDATED DEPLOYMENT FILE ==="
+        cat $DEPLOYMENT_FILE
+        
+        # Apply the updated file
+        kubectl apply -n $KUBE_NS -f $DEPLOYMENT_FILE
+        
+        # --- Wait for all pods in the dynamo graph deployment to be ready ---
         sleep 20
-
-        echo "Waiting for pods with label nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}..."
-        kubectl wait --for=condition=ready \
-          pod -l "nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}" \
-          -n "${NAMESPACE}" \
-          --timeout="${POD_READY_TIMEOUT}"
-
-        echo "=== Backend Service Pod Status ==="
-        kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}" \
-          -n "${NAMESPACE}" -o wide
-        echo "==================================="
-
-        cd -
-
-    - name: Test backend service
-      run: |
-        set -euo pipefail
-        export KUBECONFIG="${PWD}/${KUBECONFIG_PATH}"
-
-        echo "Finding frontend pod..."
-        FRONTEND_POD=$(kubectl get pods -n "${NAMESPACE}" -l app=frontend --no-headers | sort -k1 | tail -n1 | awk '{print $1}')
-
-        if [ -z "${FRONTEND_POD}" ]; then
-          echo "ERROR: Frontend pod not found"
-          kubectl get pods -n "${NAMESPACE}"
-          exit 1
-        fi
-
-        echo "Frontend pod: ${FRONTEND_POD}"
-
-        CONTAINER_PORT=$(kubectl get pod "${FRONTEND_POD}" -n "${NAMESPACE}" \
-          -o jsonpath='{.spec.containers[0].ports[?(@.name=="http")].containerPort}')
-        echo "Container port: ${CONTAINER_PORT}"
-
-        echo "Setting up port forwarding..."
-        kubectl port-forward "pod/${FRONTEND_POD}" "8000:${CONTAINER_PORT}" -n "${NAMESPACE}" &
-        PORT_FORWARD_PID=$!
-
-        sleep "${PORT_FORWARD_WAIT}"
-
-        LLM_URL="http://localhost:8000"
+        # Get the deployment name from the file
+        export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
+        echo "Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: $GRAPH_NAME"
+        # Wait for all pods with the deployment label to be ready
+        kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} --timeout=1000s
+        
+        # Debug: Show final pod statuses for the deployment
+        echo "=== FINAL POD STATUSES ==="
+        kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n $KUBE_NS -o wide
+        echo ""
+        
+        kubectl get all -n $KUBE_NS
+        export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "frontend" | sort -k1 | tail -n1 | awk '{print $1}')
+        export CONTAINER_PORT=$(kubectl get pod $FRONTEND_POD -n ${KUBE_NS} -o jsonpath='{.spec.containers[0].ports[?(@.name=="http")].containerPort}')
+        echo "Container port is ${CONTAINER_PORT}"
+        kubectl port-forward pod/$FRONTEND_POD 8000:${CONTAINER_PORT} -n ${KUBE_NS} &
+        export LLM_URL="http://localhost:8000"
+        sleep 10  # Give port-forward time to establish the connection
         echo "LLM URL: ${LLM_URL}"
-        echo "Model Name: ${MODEL_NAME}"
-
-        # Wait for model to be available
-        echo "Waiting for model ${MODEL_NAME} to be available..."
+        echo "MODEL NAME: ${MODEL_NAME}"
+        # Wait until the model is available in the /v1/models response
+        MAX_ATTEMPTS=30
         ATTEMPT=1
-        while [ ${ATTEMPT} -le ${MODEL_WAIT_MAX_ATTEMPTS} ]; do
-          MODELS_RESPONSE=$(curl -s --retry 5 --retry-delay 2 --retry-connrefused "${LLM_URL}/v1/models" || echo "{}")
-
-          if echo "${MODELS_RESPONSE}" | jq -e --arg MODEL_NAME "${MODEL_NAME}" '.data[]?.id == $MODEL_NAME' >/dev/null 2>&1; then
-            echo "✓ Model ${MODEL_NAME} is available"
+        while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+          MODELS_RESPONSE=$(curl -s --retry 5 --retry-delay 2 --retry-connrefused "${LLM_URL}/v1/models")
+          if echo "$MODELS_RESPONSE" | jq -e --arg MODEL_NAME "$MODEL_NAME" '.data[]?.id == $MODEL_NAME' >/dev/null 2>&1; then
+            echo "Model $MODEL_NAME is available in /v1/models"
             break
           fi
-
-          echo "Waiting for model ${MODEL_NAME}... (attempt ${ATTEMPT}/${MODEL_WAIT_MAX_ATTEMPTS})"
-          sleep "${MODEL_WAIT_INTERVAL}"
+          echo "Waiting for model $MODEL_NAME to be available in /v1/models... (attempt $ATTEMPT/$MAX_ATTEMPTS)"
+          sleep 5
           ATTEMPT=$((ATTEMPT + 1))
         done
-
-        if [ ${ATTEMPT} -gt ${MODEL_WAIT_MAX_ATTEMPTS} ]; then
-          echo "ERROR: Model ${MODEL_NAME} not found after ${MODEL_WAIT_MAX_ATTEMPTS} attempts"
-          echo "Last response: ${MODELS_RESPONSE}"
-          kill ${PORT_FORWARD_PID} 2>/dev/null || true
+        if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+          echo "Model $MODEL_NAME not found in /v1/models after $MAX_ATTEMPTS attempts"
+          echo "Last response: $MODELS_RESPONSE"
           exit 1
         fi
-
-        # Test inference
-        echo "Testing inference..."
-        RESPONSE=$(curl -s -N --no-buffer --retry 10 --retry-delay 5 --retry-connrefused \
-          -X POST "${LLM_URL}/v1/chat/completions" \
+        RESPONSE=$(curl -s -N --no-buffer --retry 10 --retry-delay 5 --retry-connrefused -X POST "${LLM_URL}/v1/chat/completions" \
           -H 'accept: text/event-stream' \
           -H 'Content-Type: application/json' \
           -d '{
             "model": "'"${MODEL_NAME:-Qwen/Qwen3-0.6B}"'",
-            "messages": [{
-              "role": "user",
-              "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
-            }],
-            "stream": false,
+            "messages": [
+            {
+                "role": "user",
+                "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
+            }
+            ],
+            "stream":false,
             "max_tokens": 30,
             "temperature": 0.0
           }' 2>&1)
-
-        # Cleanup port forward
-        kill ${PORT_FORWARD_PID} 2>/dev/null || true
-
-        echo "=== Response ==="
-        echo "${RESPONSE}"
-        echo "================"
-
-        # Validate response
+        echo "Response: $RESPONSE"
         TEST_RESULT=0
-
-        if ! echo "${RESPONSE}" | jq -e . >/dev/null 2>&1; then
-          echo "✗ Test failed: Response is not valid JSON"
+        if ! echo "$RESPONSE" | jq -e . >/dev/null 2>&1; then
+          echo "Test failed: Response is not valid JSON"
+          echo "Got: $RESPONSE"
           TEST_RESULT=1
-        elif ! echo "${RESPONSE}" | jq -e '.choices[0].message.role == "assistant"' >/dev/null 2>&1; then
-          echo "✗ Test failed: Message role is not 'assistant'"
-          echo "Got: $(echo "${RESPONSE}" | jq -r '.choices[0].message.role')"
+        elif ! echo "$RESPONSE" | jq -e '.choices[0].message.role == "assistant"' >/dev/null 2>&1; then
+          echo "Test failed: Message role is not 'assistant'"
+          echo "Got: $(echo "$RESPONSE" | jq '.choices[0].message.role')"
           TEST_RESULT=1
-        elif ! echo "${RESPONSE}" | jq -e '.model == "'"${MODEL_NAME}"'"' >/dev/null 2>&1; then
-          echo "✗ Test failed: Model name is incorrect"
-          echo "Got: $(echo "${RESPONSE}" | jq -r '.model')"
+        elif ! echo "$RESPONSE" | jq -e '.model == "'"${MODEL_NAME}"'"' >/dev/null 2>&1; then
+          echo "Test failed: Model name is incorrect"
+          echo "Got: $(echo "$RESPONSE" | jq '.model')"
           TEST_RESULT=1
-        elif ! echo "${RESPONSE}" | jq -e '.choices[0].message.content | length > 100' >/dev/null 2>&1; then
-          echo "✗ Test failed: Response content length is not greater than 100 characters"
-          echo "Got length: $(echo "${RESPONSE}" | jq -r '.choices[0].message.content | length')"
+        elif ! echo "$RESPONSE" | jq -e '.choices[0].message.content | length > 100' >/dev/null 2>&1; then
+          echo "Test failed: Response content length is not greater than 100 characters"
+          echo "Got length: $(echo "$RESPONSE" | jq '.choices[0].message.content | length')"
           TEST_RESULT=1
         else
-          echo "✓ All tests passed: Response matches expected format and content"
+          echo "Test passed: Response matches expected format and content"
         fi
+        exit $TEST_RESULT
+    # - name: Cleanup
+    #   if: always()
+    #   timeout-minutes: 10
+    #   run: |
+    #     echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+    #     chmod 600 .kubeconfig
+    #     export KUBECONFIG=$(pwd)/.kubeconfig
+    #     kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
 
-        exit ${TEST_RESULT}
+    #     # For debugging purposes, list all the resources before we uninstall
+    #     kubectl get all
 
-    - name: Cleanup
-      if: always()
-      timeout-minutes: 10
-      run: |
-        set -euo pipefail
+    #     echo "Starting cleanup... after 30 seconds"
+    #     sleep 30
 
-        echo "Setting up kubeconfig for cleanup..."
-        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > "${KUBECONFIG_PATH}"
-        chmod 600 "${KUBECONFIG_PATH}"
-        export KUBECONFIG="${PWD}/${KUBECONFIG_PATH}"
-        kubectl config set-context --current --namespace="${NAMESPACE}"
+    #     echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
+    #     kubectl delete dynamographdeployments --all -n $NAMESPACE || true
 
-        echo "=== Current Resources in ${NAMESPACE} ==="
-        kubectl get all -n "${NAMESPACE}" || true
-        echo "=========================================="
+    #     # Uninstall the helm chart
+    #     helm ls
+    #     helm uninstall dynamo-platform || true
 
-        echo "Waiting ${NAMESPACE_CLEANUP_DELAY}s before cleanup..."
-        sleep "${NAMESPACE_CLEANUP_DELAY}"
-
-        echo "Deleting DynamoGraphDeployments..."
-        kubectl delete dynamographdeployments --all -n "${NAMESPACE}" --timeout=120s --ignore-not-found=true || true
-
-        echo "Uninstalling Helm chart..."
-        helm list -n "${NAMESPACE}"
-        helm uninstall dynamo-platform -n "${NAMESPACE}" --timeout=5m || true
-
-        echo "Deleting namespace ${NAMESPACE}..."
-        kubectl delete namespace "${NAMESPACE}" --timeout=120s --ignore-not-found=true || true
-
-        echo "Cleanup completed for namespace ${NAMESPACE}"
+    #     echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
+    #     kubectl delete namespace $NAMESPACE || true
+    #     echo "Namespace $NAMESPACE completed."
