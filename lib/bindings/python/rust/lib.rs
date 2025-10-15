@@ -126,20 +126,22 @@ fn get_span_for_direct_context(
 // Helper to create request context with proper linking and cancellation handling
 fn create_request_context(
     request: serde_json::Value,
-    context: &Option<context::Context>,
+    parent_ctx: &Option<context::Context>,
 ) -> RsContext<serde_json::Value> {
-    match context {
-        Some(context) => {
-            let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
-            context.inner().link_child(request_ctx.context());
-            if context.inner().is_stopped() || context.inner().is_killed() {
+    match parent_ctx {
+        // If there is a parent context, link the request as a child context of it
+        Some(parent_ctx) => {
+            let child_ctx = RsContext::with_id(request, parent_ctx.inner().id().to_string());
+            parent_ctx.inner().link_child(child_ctx.context());
+            if parent_ctx.inner().is_stopped() || parent_ctx.inner().is_killed() {
                 // Let the server handle the cancellation for now since not all backends are
                 // properly handling request exceptions
                 // TODO: (DIS-830) Return an error if context is cancelled
-                request_ctx.context().stop_generating();
+                child_ctx.context().stop_generating();
             }
-            request_ctx
+            child_ctx
         }
+        // Otherwise if there is no parent context, use the request as-is
         _ => request.into(),
     }
 }
