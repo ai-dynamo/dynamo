@@ -9,6 +9,7 @@ use super::*;
 use crate::logging::DistributedTraceContext;
 use crate::logging::get_distributed_tracing_context;
 use crate::{Result, protocols::maybe_error::MaybeError};
+use tokio::task::JoinSet;
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
 
@@ -66,6 +67,68 @@ impl AddressedPushRouter {
             req_transport,
             resp_transport,
         }))
+    }
+
+    /// Helper method to send a request with cancellation support.
+    /// If the engine context is stopped before the request completes, the request is detached and
+    /// allowed to complete in the background, since NATS is not cancellation safe.
+    async fn send_request_with_cancellation(
+        &self,
+        address: String,
+        headers: HeaderMap,
+        buffer: Bytes,
+        engine_ctx: Arc<dyn AsyncEngineContext>,
+        request_id: &str,
+    ) -> Result<async_nats::Message> {
+        // Define the result type for the concurrent tasks
+        enum TaskResult {
+            RequestCompleted(
+                Result<
+                    async_nats::Message,
+                    async_nats::error::Error<async_nats::client::RequestErrorKind>,
+                >,
+            ),
+            Cancelled,
+        }
+
+        let mut join_set = JoinSet::new();
+
+        // Spawn the request task
+        let req_transport = self.req_transport.clone();
+        let engine_ctx_ = engine_ctx.clone();
+        join_set.spawn(async move {
+            let result = req_transport
+                .request_with_headers(address, headers, buffer.into())
+                .await;
+            if engine_ctx_.is_stopped() {
+                // Replay the stop signal to ensure the request is explicitly cancelled
+                engine_ctx_.stop_generating();
+            }
+            TaskResult::RequestCompleted(result)
+        });
+
+        // Spawn the cancellation monitor tasks
+        join_set.spawn(async move {
+            engine_ctx.stopped().await;
+            TaskResult::Cancelled
+        });
+
+        // Wait for the first task to complete
+        let result = join_set
+            .join_next()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("JoinSet unexpectedly empty"))?
+            .map_err(|e| anyhow::anyhow!("Join task failed: {}", e))?;
+
+        // Check if it was the request or the cancellation
+        match result {
+            TaskResult::RequestCompleted(response) => response.map_err(|e| e.into()),
+            TaskResult::Cancelled => {
+                log::debug!(request_id, "Request cancelled before stream is established");
+                join_set.detach_all();
+                Err(PipelineError::DetachedStreamReceiver.into())
+            }
+        }
     }
 }
 
@@ -162,8 +225,13 @@ where
         // we might need to add a timeout on this if there is no subscriber to the subject; however, I think nats
         // will handle this for us
         let _response = self
-            .req_transport
-            .request_with_headers(address.to_string(), headers, buffer)
+            .send_request_with_cancellation(
+                address,
+                headers,
+                buffer,
+                engine_ctx.clone(),
+                &request_id,
+            )
             .await?;
 
         log::trace!(request_id, "awaiting transport handshake");
