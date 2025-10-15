@@ -236,11 +236,11 @@ jobs:
           merge-multiple: true
         continue-on-error: true  # Don't fail if artifacts don't exist
 
-      - name: Download test metrics
+      - name: Download test results
         uses: actions/download-artifact@v4
         with:
-          pattern: test-metrics-*
-          path: test-metrics/
+          pattern: test-results-*
+          path: test-results/
           merge-multiple: true
         continue-on-error: true  # Don't fail if artifacts don't exist
 
