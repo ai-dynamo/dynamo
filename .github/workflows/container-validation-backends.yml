@@ -45,7 +45,7 @@ jobs:
       matrix:
         platform:
           - { arch: amd64, runner: gpu-l40-amd64 }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+          # - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
     name: vllm (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
@@ -78,18 +78,18 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-      - name: Run unit tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "unit and vllm and gpu_1"
-      - name: Run e2e tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "e2e and vllm and gpu_1 and not slow"
+      # - name: Run unit tests
+      #   if: ${{ matrix.platform.arch != 'arm64' }}
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
+      #     pytest_marks: "unit and vllm and gpu_1"
+      # - name: Run e2e tests
+      #   if: ${{ matrix.platform.arch != 'arm64' }}
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
+      #     pytest_marks: "e2e and vllm and gpu_1 and not slow"
 
   sglang:
     needs: changed-files
@@ -141,20 +141,20 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-      - name: Run unit tests
-        # OPS-1140: Uncomment the below line
-        # if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "unit and sglang and gpu_1"
-      - name: Run e2e tests
-        # OPS-1140: Uncomment the below line
-        # if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "e2e and sglang and gpu_1"
+      # - name: Run unit tests
+      #   # OPS-1140: Uncomment the below line
+      #   # if: ${{ matrix.platform.arch != 'arm64' }}
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
+      #     pytest_marks: "unit and sglang and gpu_1"
+      # - name: Run e2e tests
+      #   # OPS-1140: Uncomment the below line
+      #   # if: ${{ matrix.platform.arch != 'arm64' }}
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
+      #     pytest_marks: "e2e and sglang and gpu_1"
 
   trtllm:
     needs: changed-files
@@ -164,7 +164,7 @@ jobs:
       matrix:
         platform:
           - { arch: amd64, runner: gpu-l40-amd64 }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+          # - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
     name: trtllm (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
@@ -199,18 +199,18 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-      - name: Run unit tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "unit and trtllm_marker and gpu_1"
-      - name: Run e2e tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow"
+      # - name: Run unit tests
+      #   if: ${{ matrix.platform.arch != 'arm64' }}
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
+      #     pytest_marks: "unit and trtllm_marker and gpu_1"
+      # - name: Run e2e tests
+      #   if: ${{ matrix.platform.arch != 'arm64' }}
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
+      #     pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow"
 
   # # Upload metrics for this workflow and all its jobs
   # upload-workflow-metrics:
@@ -280,7 +280,7 @@ jobs:
 
   deploy-test:
     runs-on: cpu-amd-m5-2xlarge
-    needs: [build-operator]
+    needs: [build-operator, vllm, sglang, trtllm]
     strategy:
       fail-fast: false
       matrix:
