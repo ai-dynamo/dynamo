@@ -18,7 +18,7 @@ limitations under the License.
 
 # Understanding KVBM components
 
-The design of the KVBM is inspired from vLLM and SGLang KV block managers but with a twist from historical memory tiering design aspired in general GPU programming. [See KVBM Reading](kvbm_reading.md). The following figure shows the internal components of KVBM.
+KVBM design takes inspiration from the KV block managers used in vLLM and SGLang, with an added influence from historical memory tiering strategies common in general GPU programming. For more details, [See KVBM Reading](kvbm_reading.md). The figure below illustrates the internal components of KVBM.
 
 ![Internal Components of Dynamo KVBM. ](../images/kvbm-components.png)
 **Internal Components of Dynamo KVBM**
