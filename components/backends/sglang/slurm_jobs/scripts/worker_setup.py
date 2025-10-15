@@ -387,10 +387,10 @@ def setup_env(master_ip: str):
     nats_server = f"nats://{master_ip}:{NATS_PORT}"
     etcd_endpoints = f"http://{master_ip}:{ETCD_CLIENT_PORT}"
 
-    os.environ["NATS_SERVERS"] = nats_server
+    os.environ["NATS_SERVER"] = nats_server
     os.environ["ETCD_ENDPOINTS"] = etcd_endpoints
 
-    logging.info(f"set NATS_SERVERS: {nats_server}")
+    logging.info(f"set NATS_SERVER: {nats_server}")
     logging.info(f"set ETCD_ENDPOINTS: {etcd_endpoints}")
 
 

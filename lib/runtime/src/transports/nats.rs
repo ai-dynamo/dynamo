@@ -5,7 +5,7 @@
 //!
 //! The following environment variables are used to configure the NATS client:
 //!
-//! - `NATS_SERVERS`: the NATS server address
+//! - `NATS_SERVER`: the NATS server address
 //!
 //! For authentication, the following environment variables are used and prioritized in the following order:
 //!
@@ -283,7 +283,7 @@ pub struct ClientOptions {
 }
 
 fn default_server() -> Vec<String> {
-    match std::env::var("NATS_SERVERS") {
+    match std::env::var("NATS_SERVER") {
         Ok(possible_list_of_urls) => possible_list_of_urls
             .split(',')
             .map(|s| s.to_string())
@@ -1021,7 +1021,7 @@ mod tests {
         });
 
         Jail::expect_with(|jail| {
-            jail.set_env("NATS_SERVERS", "nats://localhost:5222");
+            jail.set_env("NATS_SERVER", "nats://localhost:5222");
             jail.set_env("NATS_AUTH_USERNAME", "user");
             jail.set_env("NATS_AUTH_PASSWORD", "pass");
 
@@ -1039,7 +1039,7 @@ mod tests {
         });
 
         Jail::expect_with(|jail| {
-            jail.set_env("NATS_SERVERS", "nats://localhost:5222");
+            jail.set_env("NATS_SERVER", "nats://localhost:5222");
             jail.set_env("NATS_AUTH_USERNAME", "user");
             jail.set_env("NATS_AUTH_PASSWORD", "pass");
 

@@ -104,7 +104,7 @@ spec:
           value: "{{ $.Values.etcdAddr }}"
         {{- end }}
         {{- if $.Values.natsAddr }}
-        - name: NATS_SERVERS
+        - name: NATS_SERVER
           value: "{{ $.Values.natsAddr }}"
         {{- end }}
         {{- if $serviceSpec.componentType | eq "frontend" }}

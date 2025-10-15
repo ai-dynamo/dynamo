@@ -38,7 +38,7 @@ Set the head node IP address and service endpoints. **Set this on all nodes** fo
 export HEAD_NODE_IP="<your-head-node-ip>"
 
 # Service endpoints (set on all nodes)
-export NATS_SERVERS="nats://${HEAD_NODE_IP}:4222"
+export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
 export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
 ```
 
