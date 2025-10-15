@@ -66,5 +66,5 @@ KVBM design takes inspiration from the KV block managers used in vLLM and SGLang
 
 **Disk → Device (Onboard)**
 * Called to bring a disk block directly into GPU memory.
-* Worker ses provided Device targets and performs NIXL Read (Disk→Device), possibly via GDS.
+* Worker uses provided Device targets and performs NIXL Read (Disk→Device), possibly via GDS.
 * Device pool registers the new immutable block.
