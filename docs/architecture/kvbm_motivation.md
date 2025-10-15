@@ -33,7 +33,7 @@ Conventional systems either lack dynamic feedback mechanisms or require deep int
 
 With KV Cache offloading, inference service providers can support models with longer context windows without limiting prompt size. Offloading reduces GPU memory usage, allowing clusters to handle more users at the same time and improving overall concurrency. This lowers infrastructure costs by reducing the need for additional GPUs, which can be passed on to end users as discounts for prompts that include cached input tokens. KV Cache offloading also avoids expensive KV Cache recomputation, resulting in faster response times and a better user experience. In the end, providers benefit from higher throughput and lower cost per token, making their inference services more scalable and efficient.
 
-## When to offload  KV Cache for reuse
+## When to offload KV Cache for reuse
 
 Offloading KV cache to CPU or storage is most effective when KV Cache exceeds GPU memory and cache reuse outweighs the overhead of transferring data. It is especially valuable in long-context, high-concurrency, or resource-constrained inference environments such as:
 
