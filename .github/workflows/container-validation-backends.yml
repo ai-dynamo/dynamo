@@ -278,25 +278,18 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-  deploy-test:
+  deploy-test-vllm:
     runs-on: cpu-amd-m5-2xlarge
-    needs: [build-operator, vllm, sglang, trtllm]
-    strategy:
-      fail-fast: false
-      matrix:
-        framework:
-          - vllm
-          - sglang
-          - trtllm
-    name: deploy-test (${{ matrix.framework }})
+    needs: [build-operator, vllm]
+    permissions:
+      contents: read
     env:
-      NAMESPACE: gh-job-id-${{ github.run_id }}-${{ matrix.framework }}
+      FRAMEWORK: vllm
+      NAMESPACE: gh-job-id-${{ github.run_id }}-vllm
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
       DEPLOYMENT_FILE: "deploy/disagg.yaml"
       MODEL_NAME: "Qwen/Qwen3-0.6B"
-    permissions:
-      contents: read
-    steps:
+    steps: &deploy-test-steps
     - uses: actions/checkout@v4
     - name: Install dependencies
       run: |
@@ -377,8 +370,8 @@ jobs:
         export KUBECONFIG=$(pwd)/.kubeconfig
         kubectl config set-context --current --namespace=$NAMESPACE
 
-        cd components/backends/${{ matrix.framework }}
-        export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework }}-amd64"
+        cd components/backends/$FRAMEWORK
+        export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
         export KUBE_NS=$NAMESPACE
         export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
         # Update the deployment file in-place
@@ -493,3 +486,29 @@ jobs:
         echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
         kubectl delete namespace $NAMESPACE || true
         echo "Namespace $NAMESPACE completed."
+
+  deploy-test-sglang:
+    runs-on: cpu-amd-m5-2xlarge
+    needs: [build-operator, sglang]
+    permissions:
+      contents: read
+    env:
+      FRAMEWORK: sglang
+      NAMESPACE: gh-job-id-${{ github.run_id }}-sglang
+      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+      DEPLOYMENT_FILE: "deploy/disagg.yaml"
+      MODEL_NAME: "Qwen/Qwen3-0.6B"
+    steps: *deploy-test-steps
+
+  deploy-test-trtllm:
+    runs-on: cpu-amd-m5-2xlarge
+    needs: [build-operator, trtllm]
+    permissions:
+      contents: read
+    env:
+      FRAMEWORK: trtllm
+      NAMESPACE: gh-job-id-${{ github.run_id }}-trtllm
+      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+      DEPLOYMENT_FILE: "deploy/disagg.yaml"
+      MODEL_NAME: "Qwen/Qwen3-0.6B"
+    steps: *deploy-test-steps
