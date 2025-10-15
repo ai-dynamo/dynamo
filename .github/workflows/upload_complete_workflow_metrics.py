@@ -67,13 +67,11 @@ FIELD_BUILD_FRAMEWORK = "s_build_framework"
 FIELD_BUILD_SIZE_BYTES = "l_build_size_bytes"
 
 # Test Info
-FIELD_FRAMEWORK = "s_framework"  # Framework name
-FIELD_ERROR_MESSAGE = "s_error_message"  # Error message if any
+FIELD_FRAMEWORK = "s_framework"
+FIELD_ERROR_MESSAGE = "s_error_message"
 FIELD_TEST_NAME = "s_test_name"  # Test name (e.g., test_sglang_deployment[aggregated])
 FIELD_TEST_CLASSNAME = "s_test_classname"  # Test class name (e.g., tests.serve.test_sglang)
-FIELD_TEST_MARKERS = "s_test_markers"  # Comma-separated list of marker names
-FIELD_TEST_MARKERS_DETAIL = "s_test_markers_detail"  # JSON string of detailed marker info
-FIELD_TEST_DURATION = "l_test_duration_ms"  # Test duration in milliseconds
+FIELD_TEST_DURATION = "l_test_duration_ms"
 FIELD_TEST_STATUS = "s_test_status"  # Test status (passed, failed, error, skipped)
 
 

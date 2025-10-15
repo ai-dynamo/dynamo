@@ -58,6 +58,10 @@ jobs:
           framework: vllm
           target: runtime
           platform: 'linux/${{ matrix.platform.arch }}'
+          base_image_tag: ${{ matrix.platform.arch == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
+          runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
+          cuda_version: ${{ matrix.platform.arch == 'arm64' && '129' || '' }}
+          torch_backend: ${{ matrix.platform.arch == 'arm64' && 'cu129' || '' }}
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -145,7 +149,16 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-      - name: Run tests
+      - name: Run unit tests
+        # OPS-1140: Uncomment the below line
+        # if: ${{ matrix.platform.arch != 'arm64' }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          pytest_marks: "unit and sglang and gpu_1"
+          framework: "sglang"
+          test_type: "unit"
+      - name: Run e2e tests
         # OPS-1140: Uncomment the below line
         # if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
@@ -198,7 +211,15 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-      - name: Run tests
+      - name: Run unit tests
+        if: ${{ matrix.platform.arch != 'arm64' }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          pytest_marks: "unit and trtllm_marker and gpu_1"
+          framework: "trtllm"
+          test_type: "unit"
+      - name: Run e2e tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:

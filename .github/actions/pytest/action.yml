@@ -25,14 +25,9 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Setup Test Environment and Capture Start Time
+    - name: Setup Test Environment
       shell: bash
       run: |
-        # Capture test start time
-        TEST_START_TIME=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")
-        echo "TEST_START_TIME=${TEST_START_TIME}" >> $GITHUB_ENV
-        echo "🕐 Test started at: ${TEST_START_TIME}"
-        
         # Setup test directories
         mkdir -p test-results
         
@@ -54,9 +49,6 @@ runs:
       run: |
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
-        # TODO: Pytest marker collection temporarily disabled
-        # Copy the markers plugin into the container mount directory
-        # cp ${{ github.action_path }}/pytest_markers_plugin.py test-results/
         
         docker run --runtime=nvidia --rm --gpus all -w /workspace \
           --cpus=${NUM_CPUS} \
@@ -70,23 +62,12 @@ runs:
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
         
-        # Always continue to metrics capture
+        # Always continue to results processing
         exit 0
 
-    - name: Capture Test Metrics
+    - name: Process Test Results
       shell: bash
       run: |
-        # Capture test end time and calculate duration
-        TEST_END_TIME=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")
-        echo "TEST_END_TIME=${TEST_END_TIME}" >> $GITHUB_ENV
-        
-        # Calculate test duration in seconds
-        START_EPOCH=$(date -d "${TEST_START_TIME}" +%s)
-        END_EPOCH=$(date -d "${TEST_END_TIME}" +%s)
-        TEST_DURATION_SEC=$((END_EPOCH - START_EPOCH))
-        
-        echo "🕐 Test ended at: ${TEST_END_TIME}"
-        echo "⏱️  Test duration: ${TEST_DURATION_SEC} seconds"
         
         # Parse JUnit XML for detailed test metrics
         JUNIT_FILE="test-results/pytest_test_report.xml"
@@ -164,7 +145,6 @@ runs:
         echo "   Errors: ${ERROR_TESTS}"
         echo "   Skipped: ${SKIPPED_TESTS}"
         echo "   Status: ${TEST_STATUS}"
-        echo "   Duration: ${TEST_DURATION_SEC}s"
         
         # Individual test data is now handled directly by the upload script parsing JUnit XML
         echo "✅ Test metrics collection completed - JUnit XML will be processed by upload script"
