@@ -65,5 +65,5 @@ The Dynamo KV Block Manager serves as a reference implementation that emphasizes
    Integrations <kvbm_integrations.md>
    KVBM in vLLM <../guides/run_kvbm_in_vllm.md>
    KVBM in TRTLLM <../guides/run_kvbm_in_trtllm.md>
-   Further Reading <kvbm_reading>
    LMCache Integration <../backends/vllm/LMCache_Integration>
+   Further Reading <kvbm_reading>
