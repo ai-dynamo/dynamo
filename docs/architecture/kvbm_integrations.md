@@ -30,7 +30,7 @@ The following figure shows the typical integration of KVBM with inference framew
 
 
 Instructions to [run KVBM in vLLM](../guides/run_kvbm_in_vllm.md)
-Instructions to run KVBM with TRTLLM:
+Instructions to [run KVBM with TRTLLM](../guides/run_kvbm_in_trtllm.md)
 
 ## Onboarding
 ![Onboarding blocks from Host to Device](../images/kvbm-onboard-host2device.png)
