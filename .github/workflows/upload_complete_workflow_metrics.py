@@ -314,9 +314,11 @@ class WorkflowMetricsUploader:
         self.workflow_name = os.getenv("GITHUB_WORKFLOW")
         self.actor = os.getenv("GITHUB_ACTOR")
         self.event_name = os.getenv("GITHUB_EVENT_NAME")
+        self.sha = os.getenv("GITHUB_SHA")
+        
+        # These are only used for debug logging (actual data uses GitHub API)
         self.ref = os.getenv("GITHUB_REF")
         self.ref_name = os.getenv("GITHUB_REF_NAME")
-        self.sha = os.getenv("GITHUB_SHA")
 
         if not self.repo or not self.run_id:
             raise ValueError("Missing required GitHub environment variables")
@@ -393,24 +395,21 @@ class WorkflowMetricsUploader:
             return None
 
     def add_common_context_fields(
-        self, db_data: Dict[str, Any], workflow_data: Optional[Dict[str, Any]] = None
+        self, db_data: Dict[str, Any], workflow_data: Dict[str, Any]
     ) -> None:
-        """Add common context fields used across all metric types"""
+        """Add common context fields used across all metric types
+        
+        Args:
+            db_data: Dictionary to add fields to
+            workflow_data: Workflow data from GitHub API (required for authoritative branch info)
+        """
         db_data[FIELD_USER_ALIAS] = self.actor
         db_data[FIELD_REPO] = self.repo
         db_data[FIELD_WORKFLOW_NAME] = self.workflow_name
         db_data[FIELD_GITHUB_EVENT] = self.event_name
         
-        # Use branch from workflow API data if available (more reliable for reusable workflows)
-        # Otherwise fall back to environment variable
-        if workflow_data and workflow_data.get("head_branch"):
-            branch_from_api = workflow_data.get("head_branch")
-            db_data[FIELD_BRANCH] = branch_from_api
-            # Log if there's a mismatch between API and env variable
-            if branch_from_api != self.ref_name:
-                print(f"   ℹ️  Branch from API ({branch_from_api}) differs from env var ({self.ref_name}), using API value")
-        else:
-            db_data[FIELD_BRANCH] = self.ref_name
+        # Always use branch from GitHub API (authoritative source)
+        db_data[FIELD_BRANCH] = workflow_data.get("head_branch", "unknown")
             
         db_data[FIELD_WORKFLOW_ID] = str(self.run_id)
         db_data[FIELD_COMMIT_SHA] = self.sha
