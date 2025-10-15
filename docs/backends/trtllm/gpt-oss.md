@@ -402,9 +402,9 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 ```
 ## Benchmarking
 
-### Performance Testing with GenAI-Perf
+### Performance Testing with AIPerf
 
-The Dynamo container includes [GenAI-Perf](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/perf_analyzer/genai-perf/README.html), NVIDIA's tool for benchmarking generative AI models. This tool helps measure throughput, latency, and other performance metrics for your deployment.
+The Dynamo container includes [AIPerf](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/perf_analyzer/aiperf/README.html), NVIDIA's tool for benchmarking generative AI models. This tool helps measure throughput, latency, and other performance metrics for your deployment.
 
 **Run the following benchmark from inside the container** (after completing the deployment steps above):
 
@@ -413,7 +413,7 @@ The Dynamo container includes [GenAI-Perf](https://docs.nvidia.com/deeplearning/
 mkdir -p /tmp/benchmark-results
 
 # Run the benchmark - this command tests the deployment with high-concurrency synthetic workload
-genai-perf profile \
+aiperf profile \
     --model openai/gpt-oss-120b \
     --tokenizer /model \
     --endpoint-type chat \
@@ -434,9 +434,7 @@ genai-perf profile \
     --num-dataset-entries 8000 \
     --random-seed 100 \
     --artifact-dir /tmp/benchmark-results \
-    -- \
     -v \
-    --max-threads 500 \
     -H 'Authorization: Bearer NOT USED' \
     -H 'Accept: text/event-stream'
 ```
@@ -457,13 +455,13 @@ Key parameters you can adjust:
 - `--output-tokens-mean`: Average output length (tests decode throughput)
 - `--request-count`: Total number of requests for the benchmark
 
-### Installing GenAI-Perf Outside the Container
+### Installing AIPerf Outside the Container
 
 If you prefer to run benchmarks from outside the container:
 
 ```bash
-# Install GenAI-Perf
-pip install genai-perf
+# Install AIPerf
+pip install aiperf
 
 # Then run the same benchmark command, adjusting the tokenizer path if needed
 ```
@@ -520,4 +518,4 @@ flowchart TD
 - **Production Deployment**: For multi-node deployments, see the [Multi-node Guide](../../../examples/basics/multinode/README.md)
 - **Advanced Configuration**: Explore TensorRT-LLM engine building options for further optimization
 - **Monitoring**: Set up Prometheus and Grafana for production monitoring
-- **Performance Benchmarking**: Use GenAI-Perf to measure and optimize your deployment performance
+- **Performance Benchmarking**: Use AIPerf to measure and optimize your deployment performance
