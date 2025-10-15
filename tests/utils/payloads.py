@@ -63,8 +63,10 @@ class BasePayload:
                 if not content or expected not in content:
                     missing_expected.append(expected)
             if missing_expected:
+                preview = (content or "")[:1000]
                 raise AssertionError(
-                    f"Expected content not found in response. Missing: {missing_expected}"
+                    f"Expected content not found in response. Missing: {missing_expected}. "
+                    f"Content preview (first 1000 chars): {preview!r}"
                 )
         logger.info(f"SUCCESS: All expected_responses: {self.expected_response} found.")
 
