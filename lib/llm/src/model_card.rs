@@ -29,6 +29,7 @@ use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned, transports
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
 
+use crate::preprocessor::media::MediaDecoder;
 use crate::protocols::TokenIdType;
 
 /// Identify model deployment cards in the key-value store
@@ -169,6 +170,10 @@ pub struct ModelDeploymentCard {
 
     #[serde(default)]
     pub runtime_config: ModelRuntimeConfig,
+
+    /// Media decoding configuration
+    #[serde(default)]
+    pub media_decoder: Option<MediaDecoder>,
 
     #[serde(skip)]
     cache_dir: Option<Arc<tempfile::TempDir>>,
@@ -564,6 +569,7 @@ impl ModelDeploymentCard {
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
             cache_dir: None,
+            media_decoder: None,
             checksum: OnceLock::new(),
         })
     }

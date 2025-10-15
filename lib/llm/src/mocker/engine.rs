@@ -316,6 +316,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
     ) -> Result<ManyOut<LLMEngineOutput>, Error> {
         let (request, ctx) = input.into_parts();
 
+        println!("multi_modal_data: {:?}", request.multi_modal_data);
         // Extract dp_rank from annotations if present
         let dp_rank = request
             .annotations
