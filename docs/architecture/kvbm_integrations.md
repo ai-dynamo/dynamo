@@ -29,7 +29,7 @@ The following figure shows the typical integration of KVBM with inference framew
 **vLLM KVBM Integration**
 
 
-Instructions to run KVBM with vLLM:
+Instructions to [run KVBM in vLLM](../guides/run_kvbm_in_vllm.md)
 Instructions to run KVBM with TRTLLM:
 
 ## Onboarding
