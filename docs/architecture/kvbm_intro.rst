@@ -43,7 +43,7 @@ The Dynamo KV Block Manager serves as a reference implementation that emphasizes
      - ✅
      - vLLM
    * -
-     - ❌
+     - ✅
      - TensorRT-LLM
    * -
      - ❌
