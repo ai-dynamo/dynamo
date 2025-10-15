@@ -135,7 +135,10 @@ impl RetryManager {
             self.context.link_child(request.context());
             if self.context.is_stopped() || self.context.is_killed() {
                 tracing::debug!("Abort creating new stream after context is stopped or killed");
-                return Err(Error::msg("Context is stopped or killed"));
+                return Err(Error::msg(format!(
+                    "Context id {} is stopped or killed",
+                    self.context.id()
+                )));
             }
             response_stream = Some(self.next_generate.generate(request).await);
             if let Some(err) = response_stream.as_ref().unwrap().as_ref().err()
@@ -748,7 +751,11 @@ mod tests {
 
         assert!(retry_manager_result.is_err());
         if let Err(error) = retry_manager_result {
-            assert!(error.to_string().contains("Context is stopped or killed"));
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("Context id {} is stopped or killed", context_id))
+            );
         }
     }
 }
