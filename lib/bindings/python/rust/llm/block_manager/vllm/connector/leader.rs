@@ -386,10 +386,6 @@ impl Leader for KvConnectorLeader {
                 .get(request_id)
                 .unwrap_or(&0);
 
-            tracing::info!(
-                "Applying scheduler output for num_computed_tokens: {}, scheduled_tokens: {}",
-                new_req.num_computed_tokens, scheduled_tokens
-            );
             slot.apply_scheduler_output(&[], &[], new_req.num_computed_tokens, scheduled_tokens)?;
 
             if let Some(pending_ops) = slot.take_pending_operations() {

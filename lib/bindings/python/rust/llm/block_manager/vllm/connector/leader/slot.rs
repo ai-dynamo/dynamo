@@ -482,20 +482,6 @@ impl Slot for VllmConnectorSlot {
         num_computed_tokens: usize,
         num_scheduled_tokens: usize,
     ) -> Result<(), SlotError> {
-        tracing::info!(
-            "apply_scheduler_output: tokens: {}, block_ids: {}, num_computed_tokens: {}, num_scheduled_tokens: {}",
-            tokens.len(),
-            block_ids.len(),
-            num_computed_tokens,
-            num_scheduled_tokens
-        );
-
-        tracing::info!(
-            "before advancing current_position and evaluated_blocks: {}, {}",
-            self.current_position,
-            self.evaluated_blocks
-        );
-
         if !tokens.is_empty() {
             tracing::debug!(
                 "appending {} newly decoded tokens to sequence",
@@ -507,15 +493,10 @@ impl Slot for VllmConnectorSlot {
             self.state = SlotState::Prefilling;
         }
 
-        // advance the current position and evaluated blocks by the number of computed tokens
+        // Use max to advance both current_position and evaluated_blocks at least by num_computed_tokens.
+        // This logic is to prevent redundant block offloading.
         self.current_position = max(self.current_position, num_computed_tokens);
         self.evaluated_blocks = max(self.evaluated_blocks, num_computed_tokens / self.block_size);
-
-        tracing::info!(
-            "after advancing current_position and evaluated_blocks: {}, {}",
-            self.current_position,
-            self.evaluated_blocks
-        );
 
         // apply new block_ids
         if !block_ids.is_empty() {
@@ -525,12 +506,6 @@ impl Slot for VllmConnectorSlot {
 
         // we should have enough device blocks to cover the newly scheduled tokens
         let next_position = self.current_position + num_scheduled_tokens;
-        tracing::info!(
-            "next_position: {}, current_position: {}, num_scheduled_tokens: {}",
-            next_position,
-            self.current_position,
-            num_scheduled_tokens,
-        );
         assert!(
             next_position <= self.device_blocks.len() * self.block_size,
             "next_position: {} > device_blocks.len() {} * block_size {}",
@@ -539,12 +514,6 @@ impl Slot for VllmConnectorSlot {
             self.block_size
         );
 
-        tracing::info!(
-            "next_position: {}, sequence.total_tokens(): {}",
-            next_position,
-            self.sequence.total_tokens()
-        );
-        tracing::info!("before evaluated_blocks: {}", self.evaluated_blocks);
         if next_position > self.sequence.total_tokens() {
             // vllm stopped providing tokens, so we are done
             self.state = SlotState::Decoding;
@@ -608,7 +577,6 @@ impl Slot for VllmConnectorSlot {
                 .expect("failed to offload blocks");
 
             self.evaluated_blocks += num_candidate_blocks;
-            tracing::info!("after evaluated_blocks: {}", self.evaluated_blocks);
         }
 
         // done applying policy
@@ -1316,11 +1284,6 @@ async fn process_offload_request(
 ) -> anyhow::Result<()> {
     let request_id = &offload_req.request_id;
     let operation_id = &offload_req.operation_id;
-
-    tracing::info!(
-        "Processing offload request for request_id: {}, operation_id: {}, blocks: {:?}",
-        request_id, operation_id, offload_req.block_ids,
-    );
 
     tracing::debug!(
         "Processing offload request for {} blocks",
