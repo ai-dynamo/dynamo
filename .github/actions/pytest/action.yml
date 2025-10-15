@@ -20,6 +20,10 @@ inputs:
     description: 'Test type (unit, e2e, integration)'
     required: false
     default: 'e2e'
+  platform_arch:
+    description: 'Platform architecture (amd64, arm64)'
+    required: false
+    default: 'amd64'
 
 
 runs:
@@ -30,11 +34,11 @@ runs:
       run: |
         # Setup test directories
         mkdir -p test-results
-        
-        # Extract platform architecture from job context
-        PLATFORM_ARCH="amd64"  # Default
-        if [[ "${{ github.job }}" == *"arm64"* ]]; then
-          PLATFORM_ARCH="arm64"
+
+        # Set platform architecture from input
+        PLATFORM_ARCH="${{ inputs.platform_arch }}"
+        if [[ -z "${PLATFORM_ARCH}" ]]; then
+          PLATFORM_ARCH="amd64"
         fi
         echo "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV
         echo "🏗️  Platform architecture: ${PLATFORM_ARCH}"
@@ -49,7 +53,7 @@ runs:
       run: |
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
-        
+
         docker run --runtime=nvidia --rm --gpus all -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
@@ -57,21 +61,21 @@ runs:
           -v "$(pwd)/test-results:/test-results" \
           ${{ inputs.image_tag }} \
           bash -c "pytest -v --tb=short --basetemp=/tmp --junitxml=/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
-        
+
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
-        
+
         # Always continue to results processing
         exit 0
 
     - name: Process Test Results
       shell: bash
       run: |
-        
+
         # Check for JUnit XML file and determine test status
         JUNIT_FILE="test-results/pytest_test_report.xml"
-        
+
         if [[ -f "$JUNIT_FILE" ]]; then
           echo "✅ JUnit XML generated successfully"
           # Extract basic test counts for status determination
@@ -85,7 +89,7 @@ runs:
           FAILED_TESTS=1  # Treat missing XML as failure
           ERROR_TESTS=0
         fi
-        
+
         # Exit with original test result to maintain workflow behavior
         exit ${TEST_EXIT_CODE}
 

@@ -90,6 +90,7 @@ jobs:
           pytest_marks: "unit and vllm and gpu_1"
           framework: "vllm"
           test_type: "unit"
+          platform_arch: ${{ matrix.platform.arch }}
       - name: Run e2e tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
@@ -172,7 +173,7 @@ jobs:
     needs: changed-files
     if: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
-      fail-fast: false 
+      fail-fast: false
       matrix:
         platform:
           - { arch: amd64, runner: gpu-l40-amd64 }
