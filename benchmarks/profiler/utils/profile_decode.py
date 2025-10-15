@@ -6,9 +6,9 @@ from typing import Callable, Optional, Tuple
 
 import numpy as np
 
+from benchmarks.profiler.utils.aiperf import benchmark_decode
 from benchmarks.profiler.utils.defaults import DECODE_MAX_CONCURRENCY
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
-from benchmarks.profiler.utils.genai_perf import benchmark_decode
 from benchmarks.profiler.utils.plot import plot_decode_3d_surface
 
 logger = logging.getLogger(__name__)
@@ -113,19 +113,21 @@ def profile_decode(
     attention_dp_size,
 ):
     def get_itl_and_thpt_per_gpu(isl, osl, num_request):
-        genai_perf_artifact_dir = f"{work_dir}/gap_isl{isl}_osl{osl}_n{num_request}"
-        gap_result = benchmark_decode(
+        ai_perf_artifact_dir = f"{work_dir}/aiperf_isl{isl}_osl{osl}_n{num_request}"
+        aiperf_result = benchmark_decode(
             isl,
             osl,
             num_request,
-            genai_perf_artifact_dir,
+            ai_perf_artifact_dir,
             model_name,
             tokenizer,
             base_url=url,
         )
-        if gap_result is not None:
-            itl = gap_result["inter_token_latency"]["avg"]
-            thpt_per_gpu = gap_result["output_token_throughput"]["avg"] / num_gpus
+        if aiperf_result is not None:
+            itl = aiperf_result["records"]["inter_token_latency"]["avg"]
+            thpt_per_gpu = (
+                aiperf_result["records"]["output_token_throughput"]["avg"] / num_gpus
+            )
             return itl, thpt_per_gpu
         return None, None
 

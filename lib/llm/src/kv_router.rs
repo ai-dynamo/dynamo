@@ -569,17 +569,34 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
                 let stream_context = response_stream.context();
                 let chooser = self.chooser.clone();
+                let context_for_monitoring = stream_context.clone();
 
                 let wrapped_stream = Box::pin(async_stream::stream! {
-                    if let Some(first_item) = response_stream.next().await {
-                        if let Err(e) = chooser.mark_prefill_completed(&context_id).await {
-                            tracing::warn!("Failed to mark prefill completed for request {context_id}: {e:?}");
-                        }
-                        yield first_item;
-                    }
+                    let mut prefill_marked = false;
 
-                    while let Some(item) = response_stream.next().await {
-                        yield item;
+                    loop {
+                        tokio::select! {
+                            biased;
+
+                            _ = context_for_monitoring.stopped() => {
+                                tracing::debug!("Request {context_id} cancelled, ending stream");
+                                break;
+                            }
+
+                            item = response_stream.next() => {
+                                let Some(item) = item else {
+                                    break;
+                                };
+
+                                if !prefill_marked {
+                                    if let Err(e) = chooser.mark_prefill_completed(&context_id).await {
+                                        tracing::warn!("Failed to mark prefill completed for request {context_id}: {e:?}");
+                                    }
+                                    prefill_marked = true;
+                                }
+                                yield item;
+                            }
+                        }
                     }
 
                     if let Err(e) = chooser.free(&context_id).await {

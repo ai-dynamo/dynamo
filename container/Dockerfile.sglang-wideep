@@ -1,103 +1,68 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-ARG SGLANG_IMAGE_TAG="v0.5.3-cu126"
+ARG SGLANG_IMAGE_TAG="v0.5.3.post1"
+ARG BRANCH_TYPE
+
+FROM scratch AS local_src
+COPY . /src
 
 FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG}
 
-ARG MODE="hopper"
-ARG ARCH="amd64"
-ARG ARCH_ALT="x86_64"
-ARG NIXL_UCX_REF="v1.19.0"
-ARG NIXL_TAG="0.5.0"
-ARG CMAKE_VERSION="3.31.8"
-ARG RUST_VERSION="1.90.0"
-ARG CARGO_BUILD_JOBS="16"
+WORKDIR /sgl-workspace
 
-RUN apt-get update -y && \
-    apt-get install -y \
-      cmake meson ninja-build pybind11-dev patchelf net-tools \
-      build-essential protobuf-compiler libssl-dev pkg-config \
-      clang libclang-dev git rapidjson-dev zlib1g-dev jq && \
-    pip install --break-system-packages meson-python wheel build
-
-# Build UCX + NIXL for x86/hopper until its fully tested on GB200
-RUN if [ "$MODE" = "hopper" ]; then \
-      apt-get install -y --no-install-recommends \
-        libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
-        libnuma-dev librdmacm-dev ibverbs-providers autoconf libtool && \
-      # UCX from source
-      rm -rf /opt/hpcx/ucx /usr/local/ucx && \
-      cd /usr/local/src && \
-      git clone https://github.com/openucx/ucx.git && \
-      cd ucx && git checkout $NIXL_UCX_REF && \
-      ./autogen.sh && \
-      ./configure \
-        --prefix=/usr/local/ucx \
-        --enable-shared \
-        --disable-static \
-        --disable-doxygen-doc \
-        --enable-optimizations \
-        --enable-cma \
-        --enable-devel-headers \
-        --with-cuda=/usr/local/cuda \
-        --with-verbs \
-        --with-efa \
-        --with-dm \
-        --with-gdrcopy=/usr/local \
-        --enable-mt && \
-      make -j && make install-strip && ldconfig && \
-      # NIXL
-      git clone https://github.com/ai-dynamo/nixl.git /opt/nixl && \
-      cd /opt/nixl && git checkout $NIXL_TAG && \
-      pip install --break-system-packages . \
-        --config-settings="setup-args=-Ducx_path=/usr/local/ucx"; \
+# Install dynamo
+# Providing --build-arg BRANCH_TYPE=local will editable install the local dynamo repo
+# Providing --build-arg BRANCH_TYPE=remote will editable install the remote dynamo repo
+# Default is to install the latest published dynamo version
+ARG BRANCH_TYPE
+COPY --from=local_src /src /tmp/local_src
+RUN if [ "$BRANCH_TYPE" = "local" ]; then \
+        cp -r /tmp/local_src /sgl-workspace/dynamo; \
+    elif [ "$BRANCH_TYPE" = "remote" ]; then \
+        git clone https://github.com/ai-dynamo/dynamo.git /sgl-workspace/dynamo; \
     fi
 
-ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
-
-# Dynamo
-WORKDIR /sgl-workspace
-COPY . /sgl-workspace/dynamo
-
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH
-
-RUN wget --tries=3 --waitretry=5 \
-    "https://static.rust-lang.org/rustup/archive/1.28.1/${ARCH_ALT}-unknown-linux-gnu/rustup-init" && \
-    chmod +x rustup-init && \
-    ./rustup-init -y \
-      --no-modify-path \
-      --profile minimal \
-      --default-toolchain $RUST_VERSION \
-      --default-host ${ARCH_ALT}-unknown-linux-gnu && \
-    rm rustup-init && \
-    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
-
-ARG CARGO_BUILD_JOBS
-ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
-
-RUN cd dynamo && cargo build --release
-
-RUN cd dynamo/lib/bindings/python && \
-    pip install --break-system-packages -e . && \
+# SGLang does not use a venv in their container
+RUN if [ "$BRANCH_TYPE" = "local" ]; then \
+    cd dynamo/lib/bindings/python && \
+    pip install --break-system-packages maturin && \
+    maturin build --release && \
+    pip install --break-system-packages target/wheels/*.whl && \
     cd /sgl-workspace/dynamo && \
-    pip install --break-system-packages .
+    pip install --break-system-packages -e . && \
+    pip install --break-system-packages --requirement /tmp/local_src/container/deps/requirements.txt ; \
+  elif [ "$BRANCH_TYPE" = "remote" ]; then \
+    cd dynamo/lib/bindings/python && \
+    pip install --break-system-packages maturin && \
+    maturin build --release && \
+    pip install --break-system-packages target/wheels/*.whl && \
+    cd /sgl-workspace/dynamo && \
+    pip install --break-system-packages -e . && \
+    pip install --break-system-packages --requirement /sgl-workspace/dynamo/container/deps/requirements.txt ; \
+  else \
+    pip install --break-system-packages ai-dynamo ; \
+  fi \
+&& rm -rf /tmp/local_src
 
-RUN pip install --break-system-packages sglang-router==0.1.9
-
-# Install dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    pip install --break-system-packages --requirement /tmp/requirements.txt
-
-RUN wget --tries=3 --waitretry=5 \
+# Install NATS and ETCD
+RUN case "$(uname -m)" in \
+      x86_64) ARCH=amd64 ;; \
+      aarch64) ARCH=arm64 ;; \
+      *) echo "Unsupported architecture: $(uname -m)" && exit 1 ;; \
+    esac && \
+    wget --tries=3 --waitretry=5 \
       https://github.com/nats-io/nats-server/releases/download/v2.10.28/\
 nats-server-v2.10.28-${ARCH}.deb && \
     dpkg -i nats-server-v2.10.28-${ARCH}.deb && rm nats-server-v2.10.28-${ARCH}.deb
 
 ENV ETCD_VERSION="v3.5.21"
-RUN wget --tries=3 --waitretry=5 \
+RUN case "$(uname -m)" in \
+      x86_64) ARCH=amd64 ;; \
+      aarch64) ARCH=arm64 ;; \
+      *) echo "Unsupported architecture: $(uname -m)" && exit 1 ;; \
+    esac && \
+    wget --tries=3 --waitretry=5 \
       https://github.com/etcd-io/etcd/releases/download/${ETCD_VERSION}/\
 etcd-${ETCD_VERSION}-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
     mkdir -p /usr/local/bin/etcd && \
@@ -106,29 +71,6 @@ etcd-${ETCD_VERSION}-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
     rm /tmp/etcd.tar.gz
 
 ENV PATH=/usr/local/bin/etcd:$PATH
-
-# GenAI Perf
-RUN apt-get purge -y cmake
-
-RUN mkdir /sgl-workspace/cmake_build && \
-    cd /sgl-workspace/cmake_build && \
-    wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/\
-cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz && \
-    tar -xzf cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz && \
-    mv cmake-${CMAKE_VERSION}-linux-$(uname -m) custom_cmake && \
-    rm cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz
-
-ENV PATH=/sgl-workspace/cmake_build/custom_cmake/bin:$PATH
-RUN cmake --version
-
-RUN git clone --depth=1 \
-      https://github.com/triton-inference-server/perf_analyzer.git && \
-    mkdir perf_analyzer/build && \
-    cmake -B perf_analyzer/build -S perf_analyzer && \
-    cmake --build perf_analyzer/build -- -j$(nproc)
-
-ENV PATH=/sgl-workspace/perf_analyzer/build/perf_analyzer/src/perf-analyzer-build:$PATH
-RUN pip install --break-system-packages genai-perf
 
 # Enable forceful shutdown of inflight requests
 ENV SGL_FORCE_SHUTDOWN=1

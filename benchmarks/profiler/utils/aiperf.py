@@ -30,7 +30,7 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-def _get_common_genai_perf_cmd(
+def _get_common_aiperf_cmd(
     artifact_dir,
     seed=100,
     model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
@@ -38,7 +38,7 @@ def _get_common_genai_perf_cmd(
     base_url="http://localhost:8000",
 ):
     return [
-        "genai-perf",
+        "aiperf",
         "profile",
         "--model",
         model,
@@ -64,7 +64,7 @@ def _get_common_genai_perf_cmd(
     ]
 
 
-def get_prefill_genai_perf_cmd(
+def get_prefill_aiperf_cmd(
     isl,
     artifact_dir,
     seed=100,
@@ -73,7 +73,7 @@ def get_prefill_genai_perf_cmd(
     osl=5,
     base_url="http://localhost:8000",
 ):
-    return _get_common_genai_perf_cmd(
+    return _get_common_aiperf_cmd(
         artifact_dir,
         seed,
         model,
@@ -99,7 +99,7 @@ def get_prefill_genai_perf_cmd(
     ]
 
 
-def get_decode_genai_perf_cmd(
+def get_decode_aiperf_cmd(
     isl,
     osl,
     artifact_dir,
@@ -109,7 +109,7 @@ def get_decode_genai_perf_cmd(
     tokenizer="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     base_url="http://localhost:8000",
 ):
-    return _get_common_genai_perf_cmd(
+    return _get_common_aiperf_cmd(
         artifact_dir,
         seed,
         model,
@@ -137,15 +137,15 @@ def get_decode_genai_perf_cmd(
     ]
 
 
-def get_gap_result(artifact_dir: str) -> dict:
+def get_aiperf_result(artifact_dir: str) -> dict:
     json_file_path = None
     for root, _, files in os.walk(artifact_dir):
-        if "profile_export_genai_perf.json" in files:
-            json_file_path = os.path.join(root, "profile_export_genai_perf.json")
+        if "profile_export_aiperf.json" in files:
+            json_file_path = os.path.join(root, "profile_export_aiperf.json")
             break
     if json_file_path is None:
         raise FileNotFoundError(
-            f"profile_export_genai_perf.json not found in {artifact_dir}"
+            f"profile_export_aiperf.json not found in {artifact_dir}"
         )
     with open(json_file_path, "r") as f:
         return json.load(f)
@@ -153,35 +153,35 @@ def get_gap_result(artifact_dir: str) -> dict:
 
 def benchmark_prefill(
     isl,
-    genai_perf_artifact_dir,
+    aiperf_artifact_dir,
     model_name,
     tokenizer,
     base_url="http://localhost:8000",
 ):
-    logger.info(f"Running genai-perf with isl {isl}")
-    genai_perf_cmd = get_prefill_genai_perf_cmd(
+    logger.info(f"Running aiperf with isl {isl}")
+    aiperf_cmd = get_prefill_aiperf_cmd(
         isl,
-        genai_perf_artifact_dir,
+        aiperf_artifact_dir,
         model=model_name,
         tokenizer=tokenizer,
         base_url=base_url,
     )
-    print(f"genai-perf cmd: {genai_perf_cmd}")
+    print(f"aiperf cmd: {aiperf_cmd}")
     # import pdb; pdb.set_trace()
-    gap_process = subprocess.Popen(
-        genai_perf_cmd,
+    aiperf_process = subprocess.Popen(
+        aiperf_cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
-    stdout, stderr = gap_process.communicate()
-    if gap_process.returncode == 0:
-        logger.info("Genai-perf profiling completed successfully")
+    stdout, stderr = aiperf_process.communicate()
+    if aiperf_process.returncode == 0:
+        logger.info("AIperf profiling completed successfully")
         logger.info(stdout)
-        gap_result = get_gap_result(genai_perf_artifact_dir)
-        return gap_result
+        aiperf_result = get_aiperf_result(aiperf_artifact_dir)
+        return aiperf_result
     else:
-        logger.error(f"Genai-perf failed with error code: {gap_process.returncode}")
+        logger.error(f"AIPerf failed with error code: {aiperf_process.returncode}")
         logger.error(f"stderr: {stderr}")
         return None
 
@@ -190,7 +190,7 @@ def benchmark_decode(
     isl,
     osl,
     num_request,
-    genai_perf_artifact_dir,
+    aiperf_artifact_dir,
     model_name,
     tokenizer,
     base_url="http://localhost:8000",
@@ -201,47 +201,47 @@ def benchmark_decode(
     # we use the same random seed to make sure the prompt is the same
     seed = random.randint(0, 1000000)
 
-    genai_perf_cmd = get_decode_genai_perf_cmd(
+    aiperf_cmd = get_decode_aiperf_cmd(
         isl,
         osl,
-        f"{genai_perf_artifact_dir}_warmup",
+        f"{aiperf_artifact_dir}_warmup",
         num_request,
         seed=seed,
         model=model_name,
         tokenizer=tokenizer,
         base_url=base_url,
     )
-    gap_process = subprocess.Popen(
-        genai_perf_cmd,
+    aiperf_process = subprocess.Popen(
+        aiperf_cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
-    gap_process.communicate()
+    aiperf_process.communicate()
     # then send out the real requests, hopefully, this will skip all prefill computation
-    genai_perf_cmd = get_decode_genai_perf_cmd(
+    aiperf_cmd = get_decode_aiperf_cmd(
         isl,
         osl,
-        genai_perf_artifact_dir,
+        aiperf_artifact_dir,
         num_request,
         seed=seed,
         model=model_name,
         tokenizer=tokenizer,
         base_url=base_url,
     )
-    gap_process = subprocess.Popen(
-        genai_perf_cmd,
+    aiperf_process = subprocess.Popen(
+        aiperf_cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
-    stdout, stderr = gap_process.communicate()
-    if gap_process.returncode == 0:
-        logger.info("Genai-perf profiling completed successfully")
+    stdout, stderr = aiperf_process.communicate()
+    if aiperf_process.returncode == 0:
+        logger.info("AIperf profiling completed successfully")
         logger.info(stdout)
-        gap_result = get_gap_result(genai_perf_artifact_dir)
-        return gap_result
+        aiperf_result = get_aiperf_result(aiperf_artifact_dir)
+        return aiperf_result
     else:
-        logger.error(f"Genai-perf failed with error code: {gap_process.returncode}")
+        logger.error(f"AIPerf failed with error code: {aiperf_process.returncode}")
         logger.error(f"stderr: {stderr}")
         return None

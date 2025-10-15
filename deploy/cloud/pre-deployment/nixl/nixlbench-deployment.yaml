@@ -14,16 +14,22 @@ spec:
       labels:
         app: nixl-benchmark
     spec:
-      imagePullSecrets:
-        - name: nvcr-imagepullsecret
       containers:
       - name: nixl-benchmark
-        image: my-registry/vllm-runtime:nixlbench-e42c07a8
+        image: "my-registry/nixlbench:version-arch"
         command: ["sh", "-c"]
+        env:
+          - name: ETCD_ENDPOINTS
+            value: etcd:2379
         args:
-          - "nixlbench -etcd_endpoints http://dynamo-platform-etcd:2379 --target_seg_type VRAM --initiator_seg_type VRAM && sleep infinity"
+        - |
+          nixlbench -etcd_endpoints ${ETCD_ENDPOINTS} --target_seg_type VRAM --initiator_seg_type VRAM && sleep infinity
         resources:
           requests:
-            nvidia.com/gpu: "1"
+              cpu: "10"
+              memory: "5Gi"
+              nvidia.com/gpu: "1"
           limits:
-            nvidia.com/gpu: "1"
+              cpu: "10"
+              memory: "5Gi"
+              nvidia.com/gpu: "1"

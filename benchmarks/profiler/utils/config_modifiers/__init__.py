@@ -13,28 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-[package]
-name = "dynamo-parsers"
-version.workspace = true
-edition.workspace = true
-description = "Dynamo Parser Library for Tool Calling and Reasoning"
-authors.workspace = true
-license.workspace = true
-homepage.workspace = true
-repository.workspace = true
-keywords.workspace = true
+from typing import TYPE_CHECKING
 
-[dependencies]
-anyhow = { workspace = true }
-dynamo-async-openai = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
-uuid = { workspace = true }
+if TYPE_CHECKING:
+    from benchmarks.profiler.utils.config import ConfigModifierProtocol
 
-regex = "1"
-openai-harmony = "0.0.3"
-lazy_static = "1.5.0"
-rustpython-parser = "0.4.0"
-num-traits = "0.2"
+from benchmarks.profiler.utils.config_modifiers.sglang import SGLangConfigModifier
+from benchmarks.profiler.utils.config_modifiers.trtllm import TrtllmConfigModifier
+from benchmarks.profiler.utils.config_modifiers.vllm import VllmV1ConfigModifier
+
+CONFIG_MODIFIERS: dict[str, type["ConfigModifierProtocol"]] = {
+    "vllm": VllmV1ConfigModifier,
+    "sglang": SGLangConfigModifier,
+    "trtllm": TrtllmConfigModifier,
+}
+
+__all__ = [
+    "VllmV1ConfigModifier",
+    "SGLangConfigModifier",
+    "TrtllmConfigModifier",
+    "CONFIG_MODIFIERS",
+]

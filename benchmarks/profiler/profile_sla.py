@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import argparse
 import asyncio
 import logging
 import math
@@ -22,14 +21,10 @@ import os
 import numpy as np
 import yaml
 
-from benchmarks.profiler.utils.config import (
-    CONFIG_MODIFIERS,
-    WORKER_COMPONENT_NAMES,
-    generate_dgd_config_with_planner,
-)
+from benchmarks.profiler.utils.aiperf import benchmark_decode, benchmark_prefill
+from benchmarks.profiler.utils.config import generate_dgd_config_with_planner
+from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
-from benchmarks.profiler.utils.genai_perf import benchmark_decode, benchmark_prefill
-from benchmarks.profiler.utils.planner_utils import add_planner_arguments_to_parser
 from benchmarks.profiler.utils.plot import (
     plot_decode_performance,
     plot_prefill_performance,
@@ -49,10 +44,12 @@ from benchmarks.profiler.utils.profile_prefill import (
     profile_prefill,
     profile_prefill_aiconfigurator,
 )
+from benchmarks.profiler.utils.profiler_argparse import create_profiler_parser
 from deploy.utils.dynamo_deployment import (
     DynamoDeploymentClient,
     cleanup_remaining_deployments,
 )
+from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -245,18 +242,18 @@ async def run_profile(args):
                     f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
                 )
 
-                # run genai-perf
+                # run ai-perf
                 base_url = client.get_service_url()
-                genai_perf_artifact_dir = f"{work_dir}/gap_isl{args.isl}"
-                gap_result = benchmark_prefill(
+                ai_perf_artifact_dir = f"{work_dir}/aiperf_isl{args.isl}"
+                aiperf_result = benchmark_prefill(
                     args.isl,
-                    genai_perf_artifact_dir,
+                    ai_perf_artifact_dir,
                     model_name,
                     model_name,
                     base_url=base_url,
                 )
-                if gap_result is not None:
-                    ttft = gap_result["time_to_first_token"]["avg"]
+                if aiperf_result is not None:
+                    ttft = aiperf_result["records"]["ttft"]["avg"]
 
                 logger.info("Cleaning up deployment...")
                 await client.delete_deployment()
@@ -424,20 +421,23 @@ async def run_profile(args):
                         )
                     else:
                         base_url = client.get_service_url()
-                        genai_perf_artifact_dir = f"{work_dir}/gap_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}"
-                        gap_result = benchmark_decode(
+                        ai_perf_artifact_dir = f"{work_dir}/aiperf_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}"
+                        aiperf_result = benchmark_decode(
                             args.isl,
                             args.osl,
                             num_request,
-                            genai_perf_artifact_dir,
+                            ai_perf_artifact_dir,
                             model_name,
                             model_name,
                             base_url=base_url,
                         )
-                        if gap_result is not None:
-                            itl = gap_result["inter_token_latency"]["avg"]
+                        if aiperf_result is not None:
+                            itl = aiperf_result["records"]["inter_token_latency"]["avg"]
                             thpt_per_gpu = (
-                                gap_result["output_token_throughput"]["avg"] / num_gpus
+                                aiperf_result["records"]["output_token_throughput"][
+                                    "avg"
+                                ]
+                                / num_gpus
                             )
 
                     if itl is not None and thpt_per_gpu is not None:
@@ -740,166 +740,9 @@ async def run_profile(args):
         await cleanup_remaining_deployments(deployment_clients, args.namespace)
         logger.info("Final cleanup completed.")
 
-    # deploy the optimized DGD with planner
-    if args.deploy_after_profile and not args.dry_run:
-        logger.info("Deploying the optimized DGD with planner...")
-        # TODO: check conflicts for dynamo namespace and DGD name
-        # TODO: handle deployment errors and propagate proper error messages to users
-        client = DynamoDeploymentClient(
-            namespace=args.namespace,
-            base_log_dir=f"{args.output_dir}/final_deployment",
-            model_name=model_name,
-            service_name=args.service_name,
-            frontend_port=frontend_port,
-            deployment_name=config["metadata"]["name"],
-        )
-        await client.create_deployment(f"{args.output_dir}/config_with_planner.yaml")
-
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Profile the TTFT and ITL of the Prefill and Decode engine with different parallelization mapping. When profiling prefill we mock/fix decode,when profiling decode we mock/fix prefill."
-    )
-    parser.add_argument(
-        "--namespace",
-        type=str,
-        default="dynamo-sla-profiler",
-        help="Kubernetes namespace to deploy the DynamoGraphDeployment",
-    )
-    parser.add_argument(
-        "--backend",
-        type=str,
-        default="vllm",
-        choices=["vllm", "sglang", "trtllm"],
-        help="backend type, currently support [vllm, sglang, trtllm]",
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        required=True,
-        help="Path to the DynamoGraphDeployment config file",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="profiling_results",
-        help="Path to the output results directory",
-    )
-    parser.add_argument(
-        "--min-num-gpus-per-engine",
-        type=int,
-        default=1,
-        help="minimum number of GPUs per engine",
-    )
-    parser.add_argument(
-        "--max-num-gpus-per-engine",
-        type=int,
-        default=8,
-        help="maximum number of GPUs per engine",
-    )
-    parser.add_argument(
-        "--skip-existing-results",
-        action="store_true",
-        help="Skip TP sizes that already have results in the output directory",
-    )
-    parser.add_argument(
-        "--force-rerun",
-        action="store_true",
-        help="Force re-running all tests even if results already exist (overrides --skip-existing-results)",
-    )
-    parser.add_argument(
-        "--isl", type=int, default=3000, help="target input sequence length"
-    )
-    parser.add_argument(
-        "--osl", type=int, default=500, help="target output sequence length"
-    )
-    parser.add_argument(
-        "--ttft", type=int, default=50, help="target Time To First Token in ms"
-    )
-    parser.add_argument(
-        "--itl", type=int, default=10, help="target Inter Token Latency in ms"
-    )
-
-    # arguments used for interpolating TTFT and ITL under different ISL/OSL
-    parser.add_argument(
-        "--max-context-length",
-        type=int,
-        default=16384,
-        help="maximum context length supported by the served model",
-    )
-    parser.add_argument(
-        "--prefill-interpolation-granularity",
-        type=int,
-        default=16,
-        help="how many samples to benchmark to interpolate TTFT under different ISL",
-    )
-    parser.add_argument(
-        "--decode-interpolation-granularity",
-        type=int,
-        default=6,
-        help="how many samples to benchmark to interpolate ITL under different active kv cache size and decode context length",
-    )
-    parser.add_argument(
-        "--service-name",
-        type=str,
-        default="",
-        help="Service name for port forwarding (default: {deployment_name}-frontend)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Dry run the profile job",
-    )
-    parser.add_argument(
-        "--is-moe-model",
-        action="store_true",
-        dest="is_moe_model",
-        help="Enable MoE (Mixture of Experts) model support, use TEP for prefill and DEP for decode",
-    )
-    parser.add_argument(
-        "--num-gpus-per-node",
-        type=int,
-        default=8,
-        help="Number of GPUs per node for MoE models - this will be the granularity when searching for the best TEP/DEP size",
-    )
-
-    # arguments for dgd config generation and deployment
-    parser.add_argument(
-        "--deploy-after-profile",
-        action="store_true",
-        help="deploy the optimized DGD with planner",
-    )
-    # Dynamically add all planner arguments from planner_argparse.py
-    add_planner_arguments_to_parser(parser, prefix="planner-")
-
-    # arguments if using aiconfigurator
-    parser.add_argument(
-        "--use-ai-configurator",
-        action="store_true",
-        help="Use ai-configurator to estimate benchmarking results instead of running actual deployment.",
-    )
-    parser.add_argument(
-        "--aic-system",
-        type=str,
-        help="Target system for use with aiconfigurator (e.g. h100_sxm, h200_sxm)",
-    )
-    parser.add_argument(
-        "--aic-model-name",
-        type=str,
-        help="aiconfigurator name of the target model (e.g. QWEN3_32B, DEEPSEEK_V3)",
-    )
-    parser.add_argument(
-        "--aic-backend",
-        type=str,
-        default="",
-        help="aiconfigurator backend of the target model, if not provided, will use args.backend",
-    )
-    parser.add_argument(
-        "--aic-backend-version",
-        type=str,
-        help="Specify backend version when using aiconfigurator to estimate perf.",
-    )
-    args = parser.parse_args()
+    args = create_profiler_parser()
 
     # setup file logging
     os.makedirs(args.output_dir, exist_ok=True)

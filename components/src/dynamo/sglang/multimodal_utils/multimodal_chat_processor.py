@@ -38,7 +38,6 @@ def multimodal_request_to_sglang(raw_request, tokenizer, chat_template):
     sglang_request = {
         "model": raw_request.model,
         "token_ids": input_ids,
-        "batch_token_ids": None,
         "stop_conditions": {"max_tokens": raw_request.max_tokens or None},
         "sampling_options": {"temperature": raw_request.temperature or 0.7},
         "eos_token_ids": [tokenizer.eos_token_id],
