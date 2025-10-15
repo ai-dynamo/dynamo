@@ -38,6 +38,6 @@ With KV Cache offloading, inference service providers can support models with lo
 Offloading KV cache to CPU or storage is most effective when KV Cache exceeds GPU memory and cache reuse outweighs the overhead of transferring data. It is especially valuable in long-context, high-concurrency, or resource-constrained inference environments such as:
 
 * **Long sessions and multi-turn conversations:** Offloading preserves large prompt prefixes, avoids recomputation, and improves first-token latency and throughput.
-* **High concurrency:** Idle or partial conversations can be moved out of GPU memory, allowing active requests to proceed without hitting memory limits.
+* **High concurrency (future):** Idle or partial conversations can be moved out of GPU memory, allowing active requests to proceed without hitting memory limits.
 * **Shared or repeated content (future):** Reuse across users or sessions (for example, system prompts and templates) increases cache hits, especially with remote or cross-instance sharing.
 * **Memory- or cost-constrained deployments:** Offloading to RAM or SSD reduces GPU demand, allowing longer prompts or more users without adding hardware.
