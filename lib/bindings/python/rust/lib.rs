@@ -135,7 +135,7 @@ fn create_request_context(
             if context.inner().is_stopped() || context.inner().is_killed() {
                 // Let the server handle the cancellation for now since not all backends are
                 // properly handling request exceptions
-                // TODO: (DIS-829) Return an error if context is cancelled
+                // TODO: (DIS-830) Return an error if context is cancelled
                 request_ctx.context().stop_generating();
             }
             request_ctx

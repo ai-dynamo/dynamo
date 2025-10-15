@@ -297,7 +297,7 @@ async def test_client_context_already_cancelled(server, client):
     _, handler = server
     context = Context()
     context.stop_generating()
-    # TODO: (DIS-829) The outgoing call should raise if context is cancelled
+    # TODO: (DIS-830) The outgoing call should raise if context is cancelled
     stream = await client.generate("_generate_until_context_cancelled", context=context)
 
     # Give server a moment to process anything
@@ -318,7 +318,7 @@ async def test_client_context_cancel_before_await_request(server, client):
     context = Context()
     request = client.generate("_generate_until_context_cancelled", context=context)
     context.stop_generating()
-    # TODO: (DIS-829) The outgoing call should raise if context is cancelled
+    # TODO: (DIS-830) The outgoing call should raise if context is cancelled
     stream = await request
 
     # Give server a moment to process anything
