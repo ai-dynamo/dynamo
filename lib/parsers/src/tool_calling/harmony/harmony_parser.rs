@@ -62,7 +62,6 @@ pub async fn parse_tool_calls_harmony(
 
     // Encode the text into tokens using harmony encoding
     let tokens = enc.tokenizer().encode_with_special_tokens(&trimmed);
-
     // Create StreamableParser to process each token and create Harmony Format messages
     // Set Role to Assistant because we are parsing tool calls from an assistant message
     let mut parser = match StreamableParser::new(enc.clone(), Some(Role::Assistant)) {
@@ -193,8 +192,14 @@ pub async fn parse_tool_calls_harmony_complete(
         }
     };
 
+    // Issue: Encoder can not convert tokens to messages when there is role mentioned in the text
+    // Eg : <|start|>assistant
+    // Err: unexpected tokens remaining in message header: ["<|start|>assistant"]
+    // Solution: Since we are responsinble for dealing with assistant role, we can strip that out if there
     // // Encode the text into tokens using harmony encoding
-    let tokens: Vec<u32> = enc.tokenizer().encode_with_special_tokens(text);
+    let tokens: Vec<u32> = enc
+        .tokenizer()
+        .encode_with_special_tokens(text.trim_start_matches("<|start|>assistant"));
     let messages = match enc.parse_messages_from_completion_tokens(tokens, Some(Role::Assistant)) {
         Ok(messages) => messages,
         Err(e) => {
@@ -254,8 +259,9 @@ pub async fn parse_tool_calls_harmony_complete(
                     },
                 });
             }
-        // Handle reasoning(analysis) channel
-        } else if channel == Some("analysis") {
+        // No Need to handle reasoning (analysis) channel anymore. The analysis channel will be handled by the reasoning parser.
+        // Handle final channel to get the normal text.
+        } else if channel == Some("final") {
             normal_text.push_str(match &message.content[0] {
                 Text(t) => &t.text,
                 _ => "",
