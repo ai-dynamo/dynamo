@@ -140,13 +140,13 @@ def start_nats_and_etcd_default_ports():
             f"Reusing existing NATS on port {nats_port} and ETCD on port {etcd_client_port}"
         )
         # Set environment variables for the runtime to use
-        os.environ["NATS_SERVERS"] = f"nats://localhost:{nats_port}"
+        os.environ["NATS_SERVER"] = f"nats://localhost:{nats_port}"
         os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_client_port}"
         # Return None for processes since we're reusing existing services
         return None, None, nats_port, etcd_client_port, None, None
 
     # Set environment variables for the runtime to use
-    os.environ["NATS_SERVERS"] = f"nats://localhost:{nats_port}"
+    os.environ["NATS_SERVER"] = f"nats://localhost:{nats_port}"
     os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_client_port}"
 
     print(f"Using NATS on default port {nats_port}")
@@ -292,7 +292,7 @@ def start_nats_and_etcd_random_ports():
                 )
 
     # Set environment variables for the runtime to use
-    os.environ["NATS_SERVERS"] = f"nats://localhost:{nats_port}"
+    os.environ["NATS_SERVER"] = f"nats://localhost:{nats_port}"
     os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_client_port}"
 
     return nats_server, etcd, nats_port, etcd_client_port, nats_data_dir, etcd_data_dir

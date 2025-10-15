@@ -31,7 +31,7 @@
                     "value": "http://IP_ADDRESS:2379"
                 },
                 {
-                    "name": "NATS_SERVERS",
+                    "name": "NATS_SERVER",
                     "value": "nats://IP_ADDRESS:4222"
                 }
             ],
