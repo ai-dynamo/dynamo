@@ -12,7 +12,6 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      dynamoNamespace: llama3-70b-agg
       volumeMounts:
         - name: model-cache
           mountPoint: /root/.cache/huggingface

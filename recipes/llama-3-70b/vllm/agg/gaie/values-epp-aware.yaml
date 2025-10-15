@@ -16,15 +16,16 @@
 eppAware:
   enabled: true
   eppImage: nvcr.io/nvstaging/ai-dynamo/gaie-epp-dynamo:v0.6.0-1
-  dynamoNamespace: vllm-agg
+  dynamoNamespace: llama3-70b-agg
   dynamoComponent: backend
-  dynamoKvBlockSize: '{{ env "KV_BLOCK_SIZE" | default "16" }}'
+  # This must match your cli parameter in --block-size 128 in your VLLM deploy file deploy.yaml.
+  dynamoKvBlockSize: '{{ env "DYNAMO_KV_BLOCK_SIZE" | default "128" }}'
 
 imagePullSecrets:
   - docker-imagepullsecret
 
 platformReleaseName: dynamo-platform
-platformNamespace: "my-model"
+platformNamespace: "dynamo"
 
 epp:
   extraEnv:

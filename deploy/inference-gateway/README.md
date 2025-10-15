@@ -196,7 +196,7 @@ You can configure the plugin by setting environment vars in your [values-epp-awa
 - Set `DYNAMO_ROUTER_REPLICA_SYNC=true` to enable a background watcher to keep multiple router instances in sync (important if you run more than one KV router per component).
 - By default the Dynamo plugin uses KV routing. You can expose `DYNAMO_USE_KV_ROUTING=false`  in your [values-epp-aware.yaml] if you prefer to route in the round-robin fashion.
 - If using kv-routing:
-  - Overwrite the `DYNAMO_KV_BLOCK_SIZE` in your [values-epp-aware.yaml](./values-epp-aware.yaml) to match your model's block size.The `DYNAMO_KV_BLOCK_SIZE` env var is ***MANDATORY*** to prevent silent KV routing failures.
+  - Overwrite the `DYNAMO_KV_BLOCK_SIZE` in your [values-epp-aware.yaml](./values-epp-aware.yaml) to match your inference engine's block size. The default is 16. You can change the default in your model deployment file i.e. ag.yaml in the cli `"python3 -m dynamo.vllm--block-size 128"`. The `DYNAMO_KV_BLOCK_SIZE` env var is ***MANDATORY*** to prevent silent KV routing failures.
   - Set `DYNAMO_OVERLAP_SCORE_WEIGHT` to weigh how heavily the score uses token overlap (predicted KV cache hits) versus other factors (load, historical hit rate). Higher weight biases toward reusing workers with similar cached prefixes.
   - Set `DYNAMO_ROUTER_TEMPERATURE` to soften or sharpen the selection curve when combining scores. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
   - Set `DYNAMO_USE_KV_EVENTS=false` if you want to disable KV event tracking while using kv-routing
@@ -218,7 +218,9 @@ Key configurations include:
 - A service for the inference gateway
 - Required RBAC roles and bindings
 - RBAC permissions
-- values-epp-aware.yaml sets eppAware.dynamoNamespace=vllm-agg for the bundled example. Point it at your actual Dynamo namespace by editing that file or adding --set eppAware.dynamoNamespace=<namespace> (and likewise for dynamoComponent, dynamoKvBlockSize if they differ).
+
+- values-epp-aware.yaml sets `eppAware.dynamoNamespace=vllm-agg` for the bundled example. Point it at your actual Dynamo namespace by editing that file or adding --set eppAware.dynamoNamespace=<namespace>
+- `--set-string eppAware.dynamoKvBlockSize=128` can be overwritten to match you inference engine config. You can also use env var KV_BLOCK_SIZE
 
 ### 5. Verify Installation ###
 
