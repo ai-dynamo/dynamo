@@ -47,12 +47,12 @@ impl SnapshotResources {
         remove_worker_tx: &mpsc::Sender<WorkerId>,
     ) -> anyhow::Result<()> {
         // Try to acquire write lock (non-blocking)
-        let Some(write_lock) = self.rwlock.try_write_lock(etcd_client).await else {
+        if !self.rwlock.try_write_lock(etcd_client).await {
             tracing::debug!(
                 "Could not acquire write lock for snapshot (readers active or lock held)"
             );
             anyhow::bail!("Write lock unavailable");
-        };
+        }
         // Purge before snapshot ensures new/warm-restarted routers won't replay already-acknowledged messages.
         // Since KV events are idempotent, this ordering reduces unnecessary reprocessing while maintaining
         // at-least-once delivery guarantees. The snapshot will capture the clean state after purge.
@@ -135,7 +135,7 @@ impl SnapshotResources {
         );
 
         // Release write lock
-        self.rwlock.unlock_write(etcd_client, write_lock).await;
+        self.rwlock.unlock_write(etcd_client).await;
 
         Ok(())
     }
@@ -206,46 +206,43 @@ pub async fn start_kv_router_background(
         ))?;
 
         // Acquire read lock with default timeout
-        match snapshot_rwlock
+        if let Ok(()) = snapshot_rwlock
             .read_lock_with_wait(&etcd_client, &consumer_uuid, None)
             .await
         {
-            Ok(reader_key) => {
-                tracing::debug!("Acquired read lock for snapshot download");
+            tracing::debug!("Acquired read lock for snapshot download");
 
-                // Download snapshot while holding read lock
-                match nats_client
-                    .object_store_download_data::<Vec<RouterEvent>>(&url)
-                    .await
-                {
-                    Ok(events) => {
-                        tracing::info!(
-                            "Successfully downloaded {} events from object store",
-                            events.len()
-                        );
-                        // Send all events to the indexer
-                        for event in events {
-                            if let Err(e) = kv_events_tx.send(event).await {
-                                tracing::warn!("Failed to send initial event to indexer: {e:?}");
-                            }
+            // Download snapshot while holding read lock
+            match nats_client
+                .object_store_download_data::<Vec<RouterEvent>>(&url)
+                .await
+            {
+                Ok(events) => {
+                    tracing::info!(
+                        "Successfully downloaded {} events from object store",
+                        events.len()
+                    );
+                    // Send all events to the indexer
+                    for event in events {
+                        if let Err(e) = kv_events_tx.send(event).await {
+                            tracing::warn!("Failed to send initial event to indexer: {e:?}");
                         }
-                        tracing::info!("Successfully sent all initial events to indexer");
                     }
-                    Err(e) => {
-                        tracing::info!(
-                            "Did not initialize radix state from NATS object store (likely no snapshots yet): {e:?}"
-                        );
-                    }
+                    tracing::info!("Successfully sent all initial events to indexer");
                 }
+                Err(e) => {
+                    tracing::info!(
+                        "Did not initialize radix state from NATS object store (likely no snapshots yet): {e:?}"
+                    );
+                }
+            }
 
-                // Release read lock
-                snapshot_rwlock.unlock_read(&etcd_client, reader_key).await;
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Could not acquire read lock for snapshot download (timeout or error): {e:?}"
-                );
-            }
+            // Release read lock
+            snapshot_rwlock
+                .unlock_read(&etcd_client, &consumer_uuid)
+                .await;
+        } else {
+            tracing::warn!("Could not acquire read lock for snapshot download (timeout or error)");
         }
     }
 
