@@ -387,9 +387,6 @@ jobs:
         set -euo pipefail
         export KUBECONFIG="${PWD}/${KUBECONFIG_PATH}"
 
-        IMAGE_TAG=$(cat build.env)
-        echo "Deploying with image tag: ${IMAGE_TAG}"
-
         echo "Adding Helm repositories..."
         helm repo add bitnami https://charts.bitnami.com/bitnami
         helm repo update
