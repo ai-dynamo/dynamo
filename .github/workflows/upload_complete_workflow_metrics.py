@@ -6,10 +6,12 @@ This version runs as the final job in a workflow and captures metrics for
 the entire workflow including all previous jobs.
 """
 
+import glob
 import json
 import os
 import re
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
@@ -841,8 +843,6 @@ class WorkflowMetricsUploader:
             return
 
         # Find JUnit XML files
-        import glob
-
         xml_files = glob.glob(f"{test_results_dir}/*.xml")
 
         if not xml_files:
@@ -870,8 +870,6 @@ class WorkflowMetricsUploader:
                 print(f"📋 Processing JUnit XML: {xml_file}")
 
                 # Parse JUnit XML using xml.etree.ElementTree
-                import xml.etree.ElementTree as ET
-
                 tree = ET.parse(xml_file)
                 root = tree.getroot()
 
@@ -956,9 +954,13 @@ class WorkflowMetricsUploader:
                                 :1000
                             ]  # Limit error message length
 
-                        # Add timing (use current time as test end time)
-                        current_time = datetime.now(timezone.utc).isoformat()
-                        test_data["@timestamp"] = current_time
+                        # Add timing (use job completion time as more accurate timestamp)
+                        job_completed_at = job_data.get("completed_at")
+                        if job_completed_at:
+                            test_data["@timestamp"] = job_completed_at
+                        else:
+                            # Fallback to current time if job completion time not available
+                            test_data["@timestamp"] = datetime.now(timezone.utc).isoformat()
 
                         # Add common context fields (repo, branch, pr_id, etc.)
                         self.add_common_context_fields(test_data)

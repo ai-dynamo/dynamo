@@ -223,7 +223,7 @@ jobs:
           pytest_marks: "unit and trtllm_marker and gpu_1"
           framework: "trtllm"
           test_type: "unit"
-          platform_arch: ${{ matrix.platform.arch }}
+           platform_arch: ${{ matrix.platform.arch }}
       - name: Run e2e tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
