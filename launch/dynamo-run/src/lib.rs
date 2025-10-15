@@ -22,17 +22,31 @@ pub async fn run(
     mut flags: Flags,
 ) -> anyhow::Result<()> {
     //
+    // Download
+    //
+
+    let maybe_remote_repo = flags
+        .model_path_pos
+        .clone()
+        .or_else(|| flags.model_path_flag.clone());
+    let model_path = match maybe_remote_repo {
+        None => None,
+        Some(p) if p.exists() => {
+            // Already a local path
+            Some(p)
+        }
+        Some(p) => {
+            // model_path might be an HF repo, not a local path. Resolve it by downloading.
+            Some(LocalModel::fetch(&p.display().to_string(), false).await?)
+        }
+    };
+
+    //
     // Configure
     //
 
     let mut builder = LocalModelBuilder::default();
     builder
-        .model_path(
-            flags
-                .model_path_pos
-                .clone()
-                .or(flags.model_path_flag.clone()),
-        )
         .model_name(flags.model_name.clone())
         .kv_cache_block_size(flags.kv_cache_block_size)
         // Only set if user provides. Usually loaded from tokenizer_config.json
@@ -44,6 +58,11 @@ pub async fn run(
         .request_template(flags.request_template.clone())
         .migration_limit(flags.migration_limit)
         .is_mocker(matches!(out_opt, Some(Output::Mocker)));
+
+    // Only the worker has a model path
+    if let Some(model_path) = model_path {
+        builder.model_path(model_path);
+    }
 
     // TODO: old, address this later:
     // If `in=dyn` we want the trtllm/sglang/vllm subprocess to listen on that endpoint.

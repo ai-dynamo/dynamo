@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{any::Any, sync::Arc};
+use std::{any::Any, cmp::max, sync::Arc};
 
 use dynamo_llm::{
     block_manager::{
@@ -479,7 +479,7 @@ impl Slot for VllmConnectorSlot {
         &mut self,
         tokens: &[u32],
         block_ids: &[BlockId],
-        _num_computed_tokens: usize,
+        num_computed_tokens: usize,
         num_scheduled_tokens: usize,
     ) -> Result<(), SlotError> {
         if !tokens.is_empty() {
@@ -492,6 +492,11 @@ impl Slot for VllmConnectorSlot {
         } else {
             self.state = SlotState::Prefilling;
         }
+
+        // Use max to advance both current_position and evaluated_blocks at least by num_computed_tokens.
+        // This logic is to prevent redundant block offloading.
+        self.current_position = max(self.current_position, num_computed_tokens);
+        self.evaluated_blocks = max(self.evaluated_blocks, num_computed_tokens / self.block_size);
 
         // apply new block_ids
         if !block_ids.is_empty() {

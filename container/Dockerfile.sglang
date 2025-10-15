@@ -14,7 +14,7 @@ ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG SGLANG_VERSION="0.5.3"
+ARG SGLANG_VERSION="0.5.3.post1"
 
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.

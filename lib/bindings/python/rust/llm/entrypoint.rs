@@ -180,6 +180,8 @@ pub(crate) struct EngineConfig {
     inner: RsEngineConfig,
 }
 
+/// Create the backend engine wrapper to run the model.
+/// Download the model if necessary.
 #[pyfunction]
 #[pyo3(signature = (distributed_runtime, args))]
 pub fn make_engine<'p>(
@@ -189,8 +191,11 @@ pub fn make_engine<'p>(
 ) -> PyResult<Bound<'p, PyAny>> {
     let mut builder = LocalModelBuilder::default();
     builder
-        .model_path(args.model_path.clone())
-        .model_name(args.model_name.clone())
+        .model_name(
+            args.model_name
+                .clone()
+                .or_else(|| args.model_path.clone().map(|p| p.display().to_string())),
+        )
         .endpoint_id(args.endpoint_id.clone())
         .context_length(args.context_length)
         .request_template(args.template_file.clone())
@@ -206,6 +211,17 @@ pub fn make_engine<'p>(
         .custom_backend_metrics_endpoint(args.custom_backend_metrics_endpoint.clone())
         .custom_backend_metrics_polling_interval(args.custom_backend_metrics_polling_interval);
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        if let Some(model_path) = args.model_path.clone() {
+            let local_path = if model_path.exists() {
+                model_path
+            } else {
+                LocalModel::fetch(&model_path.display().to_string(), false)
+                    .await
+                    .map_err(to_pyerr)?
+            };
+            builder.model_path(local_path);
+        }
+
         let local_model = builder.build().await.map_err(to_pyerr)?;
         let inner = select_engine(distributed_runtime, args, local_model)
             .await
