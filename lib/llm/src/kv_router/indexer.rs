@@ -57,9 +57,6 @@ pub const XXH3_SEED: u64 = 1337;
 use crate::kv_router::protocols::*;
 use crate::tokens::SequenceHash;
 
-// Re-export WorkerId for backward compatibility
-pub type WorkerId = i64;
-
 /// Errors that can occur in the KV Router.
 #[derive(Debug, thiserror::Error)]
 pub enum KvRouterError {
@@ -441,17 +438,20 @@ impl RadixTree {
         }
     }
 
-    pub fn remove_worker(&mut self, worker_id: WorkerId) {
+    /// Helper function to remove or clear blocks for a worker.
+    /// If `keep_worker` is true, the worker remains in lookup with empty blocks.
+    /// If `keep_worker` is false, the worker is completely removed from lookup.
+    fn remove_or_clear_worker_blocks(&mut self, worker_id: WorkerId, keep_worker: bool) {
         // Collect all WorkerWithDpRank keys that match this worker_id
-        let workers_to_remove: Vec<WorkerWithDpRank> = self
+        let workers: Vec<WorkerWithDpRank> = self
             .lookup
             .keys()
             .filter(|w| w.worker_id == worker_id)
             .copied()
             .collect();
 
-        for worker in workers_to_remove {
-            if let Some((_, blocks)) = self.lookup.remove_entry(&worker) {
+        for worker in workers {
+            if let Some((worker_key, blocks)) = self.lookup.remove_entry(&worker) {
                 blocks.iter().for_each(|(_, block)| {
                     block.borrow_mut().workers.remove(&worker);
                     // If no workers are using this block, that is true for all children
@@ -459,39 +459,21 @@ impl RadixTree {
                         block.borrow_mut().children.clear();
                     }
                 });
+
+                if keep_worker {
+                    // Re-insert worker with empty blocks map to keep it tracked
+                    self.lookup.insert(worker_key, HashMap::new());
+                }
             }
         }
     }
 
+    pub fn remove_worker(&mut self, worker_id: WorkerId) {
+        self.remove_or_clear_worker_blocks(worker_id, false);
+    }
+
     pub fn clear_all_blocks(&mut self, worker_id: WorkerId) {
-        // Collect all WorkerWithDpRank keys that match this worker_id
-        let workers_to_clear: Vec<WorkerWithDpRank> = self
-            .lookup
-            .keys()
-            .filter(|w| w.worker_id == worker_id)
-            .copied()
-            .collect();
-
-        for worker in workers_to_clear {
-            // Check if the worker has any blocks to clear
-            if let Some(blocks) = self.lookup.get(&worker) {
-                let blocks_to_clear: Vec<_> = blocks.values().collect();
-
-                // Remove the worker from each block's workers map
-                blocks_to_clear.iter().for_each(|block| {
-                    block.borrow_mut().workers.remove(&worker);
-                    // If no workers are using this block, that is true for all children
-                    if block.borrow().workers.is_empty() {
-                        block.borrow_mut().children.clear();
-                    }
-                });
-
-                // Clear the worker's blocks
-                if let Some(worker_lookup) = self.lookup.get_mut(&worker) {
-                    worker_lookup.clear();
-                }
-            }
-        }
+        self.remove_or_clear_worker_blocks(worker_id, true);
     }
 
     /// Get all worker IDs currently tracked in the radix tree.

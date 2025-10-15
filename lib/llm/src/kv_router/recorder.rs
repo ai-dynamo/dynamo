@@ -12,7 +12,6 @@ mod tests {
     use super::*;
     use crate::kv_router::indexer::KvIndexer;
     use crate::kv_router::indexer::KvIndexerMetrics;
-    use crate::kv_router::indexer::WorkerId;
     use crate::kv_router::protocols::*;
     use std::time::Duration;
     use tempfile::tempdir;

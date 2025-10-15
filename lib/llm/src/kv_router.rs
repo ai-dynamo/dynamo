@@ -76,7 +76,7 @@ pub const ROUTER_CLEANUP_LOCK: &str = "router-cleanup-lock";
 pub trait WorkerSelector {
     fn select_worker(
         &self,
-        workers: &HashMap<i64, Option<ModelRuntimeConfig>>,
+        workers: &HashMap<protocols::WorkerId, Option<ModelRuntimeConfig>>,
         request: &SchedulingRequest,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;

@@ -27,11 +27,11 @@ use crate::tokens::{SequenceHash, TokenBlockSequence};
 
 use crate::kv_router::indexer::{
     DumpRequest, KvIndexerInterface, KvRouterError, OverlapScores, RadixTree, RouterEvent,
-    WorkerId, compute_block_hash_for_seq,
+    compute_block_hash_for_seq,
 };
 use crate::kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, WorkerWithDpRank,
+    KvCacheStoredBlockData, LocalBlockHash, WorkerId, WorkerWithDpRank,
 };
 
 #[derive(Debug)]

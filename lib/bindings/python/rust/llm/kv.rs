@@ -101,7 +101,7 @@ impl WorkerMetricsPublisher {
 #[derive(Clone)]
 pub struct ZmqKvEventPublisherConfig {
     #[pyo3(get, set)]
-    pub worker_id: i64,
+    pub worker_id: WorkerId,
     #[pyo3(get, set)]
     pub kv_block_size: usize,
     #[pyo3(get, set)]
@@ -120,7 +120,7 @@ impl ZmqKvEventPublisherConfig {
         zmq_topic = "".to_string()
     ))]
     pub fn new(
-        worker_id: i64,
+        worker_id: WorkerId,
         kv_block_size: usize,
         zmq_endpoint: String,
         zmq_topic: String,
@@ -234,7 +234,7 @@ impl Drop for ZmqKvEventListener {
 pub(crate) struct KvEventPublisher {
     inner: Arc<llm_rs::kv_router::publisher::KvEventPublisher>,
     kv_block_size: usize,
-    dp_rank: u32,
+    dp_rank: DpRank,
     warning_count: Arc<AtomicU32>,
 }
 
@@ -244,9 +244,9 @@ impl KvEventPublisher {
     #[pyo3(signature = (component, worker_id, kv_block_size, dp_rank=0))]
     fn new(
         component: Component,
-        worker_id: i64,
+        worker_id: WorkerId,
         kv_block_size: usize,
-        dp_rank: u32,
+        dp_rank: DpRank,
     ) -> PyResult<Self> {
         if kv_block_size == 0 {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
@@ -376,7 +376,7 @@ impl RadixTree {
     fn apply_event(
         &mut self,
         _py: Python,
-        worker_id: i64,
+        worker_id: WorkerId,
         kv_cache_event_bytes: &[u8],
     ) -> PyResult<()> {
         let kv_cache_event: llm_rs::kv_router::protocols::KvCacheEvent =
@@ -392,12 +392,12 @@ impl RadixTree {
         Ok(())
     }
 
-    fn remove_worker(&mut self, _py: Python, worker_id: i64) -> PyResult<()> {
+    fn remove_worker(&mut self, _py: Python, worker_id: WorkerId) -> PyResult<()> {
         self.inner.remove_worker(worker_id);
         Ok(())
     }
 
-    fn clear_all_blocks(&mut self, _py: Python, worker_id: i64) -> PyResult<()> {
+    fn clear_all_blocks(&mut self, _py: Python, worker_id: WorkerId) -> PyResult<()> {
         self.inner.clear_all_blocks(worker_id);
         Ok(())
     }
@@ -537,8 +537,8 @@ impl ApproxKvIndexer {
         &self,
         py: Python<'p>,
         tokens: Vec<u32>,
-        worker_id: i64,
-        dp_rank: u32,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
     ) -> PyResult<Bound<'p, PyAny>> {
         let indexer = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -556,7 +556,7 @@ impl ApproxKvIndexer {
 #[derive(Clone)]
 pub(crate) struct EndpointKvMetrics {
     #[pyo3(get, set)]
-    pub worker_id: i64,
+    pub worker_id: WorkerId,
     #[pyo3(get, set)]
     pub request_active_slots: u64,
     #[pyo3(get, set)]
@@ -802,7 +802,7 @@ impl WorkerStats {
         request_active_slots: u64,
         request_total_slots: u64,
         num_requests_waiting: u64,
-        data_parallel_rank: Option<u32>,
+        data_parallel_rank: Option<DpRank>,
     ) -> Self {
         Self(RsWorkerStats {
             data_parallel_rank,
@@ -989,8 +989,8 @@ impl KvPushRouter {
         sampling_options: Option<PyObject>,
         output_options: Option<PyObject>,
         router_config_override: Option<PyObject>,
-        worker_id: Option<i64>,
-        dp_rank: Option<u32>,
+        worker_id: Option<WorkerId>,
+        dp_rank: Option<DpRank>,
         extra_args: Option<PyObject>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the options with defaults
@@ -1157,7 +1157,7 @@ impl KvPushRouter {
                 HashMap::new();
             for load in loads {
                 aggregated
-                    .entry(load.worker_id)
+                    .entry(load.worker.worker_id)
                     .and_modify(|e| {
                         e.potential_prefill_tokens += load.potential_prefill_tokens;
                         e.potential_decode_blocks += load.potential_decode_blocks;

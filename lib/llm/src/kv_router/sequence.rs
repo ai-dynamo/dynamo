@@ -945,12 +945,21 @@ mod tests {
             .create()
             .await?;
 
-        // Create multi-worker sequence managers with ALL workers [0, 1, 2]
-        // Both use the same component to ensure event synchronization works
+        // Create multi-worker sequence managers with:
+        // - Worker 0 with dp_size=2 (dp_ranks 0 and 1)
+        // - Worker 1 with dp_size=1 (dp_rank 0)
+        // This gives us 3 effective workers total to test dp_rank effect
+        // Both seq_managers use the same component to ensure event synchronization works
         let mut workers_with_configs = HashMap::new();
-        workers_with_configs.insert(0, None);
-        workers_with_configs.insert(1, None);
-        workers_with_configs.insert(2, None);
+
+        // Create runtime config for worker 0 with dp_size=2
+        let mut config_worker_0 = crate::local_model::runtime_config::ModelRuntimeConfig::new();
+        config_worker_0.data_parallel_size = 2;
+        workers_with_configs.insert(0, Some(config_worker_0));
+
+        // Create runtime config for worker 1 with dp_size=1 (default)
+        let config_worker_1 = crate::local_model::runtime_config::ModelRuntimeConfig::new();
+        workers_with_configs.insert(1, Some(config_worker_1));
 
         let seq_manager_1 = Arc::new(ActiveSequencesMultiWorker::new(
             component.clone(),
@@ -972,36 +981,36 @@ mod tests {
 
         // PHASE 1: Add requests using both seq_manager_1 and seq_manager_2
 
-        // Add request_0 to worker 0: sequence [0, 1, 2]
+        // Add request_0 to worker 0, dp_rank 0: sequence [0, 1, 2]
         seq_manager_1
             .add_request(
                 "request_0".to_string(),
                 Some(vec![0, 1, 2]),
                 12, // ISL (3 blocks * 4 block_size)
                 0,  // no overlap
-                WorkerWithDpRank::from_worker_id(0),
+                WorkerWithDpRank::new(0, 0),
             )
             .await?;
 
-        // Add request_1 to worker 1: sequence [3, 4]
+        // Add request_1 to worker 0, dp_rank 1: sequence [3, 4]
         seq_manager_1
             .add_request(
                 "request_1".to_string(),
                 Some(vec![3, 4]),
                 8, // ISL (2 blocks * 4 block_size)
                 0, // no overlap
-                WorkerWithDpRank::from_worker_id(1),
+                WorkerWithDpRank::new(0, 1),
             )
             .await?;
 
-        // Add request_2 to worker 2: sequence [0, 1, 2, 3] using seq_manager_2
+        // Add request_2 to worker 1, dp_rank 0: sequence [0, 1, 2, 3] using seq_manager_2
         seq_manager_2
             .add_request(
                 "request_2".to_string(),
                 Some(vec![0, 1, 2, 3]),
                 16, // ISL (4 blocks * 4 block_size)
                 0,  // no overlap
-                WorkerWithDpRank::from_worker_id(2),
+                WorkerWithDpRank::new(1, 0),
             )
             .await?;
 
@@ -1012,34 +1021,38 @@ mod tests {
         let blocks_phase1 = seq_manager_1.active_blocks().await;
         let tokens_phase1 = seq_manager_1.active_tokens().await;
 
-        // Verify that seq_manager_1 sees all requests including request_2 from thread 2
-        let worker_0 = WorkerWithDpRank::from_worker_id(0);
-        let worker_1 = WorkerWithDpRank::from_worker_id(1);
-        let worker_2 = WorkerWithDpRank::from_worker_id(2);
+        // Verify that seq_manager_1 sees all requests including request_2 from seq_manager_2
+        // We now have:
+        // - Worker 0, dp_rank 0: request_0
+        // - Worker 0, dp_rank 1: request_1
+        // - Worker 1, dp_rank 0: request_2
+        let worker_0_dp0 = WorkerWithDpRank::new(0, 0);
+        let worker_0_dp1 = WorkerWithDpRank::new(0, 1);
+        let worker_1_dp0 = WorkerWithDpRank::new(1, 0);
 
         assert_eq!(
-            blocks_phase1[&worker_0], 3,
-            "Worker 0 should have 3 active blocks (from request_0)"
+            blocks_phase1[&worker_0_dp0], 3,
+            "Worker 0 dp_rank 0 should have 3 active blocks (from request_0)"
         );
         assert_eq!(
-            blocks_phase1[&worker_1], 2,
-            "Worker 1 should have 2 active blocks (from request_1)"
+            blocks_phase1[&worker_0_dp1], 2,
+            "Worker 0 dp_rank 1 should have 2 active blocks (from request_1)"
         );
         assert_eq!(
-            blocks_phase1[&worker_2], 4,
-            "Worker 2 should have 4 active blocks (from request_2 added by seq_manager_2)"
+            blocks_phase1[&worker_1_dp0], 4,
+            "Worker 1 dp_rank 0 should have 4 active blocks (from request_2 added by seq_manager_2)"
         );
         assert_eq!(
-            tokens_phase1[&worker_0], 12,
-            "Worker 0 should have 12 active tokens"
+            tokens_phase1[&worker_0_dp0], 12,
+            "Worker 0 dp_rank 0 should have 12 active tokens"
         );
         assert_eq!(
-            tokens_phase1[&worker_1], 8,
-            "Worker 1 should have 8 active tokens"
+            tokens_phase1[&worker_0_dp1], 8,
+            "Worker 0 dp_rank 1 should have 8 active tokens"
         );
         assert_eq!(
-            tokens_phase1[&worker_2], 16,
-            "Worker 2 should have 16 active tokens (from request_2 added by seq_manager_2)"
+            tokens_phase1[&worker_1_dp0], 16,
+            "Worker 1 dp_rank 0 should have 16 active tokens (from request_2 added by seq_manager_2)"
         );
 
         // PHASE 2: Free requests using opposite sequence managers, verify on seq_manager_2
@@ -1058,18 +1071,23 @@ mod tests {
         let blocks_phase2 = seq_manager_2.active_blocks().await;
         let tokens_phase2 = seq_manager_2.active_tokens().await;
 
-        // Verify phase 2 results - everything should be empty
-        for worker_id in 0..=2 {
-            let worker = WorkerWithDpRank::from_worker_id(worker_id);
+        // Verify phase 2 results - everything should be empty for all 3 workers
+        let all_workers = vec![
+            WorkerWithDpRank::new(0, 0),
+            WorkerWithDpRank::new(0, 1),
+            WorkerWithDpRank::new(1, 0),
+        ];
+
+        for worker in all_workers {
             assert_eq!(
                 blocks_phase2[&worker], 0,
-                "Worker {} should have 0 active blocks after all requests freed",
-                worker_id
+                "Worker (id={}, dp_rank={}) should have 0 active blocks after all requests freed",
+                worker.worker_id, worker.dp_rank
             );
             assert_eq!(
                 tokens_phase2[&worker], 0,
-                "Worker {} should have 0 active tokens after all requests freed",
-                worker_id
+                "Worker (id={}, dp_rank={}) should have 0 active tokens after all requests freed",
+                worker.worker_id, worker.dp_rank
             );
         }
 

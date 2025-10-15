@@ -18,23 +18,23 @@ use super::KvRouterConfig;
 use super::RouterConfigOverride;
 use super::WorkerSelector;
 use super::indexer::OverlapScores;
-use super::protocols::{WorkerSelectionResult, WorkerWithDpRank};
+use super::protocols::{DpRank, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use super::sequence::ActiveSequencesMultiWorker;
 
 use crate::tokens::SequenceHash;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KVHitRateEvent {
-    pub worker_id: i64,
+    pub worker_id: WorkerId,
     #[serde(default)]
-    pub dp_rank: u32,
+    pub dp_rank: DpRank,
     pub isl_blocks: usize,
     pub overlap_blocks: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PotentialLoad {
-    pub worker_id: i64,
+    pub worker: WorkerWithDpRank,
     pub potential_prefill_tokens: usize,
     pub potential_decode_blocks: usize,
 }
@@ -96,17 +96,18 @@ impl KvScheduler {
         component: Component,
         block_size: u32,
         instances_rx: watch::Receiver<Vec<Instance>>,
-        runtime_configs_rx: watch::Receiver<HashMap<i64, ModelRuntimeConfig>>,
+        runtime_configs_rx: watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
         router_uuid: String,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
         let instances: Vec<Instance> = instances_rx.borrow().clone();
-        let runtime_configs: HashMap<i64, ModelRuntimeConfig> = runtime_configs_rx.borrow().clone();
+        let runtime_configs: HashMap<WorkerId, ModelRuntimeConfig> =
+            runtime_configs_rx.borrow().clone();
 
         // Create shared workers_with_configs wrapped in Arc<RwLock>
-        let workers_with_configs: Arc<RwLock<HashMap<i64, Option<ModelRuntimeConfig>>>> = {
+        let workers_with_configs: Arc<RwLock<HashMap<WorkerId, Option<ModelRuntimeConfig>>>> = {
             let mut initial_map = HashMap::new();
             for instance in &instances {
                 let worker_id = instance.instance_id;
@@ -122,7 +123,7 @@ impl KvScheduler {
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
             component.clone(),
             block_size as usize,
-            workers_with_configs.read().await.clone(),
+            workers_with_configs.read().await.clone(), // this includes dp_size info
             replica_sync,
             router_uuid,
         ));
@@ -369,7 +370,7 @@ impl KvScheduler {
         let mut loads = Vec::new();
         for worker in workers {
             loads.push(PotentialLoad {
-                worker_id: worker.worker_id,
+                worker,
                 potential_prefill_tokens: prefill_tokens
                     .get(&worker)
                     .copied()
@@ -471,7 +472,7 @@ impl DefaultWorkerSelector {
 impl WorkerSelector for DefaultWorkerSelector {
     fn select_worker(
         &self,
-        workers: &HashMap<i64, Option<ModelRuntimeConfig>>,
+        workers: &HashMap<WorkerId, Option<ModelRuntimeConfig>>,
         request: &SchedulingRequest,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
@@ -550,6 +551,8 @@ impl WorkerSelector for DefaultWorkerSelector {
         let best_logit = worker_logits[&best_worker];
 
         let best_overlap = *overlaps.get(&best_worker).unwrap_or(&0);
+
+        // this is a runtime config set on a per worker basis, not per dp-rank
         let total_blocks_info = workers
             .get(&best_worker.worker_id)
             .and_then(|cfg| cfg.as_ref())

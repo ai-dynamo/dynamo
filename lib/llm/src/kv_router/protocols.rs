@@ -5,21 +5,27 @@ use crate::tokens::{SequenceHash, Token};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// A worker identifier.
+pub type WorkerId = i64;
+
+/// A data parallel rank identifier.
+pub type DpRank = u32;
+
 /// A worker identifier combined with its data parallel rank.
 /// Used for routing decisions in data parallel setups.
 /// dp_rank = 0 indicates either DP not enabled or the first rank.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct WorkerWithDpRank {
-    pub worker_id: i64,
-    pub dp_rank: u32,
+    pub worker_id: WorkerId,
+    pub dp_rank: DpRank,
 }
 
 impl WorkerWithDpRank {
-    pub fn new(worker_id: i64, dp_rank: u32) -> Self {
+    pub fn new(worker_id: WorkerId, dp_rank: DpRank) -> Self {
         Self { worker_id, dp_rank }
     }
 
-    pub fn from_worker_id(worker_id: i64) -> Self {
+    pub fn from_worker_id(worker_id: WorkerId) -> Self {
         Self {
             worker_id,
             dp_rank: 0,
@@ -49,9 +55,9 @@ impl Default for RouterRequest {
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum RouterResponse {
     New {
-        worker_id: i64,
+        worker_id: WorkerId,
         #[serde(default)]
-        dp_rank: u32,
+        dp_rank: DpRank,
         overlap_blocks: u32,
     },
     PrefillMarked {
@@ -85,7 +91,7 @@ pub struct ForwardPassMetrics {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct WorkerStats {
     // https://lmsys.org/blog/2024-12-04-sglang-v0-4/#data-parallelism-attention-for-deepseek-models
-    pub data_parallel_rank: Option<u32>,
+    pub data_parallel_rank: Option<DpRank>,
     pub request_active_slots: u64,
     pub request_total_slots: u64,
     pub num_requests_waiting: u64,
@@ -167,7 +173,7 @@ impl From<i64> for ExternalSequenceBlockHash {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PrefillEvent {
     pub request_id: String,
-    pub worker_id: i64,
+    pub worker_id: WorkerId,
     pub data: PrefillEventData,
     pub router_id: Uuid,
 }
@@ -232,7 +238,7 @@ pub struct KvCacheEvent {
     pub data: KvCacheEventData,
     /// The data parallel rank of the worker emitting this event (0 if DP not enabled).
     #[serde(default)]
-    pub dp_rank: u32,
+    pub dp_rank: DpRank,
 }
 
 /// Represents the data associated with a cache event.
