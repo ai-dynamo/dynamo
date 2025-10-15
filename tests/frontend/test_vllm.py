@@ -373,8 +373,11 @@ def test_tool_calling_second_round(
 
     assert content, "Expected model to generate a response with content"
     assert (
-        "20" in content
-    ), "Expected response to include weather information from tool call result (20°C)"
+        "20" in content and any(
+            temp_word in content.lower()
+            for temp_word in ["celsius", "temperature", "degrees", "°c", "20°"]
+        )
+    ), "Expected response to include temperature information from tool call result (20°C)"
 
 
 @pytest.mark.usefixtures("start_services")
