@@ -400,7 +400,18 @@ class WorkflowMetricsUploader:
         db_data[FIELD_REPO] = self.repo
         db_data[FIELD_WORKFLOW_NAME] = self.workflow_name
         db_data[FIELD_GITHUB_EVENT] = self.event_name
-        db_data[FIELD_BRANCH] = self.ref_name
+        
+        # Use branch from workflow API data if available (more reliable for reusable workflows)
+        # Otherwise fall back to environment variable
+        if workflow_data and workflow_data.get("head_branch"):
+            branch_from_api = workflow_data.get("head_branch")
+            db_data[FIELD_BRANCH] = branch_from_api
+            # Log if there's a mismatch between API and env variable
+            if branch_from_api != self.ref_name:
+                print(f"   ℹ️  Branch from API ({branch_from_api}) differs from env var ({self.ref_name}), using API value")
+        else:
+            db_data[FIELD_BRANCH] = self.ref_name
+            
         db_data[FIELD_WORKFLOW_ID] = str(self.run_id)
         db_data[FIELD_COMMIT_SHA] = self.sha
 
@@ -553,7 +564,7 @@ class WorkflowMetricsUploader:
             total_jobs = len(jobs_data.get('jobs', []))
             print(f"\n📊 Starting to process {total_jobs} jobs and their steps...")
             jobs_processed, steps_processed = self._upload_all_job_and_step_metrics(
-                jobs_data
+                jobs_data, workflow_data
             )
             print(
                 f"\n✅ Successfully uploaded {jobs_processed} job metrics and {steps_processed} step metrics"
@@ -581,7 +592,6 @@ class WorkflowMetricsUploader:
             db_data[FIELD_STATUS_NUMBER] = 1
         elif db_data[FIELD_STATUS] == "failure":
             db_data[FIELD_STATUS_NUMBER] = 0
-        print(f"Checking branch: {str(workflow_data.get('head_branch'))}")
 
         # Timing fields
         created_at = workflow_data.get("created_at")
@@ -598,7 +608,7 @@ class WorkflowMetricsUploader:
         self.post_to_db(self.workflow_index, db_data)
 
     def _upload_all_job_and_step_metrics(
-        self, jobs_data: Dict[str, Any]
+        self, jobs_data: Dict[str, Any], workflow_data: Dict[str, Any]
     ) -> tuple[int, int]:
         """Internal method to upload all job and step metrics, returns (jobs_processed, steps_processed)"""
         jobs_processed = 0
@@ -616,12 +626,12 @@ class WorkflowMetricsUploader:
                 print(f"📤 Uploading job: '{job_name}'")
 
                 # Upload job metrics
-                self._upload_single_job_metrics(job)
+                self._upload_single_job_metrics(job, workflow_data)
                 jobs_processed += 1
 
                 # Upload step metrics for this job
                 if self.steps_index:
-                    step_count = self._upload_job_step_metrics(job)
+                    step_count = self._upload_job_step_metrics(job, workflow_data)
                     steps_processed += step_count
 
             except Exception as e:
@@ -632,7 +642,7 @@ class WorkflowMetricsUploader:
 
         return jobs_processed, steps_processed
 
-    def _upload_single_job_metrics(self, job_data: Dict[str, Any]) -> None:
+    def _upload_single_job_metrics(self, job_data: Dict[str, Any], workflow_data: Dict[str, Any]) -> None:
         """Extract and post metrics for a single job"""
         # Extract job metrics using standardized functions
         db_data = {}
@@ -668,7 +678,7 @@ class WorkflowMetricsUploader:
         db_data[FIELD_RUNNER_NAME] = str(job_data.get("runner_name", ""))
 
         # Add common context fields
-        self.add_common_context_fields(db_data)
+        self.add_common_context_fields(db_data, workflow_data)
         self.post_to_db(self.jobs_index, db_data)
         print(f"Uploaded metrics for job: {job_name}")
 
@@ -683,7 +693,7 @@ class WorkflowMetricsUploader:
             # Also upload test metrics if available for this framework job
             self._upload_test_metrics(job_data)
 
-    def _upload_job_step_metrics(self, job_data: Dict[str, Any]) -> int:
+    def _upload_job_step_metrics(self, job_data: Dict[str, Any], workflow_data: Dict[str, Any]) -> int:
         """Extract and post metrics for all steps in a job"""
         job_name = job_data["name"]
         steps = job_data.get("steps", [])
@@ -695,7 +705,7 @@ class WorkflowMetricsUploader:
         steps_processed = 0
         for step_index, step in enumerate(steps):
             try:
-                self._upload_single_step_metrics(step, job_data, step_index)
+                self._upload_single_step_metrics(step, job_data, workflow_data, step_index)
                 steps_processed += 1
             except Exception as e:
                 step_name = step.get("name", f"step_{step_index}")
@@ -708,7 +718,7 @@ class WorkflowMetricsUploader:
         return steps_processed
 
     def _upload_single_step_metrics(
-        self, step_data: Dict[str, Any], job_data: Dict[str, Any], step_index: int
+        self, step_data: Dict[str, Any], job_data: Dict[str, Any], workflow_data: Dict[str, Any], step_index: int
     ) -> None:
         """Extract and post metrics for a single step"""
         # Extract step metrics using standardized functions
@@ -758,14 +768,14 @@ class WorkflowMetricsUploader:
         db_data[FIELD_COMMAND] = command
 
         # Add common context fields
-        self.add_common_context_fields(db_data)
+        self.add_common_context_fields(db_data, workflow_data)
 
         # Post to database
         self.post_to_db(self.steps_index, db_data)
         print(f"Uploaded metrics for step: {step_name} (step {step_number})")
 
     def _upload_container_metrics(
-        self, job_data: Dict[str, Any], build_metrics: Optional[Dict[str, Any]] = None
+        self, job_data: Dict[str, Any], workflow_data: Dict[str, Any], build_metrics: Optional[Dict[str, Any]] = None
     ) -> None:
         """Upload container-specific metrics to CONTAINER_INDEX"""
         container_index = os.getenv("CONTAINER_INDEX")
@@ -842,7 +852,7 @@ class WorkflowMetricsUploader:
         )
 
         # Add common context fields
-        self.add_common_context_fields(container_data)
+        self.add_common_context_fields(container_data, workflow_data)
 
         # Upload to container index
         try:
