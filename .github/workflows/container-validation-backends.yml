@@ -281,8 +281,16 @@ jobs:
   deploy-test:
     runs-on: cpu-amd-m5-2xlarge
     needs: [build-operator]
+    strategy:
+      fail-fast: false
+      matrix:
+        framework:
+          - vllm
+          - sglang
+          - trtllm
+    name: deploy-test (${{ matrix.framework }})
     env:
-      NAMESPACE: gh-job-id-${{ github.run_id }}
+      NAMESPACE: gh-job-id-${{ github.run_id }}-${{ matrix.framework }}
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
       DEPLOYMENT_FILE: "deploy/disagg.yaml"
       MODEL_NAME: "Qwen/Qwen3-0.6B"
@@ -369,8 +377,8 @@ jobs:
         export KUBECONFIG=$(pwd)/.kubeconfig
         kubectl config set-context --current --namespace=$NAMESPACE
 
-        cd components/backends/vllm
-        export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:f0d1f14651c94d1134f568ccfd24a7d09369226e-vllm-amd64"
+        cd components/backends/${{ matrix.framework }}
+        export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework }}-amd64"
         export KUBE_NS=$NAMESPACE
         export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
         # Update the deployment file in-place
@@ -460,28 +468,28 @@ jobs:
           echo "Test passed: Response matches expected format and content"
         fi
         exit $TEST_RESULT
-    # - name: Cleanup
-    #   if: always()
-    #   timeout-minutes: 10
-    #   run: |
-    #     echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-    #     chmod 600 .kubeconfig
-    #     export KUBECONFIG=$(pwd)/.kubeconfig
-    #     kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+    - name: Cleanup
+      if: always()
+      timeout-minutes: 20
+      run: |
+        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+        chmod 600 .kubeconfig
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
 
-    #     # For debugging purposes, list all the resources before we uninstall
-    #     kubectl get all
+        # For debugging purposes, list all the resources before we uninstall
+        kubectl get all
 
-    #     echo "Starting cleanup... after 30 seconds"
-    #     sleep 30
+        echo "Starting cleanup... after 300 seconds"
+        sleep 300
 
-    #     echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
-    #     kubectl delete dynamographdeployments --all -n $NAMESPACE || true
+        echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
+        kubectl delete dynamographdeployments --all -n $NAMESPACE || true
 
-    #     # Uninstall the helm chart
-    #     helm ls
-    #     helm uninstall dynamo-platform || true
+        # Uninstall the helm chart
+        helm ls
+        helm uninstall dynamo-platform || true
 
-    #     echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
-    #     kubectl delete namespace $NAMESPACE || true
-    #     echo "Namespace $NAMESPACE completed."
+        echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
+        kubectl delete namespace $NAMESPACE || true
+        echo "Namespace $NAMESPACE completed."
