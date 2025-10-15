@@ -2,8 +2,9 @@
 
 When integrating Dynamo with the Inference Gateway you could either use the default EPP image provided by the extension or use the custom Dynamo image.
 
-1. When using the Dynamo custom EPP image you will take advantage of the Dynamo router when EPP chooses the best worker to route the request to. This setup uses a custom Dynamo plugin `dyn-kv` to pick the best worker. In this case the Dynamo routing logic is moved upstream. We recommend this approach especially if you have more than one Dynamo deployment within an InferencePool.
-2. When using the GAIE-provided image for the EPP, the Dynamo deployment is treated as a black box and the EPP would route round-robin among Dynamo FrontEnds. In this case GAIE just fans out the traffic, and the smarts only remain within the Dynamo graph. Use this if you have one Dynamo graph and do not want to obtain the Dynamo EPP image. This is a "backup" approach.
+1. When using the Dynamo custom EPP image you will take advantage of the Dynamo router when EPP chooses the best worker to route the request to. This setup uses a custom Dynamo plugin `dyn-kv` to pick the best worker. In this case the Dynamo routing logic is moved upstream. We recommend this approach.
+
+2. When using the GAIE-provided image for the EPP, the Dynamo deployment is treated as a black box and the EPP would route round-robin. In this case GAIE just fans out the traffic, and the smarts only remain within the Dynamo graph. Use this if you have one Dynamo graph and do not want to obtain the Dynamo EPP image. This is a "backup" approach.
 
 The setup provided here uses the Dynamo custom EPP by default. Set `epp.useDynamo=false` in your deployment to pick the approach 2.
 
