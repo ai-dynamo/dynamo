@@ -271,7 +271,7 @@ args:
 
 ## Benchmarking
 
-To benchmark your deployment with GenAI-Perf, see this utility script: [perf.sh](../../../../benchmarks/llm/perf.sh)
+To benchmark your deployment with AIPerf, see this utility script: [perf.sh](../../../../benchmarks/llm/perf.sh)
 
 Configure the `model` name and `host` based on your deployment.
 
