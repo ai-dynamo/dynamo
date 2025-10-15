@@ -825,49 +825,55 @@ class WorkflowMetricsUploader:
         job_name = job_data.get("name", "")
         job_id = str(job_data["id"])
 
-        # Determine framework from job name
-        framework = "unknown"
-        for fw in ["vllm", "sglang", "trtllm"]:
-            if fw in job_name.lower():
-                framework = fw
-                break
+        print(f"🧪 Looking for test results for job '{job_name}'")
 
-        print(
-            f"🧪 Looking for JUnit XML files for job '{job_name}' (framework: {framework})"
-        )
-
-        # Look for JUnit XML files in test-results directory
+        # Look for test results directory
         test_results_dir = "test-results"
         if not os.path.exists(test_results_dir):
             print(f"⚠️  Test results directory not found: {test_results_dir}")
             return
 
-        # Find JUnit XML files
-        xml_files = glob.glob(f"{test_results_dir}/*.xml")
+        # Look for metadata files to get accurate step and framework info
+        metadata_files = glob.glob(f"{test_results_dir}/test_metadata.json")
 
-        if not xml_files:
-            print(f"⚠️  No JUnit XML files found in {test_results_dir}")
+        if not metadata_files:
+            print(f"⚠️  No test metadata files found in {test_results_dir}")
             return
 
-        print(f"📄 Found {len(xml_files)} JUnit XML files: {xml_files}")
-
-        # Find the test step ID
-        test_step_id = None
-        steps = job_data.get("steps", [])
-        for step in steps:
-            step_name = step.get("name", "").lower()
-            if "test" in step_name:
-                test_step_id = f"{job_id}_{step.get('number', 1)}"
-                break
-
-        test_step_id = test_step_id or f"{job_id}_test"
+        print(f"📄 Found {len(metadata_files)} test metadata files")
 
         total_tests_processed = 0
 
-        # Process each XML file
-        for xml_file in xml_files:
+        # Process each metadata file
+        for metadata_file in metadata_files:
             try:
-                print(f"📋 Processing JUnit XML: {xml_file}")
+                # Read metadata to get accurate step and framework info
+                with open(metadata_file, "r") as f:
+                    metadata = json.load(f)
+
+                framework = metadata.get("framework", "unknown")
+                test_type = metadata.get("test_type", "unknown")
+                step_name = metadata.get("step_name", "Run tests")
+                junit_xml_file = metadata.get(
+                    "junit_xml_file", "pytest_test_report.xml"
+                )
+
+                # Construct step ID from metadata
+                test_step_id = f"{job_id}_{step_name.lower().replace(' ', '_')}"
+
+                print("📋 Processing test results:")
+                print(f"   Framework: {framework}")
+                print(f"   Test Type: {test_type}")
+                print(f"   Step Name: {step_name}")
+                print(f"   Step ID: {test_step_id}")
+
+                # Find the corresponding XML file
+                xml_file = f"{test_results_dir}/{junit_xml_file}"
+                if not os.path.exists(xml_file):
+                    print(f"⚠️  JUnit XML file not found: {xml_file}")
+                    continue
+
+                print(f"📄 Processing JUnit XML: {xml_file}")
 
                 # Parse JUnit XML using xml.etree.ElementTree
                 tree = ET.parse(xml_file)
@@ -960,7 +966,9 @@ class WorkflowMetricsUploader:
                             test_data["@timestamp"] = job_completed_at
                         else:
                             # Fallback to current time if job completion time not available
-                            test_data["@timestamp"] = datetime.now(timezone.utc).isoformat()
+                            test_data["@timestamp"] = datetime.now(
+                                timezone.utc
+                            ).isoformat()
 
                         # Add common context fields (repo, branch, pr_id, etc.)
                         self.add_common_context_fields(test_data)
@@ -976,9 +984,9 @@ class WorkflowMetricsUploader:
                             print(f"❌ Failed to upload test {test_full_name}: {e}")
 
             except Exception as e:
-                print(f"❌ Failed to process XML file {xml_file}: {e}")
+                print(f"❌ Failed to process metadata file {metadata_file}: {e}")
 
-        print(f"📊 Processed {total_tests_processed} individual tests for {framework}")
+        print(f"📊 Processed {total_tests_processed} individual tests total")
         print("   " + "=" * 50)
 
 
