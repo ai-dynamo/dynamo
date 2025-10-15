@@ -99,6 +99,7 @@ jobs:
           pytest_marks: "e2e and vllm and gpu_1 and not slow"
           framework: "vllm"
           test_type: "e2e"
+          platform_arch: ${{ matrix.platform.arch }}
 
   sglang:
     needs: changed-files
@@ -159,6 +160,7 @@ jobs:
           pytest_marks: "unit and sglang and gpu_1"
           framework: "sglang"
           test_type: "unit"
+          platform_arch: ${{ matrix.platform.arch }}
       - name: Run e2e tests
         # OPS-1140: Uncomment the below line
         # if: ${{ matrix.platform.arch != 'arm64' }}
@@ -168,6 +170,7 @@ jobs:
           pytest_marks: "e2e and sglang and gpu_1"
           framework: "sglang"
           test_type: "e2e"
+          platform_arch: ${{ matrix.platform.arch }}
 
   trtllm:
     needs: changed-files
@@ -220,6 +223,7 @@ jobs:
           pytest_marks: "unit and trtllm_marker and gpu_1"
           framework: "trtllm"
           test_type: "unit"
+          platform_arch: ${{ matrix.platform.arch }}
       - name: Run e2e tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
@@ -228,6 +232,7 @@ jobs:
           pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow"
           framework: "trtllm"
           test_type: "e2e"
+          platform_arch: ${{ matrix.platform.arch }}
 
   # Upload metrics for this workflow and all its jobs
   upload-workflow-metrics:
