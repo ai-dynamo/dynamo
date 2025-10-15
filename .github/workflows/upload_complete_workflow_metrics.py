@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 Enhanced script to upload complete GitHub Actions workflow and job metrics.
-This version runs as the final job in a workflow and captures metrics for
+This version runs as the final job in a workflow and captures metrics for 
 the entire workflow including all previous jobs.
 """
 
@@ -65,6 +65,14 @@ FIELD_BUILD_END_TIME = "ts_build_end_time"
 FIELD_BUILD_TARGET = "s_build_target"
 FIELD_BUILD_FRAMEWORK = "s_build_framework"
 FIELD_BUILD_SIZE_BYTES = "l_build_size_bytes"
+
+# Test Info
+FIELD_FRAMEWORK = "s_framework"  # Framework name
+FIELD_ERROR_MESSAGE = "s_error_message"  # Error message if any
+FIELD_TEST_NAME = "s_test_name"  # Test name (e.g., test_sglang_deployment[aggregated])
+FIELD_TEST_CLASSNAME = "s_test_classname"  # Test class name (e.g., tests.serve.test_sglang)
+FIELD_TEST_MARKERS = "s_test_markers"  # Comma-separated list of marker names
+FIELD_TEST_MARKERS_DETAIL = "s_test_markers_detail"  # JSON string of detailed marker info
 
 
 class BuildMetricsReader:
@@ -203,9 +211,83 @@ class BuildMetricsReader:
         return None
 
 
+class TestMetricsReader:
+    """Reader for test metrics from JSON artifacts"""
+
+    @staticmethod
+    def _process_test_artifact_metrics(artifact_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Process and clean up test artifact metrics data"""
+        # Convert numeric types
+        for field in ["test_duration_sec", "test_exit_code", "total_tests", "passed_tests", 
+                     "failed_tests", "error_tests", "skipped_tests"]:
+            if field in artifact_metrics:
+                try:
+                    artifact_metrics[field] = int(artifact_metrics[field])
+                except (ValueError, TypeError):
+                    artifact_metrics[field] = 0
+
+        return artifact_metrics
+
+    @staticmethod
+    def get_test_metrics_for_job(job_name: str) -> list:
+        """Get all test metrics for a given job from test-metrics artifacts"""
+        test_metrics_list = []
+        
+        # Determine framework from job name
+        framework = "unknown"
+        for fw in ["vllm", "sglang", "trtllm"]:
+            if fw in job_name.lower():
+                framework = fw
+                break
+        
+        # Determine preferred architecture from job name
+        preferred_arch = "amd64"  # Default
+        if "arm64" in job_name.lower():
+            preferred_arch = "arm64"
+        
+        print(f"🔍 Looking for test metrics for job '{job_name}' (framework: {framework}, arch: {preferred_arch})")
+        
+        # Look for test metrics files in test-metrics directory
+        test_metrics_dir = "test-metrics"
+        if not os.path.exists(test_metrics_dir):
+            print(f"⚠️  Test metrics directory not found: {test_metrics_dir}")
+            return test_metrics_list
+        
+        # Find all test metrics files for this framework and architecture
+        import glob
+        pattern = f"{test_metrics_dir}/test-metrics-{framework}-*-{preferred_arch}.json"
+        matching_files = glob.glob(pattern)
+        
+        # Also try the other architecture if no files found
+        if not matching_files:
+            other_arch = 'arm64' if preferred_arch == 'amd64' else 'amd64'
+            pattern = f"{test_metrics_dir}/test-metrics-{framework}-*-{other_arch}.json"
+            matching_files = glob.glob(pattern)
+        
+        # Also try without architecture suffix for backward compatibility
+        if not matching_files:
+            pattern = f"{test_metrics_dir}/test-metrics-{framework}-*.json"
+            matching_files = glob.glob(pattern)
+        
+        for test_file in matching_files:
+            try:
+                with open(test_file, 'r') as f:
+                    test_metrics = json.load(f)
+                processed_metrics = TestMetricsReader._process_test_artifact_metrics(test_metrics)
+                test_metrics_list.append(processed_metrics)
+                print(f"✅ Loaded test metrics from {test_file}")
+            except Exception as e:
+                print(f"⚠️  Could not read test metrics from {test_file}: {e}")
+        
+        if not test_metrics_list:
+            print(f"⚠️  No test metrics artifacts found for {framework}")
+        
+        return test_metrics_list
+
+
 class TimingProcessor:
     """Centralized processor for all datetime and duration conversions using Python built-ins"""
-
+    
     @staticmethod
     def _parse_iso(iso_string: str) -> datetime:
         """Parse ISO datetime string using built-in fromisoformat"""
@@ -218,19 +300,19 @@ class TimingProcessor:
             return datetime.fromisoformat(iso_string)
         except ValueError:
             return None
-
+    
     @staticmethod
     def calculate_time_diff(start_time: str, end_time: str) -> int:
         """Calculate duration/queue time in integer seconds"""
         if not start_time or not end_time:
             return 0
-
+        
         start_dt = TimingProcessor._parse_iso(start_time)
         end_dt = TimingProcessor._parse_iso(end_time)
-
+        
         if not start_dt or not end_dt:
             return 0
-
+        
         # Return integer seconds directly
         duration = end_dt - start_dt
         return max(0, int(duration.total_seconds()))
@@ -240,12 +322,12 @@ def mask_sensitive_urls(error_msg: str, url: str) -> str:
     """Comprehensively mask sensitive URLs and hostnames in error messages"""
     if not url:
         return error_msg
-
+        
     try:
         parsed_url = urlparse(url)
         hostname = parsed_url.hostname
         path = parsed_url.path
-
+        
         # Replace components in order of specificity
         if hostname:
             error_msg = error_msg.replace(hostname, "***HOSTNAME***")
@@ -253,17 +335,17 @@ def mask_sensitive_urls(error_msg: str, url: str) -> str:
             error_msg = error_msg.replace(url, "***DATABASE_URL***")
         if path and path in error_msg:
             error_msg = error_msg.replace(path, "***PATH***")
-
+            
         # Also mask any remaining URL patterns
         if hostname:
             pattern = rf"https?://{re.escape(hostname)}"
             error_msg = re.sub(pattern, "***MASKED_URL***", error_msg)
-
+            
     except Exception:
         # If URL parsing fails, do basic masking
         if url in error_msg:
             error_msg = error_msg.replace(url, "***DATABASE_URL***")
-
+    
     return error_msg
 
 
@@ -273,7 +355,7 @@ class WorkflowMetricsUploader:
         self.workflow_index = os.getenv("WORKFLOW_INDEX", "")
         self.jobs_index = os.getenv("JOB_INDEX", "")
         self.steps_index = os.getenv("STEPS_INDEX", "")
-
+        
         # Validate that database URLs are provided
         if not self.workflow_index or not self.jobs_index or not self.steps_index:
             raise ValueError(
@@ -282,7 +364,7 @@ class WorkflowMetricsUploader:
                 "  JOB_INDEX - URL for job metrics\n"
                 "  STEPS_INDEX - URL for step metrics"
             )
-
+        
         # Get current workflow information
         self.repo = os.getenv("GITHUB_REPOSITORY")
         self.run_id = os.getenv("GITHUB_RUN_ID")
@@ -292,31 +374,31 @@ class WorkflowMetricsUploader:
         self.ref = os.getenv("GITHUB_REF")
         self.ref_name = os.getenv("GITHUB_REF_NAME")
         self.sha = os.getenv("GITHUB_SHA")
-
+        
         if not self.repo or not self.run_id:
             raise ValueError("Missing required GitHub environment variables")
-
+        
         print(
             f"Uploading metrics for workflow '{self.workflow_name}' (run {self.run_id}) in {self.repo}"
         )
-
+        
     def handle_upload_error(self, error: Exception, operation: str) -> str:
         """Centralized error handling with URL masking for all upload operations
-
+        
         Args:
             error: The exception that occurred
             operation: Description of the operation that failed
-
+            
         Returns:
             Sanitized error message with URLs masked
         """
         error_msg = str(error)
-
+        
         # Mask all configured URLs to prevent exposure
         for url in [self.workflow_index, self.jobs_index, self.steps_index]:
             if url:  # Only mask non-empty URLs
                 error_msg = mask_sensitive_urls(error_msg, url)
-
+        
         return f"Error during {operation}: {error_msg}"
 
     def post_to_db(self, url: str, data: Dict[str, Any]) -> None:
@@ -342,12 +424,12 @@ class WorkflowMetricsUploader:
                 "Error: No GitHub token found. Set GITHUB_TOKEN environment variable or repository secret."
             )
             return None
-
+            
         headers = {
             "Authorization": f"token {token}",
             "Accept": "application/vnd.github.v3+json",
         }
-
+        
         try:
             response = requests.get(
                 f"https://api.github.com{endpoint}", headers=headers, timeout=30
@@ -389,12 +471,12 @@ class WorkflowMetricsUploader:
         metric_type: str = "workflow",
     ) -> None:
         """Add standardized timing-related fields across all metric types
-
+        
         Args:
             db_data: Dictionary to add timing fields to
             creation_time: ISO datetime string for creation time
             start_time: ISO datetime string for when execution actually started
-            end_time: ISO datetime string for end time
+            end_time: ISO datetime string for end time  
             metric_type: Type of metric ("workflow", "job", "step") for field naming consistency
         """
         # Store original ISO timestamps
@@ -402,7 +484,7 @@ class WorkflowMetricsUploader:
         db_data[FIELD_END_TIME] = end_time or ""
         if creation_time:  # Don't add for steps
             db_data[FIELD_CREATION_TIME] = creation_time
-
+        
         # Duration in integer seconds (using l_ prefix for long type)
         db_data[FIELD_DURATION_SEC] = TimingProcessor.calculate_time_diff(
             start_time, end_time
@@ -413,7 +495,7 @@ class WorkflowMetricsUploader:
             db_data[FIELD_QUEUE_TIME] = TimingProcessor.calculate_time_diff(
                 creation_time, start_time
             )
-
+        
         # Use the end_time if available, otherwise use current time
         if end_time:
             # Ensure timestamp is in proper ISO format for OpenSearch date detection
@@ -441,14 +523,14 @@ class WorkflowMetricsUploader:
             if not workflow_data:
                 print("Could not fetch workflow data from GitHub API")
                 return
-
+            
             jobs_data = self.get_github_api_data(
                 f"/repos/{self.repo}/actions/runs/{self.run_id}/jobs"
             )
             if not jobs_data or "jobs" not in jobs_data:
                 print("Could not fetch jobs data from GitHub API")
                 return
-
+            
             # Count jobs to process (exclude specified jobs)
             workflow_name = workflow_data.get("name", "")
             jobs_to_process = [
@@ -492,7 +574,7 @@ class WorkflowMetricsUploader:
                     f"Workflow still {workflow_status} after {max_retries} attempts, uploading current state"
                 )
                 break
-
+        
         # Upload workflow metrics
         try:
             print("Processing workflow metrics...")
@@ -501,7 +583,7 @@ class WorkflowMetricsUploader:
         except Exception as e:
             sanitized_error = self.handle_upload_error(e, "workflow metrics upload")
             print(sanitized_error)
-
+        
         # Upload all job and step metrics
         try:
             print(f"Processing {len(jobs_data['jobs'])} jobs and their steps...")
@@ -521,7 +603,7 @@ class WorkflowMetricsUploader:
         """Internal method to upload workflow metrics"""
         db_data = {}
         db_data[FIELD_ID] = f"github-workflow-{self.run_id}"
-
+        
         # Schema fields
         # Use conclusion for completed workflows, fallback to status
         db_data[FIELD_STATUS] = str(
@@ -540,7 +622,7 @@ class WorkflowMetricsUploader:
         self.add_standardized_timing_fields(
             db_data, created_at, run_started_at, end_time, "workflow"
         )
-
+        
         # Common context fields
         self.add_common_context_fields(db_data, workflow_data)
 
@@ -553,7 +635,7 @@ class WorkflowMetricsUploader:
         """Internal method to upload all job and step metrics, returns (jobs_processed, steps_processed)"""
         jobs_processed = 0
         steps_processed = 0
-
+        
         for job in jobs_data["jobs"]:
             try:
                 job_name = job.get("name", "")
@@ -568,18 +650,18 @@ class WorkflowMetricsUploader:
                 # Upload job metrics
                 self._upload_single_job_metrics(job)
                 jobs_processed += 1
-
+                
                 # Upload step metrics for this job
                 if self.steps_index:
                     step_count = self._upload_job_step_metrics(job)
                     steps_processed += step_count
-
+                    
             except Exception as e:
                 print(
                     f"Error uploading metrics for job {job.get('name', 'unknown')}: {e}"
                 )
                 continue
-
+        
         return jobs_processed, steps_processed
 
     def _upload_single_job_metrics(self, job_data: Dict[str, Any]) -> None:
@@ -588,9 +670,9 @@ class WorkflowMetricsUploader:
         db_data = {}
         job_id = job_data["id"]
         job_name = job_data["name"]
-
+        
         db_data[FIELD_ID] = f"github-job-{job_id}"
-
+        
         # Schema fields
         db_data[FIELD_JOB_ID] = str(job_id)
         # Handle job status - prefer conclusion for completed jobs, fallback to status
@@ -611,12 +693,12 @@ class WorkflowMetricsUploader:
         self.add_standardized_timing_fields(
             db_data, created_at, started_at, completed_at, "job"
         )
-
+        
         # Runner info
         runner_id = job_data.get("runner_id")
         db_data[FIELD_RUNNER_ID] = str(runner_id) if runner_id is not None else ""
         db_data[FIELD_RUNNER_NAME] = str(job_data.get("runner_name", ""))
-
+        
         # Add common context fields
         self.add_common_context_fields(db_data)
         self.post_to_db(self.jobs_index, db_data)
@@ -630,16 +712,18 @@ class WorkflowMetricsUploader:
 
         if is_framework_job:
             self._upload_container_metrics(job_data)
+            # Also upload test metrics if available for this framework job
+            self._upload_test_metrics(job_data)
 
     def _upload_job_step_metrics(self, job_data: Dict[str, Any]) -> int:
         """Extract and post metrics for all steps in a job"""
         job_name = job_data["name"]
         steps = job_data.get("steps", [])
-
+        
         if not steps:
             print(f"No steps found for job {job_name}")
             return 0
-
+        
         steps_processed = 0
         for step_index, step in enumerate(steps):
             try:
@@ -651,7 +735,7 @@ class WorkflowMetricsUploader:
                     f"Error uploading metrics for step {step_name} in job {job_name}: {e}"
                 )
                 continue
-
+        
         print(f"Uploaded metrics for {steps_processed} steps in job {job_name}")
         return steps_processed
 
@@ -665,11 +749,11 @@ class WorkflowMetricsUploader:
         job_name = job_data["name"]
         step_name = step_data.get("name", f"step_{step_index}")
         step_number = step_data.get("number", step_index + 1)
-
+        
         # Create unique step ID and use standardized ID generation
         step_id = f"{job_id}_{step_number}"
         db_data[FIELD_ID] = f"github-step-{step_id}"
-
+        
         # Schema-compliant fields
         db_data[FIELD_STEP_ID] = str(step_id)
         db_data[FIELD_JOB_ID] = str(job_id)
@@ -685,16 +769,16 @@ class WorkflowMetricsUploader:
             db_data[FIELD_STATUS_NUMBER] = 1
         elif db_data[FIELD_STATUS] == "failure":
             db_data[FIELD_STATUS_NUMBER] = 0
-
+        
         # Timing fields using standardized method - Fix parameter order for steps
         started_at = step_data.get("started_at")
         completed_at = step_data.get("completed_at")
-
+        
         # For steps: creation_time=None (no queue time), start_time=started_at, end_time=completed_at
         self.add_standardized_timing_fields(
             db_data, None, started_at, completed_at, "step"
         )
-
+        
         # Command/script executed (GitHub API doesn't always provide this, but we can infer)
         command = ""
         if step_data.get("action"):
@@ -704,10 +788,10 @@ class WorkflowMetricsUploader:
                 "run: <script>"  # GitHub API doesn't expose the actual script content
             )
         db_data[FIELD_COMMAND] = command
-
+        
         # Add common context fields
         self.add_common_context_fields(db_data)
-
+        
         # Post to database
         self.post_to_db(self.steps_index, db_data)
         print(f"Uploaded metrics for step: {step_name} (step {step_number})")
@@ -801,6 +885,157 @@ class WorkflowMetricsUploader:
         except Exception as e:
             print(f"❌ Failed to upload container metrics: {e}")
 
+    def _upload_test_metrics(self, job_data: Dict[str, Any]) -> None:
+        """Upload test-specific metrics to TEST_INDEX"""
+        test_index = os.getenv("TEST_INDEX")
+        if not test_index:
+            print("⚠️  TEST_INDEX not configured, skipping test metrics upload")
+            return
+
+        # Get test metrics for this job
+        job_name = job_data.get("name", "")
+        test_metrics_list = TestMetricsReader.get_test_metrics_for_job(job_name)
+
+        if not test_metrics_list:
+            print(f"⚠️  No test metrics available for job: {job_name}")
+            return
+
+        print(f"🧪 Uploading individual test metrics")
+
+        # Upload each test metrics entry (there can be multiple test types per job)
+        for i, test_metrics in enumerate(test_metrics_list):
+            job_id = str(job_data["id"])
+            test_framework = test_metrics.get("framework", "unknown")
+            test_type = test_metrics.get("test_type", "unknown")
+            platform_arch = test_metrics.get("platform_arch", "amd64")
+            
+            # Find the test step ID
+            test_step_id = None
+            steps = job_data.get("steps", [])
+            for step in steps:
+                step_name = step.get("name", "").lower()
+                if ("test" in step_name and test_type in step_name) or (test_type == "unit" and "unit" in step_name) or (test_type == "e2e" and "e2e" in step_name):
+                    test_step_id = f"{job_id}_{step.get('number', 1)}"
+                    break
+            
+            # Fallback: look for any test step
+            if not test_step_id:
+                for step in steps:
+                    if "test" in step.get("name", "").lower():
+                        test_step_id = f"{job_id}_{step.get('number', 1)}"
+                        break
+
+            test_step_id = test_step_id or f"{job_id}_test"
+
+            # Get individual tests from the metrics
+            individual_tests = test_metrics.get("individual_tests", [])
+            summary = test_metrics.get("summary", {})
+            
+            print(f"📋 Test suite summary for {test_framework} {test_type}:")
+            print(f"   Framework: {test_framework}")
+            print(f"   Test Type: {test_type}")
+            print(f"   Platform: {platform_arch}")
+            print(f"   Suite Status: {test_metrics.get('test_status', 'unknown')}")
+            print(f"   Suite Duration: {test_metrics.get('test_duration_sec', 0)}s")
+            print(f"   Total Tests: {summary.get('total_tests', 0)}")
+            print(f"   Passed: {summary.get('passed_tests', 0)}")
+            print(f"   Failed: {summary.get('failed_tests', 0)}")
+            print(f"   Errors: {summary.get('error_tests', 0)}")
+            print(f"   Skipped: {summary.get('skipped_tests', 0)}")
+            print(f"   Individual Tests Found: {len(individual_tests)}")
+            print("   " + "="*50)
+            
+            # Upload individual test cases using your specified schema
+            for test_idx, individual_test in enumerate(individual_tests):
+                # Create individual test data payload
+                test_data = {}
+                
+                # Identity & Context - using your specified fields
+                test_classname = individual_test.get("classname", "")
+                test_name = individual_test.get("name", "")
+                test_full_name = f"{test_classname}::{test_name}" if test_classname else test_name
+                
+                test_data[FIELD_ID] = f"github-test-{job_id}-{test_name}"
+                test_data[FIELD_STEP_ID] = test_step_id
+                test_data[FIELD_JOB_ID] = job_id
+
+                # Status & Events - using your specified fields
+                test_data[FIELD_STATUS] = individual_test.get("status", "unknown")
+
+                # Test Info - using your specified fields
+                test_data[FIELD_FRAMEWORK] = test_framework
+                test_data[FIELD_TEST_NAME] = test_name
+                test_data[FIELD_TEST_CLASSNAME] = test_classname
+                
+                # Add error message if test failed or had error
+                error_msg = ""
+                if individual_test.get("status") == "failed":
+                    error_msg = individual_test.get("failure_message", "") or individual_test.get("failure_text", "")
+                elif individual_test.get("status") == "error":
+                    error_msg = individual_test.get("error_message", "") or individual_test.get("error_text", "")
+                elif individual_test.get("status") == "skipped":
+                    error_msg = individual_test.get("skip_reason", "")
+                
+                if error_msg:
+                    test_data[FIELD_ERROR_MESSAGE] = error_msg
+                
+                # Add marker information if available
+                marker_names = individual_test.get("marker_names", [])
+                markers_detail = individual_test.get("markers", [])
+                
+                if marker_names:
+                    test_data[FIELD_TEST_MARKERS] = ",".join(marker_names)
+                
+                if markers_detail:
+                    try:
+                        test_data[FIELD_TEST_MARKERS_DETAIL] = json.dumps(markers_detail)
+                    except Exception as e:
+                        print(f"⚠️  Failed to serialize markers detail: {e}")
+
+                # Timing - using your specified fields (build timing for test context)
+                if "test_start_time" in test_metrics:
+                    test_data[FIELD_BUILD_START_TIME] = test_metrics["test_start_time"]
+                if "test_end_time" in test_metrics:
+                    test_data[FIELD_BUILD_END_TIME] = test_metrics["test_end_time"]
+                test_data[FIELD_BUILD_DURATION_SEC] = test_metrics.get("test_duration_sec", 0)
+
+                # Add @timestamp for time-series data
+                test_data["@timestamp"] = test_metrics.get(
+                    "test_end_time", datetime.now(timezone.utc).isoformat()
+                )
+
+                # Add common context fields (repo, branch, pr_id, etc.)
+                self.add_common_context_fields(test_data)
+
+                # Print individual test metrics instead of uploading for now
+                print(f"🧪 Individual test: {test_full_name}")
+                print(f"   ID: {test_data[FIELD_ID]}")
+                print(f"   Status: {test_data[FIELD_STATUS]}")
+                print(f"   Framework: {test_data[FIELD_FRAMEWORK]}")
+                print(f"   Test Name: {test_data[FIELD_TEST_NAME]}")
+                print(f"   Test Class: {test_data[FIELD_TEST_CLASSNAME]}")
+                print(f"   Duration: {individual_test.get('time', 0):.3f}s")
+                print(f"   Step ID: {test_data[FIELD_STEP_ID]}")
+                print(f"   Job ID: {test_data[FIELD_JOB_ID]}")
+                print(f"   Workflow ID: {test_data[FIELD_WORKFLOW_ID]}")
+                print(f"   Repo: {test_data[FIELD_REPO]}")
+                print(f"   Branch: {test_data[FIELD_BRANCH]}")
+                print(f"   PR ID: {test_data[FIELD_PR_ID]}")
+                if FIELD_TEST_MARKERS in test_data:
+                    print(f"   Markers: {test_data[FIELD_TEST_MARKERS]}")
+                if FIELD_ERROR_MESSAGE in test_data:
+                    print(f"   Error: {test_data[FIELD_ERROR_MESSAGE][:100]}...")
+                print("   " + "-"*30)
+                
+                try:
+                    self.post_to_db(test_index, test_data)
+                    print(f"✅ Individual test uploaded: {test_full_name}")
+                except Exception as e:
+                    print(f"❌ Failed to upload individual test {test_full_name}: {e}")
+            
+            print(f"📊 Processed {len(individual_tests)} individual tests for {test_framework} {test_type}")
+            print("   " + "="*50)
+
 
 def main():
     """Main function to upload complete GitHub Actions workflow metrics"""
@@ -809,11 +1044,11 @@ def main():
     except ValueError as e:
         print(f"Configuration error: {e}")
         return
-
+    
     print(
         f"Processing complete metrics for workflow '{uploader.workflow_name}' (run {uploader.run_id})"
     )
-
+    
     # Upload all metrics (workflow, jobs, and steps) in one coordinated operation
     uploader.post_all_metrics()
 
