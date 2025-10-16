@@ -396,14 +396,14 @@ jobs:
         export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
         # Update the deployment file in-place
         yq -i '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE
-        
+
         # Debug: Show updated deployment file
         echo "=== UPDATED DEPLOYMENT FILE ==="
         cat $DEPLOYMENT_FILE
-        
+
         # Apply the updated file
         kubectl apply -n $KUBE_NS -f $DEPLOYMENT_FILE
-        
+
         # --- Wait for all pods in the dynamo graph deployment to be ready ---
         sleep 20
         # Get the deployment name from the file
@@ -411,12 +411,12 @@ jobs:
         echo "Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: $GRAPH_NAME"
         # Wait for all pods with the deployment label to be ready
         kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} --timeout=1000s
-        
+
         # Debug: Show final pod statuses for the deployment
         echo "=== FINAL POD STATUSES ==="
         kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n $KUBE_NS -o wide
         echo ""
-        
+
         kubectl get all -n $KUBE_NS
         export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "frontend" | sort -k1 | tail -n1 | awk '{print $1}')
         export CONTAINER_PORT=$(kubectl get pod $FRONTEND_POD -n ${KUBE_NS} -o jsonpath='{.spec.containers[0].ports[?(@.name=="http")].containerPort}')
