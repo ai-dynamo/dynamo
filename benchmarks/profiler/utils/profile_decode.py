@@ -124,10 +124,8 @@ def profile_decode(
             base_url=url,
         )
         if aiperf_result is not None:
-            itl = aiperf_result["records"]["inter_token_latency"]["avg"]
-            thpt_per_gpu = (
-                aiperf_result["records"]["output_token_throughput"]["avg"] / num_gpus
-            )
+            itl = aiperf_result["inter_token_latency"]["avg"]
+            thpt_per_gpu = aiperf_result["output_token_throughput"]["avg"] / num_gpus
             return itl, thpt_per_gpu
         return None, None
 
