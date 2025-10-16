@@ -777,7 +777,7 @@ var _ = Describe("DGDR Validation", func() {
 			Expect(err.Error()).Should(ContainSubstring("modelName"))
 		})
 
-		It("Should fail validation when TTFT is not positive", func() {
+		It("Should fail validation when TTFT is zero", func() {
 			ctx := context.Background()
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
@@ -785,6 +785,26 @@ var _ = Describe("DGDR Validation", func() {
 					Backend:   BackendVLLM,
 					SLA: nvidiacomv1alpha1.SLASpec{
 						TTFT: 0,
+						ITL:  1500,
+						ISL:  3000,
+						OSL:  500,
+					},
+				},
+			}
+
+			err := reconciler.validateSpec(ctx, dgdr)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).Should(ContainSubstring("ttft"))
+		})
+
+		It("Should fail validation when TTFT is negative", func() {
+			ctx := context.Background()
+			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					ModelName: "test-model",
+					Backend:   BackendVLLM,
+					SLA: nvidiacomv1alpha1.SLASpec{
+						TTFT: -1,
 						ITL:  1500,
 					},
 				},
@@ -795,7 +815,27 @@ var _ = Describe("DGDR Validation", func() {
 			Expect(err.Error()).Should(ContainSubstring("ttft"))
 		})
 
-		It("Should fail validation when ITL is not positive", func() {
+		It("Should fail validation when ITL is zero", func() {
+			ctx := context.Background()
+			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					ModelName: "test-model",
+					Backend:   BackendVLLM,
+					SLA: nvidiacomv1alpha1.SLASpec{
+						TTFT: 100,
+						ITL:  0,
+						ISL:  3000,
+						OSL:  500,
+					},
+				},
+			}
+
+			err := reconciler.validateSpec(ctx, dgdr)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).Should(ContainSubstring("itl"))
+		})
+
+		It("Should fail validation when ITL is negative", func() {
 			ctx := context.Background()
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{

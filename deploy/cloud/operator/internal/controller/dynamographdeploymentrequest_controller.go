@@ -18,9 +18,11 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"text/template"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -152,6 +154,43 @@ const (
 	BackendSGLang = "sglang"
 	BackendTRTLLM = "trtllm"
 )
+
+// shell script template for the output copier sidecar
+const sidecarScriptTemplate = `
+set -e
+set -o pipefail
+while [ ! -f {{.OutputPath}}/{{.OutputFile}} ]; do sleep 2; done
+
+# Start building ConfigMap YAML with DGD spec
+cat >/tmp/cm.yaml <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{.ConfigMapName}}
+  namespace: {{.Namespace}}
+  labels:
+    dgdr.nvidia.com/name: {{.DGDRName}}
+    nvidia.com/managed-by: dynamo-operator
+data:
+  {{.OutputFile}}: |
+EOF
+sed 's/^/    /' {{.OutputPath}}/{{.OutputFile}} >> /tmp/cm.yaml
+
+# Add profiling data directories to ConfigMap for long-term storage
+# Find all interpolation directories and add their raw_data.npz files
+for dir in {{.OutputPath}}/*/interpolation; do
+  if [ -d "$dir" ]; then
+    dirname=$(basename $(dirname "$dir"))
+    if [ -f "$dir/raw_data.npz" ]; then
+      echo "  ${dirname}_raw_data.npz: |" >> /tmp/cm.yaml
+      base64 "$dir/raw_data.npz" | sed 's/^/    /' >> /tmp/cm.yaml
+    fi
+  fi
+done
+
+kubectl apply -f /tmp/cm.yaml
+echo "Saved profiling output to ConfigMap {{.ConfigMapName}}"
+`
 
 // DynamoGraphDeploymentRequestReconciler reconciles a DynamoGraphDeploymentRequest object
 type DynamoGraphDeploymentRequestReconciler struct {
@@ -720,8 +759,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 	// Use ProfilerImage for both online and offline (AIC) profiling
 	imageName := r.ProfilerImage
 	if imageName == "" {
-		return fmt.Errorf("profiler image not configured: the operator's profilerImage must be set in the Helm chart values (dynamo-operator.dynamo.dgdr.profilerImage). For development, build the profiler image from the ai-dynamo repository and push it to your registry, then set the image in your Helm values. A public image will be available in release 0.6.1")
+		return fmt.Errorf("profiler image not configured: the operator's profilerImage must be set in the Helm chart values (dynamo-operator.dynamo.dgdr.profilerImage). The image must contain the ai-dynamo profiler (python -m benchmarks.profiler.profile_sla entrypoint). For development, build from the ai-dynamo repository Dockerfile and push to your registry. A public image will be available in release 0.6.1")
 	}
+
+	logger.Info("Using profiler image", "image", imageName, "online", dgdr.Spec.Online)
 
 	// Determine label based on profiling mode
 	var labelValue string
@@ -836,53 +877,29 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			VolumeMounts: volumeMounts,
 		}
 
+		// Generate sidecar script from template
+		tmpl, err := template.New("sidecar").Parse(sidecarScriptTemplate)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to parse sidecar script template: %w", err)
+		}
+
+		var scriptBuf bytes.Buffer
+		err = tmpl.Execute(&scriptBuf, map[string]string{
+			"OutputPath":    ProfilingOutputPath,
+			"OutputFile":    ProfilingOutputFile,
+			"ConfigMapName": outputConfigMapName,
+			"Namespace":     dgdr.Namespace,
+			"DGDRName":      dgdr.Name,
+		})
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to execute sidecar script template: %w", err)
+		}
+
 		sidecarContainer := corev1.Container{
 			Name:    ContainerNameOutputCopier,
 			Image:   SidecarImage,
 			Command: []string{"/bin/sh", "-c"},
-			Args: []string{fmt.Sprintf(`
-set -e
-set -o pipefail
-while [ ! -f %s/%s ]; do sleep 2; done
-
-# Start building ConfigMap YAML with DGD spec
-cat >/tmp/cm.yaml <<EOF
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: %s
-  namespace: %s
-  labels:
-    dgdr.nvidia.com/name: %s
-    nvidia.com/managed-by: dynamo-operator
-data:
-  %s: |
-EOF
-sed 's/^/    /' %s/%s >> /tmp/cm.yaml
-
-# Add profiling data directories to ConfigMap for long-term storage
-# Find all interpolation directories and add their raw_data.npz files
-for dir in %s/*/interpolation; do
-  if [ -d "$dir" ]; then
-    dirname=$(basename $(dirname "$dir"))
-    if [ -f "$dir/raw_data.npz" ]; then
-      echo "  ${dirname}_raw_data.npz: |" >> /tmp/cm.yaml
-      base64 "$dir/raw_data.npz" | sed 's/^/    /' >> /tmp/cm.yaml
-    fi
-  fi
-done
-
-kubectl apply -f /tmp/cm.yaml
-echo "Saved profiling output to ConfigMap %s"
-`,
-				ProfilingOutputPath, ProfilingOutputFile,
-				outputConfigMapName, dgdr.Namespace,
-				dgdr.Name,
-				ProfilingOutputFile,
-				ProfilingOutputPath, ProfilingOutputFile,
-				ProfilingOutputPath,
-				outputConfigMapName,
-			)},
+			Args:    []string{scriptBuf.String()},
 			VolumeMounts: []corev1.VolumeMount{{
 				Name:      VolumeNameProfilingOutput,
 				MountPath: ProfilingOutputPath,
