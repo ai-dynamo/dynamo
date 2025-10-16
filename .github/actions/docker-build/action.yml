@@ -34,6 +34,18 @@ inputs:
   aws_secret_access_key:
     description: 'AWS Secret Access Key'
     required: false
+  base_image_tag:
+    description: 'Optional override for base image tag passed to build.sh'
+    required: false
+  runtime_image_tag:
+    description: 'Optional override for RUNTIME_IMAGE_TAG build-arg'
+    required: false
+  cuda_version:
+    description: 'Optional override for CUDA_VERSION build-arg'
+    required: false
+  torch_backend:
+    description: 'Optional override for TORCH_BACKEND build-arg (e.g., cu129)'
+    required: false
 
 outputs:
   image_tag:
@@ -81,6 +93,21 @@ runs:
         echo "BUILD_START_TIME=${BUILD_START_TIME}" >> $GITHUB_ENV
 
         echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+        # Collect optional overrides provided by the workflow
+        EXTRA_ARGS=""
+        if [ -n "${{ inputs.base_image_tag }}" ]; then
+          EXTRA_ARGS+=" --base-image-tag ${{ inputs.base_image_tag }}"
+        fi
+        if [ -n "${{ inputs.runtime_image_tag }}" ]; then
+          EXTRA_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=${{ inputs.runtime_image_tag }}"
+        fi
+        if [ -n "${{ inputs.cuda_version }}" ]; then
+          EXTRA_ARGS+=" --build-arg CUDA_VERSION=${{ inputs.cuda_version }}"
+        fi
+        if [ -n "${{ inputs.torch_backend }}" ]; then
+          EXTRA_ARGS+=" --build-arg TORCH_BACKEND=${{ inputs.torch_backend }}"
+        fi
+
         ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \
           --vllm-max-jobs 10 \
@@ -88,7 +115,7 @@ runs:
           --platform ${{ inputs.platform }} \
           --use-sccache \
           --sccache-bucket "$SCCACHE_S3_BUCKET" \
-          --sccache-region "$AWS_DEFAULT_REGION"
+          --sccache-region "$AWS_DEFAULT_REGION" $EXTRA_ARGS
 
         BUILD_END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         echo "🕐 Build ended at: ${BUILD_END_TIME}"
