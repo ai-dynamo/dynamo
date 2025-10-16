@@ -18,7 +18,8 @@ import requests
 
 # FILTERING CONFIGURATION - Process all jobs except excluded ones
 EXCLUDED_JOB_NAMES = [
-    "Upload Workflow Metrics",  # Avoid infinite loops
+    "Upload Workflow Metrics",  # Avoid infinite loops (reusable workflow display name)
+    "upload-workflow-metrics",  # Avoid infinite loops (job ID variant)
     # Add other job names to exclude here as needed
 ]
 FRAMEWORK_IMAGE_BUILD_JOBS = ["vllm", "sglang", "trtllm"]
@@ -267,6 +268,18 @@ def mask_sensitive_urls(error_msg: str, url: str) -> str:
     return error_msg
 
 
+def should_exclude_job(job_name: str, excluded_names: list) -> bool:
+    """Check if a job should be excluded based on name matching.
+    
+    Checks both exact match and case-insensitive substring match to handle
+    various job name formats from GitHub API.
+    """
+    return (
+        job_name in excluded_names or
+        any(excluded.lower() in job_name.lower() for excluded in excluded_names)
+    )
+
+
 class WorkflowMetricsUploader:
     def __init__(self):
         self.headers = {"Content-Type": "application/json", "Accept-Charset": "UTF-8"}
@@ -289,16 +302,27 @@ class WorkflowMetricsUploader:
         self.workflow_name = os.getenv("GITHUB_WORKFLOW")
         self.actor = os.getenv("GITHUB_ACTOR")
         self.event_name = os.getenv("GITHUB_EVENT_NAME")
+        self.sha = os.getenv("GITHUB_SHA")
+        
+        # These are only used for debug logging (actual data uses GitHub API)
         self.ref = os.getenv("GITHUB_REF")
         self.ref_name = os.getenv("GITHUB_REF_NAME")
-        self.sha = os.getenv("GITHUB_SHA")
 
         if not self.repo or not self.run_id:
             raise ValueError("Missing required GitHub environment variables")
 
-        print(
-            f"Uploading metrics for workflow '{self.workflow_name}' (run {self.run_id}) in {self.repo}"
-        )
+        print("=" * 80)
+        print("📊 WORKFLOW METRICS UPLOAD - INITIALIZATION")
+        print("=" * 80)
+        print(f"Repository: {self.repo}")
+        print(f"Run ID: {self.run_id}")
+        print(f"Workflow Name: {self.workflow_name}")
+        print(f"Actor: {self.actor}")
+        print(f"Event: {self.event_name}")
+        print(f"Ref: {self.ref}")
+        print(f"Ref Name: {self.ref_name}")
+        print(f"SHA: {self.sha}")
+        print("=" * 80)
 
     def handle_upload_error(self, error: Exception, operation: str) -> str:
         """Centralized error handling with URL masking for all upload operations
@@ -359,14 +383,22 @@ class WorkflowMetricsUploader:
             return None
 
     def add_common_context_fields(
-        self, db_data: Dict[str, Any], workflow_data: Optional[Dict[str, Any]] = None
+        self, db_data: Dict[str, Any], workflow_data: Dict[str, Any]
     ) -> None:
-        """Add common context fields used across all metric types"""
+        """Add common context fields used across all metric types
+        
+        Args:
+            db_data: Dictionary to add fields to
+            workflow_data: Workflow data from GitHub API (required for authoritative branch info)
+        """
         db_data[FIELD_USER_ALIAS] = self.actor
         db_data[FIELD_REPO] = self.repo
         db_data[FIELD_WORKFLOW_NAME] = self.workflow_name
         db_data[FIELD_GITHUB_EVENT] = self.event_name
-        db_data[FIELD_BRANCH] = self.ref_name
+        
+        # Always use branch from GitHub API (authoritative source)
+        db_data[FIELD_BRANCH] = workflow_data.get("head_branch", "unknown")
+            
         db_data[FIELD_WORKFLOW_ID] = str(self.run_id)
         db_data[FIELD_COMMIT_SHA] = self.sha
 
@@ -451,10 +483,29 @@ class WorkflowMetricsUploader:
 
             # Count jobs to process (exclude specified jobs)
             workflow_name = workflow_data.get("name", "")
+            
+            # Debug: Log workflow data fields to understand branch naming
+            print(f"\n🔍 Workflow API Debug Info:")
+            print(f"   head_branch: {workflow_data.get('head_branch')}")
+            print(f"   head_ref: {workflow_data.get('head_ref')}")  
+            print(f"   ref: {workflow_data.get('ref')}")
+            print(f"   event: {workflow_data.get('event')}")
+            
+            # Log all jobs found by GitHub API
+            all_jobs = jobs_data.get("jobs", [])
+            print(f"\n📋 Found {len(all_jobs)} total jobs from GitHub API:")
+            for job in all_jobs:
+                job_name = job.get("name", "")
+                job_status = job.get("status", "")
+                job_conclusion = job.get("conclusion", "N/A")
+                is_excluded = should_exclude_job(job_name, EXCLUDED_JOB_NAMES)
+                status_marker = "⏭️ EXCLUDED" if is_excluded else "✓ INCLUDED"
+                print(f"   {status_marker}: '{job_name}' (status: {job_status}, conclusion: {job_conclusion})")
+            
             jobs_to_process = [
                 job
-                for job in jobs_data.get("jobs", [])
-                if job.get("name") not in EXCLUDED_JOB_NAMES
+                for job in all_jobs
+                if not should_exclude_job(job.get("name", ""), EXCLUDED_JOB_NAMES)
             ]
 
             if not jobs_to_process:
@@ -462,11 +513,11 @@ class WorkflowMetricsUploader:
                     f"❌ No jobs to process after excluding jobs: {EXCLUDED_JOB_NAMES}"
                 )
                 print(
-                    f"   Available jobs: {[job.get('name') for job in jobs_data.get('jobs', [])]}"
+                    f"   Available jobs: {[job.get('name') for job in all_jobs]}"
                 )
                 return
 
-            print("✅ Processing workflow metrics - proceeding with upload")
+            print(f"\n✅ Processing workflow metrics - proceeding with upload")
             print(f"   Workflow: '{workflow_name}'")
             print(
                 f"   Jobs to process: {len(jobs_to_process)} (excluding {EXCLUDED_JOB_NAMES})"
@@ -504,13 +555,17 @@ class WorkflowMetricsUploader:
 
         # Upload all job and step metrics
         try:
-            print(f"Processing {len(jobs_data['jobs'])} jobs and their steps...")
+            total_jobs = len(jobs_data.get('jobs', []))
+            print(f"\n📊 Starting to process {total_jobs} jobs and their steps...")
             jobs_processed, steps_processed = self._upload_all_job_and_step_metrics(
-                jobs_data
+                jobs_data, workflow_data
             )
             print(
-                f"Successfully uploaded {jobs_processed} job metrics and {steps_processed} step metrics"
+                f"\n✅ Successfully uploaded {jobs_processed} job metrics and {steps_processed} step metrics"
             )
+            if jobs_processed < total_jobs:
+                excluded_count = total_jobs - jobs_processed
+                print(f"   ℹ️  Note: {excluded_count} job(s) were excluded (likely the metrics upload job itself)")
         except Exception as e:
             sanitized_error = self.handle_upload_error(e, "job/step metrics upload")
             print(sanitized_error)
@@ -531,7 +586,6 @@ class WorkflowMetricsUploader:
             db_data[FIELD_STATUS_NUMBER] = 1
         elif db_data[FIELD_STATUS] == "failure":
             db_data[FIELD_STATUS_NUMBER] = 0
-        print(f"Checking branch: {str(workflow_data.get('head_branch'))}")
 
         # Timing fields
         created_at = workflow_data.get("created_at")
@@ -548,7 +602,7 @@ class WorkflowMetricsUploader:
         self.post_to_db(self.workflow_index, db_data)
 
     def _upload_all_job_and_step_metrics(
-        self, jobs_data: Dict[str, Any]
+        self, jobs_data: Dict[str, Any], workflow_data: Dict[str, Any]
     ) -> tuple[int, int]:
         """Internal method to upload all job and step metrics, returns (jobs_processed, steps_processed)"""
         jobs_processed = 0
@@ -559,19 +613,19 @@ class WorkflowMetricsUploader:
                 job_name = job.get("name", "")
 
                 # FILTER: Skip excluded jobs to avoid infinite loops and other unwanted jobs
-                if job_name in EXCLUDED_JOB_NAMES:
+                if should_exclude_job(job_name, EXCLUDED_JOB_NAMES):
                     print(f"⏭️  Skipping excluded job '{job_name}'")
                     continue
 
                 print(f"📤 Uploading job: '{job_name}'")
 
                 # Upload job metrics
-                self._upload_single_job_metrics(job)
+                self._upload_single_job_metrics(job, workflow_data)
                 jobs_processed += 1
 
                 # Upload step metrics for this job
                 if self.steps_index:
-                    step_count = self._upload_job_step_metrics(job)
+                    step_count = self._upload_job_step_metrics(job, workflow_data)
                     steps_processed += step_count
 
             except Exception as e:
@@ -582,7 +636,7 @@ class WorkflowMetricsUploader:
 
         return jobs_processed, steps_processed
 
-    def _upload_single_job_metrics(self, job_data: Dict[str, Any]) -> None:
+    def _upload_single_job_metrics(self, job_data: Dict[str, Any], workflow_data: Dict[str, Any]) -> None:
         """Extract and post metrics for a single job"""
         # Extract job metrics using standardized functions
         db_data = {}
@@ -618,7 +672,7 @@ class WorkflowMetricsUploader:
         db_data[FIELD_RUNNER_NAME] = str(job_data.get("runner_name", ""))
 
         # Add common context fields
-        self.add_common_context_fields(db_data)
+        self.add_common_context_fields(db_data, workflow_data)
         self.post_to_db(self.jobs_index, db_data)
         print(f"Uploaded metrics for job: {job_name}")
 
@@ -629,9 +683,9 @@ class WorkflowMetricsUploader:
         )
 
         if is_framework_job:
-            self._upload_container_metrics(job_data)
+            self._upload_container_metrics(job_data, workflow_data)
 
-    def _upload_job_step_metrics(self, job_data: Dict[str, Any]) -> int:
+    def _upload_job_step_metrics(self, job_data: Dict[str, Any], workflow_data: Dict[str, Any]) -> int:
         """Extract and post metrics for all steps in a job"""
         job_name = job_data["name"]
         steps = job_data.get("steps", [])
@@ -643,7 +697,7 @@ class WorkflowMetricsUploader:
         steps_processed = 0
         for step_index, step in enumerate(steps):
             try:
-                self._upload_single_step_metrics(step, job_data, step_index)
+                self._upload_single_step_metrics(step, job_data, workflow_data, step_index)
                 steps_processed += 1
             except Exception as e:
                 step_name = step.get("name", f"step_{step_index}")
@@ -656,7 +710,7 @@ class WorkflowMetricsUploader:
         return steps_processed
 
     def _upload_single_step_metrics(
-        self, step_data: Dict[str, Any], job_data: Dict[str, Any], step_index: int
+        self, step_data: Dict[str, Any], job_data: Dict[str, Any], workflow_data: Dict[str, Any], step_index: int
     ) -> None:
         """Extract and post metrics for a single step"""
         # Extract step metrics using standardized functions
@@ -706,14 +760,14 @@ class WorkflowMetricsUploader:
         db_data[FIELD_COMMAND] = command
 
         # Add common context fields
-        self.add_common_context_fields(db_data)
+        self.add_common_context_fields(db_data, workflow_data)
 
         # Post to database
         self.post_to_db(self.steps_index, db_data)
         print(f"Uploaded metrics for step: {step_name} (step {step_number})")
 
     def _upload_container_metrics(
-        self, job_data: Dict[str, Any], build_metrics: Optional[Dict[str, Any]] = None
+        self, job_data: Dict[str, Any], workflow_data: Dict[str, Any], build_metrics: Optional[Dict[str, Any]] = None
     ) -> None:
         """Upload container-specific metrics to CONTAINER_INDEX"""
         container_index = os.getenv("CONTAINER_INDEX")
@@ -790,7 +844,7 @@ class WorkflowMetricsUploader:
         )
 
         # Add common context fields
-        self.add_common_context_fields(container_data)
+        self.add_common_context_fields(container_data, workflow_data)
 
         # Upload to container index
         try:
