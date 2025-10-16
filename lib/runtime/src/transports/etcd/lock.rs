@@ -78,41 +78,23 @@ impl DistributedRWLock {
     ///
     /// Returns `Some(WriteLockGuard)` if acquired, `None` if readers exist or lock unavailable.
     /// The guard automatically releases the lock when dropped.
-    /// Uses atomic transaction to check that no write lock exists and create it atomically.
     ///
-    /// Note: There is a small race window (microseconds) between the prefix check and the
-    /// atomic transaction where a reader could acquire a lock. The transaction only checks
-    /// the writer key, not the reader keys. In practice, this window is extremely small and
-    /// unlikely to cause issues for typical use cases like snapshot coordination.
+    /// Implementation strategy:
+    /// 1. Atomically create writer key if it doesn't exist
+    /// 2. Immediately check if any readers exist
+    /// 3. If readers found, rollback (delete writer key) and return None
+    ///
+    /// Note: There is still a small race window (sub-millisecond) where a reader could acquire
+    /// a lock between steps 2-3.
     pub async fn try_write_lock<'a>(
         &'a self,
         etcd_client: &'a Client,
     ) -> Option<WriteLockGuard<'a>> {
-        // First check if any locks exist (readers or writer) under the entire prefix
-        let prefix = format!("v1/{}", self.lock_prefix);
-        match etcd_client.kv_get_prefix(&prefix).await {
-            Ok(existing_locks) => {
-                if !existing_locks.is_empty() {
-                    tracing::debug!(
-                        "Cannot acquire write lock: {} existing lock(s) under prefix",
-                        existing_locks.len()
-                    );
-                    return None;
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Failed to check for existing locks: {e:?}");
-                return None;
-            }
-        }
-
-        // Atomically create write lock only if it doesn't exist
-        // This prevents the race where a reader acquires between check and create
         let write_key = format!("v1/{}/writer", self.lock_prefix);
         let lease_id = etcd_client.lease_id();
         let put_options = PutOptions::new().with_lease(lease_id);
 
-        // Build atomic transaction: only create if write_key version is 0 (doesn't exist)
+        // Step 1: Atomically create write lock only if it doesn't exist
         let txn = Txn::new()
             .when(vec![Compare::version(
                 write_key.as_str(),
@@ -128,11 +110,37 @@ impl DistributedRWLock {
         // Execute the atomic transaction
         match etcd_client.etcd_client().kv_client().txn(txn).await {
             Ok(response) if response.succeeded() => {
-                tracing::debug!("Successfully acquired write lock");
-                Some(WriteLockGuard {
-                    rwlock: self,
-                    etcd_client,
-                })
+                // Step 2: Immediately check if any readers exist
+                let reader_prefix = format!("v1/{}/readers/", self.lock_prefix);
+                match etcd_client.kv_get_prefix(&reader_prefix).await {
+                    Ok(readers) if !readers.is_empty() => {
+                        // Readers exist! Rollback - delete our writer key
+                        tracing::debug!(
+                            "Found {} reader(s) after acquiring write lock, rolling back",
+                            readers.len()
+                        );
+                        if let Err(e) = etcd_client.kv_delete(write_key.as_str(), None).await {
+                            tracing::warn!("Failed to rollback write lock: {e:?}");
+                        }
+                        None
+                    }
+                    Ok(_) => {
+                        // No readers, we successfully hold the write lock
+                        tracing::debug!("Successfully acquired write lock with no readers");
+                        Some(WriteLockGuard {
+                            rwlock: self,
+                            etcd_client,
+                        })
+                    }
+                    Err(e) => {
+                        // Error checking for readers - rollback to be safe
+                        tracing::warn!(
+                            "Failed to check for readers, rolling back write lock: {e:?}"
+                        );
+                        let _ = etcd_client.kv_delete(write_key.as_str(), None).await;
+                        None
+                    }
+                }
             }
             Ok(_) => {
                 tracing::debug!("Write lock already exists, transaction failed");
