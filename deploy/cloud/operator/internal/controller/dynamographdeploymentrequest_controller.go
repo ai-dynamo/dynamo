@@ -721,7 +721,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 	// Use ProfilerImage for both online and offline (AIC) profiling
 	imageName := r.ProfilerImage
 	if imageName == "" {
-		return fmt.Errorf("profiler image not configured")
+		return fmt.Errorf("profiler image not configured: the operator's profilerImage must be set in the Helm chart values (dynamo-operator.dynamo.dgdr.profilerImage). For development, build the profiler image from the ai-dynamo repository and push it to your registry, then set the image in your Helm values. A public image will be available in release 0.6.1")
 	}
 
 	// Determine label based on profiling mode

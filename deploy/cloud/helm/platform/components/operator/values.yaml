@@ -120,8 +120,11 @@ dynamo:
   # DynamoGraphDeploymentRequest (DGDR) configuration
   dgdr:
     # Container image to use for profiling jobs (both online and offline/AIC)
+    # REQUIRED: Must be set to create DynamoGraphDeploymentRequests
+    # For development: Build and push the profiler image from the ai-dynamo repository
+    # Public image will be available in release 0.6.1
+    # Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
     profilerImage: ""
-    # Example: "nvcr.io/nvidia/dynamo-profiler:v1.0.0"
 
 
 #imagePullSecrets: []
