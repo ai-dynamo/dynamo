@@ -494,7 +494,7 @@ jobs:
         exit $TEST_RESULT
     - name: Cleanup
       if: always()
-      timeout-minutes: 1
+      timeout-minutes: 5
       run: |
         echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
         chmod 600 .kubeconfig
