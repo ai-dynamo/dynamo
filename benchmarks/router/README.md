@@ -13,7 +13,7 @@ This directory contains scripts for benchmarking the Dynamo router with prefix c
 - etcd and NATS running (required for Dynamo coordination)
 - Required Python packages:
   - `dynamo` package (with vllm and frontend modules)
-  - `genai-perf` for benchmarking
+  - `aiperf` for benchmarking
   - `matplotlib` for plotting results
   - `data-generator` package (install with `pip install -e ./benchmarks` from repo root)
 
@@ -230,11 +230,11 @@ python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multipli
 ```
 
 > [!Note]
-> At the time of writing this documentation, you may need to install the latest genai-perf from the main source branch to loadgen on the trace files:
+> At the time of writing this documentation, you may need to install the latest aiperf from the main source branch to loadgen on the trace files:
 > ```bash
-> pip install git+https://github.com/triton-inference-server/perf_analyzer.git#subdirectory=genai-perf
+> pip install git+https://github.com/ai-dynamo/aiperf.git#subdirectory=aiperf
 > ```
-> However, by the time of release, the genai-perf version included in the vLLM runtime container should be up to date enough to use as-is.
+> However, by the time of release, the aiperf version included in the vLLM runtime container should be up to date enough to use as-is.
 
 ## Troubleshooting
 

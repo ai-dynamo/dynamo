@@ -4,12 +4,12 @@
 """Unit tests for vLLM backend components."""
 
 import re
-import sys
 from pathlib import Path
 
 import pytest
 
 from dynamo.vllm.args import parse_args
+from tests.unit.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
 TEST_DIR = Path(__file__).parent.parent
@@ -23,20 +23,16 @@ pytestmark = [
 ]
 
 
-def test_custom_jinja_template_invalid_path(monkeypatch):
+# Create vLLM-specific CLI args fixture
+# This will use monkeypatch to write to argv
+mock_vllm_cli = make_cli_args_fixture("dynamo.vllm")
+
+
+def test_custom_jinja_template_invalid_path(mock_vllm_cli):
     """Test that invalid file path raises FileNotFoundError."""
     invalid_path = "/nonexistent/path/to/template.jinja"
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "dynamo.vllm",
-            "--model",
-            "Qwen/Qwen3-0.6B",
-            "--custom-jinja-template",
-            invalid_path,
-        ],
-    )
+
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--custom-jinja-template", invalid_path)
 
     with pytest.raises(
         FileNotFoundError,
@@ -45,19 +41,9 @@ def test_custom_jinja_template_invalid_path(monkeypatch):
         parse_args()
 
 
-def test_custom_jinja_template_valid_path(monkeypatch):
+def test_custom_jinja_template_valid_path(mock_vllm_cli):
     """Test that valid absolute path is stored correctly."""
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "dynamo.vllm",
-            "--model",
-            "Qwen/Qwen3-0.6B",
-            "--custom-jinja-template",
-            JINJA_TEMPLATE_PATH,
-        ],
-    )
+    mock_vllm_cli(model="Qwen/Qwen3-0.6B", custom_jinja_template=JINJA_TEMPLATE_PATH)
 
     config = parse_args()
 
@@ -67,23 +53,13 @@ def test_custom_jinja_template_valid_path(monkeypatch):
     )
 
 
-def test_custom_jinja_template_env_var_expansion(monkeypatch):
+def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_vllm_cli):
     """Test that environment variables in paths are expanded by Python code."""
     jinja_dir = str(TEST_DIR / "serve" / "fixtures")
     monkeypatch.setenv("JINJA_DIR", jinja_dir)
 
     cli_path = "$JINJA_DIR/custom_template.jinja"
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "dynamo.vllm",
-            "--model",
-            "Qwen/Qwen3-0.6B",
-            "--custom-jinja-template",
-            cli_path,
-        ],
-    )
+    mock_vllm_cli(model="Qwen/Qwen3-0.6B", custom_jinja_template=cli_path)
 
     config = parse_args()
 

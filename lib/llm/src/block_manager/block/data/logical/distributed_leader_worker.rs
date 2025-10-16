@@ -100,6 +100,20 @@ impl LogicalResources for DistributedLeaderWorkerResources {
         RB: BlockDataProvider<Locality = Logical<Self>>,
         WB: WritableBlock + BlockDataProviderMut<Locality = Logical<Self>>,
     {
+        // Check for empty slices and length mismatch early
+        if sources.is_empty() && targets.is_empty() {
+            tracing::warn!(
+                "DistributedLeaderWorkerResources::handle_transfer called with both sources and targets empty, skipping transfer"
+            );
+            let (tx, rx) = oneshot::channel();
+            tx.send(()).unwrap();
+            return Ok(rx);
+        }
+
+        if sources.len() != targets.len() {
+            return Err(TransferError::CountMismatch(sources.len(), targets.len()));
+        }
+
         if let Some(transfer_tx) = &self.transfer_tx {
             let source_pool = Self::get_pool(sources[0].block_data());
             let target_pool = Self::get_pool(targets[0].block_data());

@@ -19,7 +19,7 @@ Dynamo supports OpenTelemetry-based distributed tracing, allowing you to visuali
 
 ## Environment Variables
 
-Dynamo's tracing is configured via environment variables. For complete logging documentation, see [docs/guides/logging.md](../../docs/guides/logging.md).
+Dynamo's tracing is configured via environment variables. For complete logging documentation, see [docs/observability/logging.md](../../docs/observability/logging.md).
 
 ### Required Environment Variables
 

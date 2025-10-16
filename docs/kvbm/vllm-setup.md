@@ -15,79 +15,61 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Running KVBM in TensorRT-LLM
+# Running KVBM in vLLM
 
-This guide explains how to leverage KVBM (KV Block Manager) to mange KV cache and do KV offloading in TensorRT-LLM (trtllm).
+This guide explains how to leverage KVBM (KV Block Manager) to mange KV cache and do KV offloading in vLLM.
 
-To learn what KVBM is, please check [here](https://docs.nvidia.com/dynamo/latest/architecture/kvbm_intro.html)
-
-> [!Note]
-> - Ensure that `etcd` and `nats` are running before starting.
-> - KVBM does not currently support CUDA graphs in TensorRT-LLM.
-> - KVBM only supports TensorRT-LLM’s PyTorch backend.
-> - To enable disk cache offloading, you must first enable a CPU memory cache offloading.
-> - Disable partial reuse `enable_partial_reuse: false` in the LLM API config’s `kv_connector_config` to increase offloading cache hits.
-> - KVBM requires TensorRT-LLM v1.1.0rc5 or newer.
-> - Enabling KVBM metrics with TensorRT-LLM is still a work in progress.
+To learn what KVBM is, please check [here](https://docs.nvidia.com/dynamo/latest/kvbm/kvbm_intro.html)
 
 ## Quick Start
 
-To use KVBM in TensorRT-LLM, you can follow the steps below:
+To use KVBM in vLLM, you can follow the steps below:
 
+### Docker Setup
 ```bash
 # start up etcd for KVBM leader/worker registration and discovery
 docker compose -f deploy/docker-compose.yml up -d
 
-# Build a container that includes TensorRT-LLM and KVBM.
-./container/build.sh --framework trtllm --enable-kvbm
+# build a container containing vllm and kvbm
+./container/build.sh --framework vllm --enable-kvbm
 
 # launch the container
-./container/run.sh --framework trtllm -it --mount-workspace --use-nixl-gds
-
-# enable kv offloading to CPU memory
-# 4 means 4GB of pinned CPU memory would be used
-export DYN_KVBM_CPU_CACHE_GB=4
-
-# enable kv offloading to disk. Note: To enable disk cache offloading, you must first enable a CPU memory cache offloading.
-# 8 means 8GB of disk would be used
-export DYN_KVBM_DISK_CACHE_GB=8
-
-# Allocating memory and disk storage can take some time.
-# We recommend setting a higher timeout for leader–worker initialization.
-# 1200 means 1200 seconds timeout
-export DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS=1200
+./container/run.sh --framework vllm -it --mount-workspace --use-nixl-gds
 ```
+
+### Aggregated Serving with KVBM
+```bash
+cd $DYNAMO_HOME/components/backends/vllm
+./launch/agg_kvbm.sh
+```
+
+### Disaggregated Serving with KVBM
+```bash
+# 1P1D - one prefill worker and one decode worker
+# NOTE: need at least 2 GPUs
+cd $DYNAMO_HOME/components/backends/vllm
+./launch/disagg_kvbm.sh
+
+# 2P2D - two prefill workers and two decode workers
+# NOTE: need at least 4 GPUs
+cd $DYNAMO_HOME/components/backends/vllm
+./launch/disagg_kvbm_2p2d.sh
+```
+> [!NOTE]
+> To tune the size of CPU or disk cache, set `DYN_KVBM_CPU_CACHE_GB` and `DYN_KVBM_DISK_CACHE_GB` accordingly. We only set `DYN_KVBM_CPU_CACHE_GB=20` in both scripts above.
+
+> [!NOTE]
+> `DYN_KVBM_CPU_CACHE_GB` must be set and `DYN_KVBM_DISK_CACHE_GB` is optional.
 
 > [!NOTE]
 > When disk offloading is enabled, to extend SSD lifespan, disk offload filtering would be enabled by default. The current policy is only offloading KV blocks from CPU to disk if the blocks have frequency equal or more than `2`. Frequency is determined via doubling on cache hit (init with 1) and decrement by 1 on each time decay step.
 >
 > To disable disk offload filtering, set `DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER` to true or 1.
 
+### Sample Request
 ```bash
-# write an example LLM API config
-# Note: Disable partial reuse "enable_partial_reuse: false" in the LLM API config’s "kv_connector_config" to increase offloading cache hits.
-cat > "/tmp/kvbm_llm_api_config.yaml" <<EOF
-backend: pytorch
-cuda_graph_config: null
-kv_cache_config:
-  enable_partial_reuse: false
-  free_gpu_memory_fraction: 0.80
-kv_connector_config:
-  connector_module: dynamo.llm.trtllm_integration.connector
-  connector_scheduler_class: DynamoKVBMConnectorLeader
-  connector_worker_class: DynamoKVBMConnectorWorker
-EOF
-
-# [DYNAMO] start dynamo frontend
-python3 -m dynamo.frontend --http-port 8000 &
-
-# [DYNAMO] To serve an LLM model with dynamo
-python3 -m dynamo.trtllm \
-  --model-path Qwen/Qwen3-0.6B \
-  --served-model-name Qwen/Qwen3-0.6B \
-  --extra-engine-args /tmp/kvbm_llm_api_config.yaml &
-
-# make a call to LLM
+# make a request to verify vLLM with KVBM is started up correctly
+# NOTE: change the model name if served with a different one
 curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
     "model": "Qwen/Qwen3-0.6B",
     "messages": [
@@ -97,14 +79,13 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
     }
     ],
     "stream":false,
-    "max_tokens": 30
+    "max_tokens": 10
   }'
-
 ```
 
-Alternatively, can use "trtllm-serve" with KVBM by replacing the above two [DYNAMO] cmds with below:
+Alternatively, can use `vllm serve` directly to use KVBM for aggregated serving:
 ```bash
-trtllm-serve Qwen/Qwen3-0.6B --host localhost --port 8000 --backend pytorch --extra_llm_api_options /tmp/kvbm_llm_api_config.yaml
+vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "dynamo.llm.vllm_integration.connector"}' Qwen/Qwen3-0.6B
 ```
 
 ## Enable and View KVBM Metrics
@@ -116,11 +97,12 @@ docker compose -f deploy/docker-compose.yml --profile metrics up -d
 
 # set env var DYN_KVBM_METRICS to true, when launch via dynamo
 # Optionally set DYN_KVBM_METRICS_PORT to choose the /metrics port (default: 6880).
+# NOTE: update launch/disagg_kvbm.sh or launch/disagg_kvbm_2p2d.sh as needed
 DYN_KVBM_METRICS=true \
-python3 -m dynamo.trtllm \
-  --model-path Qwen/Qwen3-0.6B \
-  --served-model-name Qwen/Qwen3-0.6B \
-  --extra-engine-args /tmp/kvbm_llm_api_config.yaml &
+python -m dynamo.vllm \
+    --model Qwen/Qwen3-0.6B \
+    --enforce-eager \
+    --connector kvbm
 
 # optional if firewall blocks KVBM metrics ports to send prometheus metrics
 sudo ufw allow 6880/tcp
@@ -149,16 +131,4 @@ More details about how to use LMBenchmark could be found [here](https://github.c
 
 `NOTE`: if metrics are enabled as mentioned in the above section, you can observe KV offloading, and KV onboarding in the grafana dashboard.
 
-To compare, you can remove the `kv_connector_config` section from the LLM API config and run `trtllm-serve` with the updated config as the baseline.
-```bash
-cat > "/tmp/llm_api_config.yaml" <<EOF
-backend: pytorch
-cuda_graph_config: null
-kv_cache_config:
-  enable_partial_reuse: false
-  free_gpu_memory_fraction: 0.80
-EOF
-
-# run trtllm-serve for the baseline for comparison
-trtllm-serve Qwen/Qwen3-0.6B --host localhost --port 8000 --backend pytorch --extra_llm_api_options /tmp/llm_api_config.yaml &
-```
+To compare, you can run `vllm serve Qwen/Qwen3-0.6B` to turn KVBM off as the baseline.

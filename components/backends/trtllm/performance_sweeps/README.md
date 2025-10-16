@@ -38,7 +38,7 @@ Please note that:
 
 1. `submit_disagg.sh` - Main entry point for submitting benchmark jobs for disaggregated configurations. This includes WideEP optimization for DEP>=16.
 2. `submit_agg.sh` - Main entry point for submitting benchmark jobs for aggregated configurations.
-3. `post_process.py` - Scan the genai-perf results to produce a json with entries to each config point.
+3. `post_process.py` - Scan the aiperf results to produce a json with entries to each config point.
 4. `plot_performance_comparison.py` - Takes the json result file for disaggregated and/or aggregated configuration sweeps and plots a pareto line for better visualization.
 
 For more finer grained details on how to launch TRTLLM backend workers with DeepSeek R1 on GB200 slurm, please refer [multinode-examples.md](../../../../docs/backends/trtllm/multinode/multinode-examples.md). This guide shares similar assumption to the multinode examples guide.
@@ -117,9 +117,9 @@ export SERVED_MODEL_NAME="nvidia/DeepSeek-R1-FP4"
 
 ## Post-Processing Results
 
-The above jobs use genAI-perf tool to benchmark each configuration point across different concurrency values. These get stored in `dynamo_disagg-bm-8150-1024/<config-setup>/genai_perf_artifacts` and `dynamo_agg-bm-8150-1024/<config-setup>/genai_perf_artifacts` for disaggregated and aggregated respectively.
+The above jobs use aiperf tool to benchmark each configuration point across different concurrency values. These get stored in `dynamo_disagg-bm-8150-1024/<config-setup>/aiperf_artifacts` and `dynamo_agg-bm-8150-1024/<config-setup>/aiperf_artifacts` for disaggregated and aggregated respectively.
 
-After your benchmarking jobs have completed, you can use the `post_process.py` script to aggregate and summarize the results from the generated genai_perf_artifacts.
+After your benchmarking jobs have completed, you can use the `post_process.py` script to aggregate and summarize the results from the generated aiperf_artifacts.
 
 To run the post-processing script, use:
 
@@ -149,6 +149,6 @@ Refer to [Beyond the Buzz: A Pragmatic Take on Inference Disaggregation](https:/
 
 ## Known Issues
 
-- Some jobs may time out if genai-perf requires more time to complete all concurrency levels.
+- Some jobs may time out if aiperf requires more time to complete all concurrency levels.
 - Workers may encounter out-of-memory (OOM) errors during inference, especially with larger configurations.
 - Configurations affected by these issues will result in missing data points on the performance plot.

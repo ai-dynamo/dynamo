@@ -8,7 +8,7 @@ from typing import Optional
 from tensorrt_llm.llmapi import BuildConfig
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
-from dynamo.common.config_dump import add_config_dump_args
+from dynamo.common.config_dump import add_config_dump_args, register_encoder
 from dynamo.trtllm import __version__
 from dynamo.trtllm.request_handlers.handler_base import (
     DisaggregationMode,
@@ -96,6 +96,13 @@ class Config:
             f"dump_config_to={self.dump_config_to},"
             f"custom_jinja_template={self.custom_jinja_template}"
         )
+
+
+@register_encoder(Config)
+def _preprocess_for_encode_config(
+    obj: Config,
+) -> dict:  # pyright: ignore[reportUnusedFunction]
+    return obj.__dict__
 
 
 def is_first_worker(config):

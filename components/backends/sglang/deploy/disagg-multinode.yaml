@@ -56,6 +56,8 @@ spec:
             - nixl
             - --disaggregation-bootstrap-port
             - "30001"
+            - --host
+            - "0.0.0.0"
             - --mem-fraction-static
             - "0.82"
     prefill:
@@ -93,3 +95,5 @@ spec:
             - "30001"
             - --mem-fraction-static
             - "0.82"
+            - --host
+            - "0.0.0.0"

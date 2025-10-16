@@ -133,6 +133,13 @@ impl RetryManager {
             self.retries_left -= 1;
             let request = Context::with_id(self.request.clone(), self.context.id().to_string());
             self.context.link_child(request.context());
+            if self.context.is_stopped() || self.context.is_killed() {
+                tracing::debug!("Abort creating new stream after context is stopped or killed");
+                return Err(Error::msg(format!(
+                    "Context id {} is stopped or killed",
+                    self.context.id()
+                )));
+            }
             response_stream = Some(self.next_generate.generate(request).await);
             if let Some(err) = response_stream.as_ref().unwrap().as_ref().err()
                 && let Some(req_err) = err.downcast_ref::<NatsRequestError>()
@@ -713,6 +720,42 @@ mod tests {
         assert!(error_response.err().is_some());
         if let Some(error) = error_response.err() {
             assert!(error.to_string().contains(STREAM_ERR_MSG));
+        }
+    }
+
+    /// Test case 7: Request cancelled when creating new stream
+    /// Tests the scenario where context.stop_generating() is called when creating a new stream.
+    /// The RetryManager should detect that the context is stopped and abort creating new streams.
+    /// Expected behavior: Should fail to build RetryManager with "Context is stopped or killed" error.
+    #[tokio::test]
+    async fn test_retry_manager_context_stopped_before_stream() {
+        dynamo_runtime::logging::init();
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let request = create_mock_request(10);
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::Success,
+            10,
+            100,
+            context_id.clone(),
+        ));
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            mock_engine;
+
+        let ctx = Arc::new(Controller::new(context_id.clone()));
+
+        // Stop the context before building RetryManager
+        ctx.stop_generating();
+
+        // Should fail to build due to stopped context
+        let retry_manager_result = RetryManager::build(ctx, request, next_generate, 3).await;
+
+        assert!(retry_manager_result.is_err());
+        if let Err(error) = retry_manager_result {
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("Context id {} is stopped or killed", context_id))
+            );
         }
     }
 }

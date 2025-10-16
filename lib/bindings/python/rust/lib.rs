@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_llm::local_model::LocalModel;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
@@ -9,6 +10,7 @@ use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
 use rand::seq::IteratorRandom as _;
 use rs::pipeline::network::Ingress;
+use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -19,7 +21,7 @@ use tracing::Instrument;
 use dynamo_runtime::{
     self as rs, logging,
     pipeline::{
-        EngineStream, ManyOut, SingleIn, context::Context as RsContext,
+        AsyncEngineContextProvider, EngineStream, ManyOut, SingleIn, context::Context as RsContext,
         network::egress::push_router::RouterMode as RsRouterMode,
     },
     protocols::annotated::Annotated as RsAnnotated,
@@ -88,6 +90,29 @@ fn get_span_for_direct_context(
     )
 }
 
+// Helper to create request context with proper linking and cancellation handling
+fn create_request_context(
+    request: serde_json::Value,
+    parent_ctx: &Option<context::Context>,
+) -> RsContext<serde_json::Value> {
+    match parent_ctx {
+        // If there is a parent context, link the request as a child context of it
+        Some(parent_ctx) => {
+            let child_ctx = RsContext::with_id(request, parent_ctx.inner().id().to_string());
+            parent_ctx.inner().link_child(child_ctx.context());
+            if parent_ctx.inner().is_stopped() || parent_ctx.inner().is_killed() {
+                // Let the server handle the cancellation for now since not all backends are
+                // properly handling request exceptions
+                // TODO: (DIS-830) Return an error if context is cancelled
+                child_ctx.context().stop_generating();
+            }
+            child_ctx
+        }
+        // Otherwise if there is no parent context, use the request as-is
+        _ => request.into(),
+    }
+}
+
 /// A Python module implemented in Rust. The name of this function must match
 /// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
 /// import the module.
@@ -96,6 +121,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
+    m.add_function(wrap_pyfunction!(fetch_llm, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
 
@@ -174,6 +200,8 @@ fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) 
     logging::log_message(level, message, module, file, line);
 }
 
+/// Create an engine and attach it to an endpoint to make it visible to the frontend.
+/// This is the main way you create a Dynamo worker / backend.
 #[pyfunction]
 #[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None))]
 #[allow(clippy::too_many_arguments)]
@@ -201,7 +229,7 @@ fn register_llm<'p>(
     let model_type_obj = model_type.inner;
 
     let inner_path = model_path.to_string();
-    let model_name = model_name.map(|n| n.to_string());
+    let mut model_name = model_name.map(|n| n.to_string());
     let router_mode = router_mode.unwrap_or(RouterMode::RoundRobin);
     let router_config = RouterConfig::new(router_mode.into(), KvRouterConfig::default());
 
@@ -226,9 +254,22 @@ fn register_llm<'p>(
         })?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let model_path = if fs::exists(&inner_path)? {
+            PathBuf::from(inner_path)
+        } else {
+            // Preserve the model name
+            if model_name.is_none() {
+                model_name = Some(inner_path.clone());
+            }
+            // Likely it's a Hugging Face repo, download it
+            LocalModel::fetch(&inner_path, false)
+                .await
+                .map_err(to_pyerr)?
+        };
+
         let mut builder = dynamo_llm::local_model::LocalModelBuilder::default();
         builder
-            .model_path(Some(PathBuf::from(inner_path)))
+            .model_path(model_path)
             .model_name(model_name)
             .context_length(context_length)
             .kv_cache_block_size(kv_cache_block_size)
@@ -237,7 +278,7 @@ fn register_llm<'p>(
             .runtime_config(runtime_config.unwrap_or_default().inner)
             .user_data(user_data_json)
             .custom_template_path(custom_template_path_owned);
-        // Download from HF, load the ModelDeploymentCard
+        // Load the ModelDeploymentCard
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
         // Advertise ourself on etcd so ingress can find us
         local_model
@@ -246,6 +287,17 @@ fn register_llm<'p>(
             .map_err(to_pyerr)?;
 
         Ok(())
+    })
+}
+
+/// Download a model from Hugging Face, returning it's local path
+/// Example: `model_path = await fetch_llm("Qwen/Qwen3-0.6B")`
+#[pyfunction]
+#[pyo3(signature = (remote_name))]
+fn fetch_llm<'p>(py: Python<'p>, remote_name: &str) -> PyResult<Bound<'p, PyAny>> {
+    let repo = remote_name.to_string();
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        LocalModel::fetch(&repo, false).await.map_err(to_pyerr)
     })
 }
 
@@ -765,6 +817,7 @@ impl Client {
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -773,17 +826,15 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
-
                     // Always instrument with appropriate span (none if no trace context)
                     let span = get_span_for_context(&context, "round_robin");
-                    let stream_future = client.round_robin(request_ctx).instrument(span);
-
-                    let stream = stream_future.await.map_err(to_pyerr)?;
-                    context.inner().link_child(stream.context());
-                    stream
+                    client
+                        .round_robin(request_ctx)
+                        .instrument(span)
+                        .await
+                        .map_err(to_pyerr)?
                 }
-                _ => client.round_robin(request.into()).await.map_err(to_pyerr)?,
+                _ => client.round_robin(request_ctx).await.map_err(to_pyerr)?,
             };
             tokio::spawn(process_stream(stream, tx));
             Ok(AsyncResponseStream {
@@ -803,6 +854,7 @@ impl Client {
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -811,16 +863,15 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
-
+                    // Always instrument with appropriate span (none if no trace context)
                     let span = get_span_for_context(&context, "random");
-                    let stream_future = client.random(request_ctx).instrument(span);
-
-                    let stream = stream_future.await.map_err(to_pyerr)?;
-                    context.inner().link_child(stream.context());
-                    stream
+                    client
+                        .random(request_ctx)
+                        .instrument(span)
+                        .await
+                        .map_err(to_pyerr)?
                 }
-                _ => client.random(request.into()).await.map_err(to_pyerr)?,
+                _ => client.random(request_ctx).await.map_err(to_pyerr)?,
             };
             tokio::spawn(process_stream(stream, tx));
             Ok(AsyncResponseStream {
@@ -841,6 +892,7 @@ impl Client {
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -849,18 +901,17 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
-
+                    // Always instrument with appropriate span (none if no trace context)
                     let span =
                         get_span_for_direct_context(&context, "direct", &instance_id.to_string());
-                    let stream_future = client.direct(request_ctx, instance_id).instrument(span);
-
-                    let stream = stream_future.await.map_err(to_pyerr)?;
-                    context.inner().link_child(stream.context());
-                    stream
+                    client
+                        .direct(request_ctx, instance_id)
+                        .instrument(span)
+                        .await
+                        .map_err(to_pyerr)?
                 }
                 _ => client
-                    .direct(request.into(), instance_id)
+                    .direct(request_ctx, instance_id)
                     .await
                     .map_err(to_pyerr)?,
             };
@@ -884,6 +935,7 @@ impl Client {
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -892,16 +944,15 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
-
+                    // Always instrument with appropriate span (none if no trace context)
                     let span = get_span_for_context(&context, "static");
-                    let stream_future = client.r#static(request_ctx).instrument(span);
-
-                    let stream = stream_future.await.map_err(to_pyerr)?;
-                    context.inner().link_child(stream.context());
-                    stream
+                    client
+                        .r#static(request_ctx)
+                        .instrument(span)
+                        .await
+                        .map_err(to_pyerr)?
                 }
-                _ => client.r#static(request.into()).await.map_err(to_pyerr)?,
+                _ => client.r#static(request_ctx).await.map_err(to_pyerr)?,
             };
 
             tokio::spawn(process_stream(stream, tx));

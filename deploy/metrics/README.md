@@ -3,7 +3,7 @@
 This directory contains configuration for visualizing metrics from the metrics aggregation service using Prometheus and Grafana.
 
 > [!NOTE]
-> For detailed information about Dynamo's metrics system, including hierarchical metrics, automatic labeling, and usage examples, see the [Metrics Guide](../../docs/guides/metrics.md).
+> For detailed information about Dynamo's metrics system, including hierarchical metrics, automatic labeling, and usage examples, see the [Metrics Guide](../../docs/observability/metrics.md).
 
 ## Overview
 

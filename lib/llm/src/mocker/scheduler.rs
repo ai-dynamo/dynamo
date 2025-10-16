@@ -248,7 +248,7 @@ impl Scheduler {
     /// Create a new Scheduler with the given parameters
     pub fn new(
         args: MockEngineArgs,
-        dp_rank: Option<u32>,
+        dp_rank: u32,
         output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
         kv_events_tx: Option<mpsc::UnboundedSender<KvCacheEventData>>,
         cancellation_token: Option<CancellationToken>,
@@ -280,7 +280,7 @@ impl Scheduler {
         // Create channel for request handling
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<DirectRequest>();
         let mut initial_metrics = ForwardPassMetrics::default();
-        initial_metrics.worker_stats.data_parallel_rank = dp_rank;
+        initial_metrics.worker_stats.data_parallel_rank = Some(dp_rank);
         let (metrics_tx, metrics_rx) =
             tokio::sync::watch::channel::<ForwardPassMetrics>(initial_metrics);
 
@@ -573,7 +573,7 @@ fn get_fwd_pass_metrics(
     state: &SchedulerState,
     kv_manager: &KvManager,
     hit_rates: &VecDeque<f32>,
-    dp_rank: Option<u32>,
+    dp_rank: u32,
 ) -> ForwardPassMetrics {
     // Get state metrics
     let request_active_slots = state.decode.len() as u64;
@@ -597,7 +597,7 @@ fn get_fwd_pass_metrics(
     };
 
     let worker_stats = WorkerStats {
-        data_parallel_rank: dp_rank,
+        data_parallel_rank: Some(dp_rank),
         request_active_slots,
         request_total_slots: 1024, // vllm max_num_seqs for gpu >= 70 vram, otherwise 256, fallback is 128
         num_requests_waiting,
@@ -728,7 +728,7 @@ mod tests {
             .unwrap();
 
         // Create scheduler with new args struct
-        let scheduler = Scheduler::new(args, None, Some(output_tx), None, None);
+        let scheduler = Scheduler::new(args, 0, Some(output_tx), None, None);
 
         // Create shared tokens for caching case
         let shared_tokens = if use_shared_tokens {
@@ -759,7 +759,7 @@ mod tests {
                 tokens: input_tokens,
                 max_output_tokens,
                 uuid: None,
-                dp_rank: None,
+                dp_rank: 0,
             };
             scheduler.receive(request).await;
         }
@@ -853,7 +853,7 @@ mod tests {
             .unwrap();
 
         // Create scheduler
-        let scheduler = Scheduler::new(args, None, Some(output_tx), None, None);
+        let scheduler = Scheduler::new(args, 0, Some(output_tx), None, None);
 
         // Create identical tokens for all requests
         let identical_tokens: Vec<u32> = (0..token_length).map(|i| i as u32).collect();
@@ -864,7 +864,7 @@ mod tests {
                 tokens: identical_tokens.clone(),
                 max_output_tokens,
                 uuid: None,
-                dp_rank: None,
+                dp_rank: 0,
             };
             scheduler.receive(request).await;
             // Sleep for 0.1 second after each request
@@ -950,7 +950,7 @@ mod tests {
             .unwrap();
 
         // Create scheduler
-        let scheduler = Scheduler::new(args, None, Some(output_tx), None, None);
+        let scheduler = Scheduler::new(args, 0, Some(output_tx), None, None);
 
         // Create request with 256 tokens
         let tokens: Vec<u32> = (0..input_tokens).map(|i| i as u32).collect();
@@ -958,7 +958,7 @@ mod tests {
             tokens,
             max_output_tokens,
             uuid: None,
-            dp_rank: None,
+            dp_rank: 0,
         };
 
         scheduler.receive(request).await;

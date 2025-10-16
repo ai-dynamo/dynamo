@@ -33,7 +33,7 @@ class BaseWorkerHandler(ABC):
         self.component = component
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
-        self.kv_publisher = None
+        self.kv_publishers = None
         self.engine_monitor = VllmEngineMonitor(runtime, engine)
 
     @abstractmethod
@@ -81,9 +81,16 @@ class BaseWorkerHandler(ABC):
         """Override in subclasses if cleanup is needed."""
         pass
 
-    async def generate_tokens(self, prompt, sampling_params, request_id):
+    async def generate_tokens(
+        self, prompt, sampling_params, request_id, data_parallel_rank=None
+    ):
         try:
-            gen = self.engine_client.generate(prompt, sampling_params, request_id)
+            gen = self.engine_client.generate(
+                prompt,
+                sampling_params,
+                request_id,
+                data_parallel_rank=data_parallel_rank,
+            )
 
             num_output_tokens_so_far = 0
             try:
@@ -211,10 +218,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     return
                 logger.warning(f"Prefill error: {e}, falling back to local prefill")
 
+        dp_rank = request.get("dp_rank", None)
+
         async with self._abort_monitor(context, request_id):
             try:
                 async for tok in self.generate_tokens(
-                    prompt, sampling_params, request_id
+                    prompt, sampling_params, request_id, data_parallel_rank=dp_rank
                 ):
                     yield tok
             except EngineDeadError as e:
@@ -241,9 +250,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         sampling_params_dict = extra_args.get("sampling_params", {})
         sampling_params = msgspec.convert(sampling_params_dict, SamplingParams)
 
+        dp_rank = request.get("dp_rank", None)
+
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
-                gen = self.engine_client.generate(prompt, sampling_params, request_id)
+                gen = self.engine_client.generate(
+                    prompt, sampling_params, request_id, data_parallel_rank=dp_rank
+                )
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")
                 logger.warning("Initiating Dynamo Runtime shutdown.")

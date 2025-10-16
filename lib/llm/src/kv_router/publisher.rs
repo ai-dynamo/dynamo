@@ -326,13 +326,16 @@ pub async fn start_zmq_listener(
                 };
 
                 tracing::trace!(
-                    "ZMQ listener on {} received batch with {} events (seq={})",
+                    "ZMQ listener on {} received batch with {} events (seq={}, dp_rank={})",
                     zmq_endpoint,
                     batch.events.len(),
-                    seq
+                    seq,
+                    batch.data_parallel_rank
                 );
+
+                let dp_rank = batch.data_parallel_rank;
                 for raw_event in batch.events.into_iter() {
-                    let event = convert_event(raw_event, seq, kv_block_size, &warning_count);
+                    let event = convert_event(raw_event, seq, kv_block_size, dp_rank, &warning_count);
                     if tx.send(event).is_err() {
                         tracing::warn!("Failed to send message to channel - receiver dropped");
                         exit_reason = "channel receiver dropped";
@@ -356,6 +359,7 @@ fn convert_event(
     raw: RawKvEvent,
     event_id: u64,
     kv_block_size: u32,
+    dp_rank: u32,
     warning_count: &Arc<AtomicU32>,
 ) -> KvCacheEvent {
     match raw {
@@ -387,6 +391,7 @@ fn convert_event(
                         warning_count,
                     ),
                 }),
+                dp_rank,
             }
         }
         RawKvEvent::BlockRemoved { block_hashes, .. } => {
@@ -400,11 +405,13 @@ fn convert_event(
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
                     block_hashes: hashes,
                 }),
+                dp_rank,
             }
         }
         RawKvEvent::AllBlocksCleared => KvCacheEvent {
             event_id,
             data: KvCacheEventData::Cleared,
+            dp_rank,
         },
     }
 }
@@ -1014,7 +1021,7 @@ mod test_event_processing {
             medium: None,
         };
 
-        let out = convert_event(raw_evt, 42, kv_block_size, &Arc::new(AtomicU32::new(0)));
+        let out = convert_event(raw_evt, 42, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
         assert!(matches!(out.data, KvCacheEventData::Stored(_)));
     }
 
@@ -1025,7 +1032,7 @@ mod test_event_processing {
             block_hashes: vec![BlockHashValue::Unsigned(123), BlockHashValue::Signed(456)],
             medium: None,
         };
-        let out = convert_event(raw_evt, 7, kv_block_size, &Arc::new(AtomicU32::new(0)));
+        let out = convert_event(raw_evt, 7, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
 
         assert!(matches!(out.data, KvCacheEventData::Removed(_)));
     }
@@ -1034,7 +1041,7 @@ mod test_event_processing {
     fn test_convert_event_all_blocks_cleared() {
         let kv_block_size = 4;
         let raw_evt = RawKvEvent::AllBlocksCleared;
-        let out = convert_event(raw_evt, 1, kv_block_size, &Arc::new(AtomicU32::new(0)));
+        let out = convert_event(raw_evt, 1, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
         assert!(matches!(out.data, KvCacheEventData::Cleared));
     }
 }
@@ -1115,6 +1122,7 @@ mod tests_startup_helpers {
             data: KvCacheEventData::Removed(KvCacheRemoveData {
                 block_hashes: vec![ExternalSequenceBlockHash(1), ExternalSequenceBlockHash(2)],
             }),
+            dp_rank: 0,
         };
 
         let token = CancellationToken::new();

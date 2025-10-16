@@ -65,7 +65,7 @@ This will create two components:
 
 Both components expose a `/metrics` endpoint following the OpenMetrics format, but with different metrics appropriate to their roles. For details about:
 - Deployment configuration: See the [vLLM README](/docs/backends/vllm/README.md)
-- Available metrics: See the [metrics guide](/docs/guides/metrics.md)
+- Available metrics: See the [metrics guide](/docs/observability/metrics.md)
 
 ### Validate the Deployment
 

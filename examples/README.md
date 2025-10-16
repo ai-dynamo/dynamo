@@ -36,9 +36,9 @@ Platform-specific deployment guides for production environments:
 
 - **[Amazon EKS](deployments/EKS/)** - Deploy Dynamo on Amazon Elastic Kubernetes Service
 - **[Azure AKS](deployments/AKS/)** - Deploy Dynamo on Azure Kubernetes Service
+- **[Google GKE](../docs/kubernetes/gke_setup.md)** - Deploy Dynamo on Google Kubernetes Engine
 - **[Router Standalone](deployments/router_standalone/)** - Standalone router deployment patterns
 - **Amazon ECS** - _Coming soon_
-- **Google GKE** - _Coming soon_
 - **Ray** - _Coming soon_
 - **NVIDIA Cloud Functions (NVCF)** - _Coming soon_
 
@@ -47,6 +47,16 @@ Platform-specific deployment guides for production environments:
 Low-level runtime examples for developers using Python<>Rust bindings:
 
 - **[Hello World](custom_backend/hello_world/README.md)** - Minimal Dynamo runtime service demonstrating basic concepts
+
+## Launch Tools
+
+For running Dynamo services, you can use:
+
+- **[dynamo-run](../launch/dynamo-run/)** - Rust-based CLI tool for launching Dynamo services
+- **Backend-specific launch scripts** - Pre-configured shell scripts for each backend:
+  - [vLLM launch scripts](../components/backends/vllm/launch/)
+  - [SGLang launch scripts](../components/backends/sglang/launch/)
+  - [TensorRT-LLM launch scripts](../components/backends/trtllm/launch/)
 
 ## Getting Started
 
@@ -73,6 +83,18 @@ Before running any examples, ensure you have:
 These examples show how Dynamo broadly works using major inference engines.
 
 If you want to see advanced, framework-specific deployment patterns and best practices, check out the [Components Workflows](../components/backends/) directory:
-- **[vLLM](../components/backends/vllm/)** – vLLM-specific deployment and configuration
-- **[SGLang](../components/backends/sglang/)** – SGLang integration examples and workflows
-- **[TensorRT-LLM](../components/backends/trtllm/)** – TensorRT-LLM workflows and optimizations
+
+### vLLM
+- **[vLLM Backend](../components/backends/vllm/)** – vLLM-specific deployment and configuration
+- **[Kubernetes CRDs](../components/backends/vllm/deploy/)** – Kubernetes Custom Resource Definitions for vLLM deployments
+- **[Launch Scripts](../components/backends/vllm/launch/)** – Python launch scripts for various vLLM configurations
+
+### SGLang
+- **[SGLang Backend](../components/backends/sglang/)** – SGLang integration examples and workflows
+- **[Kubernetes CRDs](../components/backends/sglang/deploy/)** – Kubernetes Custom Resource Definitions for SGLang deployments
+- **[Launch Scripts](../components/backends/sglang/launch/)** – Python launch scripts for various SGLang configurations
+
+### TensorRT-LLM
+- **[TensorRT-LLM Backend](../components/backends/trtllm/)** – TensorRT-LLM workflows and optimizations
+- **[Kubernetes CRDs](../components/backends/trtllm/deploy/)** – Kubernetes Custom Resource Definitions for TensorRT-LLM deployments
+- **[Launch Scripts](../components/backends/trtllm/launch/)** – Python launch scripts for various TensorRT-LLM configurations

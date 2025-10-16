@@ -1,7 +1,7 @@
 # Pre-Deployment Profiling
 
 > [!TIP]
-> **New to SLA Planner?** For a complete workflow including profiling and deployment, see the [SLA Planner Quick Start Guide](/docs/kubernetes/sla_planner_quickstart.md).
+> **New to SLA Planner?** For a complete workflow including profiling and deployment, see the [SLA Planner Quick Start Guide](/docs/planner/sla_planner_quickstart.md).
 
 ## Profiling Script
 
@@ -99,7 +99,7 @@ SLA planner can work with any interpolation data that follows the above format. 
 ## Detailed Kubernetes Profiling Instructions
 
 > [!TIP]
-> For a complete step-by-step workflow, see the [SLA Planner Quick Start Guide](/docs/kubernetes/sla_planner_quickstart.md).
+> For a complete step-by-step workflow, see the [SLA Planner Quick Start Guide](/docs/planner/sla_planner_quickstart.md).
 
 This section provides detailed technical information for advanced users who need to customize the profiling process.
 
@@ -127,8 +127,6 @@ spec:
 ```
 
 **For MoE models**, use `profile_sla_moe_job.yaml` with TEP/DEP configuration instead.
-
-If you want to automatically deploy the optimized DGD with planner after profiling, add `--deploy-after-profile` to the profiling job. It will deploy the DGD with the engine of the optimized parallelization mapping found for the SLA targets.
 
 ### Advanced Configuration
 

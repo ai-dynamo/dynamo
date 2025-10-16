@@ -13,20 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-eppAware:
-  enabled: true
-  eppImage: nvcr.io/nvstaging/ai-dynamo/gaie-epp-dynamo:v0.6.0-1
-  dynamoNamespace: vllm-agg
-  dynamoComponent: backend
-  dynamoKvBlockSize: "16"
+from typing import TYPE_CHECKING
 
-imagePullSecrets:
-  - docker-imagepullsecret
+if TYPE_CHECKING:
+    from benchmarks.profiler.utils.config import ConfigModifierProtocol
 
-platformReleaseName: dynamo-platform
-platformNamespace: "my-model"
+from benchmarks.profiler.utils.config_modifiers.sglang import SGLangConfigModifier
+from benchmarks.profiler.utils.config_modifiers.trtllm import TrtllmConfigModifier
+from benchmarks.profiler.utils.config_modifiers.vllm import VllmV1ConfigModifier
 
-epp:
-  extraEnv:
-    - name: USE_STREAMING
-      value: "true"
+CONFIG_MODIFIERS: dict[str, type["ConfigModifierProtocol"]] = {
+    "vllm": VllmV1ConfigModifier,
+    "sglang": SGLangConfigModifier,
+    "trtllm": TrtllmConfigModifier,
+}
+
+__all__ = [
+    "VllmV1ConfigModifier",
+    "SGLangConfigModifier",
+    "TrtllmConfigModifier",
+    "CONFIG_MODIFIERS",
+]

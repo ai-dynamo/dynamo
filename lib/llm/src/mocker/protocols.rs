@@ -37,7 +37,7 @@ pub struct DirectRequest {
     pub tokens: Vec<Token>,
     pub max_output_tokens: usize,
     pub uuid: Option<Uuid>,
-    pub dp_rank: Option<u32>,
+    pub dp_rank: u32,
 }
 
 /// Represents the cost of prefilling content in the cache

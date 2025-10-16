@@ -69,7 +69,7 @@ sglang_configs = {
                 expected_log=[
                     r"ZMQ listener .* received batch with \d+ events \(seq=\d+\)",
                     r"Event processor for worker_id \d+ processing event: Stored\(",
-                    r"Selected worker: \d+, logit: ",
+                    r"Selected worker: worker_id=\d+ dp_rank=.*?, logit: ",
                 ]
             )
         ],

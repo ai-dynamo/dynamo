@@ -1,75 +1,3 @@
-diff --git a/Dockerfile.dynamo b/Dockerfile.dynamo
-new file mode 100644
-index 0000000..3f0e0a0
---- /dev/null
-+++ b/Dockerfile.dynamo
-@@ -0,0 +1,66 @@
-+# Dockerfile.dynamo - Custom Dockerfile for Dynamo FFI plugin
-+ARG BUILDER_IMAGE=golang:1.24
-+ARG BASE_IMAGE=ubuntu:22.04
-+
-+############################
-+# Builder
-+############################
-+FROM ${BUILDER_IMAGE} AS builder
-+
-+ENV CGO_ENABLED=1
-+ENV GOOS=linux
-+ENV GOARCH=amd64
-+# be explicit; helps cgo when linking libstdc++
-+ENV CC=gcc
-+ENV CXX=g++
-+
-+# C/C++ toolchain for cgo, and libstdc++ for link-time
-+RUN apt-get update && apt-get install -y --no-install-recommends \
-+    build-essential \
-+    gcc g++ \
-+    libc6-dev \
-+    ca-certificates \
-+ && rm -rf /var/lib/apt/lists/*
-+
-+ARG COMMIT_SHA=unknown
-+ARG BUILD_REF
-+
-+WORKDIR /src
-+
-+# deps first (cache)
-+COPY go.mod go.sum ./
-+RUN go mod download
-+
-+# source
-+COPY cmd/epp ./cmd/epp
-+COPY pkg/epp ./pkg/epp
-+COPY internal ./internal
-+COPY api ./api
-+
-+# sanity (optional)
-+RUN ls -la pkg/epp/scheduling/plugins/dynamo_kv_scorer/include/ || echo "Headers not found"
-+RUN ls -la pkg/epp/scheduling/plugins/dynamo_kv_scorer/lib/ || echo "Library not found"
-+
-+# build
-+WORKDIR /src/cmd/epp
-+RUN go build \
-+  -ldflags="-X sigs.k8s.io/gateway-api-inference-extension/pkg/epp/metrics.CommitSHA=${COMMIT_SHA} -X sigs.k8s.io/gateway-api-inference-extension/pkg/epp/metrics.BuildRef=${BUILD_REF}" \
-+  -o /epp
-+
-+############################
-+# Runtime
-+############################
-+FROM ${BASE_IMAGE} AS runtime
-+
-+# Minimal runtime deps; include libstdc++ runtime for -lstdc++
-+RUN apt-get update && apt-get install -y --no-install-recommends \
-+    ca-certificates \
-+    libstdc++6 \
-+ && rm -rf /var/lib/apt/lists/* \
-+ && groupadd -r nonroot && useradd -r -g nonroot nonroot
-+
-+WORKDIR /
-+COPY --from=builder /epp /epp
-+
-+USER nonroot:nonroot
-+ENTRYPOINT ["/epp"]
 diff --git a/Makefile b/Makefile
 index dee7e99..4679ce2 100644
 --- a/Makefile
@@ -647,7 +575,7 @@ index 0000000..1f6a41f
 +)
 +
 +func loadDynamoConfig() {
-+	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE", "vllm-agg")
++	ffiNamespace = getEnvOrDefault("DYNAMO_NAMESPACE", "vllm-agg")
 +	ffiComponent = getEnvOrDefault("DYNAMO_COMPONENT", "backend")
 +	ffiModel = getEnvOrDefault("DYNAMO_MODEL", "Qwen/Qwen3-0.6B")
 +	ffiWorkerID = getEnvInt64OrDefault("DYNAMO_WORKER_ID", 1)

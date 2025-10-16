@@ -85,17 +85,21 @@ async def test_radix_tree_binding(distributed_runtime):
     overlap_scores = radix_tree.find_matches([0])
 
     # Verify the results
+    # Note: scores is now Dict[(worker_id, dp_rank), score]
     assert overlap_scores.scores is not None
     assert (
         len(overlap_scores.scores) == 1
     ), f"Expected 1 worker in scores, got {len(overlap_scores.scores)}"
-    assert worker_id in overlap_scores.scores, f"Worker {worker_id} not found in scores"
+    worker_key = (worker_id, 0)  # (worker_id, dp_rank)
     assert (
-        overlap_scores.scores[worker_id] == 1
-    ), f"Expected score 1 for worker {worker_id}, got {overlap_scores.scores[worker_id]}"
+        worker_key in overlap_scores.scores
+    ), f"Worker {worker_key} not found in scores"
+    assert (
+        overlap_scores.scores[worker_key] == 1
+    ), f"Expected score 1 for worker {worker_key}, got {overlap_scores.scores[worker_key]}"
 
     print(
-        f"✓ RadixTree test passed: worker {worker_id} has score {overlap_scores.scores[worker_id]}"
+        f"✓ RadixTree test passed: worker {worker_key} has score {overlap_scores.scores[worker_key]}"
     )
 
 
@@ -130,24 +134,25 @@ async def test_event_handler(distributed_runtime):
     event_publisher.store_event(test_token, lora_id)
     # wait for the event to be processed as it is sent asynchronously
     # Retry loop for CI environments where processing may take longer
+    worker_key = (worker_id, 0)  # (worker_id, dp_rank)
     for retry in range(10):  # Try up to 10 times
         await asyncio.sleep(0.5)  # Wait 500ms between retries
         scores = await indexer.find_matches_for_request(test_token, lora_id)
         if (
             scores.scores
-            and worker_id in scores.scores
-            and scores.scores[worker_id] == 1
+            and worker_key in scores.scores
+            and scores.scores[worker_key] == 1
         ):
             break
         if retry == 9:  # Last iteration
             # Provide detailed error message for debugging
             assert scores.scores, f"No scores found after {(retry+1)*0.5}s"
             assert (
-                worker_id in scores.scores
-            ), f"Worker {worker_id} not in scores after {(retry+1)*0.5}s"
+                worker_key in scores.scores
+            ), f"Worker {worker_key} not in scores after {(retry+1)*0.5}s"
             assert (
-                scores.scores[worker_id] == 1
-            ), f"Expected score 1, got {scores.scores.get(worker_id)} after {(retry+1)*0.5}s"
+                scores.scores[worker_key] == 1
+            ), f"Expected score 1, got {scores.scores.get(worker_key)} after {(retry+1)*0.5}s"
 
     # remove event
     event_publisher.remove_event()
@@ -185,8 +190,9 @@ async def test_approx_kv_indexer(distributed_runtime):
 
     scores = await indexer.find_matches_for_request(tokens)
     assert scores.scores
-    assert worker_id in scores.scores
-    assert scores.scores[worker_id] == 2
+    worker_key = (worker_id, 0)  # (worker_id, dp_rank)
+    assert worker_key in scores.scores
+    assert scores.scores[worker_key] == 2
 
 
 class EventPublisher:
@@ -281,7 +287,7 @@ async def metrics_publisher_task(kv_listener, expected_metrics):
         expected_metrics["request_active_slots"],
         expected_metrics["request_total_slots"],
         expected_metrics["num_requests_waiting"],
-        None,
+        0,  # data_parallel_rank (0 = DP not enabled)
     )
 
     kv_stats = KvStats(

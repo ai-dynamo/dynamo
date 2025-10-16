@@ -30,14 +30,14 @@ set -e
 warmup_model $head_node $head_port $SERVED_MODEL_NAME $MODEL_PATH "${chosen_isl}x${chosen_osl}x10000x10000x250"
 set +e
 
-genai_perf_warmup_workers=$(python3 -c "print(max(${DP:-0}, ${prefill_workers:-0}, ${decode_workers:-0}))")
+aiperf_warmup_workers=$(python3 -c "print(max(${DP:-0}, ${prefill_workers:-0}, ${decode_workers:-0}))")
 
 IFS='x' read -r -a concurrency_list <<< "$chosen_concurrencies"
 
 profile_folder="/logs/gap_isl_${chosen_isl}_osl_${chosen_osl}"
 mkdir -p $profile_folder
 
-tmp_work_dir=$(mktemp -d -t genai-perf-XXXXXXXX)
+tmp_work_dir=$(mktemp -d -t aiperf-XXXXXXXX)
 for concurrency in ${concurrency_list[@]}; do
     export_folder="${tmp_work_dir}/concurrency_${concurrency}"
     mkdir -p $export_folder
@@ -46,7 +46,7 @@ for concurrency in ${concurrency_list[@]}; do
 
     echo "Run benchmark for concurrency $concurrency; ISL $chosen_isl; OSL $chosen_osl"
     command=(
-        genai-perf profile
+        aiperf profile
         -m ${SERVED_MODEL_NAME}
         --tokenizer ${MODEL_PATH}
         --endpoint-type chat
@@ -55,7 +55,7 @@ for concurrency in ${concurrency_list[@]}; do
         --streaming
 
         --concurrency ${concurrency}
-        --warmup-request-count $(( 2*genai_perf_warmup_workers ))
+        --warmup-request-count $(( 2*aiperf_warmup_workers ))
         --request-count $(( 5*concurrency ))
 
         --synthetic-input-tokens-mean ${chosen_isl} --synthetic-input-tokens-stddev 0
@@ -69,13 +69,11 @@ for concurrency in ${concurrency_list[@]}; do
 
         --tokenizer-trust-remote-code
         --num-dataset-entries 3000
-        --
-        --max-threads ${concurrency}
     )
 
     set -e
     ${command[@]}
     set +e
 
-    cp $export_folder/*/*_genai_perf.json $profile_folder
+    cp $export_folder/*/*_aiperf.json $profile_folder
 done

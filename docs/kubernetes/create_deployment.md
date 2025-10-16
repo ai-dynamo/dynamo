@@ -90,7 +90,7 @@ Consult the corresponding sh file. Each of the python commands to launch a compo
 
 The front end is launched with "python3 -m dynamo.frontend [--http-port 8000] [--router-mode kv]"
 Each worker will launch `python -m dynamo.YOUR_INFERENCE_BACKEND --model YOUR_MODEL --your-flags `command.
-If you are a Dynamo contributor the [dynamo run guide](/docs/guides/dynamo_run.md) for details on how to run this command.
+If you are a Dynamo contributor the [dynamo run guide](/docs/reference/cli.md) for details on how to run this command.
 
 
 ## Step 3: Key Customization Points

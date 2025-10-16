@@ -677,16 +677,8 @@ spec:
                 componentType:
                   description: ComponentType indicates the role of this component (for example, "main").
                   type: string
-                dynamoComponent:
-                  description: |-
-                    DynamoComponent selects the Dynamo component from the archive to deploy.
-                    Typically corresponds to a component defined in the packaged Dynamo artifacts.
-                  type: string
                 dynamoNamespace:
                   description: Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive)
-                  type: string
-                dynamoTag:
-                  description: 'contains the tag of the DynamoComponent: for example, "my_package:MyService"'
                   type: string
                 envFromSecret:
                   description: |-

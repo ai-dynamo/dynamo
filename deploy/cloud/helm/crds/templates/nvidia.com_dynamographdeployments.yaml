@@ -64,14 +64,9 @@ spec:
                     - vllm
                     - trtllm
                   type: string
-                dynamoGraph:
-                  description: |-
-                    DynamoGraph selects the graph (workflow/topology) to deploy. This must match
-                    a graph name packaged with the Dynamo archive.
-                  type: string
                 envs:
                   description: |-
-                    Envs are environment variables applied to all services in the graph unless
+                    Envs are environment variables applied to all services in the deployment unless
                     overridden by service-specific configuration.
                   items:
                     description: EnvVar represents an environment variable present in a Container.
@@ -10388,11 +10383,7 @@ spec:
                           type: object
                         type: array
                     type: object
-                  description: |-
-                    Services allows per-service overrides of the component deployment settings.
-                    - key: name of the service defined by the DynamoComponent
-                    - value: overrides for that service
-                    If not set for a service, the default DynamoComponentDeployment values are used.
+                  description: Services are the services to deploy as part of this deployment.
                   type: object
               type: object
             status:

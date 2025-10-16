@@ -24,7 +24,7 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-def get_genai_perf_cmd_for_trace(
+def get_aiperf_cmd_for_trace(
     model,
     tokenizer,
     input_dataset,
@@ -33,7 +33,7 @@ def get_genai_perf_cmd_for_trace(
     url="http://localhost:8888",
 ):
     return [
-        "genai-perf",
+        "aiperf",
         "profile",
         "--model",
         model,
@@ -47,17 +47,13 @@ def get_genai_perf_cmd_for_trace(
         "--url",
         url,
         "--input-file",
-        f"payload:{input_dataset}",
-        "--fixed-schedule",
-        "True",
+        f"{input_dataset}",
+        "--fixed-schedule-auto-offset",
         "--random-seed",
         str(seed),
         "--artifact-dir",
         artifact_dir,
-        "--",
         "-v",
-        "--max-threads",
-        "256",
         "-H",
         "Authorization: Bearer NOT USED",
         "-H",
@@ -73,8 +69,8 @@ def run_benchmark_with_trace(
     url,
     seed,
 ):
-    """Run genai-perf benchmark with a trace dataset"""
-    genai_perf_cmd = get_genai_perf_cmd_for_trace(
+    """Run aiperf benchmark with a trace dataset"""
+    aiperf_cmd = get_aiperf_cmd_for_trace(
         model,
         tokenizer,
         trace_dataset,
@@ -83,17 +79,17 @@ def run_benchmark_with_trace(
         url,
     )
 
-    logger.info(f"Running genai-perf with trace dataset: {trace_dataset}")
-    logger.info(f"Command: {' '.join(genai_perf_cmd)}")
+    logger.info(f"Running aiperf with trace dataset: {trace_dataset}")
+    logger.info(f"Command: {' '.join(aiperf_cmd)}")
 
     try:
-        # Run genai-perf and let it output directly to terminal
-        subprocess.run(genai_perf_cmd, check=True)
+        # Run aiperf and let it output directly to terminal
+        subprocess.run(aiperf_cmd, check=True)
 
-        logger.info("Genai-perf profiling completed successfully")
+        logger.info("AIPerf profiling completed successfully")
 
     except subprocess.CalledProcessError as e:
-        logger.error(f"Genai-perf failed with error code: {e.returncode}")
+        logger.error(f"AIPerf failed with error code: {e.returncode}")
         logger.error(f"stderr: {e.stderr}")
         raise
 
@@ -301,7 +297,7 @@ def main():
         logger.info(f"Synthetic trace data saved to: {trace_dataset_path}")
 
     # Run benchmark with the trace dataset
-    artifact_dir = os.path.join(args.output_dir, "genai_perf_artifacts")
+    artifact_dir = os.path.join(args.output_dir, "aiperf_artifacts")
     os.makedirs(artifact_dir, exist_ok=True)
 
     run_benchmark_with_trace(

@@ -179,6 +179,20 @@ where
     <RB as StorageTypeProvider>::StorageType: NixlDescriptor,
     <WB as StorageTypeProvider>::StorageType: NixlDescriptor,
 {
+    // Check for empty slices and length mismatch early
+    if sources.is_empty() && targets.is_empty() {
+        tracing::warn!(
+            "handle_local_transfer called with both sources and targets empty, skipping transfer"
+        );
+        let (tx, rx) = oneshot::channel();
+        tx.send(()).unwrap();
+        return Ok(rx);
+    }
+
+    if sources.len() != targets.len() {
+        return Err(TransferError::CountMismatch(sources.len(), targets.len()));
+    }
+
     let (tx, rx) = oneshot::channel();
 
     match RB::write_to_strategy() {

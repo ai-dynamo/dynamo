@@ -27,7 +27,7 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-def get_genai_perf_cmd(
+def get_aiperf_cmd(
     model,
     tokenizer,  # Add tokenizer parameter
     prefix_ratio,
@@ -40,12 +40,12 @@ def get_genai_perf_cmd(
     artifact_dir,
     url="http://localhost:8888",
 ):
-    """Build genai-perf command based on prefix ratio"""
+    """Build aiperf command based on prefix ratio"""
     prefix_length = int(isl * prefix_ratio)
     synthetic_input_length = int(isl * (1 - prefix_ratio))
 
     return [
-        "genai-perf",
+        "aiperf",
         "profile",
         "--model",
         model,
@@ -84,10 +84,7 @@ def get_genai_perf_cmd(
         str(num_prefix_prompts),
         "--artifact-dir",
         artifact_dir,
-        "--",
         "-v",
-        "--max-threads",
-        "256",
         "-H",
         "Authorization: Bearer NOT USED",
         "-H",
@@ -95,17 +92,17 @@ def get_genai_perf_cmd(
     ]
 
 
-def get_gap_result(artifact_dir: str) -> dict:
-    """Parse genai-perf results from JSON file"""
+def get_aiperf_result(artifact_dir: str) -> dict:
+    """Parse aiperf results from JSON file"""
     json_file_path = None
     for root, _, files in os.walk(artifact_dir):
-        if "profile_export_genai_perf.json" in files:
-            json_file_path = os.path.join(root, "profile_export_genai_perf.json")
+        if "profile_export_aiperf.json" in files:
+            json_file_path = os.path.join(root, "profile_export_aiperf.json")
             break
 
     if json_file_path is None:
         raise FileNotFoundError(
-            f"profile_export_genai_perf.json not found in {artifact_dir}"
+            f"profile_export_aiperf.json not found in {artifact_dir}"
         )
 
     with open(json_file_path, "r") as f:
@@ -125,8 +122,8 @@ def run_benchmark_single_url(
     artifact_dir,
     url,
 ) -> Optional[Dict]:
-    """Run genai-perf benchmark for a single URL"""
-    genai_perf_cmd = get_genai_perf_cmd(
+    """Run aiperf benchmark for a single URL"""
+    aiperf_cmd = get_aiperf_cmd(
         model,
         tokenizer,  # Pass tokenizer parameter
         prefix_ratio,
@@ -140,21 +137,21 @@ def run_benchmark_single_url(
         url,
     )
 
-    logger.info(f"Running command for URL {url}: {' '.join(genai_perf_cmd)}")
+    logger.info(f"Running command for URL {url}: {' '.join(aiperf_cmd)}")
 
     try:
-        gap_process = subprocess.run(
-            genai_perf_cmd, capture_output=True, text=True, check=True
+        aiperf_process = subprocess.run(
+            aiperf_cmd, capture_output=True, text=True, check=True
         )
 
-        logger.info(f"Genai-perf profiling completed successfully for URL {url}")
-        logger.info(gap_process.stdout)
+        logger.info(f"AIPerf profiling completed successfully for URL {url}")
+        logger.info(aiperf_process.stdout)
 
-        gap_result = get_gap_result(artifact_dir)
-        return gap_result
+        aiperf_result = get_aiperf_result(artifact_dir)
+        return aiperf_result
 
     except subprocess.CalledProcessError as e:
-        logger.error(f"Genai-perf failed for URL {url} with error code: {e.returncode}")
+        logger.error(f"AIPerf failed for URL {url} with error code: {e.returncode}")
         logger.error(f"stderr: {e.stderr}")
         return None
 
@@ -197,7 +194,7 @@ def run_benchmark(
     output_dir,
     urls,
 ) -> Optional[Dict]:
-    """Run genai-perf benchmark for a specific prefix ratio"""
+    """Run aiperf benchmark for a specific prefix ratio"""
     logger.info(
         f"Running benchmark with prefix_ratio={prefix_ratio}, seed={seed}, URLs={urls}"
     )
@@ -242,7 +239,7 @@ def run_benchmark(
         os.makedirs(artifact_dir, exist_ok=True)
         artifact_dirs.append(artifact_dir)
 
-        genai_perf_cmd = get_genai_perf_cmd(
+        aiperf_cmd = get_aiperf_cmd(
             model,
             tokenizer,  # Pass tokenizer parameter
             prefix_ratio,
@@ -256,10 +253,10 @@ def run_benchmark(
             url,
         )
 
-        logger.info(f"Launching process for URL {url}: {' '.join(genai_perf_cmd)}")
+        logger.info(f"Launching process for URL {url}: {' '.join(aiperf_cmd)}")
 
         process = subprocess.Popen(
-            genai_perf_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            aiperf_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
         processes.append((process, url, artifact_dir))
 
@@ -269,18 +266,18 @@ def run_benchmark(
         stdout, stderr = process.communicate()
 
         if process.returncode == 0:
-            logger.info(f"Genai-perf completed successfully for URL {url}")
+            logger.info(f"AIPerf completed successfully for URL {url}")
             logger.info(stdout)
 
             try:
-                gap_result = get_gap_result(artifact_dir)
-                results.append(gap_result)
+                aiperf_result = get_aiperf_result(artifact_dir)
+                results.append(aiperf_result)
             except Exception as e:
                 logger.error(f"Failed to get results for URL {url}: {e}")
                 results.append(None)
         else:
             logger.error(
-                f"Genai-perf failed for URL {url} with error code: {process.returncode}"
+                f"AIPerf failed for URL {url} with error code: {process.returncode}"
             )
             logger.error(f"stderr: {stderr}")
             results.append(None)

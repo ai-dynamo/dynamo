@@ -16,6 +16,7 @@ from sglang.srt.server_args import ServerArgs
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import register_encoder
+from dynamo.llm import fetch_llm
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang import __version__
 
@@ -203,8 +204,9 @@ def _set_parser(
         return dynamo_str
 
 
-def parse_args(args: list[str]) -> Config:
+async def parse_args(args: list[str]) -> Config:
     """Parse CLI arguments and return combined configuration.
+    Download the model if necessary.
 
     Args:
         args: Command-line argument strings.
@@ -338,6 +340,14 @@ def parse_args(args: list[str]) -> Config:
         dump_config_to=parsed_args.dump_config_to,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
+
+    # TODO: sglang downloads the model in `from_cli_args`, so we need to do it here.
+    # That's unfortunate because `parse_args` isn't the right place for this. Fix.
+    model_path = parsed_args.model_path
+    if not parsed_args.served_model_name:
+        parsed_args.served_model_name = model_path
+    if not os.path.exists(model_path):
+        parsed_args.model_path = await fetch_llm(model_path)
 
     server_args = ServerArgs.from_cli_args(parsed_args)
 

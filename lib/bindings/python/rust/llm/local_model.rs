@@ -44,6 +44,11 @@ impl ModelRuntimeConfig {
         self.inner.reasoning_parser = reasoning_parser;
     }
 
+    #[setter]
+    fn set_data_parallel_size(&mut self, data_parallel_size: u32) {
+        self.inner.data_parallel_size = data_parallel_size;
+    }
+
     fn set_engine_specific(&mut self, key: &str, value: String) -> PyResult<()> {
         let value: serde_json::Value = serde_json::from_str(&value).map_err(to_pyerr)?;
         self.inner
