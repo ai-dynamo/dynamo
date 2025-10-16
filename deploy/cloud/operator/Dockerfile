@@ -6,7 +6,7 @@ FROM golang:1.24 AS base
 
 # Docker buildx automatically provides these
 ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 
 RUN echo "Building for ${TARGETOS}/${TARGETARCH}"
 
