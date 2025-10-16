@@ -39,12 +39,12 @@ impl HttpRequestClient {
     }
 
     /// Create a new HTTP request client with custom timeout
-    /// Uses HTTP/2 with prior knowledge (no protocol negotiation)
+    /// Uses HTTP/2 with prior knowledge to avoid ALPN negotiation overhead
     pub fn with_timeout(timeout: Duration) -> Result<Self> {
         let client = reqwest::Client::builder()
             .pool_max_idle_per_host(50) // Connection pooling
             .timeout(timeout)
-            // Note: HTTP/2 will be negotiated automatically by reqwest
+            .http2_prior_knowledge() // Force HTTP/2 without negotiation
             .build()?;
 
         Ok(Self {
