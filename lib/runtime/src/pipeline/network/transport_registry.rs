@@ -67,7 +67,6 @@ impl TransportCapabilities {
                 (Some(actual), Some(required)) => actual >= required,
                 (None, _) => true,
                 (Some(_), None) => true,
-                (_, _) => false,
             }
     }
 }
@@ -219,6 +218,10 @@ pub struct TransportRegistry {
     response_clients: RwLock<HashMap<TransportId, Arc<dyn ResponsePlaneClient>>>,
     response_servers: RwLock<HashMap<TransportId, Arc<dyn ResponsePlaneServer>>>,
 
+    // Capabilities for each transport
+    request_capabilities: RwLock<HashMap<TransportId, TransportCapabilities>>,
+    response_capabilities: RwLock<HashMap<TransportId, TransportCapabilities>>,
+
     // Priority ordering for transport selection
     request_priorities: RwLock<Vec<(TransportId, u8)>>,
     response_priorities: RwLock<Vec<(TransportId, u8)>>,
@@ -231,6 +234,8 @@ impl TransportRegistry {
             request_servers: RwLock::new(HashMap::new()),
             response_clients: RwLock::new(HashMap::new()),
             response_servers: RwLock::new(HashMap::new()),
+            request_capabilities: RwLock::new(HashMap::new()),
+            response_capabilities: RwLock::new(HashMap::new()),
             request_priorities: RwLock::new(Vec::new()),
             response_priorities: RwLock::new(Vec::new()),
         }
@@ -247,6 +252,7 @@ impl TransportRegistry {
 
         self.request_clients.write().await.insert(id.clone(), client);
         self.request_servers.write().await.insert(id.clone(), server);
+        self.request_capabilities.write().await.insert(id.clone(), registration.capabilities);
 
         // Update priority list
         let mut priorities = self.request_priorities.write().await;
@@ -279,6 +285,7 @@ impl TransportRegistry {
             .write()
             .await
             .insert(id.clone(), server);
+        self.response_capabilities.write().await.insert(id.clone(), registration.capabilities);
 
         // Update priority list
         let mut priorities = self.response_priorities.write().await;
@@ -300,24 +307,31 @@ impl TransportRegistry {
         plane: PlaneType,
         required_capabilities: &TransportCapabilities,
     ) -> Result<TransportId> {
-        let (priorities, clients) = match plane {
+        match plane {
             PlaneType::Request => {
                 let priorities = self.request_priorities.read().await;
-                let clients = self.request_clients.read().await;
-                (priorities, clients)
+                let capabilities = self.request_capabilities.read().await;
+                
+                // Find first transport that satisfies capabilities
+                for (transport_id, _) in priorities.iter() {
+                    if let Some(caps) = capabilities.get(transport_id) {
+                        if caps.satisfies(required_capabilities) {
+                            return Ok(transport_id.clone());
+                        }
+                    }
+                }
             }
             PlaneType::Response => {
                 let priorities = self.response_priorities.read().await;
-                let clients = self.response_clients.read().await;
-                (priorities, clients)
-            }
-        };
-
-        // Find first transport that satisfies capabilities
-        for (transport_id, _) in priorities.iter() {
-            if let Some(client) = clients.get(transport_id) {
-                if client.capabilities().satisfies(required_capabilities) {
-                    return Ok(transport_id.clone());
+                let capabilities = self.response_capabilities.read().await;
+                
+                // Find first transport that satisfies capabilities
+                for (transport_id, _) in priorities.iter() {
+                    if let Some(caps) = capabilities.get(transport_id) {
+                        if caps.satisfies(required_capabilities) {
+                            return Ok(transport_id.clone());
+                        }
+                    }
                 }
             }
         }

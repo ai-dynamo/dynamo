@@ -152,7 +152,7 @@ impl EndpointConfigBuilder {
                     .unwrap_or_else(|_| "/v1/rpc".to_string());
 
                 let http_endpoint =
-                    format!("http://{}:{}{}/{}", http_host, http_port, rpc_root, subject);
+                    format!("http://{}:{}{}/{}", http_host, http_port, rpc_root, endpoint_name);
 
                 TransportType::HttpTcp { http_endpoint }
             } else {
@@ -309,7 +309,7 @@ impl EndpointConfigBuilder {
                 .unwrap_or_else(|_| "/v1/rpc".to_string());
 
             let http_endpoint =
-                format!("http://{}:{}{}/{}", http_host, http_port, rpc_root, subject);
+                format!("http://{}:{}{}/{}", http_host, http_port, rpc_root, endpoint_name);
 
             TransportType::HttpTcp { http_endpoint }
         } else {

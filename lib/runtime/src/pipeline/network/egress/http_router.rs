@@ -44,7 +44,7 @@ impl HttpRequestClient {
         let client = reqwest::Client::builder()
             .pool_max_idle_per_host(50) // Connection pooling
             .timeout(timeout)
-            .http2_prior_knowledge() // Force HTTP/2 without negotiation
+            .http2_prior_knowledge(true) // Force HTTP/2 without negotiation
             .build()?;
 
         Ok(Self {
