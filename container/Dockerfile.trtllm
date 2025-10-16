@@ -249,7 +249,9 @@ RUN uv pip install \
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    uv pip install --requirement /tmp/requirements.txt --requirement /tmp/requirements.test.txt
+    UV_GIT_LFS=1 uv pip install \
+        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.test.txt
 
 # Copy UCX libraries, libucc.so is needed by pytorch. May not need to copy whole hpcx dir but only /opt/hpcx/ucc/
 COPY --from=framework /opt/hpcx /opt/hpcx

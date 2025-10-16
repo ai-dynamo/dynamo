@@ -261,7 +261,9 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    uv pip install --requirement /tmp/requirements.txt --requirement /tmp/requirements.test.txt
+    UV_GIT_LFS=1 uv pip install \
+        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.test.txt
 
 ##################################
 ##### Wheel Build Image ##########
