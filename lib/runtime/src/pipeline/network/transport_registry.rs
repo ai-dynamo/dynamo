@@ -311,7 +311,7 @@ impl TransportRegistry {
             PlaneType::Request => {
                 let priorities = self.request_priorities.read().await;
                 let capabilities = self.request_capabilities.read().await;
-                
+
                 // Find first transport that satisfies capabilities
                 for (transport_id, _) in priorities.iter() {
                     if let Some(caps) = capabilities.get(transport_id) {
@@ -324,7 +324,7 @@ impl TransportRegistry {
             PlaneType::Response => {
                 let priorities = self.response_priorities.read().await;
                 let capabilities = self.response_capabilities.read().await;
-                
+
                 // Find first transport that satisfies capabilities
                 for (transport_id, _) in priorities.iter() {
                     if let Some(caps) = capabilities.get(transport_id) {
