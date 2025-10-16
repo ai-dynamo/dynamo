@@ -104,8 +104,8 @@ cd $DYNAMO_HOME
 # installs sglang supported version along with dynamo
 # include the prerelease flag to install flashinfer rc versions
 uv pip install -e .
-# install any sglang version >= 0.5.3
-uv pip install "sglang[all]==0.5.3.post1"
+# install any sglang version >= 0.5.3.post2
+uv pip install "sglang[all]==0.5.3.post2"
 ```
 
 </details>

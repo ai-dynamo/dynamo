@@ -21,7 +21,7 @@ use tracing::Instrument;
 use dynamo_runtime::{
     self as rs, logging,
     pipeline::{
-        EngineStream, ManyOut, SingleIn, context::Context as RsContext,
+        AsyncEngineContextProvider, EngineStream, ManyOut, SingleIn, context::Context as RsContext,
         network::egress::push_router::RouterMode as RsRouterMode,
     },
     protocols::annotated::Annotated as RsAnnotated,
@@ -88,6 +88,29 @@ fn get_span_for_direct_context(
         context.trace_context(),
         Some(instance_id),
     )
+}
+
+// Helper to create request context with proper linking and cancellation handling
+fn create_request_context(
+    request: serde_json::Value,
+    parent_ctx: &Option<context::Context>,
+) -> RsContext<serde_json::Value> {
+    match parent_ctx {
+        // If there is a parent context, link the request as a child context of it
+        Some(parent_ctx) => {
+            let child_ctx = RsContext::with_id(request, parent_ctx.inner().id().to_string());
+            parent_ctx.inner().link_child(child_ctx.context());
+            if parent_ctx.inner().is_stopped() || parent_ctx.inner().is_killed() {
+                // Let the server handle the cancellation for now since not all backends are
+                // properly handling request exceptions
+                // TODO: (DIS-830) Return an error if context is cancelled
+                child_ctx.context().stop_generating();
+            }
+            child_ctx
+        }
+        // Otherwise if there is no parent context, use the request as-is
+        _ => request.into(),
+    }
 }
 
 /// A Python module implemented in Rust. The name of this function must match
@@ -794,6 +817,7 @@ impl Client {
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -802,17 +826,15 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
-
                     // Always instrument with appropriate span (none if no trace context)
                     let span = get_span_for_context(&context, "round_robin");
-                    let stream_future = client.round_robin(request_ctx).instrument(span);
-
-                    let stream = stream_future.await.map_err(to_pyerr)?;
-                    context.inner().link_child(stream.context());
-                    stream
+                    client
+                        .round_robin(request_ctx)
+                        .instrument(span)
+                        .await
+                        .map_err(to_pyerr)?
                 }
-                _ => client.round_robin(request.into()).await.map_err(to_pyerr)?,
+                _ => client.round_robin(request_ctx).await.map_err(to_pyerr)?,
             };
             tokio::spawn(process_stream(stream, tx));
             Ok(AsyncResponseStream {
@@ -832,6 +854,7 @@ impl Client {
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -840,16 +863,15 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
-
+                    // Always instrument with appropriate span (none if no trace context)
                     let span = get_span_for_context(&context, "random");
-                    let stream_future = client.random(request_ctx).instrument(span);
-
-                    let stream = stream_future.await.map_err(to_pyerr)?;
-                    context.inner().link_child(stream.context());
-                    stream
+                    client
+                        .random(request_ctx)
+                        .instrument(span)
+                        .await
+                        .map_err(to_pyerr)?
                 }
-                _ => client.random(request.into()).await.map_err(to_pyerr)?,
+                _ => client.random(request_ctx).await.map_err(to_pyerr)?,
             };
             tokio::spawn(process_stream(stream, tx));
             Ok(AsyncResponseStream {
@@ -870,6 +892,7 @@ impl Client {
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -878,18 +901,17 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
-
+                    // Always instrument with appropriate span (none if no trace context)
                     let span =
                         get_span_for_direct_context(&context, "direct", &instance_id.to_string());
-                    let stream_future = client.direct(request_ctx, instance_id).instrument(span);
-
-                    let stream = stream_future.await.map_err(to_pyerr)?;
-                    context.inner().link_child(stream.context());
-                    stream
+                    client
+                        .direct(request_ctx, instance_id)
+                        .instrument(span)
+                        .await
+                        .map_err(to_pyerr)?
                 }
                 _ => client
-                    .direct(request.into(), instance_id)
+                    .direct(request_ctx, instance_id)
                     .await
                     .map_err(to_pyerr)?,
             };
@@ -913,6 +935,7 @@ impl Client {
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -921,16 +944,15 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
-
+                    // Always instrument with appropriate span (none if no trace context)
                     let span = get_span_for_context(&context, "static");
-                    let stream_future = client.r#static(request_ctx).instrument(span);
-
-                    let stream = stream_future.await.map_err(to_pyerr)?;
-                    context.inner().link_child(stream.context());
-                    stream
+                    client
+                        .r#static(request_ctx)
+                        .instrument(span)
+                        .await
+                        .map_err(to_pyerr)?
                 }
-                _ => client.r#static(request.into()).await.map_err(to_pyerr)?,
+                _ => client.r#static(request_ctx).await.map_err(to_pyerr)?,
             };
 
             tokio::spawn(process_stream(stream, tx));

@@ -191,8 +191,10 @@ ARG HAS_TRTLLM_CONTEXT
 ARG TENSORRTLLM_PIP_WHEEL
 ARG TENSORRTLLM_INDEX_URL
 
-# Copy only wheel files from trtllm_wheel stage from build_context
+# Copy only wheel files and commit info from trtllm_wheel stage from build_context
 COPY --from=trtllm_wheel /*.whl /trtllm_wheel/
+COPY --from=trtllm_wheel /*.txt /trtllm_wheel/
+
 # Note: TensorRT needs to be uninstalled before installing the TRTLLM wheel
 # because there might be mismatched versions of TensorRT between the NGC PyTorch
 # and the TRTLLM wheel.

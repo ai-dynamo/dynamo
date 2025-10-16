@@ -26,7 +26,13 @@ struct LoadEvent {
 
 #[derive(serde::Deserialize)]
 struct ForwardPassMetrics {
+    worker_stats: WorkerStats,
     kv_stats: KvStats,
+}
+
+#[derive(serde::Deserialize)]
+struct WorkerStats {
+    data_parallel_rank: Option<u32>,
 }
 
 #[derive(serde::Deserialize)]
@@ -34,26 +40,45 @@ struct KvStats {
     kv_active_blocks: u64,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 struct RuntimeConfig {
     total_kv_blocks: Option<u64>,
+    data_parallel_size: u32,
 }
 
-/// Worker load monitoring state
-#[derive(Clone, Debug)]
+/// Worker load monitoring state per dp_rank
+#[derive(Clone, Debug, Default)]
 pub struct WorkerLoadState {
-    pub kv_active_blocks: Option<u64>,
-    pub kv_total_blocks: Option<u64>,
+    pub kv_active_blocks: HashMap<u32, u64>,
+    pub kv_total_blocks: HashMap<u32, u64>,
 }
 
 impl WorkerLoadState {
+    /// Returns true if ALL dp_ranks (that have data in both maps) exceed the threshold
     pub fn is_busy(&self, threshold: f64) -> bool {
-        match (self.kv_active_blocks, self.kv_total_blocks) {
-            (Some(active), Some(total)) if total > 0 => {
-                (active as f64) > (threshold * total as f64)
-            }
-            _ => false,
+        // Get all dp_ranks that exist in both active and total blocks
+        let common_dp_ranks: Vec<_> = self
+            .kv_active_blocks
+            .keys()
+            .filter(|dp_rank| self.kv_total_blocks.contains_key(dp_rank))
+            .collect();
+
+        // If no common dp_ranks, not busy
+        if common_dp_ranks.is_empty() {
+            return false;
         }
+
+        // Check if ALL common dp_ranks exceed threshold
+        common_dp_ranks.iter().all(|&&dp_rank| {
+            if let (Some(&active), Some(&total)) = (
+                self.kv_active_blocks.get(&dp_rank),
+                self.kv_total_blocks.get(&dp_rank),
+            ) {
+                total > 0 && (active as f64) > (threshold * total as f64)
+            } else {
+                false
+            }
+        })
     }
 }
 
@@ -97,9 +122,10 @@ impl WorkerMonitor {
             "v1/mdc/", // should be model_card::ROOT_PREFIX but wrong crate
             key_extractors::lease_id,
             |card: serde_json::Value| {
-                card.get("runtime_config")
-                    .and_then(|rc| rc.get("total_kv_blocks"))
-                    .and_then(|t_kv| t_kv.as_u64())
+                let runtime_config: Option<RuntimeConfig> = card
+                    .get("runtime_config")
+                    .and_then(|rc| serde_json::from_value(rc.clone()).ok());
+                runtime_config
             },
             component.drt().child_token(),
         )
@@ -132,13 +158,17 @@ impl WorkerMonitor {
                         let mut states = worker_load_states.write().unwrap();
                         states.retain(|lease_id, _| runtime_configs.contains_key(lease_id));
 
-                        // Update worker load states with total blocks
-                        for (lease_id, total_blocks) in runtime_configs.iter() {
-                            let state = states.entry(*lease_id).or_insert(WorkerLoadState {
-                                kv_active_blocks: None,
-                                kv_total_blocks: None,
-                            });
-                            state.kv_total_blocks = Some(*total_blocks);
+                        // Update worker load states with total blocks for all dp_ranks
+                        for (lease_id, runtime_config) in runtime_configs.iter() {
+                            let state = states.entry(*lease_id).or_default();
+
+                            // Populate total_blocks for all dp_ranks (they share the same total)
+                            // data_parallel_size defaults to 1 via serde in ModelRuntimeConfig
+                            if let Some(total_blocks) = runtime_config.total_kv_blocks {
+                                for dp_rank in 0..runtime_config.data_parallel_size {
+                                    state.kv_total_blocks.insert(dp_rank, total_blocks);
+                                }
+                            }
                         }
                     }
 
@@ -152,14 +182,12 @@ impl WorkerMonitor {
                         if let Ok(load_event) = serde_json::from_slice::<LoadEvent>(&event.payload) {
                             let worker_id = load_event.worker_id;
                             let active_blocks = load_event.data.kv_stats.kv_active_blocks;
+                            let dp_rank = load_event.data.worker_stats.data_parallel_rank.unwrap_or(0);
 
-                            // Update worker load state
+                            // Update worker load state per dp_rank
                             let mut states = worker_load_states.write().unwrap();
-                            let state = states.entry(worker_id).or_insert(WorkerLoadState {
-                                kv_active_blocks: None,
-                                kv_total_blocks: None,
-                            });
-                            state.kv_active_blocks = Some(active_blocks);
+                            let state = states.entry(worker_id).or_default();
+                            state.kv_active_blocks.insert(dp_rank, active_blocks);
                             drop(states);
 
                             // Recalculate all busy instances and update
