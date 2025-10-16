@@ -9,6 +9,9 @@ mod strategy;
 
 use super::*;
 
+use crate::block_manager::block::{
+    BlockDataExt, BlockDataProvider, BlockDataProviderMut, BlockError, StorageTypeProvider,
+};
 use crate::block_manager::storage::{
     DeviceStorage, DiskStorage, PinnedStorage, SystemStorage,
     nixl::{NixlRegisterableStorage, NixlStorage},
@@ -256,6 +259,124 @@ where
             }
         }
         TransferStrategy::Nixl(transfer_type) => {
+            let src_block_type = sources[0].block_data();
+            let src_contig = src_block_type.is_fully_contiguous();
+            let src_disk = matches!(src_block_type.storage_type(), StorageType::Disk(_));
+            let target_block_type = targets[0].block_data();
+            let target_contig = target_block_type.is_fully_contiguous();
+            let target_disk = matches!(target_block_type.storage_type(), StorageType::Disk(_));
+
+            if (!src_contig && !src_disk && target_contig && target_disk)
+                || (src_contig && src_disk && !target_contig && !target_disk)
+            {
+                // This is done to avoid small NIXL transfers done directly from
+                // GPU to disk. We use temporary GPU buffers to rearrange layout to
+                // FullyContiguous on egress, and to redistribute to LayerSeparate
+                // on ingress.
+
+                tracing::debug!(
+                    "Using temporary GPU buffer for layout conversion: {} to {}",
+                    if src_contig {
+                        "contig source"
+                    } else {
+                        "non-contig source"
+                    },
+                    if target_contig {
+                        "contig target"
+                    } else {
+                        "non-contig target"
+                    },
+                );
+
+                // Use one temporary GPU buffer per source and target block pairs.
+                let mut temp_bufs = Vec::with_capacity(targets.len());
+                for _ in 0..targets.len() {
+                    match ctx.acquire_temp_device_buffer() {
+                        Ok(temp_buf) => {
+                            temp_bufs.push(temp_buf);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to acquire temporary GPU buffer: {}, falling back to direct transfer",
+                                e
+                            );
+                            break;
+                        }
+                    }
+                }
+
+                if temp_bufs.len() == targets.len() {
+                    let mut dest_slice: Vec<_> =
+                        temp_bufs.iter().map(|x| x.data.to_owned()).collect();
+                    if target_disk {
+                        // consodliate discontigious KV cache data to contigious file data
+                        match cuda::copy_blocks_with_customized_kernel(
+                            sources,
+                            &mut dest_slice,
+                            ctx.stream().as_ref(),
+                            &ctx,
+                        ) {
+                            Ok(_) => {
+                                let transfer_fut = nixl::write_blocks_to(
+                                    &dest_slice,
+                                    targets,
+                                    &ctx,
+                                    transfer_type,
+                                )?;
+                                ctx.async_rt_handle().spawn(async move {
+                                    let temp_bufs = temp_bufs;
+                                    transfer_fut.await;
+                                    // temp_buffer will be automatically returned to pool when dropped
+                                    tx.send(()).unwrap();
+                                    drop(temp_bufs);
+                                });
+                                return Ok(rx);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Consolidation into temp buffer failed: {}, falling back to direct transfer",
+                                    e
+                                );
+                            }
+                        }
+                    } else {
+                        // src_disk == true, here we distribute to discontigious KV cache from contigious file data
+                        let transfer_fut =
+                            nixl::write_blocks_to(&sources, &mut dest_slice, &ctx, transfer_type)?;
+                        let (src_addresses, dst_addresses, dims) =
+                            cuda::get_address_pairs(&dest_slice, targets)?;
+
+                        let ctx2 = ctx.clone();
+                        ctx.async_rt_handle().spawn(async move {
+                            let temp_bufs = temp_bufs;
+                            transfer_fut.await;
+
+                            let _context_guard = ctx2.stream().context().bind_to_thread();
+                            match cuda::copy_pairs_with_customized_kernel(
+                                src_addresses,
+                                dst_addresses,
+                                dims,
+                                ctx2.stream().as_ref(),
+                                &ctx2,
+                            ) {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    tracing::warn!("Scattering from temp buffer failed: {}", e);
+                                    drop(tx);
+                                    return;
+                                }
+                            }
+
+                            // temp_buffer will be automatically returned to pool when dropped
+                            tx.send(()).unwrap();
+                            drop(temp_bufs);
+                        });
+
+                        return Ok(rx);
+                    }
+                }
+            }
+
             let transfer_fut = nixl::write_blocks_to(sources, targets, &ctx, transfer_type)?;
 
             ctx.async_rt_handle().spawn(async move {
