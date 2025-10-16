@@ -124,7 +124,7 @@ def extract_throughput_data(csv_path: str) -> Tuple[Optional[float], Optional[fl
     Extract throughput data from CSV file
 
     Args:
-        csv_path: Path to profile_export_genai_perf.csv
+        csv_path: Path to profile_export_aiperf.csv
 
     Returns:
         Tuple of (output_token_throughput, output_token_throughput_per_user)
@@ -184,10 +184,10 @@ def process_directory(dir_path: str) -> Optional[List[Dict[str, Any]]]:
         Dictionary containing extracted data, or None if processing failed
     """
     dir_path_obj = Path(dir_path)
-    artifacts_path = dir_path_obj / "genai_perf_artifacts"
+    artifacts_path = dir_path_obj / "aiperf_artifacts"
 
     if not artifacts_path.exists():
-        print(f"Warning: No genai_perf_artifacts directory found in {dir_path}")
+        print(f"Warning: No aiperf_artifacts directory found in {dir_path}")
         return None
 
     # Parse deployment configuration
@@ -205,7 +205,7 @@ def process_directory(dir_path: str) -> Optional[List[Dict[str, Any]]]:
     csv_files = []
     for item in artifacts_path.iterdir():
         if item.is_dir():
-            csv_path = item / "profile_export_genai_perf.csv"
+            csv_path = item / "profile_export_aiperf.csv"
             if csv_path.exists():
                 csv_files.append(str(csv_path))
 

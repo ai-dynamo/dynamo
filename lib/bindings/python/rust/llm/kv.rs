@@ -101,7 +101,7 @@ impl WorkerMetricsPublisher {
 #[derive(Clone)]
 pub struct ZmqKvEventPublisherConfig {
     #[pyo3(get, set)]
-    pub worker_id: i64,
+    pub worker_id: WorkerId,
     #[pyo3(get, set)]
     pub kv_block_size: usize,
     #[pyo3(get, set)]
@@ -120,7 +120,7 @@ impl ZmqKvEventPublisherConfig {
         zmq_topic = "".to_string()
     ))]
     pub fn new(
-        worker_id: i64,
+        worker_id: WorkerId,
         kv_block_size: usize,
         zmq_endpoint: String,
         zmq_topic: String,
@@ -234,13 +234,20 @@ impl Drop for ZmqKvEventListener {
 pub(crate) struct KvEventPublisher {
     inner: Arc<llm_rs::kv_router::publisher::KvEventPublisher>,
     kv_block_size: usize,
+    dp_rank: DpRank,
     warning_count: Arc<AtomicU32>,
 }
 
 #[pymethods]
 impl KvEventPublisher {
     #[new]
-    fn new(component: Component, worker_id: i64, kv_block_size: usize) -> PyResult<Self> {
+    #[pyo3(signature = (component, worker_id, kv_block_size, dp_rank=0))]
+    fn new(
+        component: Component,
+        worker_id: WorkerId,
+        kv_block_size: usize,
+        dp_rank: DpRank,
+    ) -> PyResult<Self> {
         if kv_block_size == 0 {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
@@ -256,6 +263,7 @@ impl KvEventPublisher {
         Ok(Self {
             inner: inner.into(),
             kv_block_size,
+            dp_rank,
             warning_count: Arc::new(AtomicU32::new(0)),
         })
     }
@@ -286,6 +294,7 @@ impl KvEventPublisher {
                     &self.warning_count,
                 ),
             }),
+            dp_rank: self.dp_rank,
         };
 
         self.inner.publish(event).map_err(to_pyerr)
@@ -299,6 +308,7 @@ impl KvEventPublisher {
         let event = KvCacheEvent {
             event_id,
             data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
+            dp_rank: self.dp_rank,
         };
 
         self.inner.publish(event).map_err(to_pyerr)
@@ -314,8 +324,13 @@ pub(crate) struct OverlapScores {
 #[pymethods]
 impl OverlapScores {
     #[getter]
-    fn scores(&self) -> HashMap<llm_rs::kv_router::indexer::WorkerId, u32> {
-        self.inner.scores.clone()
+    fn scores(&self) -> HashMap<(i64, u32), u32> {
+        // Return scores with full WorkerWithDpRank granularity as (worker_id, dp_rank) tuples
+        self.inner
+            .scores
+            .iter()
+            .map(|(worker, score)| ((worker.worker_id, worker.dp_rank), *score))
+            .collect()
     }
 
     #[getter]
@@ -361,7 +376,7 @@ impl RadixTree {
     fn apply_event(
         &mut self,
         _py: Python,
-        worker_id: i64,
+        worker_id: WorkerId,
         kv_cache_event_bytes: &[u8],
     ) -> PyResult<()> {
         let kv_cache_event: llm_rs::kv_router::protocols::KvCacheEvent =
@@ -377,12 +392,12 @@ impl RadixTree {
         Ok(())
     }
 
-    fn remove_worker(&mut self, _py: Python, worker_id: i64) -> PyResult<()> {
+    fn remove_worker(&mut self, _py: Python, worker_id: WorkerId) -> PyResult<()> {
         self.inner.remove_worker(worker_id);
         Ok(())
     }
 
-    fn clear_all_blocks(&mut self, _py: Python, worker_id: i64) -> PyResult<()> {
+    fn clear_all_blocks(&mut self, _py: Python, worker_id: WorkerId) -> PyResult<()> {
         self.inner.clear_all_blocks(worker_id);
         Ok(())
     }
@@ -517,16 +532,19 @@ impl ApproxKvIndexer {
         })
     }
 
+    #[pyo3(signature = (tokens, worker_id, dp_rank=0))]
     fn process_routing_decision_for_request<'p>(
         &self,
         py: Python<'p>,
         tokens: Vec<u32>,
-        worker_id: i64,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
     ) -> PyResult<Bound<'p, PyAny>> {
         let indexer = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let worker = llm_rs::kv_router::protocols::WorkerWithDpRank::new(worker_id, dp_rank);
             indexer
-                .process_routing_decision_for_request(tokens.as_slice(), worker_id)
+                .process_routing_decision_for_request(tokens.as_slice(), worker)
                 .await
                 .map_err(to_pyerr)?;
             Ok(())
@@ -538,7 +556,7 @@ impl ApproxKvIndexer {
 #[derive(Clone)]
 pub(crate) struct EndpointKvMetrics {
     #[pyo3(get, set)]
-    pub worker_id: i64,
+    pub worker_id: WorkerId,
     #[pyo3(get, set)]
     pub request_active_slots: u64,
     #[pyo3(get, set)]
@@ -784,7 +802,7 @@ impl WorkerStats {
         request_active_slots: u64,
         request_total_slots: u64,
         num_requests_waiting: u64,
-        data_parallel_rank: Option<u32>,
+        data_parallel_rank: Option<DpRank>,
     ) -> Self {
         Self(RsWorkerStats {
             data_parallel_rank,
@@ -961,7 +979,7 @@ impl KvPushRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, extra_args=None))]
+    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, dp_rank=None, extra_args=None))]
     fn generate<'p>(
         &self,
         py: Python<'p>,
@@ -971,7 +989,8 @@ impl KvPushRouter {
         sampling_options: Option<PyObject>,
         output_options: Option<PyObject>,
         router_config_override: Option<PyObject>,
-        worker_id: Option<i64>,
+        worker_id: Option<WorkerId>,
+        dp_rank: Option<DpRank>,
         extra_args: Option<PyObject>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the options with defaults
@@ -1027,6 +1046,7 @@ impl KvPushRouter {
             .sampling_options(sampling_options)
             .output_options(output_options)
             .router_config_override(router_config_override)
+            .dp_rank(dp_rank)
             .extra_args(extra_args);
 
         // Set backend_instance_id if worker_id is provided
@@ -1054,7 +1074,7 @@ impl KvPushRouter {
     }
 
     #[pyo3(signature = (token_ids, router_config_override=None, request_id=None))]
-    fn best_worker_id<'p>(
+    fn best_worker<'p>(
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
@@ -1075,7 +1095,7 @@ impl KvPushRouter {
         let update_states = request_id.is_some();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let (worker_id, overlap_blocks) = chooser
+            let (best_worker, overlap_blocks) = chooser
                 .find_best_match(
                     request_id.as_deref(),
                     &token_ids,
@@ -1085,8 +1105,55 @@ impl KvPushRouter {
                 .await
                 .map_err(to_pyerr)?;
 
-            // Return a tuple of (worker_id, overlap_blocks)
-            Ok((worker_id, overlap_blocks))
+            Ok((best_worker.worker_id, best_worker.dp_rank, overlap_blocks))
+        })
+    }
+
+    /// Deprecated: Use `best_worker()` instead which returns (worker_id, dp_rank, overlap_blocks)
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None))]
+    fn best_worker_id<'p>(
+        &self,
+        py: Python<'p>,
+        token_ids: Vec<u32>,
+        router_config_override: Option<PyObject>,
+        request_id: Option<String>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        // Issue deprecation warning
+        let warnings = py.import("warnings")?;
+        warnings.call_method1(
+            "warn",
+            (
+                "best_worker_id() is deprecated. Use best_worker() instead which returns (worker_id, dp_rank, overlap_blocks)",
+                py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
+            ),
+        )?;
+
+        let router_config_override = if let Some(obj) = router_config_override {
+            Python::with_gil(|py| {
+                let override_config: llm_rs::kv_router::RouterConfigOverride =
+                    depythonize(obj.bind(py)).map_err(to_pyerr)?;
+                Ok::<_, PyErr>(Some(override_config))
+            })?
+        } else {
+            None
+        };
+
+        let chooser = self.inner.chooser.clone();
+        let update_states = request_id.is_some();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let (best_worker, overlap_blocks) = chooser
+                .find_best_match(
+                    request_id.as_deref(),
+                    &token_ids,
+                    router_config_override.as_ref(),
+                    update_states,
+                )
+                .await
+                .map_err(to_pyerr)?;
+
+            // Return only worker_id and overlap_blocks for backward compatibility
+            Ok((best_worker.worker_id, overlap_blocks))
         })
     }
 
@@ -1130,6 +1197,7 @@ impl KvPushRouter {
                 .await
                 .map_err(to_pyerr)?;
 
+            // Return loads without aggregation - each (worker_id, dp_rank) pair is a separate entry
             // Use pythonize to convert Vec<PotentialLoad> to Python list of dicts
             Python::with_gil(|py| {
                 pythonize(py, &loads)

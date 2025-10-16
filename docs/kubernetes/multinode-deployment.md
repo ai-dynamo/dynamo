@@ -182,15 +182,37 @@ When you deploy a multinode workload, the Dynamo operator automatically applies 
 
 ### vLLM Backend
 
-For vLLM multinode deployments, the operator automatically configures Ray for distributed inference:
+For vLLM multinode deployments, the operator automatically selects and configures the appropriate distributed execution mode based on your parallelism settings:
 
-#### Leader Node
+#### Deployment Modes
+
+The operator automatically determines the deployment mode based on your parallelism configuration:
+
+**1. Ray-Based Mode (Tensor/Pipeline Parallelism across nodes)**
+- **When used**: When `world_size > GPUs_per_node` where `world_size = tensor_parallel_size × pipeline_parallel_size`
+- **Use case**: Distributing a single model instance across multiple nodes using tensor or pipeline parallelism
+
+**Leader Node:**
 - **Ray Head**: The operator prepends `ray start --head --port=6379` to your existing command
 - **Probes**: All health probes remain active (liveness, readiness, startup)
 
-#### Worker Nodes
+**Worker Nodes:**
 - **Ray Worker**: The command is replaced with `ray start --address=<leader-hostname>:6379 --block`
 - **Probes**: All probes (liveness, readiness, startup) are automatically removed since workers don't expose health endpoints
+
+**2. Data Parallel Mode (Multiple model instances across nodes)**
+- **When used**: When `world_size × data_parallel_size > GPUs_per_node`
+- **Use case**: Running multiple independent model instances across nodes with data parallelism (e.g., MoE models with expert parallelism)
+
+**All Nodes (Leader and Workers):**
+- **Injected Flags**:
+  - `--data-parallel-address <leader-hostname>` - Address of the coordination server
+  - `--data-parallel-size-local <value>` - Number of data parallel workers per node
+  - `--data-parallel-rpc-port 13445` - RPC port for data parallel coordination
+  - `--data-parallel-start-rank <value>` - Starting rank for this node (calculated automatically)
+- **Probes**: Worker probes are removed; leader probes remain active
+
+**Note**: The operator intelligently injects these flags into your command regardless of command structure (direct Python commands or shell wrappers)
 
 #### Compilation Cache Support
 When a volume mount is configured with `useAsCompilationCache: true`, the operator automatically sets:
