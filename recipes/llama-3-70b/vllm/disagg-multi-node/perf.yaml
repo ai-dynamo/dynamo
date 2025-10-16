@@ -5,7 +5,7 @@ kind: Job
 metadata:
   name: llama3-70b-disagg-mn-perf
 spec:
-  backoffLimit: 3
+  backoffLimit: 1
   completions: 1
   parallelism: 1
   template:
@@ -15,58 +15,129 @@ spec:
     spec:
       restartPolicy: Never
       containers:
-      - name: perf
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-        workingDir: /workspace/components/backends/vllm
-        command:
+      - command:
         - /bin/sh
         - -c
         - |
-          # wait for the model to be ready
-          export ENDPOINT=llama3-70b-disagg-mn-frontend:8000
-          export TARGET_MODEL=RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic
-          export INTERVAL=5
-          echo "Waiting for model '$TARGET_MODEL' at $ENDPOINT/v1/models (checking every ${INTERVAL}s)..."
-          while ! curl -s "http://$ENDPOINT/v1/models" | jq -e --arg model "$TARGET_MODEL" '.data[]? | select(.id == $model)' >/dev/null 2>&1; do
-              echo "[$(date '+%H:%M:%S')] Model not ready yet, waiting ${INTERVAL}s..."
-              sleep $INTERVAL
-          done
-          echo "✅ Model '$TARGET_MODEL' is now available!"
-          curl -s "http://$ENDPOINT/v1/models" | jq .
-          # now run the benchmark
-          export ARTIFACT_DIR="/tmp/genai"
-          mkdir -p "$ARTIFACT_DIR"
-          echo "Running benchmark..."
+          apt-get update && apt-get install -y curl jq procps git && apt-get clean
+          pip install git+https://github.com/ai-dynamo/aiperf.git@70af59489df24a601dba57604a7341966150b366;
+          echo "aiperf installation completed";
+          sysctl -w net.ipv4.ip_local_port_range="1024 65000"
+          cat /proc/sys/net/ipv4/ip_local_port_range
           export COLUMNS=200
-          aiperf profile \
-            --model "$TARGET_MODEL" \
-            --tokenizer ~/.cache/huggingface/hub/models--RedHatAI--Llama-3.3-70B-Instruct-FP8-dynamic/snapshots/ddb4128556dfcff99e0c41aee159ea6c3e655dcd  \
-            --endpoint-type chat --url "$ENDPOINT" --streaming \
-            --concurrency 64 \
-            --warmup-request-count 2 \
-            --request-count 320 \
-            --extra-inputs max_tokens:1024 \
-            --synthetic-input-tokens-mean 8192 \
-            --synthetic-input-tokens-stddev 0 \
-            --output-tokens-mean 1024 \
-            --output-tokens-stddev 0 \
-            --extra-inputs min_tokens:1024 \
-            --extra-inputs ignore_eos:true \
-            --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
-            --random-seed 1418186270 \
-            --artifact-dir $ARTIFACT_DIR \
-            --num-dataset-entries=3000 -- \
-            --max-threads 64
-          echo "----------------json----------------"
-          PERF_JSON=$(find $ARTIFACT_DIR -name profile_export_aiperf.json)
-          cat $PERF_JSON | jq .
-          echo "----------------csv-----------------"
-          PERF_CSV=$(find $ARTIFACT_DIR -name profile_export_aiperf.csv)
-          cat $PERF_CSV
-          echo "Benchmark completed successfully!"
+          EPOCH=$(date +%s)
+          ## utility functions -- can be moved to a bash script / configmap
+          wait_for_model_ready() {
+            echo "Waiting for model '$TARGET_MODEL' at $ENDPOINT/v1/models (checking every 5s)..."
+            while ! curl -s "http://$ENDPOINT/v1/models" | jq -e --arg model "$TARGET_MODEL" '.data[]? | select(.id == $model)' >/dev/null 2>&1; do
+                echo "[$(date '+%H:%M:%S')] Model not ready yet, sleeping 5s before checking again http://$ENDPOINT/v1/models"
+                sleep 5
+            done
+            echo "✅ Model '$TARGET_MODEL' is now available!"
+            echo "Model '$TARGET_MODEL' is now available!"
+            curl -s "http://$ENDPOINT/v1/models" | jq .
+          }
+          run_perf() {
+            local concurrency=$1
+            local isl=$2
+            local osl=$3
+            local max_threads=${concurrency}
+            key=concurrency_${concurrency}
+            export ARTIFACT_DIR="${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}/${key}"
+            mkdir -p "$ARTIFACT_DIR"
+            echo "ARTIFACT_DIR: $ARTIFACT_DIR"
+            aiperf profile --artifact-dir $ARTIFACT_DIR \
+                --model $TARGET_MODEL \
+                --tokenizer /root/.cache/huggingface/hub/models--RedHatAI--Llama-3.3-70B-Instruct-FP8-dynamic/snapshots/ddb4128556dfcff99e0c41aee159ea6c3e655dcd  \
+                --endpoint-type chat  --endpoint /v1/chat/completions \
+                --streaming \
+                --url http://$ENDPOINT \
+                --synthetic-input-tokens-mean $isl \
+                --synthetic-input-tokens-stddev 0 \
+                --output-tokens-mean $osl \
+                --output-tokens-stddev 0 \
+                --extra-inputs max_tokens:$osl \
+                --extra-inputs min_tokens:$osl \
+                --extra-inputs ignore_eos:true \
+                --extra-inputs repetition_penalty:1.0 \
+                --extra-inputs temperature:0.0 \
+                --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
+                --concurrency $concurrency \
+                --request-count $((10*concurrency)) \
+                --warmup-request-count $concurrency \
+                --conversation-num 12800 \
+                --random-seed 100 \
+                --workers-max $max_threads \
+                -H 'Authorization: Bearer NOT USED' \
+                -H 'Accept: text/event-stream'\
+                --record-processors 32 \
+                --ui simple
+            echo "ARTIFACT_DIR: $ARTIFACT_DIR"
+            ls -la $ARTIFACT_DIR
+          }
+          #### Actual execution ####
+          wait_for_model_ready
+          mkdir -p "${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}"
+          # Calculate total concurrency based on per-GPU concurrency and GPU count
+          TOTAL_CONCURRENCY=$((CONCURRENCY_PER_GPU * DEPLOYMENT_GPU_COUNT))
+          echo "Calculated total concurrency: $TOTAL_CONCURRENCY (${CONCURRENCY_PER_GPU} per GPU × ${DEPLOYMENT_GPU_COUNT} GPUs)"
+          # Write input_config.json
+          cat > "${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}/input_config.json" <<EOF
+          {
+            "gpu_count": $DEPLOYMENT_GPU_COUNT,
+            "max_threads": $max_threads,
+            "concurrency_per_gpu": $CONCURRENCY_PER_GPU,
+            "total_concurrency": $TOTAL_CONCURRENCY,
+            "mode": "$DEPLOYMENT_MODE",
+            "isl": $ISL,
+            "osl": $OSL,
+            "endpoint": "$ENDPOINT",
+            "model endpoint": "$TARGET_MODEL"
+          }
+          EOF
+
+          # Run perf with calculated total concurrency
+          run_perf $TOTAL_CONCURRENCY $ISL $OSL
+          echo "done with concurrency $TOTAL_CONCURRENCY"
+        env:
+        - name: TARGET_MODEL
+          value: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic
+        - name: ENDPOINT
+          value: llama3-70b-disagg-mn-frontend:8000
+        - name: CONCURRENCY_PER_GPU
+          value: "16"
+        - name: DEPLOYMENT_GPU_COUNT
+          value: "16"
+        - name: ISL
+          value: "8192"
+        - name: OSL
+          value: "1024"
+        - name: DEPLOYMENT_MODE
+          value: disagg-mn
+        - name: AIPERF_HTTP_CONNECTION_LIMIT
+          value: "200"
+        - name: JOB_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.labels['job-name']
+        - name: ROOT_ARTIFACT_DIR
+          value: /root/.cache/huggingface/perf
+        - name: HF_HOME
+          value: /root/.cache/huggingface
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        image: python:3.12-slim
+        imagePullPolicy: IfNotPresent
+        name: perf
+        securityContext:
+          privileged: true
         volumeMounts:
         - name: model-cache
           mountPath: /root/.cache/huggingface
+        workingDir: /workspace
+      imagePullSecrets:
+      - name: nvcrimagepullsecret
       volumes:
       - name: model-cache
         persistentVolumeClaim:

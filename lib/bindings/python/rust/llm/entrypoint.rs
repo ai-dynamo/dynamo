@@ -215,7 +215,9 @@ pub fn make_engine<'p>(
             let local_path = if model_path.exists() {
                 model_path
             } else {
-                LocalModel::fetch(&model_path.display().to_string(), false)
+                // Mocker only needs tokenizer, not weights
+                let ignore_weights = matches!(args.engine_type, EngineType::Mocker);
+                LocalModel::fetch(&model_path.display().to_string(), ignore_weights)
                     .await
                     .map_err(to_pyerr)?
             };

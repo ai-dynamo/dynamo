@@ -37,7 +37,9 @@ pub async fn run(
         }
         Some(p) => {
             // model_path might be an HF repo, not a local path. Resolve it by downloading.
-            Some(LocalModel::fetch(&p.display().to_string(), false).await?)
+            // Mocker only needs tokenizer, not weights
+            let ignore_weights = matches!(out_opt, Some(Output::Mocker));
+            Some(LocalModel::fetch(&p.display().to_string(), ignore_weights).await?)
         }
     };
 
