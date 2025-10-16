@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::kv_router::KV_METRICS_SUBJECT;
-use crate::kv_router::protocols::ForwardPassMetrics;
-use crate::model_card;
+use crate::kv_router::scoring::LoadEvent;
+use crate::model_card::{self, ModelDeploymentCard};
 use dynamo_runtime::component::Client;
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -12,13 +12,6 @@ use dynamo_runtime::utils::typed_prefix_watcher::{key_extractors, watch_prefix_w
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio_stream::StreamExt;
-
-/// Event structure for KV metrics
-#[derive(serde::Deserialize)]
-struct LoadEvent {
-    worker_id: i64,
-    data: ForwardPassMetrics,
-}
 
 /// Worker load monitoring state per dp_rank
 #[derive(Clone, Debug, Default)]
@@ -96,7 +89,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
             etcd_client,
             model_card::ROOT_PATH,
             key_extractors::lease_id,
-            |card: crate::model_card::ModelDeploymentCard| Some(card.runtime_config),
+            |card: ModelDeploymentCard| Some(card.runtime_config),
             component.drt().child_token(),
         )
         .await?;

@@ -403,7 +403,6 @@ impl ModelWatcher {
             }
         } else if card.model_input == ModelInput::Text && card.model_type.supports_embedding() {
             // Case: Text + Embeddings
-            // No preprocessing or KV monitoring - backend handles everything
             let push_router = PushRouter::<
                 NvCreateEmbeddingRequest,
                 Annotated<NvCreateEmbeddingResponse>,
@@ -416,7 +415,6 @@ impl ModelWatcher {
                 .add_embeddings_model(card.name(), checksum, engine)?;
         } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
             // Case 3: Text + Chat
-            // No preprocessing or KV monitoring - backend handles everything
             let push_router =
                 PushRouter::<
                     NvCreateChatCompletionRequest,
@@ -428,7 +426,6 @@ impl ModelWatcher {
                 .add_chat_completions_model(card.name(), checksum, engine)?;
         } else if card.model_input == ModelInput::Text && card.model_type.supports_completions() {
             // Case 2: Text + Completions
-            // No preprocessing or KV monitoring - backend handles everything
             let push_router = PushRouter::<
                 NvCreateCompletionRequest,
                 Annotated<NvCreateCompletionResponse>,
