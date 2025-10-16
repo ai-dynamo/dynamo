@@ -60,6 +60,7 @@
    backends/sglang/multimodal_epd.md
    backends/sglang/sgl-hicache-example.md
    backends/sglang/sglang-disaggregation.md
+   backends/sglang/prometheus.md
 
    examples/README.md
    examples/runtime/hello_world/README.md
@@ -70,6 +71,7 @@
    backends/vllm/deepseek-r1.md
    backends/vllm/gpt-oss.md
    backends/vllm/multi-node.md
+   backends/vllm/prometheus.md
 
 
 ..   TODO: architecture/distributed_runtime.md and architecture/dynamo_flow.md

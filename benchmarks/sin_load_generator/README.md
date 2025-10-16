@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Sinusoidal Load Generator
 
-`sin_synth.py` is a simple script to generate synthetic load with sinusoidal request rate and isl/osl ratio. The output is in [mooncake-style](https://github.com/kvcache-ai/Mooncake) jsonl format, which can be directly used in [AIPerf](https://github.com/ai-dynamo/aiperf/tree/main/aiperf).
+`sin_synth.py` is a simple script to generate synthetic load with sinusoidal request rate and isl/osl ratio. The output is in [mooncake-style](https://github.com/kvcache-ai/Mooncake) jsonl format, which can be directly used in [AIPerf](https://github.com/ai-dynamo/aiperf).
 
 ## Usage
 

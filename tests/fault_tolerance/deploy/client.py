@@ -383,27 +383,19 @@ def log_summary_metrics(
             with open(profile_json) as f:
                 metrics = json.load(f)
 
-            # Extract key metrics from AI-Perf format
-            records = metrics.get("records", {})
-
-            # Request count from request_count record
-            request_count_record = records.get("request_count", {})
-            request_count = (
-                int(request_count_record.get("avg", 0)) if request_count_record else 0
-            )
+            # Request count
+            request_count = int(metrics.get("request_count", {}).get("avg", 0))
 
             # Check for errors
-            error_summary = metrics.get("error_summary", [])
-            error_count = len(error_summary)
+            error_count = len(metrics.get("error_summary", []))
 
             # Latency metrics (in milliseconds)
-            request_latency = records.get("request_latency", {})
+            request_latency = metrics.get("request_latency", {})
             avg_latency = request_latency.get("avg", 0) / 1000.0  # Convert to seconds
             p99_latency = request_latency.get("p99", 0) / 1000.0  # Convert to seconds
 
             # Throughput metrics
-            request_throughput = records.get("request_throughput", {})
-            throughput = request_throughput.get("avg", 0)
+            throughput = metrics.get("request_throughput", {}).get("avg", 0)
 
             # Log summary
             logger.info(
@@ -417,7 +409,7 @@ def log_summary_metrics(
 
             # Log success rate
             if request_count > 0:
-                success_rate = (request_count - error_count) / request_count * 100
+                success_rate = ((request_count - error_count) / request_count) * 100
                 logger.info(f"Success rate: {success_rate:.1f}%")
 
             # Also write summary to CSV file for aggregation
