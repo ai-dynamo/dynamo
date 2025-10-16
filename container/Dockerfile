@@ -263,6 +263,7 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
     UV_GIT_LFS=1 uv pip install \
+        --no-cache \
         --requirement /tmp/requirements.txt \
         --requirement /tmp/requirements.test.txt
 
