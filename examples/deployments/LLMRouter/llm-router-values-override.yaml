@@ -1,0 +1,116 @@
+##
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+##
+
+# LLM Router Helm Values for NVIDIA Dynamo Cloud Platform Integration
+# Based on official sample: https://github.com/NVIDIA-AI-Blueprints/llm-router/blob/main/deploy/helm/llm-router/values.override.yaml.sample
+# Uses official External ConfigMap strategy for custom configuration
+
+# Global configuration (following official sample structure)
+# NOTE: Update imageRegistry and imagePullSecrets before deployment (see README Step 6)
+global:
+  storageClass: "standard"
+  imageRegistry: "YOUR_REGISTRY_HERE/"  # REPLACE with your Docker registry
+  imagePullSecrets:
+    - name: nvcr-secret  # UPDATE to match your registry credentials
+
+# Router Controller Configuration
+routerController:
+  enabled: true
+  replicas: 1
+  image:
+    repository: llm-router-controller  # Will be prefixed with global.imageRegistry
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 8084
+
+  # Dynamo-specific environment variables
+  env:
+    - name: LOG_LEVEL
+      value: "INFO"
+    - name: ENABLE_METRICS
+      value: "true"
+    - name: DYNAMO_API_BASE
+      value: "http://vllm-frontend-frontend.dynamo-kubernetes.svc.cluster.local:8000"
+    - name: DYNAMO_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: dynamo-api-secret
+          key: DYNAMO_API_KEY
+
+  # STRATEGY 1: External ConfigMap (Official Support)
+  # Uses the official Helm chart's external ConfigMap feature
+  config:
+    existingConfigMap: "router-config-dynamo"  # Points to our router configuration
+
+# Router Server Configuration
+routerServer:
+  enabled: true
+  replicas: 1  # Single replica for simpler deployment
+  image:
+    repository: llm-router-server
+    tag: latest
+    pullPolicy: IfNotPresent
+  env:
+    - name: HF_HOME
+      value: "/tmp/huggingface"
+    - name: TRANSFORMERS_CACHE
+      value: "/tmp/huggingface/transformers"
+    - name: HF_HUB_CACHE
+      value: "/tmp/huggingface/hub"
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+      memory: "8Gi"
+    requests:
+      nvidia.com/gpu: 1
+      memory: "8Gi"
+  # Model repository configuration
+  modelRepository:
+    path: "/model_repository/routers"
+  volumes:
+    modelRepository:
+      enabled: true
+      mountPath: "/model_repository"
+      storage:
+        persistentVolumeClaim:
+          enabled: true
+          existingClaim: "router-models-pvc"
+  service:
+    type: ClusterIP
+  shm_size: "8G"
+
+# Ingress Configuration (disabled for internal access)
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+  hosts:
+    - host: llm-router.local
+      paths:
+        - path: /app(/|$)(.*)
+          pathType: ImplementationSpecific
+          service: app
+        - path: /router-controller(/|$)(.*)
+          pathType: ImplementationSpecific
+          service: router-controller
+
+# Demo app (disabled)
+app:
+  enabled: true  # Enable for demo web interface
+  replicas: 1  # Single replica for simpler deployment
+  image:
+    repository: llm-router-app
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
