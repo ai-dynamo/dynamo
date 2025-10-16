@@ -34,8 +34,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/yaml"
@@ -74,10 +74,11 @@ const (
 	EventReasonDeploymentDeleted    = "DeploymentDeleted"
 
 	// Label keys
-	LabelApp       = "app"
-	LabelDGDR      = "dgdr"
-	LabelDGDRName  = "dgdr.nvidia.com/name"
-	LabelManagedBy = "nvidia.com/managed-by"
+	LabelApp           = "app"
+	LabelDGDR          = "dgdr"
+	LabelDGDRName      = "dgdr.nvidia.com/name"
+	LabelDGDRNamespace = "dgdr.nvidia.com/namespace"
+	LabelManagedBy     = "nvidia.com/managed-by"
 
 	// Label values
 	LabelValueDynamoProfiler = "dynamo-profiler"
@@ -535,6 +536,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	}
 	// Add/override with managed labels
 	labels[LabelDGDRName] = dgdr.Name
+	labels[LabelDGDRNamespace] = dgdr.Namespace
 	labels[LabelManagedBy] = LabelValueDynamoOperator
 
 	// Merge custom labels from overrides
@@ -569,12 +571,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 		Spec: generatedDGD.Spec,
 	}
 
-	// Set owner reference if in same namespace (enables cascade delete)
-	if dgdNamespace == dgdr.Namespace {
-		if err := controllerutil.SetControllerReference(dgdr, dgd, r.Scheme()); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
+	// Note: We don't set owner reference on DGD
+	// If a DGDR is deleted, the DGD may be serving traffic and should persist independently.
+	// We use labels (LabelDGDRName) to track the relationship.
 
 	logger.Info("Creating DynamoGraphDeployment", "name", dgdName, "namespace", dgdNamespace)
 
@@ -846,9 +845,6 @@ set -e
 set -o pipefail
 while [ ! -f %s/%s ]; do sleep 2; done
 
-DGDR_UID=$(kubectl get dynamographdeploymentrequests %s -n %s -o jsonpath='{.metadata.uid}')
-DGDR_API_VERSION=$(kubectl get dynamographdeploymentrequests %s -n %s -o jsonpath='{.apiVersion}')
-
 # Start building ConfigMap YAML with DGD spec
 cat >/tmp/cm.yaml <<EOF
 apiVersion: v1
@@ -856,13 +852,9 @@ kind: ConfigMap
 metadata:
   name: %s
   namespace: %s
-  ownerReferences:
-  - apiVersion: "$DGDR_API_VERSION"
-    kind: DynamoGraphDeploymentRequest
-    name: %s
-    uid: "$DGDR_UID"
-    controller: true
-    blockOwnerDeletion: true
+  labels:
+    dgdr.nvidia.com/name: %s
+    nvidia.com/managed-by: dynamo-operator
 data:
   %s: |
 EOF
@@ -884,8 +876,6 @@ kubectl apply -f /tmp/cm.yaml
 echo "Saved profiling output to ConfigMap %s"
 `,
 				ProfilingOutputPath, ProfilingOutputFile,
-				dgdr.Name, dgdr.Namespace,
-				dgdr.Name, dgdr.Namespace,
 				outputConfigMapName, dgdr.Namespace,
 				dgdr.Name,
 				ProfilingOutputFile,
@@ -1059,12 +1049,17 @@ func (r *DynamoGraphDeploymentRequestReconciler) cleanupProfilingResources(ctx c
 	logger := log.FromContext(ctx)
 	logger.Info("Cleaning up profiling resources", "name", dgdr.Name)
 
-	// Note: All profiling resources are cleaned up automatically via ownerReference (cascade delete):
-	// - Profiling Job: ownerReference set by SyncResource
-	// - Output ConfigMap: ownerReference set by sidecar container
-	// - Auto-created DGD: ownerReference set by controllerutil.SetControllerReference
+	// Cleanup behavior when DGDR is deleted:
+	// - Profiling Job: Automatically deleted via ownerReference (set by SyncResource)
+	// - Output ConfigMap: NOT deleted (no ownerReference) - contains valuable profiling data
+	// - Auto-created DGD: NOT deleted (no ownerReference) - may be serving traffic
 	//
-	// No manual cleanup needed!
+	// We use labels (LabelDGDRName) to track relationships without cascade delete.
+	// Users can manually clean up ConfigMaps and DGDs if needed using label selectors:
+	//   kubectl delete configmap -l dgdr.nvidia.com/name=<dgdr-name>
+	//   kubectl delete dynamographdeployment -l dgdr.nvidia.com/name=<dgdr-name>
+
+	logger.Info("Profiling job will be automatically deleted via ownerReference")
 	return nil
 }
 
@@ -1117,13 +1112,31 @@ func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manag
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
-		})). // Watch Jobs created by this controller
-		Owns(&nvidiacomv1alpha1.DynamoGraphDeployment{}, builder.WithPredicates(predicate.Funcs{
-			// ignore creation cause we don't want to be called again after we create the DGD
-			CreateFunc:  func(ce event.CreateEvent) bool { return false },
-			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
-			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
-			GenericFunc: func(ge event.GenericEvent) bool { return true },
-		})). // Watch DGDs created by this controller (via ownerReference)
+		})). // Watch Jobs created by this controller (via ownerReference)
+		Watches(
+			&nvidiacomv1alpha1.DynamoGraphDeployment{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
+				// Find DGDR by label instead of owner reference
+				dgd := obj.(*nvidiacomv1alpha1.DynamoGraphDeployment)
+				dgdrName, hasName := dgd.Labels[LabelDGDRName]
+				dgdrNamespace, hasNamespace := dgd.Labels[LabelDGDRNamespace]
+				if !hasName || !hasNamespace {
+					return nil
+				}
+				return []ctrl.Request{{
+					NamespacedName: types.NamespacedName{
+						Name:      dgdrName,
+						Namespace: dgdrNamespace,
+					},
+				}}
+			}),
+			builder.WithPredicates(predicate.Funcs{
+				// ignore creation cause we don't want to be called again after we create the DGD
+				CreateFunc:  func(ce event.CreateEvent) bool { return false },
+				DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+				UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
+				GenericFunc: func(ge event.GenericEvent) bool { return true },
+			}),
+		). // Watch DGDs created by this controller (via label)
 		Complete(r)
 }
