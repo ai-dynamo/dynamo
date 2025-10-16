@@ -256,7 +256,7 @@ async def run_profile(args):
                     base_url=base_url,
                 )
                 if aiperf_result is not None:
-                    ttft = aiperf_result["records"]["ttft"]["avg"]
+                    ttft = aiperf_result["time_to_first_token"]["avg"]
 
                 logger.info("Cleaning up deployment...")
                 await client.delete_deployment()
@@ -435,11 +435,9 @@ async def run_profile(args):
                             base_url=base_url,
                         )
                         if aiperf_result is not None:
-                            itl = aiperf_result["records"]["inter_token_latency"]["avg"]
+                            itl = aiperf_result["inter_token_latency"]["avg"]
                             thpt_per_gpu = (
-                                aiperf_result["records"]["output_token_throughput"][
-                                    "avg"
-                                ]
+                                aiperf_result["output_token_throughput"]["avg"]
                                 / num_gpus
                             )
 
