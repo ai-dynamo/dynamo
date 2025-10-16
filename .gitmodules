@@ -1,0 +1,3 @@
+[submodule "vllm"]
+    path = vllm
+    url = https://github.com/galletas1712/vllm.git
