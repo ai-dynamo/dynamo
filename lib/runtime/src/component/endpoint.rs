@@ -232,7 +232,7 @@ impl EndpointConfigBuilder {
             // Register this endpoint with the shared server
             http_server
                 .register_endpoint(
-                    subject.clone(),
+                    endpoint_name_for_task.clone(),
                     handler,
                     lease_id,
                     namespace_name_for_task.clone(),
@@ -243,7 +243,6 @@ impl EndpointConfigBuilder {
                 .await?;
 
             // Create a task that waits for cancellation and then unregisters
-            let subject_for_cleanup = subject.clone();
             let endpoint_name_for_cleanup = endpoint_name_for_task.clone();
             let http_server_for_cleanup = http_server.clone();
             let cancel_token_for_cleanup = cancel_token.clone();
@@ -252,7 +251,7 @@ impl EndpointConfigBuilder {
                 cancel_token_for_cleanup.cancelled().await;
 
                 tracing::debug!("Unregistering endpoint from shared HTTP server");
-                http_server_for_cleanup.unregister_endpoint(&subject_for_cleanup, &endpoint_name_for_cleanup).await;
+                http_server_for_cleanup.unregister_endpoint(&endpoint_name_for_cleanup, &endpoint_name_for_cleanup).await;
 
                 // Unregister from graceful shutdown tracker
                 if let Some(tracker) = tracker_clone {

@@ -1,9 +1,9 @@
 # Cargo configuration for sccache
 # This file configures Cargo to use sccache as a compiler wrapper for faster builds
 
-[build]
+# [build]
 # Use sccache as the rustc wrapper
-rustc-wrapper = "/home/ubuntu/.local/bin/sccache"
+# rustc-wrapper = "/usr/bin/sccache"
 
 # Optional: Configure linker for faster linking (if you have mold or lld installed)
 # rustflags = ["-C", "link-arg=-fuse-ld=mold"]

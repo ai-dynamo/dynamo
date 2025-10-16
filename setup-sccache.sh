@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-SCCACHE_BIN="$HOME/.local/bin/sccache"
+SCCACHE_BIN="/usr/bin/sccache"
 SCCACHE_CACHE_DIR="$HOME/.cache/sccache"
 SCCACHE_CACHE_SIZE="10G"
 
@@ -24,6 +24,7 @@ Commands:
     status          Show sccache server status
     env             Show environment variables to export
     help            Show this help message
+    install          Install sccache via apt and configure environment
 
 Environment Configuration:
     SCCACHE_DIR     Cache directory (default: $SCCACHE_CACHE_DIR)
@@ -63,7 +64,7 @@ setup_sccache() {
 # sccache configuration
 export SCCACHE_DIR="$HOME/.cache/sccache"
 export SCCACHE_CACHE_SIZE="10G"
-export RUSTC_WRAPPER="$HOME/.local/bin/sccache"
+export RUSTC_WRAPPER="/usr/bin/sccache"
 EOF
 
     # Export for current session
@@ -145,10 +146,17 @@ show_env() {
     echo "export PATH=\"\$HOME/.local/bin:\$PATH\""
     echo "export SCCACHE_DIR=\"$SCCACHE_CACHE_DIR\""
     echo "export SCCACHE_CACHE_SIZE=\"$SCCACHE_CACHE_SIZE\""
-    echo "export RUSTC_WRAPPER=\"$SCCACHE_BIN\""
+    echo "export RUSTC_WRAPPER=\"/usr/bin/sccache\""
     echo ""
     echo "# To apply these settings:"
     echo "# source <(./setup-sccache.sh env)"
+}
+
+install_sccache_apt() {
+    echo "Installing sccache via apt..."
+    apt-get update
+    apt-get install -y sccache
+    echo "✓ sccache installed"
 }
 
 main() {
@@ -176,6 +184,9 @@ main() {
             ;;
         help|--help|-h)
             usage
+            ;;
+        install)
+            install_sccache_apt
             ;;
         *)
             echo "Unknown command: $1"
