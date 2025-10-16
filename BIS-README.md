@@ -1,4 +1,8 @@
+DYN_REQUEST_PLANE=http DYN_HTTP_RPC_PORT=8084 DYN_HTTP_RPC_HOST=10.0.8.158  DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8085    python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --connector none
 
+DYN_REQUEST_PLANE=http python -m dynamo.frontend --http-port=8000
+
+# -------------
 
 DYN_REQUEST_PLANE=http python -m dynamo.frontend --http-port=8000
 

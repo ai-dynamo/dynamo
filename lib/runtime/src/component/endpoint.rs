@@ -143,8 +143,7 @@ impl EndpointConfigBuilder {
             // Build transport based on request plane mode
             let transport = if request_plane_mode.is_http() {
                 // For HTTP mode, construct the HTTP endpoint URL
-                let http_host =
-                    std::env::var("DYN_HTTP_RPC_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+                let http_host = crate::utils::get_http_rpc_host_from_env();
                 let http_port = std::env::var("DYN_HTTP_RPC_PORT")
                     .ok()
                     .and_then(|p| p.parse::<u16>().ok())
@@ -305,8 +304,7 @@ impl EndpointConfigBuilder {
 
         // Build transport for etcd registration based on request plane mode
         let transport = if request_plane_mode.is_http() {
-            let http_host =
-                std::env::var("DYN_HTTP_RPC_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+            let http_host = crate::utils::get_http_rpc_host_from_env();
             let http_port = std::env::var("DYN_HTTP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())

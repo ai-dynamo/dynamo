@@ -30,7 +30,6 @@
 //! The following environment variables control the HTTP request plane:
 //!
 //! - `DYN_REQUEST_PLANE`: Set to "http" to enable HTTP mode (default: "nats")
-//! - `DYN_HTTP_RPC_HOST`: HTTP server bind address (default: "0.0.0.0")
 //! - `DYN_HTTP_RPC_PORT`: HTTP server port (default: 8081)
 //! - `DYN_HTTP_RPC_ROOT_PATH`: HTTP RPC root path (default: "/v1/dynamo")
 //! - `DYN_HTTP_REQUEST_TIMEOUT`: HTTP request timeout in seconds (default: 5)
@@ -127,7 +126,7 @@ async fn server_app(runtime: Runtime) -> Result<()> {
     if mode.is_nats() {
         tracing::warn!("Running in NATS mode. Set DYN_REQUEST_PLANE=http to use HTTP mode.");
     } else {
-        let host = std::env::var("DYN_HTTP_RPC_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+        let host = dynamo_runtime::utils::get_http_rpc_host_from_env();
         let port = std::env::var("DYN_HTTP_RPC_PORT").unwrap_or_else(|_| "8081".to_string());
         let root_path =
             std::env::var("DYN_HTTP_RPC_ROOT_PATH").unwrap_or_else(|_| "/v1/dynamo".to_string());

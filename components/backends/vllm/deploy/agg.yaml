@@ -13,7 +13,21 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidian/dynamo-dev/biswa:v0.1.0.dev.fcc909d26-vllm-runtime
+          command:
+          - /bin/sh -c "sleep infinity"
+          livenessProbe:
+            exec:
+              command:
+                - /bin/true
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - /bin/true
+            initialDelaySeconds: 2
+            periodSeconds: 10
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: vllm-agg
@@ -24,12 +38,19 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidian/dynamo-dev/biswa:v0.1.0.dev.fcc909d26-vllm-runtime
           workingDir: /workspace/components/backends/vllm
           command:
-          - python3
-          - -m
-          - dynamo.vllm
-          args:
-            - --model
-            - Qwen/Qwen3-0.6B
+          - /bin/sh -c "sleep infinity"
+          livenessProbe:
+            exec:
+              command:
+                - /bin/true
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - /bin/true
+            initialDelaySeconds: 2
+            periodSeconds: 10

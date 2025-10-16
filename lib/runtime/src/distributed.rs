@@ -266,8 +266,7 @@ impl DistributedRuntime {
     pub async fn http_server(&self) -> Result<Arc<crate::pipeline::network::ingress::http_endpoint::SharedHttpServer>> {
         use crate::pipeline::network::ingress::http_endpoint::SharedHttpServer;
 
-        let http_host = std::env::var("DYN_HTTP_RPC_HOST")
-            .unwrap_or_else(|_| "0.0.0.0".to_string());
+        let http_host = crate::utils::get_http_rpc_host_from_env();
         let http_port = std::env::var("DYN_HTTP_RPC_PORT")
             .ok()
             .and_then(|p| p.parse::<u16>().ok())
