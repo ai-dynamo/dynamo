@@ -404,7 +404,7 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 ### Performance Testing with AIPerf
 
-The Dynamo container includes [AIPerf](https://github.com/ai-dynamo/aiperf/blob/main/README.md), NVIDIA's tool for benchmarking generative AI models. This tool helps measure throughput, latency, and other performance metrics for your deployment.
+The Dynamo container includes [AIPerf](https://github.com/ai-dynamo/aiperf/tree/main?tab=readme-ov-file#aiperf), NVIDIA's tool for benchmarking generative AI models. This tool helps measure throughput, latency, and other performance metrics for your deployment.
 
 **Run the following benchmark from inside the container** (after completing the deployment steps above):
 

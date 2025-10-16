@@ -227,7 +227,7 @@ aiperf profile \
   --input-file payload:/workspace/rr-5-45_i3000o300.jsonl \ # path to the generated load dataset \
   --fixed-schedule True \
   --goodput time_to_first_token:200 inter_token_latency:10 \
-  -v \
+  -v
 ```
 
 > [!NOTE]
