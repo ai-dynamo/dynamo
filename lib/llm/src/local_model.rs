@@ -211,11 +211,26 @@ impl LocalModelBuilder {
             .map(RequestTemplate::load)
             .transpose()?;
 
+        // Override runtime configs with mocker engine args (applies to both paths)
+        if self.is_mocker
+            && let Some(path) = &self.extra_engine_args
+        {
+            let mocker_engine_args = MockEngineArgs::from_json_file(path)
+                .expect("Failed to load mocker engine args for runtime config overriding.");
+            self.kv_cache_block_size = mocker_engine_args.block_size as u32;
+            self.runtime_config.total_kv_blocks = Some(mocker_engine_args.num_gpu_blocks as u64);
+            self.runtime_config.max_num_seqs = mocker_engine_args.max_num_seqs.map(|v| v as u64);
+            self.runtime_config.max_num_batched_tokens =
+                mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
+            self.runtime_config.data_parallel_size = mocker_engine_args.dp_size;
+        }
+
         // frontend and echo engine don't need a path.
         if self.model_path.is_none() {
             let mut card = ModelDeploymentCard::with_name_only(
                 self.model_name.as_deref().unwrap_or(DEFAULT_NAME),
             );
+            card.kv_cache_block_size = self.kv_cache_block_size;
             card.migration_limit = self.migration_limit;
             card.user_data = self.user_data.take();
             card.runtime_config = self.runtime_config.clone();
@@ -264,18 +279,6 @@ impl LocalModelBuilder {
         // Override max number of tokens in context. We usually only do this to limit kv cache allocation.
         if let Some(context_length) = self.context_length {
             card.context_length = context_length;
-        }
-
-        // Override runtime configs with mocker engine args
-        if self.is_mocker
-            && let Some(path) = &self.extra_engine_args
-        {
-            let mocker_engine_args = MockEngineArgs::from_json_file(path)
-                .expect("Failed to load mocker engine args for runtime config overriding.");
-            self.runtime_config.total_kv_blocks = Some(mocker_engine_args.num_gpu_blocks as u64);
-            self.runtime_config.max_num_seqs = mocker_engine_args.max_num_seqs.map(|v| v as u64);
-            self.runtime_config.max_num_batched_tokens =
-                mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
         }
 
         card.migration_limit = self.migration_limit;
