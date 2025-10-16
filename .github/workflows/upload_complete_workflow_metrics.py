@@ -35,7 +35,8 @@ FIELD_USER_ALIAS = "s_user_alias"
 FIELD_REPO = "s_repo"
 FIELD_WORKFLOW_NAME = "s_workflow_name"
 FIELD_GITHUB_EVENT = "s_github_event"
-FIELD_BRANCH = "s_branch"
+FIELD_BRANCH = "s_branch"  # PR target branch (e.g., "pull-request/3654") or main branch
+FIELD_SOURCE_BRANCH = "s_source_branch"  # Source branch name (e.g., "user/feature-branch")
 FIELD_PR_ID = "s_pr_id"  # Pull request ID as string ("N/A" if not a PR)
 FIELD_STATUS = "s_status"
 FIELD_STATUS_NUMBER = "l_status_number"
@@ -408,8 +409,47 @@ class WorkflowMetricsUploader:
         db_data[FIELD_WORKFLOW_NAME] = self.workflow_name
         db_data[FIELD_GITHUB_EVENT] = self.event_name
         
-        # Always use branch from GitHub API (authoritative source)
-        db_data[FIELD_BRANCH] = workflow_data.get("head_branch", "unknown")
+        # Populate branch fields based on event type
+        event_type = workflow_data.get("event", "")
+        head_branch = workflow_data.get("head_branch", "unknown")
+        pull_requests = workflow_data.get("pull_requests", [])
+        
+        if event_type == "pull_request":
+            # For pull_request events:
+            # - FIELD_BRANCH = PR target branch (pull-request/3654)
+            # - FIELD_SOURCE_BRANCH = contributor's source branch
+            if pull_requests and len(pull_requests) > 0:
+                pr_data = pull_requests[0]
+                pr_number = pr_data.get("number")
+                if pr_number:
+                    # Target branch (for consistent querying)
+                    db_data[FIELD_BRANCH] = f"pull-request/{pr_number}"
+                    # Source branch (contributor's branch)
+                    db_data[FIELD_SOURCE_BRANCH] = head_branch
+                    print(f"   ℹ️  PR branch mapping: target=pull-request/{pr_number}, source={head_branch}")
+                else:
+                    # Fallback if PR number not available
+                    db_data[FIELD_BRANCH] = head_branch
+                    db_data[FIELD_SOURCE_BRANCH] = head_branch
+            else:
+                db_data[FIELD_BRANCH] = head_branch
+                db_data[FIELD_SOURCE_BRANCH] = head_branch
+        else:
+            # For push events on PR branches, head_branch is already "pull-request/3654"
+            db_data[FIELD_BRANCH] = head_branch
+            
+            # Try to extract source branch from PR data if available
+            if pull_requests and len(pull_requests) > 0:
+                pr_data = pull_requests[0]
+                # PR head.ref contains the source branch name
+                pr_head = pr_data.get("head", {})
+                source_branch = pr_head.get("ref", head_branch)
+                db_data[FIELD_SOURCE_BRANCH] = source_branch
+                if source_branch != head_branch:
+                    print(f"   ℹ️  Source branch extracted: {source_branch}")
+            else:
+                # Not a PR, both fields have same value
+                db_data[FIELD_SOURCE_BRANCH] = head_branch
             
         db_data[FIELD_WORKFLOW_ID] = str(self.run_id)
         db_data[FIELD_COMMIT_SHA] = self.sha
