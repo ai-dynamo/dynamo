@@ -70,6 +70,10 @@ spec:
             - decode
             - --disaggregation-transfer-backend
             - nixl
+            - --disaggregation-bootstrap-port
+            - "12345"
+            - --host
+            - "0.0.0.0"
     prefill:
       dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
@@ -102,3 +106,7 @@ spec:
             - prefill
             - --disaggregation-transfer-backend
             - nixl
+            - --disaggregation-bootstrap-port
+            - "12345"
+            - --host
+            - "0.0.0.0"

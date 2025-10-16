@@ -67,6 +67,7 @@ spec:
               --disaggregation-transfer-backend nixl
               --disaggregation-bootstrap-port 30001
               --mem-fraction-static 0.8
+              --host 0.0.0.0
     prefill:
       dynamoNamespace: sgl-dsr1-16gpu
       componentType: worker
@@ -108,3 +109,4 @@ spec:
               --disaggregation-transfer-backend nixl
               --disaggregation-bootstrap-port 30001
               --mem-fraction-static 0.8
+              --host 0.0.0.0
