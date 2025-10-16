@@ -17,7 +17,6 @@ import asyncio
 import logging
 import math
 import os
-import time
 
 import numpy as np
 import yaml
@@ -61,44 +60,6 @@ formatter = logging.Formatter(
 )
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
-
-
-async def wait_for_model_ready(client, timeout: int = 1800):
-    """
-    Wait for the model to be fully loaded and ready to serve requests.
-
-    Args:
-        client: DynamoDeploymentClient instance
-        timeout: Maximum time to wait in seconds (default: 30 minutes)
-
-    Raises:
-        TimeoutError: If model doesn't become ready within timeout
-    """
-    logger.info("Waiting for model to be ready to serve requests...")
-    health_check_start = time.time()
-    health_check_interval = 30  # Check every 30 seconds
-    model_ready = False
-
-    while (time.time() - health_check_start) < timeout:
-        try:
-            # Try to send a test request
-            await client.check_chat_completion(timeout_s=60.0)
-            logger.info("Model is ready to serve requests")
-            model_ready = True
-            break
-        except Exception as e:
-            elapsed = time.time() - health_check_start
-            logger.info(
-                f"Model not ready yet (elapsed: {elapsed:.0f}s, error: {str(e)[:100]})"
-            )
-            if (time.time() - health_check_start) < timeout:
-                await asyncio.sleep(health_check_interval)
-
-    if not model_ready:
-        raise TimeoutError(
-            f"Model failed to become ready to serve requests within {timeout}s. "
-            "The deployment pods may be running, but the model is still loading/compiling."
-        )
 
 
 async def run_profile(args):
@@ -275,9 +236,6 @@ async def run_profile(args):
                 await client.wait_for_deployment_ready()
                 logger.info("Deployment is ready")
 
-                # Wait for model to be fully loaded and serving requests
-                await wait_for_model_ready(client)
-
                 logger.info("Getting deployment logs...")
                 await client.get_deployment_logs()
                 logger.info(
@@ -413,9 +371,6 @@ async def run_profile(args):
                 logger.info("Waiting for deployment to be ready...")
                 await client.wait_for_deployment_ready()
                 logger.info("Deployment is ready")
-
-                # Wait for model to be fully loaded and serving requests
-                await wait_for_model_ready(client)
 
                 logger.info("Getting deployment logs...")
                 await client.get_deployment_logs()
@@ -644,9 +599,6 @@ async def run_profile(args):
                 await client.wait_for_deployment_ready()
                 logger.info("Deployment is ready")
 
-                # Wait for model to be fully loaded and serving requests
-                await wait_for_model_ready(client)
-
                 skip_profile = False
             except TimeoutError:
                 logger.error(
@@ -730,9 +682,6 @@ async def run_profile(args):
             logger.info("Waiting for deployment to be ready...")
             await client.wait_for_deployment_ready()
             logger.info("Deployment is ready")
-
-            # Wait for model to be fully loaded and serving requests
-            await wait_for_model_ready(client)
 
             logger.info("Getting deployment logs...")
             await client.get_deployment_logs()
