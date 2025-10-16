@@ -71,7 +71,7 @@ fn cuda_memcpy_fn_ptr(strategy: &TransferStrategy) -> Result<CudaMemcpyFnPtr, Tr
 }
 
 /// Collect K/V cache addresses from source and destination blocks
-fn collect_kv_addresses<Source, Destination>(
+pub fn collect_kv_addresses<Source, Destination>(
     sources: &[Source],
     destinations: &[Destination],
     num_layers: usize,
@@ -180,7 +180,7 @@ unsafe fn launch_copy_kernel_direct(
 }
 
 #[derive(Clone, Copy, Debug)]
-struct CachedBlockDimensions {
+pub struct CachedBlockDimensions {
     num_layers: usize,
     num_outer_dims: usize,
     layer_size: usize,
@@ -188,7 +188,7 @@ struct CachedBlockDimensions {
 
 static BLOCK_DIMENSIONS_CACHE: OnceLock<CachedBlockDimensions> = OnceLock::new();
 
-fn get_cached_block_dimensions<T: BlockDataProvider>(
+pub fn get_cached_block_dimensions<T: BlockDataProvider>(
     block: &T,
 ) -> Result<CachedBlockDimensions, TransferError> {
     Ok(*BLOCK_DIMENSIONS_CACHE
@@ -212,6 +212,24 @@ fn calculate_block_dimensions_from_layout<T: BlockDataProvider>(
     })
 }
 
+pub fn get_address_pairs<'a, Source, Destination>(
+    sources: &'a [Source],
+    destinations: &'a mut [Destination],
+) -> Result<(Vec<u64>, Vec<u64>, CachedBlockDimensions), TransferError>
+where
+    Source: BlockDataProvider,
+    Destination: BlockDataProviderMut,
+{
+    // Get cached dimensions (calculated once per program lifetime!)
+    let dims = get_cached_block_dimensions(&sources[0])?;
+
+    // Use cached dimensions
+    let (src_addresses, dst_addresses) =
+        collect_kv_addresses(sources, destinations, dims.num_layers, dims.num_outer_dims)?;
+
+    Ok((src_addresses, dst_addresses, dims))
+}
+
 pub fn copy_blocks_with_customized_kernel<'a, Source, Destination>(
     sources: &'a [Source],
     destinations: &'a mut [Destination],
@@ -223,12 +241,8 @@ where
     Destination: BlockDataProviderMut,
 {
     let _context_guard = stream.context().bind_to_thread();
-    // Get cached dimensions (calculated once per program lifetime!)
-    let dims = get_cached_block_dimensions(&sources[0])?;
 
-    // Use cached dimensions
-    let (src_addresses, dst_addresses) =
-        collect_kv_addresses(sources, destinations, dims.num_layers, dims.num_outer_dims)?;
+    let (src_addresses, dst_addresses, dims) = get_address_pairs(sources, destinations)?;
 
     tracing::debug!(
         "Using vectorized_copy for {} blocks [{}L×{}O×{}B], {} address pairs",
@@ -239,6 +253,16 @@ where
         src_addresses.len()
     );
 
+    copy_pairs_with_customized_kernel(src_addresses, dst_addresses, dims, stream, ctx)
+}
+
+pub fn copy_pairs_with_customized_kernel(
+    src_addresses: Vec<u64>,
+    dst_addresses: Vec<u64>,
+    dims: CachedBlockDimensions,
+    stream: &CudaStream,
+    ctx: &crate::block_manager::block::transfer::TransferContext,
+) -> Result<Option<(Vec<u64>, usize)>, TransferError> {
     // Use pool-based approach with TransferResources
     let resources = crate::block_manager::block::transfer::context::TransferResources::acquire_for_kernel_launch(
         ctx,

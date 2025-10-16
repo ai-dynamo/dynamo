@@ -147,10 +147,14 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
 
         let pool_config = PoolConfig {
             enable_pool: true,
+            enable_temp_device_buffer_pool: false,
             max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
             max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
             num_outer_components: config.model_config.outer_dim,
             num_layers: config.model_config.num_layers,
+            page_size: config.model_config.page_size,
+            inner_dim: config.model_config.inner_dim,
+            dtype_width_bytes: config.model_config.dtype_width_bytes,
         };
 
         // We want cuda offloads to happen in parallel with host onboards, so we need to use a different stream.
@@ -158,7 +162,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             config.nixl_agent.clone(),
             cuda_ctx.new_stream()?,
             config.async_rt_handle.clone(),
-            Some(pool_config),
+            Some(pool_config.clone()),
         ));
 
         // Device -> Host offload
@@ -196,7 +200,10 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             config.nixl_agent.clone(),
             cuda_ctx.new_stream()?,
             config.async_rt_handle.clone(),
-            None,
+            Some(PoolConfig {
+                enable_temp_device_buffer_pool: true,
+                ..pool_config
+            }),
         ));
 
         // Host -> Disk offload
