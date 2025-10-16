@@ -100,7 +100,7 @@ const CONFIG_PATH_ENV: &str = "DYN_LOGGING_CONFIG_PATH";
 const OTEL_EXPORT_ENABLED_ENV: &str = "OTEL_EXPORT_ENABLED";
 
 /// OTEL exporter endpoint
-const OTEL_EXPORT_ENDPOINT_ENV: &str = "OTEL_EXPORT_ENDPOINT";
+const OTEL_EXPORT_ENDPOINT_ENV: &str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
 
 /// Default OTLP endpoint
 const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
@@ -744,7 +744,6 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     if jsonl_logging_enabled() {
         let l = fmt::layer()
             .with_ansi(false)
-            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
             .event_format(CustomJsonFormatter::new())
             .with_writer(std::io::stderr)
             .with_filter(fmt_filter_layer);
