@@ -296,22 +296,49 @@ def parse_aiperf_client_results(log_dir: str) -> Dict[str, Any]:
                 # AI-Perf format has "records" dictionary at the top level
                 records = client_metrics.get("records", {})
 
-                # Extract request count (this is the total requests made)
+                # Extract successful request count
                 request_count_record = records.get("request_count", {})
-                request_count = (
+                successful_count = (
                     int(request_count_record.get("avg", 0))
                     if request_count_record
                     else 0
                 )
 
+                # Extract error request count
+                error_request_count_record = records.get("error_request_count", {})
+                error_request_count = (
+                    int(error_request_count_record.get("avg", 0))
+                    if error_request_count_record
+                    else 0
+                )
+
+                # Calculate total requests: successful + errors
+                # Note: request_count appears to only track successful requests when errors are present
+                request_count = successful_count + error_request_count
+
+                # Fall back to input config if no requests were recorded
+                if request_count == 0 and "input_config" in client_metrics:
+                    loadgen_config = client_metrics.get("input_config", {}).get(
+                        "loadgen", {}
+                    )
+                    request_count = loadgen_config.get("request_count", 0)
+
                 # Check for errors in error_summary
                 error_summary = client_metrics.get("error_summary", [])
-                error_count = len(error_summary)
+                # Sum up actual error counts from each error type
+                error_count = sum(error.get("count", 0) for error in error_summary)
 
                 # Check if test was cancelled
                 was_cancelled = client_metrics.get("was_cancelled", False)
                 if was_cancelled:
                     error_count = request_count  # Mark all as failed if cancelled
+
+                # Validate data consistency
+                if request_count < error_count:
+                    logging.warning(
+                        f"Data inconsistency in {item}: error_count ({error_count}) > "
+                        f"total_request_count ({request_count}). This may indicate incomplete data from aiperf."
+                    )
 
                 all_metrics["total_requests"] += request_count
                 all_metrics["successful_requests"] += request_count - error_count
