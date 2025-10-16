@@ -135,9 +135,9 @@ impl Default for LoggingConfig {
                 ("tonic".to_string(), "error".to_string()),
                 ("mistralrs_core".to_string(), "error".to_string()),
                 ("hf_hub".to_string(), "error".to_string()),
-                ("opentelemetry".to_string(), "error".to_string()),
-                ("opentelemetry-otlp".to_string(), "error".to_string()),
-                ("opentelemetry_sdk".to_string(), "error".to_string()),
+                // ("opentelemetry".to_string(), "error".to_string()),
+                // ("opentelemetry-otlp".to_string(), "error".to_string()),
+                // ("opentelemetry_sdk".to_string(), "error".to_string()),
             ]),
         }
     }
@@ -751,52 +751,46 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
 
         // Create OpenTelemetry tracer - conditionally export to OTLP based on env var
         let service_name = get_service_name();
+        let otlp_enabled = otlp_exporter_enabled();
 
         // Build tracer provider - with or without OTLP export
-        let tracer_provider = if otlp_exporter_enabled() {
+        let (tracer_provider, endpoint_opt) = if otlp_enabled {
             // Export enabled: create OTLP exporter with batch processor
             let endpoint = std::env::var(OTEL_EXPORT_ENDPOINT_ENV)
                 .unwrap_or_else(|_| DEFAULT_OTLP_ENDPOINT.to_string());
 
-            tracing::info!(
-                "OpenTelemetry OTLP export enabled, endpoint: {}, service: {}",
-                endpoint,
-                service_name
-            );
-
             // Initialize OTLP exporter using gRPC (Tonic)
             let otlp_exporter = opentelemetry_otlp::SpanExporter::builder()
                 .with_tonic()
-                .with_endpoint(endpoint)
+                .with_endpoint(&endpoint)
                 .build()?;
 
             // Create tracer provider with batch exporter and service name
-            opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
                 .with_batch_exporter(otlp_exporter)
                 .with_resource(
                     opentelemetry_sdk::Resource::builder_empty()
                         .with_service_name(service_name.clone())
                         .build(),
                 )
-                .build()
+                .build();
+
+            (provider, Some(endpoint))
         } else {
             // No export - traces generated locally only (for logging/trace IDs)
-            tracing::info!(
-                "OpenTelemetry OTLP export disabled, traces local only, service: {}",
-                service_name
-            );
-
-            opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
                 .with_resource(
                     opentelemetry_sdk::Resource::builder_empty()
                         .with_service_name(service_name.clone())
                         .build(),
                 )
-                .build()
+                .build();
+
+            (provider, None)
         };
 
         // Get a tracer from the provider
-        let tracer = tracer_provider.tracer(service_name);
+        let tracer = tracer_provider.tracer(service_name.clone());
 
         tracing_subscriber::registry()
             .with(
@@ -807,6 +801,20 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
             .with(l)
             .init();
+
+        // Log initialization status after subscriber is ready
+        if let Some(endpoint) = endpoint_opt {
+            tracing::info!(
+                endpoint = %endpoint,
+                service = %service_name,
+                "OpenTelemetry OTLP export enabled"
+            );
+        } else {
+            tracing::info!(
+                service = %service_name,
+                "OpenTelemetry OTLP export disabled, traces local only"
+            );
+        }
     } else {
         let l = fmt::layer()
             .with_ansi(!disable_ansi_logging())
