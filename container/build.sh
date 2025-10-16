@@ -331,6 +331,7 @@ get_options() {
             ;;
 
         --vllm-max-jobs)
+            # Set MAX_JOBS for vLLM compilation (only used by Dockerfile.vllm)
             if [ "$2" ]; then
                 MAX_JOBS=$2
                 shift
@@ -480,6 +481,7 @@ show_help() {
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
+    echo "  [--vllm-max-jobs number of parallel jobs for compilation (only used by vLLM framework)]"
     echo ""
     echo "  Note: When using --use-sccache, AWS credentials must be set:"
     echo "        export AWS_ACCESS_KEY_ID=your_access_key"
@@ -588,16 +590,9 @@ if [[ $TARGET == "local-dev" ]]; then
     TARGET_STR="--target dev"
 fi
 
-# DEPRECATION: The following build args are not currently used by any Dockerfile and will be removed soon:
-#   - FRAMEWORK
-#   - VLLM_FRAMEWORK (or TRTLLM_FRAMEWORK, SGLANG_FRAMEWORK, etc.)
-#   - VERSION
-#   - PYTHON_PACKAGE_VERSION
-#   - HF_TOKEN
-
 # BUILD DEV IMAGE
 
-BUILD_ARGS+=" --build-arg BASE_IMAGE=$BASE_IMAGE --build-arg BASE_IMAGE_TAG=$BASE_IMAGE_TAG --build-arg FRAMEWORK=$FRAMEWORK --build-arg ${FRAMEWORK}_FRAMEWORK=1 --build-arg VERSION=$VERSION --build-arg PYTHON_PACKAGE_VERSION=$PYTHON_PACKAGE_VERSION"
+BUILD_ARGS+=" --build-arg BASE_IMAGE=$BASE_IMAGE --build-arg BASE_IMAGE_TAG=$BASE_IMAGE_TAG"
 
 if [ -n "${GITHUB_TOKEN}" ]; then
     BUILD_ARGS+=" --build-arg GITHUB_TOKEN=${GITHUB_TOKEN} "
@@ -699,10 +694,8 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
     fi
 fi
 
-if [ -n "${HF_TOKEN}" ]; then
-    BUILD_ARGS+=" --build-arg HF_TOKEN=${HF_TOKEN} "
-fi
-
+# ENABLE_KVBM: Used in base Dockerfile for block-manager feature.
+#              Declared but not currently used in Dockerfile.{vllm,trtllm}.
 if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
     echo "Forcing enable_kvbm to true in ${FRAMEWORK} image build"
     ENABLE_KVBM=true
@@ -713,10 +706,13 @@ if [  ! -z ${ENABLE_KVBM} ]; then
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
 fi
 
+# NIXL_UCX_REF: Used in base Dockerfile only.
+#               Passed to framework Dockerfile.{vllm,sglang,...} where it's NOT used.
 if [ -n "${NIXL_UCX_REF}" ]; then
     BUILD_ARGS+=" --build-arg NIXL_UCX_REF=${NIXL_UCX_REF} "
 fi
 
+# MAX_JOBS is only used by Dockerfile.vllm
 if [ -n "${MAX_JOBS}" ]; then
     BUILD_ARGS+=" --build-arg MAX_JOBS=${MAX_JOBS} "
 fi
@@ -752,27 +748,11 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         echo "======================================"
         echo "Starting Build 1: Base Image"
         echo "======================================"
-        # Build 1 (container/Dockerfile) does NOT use (will be removed soon):
-        #   - FRAMEWORK
-        #   - VLLM_FRAMEWORK (or TRTLLM_FRAMEWORK, SGLANG_FRAMEWORK, etc.)
-        #   - VERSION
-        #   - PYTHON_PACKAGE_VERSION
-        #   - HF_TOKEN
-        #   - MAX_JOBS
         $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
         # Start framework build
         echo "======================================"
         echo "Starting Build 2: Framework Image"
         echo "======================================"
-        # Build 2 (container/Dockerfile.vllm or .trtllm, .sglang) does NOT use (will be removed soon):
-        #   - FRAMEWORK
-        #   - VLLM_FRAMEWORK (or TRTLLM_FRAMEWORK, SGLANG_FRAMEWORK, etc.)
-        #   - VERSION
-        #   - PYTHON_PACKAGE_VERSION
-        #   - HF_TOKEN
-        #   - NIXL_REF
-        #   - NIXL_UCX_REF
-        #   - ENABLE_KVBM
         BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
         $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
     else
