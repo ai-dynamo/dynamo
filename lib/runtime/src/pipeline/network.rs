@@ -8,6 +8,7 @@ pub mod egress;
 pub mod ingress;
 pub mod request_plane;
 pub mod tcp;
+pub mod transport_registry;
 
 use crate::SystemHealth;
 use std::sync::{Arc, OnceLock};

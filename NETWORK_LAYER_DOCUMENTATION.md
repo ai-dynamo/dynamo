@@ -304,7 +304,7 @@ DYN_REQUEST_PLANE_MODE=http    # Use HTTP/2 transport
 ### HTTP Configuration
 ```bash
 DYN_HTTP_REQUEST_TIMEOUT=5     # HTTP request timeout (seconds)
-DYN_HTTP_RPC_ROOT_PATH=/v1/dynamo  # HTTP endpoint root path
+DYN_HTTP_RPC_ROOT_PATH=/v1/rpc  # HTTP endpoint root path
 ```
 
 ### TCP Configuration

@@ -149,7 +149,7 @@ impl EndpointConfigBuilder {
                     .and_then(|p| p.parse::<u16>().ok())
                     .unwrap_or(8081);
                 let rpc_root = std::env::var("DYN_HTTP_RPC_ROOT_PATH")
-                    .unwrap_or_else(|_| "/v1/dynamo".to_string());
+                    .unwrap_or_else(|_| "/v1/rpc".to_string());
 
                 let http_endpoint =
                     format!("http://{}:{}{}/{}", http_host, http_port, rpc_root, subject);
@@ -304,9 +304,9 @@ impl EndpointConfigBuilder {
             let http_port = std::env::var("DYN_HTTP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(8081);
+                .unwrap_or(8080);
             let rpc_root = std::env::var("DYN_HTTP_RPC_ROOT_PATH")
-                .unwrap_or_else(|_| "/v1/dynamo".to_string());
+                .unwrap_or_else(|_| "/v1/rpc".to_string());
 
             let http_endpoint =
                 format!("http://{}:{}{}/{}", http_host, http_port, rpc_root, subject);

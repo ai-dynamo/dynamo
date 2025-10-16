@@ -17,7 +17,7 @@ Successfully implemented an HTTP/2-based alternative to NATS for the request pla
 
 3. **`lib/runtime/src/pipeline/network/ingress/http_endpoint.rs`**
    - Axum-based HTTP/2 server endpoint
-   - Handles POST requests at `/v1/dynamo/{endpoint}`
+   - Handles POST requests at `/v1/rpc/{endpoint}`
    - Returns 202 Accepted immediately, processes requests asynchronously
    - Extracts W3C TraceContext headers for distributed tracing
 
@@ -58,7 +58,7 @@ Successfully implemented an HTTP/2-based alternative to NATS for the request pla
 │                                                               │
 │  ┌────────┐    HTTP POST      ┌────────┐                    │
 │  │ Client ├──────────────────>│ Worker │                    │
-│  │ Router │   /v1/dynamo/...  │Handler │                    │
+│  │ Router │   /v1/rpc/...  │Handler │                    │
 │  └───┬────┘                   └───┬────┘                    │
 │      │                            │                          │
 │      │  ← 202 Accepted            │                          │
@@ -109,8 +109,8 @@ DYN_HTTP_RPC_HOST=0.0.0.0
 # HTTP server port (default: 8081)
 DYN_HTTP_RPC_PORT=8081
 
-# HTTP RPC root path (default: /v1/dynamo)
-DYN_HTTP_RPC_ROOT_PATH=/v1/dynamo
+# HTTP RPC root path (default: /v1/rpc)
+DYN_HTTP_RPC_ROOT_PATH=/v1/rpc
 
 # HTTP request timeout in seconds (default: 5)
 DYN_HTTP_REQUEST_TIMEOUT=10

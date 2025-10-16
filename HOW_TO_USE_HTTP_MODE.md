@@ -66,7 +66,7 @@ services:
       - DYN_REQUEST_PLANE=http
       - DYN_HTTP_RPC_HOST=0.0.0.0
       - DYN_HTTP_RPC_PORT=8081
-      - DYN_HTTP_RPC_ROOT_PATH=/v1/dynamo
+      - DYN_HTTP_RPC_ROOT_PATH=/v1/rpc
     ports:
       - "8081:8081"  # HTTP RPC port
       - "9000:9000"  # TCP streaming port (if needed)
@@ -91,7 +91,7 @@ data:
   DYN_REQUEST_PLANE: "http"
   DYN_HTTP_RPC_HOST: "0.0.0.0"
   DYN_HTTP_RPC_PORT: "8081"
-  DYN_HTTP_RPC_ROOT_PATH: "/v1/dynamo"
+  DYN_HTTP_RPC_ROOT_PATH: "/v1/rpc"
 
 ---
 apiVersion: apps/v1
@@ -167,7 +167,7 @@ DYN_REQUEST_PLANE=http python -m dynamo.backend.trtllm
 | `DYN_REQUEST_PLANE` | `nats` | Request plane mode: `nats` or `http` |
 | `DYN_HTTP_RPC_HOST` | `0.0.0.0` | HTTP server bind address |
 | `DYN_HTTP_RPC_PORT` | `8081` | HTTP server port |
-| `DYN_HTTP_RPC_ROOT_PATH` | `/v1/dynamo` | API path prefix |
+| `DYN_HTTP_RPC_ROOT_PATH` | `/v1/rpc` | API path prefix |
 | `DYN_HTTP_REQUEST_TIMEOUT` | `5` | HTTP request timeout (seconds) |
 
 ### Port Requirements
@@ -190,7 +190,7 @@ DYN_REQUEST_PLANE=http python -m dynamo.backend.trtllm
 
 ```bash
 # Check HTTP endpoint
-curl -X POST http://localhost:8081/v1/dynamo/health
+curl -X POST http://localhost:8081/v1/rpc/health
 # Or
 lsof -i :8081
 ```
@@ -211,7 +211,7 @@ You should see HTTP endpoint info in the transport field:
 {
   "transport": {
     "http_tcp": {
-      "http_endpoint": "http://0.0.0.0:8081/v1/dynamo/namespace.default.component.backend.endpoint.generate.instance.0",
+      "http_endpoint": "http://0.0.0.0:8081/v1/rpc/namespace.default.component.backend.endpoint.generate.instance.0",
       "tcp_endpoint": "0.0.0.0:9000"
     }
   }
@@ -245,7 +245,7 @@ upstream dynamo_backends {
 server {
     listen 80;
 
-    location /v1/dynamo/ {
+    location /v1/rpc/ {
         proxy_pass http://dynamo_backends;
         proxy_http_version 1.1;
 
@@ -284,7 +284,7 @@ static_resources:
               domains: ["*"]
               routes:
               - match:
-                  prefix: "/v1/dynamo/"
+                  prefix: "/v1/rpc/"
                 route:
                   cluster: dynamo_backends
           http_filters:

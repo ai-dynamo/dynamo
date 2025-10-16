@@ -55,7 +55,7 @@ The HTTP endpoint accepts POST requests with TwoPartCodec-encoded payloads:
 ```
 INFO http_request_plane_demo: Request plane mode: http
 INFO http_request_plane_demo: ✓ Running in HTTP/2 mode
-INFO http_request_plane_demo: HTTP RPC endpoint: http://0.0.0.0:8081/v1/dynamo
+INFO http_request_plane_demo: HTTP RPC endpoint: http://0.0.0.0:8081/v1/rpc
 
 📋 To test the HTTP endpoint:
    Run the client: cargo run --example http_request_plane_demo -- client
@@ -63,7 +63,7 @@ INFO http_request_plane_demo: HTTP RPC endpoint: http://0.0.0.0:8081/v1/dynamo
    Note: Direct curl testing requires encoding the request with TwoPartCodec,
    which includes control headers + request payload. Use the client instead.
 
-INFO dynamo_runtime::pipeline::network::ingress::http_endpoint: Starting HTTP endpoint server on 0.0.0.0:8081 at path /v1/dynamo/:endpoint
+INFO dynamo_runtime::pipeline::network::ingress::http_endpoint: Starting HTTP endpoint server on 0.0.0.0:8081 at path /v1/rpc/:endpoint
 ```
 
 ### Client Output
@@ -103,8 +103,8 @@ export DYN_HTTP_RPC_HOST=0.0.0.0
 # HTTP server port (default: 8081)
 export DYN_HTTP_RPC_PORT=8081
 
-# HTTP RPC root path (default: /v1/dynamo)
-export DYN_HTTP_RPC_ROOT_PATH=/v1/dynamo
+# HTTP RPC root path (default: /v1/rpc)
+export DYN_HTTP_RPC_ROOT_PATH=/v1/rpc
 
 # HTTP request timeout in seconds (default: 5)
 export DYN_HTTP_REQUEST_TIMEOUT=10

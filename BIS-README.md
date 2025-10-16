@@ -33,7 +33,7 @@ v1/instances/dynamo/backend/generate/694d99eabb918920
   "instance_id": 7587890180637428000,
   "transport": {
     "http_tcp": {
-      "http_endpoint": "http://0.0.0.0:8084/v1/dynamo/dynamo_backend.generate-694d99eabb918920",
+      "http_endpoint": "http://0.0.0.0:8084/v1/rpc/dynamo_backend.generate-694d99eabb918920",
       "tcp_endpoint": "0.0.0.0:8084"
     }
   }

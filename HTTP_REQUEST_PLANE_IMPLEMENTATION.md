@@ -36,7 +36,7 @@ let mode = RequestPlaneMode::from_env();  // reads DYN_REQUEST_PLANE
 - `DYN_REQUEST_PLANE`: `nats` (default) or `http`
 - `DYN_HTTP_RPC_HOST`: Bind address (default: `0.0.0.0`)
 - `DYN_HTTP_RPC_PORT`: Bind port (default: `8081`)
-- `DYN_HTTP_RPC_ROOT_PATH`: API path prefix (default: `/v1/dynamo`)
+- `DYN_HTTP_RPC_ROOT_PATH`: API path prefix (default: `/v1/rpc`)
 - `DYN_HTTP_REQUEST_TIMEOUT`: Timeout in seconds (default: `5`)
 
 ### 2. Request Plane Abstraction (`lib/runtime/src/pipeline/network/request_plane.rs`)
@@ -65,7 +65,7 @@ pub trait RequestPlaneServer: Send + Sync {
 ### 3. HTTP Server Endpoint (`lib/runtime/src/pipeline/network/ingress/http_endpoint.rs`)
 
 Axum-based HTTP/2 server that:
-- Accepts POST requests at `/v1/dynamo/{endpoint}`
+- Accepts POST requests at `/v1/rpc/{endpoint}`
 - Extracts tracing headers (`traceparent`, `tracestate`, `x-request-id`, `x-dynamo-request-id`)
 - Returns `202 Accepted` immediately (like NATS ack)
 - Spawns async handler in background
@@ -128,7 +128,7 @@ Both paths:
 pub enum TransportType {
     NatsTcp(String),  // NATS subject
     HttpTcp {
-        http_endpoint: String,  // e.g., http://worker:8081/v1/dynamo/...
+        http_endpoint: String,  // e.g., http://worker:8081/v1/rpc/...
     },
 }
 ```
@@ -146,7 +146,7 @@ pub enum TransportType {
 [Client/Router]
   ├─ Register TCP response stream → get ConnectionInfo
   ├─ Encode TwoPartMessage(control_header + request)
-  ├─ POST http://worker:8081/v1/dynamo/{subject}
+  ├─ POST http://worker:8081/v1/rpc/{subject}
   │   Headers: traceparent, tracestate, x-request-id, x-dynamo-request-id
   │   Body: TwoPartCodec-encoded bytes
   └─ Receive 202 Accepted
@@ -216,7 +216,7 @@ DYN_REQUEST_PLANE=http cargo run
 export DYN_REQUEST_PLANE=http
 export DYN_HTTP_RPC_HOST=0.0.0.0
 export DYN_HTTP_RPC_PORT=8081
-export DYN_HTTP_RPC_ROOT_PATH=/v1/dynamo
+export DYN_HTTP_RPC_ROOT_PATH=/v1/rpc
 ```
 
 ### For Developers

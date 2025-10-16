@@ -134,8 +134,8 @@ When using HTTP mode, configure the HTTP RPC endpoint:
 export DYN_HTTP_RPC_HOST=0.0.0.0
 export DYN_HTTP_RPC_PORT=8081
 
-# HTTP RPC root path (default: /v1/dynamo)
-export DYN_HTTP_RPC_ROOT_PATH=/v1/dynamo
+# HTTP RPC root path (default: /v1/rpc)
+export DYN_HTTP_RPC_ROOT_PATH=/v1/rpc
 ```
 
 ## 2. Select an engine

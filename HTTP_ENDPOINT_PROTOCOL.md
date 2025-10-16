@@ -54,7 +54,7 @@ POST http://{host}:{port}{root_path}/{subject}
 
 Example:
 ```
-POST http://localhost:8081/v1/dynamo/namespace.example.component.echo-worker.endpoint.echo.instance.0
+POST http://localhost:8081/v1/rpc/namespace.example.component.echo-worker.endpoint.echo.instance.0
 ```
 
 ### Headers
@@ -147,7 +147,7 @@ let encoded = codec.encode_message(msg)?;
 
 // 4. Send HTTP POST
 let response = reqwest::Client::new()
-    .post("http://localhost:8081/v1/dynamo/namespace.example.component.worker.endpoint.echo.instance.0")
+    .post("http://localhost:8081/v1/rpc/namespace.example.component.worker.endpoint.echo.instance.0")
     .header("Content-Type", "application/octet-stream")
     .body(encoded)
     .send()

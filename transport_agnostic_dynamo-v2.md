@@ -125,8 +125,8 @@ export DYN_REQUEST_PLANE=nats
 export DYN_HTTP_RPC_HOST=0.0.0.0
 export DYN_HTTP_RPC_PORT=8081
 
-# HTTP RPC root path (default: /v1/dynamo)
-export DYN_HTTP_RPC_ROOT_PATH=/v1/dynamo
+# HTTP RPC root path (default: /v1/rpc)
+export DYN_HTTP_RPC_ROOT_PATH=/v1/rpc
 
 # HTTP request timeout in seconds (default: 5)
 export DYN_HTTP_REQUEST_TIMEOUT=5
@@ -383,7 +383,7 @@ DYN_REQUEST_PLANE=http cargo run --example http_request_plane_demo -- server
 DYN_REQUEST_PLANE=http cargo run --example http_request_plane_demo -- client
 
 # 4. Test with curl
-curl -X POST http://localhost:8081/v1/dynamo/echo \
+curl -X POST http://localhost:8081/v1/rpc/echo \
   -H "Content-Type: application/json" \
   -d '{"message": "Hello HTTP mode!"}'
 ```
