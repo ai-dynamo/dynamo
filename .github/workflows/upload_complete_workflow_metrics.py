@@ -496,9 +496,16 @@ class WorkflowMetricsUploader:
             # Count jobs to process (exclude specified jobs)
             workflow_name = workflow_data.get("name", "")
             
+            # Debug: Log workflow data fields to understand branch naming
+            print(f"\n🔍 Workflow API Debug Info:")
+            print(f"   head_branch: {workflow_data.get('head_branch')}")
+            print(f"   head_ref: {workflow_data.get('head_ref')}")  
+            print(f"   ref: {workflow_data.get('ref')}")
+            print(f"   event: {workflow_data.get('event')}")
+            
             # Log all jobs found by GitHub API
             all_jobs = jobs_data.get("jobs", [])
-            print(f"📋 Found {len(all_jobs)} total jobs from GitHub API:")
+            print(f"\n📋 Found {len(all_jobs)} total jobs from GitHub API:")
             for job in all_jobs:
                 job_name = job.get("name", "")
                 job_status = job.get("status", "")
