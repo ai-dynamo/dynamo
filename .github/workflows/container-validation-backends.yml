@@ -98,7 +98,7 @@ jobs:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
           pytest_marks: "e2e and vllm and gpu_1 and not slow"
           framework: "vllm"
-          test_type: "e2e"
+          test_type: "e2e, gpu_1"
           platform_arch: ${{ matrix.platform.arch }}
 
   sglang:
@@ -169,7 +169,7 @@ jobs:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
           pytest_marks: "e2e and sglang and gpu_1"
           framework: "sglang"
-          test_type: "e2e"
+          test_type: "e2e, gpu_1"
           platform_arch: ${{ matrix.platform.arch }}
 
   trtllm:
@@ -231,7 +231,7 @@ jobs:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
           pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow"
           framework: "trtllm"
-          test_type: "e2e"
+          test_type: "e2e, gpu_1"
           platform_arch: ${{ matrix.platform.arch }}
 
   # Upload metrics for this workflow and all its jobs
