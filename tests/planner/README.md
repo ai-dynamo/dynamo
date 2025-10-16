@@ -10,7 +10,7 @@ This directory contains comprehensive testing tools for validating the SLA plann
 The SLA planner monitors metrics every 60 seconds (default adjustment interval) and scales
 prefill/decode workers based on TTFT, ITL, and request patterns.
 
-To setup the environment, simply use the released docker images for any backends, or build your own docker image following the READMEs in `./components/backends/<vllm/sglang/trtllm>/README.md`, or follow the `Developing Locally` section in [README.md](../../README.md) to setup the environment locally. If using the local environment, make sure to install dependencies by running `uv pip install -r container/deps/requirements.txt`
+To setup the environment, simply use the released docker images for any backends, or build your own docker image following the READMEs in `./components/backends/<vllm/sglang/trtllm>/README.md`, or follow the `Developing Locally` section in [README.md](../../README.md) to setup the environment locally. If using the local environment, make sure to install dependencies by running `UV_GIT_LFS=1 uv pip install --no-cache -r container/deps/requirements.txt`
 
 ## Pre-Requisite: Pre-Deployment Profiling Data
 

@@ -77,6 +77,7 @@ RUN apt-get update && \
         g++ \
         ninja-build \
         git \
+        git-lfs \
         # Python runtime - CRITICAL for virtual environment to work
         python${PYTHON_VERSION}-dev \
         python3-pip \
@@ -242,14 +243,17 @@ RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
     && cd /opt/dynamo/benchmarks \
-    && uv pip install . \
+    && UV_GIT_LFS=1 uv pip install --no-cache . \
     && cd - \
     && rm -rf /opt/dynamo/benchmarks
 
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    uv pip install --requirement /tmp/requirements.txt --requirement /tmp/requirements.test.txt
+    UV_GIT_LFS=1 uv pip install \
+        --no-cache \
+        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.test.txt
 
 # Copy UCX libraries, libucc.so is needed by pytorch. May not need to copy whole hpcx dir but only /opt/hpcx/ucc/
 COPY --from=framework /opt/hpcx /opt/hpcx
