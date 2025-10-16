@@ -127,7 +127,11 @@ def break_arguments(args: list[str] | None) -> list[str]:
             if arg is not None:
                 # If the arg looks like it might be JSON (starts with { or [) or is already a single token,
                 # don't split it further. Only split if it contains spaces AND doesn't look like JSON.
-                if isinstance(arg, str) and (" " in arg or "\t" in arg) and not (arg.strip().startswith(("{", "["))):
+                if (
+                    isinstance(arg, str)
+                    and (" " in arg or "\t" in arg)
+                    and not (arg.strip().startswith(("{", "[")))
+                ):
                     # Use shlex.split to properly handle quoted arguments
                     ans.extend(shlex.split(arg))
                 else:
