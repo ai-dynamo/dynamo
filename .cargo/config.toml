@@ -1,6 +1,14 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# Cargo configuration for sccache
+# This file configures Cargo to use sccache as a compiler wrapper for faster builds
 
 [build]
-# tokio-console needs this
-rustflags = ["--cfg", "tokio_unstable"]
+# Use sccache as the rustc wrapper
+rustc-wrapper = "/home/ubuntu/.local/bin/sccache"
+
+# Optional: Configure linker for faster linking (if you have mold or lld installed)
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[target.x86_64-unknown-linux-gnu]
+# Optional: Use a faster linker if available
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]

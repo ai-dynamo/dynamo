@@ -153,12 +153,8 @@ impl EndpointConfigBuilder {
 
                 let http_endpoint =
                     format!("http://{}:{}{}/{}", http_host, http_port, rpc_root, subject);
-                let tcp_endpoint = format!("{}:{}", http_host, http_port);
 
-                TransportType::HttpTcp {
-                    http_endpoint,
-                    tcp_endpoint,
-                }
+                TransportType::HttpTcp { http_endpoint }
             } else {
                 TransportType::NatsTcp(subject.clone())
             };
@@ -314,12 +310,8 @@ impl EndpointConfigBuilder {
 
             let http_endpoint =
                 format!("http://{}:{}{}/{}", http_host, http_port, rpc_root, subject);
-            let tcp_endpoint = format!("{}:{}", http_host, http_port);
 
-            TransportType::HttpTcp {
-                http_endpoint,
-                tcp_endpoint,
-            }
+            TransportType::HttpTcp { http_endpoint }
         } else {
             TransportType::NatsTcp(subject.clone())
         };

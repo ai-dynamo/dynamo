@@ -129,7 +129,6 @@ pub enum TransportType {
     NatsTcp(String),  // NATS subject
     HttpTcp {
         http_endpoint: String,  // e.g., http://worker:8081/v1/dynamo/...
-        tcp_endpoint: String,   // e.g., worker:8081
     },
 }
 ```

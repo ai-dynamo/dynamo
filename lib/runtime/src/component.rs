@@ -82,7 +82,6 @@ pub enum TransportType {
     NatsTcp(String),
     HttpTcp {
         http_endpoint: String,
-        tcp_endpoint: String,
     },
 }
 

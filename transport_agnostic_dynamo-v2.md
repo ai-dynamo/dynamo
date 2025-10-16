@@ -302,7 +302,6 @@ etcd_client.put(
     serde_json::to_string(&InstanceInfo {
         transport: TransportType::HttpTcp {
             http_endpoint,
-            tcp_endpoint: tcp_addr
         },
         instance_id,
         // ... other fields
