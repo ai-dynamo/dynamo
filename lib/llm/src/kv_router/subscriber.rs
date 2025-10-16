@@ -81,13 +81,11 @@ impl SnapshotResources {
                     for worker_id in indexer_worker_ids {
                         if !current_worker_ids.contains(&worker_id) {
                             tracing::info!(
-                                "Removing stale worker {} from indexer during snapshot",
-                                worker_id
+                                "Removing stale worker {worker_id} from indexer during snapshot"
                             );
                             if let Err(e) = remove_worker_tx.send(worker_id).await {
                                 tracing::warn!(
-                                    "Failed to send remove_worker for stale worker {}: {e:?}",
-                                    worker_id
+                                    "Failed to send remove_worker for stale worker {worker_id}: {e:?}"
                                 );
                             }
                         }
@@ -247,8 +245,6 @@ pub async fn start_kv_router_background(
         .kv_get_and_watch_prefix(&format!("{}/", KV_ROUTERS_ROOT_PATH))
         .await?
         .dissolve();
-    let cleanup_lock_name = format!("{}/{}", ROUTER_CLEANUP_LOCK, component.subject());
-    let cleanup_rwlock = DistributedRWLock::new(cleanup_lock_name.clone());
 
     // Get the generate endpoint and watch for instance deletions
     let generate_endpoint = component.endpoint("generate");
@@ -312,19 +308,19 @@ pub async fn start_kv_router_background(
 
                     // Extract the hex worker ID after the colon (e.g., "generate:694d99badb9f7c07" -> "694d99badb9f7c07")
                     let Some(worker_id_str) = key.split(':').next_back() else {
-                        tracing::warn!("Could not extract worker ID from instance key: {}", key);
+                        tracing::warn!("Could not extract worker ID from instance key: {key}");
                         continue;
                     };
 
                     // Parse as hexadecimal (base 16)
                     let Ok(worker_id) = i64::from_str_radix(worker_id_str, 16) else {
-                        tracing::warn!("Could not parse worker ID from instance key: {}", key);
+                        tracing::warn!("Could not parse worker ID from instance key: {key}");
                         continue;
                     };
 
-                    tracing::info!("Generate endpoint instance deleted, removing worker {}", worker_id);
+                    tracing::info!("Generate endpoint instance deleted, removing worker {worker_id}");
                     if let Err(e) = remove_worker_tx.send(worker_id).await {
-                        tracing::warn!("Failed to send worker removal for worker {}: {}", worker_id, e);
+                        tracing::warn!("Failed to send worker removal for worker {worker_id}: {e}");
                     }
                 }
 
@@ -397,7 +393,7 @@ pub async fn start_kv_router_background(
                     };
 
                     let key = String::from_utf8_lossy(kv.key());
-                    tracing::info!("Detected router replica deletion: {}", key);
+                    tracing::info!("Detected router replica deletion: {key}");
 
                     // Only process deletions for routers on the same component
                     if !key.contains(component.path().as_str()) {
@@ -410,34 +406,36 @@ pub async fn start_kv_router_background(
 
                     // Extract the router UUID from the key
                     let Some(router_uuid) = key.split('/').next_back() else {
-                        tracing::warn!("Could not extract UUID from router key: {}", key);
+                        tracing::warn!("Could not extract UUID from router key: {key}");
                         continue;
                     };
 
                     // The consumer UUID is the router UUID
                     let consumer_to_delete = router_uuid.to_string();
 
-                    tracing::info!("Attempting to delete orphaned consumer: {}", consumer_to_delete);
+                    tracing::info!("Attempting to delete orphaned consumer: {consumer_to_delete}");
+
+                    // Create a unique cleanup lock for this specific consumer
+                    let cleanup_lock_name = format!("{}/{}/{}", ROUTER_CLEANUP_LOCK, component.subject(), consumer_to_delete);
+                    let cleanup_rwlock = DistributedRWLock::new(cleanup_lock_name);
 
                     // Try to acquire cleanup write lock (non-blocking) before deleting consumer
                     if let Some(_cleanup_guard) = cleanup_rwlock.try_write_lock(&etcd_client).await {
                         tracing::debug!(
-                            "Acquired cleanup lock for deleting consumer: {}",
-                            consumer_to_delete
+                            "Acquired cleanup lock for deleting consumer: {consumer_to_delete}"
                         );
 
                         // Delete the consumer
                         if let Err(e) = nats_queue.shutdown(Some(consumer_to_delete.clone())).await {
-                            tracing::warn!("Failed to delete consumer {}: {}", consumer_to_delete, e);
+                            tracing::warn!("Failed to delete consumer {consumer_to_delete}: {e}");
                         } else {
-                            tracing::info!("Successfully deleted orphaned consumer: {}", consumer_to_delete);
+                            tracing::info!("Successfully deleted orphaned consumer: {consumer_to_delete}");
                         }
 
                         // Cleanup lock is automatically released when _cleanup_guard goes out of scope
                     } else {
                         tracing::debug!(
-                            "Could not acquire cleanup lock for consumer {}",
-                            consumer_to_delete
+                            "Could not acquire cleanup lock for consumer {consumer_to_delete}"
                         );
                     }
                 }
@@ -485,7 +483,7 @@ async fn cleanup_orphaned_consumers(
             continue;
         }
         if !active_uuids.contains(&consumer) {
-            tracing::info!("Cleaning up orphaned consumer: {}", consumer);
+            tracing::info!("Cleaning up orphaned consumer: {consumer}");
             let _ = nats_queue.shutdown(Some(consumer)).await;
         }
     }
