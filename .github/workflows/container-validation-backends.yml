@@ -298,14 +298,18 @@ jobs:
     name: deploy-test-vllm (${{ matrix.profile }})
     env:
       FRAMEWORK: vllm
-      NAMESPACE: gh-job-id-${{ github.run_id }}-vllm-${{ replace(matrix.profile, '_', '-') }}
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
       DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
       MODEL_NAME: "Qwen/Qwen3-0.6B"
     steps: &deploy-test-steps
     - uses: actions/checkout@v4
-    - name: Install dependencies
+    - name: Set namespace and install dependencies
       run: |
+        # Set namespace using FRAMEWORK env var
+        PROFILE_SANITIZED="${{ matrix.profile }}"
+        PROFILE_SANITIZED="${PROFILE_SANITIZED//_/-}"
+        echo "NAMESPACE=gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED}" >> $GITHUB_ENV
+
         set -x
         # Install dependencies
         sudo apt-get update && sudo apt-get install -y curl bash openssl gettext git jq
@@ -514,7 +518,6 @@ jobs:
     name: deploy-test-sglang (${{ matrix.profile }})
     env:
       FRAMEWORK: sglang
-      NAMESPACE: gh-job-id-${{ github.run_id }}-sglang-${{ replace(matrix.profile, '_', '-') }}
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
       DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
       MODEL_NAME: "Qwen/Qwen3-0.6B"
@@ -536,7 +539,6 @@ jobs:
     name: deploy-test-trtllm (${{ matrix.profile }})
     env:
       FRAMEWORK: trtllm
-      NAMESPACE: gh-job-id-${{ github.run_id }}-trtllm-${{ replace(matrix.profile, '_', '-') }}
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
       DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
       MODEL_NAME: "Qwen/Qwen3-0.6B"
