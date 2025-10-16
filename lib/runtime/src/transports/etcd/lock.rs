@@ -297,6 +297,14 @@ mod tests {
             .expect("Write lock should succeed with no readers");
         println!("✓ Acquired write lock");
 
+        // Step 5a: Try to acquire write lock again (should fail immediately - already held)
+        let write_result_already_held = rwlock.try_write_lock(&etcd_client).await;
+        assert!(
+            write_result_already_held.is_none(),
+            "Write lock should fail when another write lock is already held"
+        );
+        println!("✓ Write lock correctly failed when already held");
+
         // Step 6: Spawn background task to acquire read lock
         // It should wait because write lock is held
         let barrier = Arc::new(Barrier::new(2));
