@@ -4,7 +4,7 @@
 """
 Load generation script for SLA planner scaling tests.
 
-This script uses genai-perf to generate load at specific request rates
+This script uses aiperf to generate load at specific request rates
 to test the planner's scaling behavior.
 """
 
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class LoadGenerator:
-    """Generate load using genai-perf to test planner scaling."""
+    """Generate load using aiperf to test planner scaling."""
 
     def __init__(
         self,
@@ -40,12 +40,12 @@ class LoadGenerator:
         self.osl = osl
         self.save_results = save_results
 
-    def _calculate_genai_perf_params(
+    def _calculate_aiperf_params(
         self,
         req_per_sec: float,
     ) -> Dict[str, Any]:
         """
-        Calculate genai-perf parameters to approximate desired request rate.
+        Calculate aiperf parameters to approximate desired request rate.
 
         Args:
             req_per_sec: Desired requests per second
@@ -71,15 +71,15 @@ class LoadGenerator:
         Args:
             req_per_sec: Target requests per second
             duration_sec: Duration to generate load (seconds)
-            artifact_dir: Directory to store genai-perf artifacts
+            artifact_dir: Directory to store aiperf artifacts
 
         Returns:
             Dictionary with load test results
         """
         logger.info(f"Generating load: {req_per_sec} req/s for {duration_sec}s")
 
-        # Calculate genai-perf parameters
-        params = self._calculate_genai_perf_params(req_per_sec)
+        # Calculate aiperf parameters
+        params = self._calculate_aiperf_params(req_per_sec)
         logger.info(f"Using request_rate={params['request_rate']} req/s")
 
         # Create artifact directory if not provided
@@ -95,9 +95,9 @@ class LoadGenerator:
             f"Adjusted parameters: duration={duration_sec}s, request_count={request_count}"
         )
 
-        # Build genai-perf command based on coworker's successful approach
+        # Build aiperf command based on coworker's successful approach
         cmd = [
-            "genai-perf",
+            "aiperf",
             "profile",
             "--model",
             self.model,
@@ -124,10 +124,7 @@ class LoadGenerator:
             ),  # Generate reasonable dataset size
             "--artifact-dir",
             artifact_dir,
-            "--",
             "-v",
-            "-max-threads",
-            "64",
         ]
 
         logger.info(f"Running command: {' '.join(cmd)}")
@@ -135,7 +132,7 @@ class LoadGenerator:
             f"Expected duration: {duration_sec}s, timeout: {max(duration_sec * 2 + 120, int(duration_sec * 2.5))}s"
         )
 
-        # Run genai-perf (async)
+        # Run aiperf (async)
         start_time = time.time()
         # More generous timeout for high-load tests - allow 2x duration + 2 minutes buffer
         timeout = max(duration_sec * 2 + 120, int(duration_sec * 2.5))
@@ -152,7 +149,7 @@ class LoadGenerator:
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.communicate()
-                logger.error("genai-perf timed out")
+                logger.error("aiperf timed out")
                 raise RuntimeError("Load generation timed out")
 
             end_time = time.time()
@@ -160,13 +157,9 @@ class LoadGenerator:
 
             # Persist logs for debugging
             try:
-                with open(
-                    os.path.join(artifact_dir, "genai_perf.stdout.log"), "wb"
-                ) as f:
+                with open(os.path.join(artifact_dir, "aiperf.stdout.log"), "wb") as f:
                     f.write(stdout or b"")
-                with open(
-                    os.path.join(artifact_dir, "genai_perf.stderr.log"), "wb"
-                ) as f:
+                with open(os.path.join(artifact_dir, "aiperf.stderr.log"), "wb") as f:
                     f.write(stderr or b"")
             except Exception:
                 pass
@@ -174,31 +167,31 @@ class LoadGenerator:
             if proc.returncode == 0:
                 logger.info("Load generation completed successfully")
                 logger.info(f"Actual duration: {actual_duration:.2f}s")
-                results = self._parse_genai_perf_results(artifact_dir)
+                results = self._parse_aiperf_results(artifact_dir)
                 results.update(
                     {
                         "requested_req_per_sec": req_per_sec,
                         "actual_duration": actual_duration,
                         "target_duration": duration_sec,
-                        "genai_perf_params": params,
+                        "aiperf_params": params,
                         "artifact_dir": artifact_dir,
                         "success": True,
                     }
                 )
                 return results
             else:
-                logger.error(f"genai-perf failed with return code {proc.returncode}")
-                raise RuntimeError("genai-perf failed; see logs in artifact dir")
+                logger.error(f"aiperf failed with return code {proc.returncode}")
+                raise RuntimeError("aiperf failed; see logs in artifact dir")
         except RuntimeError:
             raise
         except Exception as e:
-            logger.error(f"genai-perf execution error: {e}")
+            logger.error(f"aiperf execution error: {e}")
             raise
 
-    def _parse_genai_perf_results(self, artifact_dir: str) -> Dict[str, Any]:
-        """Parse genai-perf results from artifact directory."""
+    def _parse_aiperf_results(self, artifact_dir: str) -> Dict[str, Any]:
+        """Parse aiperf results from artifact directory."""
         try:
-            # Look for the profile_export_genai_perf.json file
+            # Look for the profile_export_aiperf.json file
             json_files = [f for f in os.listdir(artifact_dir) if f.endswith(".json")]
             if not json_files:
                 logger.warning("No JSON results found in artifact directory")
@@ -207,7 +200,7 @@ class LoadGenerator:
             # Main results file
             results_file = None
             for json_file in json_files:
-                if "profile_export" in json_file or "genai_perf" in json_file:
+                if "profile_export" in json_file or "aiperf" in json_file:
                     results_file = os.path.join(artifact_dir, json_file)
                     break
 
@@ -236,7 +229,7 @@ class LoadGenerator:
                             ).get("avg", 0),
                         }
                     )
-            if not results and "profile_export_genai_perf" in data:
+            if not results and "profile_export_aiperf" in data:
                 summary = data.get("summary", {})
                 results.update(
                     {
@@ -250,7 +243,7 @@ class LoadGenerator:
             return results
 
         except Exception as e:
-            logger.warning(f"Failed to parse genai-perf results: {e}")
+            logger.warning(f"Failed to parse aiperf results: {e}")
             return {}
 
     async def run_scaling_test(self) -> Dict[str, Any]:
