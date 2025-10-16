@@ -183,7 +183,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         "pipeline_parallel_size": config.pipeline_parallel_size,
         "moe_expert_parallel_size": config.expert_parallel_size,
         "backend": "pytorch",
-        "skip_tokenizer_init": True,
         "build_config": build_config,
         "kv_cache_config": kv_cache_config,
         "gpus_per_node": gpus_per_node,
