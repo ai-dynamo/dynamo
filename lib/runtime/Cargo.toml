@@ -45,8 +45,11 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
+tower = { version = "0.5" }
 tower-http = { workspace = true }
 tracing = { workspace = true }
+hyper = { version = "1.5", features = ["http2", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto"] }
 tracing-subscriber = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 opentelemetry = { workspace = true }

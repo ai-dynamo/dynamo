@@ -39,10 +39,12 @@ impl HttpRequestClient {
     }
 
     /// Create a new HTTP request client with custom timeout
+    /// Uses HTTP/2 with prior knowledge (no protocol negotiation)
     pub fn with_timeout(timeout: Duration) -> Result<Self> {
         let client = reqwest::Client::builder()
             .pool_max_idle_per_host(50) // Connection pooling
             .timeout(timeout)
+            .http2_prior_knowledge() // Force HTTP/2 without negotiation
             .build()?;
 
         Ok(Self {
@@ -271,6 +273,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{Router, routing::post, body::Bytes as AxumBytes, extract::State as AxumState};
+    use std::sync::Arc;
+    use tokio::sync::Mutex as TokioMutex;
 
     #[test]
     fn test_http_client_creation() {
@@ -296,5 +301,273 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_http2_client_server_integration() {
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+        use hyper_util::server::conn::auto::Builder as ConnBuilder;
+        use hyper_util::service::TowerToHyperService;
+
+        // Create a test server that accepts HTTP/2
+        #[derive(Clone)]
+        struct TestState {
+            received: Arc<TokioMutex<Vec<Bytes>>>,
+            protocol_version: Arc<TokioMutex<Option<String>>>,
+        }
+
+        async fn test_handler(
+            AxumState(state): AxumState<TestState>,
+            body: AxumBytes,
+        ) -> &'static str {
+            state.received.lock().await.push(body);
+            "OK"
+        }
+
+        let state = TestState {
+            received: Arc::new(TokioMutex::new(Vec::new())),
+            protocol_version: Arc::new(TokioMutex::new(None)),
+        };
+
+        let app = Router::new()
+            .route("/test", post(test_handler))
+            .with_state(state.clone());
+
+        // Bind to a random port
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Start HTTP/2 server
+        let server_handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+
+                let app = app.clone();
+                tokio::spawn(async move {
+                    let conn_builder = ConnBuilder::new(TokioExecutor::new());
+                    let io = TokioIo::new(stream);
+                    let tower_service = app.into_service();
+                    let hyper_service = TowerToHyperService::new(tower_service);
+
+                    let _ = conn_builder.serve_connection(io, hyper_service).await;
+                });
+            }
+        });
+
+        // Give server time to start
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Create HTTP/2 client with prior knowledge
+        let client = HttpRequestClient::new().unwrap();
+
+        // Send request
+        let test_data = Bytes::from("test_payload");
+        let result = client
+            .send_request(
+                format!("http://{}/test", addr),
+                test_data.clone(),
+                std::collections::HashMap::new(),
+            )
+            .await;
+
+        // Verify request succeeded
+        assert!(result.is_ok(), "Request failed: {:?}", result.err());
+
+        // Verify server received the data
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let received = state.received.lock().await;
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0], test_data);
+
+        // Cleanup
+        server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_http2_headers_propagation() {
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+        use hyper_util::server::conn::auto::Builder as ConnBuilder;
+        use hyper_util::service::TowerToHyperService;
+
+        // Create a test server that captures headers
+        #[derive(Clone)]
+        struct HeaderState {
+            headers: Arc<TokioMutex<Vec<(String, String)>>>,
+        }
+
+        async fn header_handler(
+            AxumState(state): AxumState<HeaderState>,
+            headers: axum::http::HeaderMap,
+        ) -> &'static str {
+            let mut captured = state.headers.lock().await;
+            for (name, value) in headers.iter() {
+                if let Ok(val_str) = value.to_str() {
+                    captured.push((name.to_string(), val_str.to_string()));
+                }
+            }
+            "OK"
+        }
+
+        let state = HeaderState {
+            headers: Arc::new(TokioMutex::new(Vec::new())),
+        };
+
+        let app = Router::new()
+            .route("/test", post(header_handler))
+            .with_state(state.clone());
+
+        // Bind to a random port
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Start HTTP/2 server
+        let server_handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+
+                let app = app.clone();
+                tokio::spawn(async move {
+                    let conn_builder = ConnBuilder::new(TokioExecutor::new());
+                    let io = TokioIo::new(stream);
+                    let tower_service = app.into_service();
+                    let hyper_service = TowerToHyperService::new(tower_service);
+
+                    let _ = conn_builder.serve_connection(io, hyper_service).await;
+                });
+            }
+        });
+
+        // Give server time to start
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Create HTTP/2 client
+        let client = HttpRequestClient::new().unwrap();
+
+        // Send request with custom headers
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("x-test-header".to_string(), "test-value".to_string());
+        headers.insert("x-request-id".to_string(), "req-123".to_string());
+
+        let result = client
+            .send_request(
+                format!("http://{}/test", addr),
+                Bytes::from("test"),
+                headers,
+            )
+            .await;
+
+        // Verify request succeeded
+        assert!(result.is_ok());
+
+        // Verify headers were received
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let received_headers = state.headers.lock().await;
+
+        let header_map: std::collections::HashMap<_, _> = received_headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        assert!(header_map.contains_key("x-test-header"));
+        assert_eq!(header_map.get("x-test-header"), Some(&"test-value"));
+        assert!(header_map.contains_key("x-request-id"));
+        assert_eq!(header_map.get("x-request-id"), Some(&"req-123"));
+
+        // Cleanup
+        server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_http2_concurrent_requests() {
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+        use hyper_util::server::conn::auto::Builder as ConnBuilder;
+        use hyper_util::service::TowerToHyperService;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        // Create a test server that counts requests
+        #[derive(Clone)]
+        struct CounterState {
+            count: Arc<AtomicU64>,
+        }
+
+        async fn counter_handler(AxumState(state): AxumState<CounterState>) -> String {
+            let count = state.count.fetch_add(1, Ordering::SeqCst);
+            format!("{}", count)
+        }
+
+        let state = CounterState {
+            count: Arc::new(AtomicU64::new(0)),
+        };
+
+        let app = Router::new()
+            .route("/test", post(counter_handler))
+            .with_state(state.clone());
+
+        // Bind to a random port
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Start HTTP/2 server
+        let server_handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+
+                let app = app.clone();
+                tokio::spawn(async move {
+                    let conn_builder = ConnBuilder::new(TokioExecutor::new());
+                    let io = TokioIo::new(stream);
+                    let tower_service = app.into_service();
+                    let hyper_service = TowerToHyperService::new(tower_service);
+
+                    let _ = conn_builder.serve_connection(io, hyper_service).await;
+                });
+            }
+        });
+
+        // Give server time to start
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Create HTTP/2 client
+        let client = Arc::new(HttpRequestClient::new().unwrap());
+
+        // Send multiple concurrent requests (HTTP/2 multiplexing)
+        let mut handles = vec![];
+        for _ in 0..10 {
+            let client = client.clone();
+            let addr = addr;
+            let handle = tokio::spawn(async move {
+                client
+                    .send_request(
+                        format!("http://{}/test", addr),
+                        Bytes::from("test"),
+                        std::collections::HashMap::new(),
+                    )
+                    .await
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all requests to complete
+        let mut success_count = 0;
+        for handle in handles {
+            if let Ok(Ok(_)) = handle.await {
+                success_count += 1;
+            }
+        }
+
+        // Verify all requests succeeded
+        assert_eq!(success_count, 10);
+
+        // Verify server received all requests
+        assert_eq!(state.count.load(Ordering::SeqCst), 10);
+
+        // Cleanup
+        server_handle.abort();
     }
 }

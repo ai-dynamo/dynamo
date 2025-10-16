@@ -17,12 +17,16 @@ use axum::{
     routing::post,
 };
 use derive_builder::Builder;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as Http2Builder;
+use hyper_util::service::TowerToHyperService;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
+use tower::Service;
 use tower_http::trace::TraceLayer;
 use tracing::Instrument;
 
@@ -118,20 +122,54 @@ impl SharedHttpServer {
             .with_state(self.clone());
 
         tracing::info!(
-            "Starting shared HTTP endpoint server on {} at path {}/:endpoint",
+            "Starting shared HTTP/2 endpoint server on {} at path {}/:endpoint",
             self.bind_addr,
             rpc_root_path
         );
 
         let listener = tokio::net::TcpListener::bind(&self.bind_addr).await?;
-        let server = axum::serve(listener, app.into_make_service());
+        let cancellation_token = self.cancellation_token.clone();
 
-        tokio::select! {
-            result = server => result.map_err(|e| anyhow::anyhow!("HTTP server error: {}", e)),
-            _ = self.cancellation_token.cancelled() => {
-                tracing::info!("SharedHttpServer received cancellation signal, shutting down");
-                Ok(())
-            },
+        loop {
+            tokio::select! {
+                accept_result = listener.accept() => {
+                    match accept_result {
+                        Ok((stream, _addr)) => {
+                            let app_clone = app.clone();
+                            let cancel_clone = cancellation_token.clone();
+
+                            tokio::spawn(async move {
+                                // Create HTTP/2 connection builder with prior knowledge
+                                let http2_builder = Http2Builder::new(TokioExecutor::new());
+
+                                let io = TokioIo::new(stream);
+                                let tower_service = app_clone.into_service();
+
+                                // Wrap Tower service for Hyper compatibility
+                                let hyper_service = TowerToHyperService::new(tower_service);
+
+                                tokio::select! {
+                                    result = http2_builder.serve_connection(io, hyper_service) => {
+                                        if let Err(e) = result {
+                                            tracing::debug!("HTTP/2 connection error: {}", e);
+                                        }
+                                    }
+                                    _ = cancel_clone.cancelled() => {
+                                        tracing::trace!("Connection cancelled");
+                                    }
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to accept connection: {}", e);
+                        }
+                    }
+                }
+                _ = cancellation_token.cancelled() => {
+                    tracing::info!("SharedHttpServer received cancellation signal, shutting down");
+                    return Ok(());
+                }
+            }
         }
     }
 
@@ -289,24 +327,62 @@ impl HttpEndpoint {
             .with_state(state);
 
         tracing::info!(
-            "Starting HTTP endpoint server on {} at path {}/:endpoint",
+            "Starting HTTP/2 endpoint server on {} at path {}/:endpoint",
             bind_addr,
             rpc_root_path
         );
 
         // Create the server
         let listener = tokio::net::TcpListener::bind(bind_addr).await?;
-        let server = axum::serve(listener, app.into_make_service());
+        let cancellation_token = self.cancellation_token.clone();
 
         // Run server with graceful shutdown
-        tokio::select! {
-            result = server => {
-                result?;
+        let server_handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    accept_result = listener.accept() => {
+                        match accept_result {
+                            Ok((stream, _addr)) => {
+                                let app_clone = app.clone();
+                                let cancel_clone = cancellation_token.clone();
+
+                                tokio::spawn(async move {
+                                    // Create HTTP/2 connection builder with prior knowledge
+                                    let http2_builder = Http2Builder::new(TokioExecutor::new());
+
+                                    let io = TokioIo::new(stream);
+                                    let tower_service = app_clone.into_service();
+
+                                    // Wrap Tower service for Hyper compatibility
+                                    let hyper_service = TowerToHyperService::new(tower_service);
+
+                                    tokio::select! {
+                                        result = http2_builder.serve_connection(io, hyper_service) => {
+                                            if let Err(e) = result {
+                                                tracing::debug!("HTTP/2 connection error: {}", e);
+                                            }
+                                        }
+                                        _ = cancel_clone.cancelled() => {
+                                            tracing::trace!("Connection cancelled");
+                                        }
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to accept connection: {}", e);
+                            }
+                        }
+                    }
+                    _ = cancellation_token.cancelled() => {
+                        tracing::info!("HttpEndpoint received cancellation signal, shutting down service");
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                }
             }
-            _ = self.cancellation_token.cancelled() => {
-                tracing::info!("HttpEndpoint received cancellation signal, shutting down service");
-            }
-        }
+        });
+
+        // Wait for server to complete or be cancelled
+        server_handle.await??;
 
         // Mark as not ready
         system_health
