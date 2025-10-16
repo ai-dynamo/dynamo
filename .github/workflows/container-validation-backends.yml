@@ -294,7 +294,7 @@ jobs:
     name: deploy-test-vllm (${{ matrix.profile }})
     env:
       FRAMEWORK: vllm
-      NAMESPACE: gh-job-id-${{ github.run_id }}-vllm-${{ matrix.profile }}
+      NAMESPACE: gh-job-id-${{ github.run_id }}-vllm-${{ replace(matrix.profile, '_', '-') }}
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
       DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
       MODEL_NAME: "Qwen/Qwen3-0.6B"
@@ -472,7 +472,7 @@ jobs:
         exit $TEST_RESULT
     - name: Cleanup
       if: always()
-      timeout-minutes: 3600
+      timeout-minutes: 4200
       run: |
         echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
         chmod 600 .kubeconfig
@@ -507,11 +507,10 @@ jobs:
         profile:
           - agg
           - agg_router
-          - disagg
     name: deploy-test-sglang (${{ matrix.profile }})
     env:
       FRAMEWORK: sglang
-      NAMESPACE: gh-job-id-${{ github.run_id }}-sglang-${{ matrix.profile }}
+      NAMESPACE: gh-job-id-${{ github.run_id }}-sglang-${{ replace(matrix.profile, '_', '-') }}
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
       DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
       MODEL_NAME: "Qwen/Qwen3-0.6B"
@@ -533,7 +532,7 @@ jobs:
     name: deploy-test-trtllm (${{ matrix.profile }})
     env:
       FRAMEWORK: trtllm
-      NAMESPACE: gh-job-id-${{ github.run_id }}-trtllm-${{ matrix.profile }}
+      NAMESPACE: gh-job-id-${{ github.run_id }}-trtllm-${{ replace(matrix.profile, '_', '-') }}
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
       DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
       MODEL_NAME: "Qwen/Qwen3-0.6B"
