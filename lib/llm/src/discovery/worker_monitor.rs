@@ -1,50 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// TODO: Make load comparisons and runtime metrics a generic trait so this monitoring
-// system is not tied to KV cache concepts, which are LLM-specific. This would allow
-// different types of workers to define their own load metrics and busy thresholds.
-
-use crate::component::{Client, InstanceSource};
-use crate::traits::DistributedRuntimeProvider;
-use crate::traits::events::EventSubscriber;
-use crate::utils::typed_prefix_watcher::{key_extractors, watch_prefix_with_extraction};
+use crate::kv_router::KV_METRICS_SUBJECT;
+use crate::kv_router::scoring::LoadEvent;
+use crate::model_card::{self, ModelDeploymentCard};
+use dynamo_runtime::component::Client;
+use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
+use dynamo_runtime::traits::DistributedRuntimeProvider;
+use dynamo_runtime::traits::events::EventSubscriber;
+use dynamo_runtime::utils::typed_prefix_watcher::{key_extractors, watch_prefix_with_extraction};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use tokio::sync::watch;
 use tokio_stream::StreamExt;
-
-// Constants for monitoring configuration
-const KV_METRICS_SUBJECT: &str = "kv_metrics";
-
-// Internal structs for deserializing metrics events
-#[derive(serde::Deserialize)]
-struct LoadEvent {
-    worker_id: i64,
-    data: ForwardPassMetrics,
-}
-
-#[derive(serde::Deserialize)]
-struct ForwardPassMetrics {
-    worker_stats: WorkerStats,
-    kv_stats: KvStats,
-}
-
-#[derive(serde::Deserialize)]
-struct WorkerStats {
-    data_parallel_rank: Option<u32>,
-}
-
-#[derive(serde::Deserialize)]
-struct KvStats {
-    kv_active_blocks: u64,
-}
-
-#[derive(serde::Deserialize, Clone)]
-struct RuntimeConfig {
-    total_kv_blocks: Option<u64>,
-    data_parallel_size: u32,
-}
 
 /// Worker load monitoring state per dp_rank
 #[derive(Clone, Debug, Default)]
@@ -83,15 +50,15 @@ impl WorkerLoadState {
 }
 
 /// Worker monitor for tracking KV cache usage and busy states
-pub struct WorkerMonitor {
+pub struct KvWorkerMonitor {
     client: Arc<Client>,
     worker_load_states: Arc<RwLock<HashMap<i64, WorkerLoadState>>>,
     busy_threshold: f64,
 }
 
-impl WorkerMonitor {
+impl KvWorkerMonitor {
     /// Create a new worker monitor with custom threshold
-    pub fn new_with_threshold(client: Arc<Client>, busy_threshold: f64) -> Self {
+    pub fn new(client: Arc<Client>, busy_threshold: f64) -> Self {
         Self {
             client,
             worker_load_states: Arc::new(RwLock::new(HashMap::new())),
@@ -103,9 +70,12 @@ impl WorkerMonitor {
     pub fn load_states(&self) -> Arc<RwLock<HashMap<i64, WorkerLoadState>>> {
         self.worker_load_states.clone()
     }
+}
 
+#[async_trait]
+impl WorkerLoadMonitor for KvWorkerMonitor {
     /// Start background monitoring of worker KV cache usage
-    pub async fn start_monitoring(&self) -> anyhow::Result<()> {
+    async fn start_monitoring(&self) -> anyhow::Result<()> {
         let endpoint = &self.client.endpoint;
         let component = endpoint.component();
 
@@ -114,19 +84,12 @@ impl WorkerMonitor {
             return Ok(());
         };
 
-        // WorkerMonitor is in the wrong crate. It deals with LLM things (KV) so it should be in
-        // dynamo-llm not dynamo-runtime.
-        // That means we cannot use ModelDeploymentCard, so use serde_json::Value for now .
+        // Watch for runtime config updates from model deployment cards
         let runtime_configs_watcher = watch_prefix_with_extraction(
             etcd_client,
-            "v1/mdc/", // should be model_card::ROOT_PREFIX but wrong crate
+            model_card::ROOT_PATH,
             key_extractors::lease_id,
-            |card: serde_json::Value| {
-                let runtime_config: Option<RuntimeConfig> = card
-                    .get("runtime_config")
-                    .and_then(|rc| serde_json::from_value(rc.clone()).ok());
-                runtime_config
-            },
+            |card: ModelDeploymentCard| Some(card.runtime_config),
             component.drt().child_token(),
         )
         .await?;
@@ -138,7 +101,7 @@ impl WorkerMonitor {
         let worker_load_states = self.worker_load_states.clone();
         let client = self.client.clone();
         let cancellation_token = component.drt().child_token();
-        let busy_threshold = self.busy_threshold; // Capture threshold for the closure
+        let busy_threshold = self.busy_threshold;
 
         // Spawn background monitoring task
         tokio::spawn(async move {
@@ -151,7 +114,7 @@ impl WorkerMonitor {
                         break;
                     }
 
-                    // Handle runtime config updates - now receives full HashMap
+                    // Handle runtime config updates
                     _ = config_events_rx.changed() => {
                         let runtime_configs = config_events_rx.borrow().clone();
 
@@ -163,7 +126,6 @@ impl WorkerMonitor {
                             let state = states.entry(*lease_id).or_default();
 
                             // Populate total_blocks for all dp_ranks (they share the same total)
-                            // data_parallel_size defaults to 1 via serde in ModelRuntimeConfig
                             if let Some(total_blocks) = runtime_config.total_kv_blocks {
                                 for dp_rank in 0..runtime_config.data_parallel_size {
                                     state.kv_total_blocks.insert(dp_rank, total_blocks);
