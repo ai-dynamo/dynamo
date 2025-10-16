@@ -42,7 +42,7 @@ Quickstart
 
    Quickstart <self>
    Installation <_sections/installation>
-   Support Matrix <support_matrix.md>
+   Support Matrix <reference/support-matrix.md>
    Architecture <_sections/architecture>
    Examples <_sections/examples>
 
@@ -63,18 +63,18 @@ Quickstart
    :caption: Components
 
    Backends <_sections/backends>
-   Router <components/router/README>
-   Planner <architecture/planner_intro>
-   KVBM <architecture/kvbm_intro>
+   Router <router/README>
+   Planner <planner/planner_intro>
+   KVBM <kvbm/kvbm_intro>
 
 .. toctree::
    :hidden:
    :caption: Developer Guide
 
    Benchmarking Guide <benchmarks/benchmarking.md>
-   SLA Planner (Autoscaling) Quickstart <kubernetes/sla_planner_quickstart>
-   Logging <guides/logging.md>
-   Health Checks <guides/health_check.md>
-   Tuning Disaggregated Serving Performance <guides/disagg_perf_tuning.md>
-   Writing Python Workers in Dynamo <guides/backend.md>
-   Glossary <dynamo_glossary.md>
+   SLA Planner (Autoscaling) Quickstart <planner/sla_planner_quickstart>
+   Logging <observability/logging.md>
+   Health Checks <observability/health-checks.md>
+   Tuning Disaggregated Serving Performance <performance/tuning.md>
+   Writing Python Workers in Dynamo <development/backend-guide.md>
+   Glossary <reference/glossary.md>
