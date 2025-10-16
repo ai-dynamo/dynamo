@@ -480,7 +480,7 @@ jobs:
         exit $TEST_RESULT
     - name: Cleanup
       if: always()
-      timeout-minutes: 4200
+      timeout-minutes: 600
       run: |
         echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
         chmod 600 .kubeconfig
@@ -489,9 +489,6 @@ jobs:
 
         # For debugging purposes, list all the resources before we uninstall
         kubectl get all
-
-        echo "Starting cleanup... after 3600 seconds (1 hour)"
-        sleep 3600
 
         echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
         kubectl delete dynamographdeployments --all -n $NAMESPACE || true
