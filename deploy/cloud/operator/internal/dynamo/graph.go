@@ -759,6 +759,14 @@ func GenerateBasePodSpec(
 		maps.Copy(container.Resources.Limits, overrideResources.Limits)
 	}
 
+	// Claims
+	if overrideResources != nil && len(overrideResources.Claims) > 0 {
+		if container.Resources.Claims == nil {
+			container.Resources.Claims = []corev1.ResourceClaim{}
+		}
+		container.Resources.Claims = append(container.Resources.Claims, overrideResources.Claims...)
+	}
+
 	shouldDisableImagePullSecret := component.Annotations[commonconsts.KubeAnnotationDisableImagePullSecretDiscovery] == commonconsts.KubeLabelValueTrue
 
 	imagePullSecrets := []corev1.LocalObjectReference{}
@@ -846,6 +854,7 @@ func GenerateBasePodSpec(
 	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
 	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, imagePullSecrets...)
+
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName)
 	return controller_common.CanonicalizePodSpec(&podSpec), nil
 }
