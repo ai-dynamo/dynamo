@@ -268,8 +268,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     # Populate default sampling params from the model
     tokenizer = tokenizer_factory(arg_map["model"])
     default_sampling_params = SamplingParams()
-    default_sampling_params._setup(tokenizer)
-    default_sampling_params.stop = None
     model_input = ModelInput.Tokens
     model_type = ModelType.Chat | ModelType.Completions
     multimodal_processor = None
