@@ -116,6 +116,7 @@ RUN apt-get update -y \
         automake \
         cmake \
         git \
+        git-lfs \
         libtool \
         meson \
         net-tools \
