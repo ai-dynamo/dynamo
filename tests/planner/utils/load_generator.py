@@ -211,7 +211,7 @@ class LoadGenerator:
                 metrics = json.load(f)
 
             results = {
-                "throughput": metrics.get("request_throughput", {}).get("avg", 0),
+                "throughput": metrics.get("output_token_throughput", {}).get("avg", 0),
                 "ttft_mean": metrics.get("time_to_first_token", {}).get("avg", 0),
                 "itl_mean": metrics.get("inter_token_latency", {}).get("avg", 0),
                 "end_to_end_latency_mean": metrics.get("request_latency", {}).get(
