@@ -142,7 +142,7 @@ impl SnapshotResources {
 /// This avoids all NATS connections while maintaining essential functionality
 async fn start_http_mode_background(
     component: Component,
-    remove_worker_tx: mpsc::Sender<crate::kv_router::indexer::WorkerId>,
+    remove_worker_tx: mpsc::Sender<crate::kv_router::protocols::WorkerId>,
     cancellation_token: CancellationToken,
 ) -> Result<()> {
     // Get etcd client for instance watching
