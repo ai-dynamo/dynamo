@@ -5,6 +5,8 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use super::{bus, handle::AuditRecord};
+mod sink_nats;
+use sink_nats::NatsSink;
 
 pub trait AuditSink: Send + Sync {
     fn name(&self) -> &'static str;
@@ -32,7 +34,7 @@ fn parse_sinks_from_env() -> Vec<Arc<dyn AuditSink>> {
     for name in cfg.split(',').map(|s| s.trim().to_lowercase()) {
         match name.as_str() {
             "stderr" | "" => out.push(Arc::new(StderrSink)),
-            // "nats" => out.push(Arc::new(NatsSink::from_env())),
+            "nats" => out.push(Arc::new(NatsSink::from_env())),
             // "pg"   => out.push(Arc::new(PostgresSink::from_env())),
             other => tracing::warn!(%other, "audit: unknown sink ignored"),
         }
