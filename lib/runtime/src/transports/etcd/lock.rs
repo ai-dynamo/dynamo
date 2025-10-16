@@ -12,7 +12,7 @@ use crate::Result;
 use super::Client;
 
 /// Timeout for acquiring read lock when downloading snapshots
-const DEFAULT_READ_LOCK_TIMEOUT_SECS: u64 = 5;
+const DEFAULT_READ_LOCK_TIMEOUT_SECS: u64 = 30;
 
 /// Distributed read-write lock for coordinating operations across multiple processes
 ///
