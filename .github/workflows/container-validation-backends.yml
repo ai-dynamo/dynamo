@@ -28,14 +28,14 @@ jobs:
         with:
           filters: .github/filters.yaml
 
-  # backend-status-check:
-  #   runs-on: ubuntu-latest
-  #   needs: [vllm, sglang, trtllm]
-  #   if: always()
-  #   steps:
-  #     - name: "Check all dependent jobs"
-  #       run: |
-  #         echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+  backend-status-check:
+    runs-on: ubuntu-latest
+    needs: [vllm, sglang, trtllm]
+    if: always()
+    steps:
+      - name: "Check all dependent jobs"
+        run: |
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
   vllm:
     needs: changed-files
@@ -82,18 +82,18 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-      # - name: Run unit tests
-      #   if: ${{ matrix.platform.arch != 'arm64' }}
-      #   uses: ./.github/actions/pytest
-      #   with:
-      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
-      #     pytest_marks: "unit and vllm and gpu_1"
-      # - name: Run e2e tests
-      #   if: ${{ matrix.platform.arch != 'arm64' }}
-      #   uses: ./.github/actions/pytest
-      #   with:
-      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
-      #     pytest_marks: "e2e and vllm and gpu_1 and not slow"
+      - name: Run unit tests
+        if: ${{ matrix.platform.arch != 'arm64' }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          pytest_marks: "unit and vllm and gpu_1"
+      - name: Run e2e tests
+        if: ${{ matrix.platform.arch != 'arm64' }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          pytest_marks: "e2e and vllm and gpu_1 and not slow"
 
   sglang:
     needs: changed-files
@@ -145,20 +145,20 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-      # - name: Run unit tests
-      #   # OPS-1140: Uncomment the below line
-      #   # if: ${{ matrix.platform.arch != 'arm64' }}
-      #   uses: ./.github/actions/pytest
-      #   with:
-      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
-      #     pytest_marks: "unit and sglang and gpu_1"
-      # - name: Run e2e tests
-      #   # OPS-1140: Uncomment the below line
-      #   # if: ${{ matrix.platform.arch != 'arm64' }}
-      #   uses: ./.github/actions/pytest
-      #   with:
-      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
-      #     pytest_marks: "e2e and sglang and gpu_1"
+      - name: Run unit tests
+        # OPS-1140: Uncomment the below line
+        # if: ${{ matrix.platform.arch != 'arm64' }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          pytest_marks: "unit and sglang and gpu_1"
+      - name: Run e2e tests
+        # OPS-1140: Uncomment the below line
+        # if: ${{ matrix.platform.arch != 'arm64' }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          pytest_marks: "e2e and sglang and gpu_1"
 
   trtllm:
     needs: changed-files
@@ -203,59 +203,59 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-      # - name: Run unit tests
-      #   if: ${{ matrix.platform.arch != 'arm64' }}
-      #   uses: ./.github/actions/pytest
-      #   with:
-      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
-      #     pytest_marks: "unit and trtllm_marker and gpu_1"
-      # - name: Run e2e tests
-      #   if: ${{ matrix.platform.arch != 'arm64' }}
-      #   uses: ./.github/actions/pytest
-      #   with:
-      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
-      #     pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow"
+      - name: Run unit tests
+        if: ${{ matrix.platform.arch != 'arm64' }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          pytest_marks: "unit and trtllm_marker and gpu_1"
+      - name: Run e2e tests
+        if: ${{ matrix.platform.arch != 'arm64' }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow"
 
-  # # Upload metrics for this workflow and all its jobs
-  # upload-workflow-metrics:
-  #   name: Upload Workflow Metrics
-  #   runs-on: gitlab
-  #   if: always()  # Always run, even if other jobs fail
-  #   needs: [backend-status-check]  # Wait for the status check which waits for all build jobs
+  # Upload metrics for this workflow and all its jobs
+  upload-workflow-metrics:
+    name: Upload Workflow Metrics
+    runs-on: gitlab
+    if: always()  # Always run, even if other jobs fail
+    needs: [backend-status-check]  # Wait for the status check which waits for all build jobs
 
-  #   steps:
-  #     - name: Check out repository
-  #       uses: actions/checkout@v4
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-  #     - name: Set up Python
-  #       uses: actions/setup-python@v4
-  #       with:
-  #         python-version: '3.x'
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
 
-  #     - name: Install dependencies
-  #       run: |
-  #         python -m pip install --upgrade pip
-  #         pip install requests
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
 
-  #     - name: Download build metrics
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         pattern: build-metrics-*
-  #         path: build-metrics/
-  #         merge-multiple: true
-  #       continue-on-error: true  # Don't fail if artifacts don't exist
+      - name: Download build metrics
+        uses: actions/download-artifact@v4
+        with:
+          pattern: build-metrics-*
+          path: build-metrics/
+          merge-multiple: true
+        continue-on-error: true  # Don't fail if artifacts don't exist
 
-  #     - name: Upload Complete Workflow Metrics
-  #       env:
-  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  #         WORKFLOW_INDEX: ${{ secrets.WORKFLOW_INDEX }}
-  #         JOB_INDEX: ${{ secrets.JOB_INDEX }}
-  #         STEPS_INDEX: ${{ secrets.STEPS_INDEX }}
-  #         # Container index configuration
-  #         CONTAINER_INDEX: ${{ secrets.CONTAINER_INDEX }}
-  #       run: |
-  #         # Upload complete workflow metrics including container metrics
-  #         python3 .github/workflows/upload_complete_workflow_metrics.py
+      - name: Upload Complete Workflow Metrics
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKFLOW_INDEX: ${{ secrets.WORKFLOW_INDEX }}
+          JOB_INDEX: ${{ secrets.JOB_INDEX }}
+          STEPS_INDEX: ${{ secrets.STEPS_INDEX }}
+          # Container index configuration
+          CONTAINER_INDEX: ${{ secrets.CONTAINER_INDEX }}
+        run: |
+          # Upload complete workflow metrics including container metrics
+          python3 .github/workflows/upload_complete_workflow_metrics.py
 
   build-operator:
     runs-on: gpu-l40-amd64
@@ -480,7 +480,7 @@ jobs:
         exit $TEST_RESULT
     - name: Cleanup
       if: always()
-      timeout-minutes: 600
+      timeout-minutes: 2
       run: |
         echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
         chmod 600 .kubeconfig
