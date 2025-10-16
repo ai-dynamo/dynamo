@@ -10,7 +10,7 @@ This directory contains comprehensive testing tools for validating the SLA plann
 The SLA planner monitors metrics every 60 seconds (default adjustment interval) and scales
 prefill/decode workers based on TTFT, ITL, and request patterns.
 
-To setup the environment, simply use the released docker images for any backends, or build your own docker image following the READMEs in `./components/backends/<vllm/sglang/trtllm>/README.md`, or follow the `Developing Locally` section in [README.md](../../README.md) to setup the environment locally. If using the local environment, make sure to install dependencies by running `uv pip install -r container/deps/requirements.txt`
+To setup the environment, simply use the released docker images for any backends, or build your own docker image following the READMEs in `./components/backends/<vllm/sglang/trtllm>/README.md`, or follow the `Developing Locally` section in [README.md](../../README.md) to setup the environment locally. If using the local environment, make sure to install dependencies by running `UV_GIT_LFS=1 uv pip install --no-cache -r container/deps/requirements.txt`
 
 ## Pre-Requisite: Pre-Deployment Profiling Data
 
@@ -215,10 +215,10 @@ When running deployment with sla-planner, to reduce the image pulling time, depl
 kubectl apply -f ./perf_test_configs/image_cache_daemonset.yaml -n <namespace>
 ```
 
-Then, port-forward or shell into the frontend pod and run GenAI-Perf to get the goodput:
+Then, port-forward or shell into the frontend pod and run AIPerf to get the goodput:
 
 ```bash
-genai-perf profile \
+aiperf profile \
   --model nvidia/Llama-3.1-8B-Instruct-FP8 \
   --tokenizer nvidia/Llama-3.1-8B-Instruct-FP8 \
   --endpoint-type chat \
@@ -227,11 +227,11 @@ genai-perf profile \
   --input-file payload:/workspace/rr-5-45_i3000o300.jsonl \ # path to the generated load dataset \
   --fixed-schedule True \
   --goodput time_to_first_token:200 inter_token_latency:10 \
-  -- -v -max-threads 64 \
+  -v
 ```
 
 > [!NOTE]
-> Sometimes, when sla planner scales down the number of workers, a few requests will error out and cause GenAI-Perf to stuck. We are aware of this issue and are working on fixing it.
+> Sometimes, when sla planner scales down the number of workers, a few requests will error out and cause AIPerf to stuck. We are aware of this issue and are working on fixing it.
 
 #### E2E Perf Test Results
 

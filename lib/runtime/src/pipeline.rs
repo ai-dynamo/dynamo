@@ -15,7 +15,7 @@ pub mod context;
 pub mod error;
 pub mod network;
 pub use network::egress::addressed_router::{AddressedPushRouter, AddressedRequest};
-pub use network::egress::push_router::{PushRouter, RouterMode};
+pub use network::egress::push_router::{PushRouter, RouterMode, WorkerLoadMonitor};
 pub mod registry;
 
 pub use crate::engine::{

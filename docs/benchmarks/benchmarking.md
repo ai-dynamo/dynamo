@@ -283,7 +283,7 @@ results/                         # Client-side: ./benchmarks/results/ or custom 
 │   └── avg_time_to_first_token_vs_concurrency.png
 ├── <your-benchmark-name>/       # Results for your benchmark (uses your custom name)
 │   ├── c1/                      # Concurrency level 1
-│   │   └── profile_export_genai_perf.json
+│   │   └── profile_export_aiperf.json
 │   ├── c2/                      # Concurrency level 2
 │   ├── c5/                      # Concurrency level 5
 │   └── ...                      # Other concurrency levels (10, 50, 100, 250)
@@ -457,7 +457,7 @@ Results are stored in `/data/results` and follow the same structure as client-si
 /data/results/
 └── <benchmark-name>/                # Results for your benchmark name
     ├── c1/                          # Concurrency level 1
-    │   └── profile_export_genai_perf.json
+    │   └── profile_export_aiperf.json
     ├── c2/                          # Concurrency level 2
     └── ...                          # Other concurrency levels
 ```

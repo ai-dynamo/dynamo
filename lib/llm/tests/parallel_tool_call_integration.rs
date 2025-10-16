@@ -381,3 +381,99 @@ async fn test_empty_tool_calls() {
     );
     assert_eq!(remaining_content.unwrap(), content_without_tools);
 }
+
+#[tokio::test]
+async fn test_deepseek_v3_1_tool_call_parsing() {
+    let response_content = r#"I'll help you understand this codebase. Let me start by exploring the structure and key
+  files to provide you with a comprehensive
+  explanation.<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>TodoWrite<｜tool▁sep｜>{"todos":
+  [{"content": "Explore the root directory structure", "status": "in_progress", "activeForm":
+   "Exploring the root directory structure"}, {"content": "Examine package.json and
+  configuration files", "status": "pending", "activeForm": "Examining package.json and
+  configuration files"}, {"content": "Analyze source code structure and key modules",
+  "status": "pending", "activeForm": "Analyzing source code structure and key modules"},
+  {"content": "Identify main entry points and architectural patterns", "status": "pending",
+  "activeForm": "Identifying main entry points and architectural patterns"}, {"content":
+  "Summarize the codebase purpose and functionality", "status": "pending", "activeForm":
+  "Summarizing the codebase purpose and
+  functionality"}]}<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#;
+
+    // Debug: Print the content
+    println!("Response content: {}", response_content);
+    println!(
+        "Contains tool_calls_begin: {}",
+        response_content.contains("<｜tool▁calls▁begin｜>")
+    );
+    println!(
+        "Contains tool_call_begin: {}",
+        response_content.contains("<｜tool▁call▁begin｜>")
+    );
+
+    // Parse the tool calls using the deepseek_v3_1 parser
+    let (tool_calls, remaining_content) =
+        detect_and_parse_tool_call(response_content, Some("deepseek_v3_1"))
+            .await
+            .expect("Should successfully parse deepseek_v3_1 tool calls");
+
+    println!("Number of tool calls parsed: {}", tool_calls.len());
+    if let Some(ref content) = remaining_content {
+        println!("Remaining content: {}", content);
+    }
+
+    // Validate we got exactly 1 tool call
+    assert_eq!(tool_calls.len(), 1, "Should parse exactly 1 tool call");
+
+    // Validate remaining content (should be the explanatory text before the tool call)
+    assert!(remaining_content.is_some());
+    let remaining = remaining_content.unwrap();
+    assert!(remaining.contains("I'll help you understand this codebase"));
+    assert!(remaining.contains("comprehensive"));
+
+    // Validate the tool call
+    let tool_call = &tool_calls[0];
+    assert_eq!(tool_call.function.name, "TodoWrite");
+
+    // Validate OpenAI compatibility
+    assert!(!tool_call.id.is_empty(), "Tool call should have an ID");
+    assert_eq!(tool_call.tp, ToolCallType::Function);
+
+    // Parse and validate the arguments
+    let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)
+        .expect("Arguments should be valid JSON");
+    let args_obj = args.as_object().expect("Arguments should be an object");
+
+    // Check that todos array exists and has 5 items
+    assert!(args_obj.contains_key("todos"), "Should have 'todos' key");
+    let todos = args_obj
+        .get("todos")
+        .unwrap()
+        .as_array()
+        .expect("todos should be an array");
+    assert_eq!(todos.len(), 5, "Should have exactly 5 todo items");
+
+    // Validate first todo item
+    let first_todo = &todos[0];
+    assert_eq!(
+        first_todo.get("content").unwrap().as_str().unwrap(),
+        "Explore the root directory structure"
+    );
+    assert_eq!(
+        first_todo.get("status").unwrap().as_str().unwrap(),
+        "in_progress"
+    );
+    assert_eq!(
+        first_todo.get("activeForm").unwrap().as_str().unwrap(),
+        "Exploring the root directory structure"
+    );
+
+    // Validate last todo item
+    let last_todo = &todos[4];
+    assert_eq!(
+        last_todo.get("content").unwrap().as_str().unwrap(),
+        "Summarize the codebase purpose and functionality"
+    );
+    assert_eq!(
+        last_todo.get("status").unwrap().as_str().unwrap(),
+        "pending"
+    );
+}

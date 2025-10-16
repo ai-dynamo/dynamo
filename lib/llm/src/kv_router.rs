@@ -38,7 +38,9 @@ use crate::{
             KvIndexer, KvIndexerInterface, KvRouterError, OverlapScores, RouterEvent,
             compute_block_hash_for_seq, compute_seq_hash_for_block,
         },
-        protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
+        protocols::{
+            LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult, WorkerWithDpRank,
+        },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
         scoring::ProcessedEndpoints,
         subscriber::start_kv_router_background,
@@ -74,7 +76,7 @@ pub const ROUTER_CLEANUP_LOCK: &str = "router-cleanup-lock";
 pub trait WorkerSelector {
     fn select_worker(
         &self,
-        workers: &HashMap<i64, Option<ModelRuntimeConfig>>,
+        workers: &HashMap<protocols::WorkerId, Option<ModelRuntimeConfig>>,
         request: &SchedulingRequest,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
@@ -316,7 +318,7 @@ impl KvRouter {
     }
 
     /// Give these tokens, find the worker with the best match in it's KV cache.
-    /// Returned overlap amount is in number of blocks.
+    /// Returns the best worker (with dp_rank) and overlap amount in number of blocks.
     /// Now also takes optional context_id for request tracking
     pub async fn find_best_match(
         &self,
@@ -324,7 +326,7 @@ impl KvRouter {
         tokens: &[u32],
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
-    ) -> anyhow::Result<(i64, u32)> {
+    ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
         // Validate that context_id is provided when update_states is true
         if update_states && context_id.is_none() {
             panic!("context_id must be provided if update_states is true");
@@ -350,7 +352,7 @@ impl KvRouter {
                 (false, false) => (None, None),
             };
 
-        let best_worker_id = self
+        let best_worker = self
             .scheduler
             .schedule(
                 context_id.map(|s| s.to_string()),
@@ -364,17 +366,17 @@ impl KvRouter {
 
         if let Indexer::ApproxKvIndexer(ref indexer) = self.indexer {
             indexer
-                .process_routing_decision(best_worker_id, block_hashes, maybe_seq_hashes_1.unwrap())
+                .process_routing_decision(best_worker, block_hashes, maybe_seq_hashes_1.unwrap())
                 .await
                 .unwrap();
         };
 
         let overlap_amount = overlap_scores
             .scores
-            .get(&best_worker_id)
+            .get(&best_worker)
             .copied()
             .unwrap_or(0);
-        Ok((best_worker_id, overlap_amount))
+        Ok((best_worker, overlap_amount))
     }
 
     pub async fn add_request(
@@ -382,7 +384,7 @@ impl KvRouter {
         request_id: String,
         tokens: &[u32],
         overlap_blocks: u32,
-        worker_id: i64,
+        worker: WorkerWithDpRank,
     ) {
         let isl_tokens = tokens.len();
 
@@ -397,7 +399,7 @@ impl KvRouter {
                 maybe_seq_hashes,
                 isl_tokens,
                 overlap_blocks,
-                worker_id,
+                worker,
             )
             .await;
     }
@@ -450,12 +452,13 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         // Handle different request types
         let response = match request {
             RouterRequest::New { tokens } => {
-                let (worker_id, overlap_blocks) = self
+                let (best_worker, overlap_blocks) = self
                     .find_best_match(Some(&context_id), &tokens, None, true)
                     .await?;
 
                 RouterResponse::New {
-                    worker_id,
+                    worker_id: best_worker.worker_id,
+                    dp_rank: best_worker.dp_rank,
                     overlap_blocks,
                 }
             }
@@ -523,24 +526,45 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 // Check if this is a query_instance_id request first
                 let query_instance_id = request.has_annotation("query_instance_id");
 
-                let (instance_id, overlap_amount) = if let Some(id) = request.backend_instance_id {
-                    // If instance_id is set, use it and manually add the request to track it
-                    if !query_instance_id {
-                        self.chooser
-                            .add_request(context_id.clone(), &request.token_ids, 0, id)
-                            .await;
+                let (instance_id, dp_rank, overlap_amount) = if let Some(id) =
+                    request.backend_instance_id
+                {
+                    // If instance_id is set, use it and compute actual overlap
+                    let dp_rank = request.dp_rank.unwrap_or(0);
+                    if query_instance_id {
+                        tracing::debug!(
+                            "backend_instance_id is set, routing to instance {id} with dp_rank {dp_rank} and ignoring query_instance_id annotation"
+                        );
                     }
-                    (id, 0)
+
+                    // Compute actual overlap blocks by querying the indexer
+                    let block_hashes =
+                        compute_block_hash_for_seq(&request.token_ids, self.chooser.block_size());
+                    let overlap_scores = self.chooser.indexer.find_matches(block_hashes).await?;
+                    let worker = WorkerWithDpRank::new(id, dp_rank);
+                    let overlap_blocks = overlap_scores.scores.get(&worker).copied().unwrap_or(0);
+
+                    self.chooser
+                        .add_request(
+                            context_id.clone(),
+                            &request.token_ids,
+                            overlap_blocks,
+                            worker,
+                        )
+                        .await;
+                    (id, dp_rank, overlap_blocks)
                 } else {
                     // Otherwise, find the best match
-                    self.chooser
+                    let (best_worker, overlap_amount) = self
+                        .chooser
                         .find_best_match(
                             Some(&context_id),
                             &request.token_ids,
                             request.router_config_override.as_ref(),
                             !query_instance_id, // Don't update states if query_instance_id
                         )
-                        .await?
+                        .await?;
+                    (best_worker.worker_id, best_worker.dp_rank, overlap_amount)
                 };
 
                 // if request has the annotation "query_instance_id",
@@ -564,6 +588,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 }
                 let (mut backend_input, context) = request.into_parts();
                 backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
+                backend_input.dp_rank = Some(dp_rank);
                 let updated_request = context.map(|_| backend_input);
 
                 let mut response_stream = self.inner.direct(updated_request, instance_id).await?;

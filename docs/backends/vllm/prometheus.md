@@ -10,7 +10,7 @@ When running vLLM through Dynamo, vLLM engine metrics are automatically passed t
 
 For the complete and authoritative list of all vLLM metrics, always refer to the official documentation linked above.
 
-Dynamo runtime metrics are documented in [docs/guides/metrics.md](../../../docs/guides/metrics.md).
+Dynamo runtime metrics are documented in [docs/guides/metrics.md](../../guides/metrics.md).
 
 ## Metric Reference
 

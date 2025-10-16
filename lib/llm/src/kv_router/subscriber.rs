@@ -23,7 +23,8 @@ use crate::{
     kv_router::{
         KV_EVENT_SUBJECT, RADIX_STATE_BUCKET, RADIX_STATE_FILE, ROUTER_CLEANUP_LOCK,
         ROUTER_SNAPSHOT_LOCK,
-        indexer::{DumpRequest, GetWorkersRequest, RouterEvent, WorkerId},
+        indexer::{DumpRequest, GetWorkersRequest, RouterEvent},
+        protocols::WorkerId,
     },
 };
 
