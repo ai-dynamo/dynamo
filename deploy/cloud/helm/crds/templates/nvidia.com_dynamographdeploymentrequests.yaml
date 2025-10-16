@@ -197,32 +197,31 @@ spec:
                     The profiler uses these targets to find an optimal deployment configuration.
                   properties:
                     isl:
+                      default: 3000
                       description: |-
                         ISL is the Input Sequence Length for profiling.
                         Defines the length of input sequences to use during profiling tests.
                       minimum: 1
                       type: integer
                     itl:
+                      default: 10
                       description: |-
                         ITL is the target Inter-Token Latency in milliseconds.
                         This represents the maximum time allowed between consecutive tokens in the output.
                       type: integer
                     osl:
+                      default: 500
                       description: |-
                         OSL is the Output Sequence Length for profiling.
                         Defines the expected length of output sequences to generate during profiling tests.
                       minimum: 1
                       type: integer
                     ttft:
+                      default: 50
                       description: |-
                         TTFT is the target Time To First Token in milliseconds.
                         This represents the maximum time allowed from request submission to receiving the first token.
                       type: integer
-                  required:
-                    - isl
-                    - itl
-                    - osl
-                    - ttft
                   type: object
               required:
                 - modelName

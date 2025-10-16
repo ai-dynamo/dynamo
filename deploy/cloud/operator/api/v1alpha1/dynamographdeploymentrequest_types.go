@@ -37,25 +37,29 @@ import (
 type SLASpec struct {
 	// ITL is the target Inter-Token Latency in milliseconds.
 	// This represents the maximum time allowed between consecutive tokens in the output.
-	// +kubebuilder:validation:Required
-	ITL int `json:"itl"`
+	// +kubebuilder:default=10
+	// +optional
+	ITL int `json:"itl,omitempty"`
 
 	// TTFT is the target Time To First Token in milliseconds.
 	// This represents the maximum time allowed from request submission to receiving the first token.
-	// +kubebuilder:validation:Required
-	TTFT int `json:"ttft"`
+	// +kubebuilder:default=50
+	// +optional
+	TTFT int `json:"ttft,omitempty"`
 
 	// ISL is the Input Sequence Length for profiling.
 	// Defines the length of input sequences to use during profiling tests.
-	// +kubebuilder:validation:Required
+	// +kubebuilder:default=3000
 	// +kubebuilder:validation:Minimum=1
-	ISL int `json:"isl"`
+	// +optional
+	ISL int `json:"isl,omitempty"`
 
 	// OSL is the Output Sequence Length for profiling.
 	// Defines the expected length of output sequences to generate during profiling tests.
-	// +kubebuilder:validation:Required
+	// +kubebuilder:default=500
 	// +kubebuilder:validation:Minimum=1
-	OSL int `json:"osl"`
+	// +optional
+	OSL int `json:"osl,omitempty"`
 }
 
 // GPUSpec defines optional GPU type and resource specifications for profiling and deployment.

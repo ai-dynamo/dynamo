@@ -20,11 +20,11 @@ metadata:
 spec:
   modelName: "meta/llama3-70b"
   backend: trtllm # enum: [vllm, sglang, trtllm]; default is trtllm
-  sla: # SLA profiling targets
-    itl: 1500  # Inter-Token Latency target in milliseconds
-    ttft: 100  # Time To First Token target in milliseconds
-    isl: 3000  # Input Sequence Length
-    osl: 150   # Output Sequence Length
+  sla: # SLA profiling targets (all fields optional with defaults)
+    itl: 10    # Inter-Token Latency target in milliseconds (default: 10)
+    ttft: 50   # Time To First Token target in milliseconds (default: 50)
+    isl: 3000  # Input Sequence Length (default: 3000)
+    osl: 500   # Output Sequence Length (default: 500)
   gpu: # optional
     type: h200_sxm
     minNumGPUsPerEngine: 1  # default is 1
