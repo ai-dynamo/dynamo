@@ -65,6 +65,7 @@ RUN apt-get update -y \
         python${PYTHON_VERSION}-dev \
         build-essential \
         git \
+        git-lfs \
         # SGLang build dependencies
         cmake \
         ibverbs-providers \
@@ -149,6 +150,7 @@ RUN apt-get update && \
         # jq and curl for polling various endpoints and health checks
         jq \
         git \
+        git-lfs \
         curl \
         # Libraries required by UCX to find RDMA devices
         libibverbs1 rdma-core ibverbs-utils libibumad3 \
@@ -206,14 +208,17 @@ RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
     && cd /opt/dynamo/benchmarks \
-    && uv pip install . \
+    && UV_GIT_LFS=1 uv pip install --no-cache . \
     && cd - \
     && rm -rf /opt/dynamo/benchmarks
 
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    uv pip install --requirement /tmp/requirements.txt --requirement /tmp/requirements.test.txt
+    UV_GIT_LFS=1 uv pip install \
+        --no-cache \
+        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.test.txt
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \

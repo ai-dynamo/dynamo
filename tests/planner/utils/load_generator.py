@@ -116,8 +116,6 @@ class LoadGenerator:
             str(params["request_rate"]),
             "--request-count",
             str(request_count),  # Use request count to limit test duration
-            "--stability-percentage",
-            "50",
             "--num-dataset-entries",
             str(
                 max(20, int(params["request_rate"] * 10))
@@ -210,35 +208,16 @@ class LoadGenerator:
             logger.info(f"Parsing results from: {results_file}")
 
             with open(results_file, "r") as f:
-                data = json.load(f)
+                metrics = json.load(f)
 
-            results = {}
-            if "experiments" in data and data["experiments"]:
-                exp = data["experiments"][0]
-                if "perf_metrics" in exp:
-                    metrics = exp["perf_metrics"]
-                    results.update(
-                        {
-                            "throughput": metrics.get("throughput", {}).get("avg", 0),
-                            "ttft_mean": metrics.get("ttft", {}).get("avg", 0),
-                            "itl_mean": metrics.get("inter_token_latency", {}).get(
-                                "avg", 0
-                            ),
-                            "end_to_end_latency_mean": metrics.get(
-                                "request_latency", {}
-                            ).get("avg", 0),
-                        }
-                    )
-            if not results and "profile_export_aiperf" in data:
-                summary = data.get("summary", {})
-                results.update(
-                    {
-                        "throughput": summary.get("throughput", 0),
-                        "ttft_mean": summary.get("time_to_first_token_ms", 0),
-                        "itl_mean": summary.get("inter_token_latency_ms", 0),
-                    }
-                )
-
+            results = {
+                "throughput": metrics.get("output_token_throughput", {}).get("avg", 0),
+                "ttft_mean": metrics.get("time_to_first_token", {}).get("avg", 0),
+                "itl_mean": metrics.get("inter_token_latency", {}).get("avg", 0),
+                "end_to_end_latency_mean": metrics.get("request_latency", {}).get(
+                    "avg", 0
+                ),
+            }
             logger.info(f"Parsed results: {results}")
             return results
 
