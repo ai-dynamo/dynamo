@@ -156,10 +156,10 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
 # Copy pytorch installation from NGC PyTorch
-ARG TORCH_VER=2.8.0a0+5228986c39.nv25.6
-ARG TORCHVISION_VER=0.22.0a0+95f10a4e
+ARG TORCH_VER=2.8.0a0+34c6371d24.nv25.8
+ARG TORCHVISION_VER=0.23.0a0+428a54c9
 ARG SETUPTOOLS_VER=78.1.1
-ARG PYTORCH_TRITON_VER=3.3.0+git96316ce52.nvinternal
+ARG PYTORCH_TRITON_VER=3.3.1+gitc8757738
 ARG JINJA2_VER=3.1.6
 ARG NETWORKX_VER=3.5
 ARG SYMPY_VER=1.14.0
@@ -195,9 +195,6 @@ ARG TENSORRTLLM_INDEX_URL
 # Copy only wheel files and commit info from trtllm_wheel stage from build_context
 COPY --from=trtllm_wheel /*.whl /trtllm_wheel/
 COPY --from=trtllm_wheel /*.txt /trtllm_wheel/
-
-# NOTE: locking cuda-python version to <13 to avoid breaks with tensorrt-llm 1.0.0rc6.
-RUN uv pip install "cuda-python>=12,<13"
 
 # Note: TensorRT needs to be uninstalled before installing the TRTLLM wheel
 # because there might be mismatched versions of TensorRT between the NGC PyTorch
