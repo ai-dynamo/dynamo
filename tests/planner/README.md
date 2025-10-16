@@ -34,34 +34,34 @@ python components/planner/src/dynamo/planner/utils/perf_interpolation.py \
   --profile_results_dir <path_to_profile_results> \
   --isl <ISL> \
   --osl <OSL> \
-  --ttft <TTFT(s)> \
-  --itl <ITL(s)>
+  --ttft <TTFT(ms)> \
+  --itl <ITL(ms)>
 ```
 
 The script will perform the interpolation based on ISL, OSL, and TTFT and ITL SLAs and advise the load that can saturate the engine.
 
-For example, to test the interpolator for `nvidia/Llama-3.1-8B-Instruct-FP8` on H200,
+For example, to test the interpolator for `nvidia/Llama-3.1-8B-Instruct-FP8` on H200 (target TTFT=200ms, ITL=10ms):
 
 ```bash
 python components/planner/src/dynamo/planner/utils/perf_interpolation.py \
   --profile_results_dir tests/planner/profiling_results/H200_TP1P_TP1D/ \
   --isl 3000 \
   --osl 300 \
-  --ttft 0.2 \
-  --itl 0.01
+  --ttft 200 \
+  --itl 10
 
 # output:
 ISL=3000, OSL=300
-TTFT=0.1s, ITL=0.01s
+TTFT=200ms, ITL=10ms
 Using profile results from tests/planner/profiling_results/H200_TP1P_TP1D/
 
 Interpolating prefill performance ...
-        Estimated TTFT=0.060s <= target TTFT=0.200s. Requests can queue 0.140s maximally while meeting TTFT SLA.
+        Estimated TTFT=60.00ms <= target TTFT=200.00ms. Requests can queue 140.00ms maximally while meeting TTFT SLA.
         Estimated throughput: 49481.09 tokens/s/gpu. Request rate at 16.49 requests/s will saturate one GPU.
 
 Interpolating decode performance ...
         Average context length: isl + osl/2 = 3150.
-        Estimated ITL=0.0097s <= target ITL=0.0100s at 16.16% active kv usage.
+        Estimated ITL=9.70ms <= target ITL=10.00ms at 16.16% active kv usage.
         Estimated throughput: 4555.68 token/s/gpu. Request rate at 15.19 requests/s will saturate one GPU.
 ```
 
@@ -111,8 +111,8 @@ For example, to dry run SLA planner for the previous FP8 8B on H200 using the ge
 
 ```bash
 python components/planner/test/planner_sla_dryrun.py \
-    --ttft 0.2 \
-    --itl 0.01 \
+    --ttft 200 \
+    --itl 10 \
     --adjustment-interval 60 \
     --profile-results-dir tests/planner/profiling_results/H200_TP1P_TP1D/ \
     --dataset rr-5-45_i3000o300.jsonl \
