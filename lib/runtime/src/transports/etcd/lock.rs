@@ -33,14 +33,24 @@ pub struct WriteLockGuard<'a> {
 
 impl Drop for WriteLockGuard<'_> {
     fn drop(&mut self) {
-        let rwlock = self.rwlock.clone();
-        let etcd_client = self.etcd_client.clone();
-        tokio::spawn(async move {
-            let write_key = format!("v1/{}/writer", rwlock.lock_prefix);
-            if let Err(e) = etcd_client.kv_delete(write_key.as_str(), None).await {
-                tracing::warn!("Failed to release write lock in drop: {e:?}");
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let rwlock = self.rwlock.clone();
+                let etcd_client = self.etcd_client.clone();
+                handle.spawn(async move {
+                    let write_key = format!("v1/{}/writer", rwlock.lock_prefix);
+                    if let Err(e) = etcd_client.kv_delete(write_key.as_str(), None).await {
+                        tracing::warn!("Failed to release write lock in drop: {e:?}");
+                    }
+                });
             }
-        });
+            Err(_) => {
+                tracing::error!(
+                    "WriteLockGuard dropped outside tokio runtime - lock not released! \
+                     Lock will be cleaned up when etcd lease expires."
+                );
+            }
+        }
     }
 }
 
@@ -52,15 +62,25 @@ pub struct ReadLockGuard<'a> {
 
 impl Drop for ReadLockGuard<'_> {
     fn drop(&mut self) {
-        let rwlock = self.rwlock.clone();
-        let etcd_client = self.etcd_client.clone();
-        let reader_id = self.reader_id.clone();
-        tokio::spawn(async move {
-            let reader_key = format!("v1/{}/readers/{reader_id}", rwlock.lock_prefix);
-            if let Err(e) = etcd_client.kv_delete(reader_key.as_str(), None).await {
-                tracing::warn!("Failed to release read lock in drop: {e:?}");
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let rwlock = self.rwlock.clone();
+                let etcd_client = self.etcd_client.clone();
+                let reader_id = self.reader_id.clone();
+                handle.spawn(async move {
+                    let reader_key = format!("v1/{}/readers/{reader_id}", rwlock.lock_prefix);
+                    if let Err(e) = etcd_client.kv_delete(reader_key.as_str(), None).await {
+                        tracing::warn!("Failed to release read lock in drop: {e:?}");
+                    }
+                });
             }
-        });
+            Err(_) => {
+                tracing::error!(
+                    "ReadLockGuard dropped outside tokio runtime - lock not released! \
+                     Lock will be cleaned up when etcd lease expires."
+                );
+            }
+        }
     }
 }
 
@@ -223,6 +243,7 @@ impl DistributedRWLock {
     }
 }
 
+#[cfg(feature = "testing-etcd")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,7 +258,6 @@ mod tests {
     /// 2. Write lock fails when readers are active
     /// 3. Write lock succeeds when no locks are held
     /// 4. Read lock waits for write lock to be released
-    #[ignore] // Requires etcd to be running
     #[tokio::test]
     async fn test_distributed_rwlock() {
         // Setup: Create etcd client
