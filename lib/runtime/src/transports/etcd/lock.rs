@@ -89,8 +89,6 @@ impl DistributedRWLock {
         etcd_client: &'a Client,
     ) -> Option<WriteLockGuard<'a>> {
         // First check if any locks exist (readers or writer) under the entire prefix
-        // This is an optimization to avoid unnecessary transaction attempts
-        // Note: A reader could slip in between this check and the transaction below
         let prefix = format!("v1/{}", self.lock_prefix);
         match etcd_client.kv_get_prefix(&prefix).await {
             Ok(existing_locks) => {
