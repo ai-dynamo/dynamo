@@ -290,7 +290,9 @@ impl Component {
     pub async fn scrape_stats(&self, timeout: Duration) -> Result<ServiceSet> {
         // Debug: scraping stats for component
         let service_name = self.service_name();
-        let service_client = self.drt().service_client();
+        let Some(service_client) = self.drt().service_client() else {
+            anyhow::bail!("ServiceSet is gathered via NATS, do not call this in non-NATS setups.");
+        };
         service_client
             .collect_services(&service_name, timeout)
             .await
