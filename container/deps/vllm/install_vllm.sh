@@ -146,6 +146,7 @@ else
     # VLLM_REF does not start with 'v' or amd64 - use git checkout path
     if [ "$ARCH" = "arm64" ]; then
 
+        # TODO: update comments for torch 2.9.0
         # torch 2.8.0 doesn't have a aarch wheel for cu128, vLLM uses torch 2.8.0 nightly wheel builds to compile its aarch wheel against
         # nightly can be unstable so we will not use it here
         # for now we will use torch 2.7.1+cu128 but this requires a recompilation from source
@@ -154,7 +155,7 @@ else
 
         # Try to install specific PyTorch version first
         echo "Attempting to install pinned PyTorch nightly versions..."
-        if ! uv pip install torch==2.7.1+cu128 torchaudio==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128; then
+        if ! uv pip install torch==2.9.0+cu130 torchaudio==2.9.0+cu130 torchvision==0.24.0+cu130 --index-url https://download.pytorch.org/whl/cu130; then
             echo "Pinned versions failed"
             exit 1
         fi

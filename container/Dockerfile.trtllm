@@ -82,7 +82,7 @@ RUN apt-get update && \
         python${PYTHON_VERSION}-dev \
         python3-pip \
         # CUDA/ML libraries
-        libcudnn9-cuda-12 \
+        libcudnn9-cuda-13 \
         # Network and communication libraries
         libzmq3-dev \
         # RDMA/UCX libraries required to find RDMA devices
