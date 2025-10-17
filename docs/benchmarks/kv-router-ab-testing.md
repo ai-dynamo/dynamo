@@ -5,8 +5,8 @@ This guide walks you through setting up and running A/B benchmarks to compare Dy
 ## Overview
 Dynamo's KV Smart Router intelligently routes requests based on KV cache affinity, improving performance for workloads with shared prompt prefixes. This guide helps you:
 
-1. Deploy two identical Dynamo configurations:  
-   a. A vllm server for Qwen3-32B with 8 workers (aggregated) **WITHOUT** KV Smart Router enabled  
+1. Deploy two identical Dynamo configurations:
+   a. A vllm server for Qwen3-32B with 8 workers (aggregated) **WITHOUT** KV Smart Router enabled
    b. A vllm server for Qwen3-32B with 8 workers (aggregated) **WITH** KV Smart Router enabled
 2. Run controlled benchmarks using AIPerf
 3. Compare performance metrics to evaluate KV router effectiveness
@@ -39,7 +39,7 @@ Dynamo's KV Smart Router intelligently routes requests based on KV cache affinit
 
 This guide sets up two parallel deployments, as well as a benchmarking pod that can test each deployment:
 
-```
+```text
 ┌─────────────────────────────────────┐
 │  Deployment A: Router OFF           │
 │  Namespace: router-off-test          │
@@ -112,7 +112,7 @@ Wait for operators and infrastructure to be ready:
 # Check router-off-test
 kubectl get pods -n router-off-test
 
-# Check router-on-test  
+# Check router-on-test
 kubectl get pods -n router-on-test
 ```
 
@@ -318,7 +318,7 @@ With this configuration, only the first worker downloads the model; others use t
 # Watch router-OFF pods
 kubectl get pods -n router-off-test -w
 
-# Watch router-ON pods  
+# Watch router-ON pods
 kubectl get pods -n router-on-test -w
 ```
 
@@ -382,9 +382,9 @@ For this A/B comparison, we use the **Mooncake Trace Dataset**, published by [Mo
 
 Instead of storing actual prompt text, the Mooncake dataset uses cryptographic hashes to represent KV cache blocks. Each hash ID represents a **512-token block**, and the hash includes both the current block and all preceding blocks. This preserves the **pattern of prefix reuse** while completely protecting user privacy.
 
-**How it works - Multi-turn conversation example:**
+### How it works - Multi-turn conversation example
 
-```
+```text
 Turn 1 (initial request - long document analysis):
   Input: ~8,000 tokens (e.g., research paper + question)
   Hash IDs: [46][47][48][49][50][51][52][53][54][55][56][57][58][59][60][61]
@@ -394,11 +394,11 @@ Turn 2 (follow-up question on same document):
   Input: Same document + new question (~8,500 tokens)
   Hash IDs: [46][47][48][49][50][51][52][53][54][55][56][57][58][59][60][61][62]
             └──────────── Reuses first 16 blocks (~8,192 tokens) ───────────────┘
-            
+
             ✅ Cache hit: First 8,192 tokens don't need recomputation!
 
 Turn 3 (another follow-up):
-  Input: Same document + different question (~9,000 tokens)  
+  Input: Same document + different question (~9,000 tokens)
   Hash IDs: [46][47][48][49][50][51][52][53][54][55][56][57][58][59][60][61][62][63]
             └──────────── Reuses first 16 blocks (~8,192 tokens) ───────────────┘
 ```
@@ -793,5 +793,5 @@ For questions or issues, consult the [Dynamo documentation](https://github.com/a
 - `prepare-dataset.sh`: Dataset preparation script
 - Results CSVs: Detailed metrics from AIPerf
 
-**Repository:** https://github.com/ai-dynamo/dynamo
+**Repository:** [https://github.com/ai-dynamo/dynamo](https://github.com/ai-dynamo/dynamo)
 
