@@ -14,11 +14,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set -euo pipefail
+IFS=$'\n\t'
+
 RECIPES_DIR="$( cd "$( dirname "$0" )" && pwd )"
 # Default values
 NAMESPACE="${NAMESPACE:-dynamo}"
 DOWNLOAD_MODEL=true
 DEPLOY_TYPE=""
+GAIE="${GAIE:-false}"
 MODEL=""
 FRAMEWORK=""
 DRY_RUN=""
@@ -42,6 +46,7 @@ usage() {
     echo "  --namespace <ns>   Kubernetes namespace (default: dynamo)"
     echo "  --skip-model-cache Skip model downloading (assumes model cache already exists)"
     echo "  --dry-run          Print commands without executing them"
+    echo "  --gaie[=true|false] Enable GAIE integration subfolder (applies GAIE manifests skips benchmark) (default: ${GAIE})"
     echo "  -h, --help         Show this help message"
     echo ""
     echo "Environment Variables:"
@@ -98,6 +103,22 @@ while [[ $# -gt 0 ]]; do
                 missing_requirement "$1"
             fi
             ;;
+        --gaie)
+            GAIE=true
+            shift
+            ;;
+        --gaie=false)
+            GAIE=false
+            shift
+            ;;
+        --gaie=*)
+            GAIE="${1#*=}"
+            case "${GAIE,,}" in
+              true|false) GAIE="${GAIE,,}";;
+              *) echo "ERROR: --gaie must be true or false"; exit 1;;
+            esac
+            shift
+            ;;
         -h|--help)
             usage
             ;;
@@ -142,6 +163,7 @@ fi
 MODEL_DIR="$RECIPES_DIR/$MODEL"
 FRAMEWORK_DIR="$MODEL_DIR/${FRAMEWORK,,}"
 DEPLOY_PATH="$FRAMEWORK_DIR/$DEPLOY_TYPE"
+INTEGRATION="$([[ "${GAIE,,}" == "true" ]] && echo gaie || echo "")"
 
 # Check if model directory exists
 if [[ ! -d "$MODEL_DIR" ]]; then
@@ -190,6 +212,7 @@ echo "Framework: ${FRAMEWORK,,}"
 echo "Deployment Type: $DEPLOY_TYPE"
 echo "Namespace: $NAMESPACE"
 echo "Model Download: $DOWNLOAD_MODEL"
+echo "GAIE integration: $GAIE"
 echo "======================================"
 
 # Handle model downloading
@@ -201,16 +224,34 @@ if [[ "$DOWNLOAD_MODEL" == "true" ]]; then
 
     # Wait for the model download to complete
     echo "Waiting for the model download to complete..."
-    $DRY_RUN kubectl wait --for=condition=Complete job/model-download-${MODEL} -n $NAMESPACE --timeout=6000s
+    $DRY_RUN kubectl wait --for=condition=Complete job/model-download -n $NAMESPACE --timeout=6000s
 else
     echo "Skipping model download (using existing model cache)..."
-    # Still create the PVC in case it doesn't exist
-    $DRY_RUN kubectl apply -n $NAMESPACE -f $MODEL_CACHE_DIR/model-cache.yaml
+    # Create PVC only if it does not exist
+    if [ -z "${DRY_RUN:-}" ]; then
+      if ! kubectl get pvc model-cache -n "$NAMESPACE" >/dev/null 2>&1; then
+        echo "PVC model-cache not found; creating it…"
+        kubectl apply -n "$NAMESPACE" -f "$MODEL_CACHE_DIR/model-cache.yaml"
+      else
+        echo "PVC model-cache already exists; leaving it unchanged."
+      fi
+    else
+      echo "DRY RUN: would ensure PVC model-cache exists"
+    fi
 fi
 
 # Deploy the specified configuration
 echo "Deploying $MODEL ${FRAMEWORK,,} $DEPLOY_TYPE configuration..."
 $DRY_RUN kubectl apply -n $NAMESPACE -f $DEPLOY_FILE
+
+if [[ "$INTEGRATION" == "gaie" ]]; then
+    # run gaie checks.
+    SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    "${SCRIPT_DIR}/gaie_checks.sh"
+    kubectl apply -f "$DEPLOY_PATH/gaie/k8s-manifests" -n "$NAMESPACE"
+    # For now do not run the benchmark
+    exit
+ fi
 
 # Launch the benchmark job
 echo "Launching benchmark job..."

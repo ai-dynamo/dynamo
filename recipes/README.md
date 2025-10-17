@@ -1,12 +1,12 @@
 # Dynamo model serving recipes
 
-| Model family  | Backend | Mode                | GPU   | Deployment | Benchmark |
-|---------------|---------|---------------------|-------|------------|-----------|
-| llama-3-70b   | vllm    | agg                 | H100, H200  |     ✓      |     ✓     |
-| llama-3-70b   | vllm    | disagg-multi-node   | H100, H200  |     ✓      |     ✓     |
-| llama-3-70b   | vllm    | disagg-single-node  | H100, H200  |     ✓      |     ✓     |
-| DeepSeek-R1   | sglang  | disaggregated       | H200  |     ✓      |    🚧     |
-| oss-gpt       | trtllm  | aggregated          | GB200 |     ✓      |     ✓     |
+| Model family  | Backend | Mode                | Deployment | Benchmark | GAIE-integration |
+|---------------|---------|---------------------|------------|-----------|------------------|
+| llama-3-70b   | vllm    | agg                 |     ✓      |     ✓     |        ✓         |
+| llama-3-70b   | vllm    | disagg-multi-node   |     ✓      |     ✓     |                  |
+| llama-3-70b   | vllm    | disagg-single-node  |     ✓      |     ✓     |                  |
+| oss-gpt       | trtllm  | aggregated          |     ✓      |     ✓     |                  |
+| DeepSeek-R1   | sglang  | disaggregated       |     ✓      |    🚧     |                  |
 
 
 ## Prerequisites
@@ -32,8 +32,7 @@ Update the `hf-token-secret.yaml` file with your HuggingFace token.
 kubectl apply -f hf_hub_secret/hf_hub_secret.yaml -n ${NAMESPACE}
 ```
 
-6. (Optional) Create a shared model cache pvc to store the model weights.
-Choose a storage class to create the model cache pvc. You'll need to use this storage class name to update the `storageClass` field in the model-cache/model-cache.yaml file.
+6. Choose a storage class to create the model cache pvc. You'll need to use this storage class name to update the `storageClass` field in the model-cache/model-cache.yaml file. (Optional) Create a shared model cache pvc to store the model weights. If not, the script below will create it for you. If you created it manually, pass `--skip-model-cache` to the script below.
 
 ```bash
 kubectl get storageclass
@@ -70,6 +69,20 @@ Example:
 ./run.sh --model llama-3-70b --framework vllm --deployment-type agg
 ```
 
+## If deploying with Gateway API Inference extension GAIE
+
+1. Follow [Deploy Inference Gateway Section 2](../deploy/inference-gateway/README.md#2-deploy-inference-gateway) to install GAIE.
+
+2. Apply manifests by running a script.
+
+```bash
+# Match the block size to the cli value in your deployment file deploy.yaml: - "python3 -m dynamo.vllm ... --block-size 128"
+export DYNAMO_KV_BLOCK_SIZE=128
+export EPP_IMAGE=nvcr.io/you/epp:tag
+# Add --gaie argument to the script i.e.:
+./run.sh --model llama-3-70b --framework vllm --gaie agg
+```
+The script will perform gateway checks and apply the manifests.
 
 ## Dry run mode
 
