@@ -464,6 +464,13 @@ class WorkerMetricsPublisher:
         """
         Similar to Component.create_service, but only service created through
         this method will interact with KV router of the same component.
+
+        Args:
+            component: The component to create the endpoint for
+            metrics_labels: [DEPRECATED] This parameter is no longer used and will be removed in a future version
+
+        .. deprecated::
+            The metrics_labels parameter is deprecated and has no effect.
         """
 
     def publish(
@@ -742,31 +749,6 @@ class KvRecorder:
     def shutdown(self) -> None:
         """
         Shutdown the recorder.
-        """
-        ...
-
-class AggregatedMetrics:
-    """
-    A collection of metrics of the endpoints
-    """
-
-    ...
-
-class KvMetricsAggregator:
-    """
-    A metrics aggregator will collect KV metrics of the endpoints.
-    """
-
-    ...
-
-    def __init__(self, component: Component) -> None:
-        """
-        Create a `KvMetricsAggregator` object
-        """
-
-    def get_metrics(self) -> AggregatedMetrics:
-        """
-        Return the aggregated metrics of the endpoints.
         """
         ...
 
