@@ -62,7 +62,7 @@ The Dynamo KV Block Manager serves as a reference implementation that emphasizes
    Motivation <kvbm_motivation.md>
    Architecture <kvbm_architecture.md>
    Components <kvbm_components.md>
-   Components Deep Dive <kvbm_component_deepdive.md>
+   Design Deep Dive <kvbm_design_deepdive.md>
    Integrations <kvbm_integrations.md>
    KVBM in vLLM <vllm-setup.md>
    KVBM in TRTLLM <trtllm-setup.md>
