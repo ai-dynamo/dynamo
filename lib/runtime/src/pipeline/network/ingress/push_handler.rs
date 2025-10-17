@@ -47,38 +47,39 @@ impl WorkHandlerMetrics {
         metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let metrics_labels = metrics_labels.unwrap_or(&[]);
-        let request_counter = endpoint.create_intcounter(
+        let metrics = endpoint.metrics();
+        let request_counter = metrics.create_intcounter(
             work_handler::REQUESTS_TOTAL,
             "Total number of requests processed by work handler",
             metrics_labels,
         )?;
 
-        let request_duration = endpoint.create_histogram(
+        let request_duration = metrics.create_histogram(
             work_handler::REQUEST_DURATION_SECONDS,
             "Time spent processing requests by work handler",
             metrics_labels,
             None,
         )?;
 
-        let inflight_requests = endpoint.create_intgauge(
+        let inflight_requests = metrics.create_intgauge(
             work_handler::INFLIGHT_REQUESTS,
             "Number of requests currently being processed by work handler",
             metrics_labels,
         )?;
 
-        let request_bytes = endpoint.create_intcounter(
+        let request_bytes = metrics.create_intcounter(
             work_handler::REQUEST_BYTES_TOTAL,
             "Total number of bytes received in requests by work handler",
             metrics_labels,
         )?;
 
-        let response_bytes = endpoint.create_intcounter(
+        let response_bytes = metrics.create_intcounter(
             work_handler::RESPONSE_BYTES_TOTAL,
             "Total number of bytes sent in responses by work handler",
             metrics_labels,
         )?;
 
-        let error_counter = endpoint.create_intcountervec(
+        let error_counter = metrics.create_intcountervec(
             work_handler::ERRORS_TOTAL,
             "Total number of errors in work handler processing",
             &[work_handler::ERROR_TYPE_LABEL],

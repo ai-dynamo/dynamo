@@ -3,7 +3,7 @@
 
 use dynamo_runtime::{
     DistributedRuntime, Result,
-    metrics::MetricsRegistry,
+    metrics::MetricsHierarchy,
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
         async_trait, network::Ingress,
@@ -33,7 +33,7 @@ pub struct MySystemStatsMetrics {
 
 impl MySystemStatsMetrics {
     pub fn from_endpoint(endpoint: &dynamo_runtime::component::Endpoint) -> anyhow::Result<Self> {
-        let data_bytes_processed = endpoint.create_intcounter(
+        let data_bytes_processed = endpoint.metrics().create_intcounter(
             "my_custom_bytes_processed_total",
             "Example of a custom metric. Total number of data bytes processed by system handler",
             &[],
