@@ -1,20 +1,3 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
--->
-
 # Dynamo KV Smart Router A/B Benchmarking Guide
 
 This guide walks you through setting up and running A/B benchmarks to compare Dynamo's KV Smart Router against standard round-robin routing on a Kubernetes cluster.
@@ -111,59 +94,17 @@ kubectl create secret generic hf-token-secret \
 
 ### Step 1.3: Install Dynamo Platform (Per-Namespace)
 
-If your cluster uses namespace-restricted Dynamo operators, install the platform in each namespace:
+If your cluster uses namespace-restricted Dynamo operators, you'll need to install the Dynamo platform in each namespace. Follow the [Dynamo Kubernetes Installation Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation_guide.md) to install the platform in both namespaces:
 
-```bash
-# Clone Dynamo repository
-git clone https://github.com/ai-dynamo/dynamo.git
-cd dynamo
+- `router-off-test`
+- `router-on-test`
 
-# Add required Helm repositories
-helm repo add nats https://nats-io.github.io/k8s/helm/charts/
-helm repo add bitnami https://charts.bitnami.com/bitnami
-helm repo update
+**Key Configuration Notes:**
+- If your cluster uses namespace restrictions, ensure `dynamo-operator.namespaceRestriction.enabled=true` is set during installation
+- Adjust version tags to match your cluster's available Dynamo versions
+- If you encounter operator compatibility issues (e.g., unsupported MPI arguments), consult your cluster administrator or the Dynamo troubleshooting documentation
 
-# Build Helm dependencies
-helm dependency build deploy/cloud/helm/platform/
-
-# Install in router-off-test namespace
-helm install dynamo-platform deploy/cloud/helm/platform/ \
-  --namespace router-off-test \
-  --set "dynamo-operator.namespaceRestriction.enabled=true" \
-  --set "dynamo-operator.controllerManager.manager.image.tag=0.5.0" \
-  --set "dynamo-operator.mpiRun.sshKeygen.enabled=false" \
-  --timeout 5m
-
-# Install in router-on-test namespace
-helm install dynamo-platform deploy/cloud/helm/platform/ \
-  --namespace router-on-test \
-  --set "dynamo-operator.namespaceRestriction.enabled=true" \
-  --set "dynamo-operator.controllerManager.manager.image.tag=0.5.0" \
-  --set "dynamo-operator.mpiRun.sshKeygen.enabled=false" \
-  --timeout 5m
-```
-
-**Important:** Adjust the `image.tag` to match your cluster's available Dynamo version.
-
-### Step 1.4: Fix Operator Configuration (If Needed)
-
-If using Dynamo 0.5.0 with a 0.6.0 Helm chart, remove unsupported MPI arguments:
-
-```bash
-# Patch router-off-test operator
-kubectl patch deployment dynamo-platform-dynamo-operator-controller-manager \
-  -n router-off-test \
-  --type json \
-  -p='[{"op": "remove", "path": "/spec/template/spec/containers/1/args/8"}, {"op": "remove", "path": "/spec/template/spec/containers/1/args/7"}]'
-
-# Patch router-on-test operator
-kubectl patch deployment dynamo-platform-dynamo-operator-controller-manager \
-  -n router-on-test \
-  --type json \
-  -p='[{"op": "remove", "path": "/spec/template/spec/containers/1/args/8"}, {"op": "remove", "path": "/spec/template/spec/containers/1/args/7"}]'
-```
-
-### Step 1.5: Verify Infrastructure
+### Step 1.4: Verify Infrastructure
 
 Wait for operators and infrastructure to be ready:
 
