@@ -14,7 +14,7 @@ use super::block::{
     Block, BlockError, BlockMetadata, GlobalRegistry, MaybeReturnableBlock, nixl::short_type_name,
     private, registry::BlockRegistry,
 };
-use super::events::{EventManager, NullEventManager};
+use super::events::EventManager;
 use super::storage::Storage;
 
 use crate::block_manager::CacheLevel;

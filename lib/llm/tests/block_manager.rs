@@ -879,4 +879,185 @@ mod tests {
         );
         rt.shutdown();
     }
+
+    // KVBM KV Event Emission Tests using the DynamoEventManager (from events.rs)
+    // These tests verify that the event manager correctly emits KV cache events to the indexer
+
+    #[tokio::test]
+    async fn test_kvbm_dynamo_event_manager_emits_store_event() {
+        dynamo_runtime::logging::init();
+        let sequence = create_sequence();
+        let rt = Runtime::from_current().unwrap();
+
+        // Create the DynamoEventManager with test mode
+        let (manager, mut event_rx) =
+            dynamo_llm::block_manager::events::DynamoEventManager::new_test();
+        let event_manager: Arc<dyn EventManager> = manager;
+
+        let global_registry = GlobalRegistry::default();
+        let mut block_registry =
+            BlockRegistry::new(event_manager, global_registry.clone(), rt.primary().clone());
+
+        // Register a block
+        let complete_state = CompleteState::new(sequence.blocks()[0].clone());
+        let mut block_state = BlockState::Complete(complete_state);
+        let publish_handle = block_registry.register_block(&mut block_state).unwrap();
+
+        // No event should have been triggered yet
+        let timeout = tokio::time::timeout(Duration::from_millis(100), event_rx.recv()).await;
+        assert!(
+            timeout.is_err(),
+            "Unexpected event triggered before dropping publish_handle"
+        );
+
+        // Dropping the publish handle should trigger a Store event
+        drop(publish_handle);
+
+        let timeout = tokio::time::timeout(Duration::from_secs(1), event_rx.recv()).await;
+        match timeout {
+            Ok(Some(event)) => match &event.data {
+                KvCacheEventData::Stored(store_data) => {
+                    assert_eq!(store_data.blocks.len(), 1, "Should have one block");
+                    assert_eq!(
+                        store_data.blocks[0].block_hash,
+                        ExternalSequenceBlockHash(sequence.blocks()[0].sequence_hash()),
+                        "Block hash should match"
+                    );
+                }
+                _ => panic!("Expected Stored event, got: {:?}", event.data),
+            },
+            Ok(None) => panic!("Event channel closed without receiving event"),
+            Err(_) => panic!("Timeout waiting for Store event"),
+        }
+
+        drop(block_state);
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_kvbm_dynamo_event_manager_emits_remove_event() {
+        dynamo_runtime::logging::init();
+        let sequence = create_sequence();
+        let rt = Runtime::from_current().unwrap();
+
+        // Create the DynamoEventManager with test mode
+        let (manager, mut event_rx) =
+            dynamo_llm::block_manager::events::DynamoEventManager::new_test();
+        let event_manager: Arc<dyn EventManager> = manager;
+
+        let global_registry = GlobalRegistry::default();
+        let mut block_registry =
+            BlockRegistry::new(event_manager, global_registry.clone(), rt.primary().clone());
+
+        // Register a block
+        let complete_state = CompleteState::new(sequence.blocks()[0].clone());
+        let mut block_state = BlockState::Complete(complete_state);
+        let publish_handle = block_registry.register_block(&mut block_state).unwrap();
+        drop(publish_handle);
+
+        // Wait for Store event
+        let timeout = tokio::time::timeout(Duration::from_secs(1), event_rx.recv()).await;
+        match timeout {
+            Ok(Some(_event)) => {
+                // Store event received successfully
+            }
+            Ok(None) => panic!("Event channel closed without receiving Store event"),
+            Err(_) => panic!("Timeout waiting for Store event"),
+        }
+
+        // Drop the block state to trigger Remove event
+        let expected_hash = sequence.blocks()[0].sequence_hash();
+        drop(block_state);
+
+        // Wait for and verify the Remove event
+        let timeout = tokio::time::timeout(Duration::from_secs(1), event_rx.recv()).await;
+        match timeout {
+            Ok(Some(event)) => match &event.data {
+                KvCacheEventData::Removed(remove_data) => {
+                    assert_eq!(
+                        remove_data.block_hashes.len(),
+                        1,
+                        "Should have one block hash"
+                    );
+                    assert_eq!(
+                        remove_data.block_hashes[0],
+                        ExternalSequenceBlockHash(expected_hash),
+                        "Block hash should match"
+                    );
+                }
+                _ => panic!("Expected Removed event, got: {:?}", event.data),
+            },
+            Ok(None) => panic!("Event channel closed without receiving event"),
+            Err(_) => panic!("Timeout waiting for Remove event"),
+        }
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_kvbm_dynamo_event_manager_emits_multiple_blocks() {
+        dynamo_runtime::logging::init();
+        let sequence = create_sequence();
+        let rt = Runtime::from_current().unwrap();
+
+        // Create the DynamoEventManager with test mode
+        let (manager, mut event_rx) =
+            dynamo_llm::block_manager::events::DynamoEventManager::new_test();
+        let mut publisher = kvbm::events::Publisher::new(manager.clone());
+        let event_manager: Arc<dyn EventManager> = manager;
+
+        let global_registry = GlobalRegistry::default();
+        let mut block_registry =
+            BlockRegistry::new(event_manager, global_registry.clone(), rt.primary().clone());
+
+        // Register two blocks
+        let complete_state_1 = CompleteState::new(sequence.blocks()[0].clone());
+        let mut block_state_1 = BlockState::Complete(complete_state_1);
+        let publish_handle_1 = block_registry.register_block(&mut block_state_1).unwrap();
+
+        let complete_state_2 = CompleteState::new(sequence.blocks()[1].clone());
+        let mut block_state_2 = BlockState::Complete(complete_state_2);
+        let publish_handle_2 = block_registry.register_block(&mut block_state_2).unwrap();
+
+        // Use publisher to emit both blocks in a single event
+        publisher.take_handle(publish_handle_1.unwrap());
+        publisher.take_handle(publish_handle_2.unwrap());
+        publisher.publish();
+
+        // Wait for and verify the Store event contains both blocks
+        let timeout = tokio::time::timeout(Duration::from_secs(1), event_rx.recv()).await;
+        match timeout {
+            Ok(Some(event)) => {
+                match &event.data {
+                    KvCacheEventData::Stored(store_data) => {
+                        assert_eq!(store_data.blocks.len(), 2, "Should have two blocks");
+
+                        // Verify both block hashes are present
+                        let hash1 = ExternalSequenceBlockHash(sequence.blocks()[0].sequence_hash());
+                        let hash2 = ExternalSequenceBlockHash(sequence.blocks()[1].sequence_hash());
+
+                        let received_hashes: Vec<_> =
+                            store_data.blocks.iter().map(|b| b.block_hash).collect();
+
+                        assert!(
+                            received_hashes.contains(&hash1),
+                            "Should contain first block hash"
+                        );
+                        assert!(
+                            received_hashes.contains(&hash2),
+                            "Should contain second block hash"
+                        );
+                    }
+                    _ => panic!("Expected Stored event, got: {:?}", event.data),
+                }
+            }
+            Ok(None) => panic!("Event channel closed without receiving event"),
+            Err(_) => panic!("Timeout waiting for Store event with multiple blocks"),
+        }
+
+        drop(publisher);
+        drop(block_state_1);
+        drop(block_state_2);
+        rt.shutdown();
+    }
 }

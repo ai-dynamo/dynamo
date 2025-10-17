@@ -33,6 +33,9 @@ pub struct KvManagerRuntimeConfig {
 
     #[builder(default = "Arc::new(Registry::new())")]
     pub metrics_registry: Arc<Registry>,
+
+    #[builder(default)]
+    pub kv_event_publisher: Option<Arc<crate::kv_router::publisher::KvEventPublisher>>,
 }
 
 impl KvManagerRuntimeConfig {

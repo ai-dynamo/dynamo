@@ -51,6 +51,17 @@ enum KvEventSource {
     },
 }
 
+impl std::fmt::Debug for KvEventSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KvEventSource::Zmq { .. } => f
+                .debug_struct("Zmq")
+                .field("zmq_handle", &"<JoinHandle>")
+                .finish(),
+        }
+    }
+}
+
 impl KvEventSource {
     /// Start the event source from a [`KvEventSourceConfig`].
     fn start(
@@ -89,6 +100,7 @@ impl KvEventSource {
 }
 
 /// A publisher of KV events.
+#[derive(Debug)]
 pub struct KvEventPublisher {
     /// The size of the KV block.
     kv_block_size: u32,

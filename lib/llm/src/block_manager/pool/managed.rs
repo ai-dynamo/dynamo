@@ -57,8 +57,13 @@ use inactive::InactiveBlockPool;
 #[derive(Builder, Dissolve)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
 pub struct ManagedBlockPoolArgs<S: Storage, L: LocalityProvider, M: BlockMetadata> {
-    #[builder(default = "NullEventManager::new()")]
-    event_manager: Arc<dyn EventManager>,
+    /// Event manager for publishing block registration and removal events.
+    ///
+    /// If not provided here, the BlockManager will choose:
+    /// - `DynamoEventManager` when a `kv_event_publisher` is present in the runtime config, or
+    /// - `NullEventManager` (no op event manager) otherwise.
+    #[builder(default = "None", setter(strip_option))]
+    event_manager: Option<Arc<dyn EventManager>>,
 
     #[builder(default = "CancellationToken::new()")]
     cancel_token: CancellationToken,
@@ -80,13 +85,20 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPoolArgsBuil
     pub fn build(self) -> anyhow::Result<ManagedBlockPool<S, L, M>> {
         let args = self.build_internal()?;
         let (
-            event_manager,
+            event_manager_opt,
             cancel_token,
             blocks,
             global_registry,
             async_runtime,
             default_duplication_setting,
         ) = args.dissolve();
+
+        // Use provided event manager, or default to NullEventManager (no event publishing)
+        let event_manager = if let Some(event_manager) = event_manager_opt {
+            event_manager
+        } else {
+            crate::block_manager::events::NullEventManager::new()
+        };
 
         tracing::info!("building block pool");
         let pool = ManagedBlockPool::new(
@@ -584,13 +596,20 @@ mod tests {
         ) -> anyhow::Result<(ManagedBlockPool<S, L, M>, ProgressEngine<S, L, M>)> {
             let args = self.build_internal()?;
             let (
-                event_manager,
+                event_manager_opt,
                 cancel_token,
                 blocks,
                 global_registry,
                 async_runtime,
                 default_duplication_setting,
             ) = args.dissolve();
+
+            // Use provided event manager, or default to NullEventManager
+            let event_manager = if let Some(event_manager) = event_manager_opt {
+                event_manager
+            } else {
+                crate::block_manager::events::NullEventManager::new()
+            };
 
             let (pool, progress_engine) = ManagedBlockPool::with_progress_engine(
                 event_manager,

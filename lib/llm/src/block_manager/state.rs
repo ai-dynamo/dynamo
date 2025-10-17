@@ -14,7 +14,7 @@ use super::{
         factory::LocalBlockDataFactory, locality::LocalityProvider,
     },
     config::NixlOptions,
-    events::{EventManager, NullEventManager},
+    events::EventManager,
     locality::LogicalResources,
     offload::{
         OffloadFilters, OffloadManager, OffloadManagerConfig, filter::OffloadFilter,

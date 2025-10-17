@@ -18,10 +18,18 @@ impl Resources {
 
         let global_registry = GlobalRegistry::default();
 
-        let event_manager = config
-            .event_manager
-            .clone()
-            .unwrap_or_else(|| NullEventManager::new());
+        // Use provided event manager, or default to NullEventManager (no event publishing)
+        let event_manager: Arc<dyn crate::block_manager::events::EventManager> =
+            if let Some(event_manager) = config.event_manager.clone() {
+                tracing::info!("using explicitly provided event manager for KV block manager");
+                event_manager
+            } else if let Some(kv_event_publisher) = config.runtime.kv_event_publisher.clone() {
+                tracing::info!("using DynamoEventManager for KV block manager");
+                crate::block_manager::events::DynamoEventManager::new(kv_event_publisher)
+            } else {
+                tracing::info!("using NullEventManager for KV block manager (no event publishing)");
+                crate::block_manager::events::NullEventManager::new()
+            };
 
         // Create a NIXL agent if NIXL is enabled and instantiate requested backends
         // TODO: Build a map of NIXL backends to block pools/sets

@@ -230,7 +230,7 @@ pub struct RegistrationHandle {
 }
 
 impl RegistrationHandle {
-    fn from_token_block(
+    pub(crate) fn from_token_block(
         token_block: &TokenBlock,
         release_manager: Arc<dyn EventReleaseManager>,
     ) -> Self {

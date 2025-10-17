@@ -124,12 +124,63 @@ impl KvConnectorLeader {
                     return;
                 }
 
+                // todo: get namespace and component name from the component/config
+                let namespace_name = std::env::var("DYNAMO_NAMESPACE").unwrap_or_else(|_| "dynamo".to_string());
+                let component_name = std::env::var("DYNAMO_COMPONENT").unwrap_or_else(|_| "backend".to_string());
+
+                // Get worker_id directly from drt's primary lease
+                let publisher_worker_id = drt.primary_lease()
+                    .map(|lease| lease.id())
+                    .unwrap_or(0);  // Default to 0 if no lease (static mode)
+
+                // Get the component once for creating the publisher
+                let component_result = drt.namespace(namespace_name.clone())
+                    .and_then(|ns| ns.component(component_name.clone()));
+
+                // Create KV event publisher using the publisher_worker_id
+                let kv_event_publisher = match component_result {
+                    Ok(component) => {
+                        tracing::info!(
+                            "Creating KVBM KV event publisher using component: namespace={}, component={}, worker_id={}",
+                            namespace_name,
+                            component_name,
+                            publisher_worker_id
+                        );
+
+                        match dynamo_llm::kv_router::publisher::KvEventPublisher::new(
+                            component,
+                            publisher_worker_id,
+                            page_size as u32,
+                            None, // No ZMQ source
+                        ) {
+                            Ok(publisher) => Some(Arc::new(publisher)),
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to create KVBM KV event publisher: {}. Continuing without event publishing.",
+                                    e
+                                );
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to get component '{}' from namespace '{}': {}. Continuing without event publishing.",
+                            component_name,
+                            namespace_name,
+                            e
+                        );
+                        None
+                    }
+                };
+
                 let block_manager = match BlockManagerBuilder::new()
                     .worker_id(0)
                     .leader(leader_py)
                     .page_size(page_size)
                     .disable_device_pool(false)
                     .kvbm_metrics(kvbm_metrics_clone.clone())
+                    .kv_event_publisher(kv_event_publisher)
                     .build()
                     .await
                 {

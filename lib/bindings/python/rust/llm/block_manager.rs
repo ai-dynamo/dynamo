@@ -257,6 +257,7 @@ pub struct BlockManagerBuilder {
     page_size: usize,
     disable_device_pool: bool,
     kvbm_metrics: Option<dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics>,
+    kv_event_publisher: Option<Arc<dynamo_llm::kv_router::publisher::KvEventPublisher>>,
 }
 
 impl BlockManagerBuilder {
@@ -291,6 +292,14 @@ impl BlockManagerBuilder {
         self
     }
 
+    pub fn kv_event_publisher(
+        mut self,
+        publisher: Option<Arc<dynamo_llm::kv_router::publisher::KvEventPublisher>>,
+    ) -> Self {
+        self.kv_event_publisher = publisher;
+        self
+    }
+
     /// Async build (call from an async context).
     pub async fn build(self) -> Result<BlockManager> {
         let worker_id = self.worker_id;
@@ -304,10 +313,17 @@ impl BlockManagerBuilder {
         let cancel_token = CancellationToken::new();
 
         // Runtime & model config
-        let runtime_config = dynamo_llm::block_manager::KvManagerRuntimeConfig::builder()
-            .worker_id(worker_id)
-            .cancellation_token(cancel_token.clone())
-            .build()?;
+        let mut runtime_config_builder =
+            dynamo_llm::block_manager::KvManagerRuntimeConfig::builder()
+                .worker_id(worker_id)
+                .cancellation_token(cancel_token.clone());
+
+        // Pass KV event publisher if provided
+        if let Some(publisher) = self.kv_event_publisher {
+            runtime_config_builder = runtime_config_builder.kv_event_publisher(Some(publisher));
+        }
+
+        let runtime_config = runtime_config_builder.build()?;
 
         let mut config =
             dynamo_llm::block_manager::KvBlockManagerConfig::builder().runtime(runtime_config);
