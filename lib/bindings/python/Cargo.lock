@@ -886,7 +886,11 @@ version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fde0e0ec90c9dfb3b4b1a0891a7dcd0e2bffde2f7efed5fe7c9bb00e5bfb915e"
 dependencies = [
+<<<<<<< Updated upstream
  "windows-sys 0.59.0",
+=======
+ "windows-sys 0.52.0",
+>>>>>>> Stashed changes
 ]
 
 [[package]]
@@ -3005,7 +3009,11 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde",
+<<<<<<< Updated upstream
  "windows-sys 0.59.0",
+=======
+ "windows-sys 0.52.0",
+>>>>>>> Stashed changes
 ]
 
 [[package]]
@@ -3482,21 +3490,34 @@ dependencies = [
 
 [[package]]
 name = "modelexpress-client"
+<<<<<<< Updated upstream
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9462ec6cd8b3d6beaa262ad0907a8ba297c7e3a220c11e4159742d8c275588eb"
+=======
+version = "0.1.0"
+source = "git+https://github.com/ai-dynamo/modelexpress.git?rev=a232220bf268a475d293914d407f4ae186f443e3#a232220bf268a475d293914d407f4ae186f443e3"
+>>>>>>> Stashed changes
 dependencies = [
  "anyhow",
  "clap",
  "colored",
  "futures",
  "modelexpress-common",
+<<<<<<< Updated upstream
  "prost 0.13.5",
+=======
+ "prost",
+>>>>>>> Stashed changes
  "serde",
  "serde_json",
  "thiserror 2.0.16",
  "tokio",
+<<<<<<< Updated upstream
  "tonic 0.13.1",
+=======
+ "tonic",
+>>>>>>> Stashed changes
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -3504,9 +3525,14 @@ dependencies = [
 
 [[package]]
 name = "modelexpress-common"
+<<<<<<< Updated upstream
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cd921793901b2a39105accab89a953d96661cc0eebfecfda307bec266edafbb"
+=======
+version = "0.1.0"
+source = "git+https://github.com/ai-dynamo/modelexpress.git?rev=a232220bf268a475d293914d407f4ae186f443e3#a232220bf268a475d293914d407f4ae186f443e3"
+>>>>>>> Stashed changes
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3515,13 +3541,21 @@ dependencies = [
  "config",
  "hf-hub",
  "jiff",
+<<<<<<< Updated upstream
  "prost 0.13.5",
+=======
+ "prost",
+>>>>>>> Stashed changes
  "serde",
  "serde_json",
  "serde_yaml",
  "thiserror 2.0.16",
  "tokio",
+<<<<<<< Updated upstream
  "tonic 0.13.1",
+=======
+ "tonic",
+>>>>>>> Stashed changes
  "tonic-build",
  "tracing",
 ]
@@ -4137,20 +4171,34 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pest"
+<<<<<<< Updated upstream
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "21e0a3a33733faeaf8651dfee72dd0f388f0c8e5ad496a3478fa5a922f49cfa8"
 dependencies = [
  "memchr",
  "thiserror 2.0.16",
+=======
+version = "2.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "989e7521a040efde50c3ab6bbadafbe15ab6dc042686926be59ac35d74607df4"
+dependencies = [
+ "memchr",
+>>>>>>> Stashed changes
  "ucd-trie",
 ]
 
 [[package]]
 name = "pest_derive"
+<<<<<<< Updated upstream
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bc58706f770acb1dbd0973e6530a3cff4746fb721207feb3a8a6064cd0b6c663"
+=======
+version = "2.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "187da9a3030dbafabbbfb20cb323b976dc7b7ce91fcd84f2f74d6e31d378e2de"
+>>>>>>> Stashed changes
 dependencies = [
  "pest",
  "pest_generator",
@@ -4158,9 +4206,15 @@ dependencies = [
 
 [[package]]
 name = "pest_generator"
+<<<<<<< Updated upstream
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d4f36811dfe07f7b8573462465d5cb8965fffc2e71ae377a33aecf14c2c9a2f"
+=======
+version = "2.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49b401d98f5757ebe97a26085998d6c0eecec4995cad6ab7fc30ffdf4b052843"
+>>>>>>> Stashed changes
 dependencies = [
  "pest",
  "pest_meta",
@@ -4171,9 +4225,15 @@ dependencies = [
 
 [[package]]
 name = "pest_meta"
+<<<<<<< Updated upstream
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42919b05089acbd0a5dcd5405fb304d17d1053847b81163d09c4ad18ce8e8420"
+=======
+version = "2.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72f27a2cfee9f9039c4d86faa5af122a0ac3851441a34865b8a043b46be0065a"
+>>>>>>> Stashed changes
 dependencies = [
  "pest",
  "sha2",
@@ -5171,6 +5231,7 @@ dependencies = [
 ]
 
 [[package]]
+<<<<<<< Updated upstream
 name = "rust-embed"
 version = "8.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5205,6 +5266,8 @@ dependencies = [
 ]
 
 [[package]]
+=======
+>>>>>>> Stashed changes
 name = "rust-ini"
 version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6376,9 +6439,15 @@ dependencies = [
 
 [[package]]
 name = "toml_parser"
+<<<<<<< Updated upstream
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cf893c33be71572e0e9aa6dd15e6677937abd686b066eac3f8cd3531688a627"
+=======
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0cbe268d35bdb4bb5a56a2de88d0ad0eb70af5384a99d648cd4b3d04039800e"
+>>>>>>> Stashed changes
 dependencies = [
  "winnow",
 ]

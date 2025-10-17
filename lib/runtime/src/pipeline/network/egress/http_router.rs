@@ -26,6 +26,7 @@ use tracing::Instrument;
 /// Default timeout for HTTP requests (ack only, not full response)
 const DEFAULT_HTTP_REQUEST_TIMEOUT_SECS: u64 = 5;
 
+<<<<<<< Updated upstream
 /// HTTP/2 request plane client
 pub struct HttpRequestClient {
     client: reqwest::Client,
@@ -51,16 +52,161 @@ impl HttpRequestClient {
             client,
             request_timeout: timeout,
         })
+=======
+/// HTTP/2 Performance Configuration Constants
+const DEFAULT_MAX_FRAME_SIZE: u32 = 1024 * 1024; // 1MB frame size for better throughput
+const DEFAULT_MAX_CONCURRENT_STREAMS: u32 = 1000; // Allow more concurrent streams
+const DEFAULT_POOL_MAX_IDLE_PER_HOST: usize = 100; // Increased connection pool
+const DEFAULT_POOL_IDLE_TIMEOUT_SECS: u64 = 90; // Keep connections alive longer
+const DEFAULT_HTTP2_KEEP_ALIVE_INTERVAL_SECS: u64 = 30; // Send pings every 30s
+const DEFAULT_HTTP2_KEEP_ALIVE_TIMEOUT_SECS: u64 = 10; // Timeout for ping responses
+const DEFAULT_HTTP2_ADAPTIVE_WINDOW: bool = true; // Enable adaptive flow control
+
+/// HTTP/2 Performance Configuration
+#[derive(Debug, Clone)]
+pub struct Http2Config {
+    pub max_frame_size: u32,
+    pub max_concurrent_streams: u32,
+    pub pool_max_idle_per_host: usize,
+    pub pool_idle_timeout: Duration,
+    pub keep_alive_interval: Duration,
+    pub keep_alive_timeout: Duration,
+    pub adaptive_window: bool,
+    pub request_timeout: Duration,
+}
+
+impl Default for Http2Config {
+    fn default() -> Self {
+        Self {
+            max_frame_size: DEFAULT_MAX_FRAME_SIZE,
+            max_concurrent_streams: DEFAULT_MAX_CONCURRENT_STREAMS,
+            pool_max_idle_per_host: DEFAULT_POOL_MAX_IDLE_PER_HOST,
+            pool_idle_timeout: Duration::from_secs(DEFAULT_POOL_IDLE_TIMEOUT_SECS),
+            keep_alive_interval: Duration::from_secs(DEFAULT_HTTP2_KEEP_ALIVE_INTERVAL_SECS),
+            keep_alive_timeout: Duration::from_secs(DEFAULT_HTTP2_KEEP_ALIVE_TIMEOUT_SECS),
+            adaptive_window: DEFAULT_HTTP2_ADAPTIVE_WINDOW,
+            request_timeout: Duration::from_secs(DEFAULT_HTTP_REQUEST_TIMEOUT_SECS),
+        }
+    }
+}
+
+impl Http2Config {
+    /// Create configuration from environment variables
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+
+        if let Ok(val) = std::env::var("DYN_HTTP2_MAX_FRAME_SIZE") {
+            if let Ok(size) = val.parse::<u32>() {
+                config.max_frame_size = size;
+            }
+        }
+
+        if let Ok(val) = std::env::var("DYN_HTTP2_MAX_CONCURRENT_STREAMS") {
+            if let Ok(streams) = val.parse::<u32>() {
+                config.max_concurrent_streams = streams;
+            }
+        }
+
+        if let Ok(val) = std::env::var("DYN_HTTP2_POOL_MAX_IDLE_PER_HOST") {
+            if let Ok(pool_size) = val.parse::<usize>() {
+                config.pool_max_idle_per_host = pool_size;
+            }
+        }
+
+        if let Ok(val) = std::env::var("DYN_HTTP2_POOL_IDLE_TIMEOUT_SECS") {
+            if let Ok(timeout) = val.parse::<u64>() {
+                config.pool_idle_timeout = Duration::from_secs(timeout);
+            }
+        }
+
+        if let Ok(val) = std::env::var("DYN_HTTP2_KEEP_ALIVE_INTERVAL_SECS") {
+            if let Ok(interval) = val.parse::<u64>() {
+                config.keep_alive_interval = Duration::from_secs(interval);
+            }
+        }
+
+        if let Ok(val) = std::env::var("DYN_HTTP2_KEEP_ALIVE_TIMEOUT_SECS") {
+            if let Ok(timeout) = val.parse::<u64>() {
+                config.keep_alive_timeout = Duration::from_secs(timeout);
+            }
+        }
+
+        if let Ok(val) = std::env::var("DYN_HTTP2_ADAPTIVE_WINDOW") {
+            config.adaptive_window = val.parse().unwrap_or(DEFAULT_HTTP2_ADAPTIVE_WINDOW);
+        }
+
+        if let Ok(val) = std::env::var("DYN_HTTP_REQUEST_TIMEOUT") {
+            if let Ok(timeout) = val.parse::<u64>() {
+                config.request_timeout = Duration::from_secs(timeout);
+            }
+        }
+
+        config
+    }
+}
+
+/// HTTP/2 request plane client
+pub struct HttpRequestClient {
+    client: reqwest::Client,
+    config: Http2Config,
+}
+
+impl HttpRequestClient {
+    /// Create a new HTTP request client with HTTP/2 and default configuration
+    pub fn new() -> Result<Self> {
+        Self::with_config(Http2Config::default())
+    }
+
+    /// Create a new HTTP request client with custom timeout (legacy method)
+    /// Uses HTTP/2 with prior knowledge to avoid ALPN negotiation overhead
+    pub fn with_timeout(timeout: Duration) -> Result<Self> {
+        let mut config = Http2Config::default();
+        config.request_timeout = timeout;
+        Self::with_config(config)
+    }
+
+    /// Create a new HTTP request client with full HTTP/2 configuration
+    pub fn with_config(config: Http2Config) -> Result<Self> {
+        let mut builder = reqwest::Client::builder()
+            .pool_max_idle_per_host(config.pool_max_idle_per_host)
+            .pool_idle_timeout(config.pool_idle_timeout)
+            .timeout(config.request_timeout)
+            .http2_prior_knowledge() // Force HTTP/2 without negotiation
+            .http2_initial_stream_window_size(Some(config.max_frame_size * 4)) // 4x frame size for window
+            .http2_initial_connection_window_size(Some(config.max_frame_size * 16)) // 16x frame size for connection
+            .http2_max_frame_size(Some(config.max_frame_size))
+            .http2_keep_alive_interval(config.keep_alive_interval)
+            .http2_keep_alive_timeout(config.keep_alive_timeout)
+            .http2_keep_alive_while_idle(true); // Keep connections alive even when idle
+
+        // Enable adaptive window sizing if configured
+        if config.adaptive_window {
+            builder = builder.http2_adaptive_window(true);
+        }
+
+        let client = builder.build()?;
+
+        Ok(Self { client, config })
+>>>>>>> Stashed changes
     }
 
     /// Create from environment configuration
     pub fn from_env() -> Result<Self> {
+<<<<<<< Updated upstream
         let timeout_secs = std::env::var("DYN_HTTP_REQUEST_TIMEOUT")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(DEFAULT_HTTP_REQUEST_TIMEOUT_SECS);
 
         Self::with_timeout(Duration::from_secs(timeout_secs))
+=======
+        Self::with_config(Http2Config::from_env())
+    }
+
+    /// Get the current HTTP/2 configuration
+    pub fn config(&self) -> &Http2Config {
+        &self.config
+>>>>>>> Stashed changes
     }
 }
 
@@ -287,7 +433,59 @@ mod tests {
     fn test_http_client_with_custom_timeout() {
         let client = HttpRequestClient::with_timeout(Duration::from_secs(10));
         assert!(client.is_ok());
+<<<<<<< Updated upstream
         assert_eq!(client.unwrap().request_timeout, Duration::from_secs(10));
+=======
+        assert_eq!(client.unwrap().config.request_timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_http2_config_from_env() {
+        // Set environment variables
+        std::env::set_var("DYN_HTTP2_MAX_FRAME_SIZE", "2097152"); // 2MB
+        std::env::set_var("DYN_HTTP2_MAX_CONCURRENT_STREAMS", "2000");
+        std::env::set_var("DYN_HTTP2_POOL_MAX_IDLE_PER_HOST", "200");
+        std::env::set_var("DYN_HTTP2_KEEP_ALIVE_INTERVAL_SECS", "60");
+        std::env::set_var("DYN_HTTP2_ADAPTIVE_WINDOW", "false");
+
+        let config = Http2Config::from_env();
+
+        assert_eq!(config.max_frame_size, 2097152);
+        assert_eq!(config.max_concurrent_streams, 2000);
+        assert_eq!(config.pool_max_idle_per_host, 200);
+        assert_eq!(config.keep_alive_interval, Duration::from_secs(60));
+        assert_eq!(config.adaptive_window, false);
+
+        // Clean up
+        std::env::remove_var("DYN_HTTP2_MAX_FRAME_SIZE");
+        std::env::remove_var("DYN_HTTP2_MAX_CONCURRENT_STREAMS");
+        std::env::remove_var("DYN_HTTP2_POOL_MAX_IDLE_PER_HOST");
+        std::env::remove_var("DYN_HTTP2_KEEP_ALIVE_INTERVAL_SECS");
+        std::env::remove_var("DYN_HTTP2_ADAPTIVE_WINDOW");
+    }
+
+    #[test]
+    fn test_http_client_with_custom_config() {
+        let config = Http2Config {
+            max_frame_size: 512 * 1024, // 512KB
+            max_concurrent_streams: 500,
+            pool_max_idle_per_host: 75,
+            pool_idle_timeout: Duration::from_secs(60),
+            keep_alive_interval: Duration::from_secs(45),
+            keep_alive_timeout: Duration::from_secs(15),
+            adaptive_window: false,
+            request_timeout: Duration::from_secs(8),
+        };
+
+        let client = HttpRequestClient::with_config(config.clone());
+        assert!(client.is_ok());
+
+        let client = client.unwrap();
+        assert_eq!(client.config.max_frame_size, 512 * 1024);
+        assert_eq!(client.config.max_concurrent_streams, 500);
+        assert_eq!(client.config.pool_max_idle_per_host, 75);
+        assert_eq!(client.config.request_timeout, Duration::from_secs(8));
+>>>>>>> Stashed changes
     }
 
     #[tokio::test]
@@ -570,4 +768,140 @@ mod tests {
         // Cleanup
         server_handle.abort();
     }
+<<<<<<< Updated upstream
+=======
+
+    #[tokio::test]
+    async fn test_http2_performance_benchmark() {
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+        use hyper_util::server::conn::auto::Builder as ConnBuilder;
+        use hyper_util::service::TowerToHyperService;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::Instant;
+
+        // Create a test server that measures performance
+        #[derive(Clone)]
+        struct PerfState {
+            request_count: Arc<AtomicU64>,
+            total_bytes: Arc<AtomicU64>,
+        }
+
+        async fn perf_handler(
+            AxumState(state): AxumState<PerfState>,
+            body: AxumBytes,
+        ) -> &'static str {
+            state.request_count.fetch_add(1, Ordering::Relaxed);
+            state.total_bytes.fetch_add(body.len() as u64, Ordering::Relaxed);
+            "OK"
+        }
+
+        let state = PerfState {
+            request_count: Arc::new(AtomicU64::new(0)),
+            total_bytes: Arc::new(AtomicU64::new(0)),
+        };
+
+        let app = Router::new()
+            .route("/perf", post(perf_handler))
+            .with_state(state.clone());
+
+        // Bind to a random port
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Start HTTP/2 server
+        let server_handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+
+                let app = app.clone();
+                tokio::spawn(async move {
+                    let conn_builder = ConnBuilder::new(TokioExecutor::new());
+                    let io = TokioIo::new(stream);
+                    let tower_service = app.into_service();
+                    let hyper_service = TowerToHyperService::new(tower_service);
+
+                    let _ = conn_builder.serve_connection(io, hyper_service).await;
+                });
+            }
+        });
+
+        // Give server time to start
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Create optimized HTTP/2 client
+        let optimized_config = Http2Config {
+            max_frame_size: 1024 * 1024, // 1MB frames
+            max_concurrent_streams: 1000,
+            pool_max_idle_per_host: 100,
+            pool_idle_timeout: Duration::from_secs(90),
+            keep_alive_interval: Duration::from_secs(30),
+            keep_alive_timeout: Duration::from_secs(10),
+            adaptive_window: true,
+            request_timeout: Duration::from_secs(30),
+        };
+
+        let client = Arc::new(HttpRequestClient::with_config(optimized_config).unwrap());
+
+        // Performance test: Send many concurrent requests
+        let num_requests = 100;
+        let payload_size = 64 * 1024; // 64KB payload
+        let payload = Bytes::from(vec![0u8; payload_size]);
+
+        let start_time = Instant::now();
+        let mut handles = vec![];
+
+        for i in 0..num_requests {
+            let client = client.clone();
+            let payload = payload.clone();
+            let addr = addr;
+
+            let handle = tokio::spawn(async move {
+                let headers = std::collections::HashMap::new();
+                client
+                    .send_request(
+                        format!("http://{}/perf", addr),
+                        payload,
+                        headers,
+                    )
+                    .await
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all requests to complete
+        let mut successful_requests = 0;
+        for handle in handles {
+            if handle.await.unwrap().is_ok() {
+                successful_requests += 1;
+            }
+        }
+
+        let elapsed = start_time.elapsed();
+        let requests_per_sec = successful_requests as f64 / elapsed.as_secs_f64();
+        let throughput_mbps = (successful_requests * payload_size) as f64 / elapsed.as_secs_f64() / (1024.0 * 1024.0);
+
+        println!("Performance Results:");
+        println!("  Successful requests: {}/{}", successful_requests, num_requests);
+        println!("  Total time: {:?}", elapsed);
+        println!("  Requests/sec: {:.2}", requests_per_sec);
+        println!("  Throughput: {:.2} MB/s", throughput_mbps);
+
+        // Verify server received all requests
+        let server_count = state.request_count.load(Ordering::Relaxed);
+        let server_bytes = state.total_bytes.load(Ordering::Relaxed);
+
+        assert_eq!(server_count, successful_requests as u64);
+        assert_eq!(server_bytes, (successful_requests * payload_size) as u64);
+
+        // Performance assertions (adjust based on your requirements)
+        assert!(successful_requests >= num_requests * 95 / 100); // At least 95% success rate
+        assert!(requests_per_sec > 50.0); // At least 50 requests per second
+        assert!(throughput_mbps > 10.0); // At least 10 MB/s throughput
+
+        // Cleanup
+        server_handle.abort();
+    }
+>>>>>>> Stashed changes
 }
