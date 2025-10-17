@@ -20,7 +20,7 @@ limitations under the License.
 
 The KVBM serves as a critical infrastructure component for scaling LLM inference workloads efficiently. By cleanly separating runtime logic from memory management, and by enabling distributed block sharing, KVBM lays the foundation for high-throughput, multi-node, and memory-disaggregated AI systems.
 
-![A block diagram showing a layered architecture view of Dynamo KV Block manager.](../images/kvbm-arch.png)
+![A block diagram showing a layered architecture view of Dynamo KV Block manager.](../images/kvbm-architecture.png)
 **High level layered architecture view of Dynamo KV Block manager and how it interfaces with different components of LLM inference ecosystem**
 
 The KVBM has three primary logical layers. The top layer-the LLM inference runtimes (TRTLLM, vLLM and SGLang)-integrates through a dedicated connector module to the Dynamo KVBM module. These connectors act as translation layers, mapping runtime-specific operations and events into the KVBM’s block-oriented memory interface. This decouples memory management from the inference runtime, enabling backend portability and providing memory tiering.
