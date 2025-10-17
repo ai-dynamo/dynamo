@@ -21,6 +21,7 @@ pub type EndpointStatsHandler =
     Box<dyn FnMut(EndpointStats) -> serde_json::Value + Send + Sync + 'static>;
 
 pub const PROJECT_NAME: &str = "Dynamo";
+const SERVICE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Educe, Builder, Dissolve)]
 #[educe(Debug)]
@@ -39,28 +40,48 @@ impl ServiceConfigBuilder {
     pub async fn create(self) -> anyhow::Result<Component> {
         let (component, description) = self.build_internal()?.dissolve();
 
-        if let Some(nats_client) = &component.drt.nats_client {
-            let service_name = component.service_name();
+        let service_name = component.service_name();
 
-            let mut guard = component.drt.component_registry.inner.lock().await;
-            if guard.services.contains_key(&service_name) {
-                return Err(anyhow::anyhow!("Service already exists"));
-            }
+        // Pre-check to save cost of creating the service, but don't hold the lock
+        if component
+            .drt
+            .component_registry
+            .inner
+            .lock()
+            .await
+            .services
+            .contains_key(&service_name)
+        {
+            anyhow::bail!("Service {service_name} already exists");
+        }
 
-            let (nats_service, stats_reg) =
-                build_nats_service(nats_client, &component, description).await?;
+        let Some(nats_client) = component.drt.nats_client() else {
+            anyhow::bail!("Cannot create NATS service without NATS.");
+        };
+        let (nats_service, stats_reg) =
+            build_nats_service(nats_client, &component, description).await?;
+
+        let mut guard = component.drt.component_registry.inner.lock().await;
+        if !guard.services.contains_key(&service_name) {
+            // Normal case
             guard.services.insert(service_name.clone(), nats_service);
             guard.stats_handlers.insert(service_name, stats_reg);
             drop(guard);
+        } else {
+            drop(guard);
+            let _ = nats_service.stop().await;
+            return Err(anyhow::anyhow!(
+                "Service create race for {service_name}, now already exists"
+            ));
+        }
 
-            // Register metrics callback. CRITICAL: Never fail service creation for metrics issues.
-            if let Err(err) = component.start_scraping_nats_service_component_metrics() {
-                tracing::debug!(
-                    "Metrics registration failed for '{}': {}",
-                    component.service_name(),
-                    err
-                );
-            }
+        // Register metrics callback. CRITICAL: Never fail service creation for metrics issues.
+        if let Err(err) = component.start_scraping_nats_service_component_metrics() {
+            tracing::debug!(
+                "Metrics registration failed for '{}': {}",
+                component.service_name(),
+                err
+            );
         }
         Ok(component)
     }
@@ -71,10 +92,8 @@ async fn build_nats_service(
     component: &Component,
     description: Option<String>,
 ) -> anyhow::Result<(NatsService, StatsHandlerRegistry)> {
-    let version = "0.0.1".to_string();
-
     let service_name = component.service_name();
-    log::trace!("component: {component}; creating, service_name: {service_name}");
+    tracing::trace!("component: {component}; creating, service_name: {service_name}");
 
     let description = description.unwrap_or(format!(
         "{PROJECT_NAME} component {} in namespace {}",
@@ -90,7 +109,7 @@ async fn build_nats_service(
         nats_service_builder
             .description(description)
             .stats_handler(move |name, stats| {
-                log::trace!("stats_handler: {name}, {stats:?}");
+                tracing::trace!("stats_handler: {name}, {stats:?}");
                 let mut guard = stats_handler_registry.lock().unwrap();
                 match guard.get_mut(&name) {
                     Some(handler) => handler(stats),
@@ -98,9 +117,9 @@ async fn build_nats_service(
                 }
             });
     let nats_service = nats_service_builder
-        .start(service_name.clone(), version)
+        .start(service_name, SERVICE_VERSION.to_string())
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to start service: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to start NATS service: {e}"))?;
 
     Ok((nats_service, stats_handler_registry_clone))
 }

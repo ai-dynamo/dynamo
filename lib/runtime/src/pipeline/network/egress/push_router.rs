@@ -89,7 +89,7 @@ impl RouterMode {
 }
 
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
-    let Some(nats_client) = endpoint.drt().nats_client.as_ref() else {
+    let Some(nats_client) = endpoint.drt().nats_client() else {
         anyhow::bail!("Missing NATS. Please ensure it is running and accessible.");
     };
     AddressedPushRouter::new(

@@ -34,7 +34,8 @@ impl EventPublisher for Namespace {
         let Some(nats_client) = self.drt().nats_client() else {
             anyhow::bail!("KV router's Namespace EventPublisher requires NATS");
         };
-        Ok(nats_client.client().publish(subject, bytes.into()).await?)
+        nats_client.client().publish(subject, bytes.into()).await?;
+        Ok(())
     }
 }
 

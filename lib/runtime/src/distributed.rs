@@ -248,9 +248,7 @@ impl DistributedRuntime {
     }
 
     pub(crate) fn service_client(&self) -> Option<ServiceClient> {
-        self.nats_client
-            .as_ref()
-            .map(|nc| ServiceClient::new(nc.clone()))
+        self.nats_client().map(|nc| ServiceClient::new(nc.clone()))
     }
 
     pub async fn tcp_server(&self) -> Result<Arc<tcp::server::TcpStreamServer>> {
@@ -265,8 +263,8 @@ impl DistributedRuntime {
             .clone())
     }
 
-    pub fn nats_client(&self) -> Option<nats::Client> {
-        self.nats_client.clone()
+    pub fn nats_client(&self) -> Option<&nats::Client> {
+        self.nats_client.as_ref()
     }
 
     /// Get system status server information if available
