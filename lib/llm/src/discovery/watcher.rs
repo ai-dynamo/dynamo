@@ -303,7 +303,8 @@ impl ModelWatcher {
         endpoint_id: &EndpointId,
         card: &mut ModelDeploymentCard,
     ) -> anyhow::Result<()> {
-        card.move_from_nats(self.drt.nats_client()).await?;
+        card.download_config().await?;
+
         let component = self
             .drt
             .namespace(&endpoint_id.namespace)?

@@ -100,6 +100,29 @@ impl CheckedFile {
             }
         }
     }
+
+    /// Is the CheckedFile a path on disk that exists?
+    pub fn is_local(&self) -> bool {
+        match self.path.as_ref() {
+            Either::Left(path) => path.exists(),
+            Either::Right(_) => false, // is a Url
+        }
+    }
+
+    /// Keep the filename but change it's containing directory to `dir`.
+    /// This is used to point at a model file (e.g. `tokenizer.json`) in the HF cache dir.
+    pub fn update_dir(&mut self, dir: &Path) {
+        match self.path.as_mut() {
+            Either::Left(path) => {
+                if let Some(file_name) = path.file_name() {
+                    let mut new_path = PathBuf::from(dir);
+                    new_path.push(file_name);
+                    *path = new_path;
+                }
+            }
+            Either::Right(_) => tracing::warn!("Cannot update directory on URL"),
+        }
+    }
 }
 
 impl Display for CheckedFile {
