@@ -43,6 +43,18 @@ critical_dependencies:
     reason: "TensorRT-LLM base container"
   - name: "CUDA-dl-base"
     reason: "vLLM/SGLang base container"
+  - name: "TensorRT-LLM"
+    reason: "NVIDIA TensorRT-LLM inference framework"
+  - name: "tensorrt-llm"
+    reason: "TensorRT-LLM Python package"
+  - name: "vLLM"
+    reason: "vLLM inference framework"
+  - name: "vllm"
+    reason: "vLLM Python package"
+  - name: "SGLang"
+    reason: "SGLang inference framework"
+  - name: "sglang"
+    reason: "SGLang Python package"
 
   # Network & Communication (ARG names are formatted: NIXL_REF -> Nixl Ref)
   - name: "Nixl"

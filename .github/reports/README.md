@@ -72,9 +72,12 @@ Critical dependencies are flagged in the CSV to highlight components that requir
 - Production stability
 - Compliance requirements
 
-The list of critical dependencies is maintained in `../workflows/extract_dependency_versions_config.yaml` under the `critical_dependencies` section. Examples include:
+The list of critical dependencies is **explicitly maintained** in `../workflows/extract_dependency_versions_config.yaml` under the `critical_dependencies` section. Only dependencies listed in this configuration file are marked as critical. Examples include:
 - CUDA (compute platform)
 - PyTorch (ML framework)
+- TensorRT-LLM (inference framework)
+- vLLM (inference framework)
+- SGLang (inference framework)
 - Python (runtime)
 - Kubernetes (orchestration)
 - NATS (message broker)

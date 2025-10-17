@@ -1031,6 +1031,10 @@ class DependencyExtractor:
                     in_dependencies = True
                     continue
                 elif stripped.startswith("[project.optional-dependencies]"):
+                    # Extract optional dependencies (e.g., trtllm, vllm, sglang)
+                    # These are component-specific dependency groups in pyproject.toml
+                    # Future enhancement: Consider using pyproject.toml as the single
+                    # source of truth for all dependencies instead of multiple files
                     in_optional = True
                     continue
                 elif stripped.startswith("[") and in_dependencies:
@@ -2031,6 +2035,11 @@ def main():
     latest_csv = args.latest_csv
     if latest_csv is None:
         # Look for dependency_versions_latest.csv in .github/reports/
+        # Note: The nightly workflow always overwrites this same file in the repo.
+        # There's no version conflict because:
+        # 1. This file is committed to the repo (one canonical "latest" version)
+        # 2. Timestamped artifacts are uploaded separately with unique names
+        # 3. Each run reads the committed latest.csv, generates new data, then overwrites it
         reports_dir = repo_root / ".github/reports"
         latest_candidate = reports_dir / "dependency_versions_latest.csv"
         if latest_candidate.exists():
