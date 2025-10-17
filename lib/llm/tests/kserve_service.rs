@@ -265,6 +265,22 @@ pub mod kserve_test {
     }
 
     #[fixture]
+    fn int_input(
+        #[default(vec![42,43,44])] input: Vec<u32>,
+    ) -> inference::model_infer_request::InferInputTensor {
+        inference::model_infer_request::InferInputTensor {
+            name: "int_input".into(),
+            datatype: "UINT32".into(),
+            shape: vec![1],
+            contents: Some(inference::InferTensorContents {
+                uint_contents: input,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[fixture]
     fn service_with_engines(
         #[default(8990)] port: u16,
     ) -> (
@@ -342,6 +358,7 @@ pub mod kserve_test {
         StreamInferCancellation = 8993,
         ModelInfo = 8994,
         TensorModel = 8995,
+        TensorModelTypes = 8996,
     }
 
     #[rstest]
@@ -1121,6 +1138,72 @@ pub mod kserve_test {
 
     #[rstest]
     #[tokio::test]
+    async fn test_tensor_infer_dtypes(
+        #[with(TestPort::TensorModelTypes as u16)] service_with_engines: (
+            KserveService,
+            Arc<SplitEngine>,
+            Arc<AlwaysFailEngine>,
+            Arc<LongRunningEngine>,
+        ),
+        int_input: inference::model_infer_request::InferInputTensor,
+    ) {
+        // start server
+        let _running = RunningService::spawn(service_with_engines.0.clone());
+
+        let mut client = get_ready_client(TestPort::TensorModelTypes as u16, 5).await;
+
+        // Register a tensor model
+        let mut card = ModelDeploymentCard::with_name_only("tensor");
+        card.model_type = ModelType::TensorBased;
+        card.model_input = ModelInput::Tensor;
+        card.runtime_config = ModelRuntimeConfig {
+            tensor_model_config: Some(tensor::TensorModelConfig {
+                name: "tensor".to_string(),
+                inputs: vec![tensor::TensorMetadata {
+                    name: "input".to_string(),
+                    data_type: tensor::DataType::Int32,
+                    shape: vec![1],
+                }],
+                outputs: vec![tensor::TensorMetadata {
+                    name: "output".to_string(),
+                    data_type: tensor::DataType::Bool,
+                    shape: vec![-1],
+                }],
+            }),
+            ..Default::default()
+        };
+        let tensor = Arc::new(TensorEngine {});
+        service_with_engines
+            .0
+            .model_manager()
+            .add_tensor_model("tensor", card.mdcsum(), tensor.clone())
+            .unwrap();
+        let _ = service_with_engines
+            .0
+            .model_manager()
+            .save_model_card("key", card);
+
+        let model_name = "tensor";
+        let inputs = vec![int_input.clone()];
+        let request = tonic::Request::new(ModelInferRequest {
+            model_name: model_name.into(),
+            model_version: "1".into(),
+            id: "1234".into(),
+            inputs: inputs.clone(),
+            ..Default::default()
+        });
+
+        let response = client.model_infer(request).await.unwrap();
+        validate_tensor_response(
+            response,
+            model_name,
+            inputs,
+            std::collections::HashMap::new(),
+        );
+    }
+
+    #[rstest]
+    #[tokio::test]
     async fn test_tensor_infer(
         #[with(TestPort::TensorModel as u16)] service_with_engines: (
             KserveService,
@@ -1273,7 +1356,12 @@ pub mod kserve_test {
         });
 
         let response = client.model_infer(request).await.unwrap();
-        validate_tensor_response(response, model_name, inputs);
+        validate_tensor_response(
+            response,
+            model_name,
+            inputs,
+            std::collections::HashMap::new(),
+        );
 
         // streaming response in model_infer(), expect failure
         let repeat = inference::model_infer_request::InferInputTensor {
@@ -1359,11 +1447,20 @@ pub mod kserve_test {
                     "Expected successful inference"
                 );
 
+                let text_input_str = "dummy input";
+                let input_len = text_input_str.len() as u32;
+                let mut serialized_text_input = input_len.to_le_bytes().to_vec();
+                serialized_text_input.extend_from_slice(text_input_str.as_bytes());
+                let serialized_repeat = 2i32.to_le_bytes().to_vec();
                 if let Some(response) = &response.infer_response {
                     validate_tensor_response(
                         Response::new(response.clone()),
                         model_name,
                         inputs.clone(),
+                        std::collections::HashMap::from([
+                            ("text_input".into(), serialized_text_input.clone()),
+                            ("repeat".into(), serialized_repeat.clone()),
+                        ]),
                     );
                 }
                 response_idx += 1;
@@ -1376,6 +1473,7 @@ pub mod kserve_test {
         response: Response<ModelInferResponse>,
         model_name: &str,
         inputs: Vec<inference::model_infer_request::InferInputTensor>,
+        expected_raw_outputs: std::collections::HashMap<String, Vec<u8>>,
     ) {
         assert_eq!(
             response.get_ref().model_name,
@@ -1397,7 +1495,12 @@ pub mod kserve_test {
             inputs.len(),
             "Expected the same number of outputs as inputs",
         );
-        for output in &response.get_ref().outputs {
+        assert_eq!(
+            response.get_ref().raw_output_contents.len(),
+            expected_raw_outputs.len(),
+            "Expected the same number of raw_output_contents as expected_raw_outputs",
+        );
+        for (idx, output) in response.get_ref().outputs.iter().enumerate() {
             let mut found = false;
             for input in &inputs {
                 if input.name != output.name {
@@ -1418,6 +1521,18 @@ pub mod kserve_test {
                     "Expected output shape to be '{:?}', got '{:?}'",
                     input.shape, output.shape
                 );
+                if expected_raw_outputs.contains_key(&output.name) {
+                    assert_eq!(
+                        &response.get_ref().raw_output_contents[idx],
+                        expected_raw_outputs.get(&output.name).unwrap(),
+                        "Expected output contents to match raw_input_contents",
+                    );
+                } else {
+                    assert_eq!(
+                        output.contents, input.contents,
+                        "Expected output contents to match input contents",
+                    );
+                }
                 found = true;
                 break;
             }
