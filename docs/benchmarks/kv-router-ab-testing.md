@@ -335,20 +335,38 @@ kubectl apply -f router-off-deployment.yaml -n router-off-test
 kubectl apply -f router-on-deployment.yaml -n router-on-test
 ```
 
-**💡 Optimization Tip:** Each worker will download the model independently (~20 minutes per pod). For faster initialization, add a shared PVC with `ReadWriteMany` access mode to cache the model:
+**💡 Optimization Tip:** Each worker will download the model independently (~20 minutes per pod). For faster initialization, add a shared PVC with `ReadWriteMany` access mode to cache the model.
+
+First, create the PVC separately:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: "your-shared-storage-class"  # e.g., nfs, efs, nebius-shared-fs
+  resources:
+    requests:
+      storage: 100Gi
+```
+
+Then reference it in your DynamoGraphDeployment:
 
 ```yaml
 spec:
   pvcs:
-    - name: model-cache
-      storageClassName: "your-shared-storage-class"  # e.g., nfs, efs
-      accessMode: ReadWriteMany
-      storage: 100Gi
+    - create: false
+      name: model-cache
+      size: "0"
   services:
     VllmDecodeWorker:
-      pvcs:
-        - name: model-cache
-          mountPath: /root/.cache/huggingface
+      volumeMounts:
+        - mountPoint: /root/.cache/huggingface
+          name: model-cache
+          useAsCompilationCache: false
 ```
 
 With this configuration, only the first worker downloads the model; others use the cached version, reducing startup time from 20+ minutes to ~2 minutes per pod.
@@ -363,21 +381,34 @@ kubectl get pods -n router-off-test -w
 kubectl get pods -n router-on-test -w
 ```
 
-Wait for all pods to reach `Running` status and pass readiness probes (typically 5-10 minutes for model downloads).
+Wait for all pods to reach `Running` status and pass readiness probes.
+
+**Expected Timeline:**
+- **With shared PVC** (ReadWriteMany): ~5-10 minutes total (first worker downloads, others reuse cache)
+- **Without shared PVC**: 20-30 minutes per worker (workers download independently)
+  - For 8 workers: Budget **1-2 hours** for full deployment (workers start in parallel but are limited by node scheduling)
+
+The startup probe allows 32 minutes per pod (failureThreshold: 60), which accommodates model download and initialization.
 
 ### Step 2.4: Verify All Workers Are Healthy
 
-**Critical:** Before benchmarking, ensure equal worker health:
+> ⚠️ **CRITICAL CHECKPOINT**: Before running benchmarks, you **MUST** verify equal worker health in both deployments. Unequal worker counts will invalidate your comparison results.
 
 ```bash
-# Check router-OFF workers
-kubectl get pods -n router-off-test -l nvidia.com/dynamo-component-type=worker
+# Quick health check - both should show "8/8"
+echo "Router OFF: $(kubectl get pods -n router-off-test -l nvidia.com/dynamo-component-type=worker --field-selector=status.phase=Running -o json | jq '[.items[] | select(.status.conditions[] | select(.type=="Ready" and .status=="True"))] | length')/8 ready"
+echo "Router ON:  $(kubectl get pods -n router-on-test -l nvidia.com/dynamo-component-type=worker --field-selector=status.phase=Running -o json | jq '[.items[] | select(.status.conditions[] | select(.type=="Ready" and .status=="True"))] | length')/8 ready"
 
-# Check router-ON workers
+# Detailed view
+kubectl get pods -n router-off-test -l nvidia.com/dynamo-component-type=worker
 kubectl get pods -n router-on-test -l nvidia.com/dynamo-component-type=worker
 ```
 
-Both should show **8/8 workers in Ready state**. Unequal worker counts will skew benchmark results.
+**Both must show 8/8 workers in Ready state (1/1 Running).** If workers are not ready:
+- Check logs: `kubectl logs -n <namespace> <pod-name>`
+- Common issues: model download in progress, startup probe timeout, insufficient GPU resources
+
+**Do not proceed with benchmarks until all 16 workers (8 per deployment) are healthy.**
 
 ---
 
@@ -589,14 +620,33 @@ kubectl -n benchmark cp ${POD_NAME}:/tmp/router_on_results/profile_export_aiperf
 
 ### Interpreting Results
 
+**Your Results May Vary**: The improvement from KV Smart Router depends heavily on your workload characteristics:
+
+**Factors that increase KV router benefit:**
+- **High prefix overlap** (shared system prompts, templates, document contexts)
+- **Long prompts** (>2000 tokens) where caching saves significant compute
+- **Multi-turn conversations** with context carryover
+- **Batch workloads** with similar queries
+
+**Factors that reduce KV router benefit:**
+- **Unique prompts** with no prefix reuse
+- **Short prompts** (<1000 tokens) where routing overhead exceeds benefit
+- **Evenly distributed load** where round-robin is already optimal
+- **Low request rate** where cache eviction negates benefits
+
+**Expected Performance:**
+- **High prefix overlap workloads**: 20-50% TTFT improvement
+- **Moderate prefix overlap**: 10-20% improvement
+- **Low prefix overlap**: <5% improvement (may not be worth enabling)
+
 **KV Smart Router is beneficial when:**
-- Workload has high prefix overlap (shared system prompts, templates)
 - TTFT improvements > 20%
 - No significant degradation in other metrics
+- Workload demonstrates measurable prefix reuse patterns
 
 **Standard routing is better when:**
-- Workload has unique prompts with low prefix overlap
-- KV router shows increased latency or reduced throughput
+- KV router shows <10% improvement
+- Increased latency variance is observed
 - Load distribution across workers is more important than cache affinity
 
 ### Example Comparison
