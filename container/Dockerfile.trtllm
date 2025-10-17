@@ -196,6 +196,9 @@ ARG TENSORRTLLM_INDEX_URL
 COPY --from=trtllm_wheel /*.whl /trtllm_wheel/
 COPY --from=trtllm_wheel /*.txt /trtllm_wheel/
 
+# NOTE: locking cuda-python version to <13 to avoid breaks with tensorrt-llm 1.0.0rc6.
+RUN uv pip install "cuda-python>=12,<13"
+
 # Note: TensorRT needs to be uninstalled before installing the TRTLLM wheel
 # because there might be mismatched versions of TensorRT between the NGC PyTorch
 # and the TRTLLM wheel.
