@@ -57,8 +57,8 @@ spec:
               --adjustment-interval=60
               --profile-results-dir=/workspace/tests/planner/profiling_results/H200_TP1P_TP1D
               --prometheus-port=9085
-              --ttft=0.1
-              --itl=0.01
+              --ttft=100
+              --itl=10
               --load-predictor=constant
               --no-correction
     VllmDecodeWorker:

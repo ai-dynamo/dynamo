@@ -815,10 +815,10 @@ if __name__ == "__main__":
         "--osl", type=int, default=500, help="target output sequence length"
     )
     parser.add_argument(
-        "--ttft", type=int, default=50, help="target Time To First Token in ms"
+        "--ttft", type=float, default=50.0, help="target Time To First Token in ms"
     )
     parser.add_argument(
-        "--itl", type=int, default=10, help="target Inter Token Latency in ms"
+        "--itl", type=float, default=10.0, help="target Inter Token Latency in ms"
     )
 
     # arguments used for interpolating TTFT and ITL under different ISL/OSL
