@@ -421,10 +421,6 @@ impl LocalModel {
         self.card.model_type = model_type;
         self.card.model_input = model_input;
 
-        // Store model config files in NATS object store
-        let nats_client = endpoint.drt().nats_client();
-        self.card.move_to_nats(nats_client.clone()).await?;
-
         // Publish the Model Deployment Card to KV store
         let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStore::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));

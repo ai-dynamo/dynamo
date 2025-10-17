@@ -206,7 +206,7 @@ kubectl logs -n $NAMESPACE deployment/vllm-disagg-planner-planner --tail=10
 ```
 New adjustment interval started!
 Observed num_req: X.XXX isl: X.XXX osl: X.XXX
-Observed ttft: X.XXXs itl: X.XXXs
+Observed ttft: X.XXms itl: X.XXms
 Number of prefill workers: 1, number of decode workers: 1
 ```
 
@@ -249,7 +249,7 @@ This is because the `subComponentType` field has only been added in newer versio
 
 ## Next Steps
 
-- **Architecture Details**: See [SLA-based Planner Architecture](/docs/architecture/sla_planner.md) for technical details
+- **Architecture Details**: See [SLA-based Planner Architecture](/docs/planner/sla_planner.md) for technical details
 - **Performance Tuning**: See [Pre-Deployment Profiling Guide](/docs/benchmarks/pre_deployment_profiling.md) for advanced profiling options
 - **Load Testing**: See [SLA Planner Load Test](/tests/planner/README.md) for comprehensive testing tools
 

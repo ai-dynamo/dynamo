@@ -15,4 +15,4 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-Please refer to [planner docs](../../docs/architecture/planner_intro.rst) for planner documentation.
+Please refer to [planner docs](../../../../docs/planner/planner_intro.rst) for planner documentation.

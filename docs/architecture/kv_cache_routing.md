@@ -156,7 +156,7 @@ For improved fault tolerance, you can launch multiple frontend + router replicas
 
 ### Router State Management
 
-The KV Router tracks two types of state (see [KV Router Architecture](../components/router/README.md) for details):
+The KV Router tracks two types of state (see [KV Router Architecture](../router/README.md) for details):
 
 1. **Prefix blocks (cached KV blocks)**: Maintained in a radix tree, tracking which blocks are cached on each worker. This state is **persistent** - backed by NATS JetStream events and object store snapshots. New router replicas automatically sync this state on startup, ensuring consistent cache awareness across restarts.
 
@@ -515,4 +515,4 @@ This approach gives you complete control over routing decisions, allowing you to
 - **Maximize cache reuse**: Use `best_worker_id()` which considers both prefill and decode loads
 - **Balance load**: Consider both `potential_prefill_tokens` and `potential_decode_blocks` together
 
-See [KV Router Architecture](../components/router/README.md) for performance tuning details.
+See [KV Router Architecture](../router/README.md) for performance tuning details.

@@ -16,7 +16,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Understanding KVBM components
+# KVBM components
 
 The design of the KVBM is inspired from vLLM and SGLang KV block managers but with a twist from historical memory tiering design aspired in general GPU programming. [See KVBM Reading](kvbm_reading.md). The following figure shows the internal architecture of KVBM and how it works across workers using NIXL.
 

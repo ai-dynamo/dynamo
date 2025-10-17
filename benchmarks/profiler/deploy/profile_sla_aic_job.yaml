@@ -53,7 +53,7 @@ spec:
           - h200_sxm
           - --aic-model-name
           - QWEN3_32B
-          - --backend-version
+          - --aic-backend-version
           - 0.20.0
         volumeMounts:
           - name: output-volume

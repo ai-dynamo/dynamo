@@ -184,7 +184,7 @@ impl MockVllmEngine {
             tokio::spawn({
                 let publisher = metrics_publisher.clone();
                 async move {
-                    if let Err(e) = publisher.create_endpoint(comp.clone(), None).await {
+                    if let Err(e) = publisher.create_endpoint(comp.clone()).await {
                         tracing::error!("Metrics endpoint failed: {e}");
                     }
                 }
@@ -713,36 +713,6 @@ mod integration_tests {
             Err(e) => {
                 return Err(Error::msg(format!("Failed to deserialize KV event: {e}")));
             }
-        }
-
-        // Use KvMetricsAggregator to get metrics more easily
-        let cancel_token = test_component.drt().runtime().child_token();
-        let metrics_aggregator = crate::kv_router::metrics_aggregator::KvMetricsAggregator::new(
-            test_component.clone(),
-            cancel_token,
-        )
-        .await;
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        let processed_endpoints = metrics_aggregator.get_endpoints();
-        tracing::info!(
-            "Found {} metrics endpoints",
-            processed_endpoints.endpoints.len()
-        );
-
-        // Verify we found at least one metrics endpoint
-        assert!(
-            !processed_endpoints.endpoints.is_empty(),
-            "Should find at least one metrics endpoint"
-        );
-        tracing::info!(
-            "✓ Successfully found {} metrics endpoints",
-            processed_endpoints.endpoints.len()
-        );
-
-        // Verify the metrics endpoints contain valid data
-        for (worker_id, endpoint) in &processed_endpoints.endpoints {
-            tracing::info!("✓ Worker {} metrics: {:?}", worker_id, endpoint.data);
         }
 
         tracing::info!("🎉 Event verification completed!");

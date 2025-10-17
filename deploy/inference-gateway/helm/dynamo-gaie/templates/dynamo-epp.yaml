@@ -98,6 +98,8 @@ spec:
             value: "{{ $comp }}"
           - name: DYNAMO_KV_BLOCK_SIZE
             value: "{{ $kv }}"
+          - name: DYNAMO_ROUTER_REPLICA_SYNC
+            value: "true"
           - name: USE_STREAMING
             value: "true"
         {{- end }}

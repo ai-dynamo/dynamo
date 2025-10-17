@@ -125,15 +125,14 @@ def break_arguments(args: list[str] | None) -> list[str]:
     else:
         for arg in args:
             if arg is not None:
-                # If arg is already a separate item in a list, don't split it further
-                # Only use shlex.split if the arg contains spaces AND is meant to be multiple args
-                # For JSON strings and single args, keep them as-is
+                # If the arg looks like it might be JSON (starts with { or [) or is already a single token,
+                # don't split it further. Only split if it contains spaces AND doesn't look like JSON.
                 if (
                     isinstance(arg, str)
-                    and " " in arg
-                    and not (arg.startswith("{") or arg.startswith("["))
+                    and (" " in arg or "\t" in arg)
+                    and not (arg.strip().startswith(("{", "[")))
                 ):
-                    # Only split if it looks like multiple arguments joined
+                    # Use shlex.split to properly handle quoted arguments
                     ans.extend(shlex.split(arg))
                 else:
                     ans.append(arg)
