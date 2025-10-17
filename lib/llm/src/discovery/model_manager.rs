@@ -41,6 +41,7 @@ pub struct ModelManager {
     chat_completion_engines: RwLock<ModelEngines<OpenAIChatCompletionsStreamingEngine>>,
     embeddings_engines: RwLock<ModelEngines<OpenAIEmbeddingsStreamingEngine>>,
     tensor_engines: RwLock<ModelEngines<TensorStreamingEngine>>,
+    prefill_engines: RwLock<ModelEngines<TensorStreamingEngine>>,
 
     // These are Mutex because we read and write rarely and equally
     cards: Mutex<HashMap<String, ModelDeploymentCard>>,
@@ -60,6 +61,7 @@ impl ModelManager {
             chat_completion_engines: RwLock::new(ModelEngines::default()),
             embeddings_engines: RwLock::new(ModelEngines::default()),
             tensor_engines: RwLock::new(ModelEngines::default()),
+            prefill_engines: RwLock::new(ModelEngines::default()),
             cards: Mutex::new(HashMap::new()),
             kv_choosers: Mutex::new(HashMap::new()),
         }
@@ -78,6 +80,7 @@ impl ModelManager {
                 ModelType::Completions => self.completion_engines.read().checksum(model_name),
                 ModelType::Embedding => self.embeddings_engines.read().checksum(model_name),
                 ModelType::TensorBased => self.tensor_engines.read().checksum(model_name),
+                ModelType::Prefill => self.prefill_engines.read().checksum(model_name),
                 _ => {
                     continue;
                 }
@@ -117,6 +120,7 @@ impl ModelManager {
             .chain(self.list_completions_models())
             .chain(self.list_embeddings_models())
             .chain(self.list_tensor_models())
+            .chain(self.list_prefill_models())
             .collect()
     }
 
@@ -134,6 +138,10 @@ impl ModelManager {
 
     pub fn list_tensor_models(&self) -> Vec<String> {
         self.tensor_engines.read().list()
+    }
+
+    pub fn list_prefill_models(&self) -> Vec<String> {
+        self.prefill_engines.read().list()
     }
 
     pub fn add_completions_model(
@@ -176,6 +184,16 @@ impl ModelManager {
         clients.add(model, card_checksum, engine)
     }
 
+    pub fn add_prefill_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: TensorStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let mut clients = self.prefill_engines.write();
+        clients.add(model, card_checksum, engine)
+    }
+
     pub fn remove_completions_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let mut clients = self.completion_engines.write();
         clients.remove(model)
@@ -193,6 +211,11 @@ impl ModelManager {
 
     pub fn remove_tensor_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let mut clients = self.tensor_engines.write();
+        clients.remove(model)
+    }
+
+    pub fn remove_prefill_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let mut clients = self.prefill_engines.write();
         clients.remove(model)
     }
 
@@ -234,6 +257,17 @@ impl ModelManager {
         model: &str,
     ) -> Result<TensorStreamingEngine, ModelManagerError> {
         self.tensor_engines
+            .read()
+            .get(model)
+            .cloned()
+            .ok_or(ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
+    pub fn get_prefill_engine(
+        &self,
+        model: &str,
+    ) -> Result<TensorStreamingEngine, ModelManagerError> {
+        self.prefill_engines
             .read()
             .get(model)
             .cloned()
