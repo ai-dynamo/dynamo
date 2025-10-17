@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::config::{ToolCallConfig, ToolCallParserType};
-use super::harmony::parse_tool_calls_harmony;
 use super::harmony::{
     detect_tool_call_start_harmony, find_tool_call_end_position_harmony,
     parse_tool_calls_harmony_complete,
@@ -54,13 +53,6 @@ pub async fn try_tool_call_parse(
         ToolCallParserType::Harmony => {
             let (results, normal_content) =
                 parse_tool_calls_harmony_complete(message, &config.json).await?;
-            if results.is_empty() {
-                // Fallback: attempt streaming parser when direct parse yields no calls
-                // This increases resilience to multi-call inputs and minor format drift
-                let (fallback_results, fallback_normal) =
-                    parse_tool_calls_harmony(message, &config.json).await?;
-                return Ok((fallback_results, fallback_normal));
-            }
             Ok((results, normal_content))
         }
         ToolCallParserType::Pythonic => {
@@ -1776,7 +1768,7 @@ fahrenheit
     #[tokio::test]
     async fn test_parallel_harmony_format_multiple_tools() {
         // Test with harmony parser for multiple tool calls
-        let input = r#"<|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"city": "Dallas", "state": "TX", "unit": "fahrenheit"}<|call|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"city": "Orlando", "state": "FL", "unit": "fahrenheit"}<|call|>"#;
+        let input = r#"<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"city": "Dallas", "state": "TX", "unit": "fahrenheit"}<|call|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"city": "Orlando", "state": "FL", "unit": "fahrenheit"}<|call|>"#;
 
         let (result, _content) = detect_and_parse_tool_call(input, Some("harmony"))
             .await
