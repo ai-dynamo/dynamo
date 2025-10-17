@@ -203,7 +203,7 @@ fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) 
 /// Create an engine and attach it to an endpoint to make it visible to the frontend.
 /// This is the main way you create a Dynamo worker / backend.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, is_prefill=false, runtime_config=None, user_data=None, custom_template_path=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_llm<'p>(
     py: Python<'p>,
@@ -216,23 +216,17 @@ fn register_llm<'p>(
     kv_cache_block_size: Option<u32>,
     router_mode: Option<RouterMode>,
     migration_limit: u32,
-    is_prefill: bool,
     runtime_config: Option<ModelRuntimeConfig>,
     user_data: Option<&Bound<'p, PyDict>>,
     custom_template_path: Option<&str>,
 ) -> PyResult<Bound<'p, PyAny>> {
-    // Validate is_prefill constraints
-    if is_prefill {
-        if !matches!(model_input, ModelInput::Tokens) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "When is_prefill=True, model_input must be ModelInput::Tokens",
-            ));
-        }
-        if model_type.inner != llm_rs::model_type::ModelType::Prefill {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "When is_prefill=True, model_type must be ModelType::Prefill",
-            ));
-        }
+    // Validate that Prefill model type requires Tokens input
+    if model_type.inner == llm_rs::model_type::ModelType::Prefill
+        && !matches!(model_input, ModelInput::Tokens)
+    {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "ModelType::Prefill requires model_input to be ModelInput::Tokens",
+        ));
     }
 
     let model_input = match model_input {

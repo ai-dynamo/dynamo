@@ -908,7 +908,6 @@ async def register_llm(
     kv_cache_block_size: Optional[int] = None,
     migration_limit: int = 0,
     router_mode: Optional[RouterMode] = None,
-    is_prefill: bool = False,
     user_data: Optional[Dict[str, Any]] = None,
     custom_template_path: Optional[str] = None,
 ) -> None:
