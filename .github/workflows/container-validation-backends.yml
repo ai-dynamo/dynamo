@@ -126,12 +126,18 @@ jobs:
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
           pytest_marks: "unit and vllm and gpu_1"
+          framework: "vllm"
+          test_type: "unit"
+          platform_arch: ${{ matrix.platform.arch }}
       - name: Run e2e tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
           pytest_marks: "e2e and vllm and gpu_1 and not slow"
+          framework: "vllm"
+          test_type: "e2e, gpu_1"
+          platform_arch: ${{ matrix.platform.arch }}
 
   sglang:
     needs: changed-files
@@ -190,6 +196,9 @@ jobs:
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
           pytest_marks: "unit and sglang and gpu_1"
+          framework: "sglang"
+          test_type: "unit"
+          platform_arch: ${{ matrix.platform.arch }}
       - name: Run e2e tests
         # OPS-1140: Uncomment the below line
         # if: ${{ matrix.platform.arch != 'arm64' }}
@@ -197,6 +206,9 @@ jobs:
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
           pytest_marks: "e2e and sglang and gpu_1"
+          framework: "sglang"
+          test_type: "e2e, gpu_1"
+          platform_arch: ${{ matrix.platform.arch }}
 
   trtllm:
     needs: changed-files
@@ -247,12 +259,18 @@ jobs:
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
           pytest_marks: "unit and trtllm_marker and gpu_1"
+          framework: "trtllm"
+          test_type: "unit"
+          platform_arch: ${{ matrix.platform.arch }}
       - name: Run e2e tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
           pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow"
+          framework: "trtllm"
+          test_type: "e2e, gpu_1"
+          platform_arch: ${{ matrix.platform.arch }}
 
   # Upload metrics for this workflow and all its jobs
   upload-workflow-metrics:
@@ -283,14 +301,23 @@ jobs:
           merge-multiple: true
         continue-on-error: true  # Don't fail if artifacts don't exist
 
+      - name: Download test results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-*
+          path: test-results/
+          merge-multiple: true
+        continue-on-error: true  # Don't fail if artifacts don't exist
+
       - name: Upload Complete Workflow Metrics
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WORKFLOW_INDEX: ${{ secrets.WORKFLOW_INDEX }}
           JOB_INDEX: ${{ secrets.JOB_INDEX }}
           STEPS_INDEX: ${{ secrets.STEPS_INDEX }}
-          # Container index configuration
+          # Container and test index configuration
           CONTAINER_INDEX: ${{ secrets.CONTAINER_INDEX }}
+          TEST_INDEX: ${{ secrets.TEST_INDEX }}
         run: |
           # Upload complete workflow metrics including container metrics
           python3 .github/workflows/upload_complete_workflow_metrics.py

@@ -116,6 +116,7 @@ RUN apt-get update -y \
         automake \
         cmake \
         git \
+        git-lfs \
         libtool \
         meson \
         net-tools \
@@ -261,7 +262,10 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    uv pip install --requirement /tmp/requirements.txt --requirement /tmp/requirements.test.txt
+    UV_GIT_LFS=1 uv pip install \
+        --no-cache \
+        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.test.txt
 
 ##################################
 ##### Wheel Build Image ##########
@@ -382,7 +386,7 @@ RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
     && cd /opt/dynamo/benchmarks \
-    && uv pip install . \
+    && UV_GIT_LFS=1 uv pip install --no-cache . \
     && cd - \
     && rm -rf /opt/dynamo/benchmarks
 
