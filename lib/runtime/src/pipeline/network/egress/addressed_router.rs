@@ -8,6 +8,7 @@ use tracing as log;
 use super::*;
 use crate::logging::DistributedTraceContext;
 use crate::logging::get_distributed_tracing_context;
+use crate::logging::inject_otel_context_into_nats_headers;
 use crate::{Result, protocols::maybe_error::MaybeError};
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
@@ -145,12 +146,13 @@ where
         // Enables span to be created in push_endpoint before
         // payload is parsed
 
+        // Prepare trace headers using the OpenTelemetry injector pattern
+        // This handles traceparent and tracestate headers according to W3C Trace Context standard
         let mut headers = HeaderMap::new();
+        inject_otel_context_into_nats_headers(&mut headers, None);
+
+        // Add additional custom headers that aren't handled by the OpenTelemetry propagator
         if let Some(trace_context) = get_distributed_tracing_context() {
-            headers.insert("traceparent", trace_context.create_traceparent());
-            if let Some(tracestate) = trace_context.tracestate {
-                headers.insert("tracestate", tracestate);
-            }
             if let Some(x_request_id) = trace_context.x_request_id {
                 headers.insert("x-request-id", x_request_id);
             }

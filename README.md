@@ -59,9 +59,9 @@ Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLa
 | [**Disaggregated Serving**](/docs/architecture/disagg_serving.md)                                 | ✅   | ✅     | ✅           |
 | [**Conditional Disaggregation**](/docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧   | 🚧     | 🚧           |
 | [**KV-Aware Routing**](/docs/architecture/kv_cache_routing.md)                                    | ✅   | ✅     | ✅           |
-| [**Load Based Planner**](/docs/architecture/load_planner.md)                                      | 🚧   | 🚧     | 🚧           |
-| [**SLA-Based Planner**](/docs/architecture/sla_planner.md)                                        | ✅   | ✅     | ✅           |
-| [**KVBM**](/docs/architecture/kvbm_architecture.md)                                               | ✅   | 🚧     | ✅           |
+| [**Load Based Planner**](docs/planner/load_planner.md)                                      | 🚧   | 🚧     | 🚧           |
+| [**SLA-Based Planner**](docs/planner/sla_planner.md)                                        | ✅   | ✅     | ✅           |
+| [**KVBM**](docs/kvbm/kvbm_architecture.md)                                               | ✅   | 🚧     | ✅           |
 
 To learn more about each framework and their capabilities, check out each framework's README!
 
@@ -74,7 +74,7 @@ Built in Rust for performance and in Python for extensibility, Dynamo is fully o
 # Installation
 
 The following examples require a few system level packages.
-Recommended to use Ubuntu 24.04 with a x86_64 CPU. See [docs/support_matrix.md](docs/support_matrix.md)
+Recommended to use Ubuntu 24.04 with a x86_64 CPU. See [docs/reference/support-matrix.md](docs/reference/support-matrix.md)
 
 ## 1. Initial setup
 
@@ -82,6 +82,14 @@ The Dynamo team recommends the `uv` Python package manager, although any way wor
 
 ```
 curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+### Install Python development headers
+
+Backend engines require Python development headers for JIT compilation. Install them with:
+
+```bash
+sudo apt install python3-dev
 ```
 
 ### Install etcd and NATS (required)
@@ -170,7 +178,7 @@ Rerun with `curl -N` and change `stream` in the request to `true` to get the res
 
 Dynamo provides comprehensive benchmarking tools to evaluate and optimize your deployments:
 
-- **[Benchmarking Guide](docs/benchmarks/benchmarking.md)** – Compare deployment topologies (aggregated vs. disaggregated vs. vanilla vLLM) using GenAI-Perf
+- **[Benchmarking Guide](docs/benchmarks/benchmarking.md)** – Compare deployment topologies (aggregated vs. disaggregated vs. vanilla vLLM) using AIPerf
 - **[Pre-Deployment Profiling](docs/benchmarks/pre_deployment_profiling.md)** – Optimize configurations before deployment to meet SLA requirements
 
 # Engines

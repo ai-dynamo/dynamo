@@ -12,11 +12,37 @@ inputs:
     description: 'Maximum number of cores available to docker'
     required: false
     default: '10'
+  framework:
+    description: 'Framework name for test metrics'
+    required: false
+    default: 'unknown'
+  test_type:
+    description: 'Test type (unit, e2e, integration)'
+    required: false
+    default: 'e2e'
+  platform_arch:
+    description: 'Platform architecture (amd64, arm64)'
+    required: false
+    default: 'amd64'
 
 
 runs:
   using: "composite"
   steps:
+    - name: Setup Test Environment
+      shell: bash
+      run: |
+        # Setup test directories
+        mkdir -p test-results
+
+        # Set platform architecture from input
+        PLATFORM_ARCH="${{ inputs.platform_arch }}"
+        if [[ -z "${PLATFORM_ARCH}" ]]; then
+          PLATFORM_ARCH="amd64"
+        fi
+        echo "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV
+        echo "🏗️  Platform architecture: ${PLATFORM_ARCH}"
+
     - name: Run tests
       shell: bash
       env:
@@ -25,9 +51,64 @@ runs:
         PYTEST_XML_FILE: pytest_test_report.xml
         HF_HOME: /runner/_work/_temp
       run: |
+        # Run pytest with detailed output and JUnit XML
+        set +e  # Don't exit on test failures
+
         docker run --runtime=nvidia --rm --gpus all -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
           --name ${{ env.CONTAINER_ID }}_pytest \
+          -v "$(pwd)/test-results:/test-results" \
           ${{ inputs.image_tag }} \
-          bash -c "pytest -xsv --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ inputs.pytest_marks }}\""
+          bash -c "pytest -v --tb=short --basetemp=/tmp --junitxml=/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
+
+        TEST_EXIT_CODE=$?
+        echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
+        echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
+
+        # Always continue to results processing
+        exit 0
+
+    - name: Process Test Results
+      shell: bash
+      run: |
+
+        # Check for JUnit XML file and determine test status
+        JUNIT_FILE="test-results/pytest_test_report.xml"
+
+        if [[ -f "$JUNIT_FILE" ]]; then
+          echo "✅ JUnit XML generated successfully"
+          # Extract basic test counts for status determination
+          TOTAL_TESTS=$(grep -o 'tests="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+          FAILED_TESTS=$(grep -o 'failures="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+          ERROR_TESTS=$(grep -o 'errors="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+          echo "📊 ${TOTAL_TESTS} tests completed (${FAILED_TESTS} failed, ${ERROR_TESTS} errors)"
+
+          # Create metadata file with step context information
+          METADATA_FILE="test-results/test_metadata.json"
+          echo '{' > "$METADATA_FILE"
+          echo '  "job_name": "${{ github.job }}",' >> "$METADATA_FILE"
+          echo '  "framework": "${{ inputs.framework }}",' >> "$METADATA_FILE"
+          echo '  "test_type": "${{ inputs.test_type }}",' >> "$METADATA_FILE"
+          echo '  "platform_arch": "${{ inputs.platform_arch }}",' >> "$METADATA_FILE"
+          echo '  "junit_xml_file": "pytest_test_report.xml",' >> "$METADATA_FILE"
+          echo '  "step_name": "Run ${{ inputs.test_type }} tests"' >> "$METADATA_FILE"
+          echo '}' >> "$METADATA_FILE"
+          echo "📝 Created test metadata file"
+        else
+          echo "⚠️  JUnit XML file not found - test results may not be available for upload"
+          TOTAL_TESTS=0
+          FAILED_TESTS=1  # Treat missing XML as failure
+          ERROR_TESTS=0
+        fi
+
+        # Exit with original test result to maintain workflow behavior
+        exit ${TEST_EXIT_CODE}
+
+    - name: Upload Test Results
+      uses: actions/upload-artifact@v4
+      if: always()  # Always upload test results, even if tests failed
+      with:
+        name: test-results-${{ inputs.framework }}-${{ inputs.test_type }}-${{ env.PLATFORM_ARCH }}
+        path: test-results/${{ env.PYTEST_XML_FILE }}
+        retention-days: 7

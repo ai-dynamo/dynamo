@@ -124,7 +124,7 @@ impl MockVllmEngine {
 
             let scheduler = Scheduler::new(
                 args.clone(),
-                Some(dp_rank),
+                dp_rank,
                 Some(output_tx),
                 Some(kv_events_tx), // Pass the KV events sender to scheduler
                 Some(cancel_token.clone()),
@@ -283,6 +283,7 @@ impl MockVllmEngine {
                             let event = KvCacheEvent {
                                 event_id: Uuid::new_v4().as_u128() as u64,
                                 data: event_data,
+                                dp_rank,
                             };
 
                             // Publish the event
@@ -316,18 +317,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
     ) -> Result<ManyOut<LLMEngineOutput>, Error> {
         let (request, ctx) = input.into_parts();
 
-        // Extract dp_rank from annotations if present
-        let dp_rank = request
-            .annotations
-            .iter()
-            .find_map(|ann| {
-                if ann.starts_with("dp_rank:") {
-                    ann.strip_prefix("dp_rank:").and_then(|s| s.parse().ok())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0);
+        // Extract dp_rank from request field (defaults to 0 if not set)
+        let dp_rank = request.dp_rank.unwrap_or(0);
 
         // Validate dp_rank
         if dp_rank >= self.engine_args.dp_size {
@@ -348,7 +339,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                 .expect("max_output_tokens must be specified for mocker")
                 as usize,
             uuid: Some(request_uuid),
-            dp_rank: Some(dp_rank),
+            dp_rank,
         };
 
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<OutputSignal>();
@@ -512,7 +503,7 @@ pub async fn make_mocker_engine(
     args: MockEngineArgs,
 ) -> Result<crate::backend::ExecutionContext, Error> {
     // Create the mocker engine
-    tracing::debug!("Creating mocker engine with config: {args:?}");
+    tracing::info!("Creating mocker engine with config: {args:?}");
     let annotated_engine =
         AnnotatedMockEngine::new(MockVllmEngine::new(args), distributed_runtime, endpoint_id);
 

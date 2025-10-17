@@ -3,7 +3,7 @@
 This directory contains configuration for visualizing metrics from the metrics aggregation service using Prometheus and Grafana.
 
 > [!NOTE]
-> For detailed information about Dynamo's metrics system, including hierarchical metrics, automatic labeling, and usage examples, see the [Metrics Guide](../../docs/guides/metrics.md).
+> For detailed information about Dynamo's metrics system, including hierarchical metrics, automatic labeling, and usage examples, see the [Metrics Guide](../../docs/observability/metrics.md).
 
 ## Overview
 
@@ -162,8 +162,6 @@ $ python -m dynamo.vllm --model Qwen/Qwen3-0.6B  \
 - **Inflight**: Measures total request lifetime including processing time
 - **HTTP Queue**: Measures queuing time before processing begins (including prefill time)
 - **HTTP Queue ≤ Inflight** (HTTP queue is a subset of inflight time)
-
-¹ **TODO**: Implement the "actual" HTTP queue metric that tracks from request start until first token generation begins, rather than the current implementation that tracks until first token is received by the frontend
 
 ### Required Files
 
