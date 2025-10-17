@@ -45,8 +45,9 @@ async def worker(runtime: DistributedRuntime):
 
     logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
 
-    config = parse_args(sys.argv[1:])
+    config = await parse_args(sys.argv[1:])
     dump_config(config.dynamo_args.dump_config_to, config)
+
     if config.dynamo_args.embedding_worker:
         await init_embedding(runtime, config)
     elif config.dynamo_args.multimodal_processor:
@@ -108,7 +109,7 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     try:
         # Start endpoint immediately and register model concurrently
-        # Requests queue until ready_event is set
+        # Requests queue until ready_event is set (TODO: Part of new PR)
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,

@@ -40,7 +40,7 @@ if [ "${enable_attention_dp}" = "false" ]; then
 fi
 
 full_logdir=${sub_dir}
-artifacts_dir=${full_logdir}/genai_perf_artifacts
+artifacts_dir=${full_logdir}/aiperf_artifacts
 mkdir -p ${artifacts_dir}
 
 

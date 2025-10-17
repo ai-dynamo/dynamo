@@ -5,7 +5,7 @@ pub use crate::component::Component;
 use crate::storage::key_value_store::{EtcdStore, KeyValueStore, MemoryStore};
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
-    ErrorContext, RuntimeCallback,
+    ErrorContext, PrometheusUpdateCallback,
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
     discovery::DiscoveryClient,
     metrics::MetricsRegistry,
@@ -55,7 +55,7 @@ impl DistributedRuntime {
             (Some(etcd_client), store)
         };
 
-        let nats_client = nats_config.clone().connect().await?;
+        let nats_client = Some(nats_config.clone().connect().await?);
 
         // Start system status server for health and metrics if enabled in configuration
         let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
@@ -96,21 +96,24 @@ impl DistributedRuntime {
             system_health,
         };
 
-        let nats_client_metrics = DRTNatsClientPrometheusMetrics::new(
-            &distributed_runtime,
-            nats_client_for_metrics.client().clone(),
-        )?;
-        let mut drt_hierarchies = distributed_runtime.parent_hierarchy();
-        drt_hierarchies.push(distributed_runtime.hierarchy());
-        // Register a callback to update NATS client metrics
-        let nats_client_callback = Arc::new({
-            let nats_client_clone = nats_client_metrics.clone();
-            move || {
-                nats_client_clone.set_from_client_stats();
-                Ok(())
-            }
-        });
-        distributed_runtime.register_metrics_callback(drt_hierarchies, nats_client_callback);
+        if let Some(nats_client_for_metrics) = nats_client_for_metrics {
+            let nats_client_metrics = DRTNatsClientPrometheusMetrics::new(
+                &distributed_runtime,
+                nats_client_for_metrics.client().clone(),
+            )?;
+            let mut drt_hierarchies = distributed_runtime.parent_hierarchy();
+            drt_hierarchies.push(distributed_runtime.hierarchy());
+            // Register a callback to update NATS client metrics
+            let nats_client_callback = Arc::new({
+                let nats_client_clone = nats_client_metrics.clone();
+                move || {
+                    nats_client_clone.set_from_client_stats();
+                    Ok(())
+                }
+            });
+            distributed_runtime
+                .register_prometheus_update_callback(drt_hierarchies, nats_client_callback);
+        }
 
         // Initialize the uptime gauge in SystemHealth
         distributed_runtime
@@ -244,8 +247,8 @@ impl DistributedRuntime {
         )
     }
 
-    pub(crate) fn service_client(&self) -> ServiceClient {
-        ServiceClient::new(self.nats_client.clone())
+    pub(crate) fn service_client(&self) -> Option<ServiceClient> {
+        self.nats_client().map(|nc| ServiceClient::new(nc.clone()))
     }
 
     pub async fn tcp_server(&self) -> Result<Arc<tcp::server::TcpStreamServer>> {
@@ -260,8 +263,8 @@ impl DistributedRuntime {
             .clone())
     }
 
-    pub fn nats_client(&self) -> nats::Client {
-        self.nats_client.clone()
+    pub fn nats_client(&self) -> Option<&nats::Client> {
+        self.nats_client.as_ref()
     }
 
     /// Get system status server information if available
@@ -311,33 +314,52 @@ impl DistributedRuntime {
             .map_err(|e| e.into())
     }
 
-    /// Add a callback function to metrics registries for the given hierarchies
-    // TODO: Rename to register_metrics_update_callback for consistency with Python API.
-    //       Do this after we move the MetricsRegistry trait to composition pattern.
-    pub fn register_metrics_callback(&self, hierarchies: Vec<String>, callback: RuntimeCallback) {
+    /// Add a Prometheus update callback to the given hierarchies
+    /// TODO: rename this to register_callback, once we move the the MetricsRegistry trait
+    ///       out of the runtime, and make it into a composed module.
+    pub fn register_prometheus_update_callback(
+        &self,
+        hierarchies: Vec<String>,
+        callback: PrometheusUpdateCallback,
+    ) {
         let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
         for hierarchy in &hierarchies {
             registries
                 .entry(hierarchy.clone())
                 .or_default()
-                .add_callback(callback.clone());
+                .add_prometheus_update_callback(callback.clone());
         }
     }
 
-    /// Execute all callbacks for a given hierarchy key and return their results
-    pub fn execute_metrics_callbacks(&self, hierarchy: &str) -> Vec<anyhow::Result<()>> {
+    /// Execute all Prometheus update callbacks for a given hierarchy and return their results
+    pub fn execute_prometheus_update_callbacks(&self, hierarchy: &str) -> Vec<anyhow::Result<()>> {
         // Clone callbacks while holding read lock (fast operation)
         let callbacks = {
             let registries = self.hierarchy_to_metricsregistry.read().unwrap();
             registries
                 .get(hierarchy)
-                .map(|entry| entry.runtime_callbacks.clone())
+                .map(|entry| entry.prometheus_update_callbacks.clone())
         }; // Read lock released here
 
         // Execute callbacks without holding the lock
         match callbacks {
             Some(callbacks) => callbacks.iter().map(|callback| callback()).collect(),
             None => Vec::new(),
+        }
+    }
+
+    /// Add a Prometheus exposition text callback that returns Prometheus text for the given hierarchies
+    pub fn register_prometheus_expfmt_callback(
+        &self,
+        hierarchies: Vec<String>,
+        callback: crate::PrometheusExpositionFormatCallback,
+    ) {
+        let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
+        for hierarchy in &hierarchies {
+            registries
+                .entry(hierarchy.clone())
+                .or_default()
+                .add_prometheus_expfmt_callback(callback.clone());
         }
     }
 

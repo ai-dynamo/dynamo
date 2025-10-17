@@ -54,8 +54,8 @@ set -x
 config_file=${log_path}/config.yaml
 
 
-# install genai-perf
-pip install genai-perf
+# install aiperf
+pip install aiperf
 
 # Create artifacts root directory if it doesn't exist
 if [ ! -d "${artifacts_dir}" ]; then
@@ -153,7 +153,7 @@ for concurrency in ${concurrency_list}; do
     num_prompts=$((concurrency * multi_round))
     echo "Benchmarking with concurrency ${concurrency} ... ${num_prompts} prompts"
     mkdir -p ${log_path}/concurrency_${concurrency}
-    genai-perf profile \
+    aiperf profile \
     	--model ${model} \
     	--tokenizer ${model_path} \
     	--endpoint-type chat \
@@ -174,9 +174,7 @@ for concurrency in ${concurrency_list}; do
 	    --num-dataset-entries ${num_prompts} \
     	--random-seed 100 \
     	--artifact-dir ${artifacts_dir} \
-    	-- \
     	-v \
-    	--max-threads ${concurrency} \
     	-H 'Authorization: Bearer NOT USED' \
     	-H 'Accept: text/event-stream'
     echo "Benchmark with concurrency ${concurrency} done"

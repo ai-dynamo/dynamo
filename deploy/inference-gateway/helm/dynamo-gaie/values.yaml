@@ -49,24 +49,33 @@ httpRoute:
     request: "300s"
 
 extension:
-  # default (non-epp-aware) EPP image for the GAIE extension
-  image: us-central1-docker.pkg.dev/k8s-artifacts-prod/images/gateway-api-inference-extension/epp:v0.4.0
+  # EPP image for the GAIE extension (Dynamo EPP image by default)
+  image: "" # leave empty to use defaults below
+  standardImage: us-central1-docker.pkg.dev/k8s-artifacts-prod/images/gateway-api-inference-extension/epp:v0.4.0
+  dynamoImage: nvcr.io/nvstaging/ai-dynamo/gaie-epp-dynamo:v0.6.0-1
 
 # generic knobs you may want in both modes
-imagePullSecrets: []     # e.g. ["docker-imagepullsecret"]
+imagePullSecrets:
+  - docker-imagepullsecret
+
 epp:
   imagePullPolicy: IfNotPresent
   # Add env in name/value pairs
-  extraEnv: []           # e.g. [{name: USE_STREAMING, value: "true"}]
+  extraEnv: []
   # If you ever want to completely override args, supply a list here.
   # When empty, chart will render sane defaults
   argsOverride: []
 
-# epp-aware mode toggle + specific settings
-eppAware:
-  enabled: false
-  # Optional: override EPP image when epp-aware=true
-  eppImage: nvcr.io/nvstaging/ai-dynamo/gaie-epp-dynamo:v0.6.0-1
-  dynamoNamespace: ""
-  dynamoComponent: ""
-  dynamoKvBlockSize: ""
+  # Dynamo routing mode - set to true to enable KV-aware routing via Dynamo EPP image
+  useDynamo: true
+
+  # Dynamo-specific settings (only used when useDynamo: true)
+  configFile: "/etc/epp/epp-config-dynamo.yaml"
+  dynamo:
+    namespace: "vllm-agg" # Required when useDynamo: true.
+    component: "backend"
+    kvBlockSize: "16"
+
+# Platform configuration (for Dynamo mode)
+platformReleaseName: dynamo-platform
+platformNamespace: "my-model"

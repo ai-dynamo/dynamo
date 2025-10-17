@@ -188,7 +188,7 @@ def update_metrics():
     request_slots.set(compute_current_slots())
     gpu_usage.set(get_gpu_usage())
 
-endpoint.metrics.register_update_callback(update_metrics)
+endpoint.metrics.register_callback(update_metrics)
 ```
 
 Both examples support vector metrics with labels:
@@ -216,7 +216,7 @@ Method 2 supports all standard Prometheus metric types:
 - **CounterVec**: `CounterVec` (float with labels), `IntCounterVec` (integer with labels)
 - **Histograms**: `Histogram`
 
-All metrics are imported from `dynamo._prometheus_metrics`.
+All metrics are imported from `dynamo.prometheus_metrics`.
 
 #### Adding/Changing Metrics in Method 2
 
@@ -290,8 +290,7 @@ graph TB
             NATS[NATS Server<br/>KV_METRICS_SUBJECT]
         end
 
-        subgraph "Aggregator Process Components"
-            AGG[KvMetricsAggregator<br/>llm/src/kv_router/metrics_aggregator.rs]
+        subgraph "Other Consumers (e.g., KvWorkerMonitor)"
             SUB[NATS Subscriber<br/>component/namespace.rs]
         end
 
@@ -303,7 +302,6 @@ graph TB
         style WATCH fill:#ce422b,color:#fff
         style PROM1 fill:#ce422b,color:#fff
         style NATS fill:#27aae1,color:#fff
-        style AGG fill:#ce422b,color:#fff
         style SUB fill:#ce422b,color:#fff
         style SS fill:#6c757d,color:#fff
     end
@@ -316,9 +314,7 @@ graph TB
     WMP -->|"tx.send(metrics)"| WATCH
     WATCH -->|"publish(KV_METRICS_SUBJECT, LoadEvent)"| NATS
     NATS -->|"subscribe_with_type LoadEvent"| SUB
-    SUB -->|"discover endpoints"| AGG
     SS -->|"Worker: gather() from PROM1"| PROM1
-    SS -->|"Aggregator: scrape_stats()"| AGG
 ```
 
 ##### Method 2: Dynamic Registration - Component View
@@ -355,7 +351,7 @@ graph TD
     MT -->|return to Python| PY
     PY -->|metric.set/get| MT
     MT -->|direct FFI call| PROM
-    PY -.->|endpoint.metrics.register_update_callback| PM
+    PY -.->|endpoint.metrics.register_callback| PM
     PM -.->|drt.register_metrics_callback| DRT
     SS ==>|execute_metrics_callbacks| DRT
     DRT -.->|invoke Python callback| PY

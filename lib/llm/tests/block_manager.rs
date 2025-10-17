@@ -190,12 +190,12 @@ pub mod llm_kvbm {
             bytes: Vec<u8>,
         ) -> Result<()> {
             let subject = format!("{}.{}", self.subject(), event_name.as_ref());
-            self.drt()
-                .nats_client()
-                .client()
-                .publish(subject, bytes.into())
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to publish to NATS: {}", e))
+
+            let Some(nats_client) = self.drt().nats_client() else {
+                anyhow::bail!("KVBMDynamoRuntimeComponent EventPublisher requires NATS");
+            };
+            nats_client.client().publish(subject, bytes.into()).await?;
+            Ok(())
         }
     }
 
@@ -294,6 +294,7 @@ pub mod llm_kvbm {
                     let event = KvCacheEvent {
                         data,
                         event_id: event_id_counter,
+                        dp_rank: 0,
                     };
                     let router_event = RouterEvent::new(worker_identifier as i64, event);
                     event_id_counter += 1;
@@ -313,6 +314,7 @@ pub mod llm_kvbm {
                             block_hashes: vec![ExternalSequenceBlockHash(sequence_hash)],
                         }),
                         event_id: event_id_counter,
+                        dp_rank: 0,
                     };
                     let router_event = RouterEvent::new(worker_identifier as i64, event);
                     event_id_counter += 1;
@@ -573,6 +575,7 @@ mod tests {
                     }],
                     parent_hash: None,
                 }),
+                dp_rank: 0,
             },
         );
 
@@ -587,6 +590,7 @@ mod tests {
                     }],
                     parent_hash: None,
                 }),
+                dp_rank: 0,
             },
         );
 
@@ -630,6 +634,7 @@ mod tests {
                     }],
                     parent_hash: None,
                 }),
+                dp_rank: 0,
             },
         );
 
@@ -678,6 +683,7 @@ mod tests {
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
                     block_hashes: vec![ExternalSequenceBlockHash(4)],
                 }),
+                dp_rank: 0,
             },
         );
 

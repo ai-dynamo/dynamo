@@ -290,7 +290,9 @@ def verify_migration_occurred(frontend_process: DynamoFrontendProcess) -> None:
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-def test_request_migration_vllm(request, runtime_services, predownload_models):
+def test_request_migration_vllm(
+    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+):
     """
     End-to-end test for worker fault tolerance with migration support.
 

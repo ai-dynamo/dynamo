@@ -58,9 +58,15 @@ python -m dynamo.frontend --http-port=8000 &
 # run processor
 python3 components/processor.py --model $MODEL_NAME --prompt-template "$PROMPT_TEMPLATE" &
 
+# To make Qwen2.5-VL fit in A100 40GB, set the following extra arguments
+EXTRA_ARGS=""
+if [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
+    EXTRA_ARGS="--gpu-memory-utilization 0.85 --max-model-len 2048"
+fi
+
 # run E/P/D workers
 CUDA_VISIBLE_DEVICES=0 python3 components/encode_worker.py --model $MODEL_NAME &
-CUDA_VISIBLE_DEVICES=1 python3 components/worker.py --model $MODEL_NAME --worker-type prefill &
+CUDA_VISIBLE_DEVICES=1 python3 components/worker.py --model $MODEL_NAME --worker-type prefill $EXTRA_ARGS &
 
 # Wait for all background processes to complete
 wait

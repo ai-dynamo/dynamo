@@ -111,7 +111,7 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 
 → [Verify Installation](#verify-installation)
 
-## Path C: Custom Development
+## Path B: Custom Development
 
 Build and deploy from source for customization.
 
@@ -196,7 +196,7 @@ kubectl get pods -n ${NAMESPACE}
 
 3. **Optional:**
    - [Set up Prometheus & Grafana](metrics.md)
-   - [SLA Planner Quickstart Guide](sla_planner_quickstart.md) (for SLA-aware scheduling and autoscaling)
+   - [SLA Planner Quickstart Guide](../planner/sla_planner_quickstart.md) (for SLA-aware scheduling and autoscaling)
 
 ## Troubleshooting
 

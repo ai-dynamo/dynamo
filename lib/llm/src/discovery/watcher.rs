@@ -303,7 +303,8 @@ impl ModelWatcher {
         endpoint_id: &EndpointId,
         card: &mut ModelDeploymentCard,
     ) -> anyhow::Result<()> {
-        card.move_from_nats(self.drt.nats_client()).await?;
+        card.download_config().await?;
+
         let component = self
             .drt
             .namespace(&endpoint_id.namespace)?
@@ -407,7 +408,7 @@ impl ModelWatcher {
                 NvCreateEmbeddingRequest,
                 Annotated<NvCreateEmbeddingResponse>,
             >::from_client_with_threshold(
-                client, self.router_mode, self.busy_threshold
+                client, self.router_mode, None, None
             )
             .await?;
             let engine = Arc::new(push_router);
@@ -415,13 +416,12 @@ impl ModelWatcher {
                 .add_embeddings_model(card.name(), checksum, engine)?;
         } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
             // Case 3: Text + Chat
-            let push_router = PushRouter::<
-                NvCreateChatCompletionRequest,
-                Annotated<NvCreateChatCompletionStreamResponse>,
-            >::from_client_with_threshold(
-                client, self.router_mode, self.busy_threshold
-            )
-            .await?;
+            let push_router =
+                PushRouter::<
+                    NvCreateChatCompletionRequest,
+                    Annotated<NvCreateChatCompletionStreamResponse>,
+                >::from_client_with_threshold(client, self.router_mode, None, None)
+                .await?;
             let engine = Arc::new(push_router);
             self.manager
                 .add_chat_completions_model(card.name(), checksum, engine)?;
@@ -431,7 +431,7 @@ impl ModelWatcher {
                 NvCreateCompletionRequest,
                 Annotated<NvCreateCompletionResponse>,
             >::from_client_with_threshold(
-                client, self.router_mode, self.busy_threshold
+                client, self.router_mode, None, None
             )
             .await?;
             let engine = Arc::new(push_router);
@@ -453,11 +453,11 @@ impl ModelWatcher {
                 PreprocessedEmbeddingRequest,
                 Annotated<EmbeddingsEngineOutput>,
             >::from_client_with_threshold(
-                client, self.router_mode, self.busy_threshold
+                client, self.router_mode, None, None
             )
             .await?;
 
-            // Note: Embeddings don't need KV routing complexity
+            // Note: Embeddings don't need KV routing complexity or load monitoring
             let service_backend = ServiceBackend::from_engine(Arc::new(router));
 
             // Link the pipeline: frontend -> preprocessor -> backend -> service_backend -> backend -> preprocessor -> frontend
@@ -473,11 +473,12 @@ impl ModelWatcher {
                 .add_embeddings_model(card.name(), checksum, embedding_engine)?;
         } else if card.model_input == ModelInput::Tensor && card.model_type.supports_tensor() {
             // Case 5: Tensor + Tensor (non-LLM)
+            // No KV cache concepts - not an LLM model
             let push_router = PushRouter::<
                 NvCreateTensorRequest,
                 Annotated<NvCreateTensorResponse>,
             >::from_client_with_threshold(
-                client, self.router_mode, self.busy_threshold
+                client, self.router_mode, None, None
             )
             .await?;
             let engine = Arc::new(push_router);

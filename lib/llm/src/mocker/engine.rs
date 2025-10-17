@@ -124,7 +124,7 @@ impl MockVllmEngine {
 
             let scheduler = Scheduler::new(
                 args.clone(),
-                Some(dp_rank),
+                dp_rank,
                 Some(output_tx),
                 Some(kv_events_tx), // Pass the KV events sender to scheduler
                 Some(cancel_token.clone()),
@@ -184,7 +184,7 @@ impl MockVllmEngine {
             tokio::spawn({
                 let publisher = metrics_publisher.clone();
                 async move {
-                    if let Err(e) = publisher.create_endpoint(comp.clone(), None).await {
+                    if let Err(e) = publisher.create_endpoint(comp.clone()).await {
                         tracing::error!("Metrics endpoint failed: {e}");
                     }
                 }
@@ -283,6 +283,7 @@ impl MockVllmEngine {
                             let event = KvCacheEvent {
                                 event_id: Uuid::new_v4().as_u128() as u64,
                                 data: event_data,
+                                dp_rank,
                             };
 
                             // Publish the event
@@ -316,18 +317,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
     ) -> Result<ManyOut<LLMEngineOutput>, Error> {
         let (request, ctx) = input.into_parts();
 
-        // Extract dp_rank from annotations if present
-        let dp_rank = request
-            .annotations
-            .iter()
-            .find_map(|ann| {
-                if ann.starts_with("dp_rank:") {
-                    ann.strip_prefix("dp_rank:").and_then(|s| s.parse().ok())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0);
+        // Extract dp_rank from request field (defaults to 0 if not set)
+        let dp_rank = request.dp_rank.unwrap_or(0);
 
         // Validate dp_rank
         if dp_rank >= self.engine_args.dp_size {
@@ -348,7 +339,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                 .expect("max_output_tokens must be specified for mocker")
                 as usize,
             uuid: Some(request_uuid),
-            dp_rank: Some(dp_rank),
+            dp_rank,
         };
 
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<OutputSignal>();
@@ -512,7 +503,7 @@ pub async fn make_mocker_engine(
     args: MockEngineArgs,
 ) -> Result<crate::backend::ExecutionContext, Error> {
     // Create the mocker engine
-    tracing::debug!("Creating mocker engine with config: {args:?}");
+    tracing::info!("Creating mocker engine with config: {args:?}");
     let annotated_engine =
         AnnotatedMockEngine::new(MockVllmEngine::new(args), distributed_runtime, endpoint_id);
 
@@ -722,36 +713,6 @@ mod integration_tests {
             Err(e) => {
                 return Err(Error::msg(format!("Failed to deserialize KV event: {e}")));
             }
-        }
-
-        // Use KvMetricsAggregator to get metrics more easily
-        let cancel_token = test_component.drt().runtime().child_token();
-        let metrics_aggregator = crate::kv_router::metrics_aggregator::KvMetricsAggregator::new(
-            test_component.clone(),
-            cancel_token,
-        )
-        .await;
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        let processed_endpoints = metrics_aggregator.get_endpoints();
-        tracing::info!(
-            "Found {} metrics endpoints",
-            processed_endpoints.endpoints.len()
-        );
-
-        // Verify we found at least one metrics endpoint
-        assert!(
-            !processed_endpoints.endpoints.is_empty(),
-            "Should find at least one metrics endpoint"
-        );
-        tracing::info!(
-            "✓ Successfully found {} metrics endpoints",
-            processed_endpoints.endpoints.len()
-        );
-
-        // Verify the metrics endpoints contain valid data
-        for (worker_id, endpoint) in &processed_endpoints.endpoints {
-            tracing::info!("✓ Worker {} metrics: {:?}", worker_id, endpoint.data);
         }
 
         tracing::info!("🎉 Event verification completed!");
