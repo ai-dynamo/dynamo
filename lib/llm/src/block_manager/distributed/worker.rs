@@ -3,8 +3,7 @@
 
 use super::*;
 
-use leader::KvbmLeaderData;
-
+use async_trait::async_trait;
 use transfer::*;
 use utils::*;
 use zmq::*;
@@ -23,23 +22,32 @@ use crate::block_manager::{
 
 use derive_builder::Builder;
 use nixl_sys::Agent as NixlAgent;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::runtime::Handle;
-use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_runtime::{
-    DistributedRuntime,
-    utils::{leader_worker_barrier::WorkerBarrier, task::CriticalTaskExecutionHandle},
-};
+use dynamo_runtime::{DistributedRuntime, utils::task::CriticalTaskExecutionHandle};
+use tokio::sync::{Mutex, RwLock, oneshot};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KvbmWorkerData {
-    pub num_device_blocks: usize,
-    pub bytes_per_block: usize,
+struct WorkerState {
+    ready_for_ping: AtomicBool,
+}
+
+impl WorkerState {
+    fn new() -> Self {
+        Self {
+            ready_for_ping: AtomicBool::new(false),
+        }
+    }
+    fn mark_ready(&self) {
+        self.ready_for_ping.store(true, Ordering::SeqCst);
+    }
+    fn is_ready(&self) -> bool {
+        self.ready_for_ping.load(Ordering::SeqCst)
+    }
 }
 
 pub fn load_and_validate_tensors(
@@ -82,6 +90,269 @@ pub fn load_and_validate_tensors(
     Ok((device_tensors, shape.unwrap()))
 }
 
+fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
+    let agent = NixlAgent::new(&format!("kvbm-worker-{}", worker_id))?;
+    if use_gds {
+        let (_, gds_params) = agent.get_plugin_params("GDS_MT")?;
+        agent.create_backend("GDS_MT", &gds_params)?;
+    }
+    let (_, posix_params) = agent.get_plugin_params("POSIX")?;
+    agent.create_backend("POSIX", &posix_params)?;
+
+    Ok(agent)
+}
+
+// Helper: perform allocation and build transfer handler (factored from previous code)
+async fn perform_allocation_and_build_handler(
+    device_layout: Box<dyn NixlLayout<StorageType = DeviceStorage>>,
+    mut layout_builder: LayoutConfigBuilder,
+    worker_config: KvbmWorkerConfig,
+    leader_meta: LeaderMetadata,
+    worker_id: usize,
+    device_id: usize,
+    scheduler_client: Option<TransferSchedulerClient>,
+) -> anyhow::Result<BlockTransferHandler> {
+    let agent = build_agent(worker_id, leader_meta.num_disk_blocks > 0)?;
+    let pool_config = PoolConfig {
+        enable_pool: true,
+        max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
+        max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
+        num_outer_components: device_layout.config().outer_dim,
+        num_layers: device_layout.config().num_layers,
+    };
+    let transfer_context = Arc::new(TransferContext::new(
+        Arc::new(Some(agent)),
+        DeviceAllocator::new(device_id)?.ctx().new_stream()?,
+        Handle::current(),
+        Some(pool_config),
+    ));
+
+    // device
+    let device_blocks = Some(KvbmWorker::make_layout::<_, BasicMetadata>(
+        device_layout,
+        transfer_context.nixl_agent().as_ref(),
+        0,
+        worker_id,
+    )?);
+    // host
+    let host_blocks = if leader_meta.num_host_blocks > 0 {
+        let host_allocator = Arc::new(PinnedAllocator::default());
+        let host_layout = layout_builder
+            .num_blocks(leader_meta.num_host_blocks)
+            .build()?
+            .allocate_layout(worker_config.host_layout_type, host_allocator)?;
+        Some(KvbmWorker::make_layout::<_, BasicMetadata>(
+            host_layout,
+            transfer_context.nixl_agent().as_ref(),
+            1,
+            worker_id,
+        )?)
+    } else {
+        None
+    };
+    // disk
+    let disk_blocks = if leader_meta.num_disk_blocks > 0 {
+        let disk_allocator = Arc::new(DiskAllocator);
+        let disk_layout = layout_builder
+            .num_blocks(leader_meta.num_disk_blocks)
+            .build()?
+            .allocate_layout(worker_config.disk_layout_type, disk_allocator)?;
+        Some(KvbmWorker::make_layout::<_, BasicMetadata>(
+            disk_layout,
+            transfer_context.nixl_agent().as_ref(),
+            2,
+            worker_id,
+        )?)
+    } else {
+        None
+    };
+
+    let handler = BlockTransferHandler::new(
+        device_blocks,
+        host_blocks,
+        disk_blocks,
+        transfer_context,
+        scheduler_client,
+    )?;
+    Ok(handler)
+}
+
+struct WorkerMetadataHandler {
+    num_device_blocks: usize,
+    bytes_per_block: usize,
+}
+
+#[async_trait]
+impl Handler for WorkerMetadataHandler {
+    async fn handle(&self, mut message: MessageHandle) -> anyhow::Result<()> {
+        let payload = bincode::serialize(&WorkerMetadata {
+            num_device_blocks: self.num_device_blocks,
+            bytes_per_block: self.bytes_per_block,
+        })?;
+        message
+            .reply(ZMQ_WORKER_METADATA_MESSAGE, &[payload])
+            .await?;
+        Ok(())
+    }
+}
+
+// Leader sends allocation config -> allocate -> publish handler -> mark ready -> ACK
+struct LeaderMetadataHandler {
+    state: Arc<WorkerState>,
+    device_layout: Mutex<Option<Box<dyn NixlLayout<StorageType = DeviceStorage>>>>,
+    layout_builder: LayoutConfigBuilder,
+    worker_config: KvbmWorkerConfig,
+    worker_id: usize,
+    device_id: usize,
+    scheduler_client: Option<TransferSchedulerClient>,
+    handler_cell: Arc<RwLock<Option<BlockTransferHandler>>>,
+    handler_tx: Arc<Mutex<Option<oneshot::Sender<BlockTransferHandler>>>>,
+    started: AtomicBool,
+}
+
+#[async_trait]
+impl Handler for LeaderMetadataHandler {
+    async fn handle(&self, mut message: MessageHandle) -> anyhow::Result<()> {
+        // Always ACK ASAP so Drop can't panic and leader can finish the round.
+        if let Err(e) = message.ack().await {
+            tracing::error!("leader_metadata: failed to ACK: {e:#}");
+        }
+
+        // Validate payload; if bad, ignore.
+        if message.data.len() != 1 {
+            tracing::error!(
+                "leader_metadata expects 1 payload frame (got {})",
+                message.data.len()
+            );
+            return Ok(());
+        }
+        let leader_meta: LeaderMetadata = match bincode::deserialize(&message.data[0]) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!("leader_metadata: bad payload: {e:#}");
+                return Ok(());
+            }
+        };
+
+        // Single-flight: only the first message triggers allocation.
+        if self
+            .started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            tracing::debug!("leader_metadata: allocation already started; dropping duplicate");
+            return Ok(());
+        }
+
+        // Take device_layout once.
+        let dev_layout = {
+            let mut guard = self.device_layout.lock().await;
+            match guard.take() {
+                Some(d) => d,
+                None => {
+                    tracing::warn!("leader_metadata: device_layout already consumed; dropping");
+                    return Ok(());
+                }
+            }
+        };
+
+        // Capture what we need and run allocation in the background.
+        let layout_builder = self.layout_builder.clone();
+        let worker_config = self.worker_config.clone();
+        let worker_id = self.worker_id;
+        let device_id = self.device_id;
+        let scheduler_client = self.scheduler_client.clone();
+        let handler_cell = self.handler_cell.clone();
+        let handler_tx = self.handler_tx.clone();
+        let state = self.state.clone();
+
+        tokio::spawn(async move {
+            match perform_allocation_and_build_handler(
+                dev_layout,
+                layout_builder,
+                worker_config,
+                leader_meta,
+                worker_id,
+                device_id,
+                scheduler_client,
+            )
+            .await
+            {
+                Ok(handler) => {
+                    // Install transfer handler
+                    {
+                        let mut w = handler_cell.write().await;
+                        *w = Some(handler.clone());
+                    }
+                    // Return handler to creator (once)
+                    {
+                        let mut g = handler_tx.lock().await;
+                        if let Some(tx) = g.take() {
+                            let _ = tx.send(handler);
+                        }
+                    }
+                    // Now the worker can ACK pings
+                    state.mark_ready();
+                    tracing::info!("allocation finished; worker is ping-ACK-able");
+                }
+                Err(e) => {
+                    tracing::error!("allocation failed: {e:#}");
+                    // leave ready=false so pings keep being ignored
+                }
+            }
+        });
+
+        Ok(())
+    }
+}
+
+// Gated ping: the worker can only response to ping after the state is ready
+struct GatedPing {
+    state: Arc<WorkerState>,
+    // fired exactly once after the first successful ping ACK
+    layout_ready_tx: Mutex<Option<oneshot::Sender<String>>>,
+}
+
+#[async_trait]
+impl Handler for GatedPing {
+    async fn handle(&self, mut message: MessageHandle) -> anyhow::Result<()> {
+        if !self.state.is_ready() {
+            tracing::info!("Ping received but worker not ready; deferring ACK");
+            // Prevent Drop panic; leader won't get an ACK for this round and will retry.
+            message.mark_handled();
+            return Ok(());
+        }
+
+        message.ack().await?;
+
+        // After a successful ACK, flip the readiness oneshot exactly once
+        let mut guard = self.layout_ready_tx.lock().await;
+        if let Some(tx) = guard.take() {
+            let _ = tx.send("ping-acked".to_string());
+            tracing::info!("Reported ping-ready after first ACK");
+        }
+
+        Ok(())
+    }
+}
+
+// Transfer dispatcher that waits until block transfer handler exists
+struct BlockTransferDispatch {
+    cell: Arc<RwLock<Option<BlockTransferHandler>>>,
+}
+
+#[async_trait]
+impl Handler for BlockTransferDispatch {
+    async fn handle(&self, message: MessageHandle) -> anyhow::Result<()> {
+        let maybe = { self.cell.read().await.clone() };
+        if let Some(inner) = maybe {
+            inner.handle(message).await
+        } else {
+            Err(anyhow::anyhow!("transfer handler not ready yet"))
+        }
+    }
+}
+
 #[derive(Builder, Clone)]
 #[builder(pattern = "owned")]
 pub struct KvbmWorkerConfig {
@@ -110,29 +381,20 @@ pub struct KvbmWorkerConfig {
     #[builder(default = "LayoutType::FullyContiguous")]
     disk_layout_type: LayoutType,
 
-    #[builder(default = "String::from(\"kvbm\")")]
-    barrier_id_prefix: String,
-
     #[builder(default = "None")]
     scheduler_client: Option<TransferSchedulerClient>,
+
+    #[builder(default = "String::from(\"tcp://127.0.0.1:56001\")")]
+    leader_pub_url: String,
+
+    #[builder(default = "String::from(\"tcp://127.0.0.1:56002\")")]
+    leader_ack_url: String,
 }
 
 impl KvbmWorkerConfig {
     pub fn builder() -> KvbmWorkerConfigBuilder {
         KvbmWorkerConfigBuilder::default()
     }
-}
-
-fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
-    let agent = NixlAgent::new(&format!("kvbm-worker-{}", worker_id))?;
-    if use_gds {
-        let (_, gds_params) = agent.get_plugin_params("GDS_MT")?;
-        agent.create_backend("GDS_MT", &gds_params)?;
-    }
-    let (_, posix_params) = agent.get_plugin_params("POSIX")?;
-    agent.create_backend("POSIX", &posix_params)?;
-
-    Ok(agent)
 }
 
 pub struct KvbmWorker {
@@ -265,26 +527,13 @@ impl KvbmWorker {
     )> {
         let cancel_token = config.drt.primary_token().clone();
 
-        // barrier sync with leader to get the leader data
-        let leader_data = tokio::task::block_in_place(|| {
-            // This is now synchronous blocking code
-            // We need a separate current-thread runtime to block_on async calls here
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                KvbmWorker::leader_barrier_sync(
-                    config.clone(),
-                    cancel_token.clone(),
-                    bytes_per_block,
-                )
-                .await
-            })
-        })?;
-
         // establish a oneshot channel to get back the raw BlockTransferHandler
         let (handler_tx, handler_rx) = oneshot::channel();
+        let handler_tx_cell = Arc::new(Mutex::new(Some(handler_tx)));
 
         // establish a oneshot channel to block on the main routine to wait for layout allocation readiness
         let (layout_ready_tx, layout_ready_rx) = oneshot::channel::<String>();
+        let layout_ready_tx_cell = Mutex::new(Some(layout_ready_tx));
 
         let scheduler_client = config.scheduler_client.clone();
 
@@ -295,13 +544,13 @@ impl KvbmWorker {
                 KvbmWorker::worker_task(
                     device_layout,
                     layout_builder,
-                    leader_data,
                     layout_type,
                     worker_config,
                     cancel_token,
-                    handler_tx,
-                    layout_ready_tx,
+                    handler_tx_cell,
+                    layout_ready_tx_cell,
                     scheduler_client,
+                    bytes_per_block,
                 )
             },
             cancel_token.clone(),
@@ -313,18 +562,6 @@ impl KvbmWorker {
             Ok(_) => tracing::info!("worker layout allocation finished."),
             Err(_) => tracing::error!("Worker layout dropped without sending"),
         }
-
-        let worker_config = config.clone();
-        let cancel_for_barrier = cancel_token.clone();
-        // wait until the leader finished the initialization of all components
-        tokio::task::block_in_place(|| {
-            // This is now synchronous blocking code
-            // We need a separate current-thread runtime to block_on async calls here
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                KvbmWorker::leader_readiness_sync(worker_config, cancel_for_barrier).await
-            })
-        })?;
 
         Ok((task, handler_rx))
     }
@@ -344,9 +581,11 @@ impl KvbmWorker {
 
         // channel to get BlockTransferHandler back to the caller
         let (handler_tx, handler_rx) = oneshot::channel::<transfer::BlockTransferHandler>();
+        let handler_tx_cell = Arc::new(Mutex::new(Some(handler_tx)));
 
         // channel that the worker will use to signal layout readiness
         let (layout_ready_tx, layout_ready_rx) = oneshot::channel::<String>();
+        let layout_ready_tx_cell = Mutex::new(Some(layout_ready_tx));
 
         // clone what we need inside the orchestrator
         let worker_config = config.clone();
@@ -359,13 +598,7 @@ impl KvbmWorker {
                 let scheduler = scheduler_client.clone();
 
                 async move {
-                    // 1) barrier (must finish before worker_task starts)
-                    let leader_data =
-                        KvbmWorker::leader_barrier_sync(cfg.clone(), ct.clone(), bytes_per_block)
-                            .await?;
-
-                    // 2) start the long-running worker (after barrier)
-                    //    Spawn it so the orchestrator can continue with readiness + waiting.
+                    // Start the long-running worker.
                     let dev_layout = device_layout; // moved in
                     let lb = layout_builder; // moved in
                     let lt = layout_type; // moved in
@@ -373,13 +606,13 @@ impl KvbmWorker {
                     let worker_fut = KvbmWorker::worker_task(
                         dev_layout,
                         lb,
-                        leader_data,
                         lt,
                         cfg.clone(),
                         ct.clone(),
-                        handler_tx,
-                        layout_ready_tx,
+                        handler_tx_cell,
+                        layout_ready_tx_cell,
                         scheduler,
+                        bytes_per_block,
                     );
 
                     // If worker_task returns Result, handle/log it inside the spawned task.
@@ -395,9 +628,6 @@ impl KvbmWorker {
                         Err(_) => tracing::warn!("worker layout readiness channel dropped"),
                     }
 
-                    // 4) wait for leader to finish its side of initialization
-                    KvbmWorker::leader_readiness_sync(cfg.clone(), ct.clone()).await?;
-
                     Ok::<(), anyhow::Error>(())
                 }
             },
@@ -407,6 +637,7 @@ impl KvbmWorker {
 
         Ok((task, handler_rx))
     }
+
     /// One-time use method to extract the block transfer handler from the worker.
     ///
     /// This is a bit of a hack. Improve the API design around this in the future.
@@ -433,134 +664,17 @@ impl KvbmWorker {
         Ok(blocks)
     }
 
-    async fn leader_barrier_sync(
-        config: KvbmWorkerConfig,
-        cancel_token: CancellationToken,
-        bytes_per_block: usize,
-    ) -> anyhow::Result<KvbmLeaderData> {
-        let drt = config.drt.clone();
-
-        let worker_id = drt
-            .primary_lease()
-            .ok_or(anyhow::anyhow!(
-                "unable to get primary lease; check that drt is not static"
-            ))?
-            .id() as usize;
-
-        let barrier_id_worker_to_leader =
-            format!("{}{}", config.barrier_id_prefix, "-worker-to-leader");
-        tracing::info!(
-            "Worker {} waiting on barrier {}",
-            worker_id,
-            barrier_id_worker_to_leader
-        );
-
-        let worker_to_leader_barrier = WorkerBarrier::<(), KvbmWorkerData>::new(
-            barrier_id_worker_to_leader,
-            worker_id.to_string(),
-        );
-
-        let worker_data = KvbmWorkerData {
-            num_device_blocks: config.num_device_blocks,
-            bytes_per_block,
-        };
-
-        tokio::select! {
-            _ = cancel_token.cancelled() => {
-                return Err(anyhow::anyhow!("Cancelled"))
-            }
-            _leader_data = worker_to_leader_barrier.sync(&drt, &worker_data) => {
-                _leader_data
-            }
-        }
-        .map_err(|e| anyhow::anyhow!("Failed to sync worker to leader barrier: {:?}", e))?;
-
-        tracing::debug!(
-            "Worker {} sent the worker data in worker to leader phase",
-            worker_id
-        );
-
-        let barrier_id_leader_to_worker =
-            format!("{}{}", config.barrier_id_prefix, "-leader-to-worker");
-        tracing::info!(
-            "Worker {} waiting on barrier {}",
-            worker_id,
-            barrier_id_leader_to_worker
-        );
-
-        let leader_to_worker_barrier = WorkerBarrier::<KvbmLeaderData, ()>::new(
-            barrier_id_leader_to_worker,
-            worker_id.to_string(),
-        );
-
-        let leader_data = tokio::select! {
-            _ = cancel_token.cancelled() => {
-                return Err(anyhow::anyhow!("Cancelled"))
-            }
-            leader_data = leader_to_worker_barrier.sync(&drt, &()) => {
-                leader_data
-            }
-        }
-        .map_err(|e| anyhow::anyhow!("Failed to sync worker to leader barrier: {:?}", e))?;
-
-        tracing::info!(
-            "Worker {} received leader data: {:?}",
-            worker_id,
-            leader_data
-        );
-
-        Ok(leader_data)
-    }
-
-    async fn leader_readiness_sync(
-        config: KvbmWorkerConfig,
-        cancel_token: CancellationToken,
-    ) -> anyhow::Result<()> {
-        let drt = config.drt.clone();
-
-        let worker_id = drt
-            .primary_lease()
-            .ok_or(anyhow::anyhow!(
-                "unable to get primary lease; check that drt is not static"
-            ))?
-            .id() as usize;
-
-        let barrier_id_leader_readiness =
-            format!("{}{}", config.barrier_id_prefix, "-leader-ready");
-        tracing::info!(
-            "Worker {} waiting on barrier {}",
-            worker_id,
-            barrier_id_leader_readiness
-        );
-
-        let leader_readiness_barrier =
-            WorkerBarrier::<(), ()>::new(barrier_id_leader_readiness, worker_id.to_string());
-
-        // leader_data is not important in the leader readiness case
-        tokio::select! {
-            _ = cancel_token.cancelled() => {
-                return Err(anyhow::anyhow!("Cancelled"))
-            }
-            _leader_data = leader_readiness_barrier.sync(&drt, &()) => {
-                _leader_data
-            }
-        }
-        .map_err(|e| anyhow::anyhow!("Failed to sync leader readiness barrier: {:?}", e))?;
-
-        Ok(())
-    }
-
     #[allow(clippy::too_many_arguments)]
     async fn worker_task(
         device_layout: Box<dyn NixlLayout<StorageType = DeviceStorage>>,
-        mut layout_builder: LayoutConfigBuilder,
-        leader_data: KvbmLeaderData,
-        _layout_type: LayoutType,
+        layout_builder: LayoutConfigBuilder,
+        _device_layout_type: LayoutType,
         config: KvbmWorkerConfig,
         cancel_token: CancellationToken,
-        handler_tx: oneshot::Sender<BlockTransferHandler>,
-        layout_ready_tx: oneshot::Sender<String>,
+        handler_tx: Arc<Mutex<Option<oneshot::Sender<BlockTransferHandler>>>>,
+        layout_ready_tx: tokio::sync::Mutex<Option<oneshot::Sender<String>>>,
         scheduler_client: Option<TransferSchedulerClient>,
+        bytes_per_block: usize,
     ) -> anyhow::Result<()> {
         let drt = config.drt.clone();
 
@@ -571,100 +685,62 @@ impl KvbmWorker {
             ))?
             .id() as usize;
 
-        let agent = build_agent(worker_id, leader_data.num_disk_blocks > 0)?;
+        // Readiness gating for ping
+        let state = Arc::new(WorkerState::new());
 
-        let pool_config = PoolConfig {
-            enable_pool: true,
-            max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
-            max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
-            num_outer_components: device_layout.config().outer_dim,
-            num_layers: device_layout.config().num_layers,
-        };
+        // Cell to publish the transfer handler
+        let transfer_handler_cell: Arc<RwLock<Option<BlockTransferHandler>>> =
+            Arc::new(RwLock::new(None));
 
-        let transfer_context = Arc::new(TransferContext::new(
-            Arc::new(Some(agent)),
-            DeviceAllocator::new(config.device_id)
-                .unwrap()
-                .ctx()
-                .new_stream()
-                .unwrap(),
-            Handle::current(),
-            Some(pool_config),
-        ));
+        // Build handlers map
+        let mut handlers: HashMap<String, Arc<dyn Handler>> = HashMap::new();
 
-        // Build our device, host, and disk block lists.
-        let device_blocks = Some(Self::make_layout::<_, BasicMetadata>(
-            device_layout,
-            transfer_context.nixl_agent().as_ref(),
-            0,
-            worker_id,
-        )?);
+        handlers.insert(
+            ZMQ_PING_MESSAGE.to_string(),
+            Arc::new(GatedPing {
+                state: state.clone(),
+                layout_ready_tx,
+            }) as Arc<dyn Handler>,
+        );
 
-        let host_blocks = if leader_data.num_host_blocks > 0 {
-            let host_allocator = Arc::new(PinnedAllocator::default());
-            let host_layout = layout_builder
-                .num_blocks(leader_data.num_host_blocks)
-                .build()?
-                .allocate_layout(config.host_layout_type, host_allocator)?;
+        handlers.insert(
+            ZMQ_WORKER_METADATA_MESSAGE.to_string(),
+            Arc::new(WorkerMetadataHandler {
+                num_device_blocks: config.num_device_blocks,
+                bytes_per_block,
+            }) as Arc<dyn Handler>,
+        );
 
-            Some(Self::make_layout::<_, BasicMetadata>(
-                host_layout,
-                transfer_context.nixl_agent().as_ref(),
-                1,
+        handlers.insert(
+            ZMQ_LEADER_METADATA_MESSAGE.to_string(),
+            Arc::new(LeaderMetadataHandler {
+                state: state.clone(),
+                device_layout: tokio::sync::Mutex::new(Some(device_layout)), // moved in
+                layout_builder,                                              // moved
+                worker_config: config.clone(),
                 worker_id,
-            )?)
-        } else {
-            None
-        };
+                device_id: config.device_id,
+                scheduler_client,
+                handler_cell: transfer_handler_cell.clone(),
+                handler_tx, // sends BlockTransferHandler to caller
+                started: AtomicBool::new(false),
+            }) as Arc<dyn Handler>,
+        );
 
-        let disk_blocks = if leader_data.num_disk_blocks > 0 {
-            let disk_allocator = Arc::new(DiskAllocator);
-            let disk_layout = layout_builder
-                .num_blocks(leader_data.num_disk_blocks)
-                .build()?
-                .allocate_layout(config.disk_layout_type, disk_allocator)?;
-
-            Some(Self::make_layout::<_, BasicMetadata>(
-                disk_layout,
-                transfer_context.nixl_agent().as_ref(),
-                2,
-                worker_id,
-            )?)
-        } else {
-            None
-        };
-
-        let block_transfer_handler = BlockTransferHandler::new(
-            device_blocks,
-            host_blocks,
-            disk_blocks,
-            transfer_context,
-            scheduler_client,
-        )?;
-
-        tracing::debug!("sending block transfer handler to worker");
-        handler_tx
-            .send(block_transfer_handler.clone())
-            .map_err(|_| {
-                anyhow::anyhow!("Failed to send block transfer handler over oneshot channel")
-            })?;
-        tracing::debug!("sent block transfer handler to worker");
-
-        let handlers = HashMap::from([(
+        // transfer requests get dispatched to built handler (after allocation)
+        handlers.insert(
             ZMQ_TRANSFER_BLOCKS_MESSAGE.to_string(),
-            Arc::new(block_transfer_handler) as Arc<dyn Handler>,
-        )]);
+            Arc::new(BlockTransferDispatch {
+                cell: transfer_handler_cell.clone(),
+            }) as Arc<dyn Handler>,
+        );
 
         let _zmq_worker = ZmqActiveMessageWorker::new(
-            &leader_data.pub_url,
-            &leader_data.ack_url,
+            &config.leader_pub_url,
+            &config.leader_ack_url,
             handlers,
             cancel_token.clone(),
         )?;
-
-        if layout_ready_tx.send("finished".to_string()).is_err() {
-            tracing::error!("worker receiver dropped before result was sent");
-        }
 
         // TODO: Some sort of fancy loop here.
         // For now, just wait for cancellation.

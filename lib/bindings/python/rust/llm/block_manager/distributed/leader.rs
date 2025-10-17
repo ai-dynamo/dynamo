@@ -2,12 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use utils::get_barrier_id_prefix;
-
 use derive_getters::Dissolve;
 use llm_rs::block_manager::distributed::{
     KvbmLeader as KvbmLeaderImpl, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig,
 };
+use utils::{get_leader_zmq_ack_url, get_leader_zmq_pub_url};
 
 const CPU_CACHE: &str = "DYN_KVBM_CPU_CACHE_GB";
 const CPU_CACHE_OVERRIDE: &str = "DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS";
@@ -72,17 +71,16 @@ impl KvbmLeader {
     #[new]
     #[pyo3(signature = (world_size, drt))]
     fn new(world_size: usize, drt: DistributedRuntime) -> PyResult<Self> {
-        let barrier_id_prefix = get_barrier_id_prefix();
         let leader_init_timeout_sec: u64 =
             get_leader_init_timeout_secs(LEADER_WORKER_INIT_TIMEOUT_SECS);
 
         let config = KvbmLeaderConfig::builder()
-            .barrier_id_prefix(barrier_id_prefix)
             .world_size(world_size)
             .leader_init_timeout_secs(leader_init_timeout_sec)
-            .drt(drt.inner().clone())
             .host_blocks_config(get_blocks_config(CPU_CACHE, CPU_CACHE_OVERRIDE))
             .disk_blocks_config(get_blocks_config(DISK_CACHE, DISK_CACHE_OVERRIDE))
+            .leader_pub_url(get_leader_zmq_pub_url())
+            .leader_ack_url(get_leader_zmq_ack_url())
             .build()
             .map_err(to_pyerr)?;
 

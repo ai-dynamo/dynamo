@@ -126,9 +126,6 @@ impl KvConnectorLeader {
 
                 let _ = slot_manager_cell.set(sm);
 
-                // another barrier sync to make sure worker init won't return before leader is ready
-                leader.spawn_leader_readiness_barrier(drt);
-
                 tracing::info!("KvConnectorLeader init complete.");
             });
         }

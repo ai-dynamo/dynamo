@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use utils::{get_leader_zmq_ack_url, get_leader_zmq_pub_url};
+
 use super::*;
 
 use std::sync::Arc;
-use utils::get_barrier_id_prefix;
 
 use llm_rs::block_manager::distributed::{
     BlockTransferHandler as RustBlockTransferHandler, KvbmWorker as KvbmWorkerImpl,
@@ -171,8 +172,6 @@ impl KvbmWorker {
             vllm_tensors.push(Arc::new(vllm_tensor));
         }
 
-        let barrier_id_prefix = get_barrier_id_prefix();
-
         let config = KvbmWorkerConfig::builder()
             .drt(drt)
             .num_device_blocks(num_device_blocks)
@@ -180,7 +179,6 @@ impl KvbmWorker {
             .tensors(vllm_tensors)
             .device_id(device_id)
             .dtype_width_bytes(dtype_width_bytes)
-            .barrier_id_prefix(barrier_id_prefix)
             .device_layout_type(
                 device_layout_type
                     .map(|py_layout| py_layout.into())
@@ -196,6 +194,8 @@ impl KvbmWorker {
                     .map(|py_layout| py_layout.into())
                     .unwrap_or(LayoutType::FullyContiguous),
             )
+            .leader_pub_url(get_leader_zmq_pub_url())
+            .leader_ack_url(get_leader_zmq_ack_url())
             .build()
             .map_err(to_pyerr)?;
 
