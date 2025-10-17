@@ -62,7 +62,7 @@ sudo apt-get install -y helm
 git clone https://github.com/ai-dynamo/dynamo.git
 
 # Checkout to the desired branch
-git checkout release/0.4.0
+git checkout release/0.6.0
 ```
 
 ###  Set environment variables for GKE
@@ -85,7 +85,7 @@ kubectl create secret generic hf-token-secret \
 ```bash
 # 1. Set environment
 export NAMESPACE=dynamo-cloud
-export RELEASE_VERSION=0.4.0 # any version of Dynamo 0.3.2+
+export RELEASE_VERSION=0.6.0 # any version of Dynamo 0.5.0+
 
 # 2. Install CRDs
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-${RELEASE_VERSION}.tgz
@@ -128,7 +128,6 @@ NAME                                                              READY   STATUS
 dynamo-platform-dynamo-operator-controller-manager-69b9794fpgv9   2/2     Running            0          4m27s
 dynamo-platform-etcd-0                                            1/1     Running            0          4m27s
 dynamo-platform-nats-0                                            2/2     Running            0          4m27s
-dynamo-platform-nats-box-5dbf45c748-ql2nk                         1/1     Running            0          4m27s
 ```
 
 Other ways to install Dynamo platform could be found here https://github.com/ai-dynamo/dynamo/blob/main/docs/guides/dynamo_deploy/dynamo_cloud.md
@@ -167,12 +166,12 @@ metadata:
 spec:
   services:
     Frontend:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
     VllmDecodeWorker:
 ​​      resources:
         limits:
           gpu: "3"
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
           args:
             - |
             export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
@@ -186,7 +185,7 @@ spec:
 ```bash
 cd dynamo/examples/deployments/GKE/vllm
 
-kubectl apply -f disagg_gke.yaml
+kubectl apply -f disagg_gke.yaml -n ${NAMESPACE}
 ```
 
 **Expected output after successful deployment**
@@ -197,7 +196,6 @@ NAME                                                              READY   STATUS
 dynamo-platform-dynamo-operator-controller-manager-c665684ssqkx   2/2     Running   0          65m
 dynamo-platform-etcd-0                                            1/1     Running   0          65m
 dynamo-platform-nats-0                                            2/2     Running   0          65m
-dynamo-platform-nats-box-5dbf45c748-rbwjr                         1/1     Running   0          65m
 vllm-disagg-frontend-5954ddc4dd-4w2cb                             1/1     Running   0          11m
 vllm-disagg-vllmdecodeworker-77844cfcff-ddn4v                     1/1     Running   0          11m
 vllm-disagg-vllmprefillworker-55d5b74b4f-zrskh                    1/1     Running   0          11m
