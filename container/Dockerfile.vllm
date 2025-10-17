@@ -3,10 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-# TODO OPS-612: NCCL will hang with 25.03, so use 25.01 for now
-# Please check https://github.com/ai-dynamo/dynamo/pull/1065
-# for details and reproducer to manually test if the image
-# can be updated to later versions.
 ARG BASE_IMAGE_TAG="25.09-cuda13.0-devel-ubuntu24.04"
 ARG RELEASE_BUILD
 ARG ENABLE_KVBM=false
@@ -18,7 +14,7 @@ ARG CUDA_VERSION="13.0"
 ARG VLLM_REF="v0.11.0"
 # FlashInfer only respected when building vLLM from source, ie when VLLM_REF does not start with 'v' or for arm64 builds
 ARG FLASHINF_REF="v0.3.1"
-ARG TORCH_BACKEND="cu128"
+ARG TORCH_BACKEND="cu130"
 
 # If left blank, then we will fallback to vLLM defaults
 ARG DEEPGEMM_REF=""
@@ -210,7 +206,7 @@ RUN apt-get update && \
         # prometheus dependencies
         ca-certificates \
         # DeepGemm uses 'cuobjdump' which does not come with CUDA image
-        cuda-command-line-tools-12-8 && \
+        cuda-command-line-tools-13-0 && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy CUDA development tools (nvcc, headers, dependencies, etc.) from base devel image

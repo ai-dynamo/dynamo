@@ -21,7 +21,7 @@ MAX_JOBS=16
 INSTALLATION_DIR=/tmp
 
 # VLLM and Dependency Configurations
-TORCH_BACKEND="cu129"
+TORCH_BACKEND="cu130"
 TORCH_CUDA_ARCH_LIST="9.0;10.0" # For EP Kernels
 DEEPGEMM_REF=""
 CUDA_VERSION="13.0" # For DEEPGEMM
@@ -239,6 +239,6 @@ echo "✓ DeepGEMM installation completed"
 
 echo "\n=== Installing EP Kernels (PPLX and DeepEP) ==="
 cd ep_kernels/
-# TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" bash install_python_libraries.sh
+TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" bash install_python_libraries.sh
 
 echo "\n✅ All installations completed successfully!"
