@@ -407,7 +407,7 @@ index 0000000..b689c00
 +      - pluginRef: picker
 diff --git a/pkg/epp/scheduling/plugins/dynamo_kv_scorer/plugin.go b/pkg/epp/scheduling/plugins/dynamo_kv_scorer/plugin.go
 new file mode 100644
-index 0000000..1f6a41f
+index 0000000..83a4ace
 --- /dev/null
 +++ b/pkg/epp/scheduling/plugins/dynamo_kv_scorer/plugin.go
 @@ -0,0 +1,428 @@
@@ -669,7 +669,7 @@ index 0000000..1f6a41f
 +			C.double(ffiOverlapScoreWeight),
 +			C.double(ffiRouterTemperature),
 +			C.bool(getEnvBoolOrDefault("DYNAMO_USE_KV_EVENTS", true)),
-+			C.bool(getEnvBoolOrDefault("DYNAMO_ROUTER_REPLICA_SYNC", false)),
++			C.bool(getEnvBoolOrDefault("DYNAMO_ROUTER_REPLICA_SYNC", true)),
 +			&pipeline,
 +		)
 +		if rc != C.DYNAMO_OK {

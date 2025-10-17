@@ -249,7 +249,7 @@ This is because the `subComponentType` field has only been added in newer versio
 
 ## Next Steps
 
-- **Architecture Details**: See [SLA-based Planner Architecture](/docs/architecture/sla_planner.md) for technical details
+- **Architecture Details**: See [SLA-based Planner Architecture](/docs/planner/sla_planner.md) for technical details
 - **Performance Tuning**: See [Pre-Deployment Profiling Guide](/docs/benchmarks/pre_deployment_profiling.md) for advanced profiling options
 - **Load Testing**: See [SLA Planner Load Test](/tests/planner/README.md) for comprehensive testing tools
 

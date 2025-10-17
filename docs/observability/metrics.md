@@ -96,6 +96,6 @@ The metrics system includes a pre-configured Grafana dashboard for visualizing s
 
 - [Distributed Runtime Architecture](../architecture/distributed_runtime.md)
 - [Dynamo Architecture Overview](../architecture/architecture.md)
-- [Backend Guide](backend.md)
+- [Backend Guide](../development/backend-guide.md)
 - [Metrics Implementation Examples](../../deploy/metrics/README.md#implementation-examples)
 - [Complete Metrics Setup Guide](../../deploy/metrics/README.md)
