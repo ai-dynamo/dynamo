@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# IMPORT NOTE: Make sure this is in sync with lib/runtime/docker-compose.yml
 networks:
   server:
     driver: bridge
@@ -45,6 +44,20 @@ services:
       - monitoring
 
   # All the services below are part of the metrics profile and monitoring network.
+
+  # Tempo - Distributed tracing backend
+  tempo:
+    image: grafana/tempo:2.8.2
+    command: [ "-config.file=/etc/tempo.yaml" ]
+    volumes:
+      - ./tracing/tempo.yaml:/etc/tempo.yaml
+    ports:
+      - "3200:3200"   # Tempo HTTP
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+    networks:
+      - monitoring
+    profiles: [metrics]
 
   # The exporter translates from /varz and other stats to Prometheus metrics
   nats-prometheus-exporter:
@@ -139,6 +152,8 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD_POLICY=false
       - GF_AUTH_DISABLE_LOGIN_FORM=false
       - GF_AUTH_DISABLE_SIGNOUT_MENU=false
+      # Enable TraceQL editor for trace queries
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
     restart: unless-stopped
     ports:
       - "3001:3001"
@@ -147,3 +162,4 @@ services:
     profiles: [metrics]
     depends_on:
       - prometheus
+      - tempo

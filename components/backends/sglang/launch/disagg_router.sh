@@ -11,8 +11,32 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Parse command line arguments
+ENABLE_OTEL=false
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --enable-otel)
+            ENABLE_OTEL=true
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+# Enable tracing if requested
+if [ "$ENABLE_OTEL" = true ]; then
+    export DYN_LOGGING_JSONL=true
+    export OTEL_EXPORT_ENABLED=1
+    export OTEL_EXPORT_ENDPOINT=http://localhost:4317
+    export DYN_SYSTEM_ENABLED=true
+    export DYN_SYSTEM_PORT=8081
+fi
+
 # run ingress
-python3 -m dynamo.frontend \
+OTEL_SERVICE_NAME=dynamo-frontend python3 -m dynamo.frontend \
  --http-port=8000 \
  --router-mode kv \
  --kv-overlap-score-weight 0 \
@@ -20,7 +44,7 @@ python3 -m dynamo.frontend \
 DYNAMO_PID=$!
 
 # run prefill router
-python3 -m dynamo.router \
+OTEL_SERVICE_NAME=dynamo-router-prefill python3 -m dynamo.router \
   --endpoint dynamo.prefill.generate \
   --block-size 64 \
   --router-reset-states \
@@ -28,7 +52,7 @@ python3 -m dynamo.router \
 PREFILL_ROUTER_PID=$!
 
 # run prefill worker
-python3 -m dynamo.sglang \
+OTEL_SERVICE_NAME=dynamo-worker-prefill-1 python3 -m dynamo.sglang \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --page-size 64 \
@@ -41,7 +65,7 @@ python3 -m dynamo.sglang \
 PREFILL_PID=$!
 
 # run prefill worker
-CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
+OTEL_SERVICE_NAME=dynamo-worker-prefill-2 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --page-size 64 \
@@ -54,7 +78,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
 PREFILL_PID=$!
 
 # run decode worker
-CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.sglang \
+OTEL_SERVICE_NAME=dynamo-worker-decode-1 CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.sglang \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --page-size 64 \
@@ -67,7 +91,7 @@ CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.sglang \
 PREFILL_PID=$!
 
 # run decode worker
-CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
+OTEL_SERVICE_NAME=dynamo-worker-decode-2 CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --page-size 64 \

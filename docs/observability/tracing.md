@@ -1,6 +1,18 @@
 <!--
 SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 -->
 
 # Distributed Tracing with Tempo
@@ -19,7 +31,7 @@ Dynamo supports OpenTelemetry-based distributed tracing, allowing you to visuali
 
 ## Environment Variables
 
-Dynamo's tracing is configured via environment variables. For complete logging documentation, see [docs/observability/logging.md](../../docs/observability/logging.md).
+Dynamo's tracing is configured via environment variables. For complete logging documentation, see [logging.md](./logging.md).
 
 ### Required Environment Variables
 
@@ -39,8 +51,8 @@ export DYN_LOGGING_JSONL=true
 # Enable trace export to Tempo
 export OTEL_EXPORT_ENABLED=1
 
-# Set the Tempo endpoint (docker-compose network)
-export OTEL_EXPORT_ENDPOINT=http://tempo:4317
+# Set the Tempo endpoint (from host machine)
+export OTEL_EXPORT_ENDPOINT=http://localhost:4317
 
 # Set service name to identify this component
 export OTEL_SERVICE_NAME=dynamo-frontend
@@ -50,23 +62,24 @@ export OTEL_SERVICE_NAME=dynamo-frontend
 
 ## Local Deployment with Docker Compose
 
-### 1. Start Tempo and Grafana
+### 1. Start the Observability Stack
 
-From the `deploy/tracing` directory, start the observability stack:
+From the `deploy` directory, start Prometheus, Tempo, and Grafana:
 
 ```bash
-cd deploy/tracing
-docker-compose up -d
+cd deploy
+docker compose --profile metrics up -d
 ```
 
 This will start:
-- **Tempo** on `http://localhost:3200` (HTTP API) and `localhost:4317` (OTLP gRPC)
-- **Grafana** on `http://localhost:3000` (username: `admin`, password: `admin`)
+- **Prometheus** on `http://localhost:9090` for metrics
+- **Tempo** on `http://localhost:3200` (HTTP API) and `localhost:4317` (OTLP gRPC) for traces
+- **Grafana** on `http://localhost:3001` (username: `dynamo`, password: `dynamo`)
 
 Verify services are running:
 
 ```bash
-docker-compose ps
+docker compose --profile metrics ps
 ```
 
 ### 2. Set Environment Variables
@@ -83,47 +96,19 @@ export OTEL_EXPORT_ENDPOINT=http://localhost:4317
 export OTEL_SERVICE_NAME=dynamo-frontend
 ```
 
-### 3. Run vLLM Disaggregated Deployment
+### 3. Run a Dynamo Deployment
 
-Run the vLLM disaggregated script with tracing enabled:
-
-```bash
-# Navigate to vLLM launch directory
-cd components/backends/vllm/launch
-
-# Run disaggregated deployment (modify the script to export env vars first)
-./disagg.sh
-```
-
-**Note:** You may need to modify `disagg.sh` to export the tracing environment variables before starting each component:
+Many launch scripts support the `--enable-otel` flag to automatically configure tracing. For example:
 
 ```bash
-#!/bin/bash
-set -e
-trap 'echo Cleaning up...; kill 0' EXIT
+# Navigate to SGLang launch directory
+cd components/backends/sglang/launch
 
-# Enable tracing
-export DYN_LOGGING_JSONL=true
-export OTEL_EXPORT_ENABLED=1
-export OTEL_EXPORT_ENDPOINT=http://localhost:4317
-
-# Run frontend
-export OTEL_SERVICE_NAME=dynamo-frontend
-python -m dynamo.frontend --router-mode kv --http-port=8000 &
-
-# Run decode worker
-export OTEL_SERVICE_NAME=dynamo-worker-decode
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager &
-
-# Run prefill worker
-export OTEL_SERVICE_NAME=dynamo-worker-prefill
-CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
-    --model Qwen/Qwen3-0.6B \
-    --enforce-eager \
-    --is-prefill-worker &
-
-wait
+# Run aggregated deployment with tracing enabled
+./agg.sh --enable-otel
 ```
+
+Alternatively, you can manually set the environment variables before running any deployment script.
 
 ### 4. Generate Traces
 
@@ -142,31 +127,45 @@ curl -d '{
 http://localhost:8000/v1/chat/completions
 ```
 
-### 5. View Traces in Grafana Tempo
+### 5. View Traces in Grafana
 
-1. Open Grafana at `http://localhost:3000`
-2. Login with username `admin` and password `admin`
+1. Open Grafana at `http://localhost:3001`
+2. Login with username `dynamo` and password `dynamo`
 3. Navigate to **Explore** (compass icon in the left sidebar)
-4. Select **Tempo** as the data source (should be selected by default)
+4. **Select "Tempo" as the datasource** from the dropdown at the top (it defaults to "Prometheus")
 5. Use the **Search** tab to find traces:
    - Search by **Service Name** (e.g., `dynamo-frontend`)
    - Search by **Span Name** (e.g., `http-request`, `handle_payload`)
    - Search by **Tags** (e.g., `x_request_id=test-trace-001`)
 6. Click on a trace to view the detailed flame graph
 
+#### Filtering Traces
+
+To see application-level spans and filter out HTTP overhead:
+
+1. In the TraceQL tab, use:
+   ```
+   {span.name != "http-request"}
+   ```
+
+2. Or in the Search tab, set:
+   - **Span Name** → **!=** → `http-request`
+
+This will show you the `handle_payload` and other application spans.
+
 #### Example Trace View
 
 Below is an example of what a trace looks like in Grafana Tempo:
 
-![Trace Example](./trace.png)
+![Trace Example](../images/trace.png)
 
 ### 6. Stop Services
 
-When done, stop the Tempo and Grafana stack:
+When done, stop the observability stack:
 
 ```bash
-cd deploy/tracing
-docker-compose down
+cd deploy
+docker compose --profile metrics down
 ```
 
 ---
@@ -177,13 +176,13 @@ For Kubernetes deployments, ensure you have a Tempo instance deployed and access
 
 ### Modify DynamoGraphDeployment for Tracing
 
-Add common tracing environment variables at the top level and service-specific names in each component in your `DynamoGraphDeployment` (e.g., `components/backends/vllm/deploy/disagg.yaml`):
+Add common tracing environment variables at the top level and service-specific names in each component in your `DynamoGraphDeployment`:
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-disagg
+  name: sglang-disagg
 spec:
   # Common environment variables for all services
   env:
@@ -204,7 +203,7 @@ spec:
             - name: OTEL_SERVICE_NAME
               value: "dynamo-frontend"
 
-    VllmDecodeWorker:
+    SglangDecodeWorker:
       # ... existing configuration ...
       extraPodSpec:
         mainContainer:
@@ -213,7 +212,7 @@ spec:
             - name: OTEL_SERVICE_NAME
               value: "dynamo-worker-decode"
 
-    VllmPrefillWorker:
+    SglangPrefillWorker:
       # ... existing configuration ...
       extraPodSpec:
         mainContainer:
@@ -226,8 +225,20 @@ spec:
 Apply the updated DynamoGraphDeployment:
 
 ```bash
-kubectl apply -f components/backends/vllm/deploy/disagg.yaml
+kubectl apply -f your-deployment.yaml
 ```
 
 Traces will now be exported to Tempo and can be viewed in Grafana.
+
+---
+
+## Unified Observability
+
+The Docker Compose setup provides a unified observability stack:
+
+- **Metrics**: View in Grafana Dashboards (datasource: Prometheus)
+- **Traces**: View in Grafana Explore (datasource: Tempo)
+- **Both accessible from**: `http://localhost:3001`
+
+All observability data is collected in a single Grafana instance for seamless correlation between metrics and traces.
 

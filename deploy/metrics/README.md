@@ -1,16 +1,19 @@
-# Metrics Visualization with Prometheus and Grafana
+# Observability with Prometheus, Tempo, and Grafana
 
-This directory contains configuration for visualizing metrics from the metrics aggregation service using Prometheus and Grafana.
+This directory contains configuration for visualizing metrics and traces from Dynamo services using Prometheus, Tempo, and Grafana.
 
 > [!NOTE]
 > For detailed information about Dynamo's metrics system, including hierarchical metrics, automatic labeling, and usage examples, see the [Metrics Guide](../../docs/observability/metrics.md).
+>
+> For distributed tracing with Tempo, see the [Tracing Guide](../../docs/observability/tracing.md).
 
 ## Overview
 
 ### Components
 
 - **Prometheus Server**: Collects and stores metrics from Dynamo services and other components.
-- **Grafana**: Provides dashboards by querying the Prometheus Server.
+- **Tempo**: Collects and stores distributed traces from Dynamo services.
+- **Grafana**: Provides unified dashboards and trace visualization by querying Prometheus and Tempo.
 
 ### Topology
 
@@ -166,9 +169,10 @@ $ python -m dynamo.vllm --model Qwen/Qwen3-0.6B  \
 ### Required Files
 
 The following configuration files should be present in this directory:
-- [docker-compose.yml](../docker-compose.yml): Defines the Prometheus and Grafana services
+- [docker-compose.yml](../docker-compose.yml): Defines the Prometheus, Tempo, and Grafana services
 - [prometheus.yml](./prometheus.yml): Contains Prometheus scraping configuration
-- [grafana-datasources.yml](./grafana-datasources.yml): Contains Grafana datasource configuration
+- [grafana-datasources.yml](./grafana-datasources.yml): Contains Grafana datasource configuration (Prometheus + Tempo)
+- [../tracing/tempo.yaml](../tracing/tempo.yaml): Contains Tempo configuration for distributed tracing
 - [grafana_dashboards/grafana-dashboard-providers.yml](./grafana_dashboards/grafana-dashboard-providers.yml): Contains Grafana dashboard provider configuration
 - [grafana_dashboards/grafana-dynamo-dashboard.json](./grafana_dashboards/grafana-dynamo-dashboard.json): A general Dynamo Dashboard for both SW and HW metrics.
 - [grafana_dashboards/grafana-dcgm-metrics.json](./grafana_dashboards/grafana-dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
@@ -227,8 +231,9 @@ This centralized approach ensures all Dynamo components use consistent, valid Pr
    ```
 
 2. Web servers started. The ones that end in /metrics are in Prometheus format:
-   - Grafana: `http://localhost:3001` (default login: dynamo/dynamo)
+   - Grafana: `http://localhost:3001` (default login: dynamo/dynamo) - unified metrics and traces
    - Prometheus Server: `http://localhost:9090`
+   - Tempo: `http://localhost:3200` (HTTP API), `localhost:4317` (OTLP gRPC)
    - NATS Server: `http://localhost:8222` (monitoring endpoints: /varz, /healthz, etc.)
    - NATS Prometheus Exporter: `http://localhost:7777/metrics`
    - etcd Server: `http://localhost:2379/metrics`
@@ -254,9 +259,12 @@ docker compose -f deploy/docker-compose.yml up prometheus -d --force-recreate
 #### Grafana
 
 Grafana is pre-configured with:
-- Prometheus datasource
-- Sample dashboard for visualizing service metrics
+- Prometheus datasource for metrics
+- Tempo datasource for distributed traces
+- Sample dashboards for visualizing service metrics
 ![grafana image](./grafana-dynamo-composite.png)
+
+To view traces, navigate to **Explore** in Grafana, select **Tempo** as the datasource, and use the Search tab or TraceQL queries. See the [Tracing Guide](../../docs/observability/tracing.md) for detailed instructions.
 
 ### Troubleshooting
 

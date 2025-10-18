@@ -34,6 +34,7 @@
    kubernetes/README.md
    reference/cli.md
    observability/metrics.md
+   observability/tracing.md
    kvbm/vllm-setup.md
    kvbm/trtllm-setup.md
    guides/tool-calling.md

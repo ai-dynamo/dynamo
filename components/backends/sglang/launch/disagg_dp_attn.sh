@@ -11,13 +11,36 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Parse command line arguments
+ENABLE_OTEL=false
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --enable-otel)
+            ENABLE_OTEL=true
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+# Enable tracing if requested
+if [ "$ENABLE_OTEL" = true ]; then
+    export DYN_LOGGING_JSONL=true
+    export OTEL_EXPORT_ENABLED=1
+    export OTEL_EXPORT_ENDPOINT=http://localhost:4317
+    export DYN_SYSTEM_ENABLED=true
+    export DYN_SYSTEM_PORT=8081
+fi
 
 # run ingress
-python3 -m dynamo.frontend --http-port=8000 &
+OTEL_SERVICE_NAME=dynamo-frontend python3 -m dynamo.frontend --http-port=8000 &
 DYNAMO_PID=$!
 
 # run prefill worker
-python3 -m dynamo.sglang \
+OTEL_SERVICE_NAME=dynamo-worker-prefill python3 -m dynamo.sglang \
   --model-path silence09/DeepSeek-R1-Small-2layers \
   --served-model-name silence09/DeepSeek-R1-Small-2layers \
   --tp 2 \
@@ -32,7 +55,7 @@ python3 -m dynamo.sglang \
 PREFILL_PID=$!
 
 # run decode worker
-CUDA_VISIBLE_DEVICES=2,3 python3 -m dynamo.sglang \
+OTEL_SERVICE_NAME=dynamo-worker-decode CUDA_VISIBLE_DEVICES=2,3 python3 -m dynamo.sglang \
   --model-path silence09/DeepSeek-R1-Small-2layers \
   --served-model-name silence09/DeepSeek-R1-Small-2layers \
   --tp 2 \
