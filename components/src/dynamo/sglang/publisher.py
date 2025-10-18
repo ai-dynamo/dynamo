@@ -226,7 +226,9 @@ async def setup_sgl_metrics(
         registry = CollectorRegistry()
         multiprocess.MultiProcessCollector(registry)
         register_engine_metrics_callback(
-            generate_endpoint, registry, "sglang:", "SGLang"
+            endpoint=generate_endpoint,
+            registry=registry,
+            metric_prefix_filter="sglang:",
         )
 
     task = asyncio.create_task(publisher.run())

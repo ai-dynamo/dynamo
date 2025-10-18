@@ -94,6 +94,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         )
 
     # publisher instantiates the metrics and kv event publishers
+    # Note that when engine.server_args.enable_metrics is True, it'll also
+    # gather internal SGLang Prometheus metrics from all worker processes.
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
