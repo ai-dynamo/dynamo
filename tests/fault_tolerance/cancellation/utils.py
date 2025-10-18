@@ -350,7 +350,7 @@ def poll_for_pattern(
 
     while iteration < max_iterations:
         # Read the process log
-        log_content = read_log_content(process._log_path)
+        log_content = read_log_content(process.log_path)
         new_content = log_content[current_offset:]
 
         # Look for the pattern
