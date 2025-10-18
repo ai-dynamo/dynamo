@@ -78,6 +78,13 @@ FIELD_TEST_CLASSNAME = (
 FIELD_TEST_DURATION = "l_test_duration_ms"
 FIELD_TEST_STATUS = "s_test_status"  # Test status (passed, failed, error, skipped)
 
+# Annotation fields
+FIELD_ANNOTATION_COUNT = "l_annotation_count"
+FIELD_ANNOTATION_FAILURE_COUNT = "l_annotation_failure_count"
+FIELD_ANNOTATION_WARNING_COUNT = "l_annotation_warning_count"
+FIELD_ANNOTATION_NOTICE_COUNT = "l_annotation_notice_count"
+FIELD_ANNOTATION_MESSAGES = "s_annotation_messages"
+
 
 class BuildMetricsReader:
     """Reader for build metrics from environment variables and artifacts"""
@@ -279,6 +286,48 @@ def mask_sensitive_urls(error_msg: str, url: str) -> str:
     return error_msg
 
 
+def process_annotations(
+    annotations: list, context_name: str = "", max_messages: int = 10
+) -> Dict[str, Any]:
+    """
+    Process a list of annotations and return structured data
+
+    Args:
+        annotations: List of annotation objects from GitHub API
+        context_name: Optional context name to prefix messages (e.g., job name)
+        max_messages: Maximum number of messages to collect
+
+    Returns:
+        Dictionary with annotation counts and messages
+    """
+    annotation_data = {
+        "count": len(annotations),
+        "failure_count": 0,
+        "warning_count": 0,
+        "notice_count": 0,
+        "messages": [],
+    }
+
+    for annotation in annotations:
+        level = annotation.get("annotation_level", "").lower()
+        message = annotation.get("message", "")
+
+        # Count by level
+        if level == "failure":
+            annotation_data["failure_count"] += 1
+        elif level == "warning":
+            annotation_data["warning_count"] += 1
+        elif level == "notice":
+            annotation_data["notice_count"] += 1
+
+        # Collect messages (limit to prevent oversized payloads)
+        if message and len(annotation_data["messages"]) < max_messages:
+            prefix = f"[{context_name}] " if context_name else ""
+            annotation_data["messages"].append(f"{prefix}[{level.upper()}] {message}")
+
+    return annotation_data
+
+
 class WorkflowMetricsUploader:
     def __init__(self):
         self.headers = {"Content-Type": "application/json", "Accept-Charset": "UTF-8"}
@@ -436,6 +485,121 @@ class WorkflowMetricsUploader:
                 "%Y-%m-%dT%H:%M:%SZ"
             )
 
+    def add_annotation_fields(
+        self,
+        db_data: Dict[str, Any],
+        annotation_type: str,
+        entity_id: str,
+        entity_name: str = "",
+        max_message_length: int = 1000,
+    ) -> None:
+        """
+        Generic method to fetch annotations and add annotation fields to data payload
+
+        Args:
+            db_data: Dictionary to add annotation fields to
+            annotation_type: Either "job" or "workflow"
+            entity_id: Job ID or workflow run ID
+            entity_name: Job name or workflow name for logging
+            max_message_length: Maximum length for the messages field
+        """
+        # Initialize default values
+        db_data[FIELD_ANNOTATION_COUNT] = 0
+        db_data[FIELD_ANNOTATION_FAILURE_COUNT] = 0
+        db_data[FIELD_ANNOTATION_WARNING_COUNT] = 0
+        db_data[FIELD_ANNOTATION_NOTICE_COUNT] = 0
+        db_data[FIELD_ANNOTATION_MESSAGES] = ""
+
+        # Check if we have a GitHub token
+        if not os.getenv("GITHUB_TOKEN"):
+            return
+
+        try:
+            if annotation_type == "job":
+                # Fetch annotations for a single job
+                annotations_data = self.get_github_api_data(
+                    f"/repos/{self.repo}/check-runs/{entity_id}/annotations"
+                )
+                if annotations_data:
+                    annotation_summary = process_annotations(
+                        annotations_data, max_messages=10
+                    )
+                else:
+                    return  # No annotations or API error
+
+            elif annotation_type == "workflow":
+                # Fetch all jobs first, then aggregate their annotations
+                jobs_data = self.get_github_api_data(
+                    f"/repos/{self.repo}/actions/runs/{entity_id}/jobs"
+                )
+                if not jobs_data or "jobs" not in jobs_data:
+                    return
+
+                # Aggregate annotations from all jobs
+                all_annotations = []
+                for job in jobs_data.get("jobs", []):
+                    job_id = job.get("id")
+                    job_name = job.get("name", "unknown")
+                    if job_id:
+                        job_annotations_data = self.get_github_api_data(
+                            f"/repos/{self.repo}/check-runs/{job_id}/annotations"
+                        )
+                        if job_annotations_data:
+                            # Add job context to each annotation
+                            for annotation in job_annotations_data:
+                                annotation["_job_context"] = job_name
+                            all_annotations.extend(job_annotations_data)
+
+                # Process all aggregated annotations
+                annotation_summary = process_annotations(
+                    all_annotations, max_messages=20
+                )
+
+                # For workflow-level, add job context to messages
+                contextualized_messages = []
+                for i, annotation in enumerate(all_annotations):
+                    if i >= 20:  # Respect max_messages limit
+                        break
+                    job_context = annotation.get("_job_context", "unknown")
+                    level = annotation.get("annotation_level", "").upper()
+                    message = annotation.get("message", "")
+                    if message:
+                        contextualized_messages.append(
+                            f"[{job_context}] [{level}] {message}"
+                        )
+
+                annotation_summary["messages"] = contextualized_messages
+            else:
+                print(f"⚠️  Unknown annotation type: {annotation_type}")
+                return
+
+            # Add annotation fields to data
+            db_data[FIELD_ANNOTATION_COUNT] = annotation_summary["count"]
+            db_data[FIELD_ANNOTATION_FAILURE_COUNT] = annotation_summary[
+                "failure_count"
+            ]
+            db_data[FIELD_ANNOTATION_WARNING_COUNT] = annotation_summary[
+                "warning_count"
+            ]
+            db_data[FIELD_ANNOTATION_NOTICE_COUNT] = annotation_summary["notice_count"]
+
+            # Join messages with separator, limit total length
+            messages_text = " | ".join(annotation_summary["messages"])
+            if len(messages_text) > max_message_length:
+                messages_text = messages_text[: max_message_length - 3] + "..."
+            db_data[FIELD_ANNOTATION_MESSAGES] = messages_text
+
+            # Log results
+            if annotation_summary["count"] > 0:
+                print(
+                    f"📊 {annotation_type.title()} annotations for '{entity_name}': {annotation_summary['count']} total, {annotation_summary['failure_count']} failures"
+                )
+
+        except Exception as e:
+            print(
+                f"⚠️  Error fetching {annotation_type} annotations for {entity_name}: {e}"
+            )
+
     def post_all_metrics(self) -> None:
         """Upload complete workflow metrics including workflow, jobs, and steps in one operation"""
         print(
@@ -460,7 +624,6 @@ class WorkflowMetricsUploader:
             if not jobs_data or "jobs" not in jobs_data:
                 print("Could not fetch jobs data from GitHub API")
                 return
-
             # Count jobs to process (exclude specified jobs)
             workflow_name = workflow_data.get("name", "")
             jobs_to_process = [
@@ -556,6 +719,16 @@ class WorkflowMetricsUploader:
         # Common context fields
         self.add_common_context_fields(db_data, workflow_data)
 
+        # Fetch and add annotation data
+        print("🔍 Fetching workflow annotations...")
+        self.add_annotation_fields(
+            db_data,
+            "workflow",
+            self.run_id,
+            self.workflow_name,
+            max_message_length=2000,
+        )
+
         # Post to database
         self.post_to_db(self.workflow_index, db_data)
 
@@ -631,6 +804,12 @@ class WorkflowMetricsUploader:
 
         # Add common context fields
         self.add_common_context_fields(db_data)
+
+        # Fetch and add annotation data for this job
+        self.add_annotation_fields(
+            db_data, "job", str(job_id), job_name, max_message_length=1000
+        )
+
         self.post_to_db(self.jobs_index, db_data)
         print(f"Uploaded metrics for job: {job_name}")
 
