@@ -9,10 +9,12 @@ A comprehensive diagnostic tool that displays system configuration and Dynamo pr
 in a hierarchical tree format. This script checks for:
 
 - System resources (OS, CPU, memory, GPU)
+- Service monitoring (etcd, NATS)
+- File system (permissions and disk space, detailed with --thorough-check)
+- Hugging Face model cache
 - Development tools (Cargo/Rust, Maturin, Python)
 - LLM frameworks (vllm, sglang, tensorrt_llm)
 - Dynamo runtime and framework components
-- File system (permissions and disk space, detailed with --thorough-check)
 - Installation status and component availability
 
 The output uses status indicators:
@@ -31,52 +33,104 @@ Exit codes:
 
 Example output (default mode):
 
-System info (hostname=jensen-linux, IP=10.111.122.133)
-├─ OS Ubuntu 24.04.1 LTS (Noble Numbat) (Linux 6.11.0-28-generic x86_64), Memory=26.7/125.5 GiB, Cores=32
-├─ User info: user=ubuntu, uid=1000, gid=1000
-├─ ✅ NVIDIA GPU NVIDIA RTX 6000 Ada Generation, driver 570.133.07, CUDA 12.8, Power=26.14/300.00 W, Memory=289/49140 MiB
+System info (hostname=keivenc-linux, IP=10.110.41.216)
+├─ OS: Ubuntu 24.04.2 LTS (Noble Numbat) (Linux 6.14.0-29-generic x86_64), Memory=31.4/125.5 GiB, Cores=32
+├─ User info: user=ubuntu, uid=1776734304, gid=748400513
+├─ ✅ NVIDIA GPU: NVIDIA RTX 6000 Ada Generation, driver 570.133.07, CUDA 12.9, Power=26.30/300.00 W, Memory=10584/49140 MiB
+├─ ✅ etcd: service running on localhost:2379
+├─ ✅ NATS: service running on localhost:4222
 ├─ File System
-│  ├─ ✅ Dynamo workspace ($HOME/dynamo) writable
-│  ├─ ✅ Dynamo .git directory writable
-│  ├─ ✅ Rustup home ($HOME/.rustup) writable
-│  ├─ ✅ Cargo home ($HOME/.cargo) writable
-│  ├─ ✅ Cargo target ($HOME/dynamo/.build/target) writable
-│  └─ ✅ Python site-packages ($HOME/dynamo/venv/lib/python3.12/site-packages) writable
-├─ ✅ Cargo $HOME/.cargo/bin/cargo, cargo 1.89.0 (c24e10642 2025-06-23)
-│  ├─ Cargo home directory CARGO_HOME=$HOME/.cargo
-│  └─ Cargo target directory CARGO_TARGET_DIR=$HOME/dynamo/.build/target
-│     ├─ Debug $HOME/dynamo/.build/target/debug, modified=2025-08-30 16:26:49 PDT
-│     ├─ Release $HOME/dynamo/.build/target/release, modified=2025-08-30 18:21:12 PDT
-│     └─ Binary $HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so, modified=2025-08-30 16:25:37 PDT
-├─ ✅ Maturin /opt/dynamo/venv/bin/maturin, maturin 1.9.3
-├─ ✅ Python 3.12.3, /opt/dynamo/venv/bin/python
-│  ├─ ✅ PyTorch 2.7.1+cu128, ✅torch.cuda.is_available
-│  └─ PYTHONPATH not set
+│  ├─ ✅ Dynamo workspace ($HOME/dynamo): writable
+│  ├─ ✅ Dynamo .git directory ($HOME/dynamo/.git): writable
+│  ├─ ✅ Rustup home ($HOME/dynamo/.build/.rustup): writable
+│  ├─ ✅ Cargo home ($HOME/dynamo/.build/.cargo): writable
+│  ├─ ✅ Cargo target ($HOME/dynamo/.build/target): writable
+│  └─ ✅ site-packages (/opt/dynamo/venv/lib/python3.12/site-packages): writable
+├─ ✅ Hugging Face Cache: 5 models in $HOME/.cache/huggingface/hub
+├─ ✅ Cargo: /.cargo/bin/cargo, cargo 1.90.0 (840b83a10 2025-07-30)
+│  ├─ Cargo home directory: CARGO_HOME=$HOME/dynamo/.build/.cargo
+│  └─ Cargo target directory: CARGO_TARGET_DIR=$HOME/dynamo/.build/target
+├─ ✅ Maturin: /opt/dynamo/venv/bin/maturin, maturin 1.9.4
+├─ ✅ Python: 3.12.3, /opt/dynamo/venv/bin/python
+│  ├─ ✅ PyTorch: 2.8.0a0+5228986c39.nv25.06, ✅torch.cuda.is_available
+│  └─ PYTHONPATH: $HOME/dynamo:$HOME/dynamo/components/metrics/src:$HOME/dynamo/components/frontend/src:...
 ├─ 🤖Framework
-│  ├─ ✅ vLLM: 0.10.1.1, module=/opt/vllm/vllm/__init__.py, exec=/opt/dynamo/venv/bin/vllm
-│  └─ ✅ Sglang: 0.3.0, module=/opt/sglang/sglang/__init__.py
-└─ Dynamo $HOME/dynamo, SHA: a03d29066, Date: 2025-08-30 16:22:29 PDT
-   ├─ ✅ Runtime components ai-dynamo-runtime 0.4.1
-   │  │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime-0.4.1.dist-info: created=2025-08-30 19:14:29 PDT
-   │  │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime.pth: modified=2025-08-30 19:14:29 PDT
+│  └─ ✅ TensorRT-LLM: 1.1.0rc5, module=/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/__init__.py
+└─ Dynamo: $HOME/dynamo, SHA: 9d73be125, Date: 2025-09-26 16:01:01 PDT
+   ├─ ✅ Runtime components: ai-dynamo-runtime 0.5.1
+   │  │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime-0.5.1.dist-info: created=2025-09-26 15:55:58 PDT
+   │  │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime.pth: modified=2025-09-26 15:55:58 PDT
    │  │  └─ →: $HOME/dynamo/lib/bindings/python/src
-   │  ├─ ✅ dynamo._core             $HOME/dynamo/lib/bindings/python/src/dynamo/_core.cpython-312-x86_64-linux-gnu.so, modified=2025-08-30 19:14:29 PDT
-   │  ├─ ✅ dynamo.logits_processing $HOME/dynamo/lib/bindings/python/src/dynamo/logits_processing/__init__.py
-   │  ├─ ✅ dynamo.nixl_connect      $HOME/dynamo/lib/bindings/python/src/dynamo/nixl_connect/__init__.py
-   │  ├─ ✅ dynamo.llm               $HOME/dynamo/lib/bindings/python/src/dynamo/llm/__init__.py
-   │  └─ ✅ dynamo.runtime           $HOME/dynamo/lib/bindings/python/src/dynamo/runtime/__init__.py
-   └─ ✅ Framework components ai-dynamo 0.5.0
-      │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo-0.5.0.dist-info: created=2025-09-05 16:20:35 PDT
-      ├─ ✅ dynamo.frontend  $HOME/dynamo/components/src/dynamo/frontend/__init__.py
-      ├─ ✅ dynamo.llama_cpp $HOME/dynamo/components/src/dynamo/llama_cpp/__init__.py
-      ├─ ✅ dynamo.mocker    $HOME/dynamo/components/src/dynamo/mocker/__init__.py
-      ├─ ✅ dynamo.planner   $HOME/dynamo/components/src/dynamo/planner/__init__.py
-      ├─ ✅ dynamo.sglang    $HOME/dynamo/components/src/dynamo/sglang/__init__.py
-      ├─ ✅ dynamo.trtllm    $HOME/dynamo/components/src/dynamo/trtllm/__init__.py
-      └─ ✅ dynamo.vllm      $HOME/dynamo/components/src/dynamo/vllm/__init__.py
+   │  ├─ ✅ dynamo._core            : $HOME/dynamo/lib/bindings/python/src/dynamo/_core.cpython-312-x86_64-linux-gnu.so, modified=2025-09-26 15:55:58 PDT
+   │  ├─ ✅ dynamo.logits_processing: $HOME/dynamo/lib/bindings/python/src/dynamo/logits_processing/__init__.py
+   │  ├─ ✅ dynamo.nixl_connect     : $HOME/dynamo/lib/bindings/python/src/dynamo/nixl_connect/__init__.py
+   │  ├─ ✅ dynamo.llm              : $HOME/dynamo/lib/bindings/python/src/dynamo/llm/__init__.py
+   │  └─ ✅ dynamo.runtime          : $HOME/dynamo/lib/bindings/python/src/dynamo/runtime/__init__.py
+   └─ ✅ Framework components: ai-dynamo 0.5.1
+      │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo-0.5.1.dist-info: created=2025-09-26 15:34:13 PDT
+      ├─ ✅ dynamo.frontend : $HOME/dynamo/components/frontend/src/dynamo/frontend/__init__.py
+      ├─ ✅ dynamo.llama_cpp: $HOME/dynamo/components/backends/llama_cpp/src/dynamo/llama_cpp/__init__.py
+      ├─ ✅ dynamo.mocker   : $HOME/dynamo/components/backends/mocker/src/dynamo/mocker/__init__.py
+      ├─ ✅ dynamo.planner  : $HOME/dynamo/components/planner/src/dynamo/planner/__init__.py
+      ├─ ✅ dynamo.sglang   : $HOME/dynamo/components/backends/sglang/src/dynamo/sglang/__init__.py
+      ├─ ✅ dynamo.trtllm   : $HOME/dynamo/components/backends/trtllm/src/dynamo/trtllm/__init__.py
+      └─ ✅ dynamo.vllm     : $HOME/dynamo/components/backends/vllm/src/dynamo/vllm/__init__.py
+
+Example output (--thorough-check mode):
+
+In thorough mode, additional details are shown:
+- Hugging Face Cache: Shows individual models with download dates and sizes
+- etcd: Shows version, cluster members, and all keys with revision information
+- NATS: Shows uptime, server name, connections, messages, JetStream streams, and Dynamo subjects
+- File System: Shows detailed directory information and disk usage
+
+├─ ✅ etcd: service running on localhost:2379
+│  ├─ Version: 3.6.1
+│  ├─ Cluster Members: 1
+│  └─ Keys: 10 keys found
+│     ├─ Key 1: dyn://dynamo/ports/10.110.41.216/28266 (rev:386, v:1)
+│     ├─ Key 2: instances/dynamo/backend/clear_kv_blocks:694d995f0d9ed01b (rev:390, v:1)
+│     ├─ Key 3: instances/dynamo/backend/generate:694d995f0d9ed01b (rev:389, v:1)
+│     ├─ Key 4: instances/dynamo/backend/load_metrics:694d995f0d9ed01b (rev:387, v:1)
+│     ├─ Key 5: mdc/qwen_qwen3-0_6b (rev:4, v:1)
+│     ├─ Key 6: mdc/test-mdc-model (rev:100, v:1)
+│     ├─ Key 7: mdc/tinyllama_tinyllama-1_1b-chat-v1_0 (rev:288, v:1)
+│     ├─ Key 8: models/f5303ed3-ed16-4615-81c3-34e95a4eaad4 (rev:388, v:1)
+│     ├─ Key 9: test_concurrent_bucket/concurrent_test_key_198126a9-e297-4f35-bded-edd63b72325f (rev:220, v:1)
+│     └─ Key 10: test_concurrent_bucket/concurrent_test_key_45ddffcd-29e0-4185-9bf9-1443cf9f518b (rev:203, v:1)
+├─ ✅ NATS: service running on localhost:4222
+│  ├─ Server: NA4B6QC5MG5YT3ZY7UPBLNQYNG6QXZLQEGILXT3BQSETPZVMQ6EI5NKN
+│  ├─ Uptime: 8d18h59m5s
+│  ├─ Connections: 3
+│  ├─ Messages: in=23638, out=25596
+│  ├─ Subscriptions: 88 active
+│  └─ Dynamo Subjects: 10 subjects found
+│     ├─ Subject 1: $SRV.PING.dynamo_backend (msgs: 0, conn: 573)
+│     ├─ Subject 2: $SRV.PING.dynamo_backend.OMZmmccbcIcvcwKF4JRoZB (msgs: 0, conn: 573)
+│     ├─ Subject 3: $SRV.INFO.dynamo_backend (msgs: 0, conn: 573)
+│     ├─ Subject 4: $SRV.INFO.dynamo_backend.OMZmmccbcIcvcwKF4JRoZB (msgs: 0, conn: 573)
+│     ├─ Subject 5: $SRV.STATS.dynamo_backend (msgs: 124, conn: 573)
+│     ├─ Subject 6: $SRV.STATS.dynamo_backend.OMZmmccbcIcvcwKF4JRoZB (msgs: 0, conn: 573)
+│     ├─ Subject 7: dynamo_backend.load_metrics-694d995f0d9ed01b (msgs: 0, conn: 573)
+│     ├─ Subject 8: dynamo_backend.generate-694d995f0d9ed01b (msgs: 0, conn: 573)
+│     ├─ Subject 9: dynamo_backend.clear_kv_blocks-694d995f0d9ed01b (msgs: 0, conn: 573)
+│     └─ Subject 10: namespace-dynamo-component-backend-kv-events.* (msgs: 0, conn: 372)
+├─ File System
+│  ├─ ✅ Dynamo workspace ($HOME/dynamo): writable, size=2.1 GB
+│  ├─ ✅ Dynamo .git directory ($HOME/dynamo/.git): writable, size=1.2 GB
+│  ├─ ✅ Rustup home ($HOME/dynamo/.build/.rustup): writable, size=45.2 MB
+│  ├─ ✅ Cargo home ($HOME/dynamo/.build/.cargo): writable, size=12.8 MB
+│  ├─ ✅ Cargo target ($HOME/dynamo/.build/target): writable, size=856.3 MB
+│  └─ ✅ site-packages (/opt/dynamo/venv/lib/python3.12/site-packages): writable, size=3.2 GB
+├─ ✅ Hugging Face Cache: 5 models in $HOME/.cache/huggingface/hub
+│  ├─ Model 1: EricB/mistralrs_tests, downloaded=2025-07-23 17:46:49 PDT, size=20.6 MB
+│  ├─ Model 2: Qwen/Qwen3-0.6B, downloaded=2025-07-26 10:03:25 PDT, size=1.41 GB
+│  ├─ Model 3: TinyLlama/TinyLlama-1.1B-Chat-v1.0, downloaded=2025-09-16 09:47:01 PDT, size=2.05 GB
+│  ├─ Model 4: deepseek-ai/DeepSeek-R1-Distill-Llama-8B, downloaded=2025-08-09 13:33:57 PDT, size=15.0 GB
+│  └─ Model 5: llava-hf/llava-1.5-7b-hf, downloaded=2025-08-22 09:57:11 PDT, size=4.01 MB
 
 Usage:
-    python deploy/sanity_check.py [--thorough-check] [--terse]
+    python dynamo_check.py [--thorough-check] [--terse]
 
 Options:
     --thorough-check  Enable thorough checking (file permissions, directory sizes, etc.)
@@ -134,6 +188,9 @@ class NodeInfo:
     # Display control
     show_symbol: bool = True  # Whether to show status symbol
 
+    # Class-level terse mode behavior (override in subclasses)
+    _always_show_when_terse: bool = False
+
     def add_child(self, child: "NodeInfo") -> "NodeInfo":
         """Add a child node and return it for chaining"""
         self.children.append(child)
@@ -143,6 +200,21 @@ class NodeInfo:
         """Add metadata key-value pair"""
         self.metadata[key] = value
         return self
+
+    def should_show_in_terse_mode(self) -> bool:
+        """Determine if this node should be shown in terse mode"""
+        return self._always_show_when_terse or self.status in [
+            NodeStatus.ERROR,
+            NodeStatus.WARNING,
+        ]
+
+    def add_child_with_terse_filtering(
+        self, child: "NodeInfo", terse_mode: bool
+    ) -> "NodeInfo":
+        """Add child node with terse mode filtering"""
+        if not terse_mode or child.should_show_in_terse_mode():
+            self.add_child(child)
+        return child
 
     def render(
         self, prefix: str = "", is_last: bool = True, is_root: bool = True
@@ -305,36 +377,19 @@ class SystemInfo(NodeInfo):
         self._suppress_planner_warnings()
 
         # Collect and add all system information
-        # Always show: OS, User, GPU, Framework, Dynamo
+        # Always show: OS, User, GPU
         self.add_child(OSInfo())
         self.add_child(UserInfo())
+        self.add_child(GPUInfo())
 
-        # Add GPU info (always show, even if not found)
-        gpu_info = GPUInfo()
-        self.add_child(gpu_info)
+        # Add all components, filtering based on terse mode and component attributes
+        self._add_components_with_terse_filtering()
 
-        # Add Framework info (vllm, sglang, tensorrt_llm)
+        # Add Framework right before Dynamo
         self.add_child(FrameworkInfo())
 
-        # In terse mode, only add other components if they have errors
-        if not self.terse:
-            # Add file permissions check
-            self.add_child(FilePermissionsInfo(thorough_check=self.thorough_check))
-
-            # Add Cargo (always show, even if not found)
-            self.add_child(CargoInfo(thorough_check=self.thorough_check))
-
-            # Add Maturin (Python-Rust build tool)
-            self.add_child(MaturinInfo())
-
-            # Add Python info
-            self.add_child(PythonInfo())
-        else:
-            # In terse mode, only add components that have errors
-            self._add_error_only_components()
-
         # Add Dynamo workspace info (always show, even if not found)
-        self.add_child(DynamoInfo(thorough_check=self.thorough_check))
+        self.add_child(DynamoInfo(thorough_check=self.thorough_check, terse=self.terse))
 
     def _get_ip_address(self) -> Optional[str]:
         """Get the primary IP address of the system."""
@@ -369,24 +424,878 @@ class SystemInfo(NodeInfo):
         defaults_logger = logging.getLogger("defaults._get_default_prometheus_endpoint")
         defaults_logger.setLevel(logging.ERROR)
 
-    def _add_error_only_components(self) -> None:
-        """In terse mode, only add components that have errors"""
-        # Create components and check their status
+    def _add_components_with_terse_filtering(self) -> None:
+        """Add components based on terse mode and always_show_when_terse attribute"""
+        # Create all components in the desired order
         components_to_check = [
-            ("File System", FilePermissionsInfo(thorough_check=self.thorough_check)),
-            ("Cargo", CargoInfo(thorough_check=self.thorough_check)),
-            ("Maturin", MaturinInfo()),
-            ("Python", PythonInfo()),
+            EtcdInfo(thorough_check=self.thorough_check),
+            NatsInfo(thorough_check=self.thorough_check),
+            FilePermissionsInfo(thorough_check=self.thorough_check),
+            HuggingFaceInfo(thorough_check=self.thorough_check),
+            CargoInfo(thorough_check=self.thorough_check),
+            MaturinInfo(),
+            PythonInfo(),
         ]
 
-        for name, component in components_to_check:
-            # Only add if the component has an error status
-            if component.status == NodeStatus.ERROR:
-                self.add_child(component)
+        for component in components_to_check:
+            self.add_child_with_terse_filtering(component, self.terse)
+
+
+class ServiceInfo(NodeInfo):
+    """Base class for service monitoring (NATS, etcd, etc.)"""
+
+    def __init__(self, service_name: str, thorough_check: bool = False):
+        self.service_name = service_name
+        self.thorough_check = thorough_check
+
+        # Parse configuration and check service
+        host, port = self._parse_service_config()
+        is_running = self._check_service_connection(host, port)
+
+        if is_running:
+            super().__init__(
+                label=service_name,
+                desc=f"service running on {host}:{port}",
+                status=NodeStatus.OK,
+            )
+            if thorough_check:
+                self._add_service_details(host, port)
+        else:
+            super().__init__(
+                label=service_name,
+                desc=f"service not available on {host}:{port}",
+                status=NodeStatus.WARNING,
+            )
+
+    def _parse_service_config(self) -> tuple:
+        """Parse service configuration from environment variables. Override in subclasses."""
+        raise NotImplementedError("Subclasses must implement _parse_service_config")
+
+    def _check_service_connection(self, host: str, port: int) -> bool:
+        """Check if service is running by attempting connection."""
+        try:
+            import socket
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)  # 1 second timeout
+            result = sock.connect_ex((host, port))
+            sock.close()
+            return result == 0
+        except Exception:
+            return False
+
+    def _add_service_details(self, host: str, port: int):
+        """Add detailed service information. Override in subclasses."""
+        pass
+
+    def _make_http_request(self, url: str, timeout: int = 2) -> dict:
+        """Make HTTP request with common error handling."""
+        try:
+            import json
+            import urllib.request
+
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return json.loads(response.read().decode())
+        except Exception:
+            return {}
+
+
+class NatsInfo(ServiceInfo):
+    """NATS service information"""
+
+    def __init__(self, thorough_check: bool = False):
+        super().__init__("NATS", thorough_check)
+
+    def _parse_service_config(self) -> tuple:
+        """Parse NATS server configuration from environment variables.
+
+        Uses the same environment variables as the actual Dynamo codebase:
+        - NATS_SERVER: Used in lib/runtime/src/transports/nats.rs (default_server function)
+        - Also used in lib/llm/src/kv_router/publisher.rs and subscriber.rs
+        - Set by components/backends/sglang/slurm_jobs/scripts/worker_setup.py
+        """
+        # Check for NATS_SERVER (primary environment variable used in Rust/Python code)
+        # See: lib/runtime/src/transports/nats.rs:284 (default_server function)
+        nats_server = os.environ.get("NATS_SERVER")
+        if nats_server:
+            try:
+                # Parse URL like "nats://localhost:4222"
+                import re
+
+                match = re.match(r"nats://([^:]+):(\d+)", nats_server)
+                if match:
+                    host = match.group(1)
+                    port = int(match.group(2))
+                    return host, port
+            except Exception:
+                pass
+
+        # Check for NATS_SERVER_PORT + NATS_SERVER_HOST (alternative format)
+        if "NATS_SERVER_PORT" in os.environ:
+            try:
+                port = int(os.environ["NATS_SERVER_PORT"])
+                host = os.environ.get("NATS_SERVER_HOST", "localhost")
+                return host, port
+            except ValueError:
+                pass
+
+        # Fallback to defaults (same as Rust code default: "nats://localhost:4222")
+        # See: lib/runtime/src/transports/nats.rs:288
+        return "localhost", 4222
+
+    def _add_service_details(self, host: str, port: int):
+        """Add NATS streams and connection details in thorough mode."""
+        try:
+            # Try to get NATS server info using HTTP monitoring endpoint
+            nats_info = self._get_nats_server_info(host, port)
+            if nats_info:
+                # Add server info
+                server = (
+                    nats_info.get("server_id")
+                    or nats_info.get("server_name")
+                    or nats_info.get("name")
+                )
+                if server:
+                    server_node = NodeInfo(
+                        label="Server",
+                        desc=server,
+                        status=NodeStatus.INFO,
+                    )
+                    self.add_child(server_node)
+
+                # Add uptime
+                if "uptime" in nats_info:
+                    uptime_str = self._format_uptime(nats_info["uptime"])
+                    uptime_node = NodeInfo(
+                        label="Uptime", desc=uptime_str, status=NodeStatus.INFO
+                    )
+                    self.add_child(uptime_node)
+
+                # Add connection count
+                if "connections" in nats_info:
+                    conn_node = NodeInfo(
+                        label="Connections",
+                        desc=str(nats_info["connections"]),
+                        status=NodeStatus.INFO,
+                    )
+                    self.add_child(conn_node)
+
+                # Add message stats
+                if "in_msgs" in nats_info and "out_msgs" in nats_info:
+                    msgs_node = NodeInfo(
+                        label="Messages",
+                        desc=f"in={nats_info['in_msgs']}, out={nats_info['out_msgs']}",
+                        status=NodeStatus.INFO,
+                    )
+                    self.add_child(msgs_node)
+
+                # Add JetStream info if available
+                if "jetstream" in nats_info:
+                    js_info = nats_info["jetstream"] or {}
+                    streams = (js_info.get("stats") or {}).get(
+                        "streams"
+                    ) or js_info.get("streams")
+                    if streams is not None:
+                        streams_node = NodeInfo(
+                            label="JetStream Streams",
+                            desc=str(streams),
+                            status=NodeStatus.INFO,
+                        )
+                        self.add_child(streams_node)
+
+                # Add subscription and subject information
+                self._add_nats_subscriptions(host, port)
+            else:
+                # Fallback: just show that monitoring endpoint is not accessible
+                monitor_node = NodeInfo(
+                    label="Monitoring",
+                    desc="HTTP monitoring endpoint not accessible",
+                    status=NodeStatus.WARNING,
+                )
+                self.add_child(monitor_node)
+        except Exception as e:
+            error_node = NodeInfo(
+                label="Details",
+                desc=f"Could not retrieve NATS details: {str(e)[:50]}...",
+                status=NodeStatus.WARNING,
+            )
+            self.add_child(error_node)
+
+    def _get_nats_server_info(self, host: str, port: int) -> Optional[dict]:
+        """Get NATS server info from HTTP monitoring endpoint."""
+        try:
+            import json
+            import urllib.request
+
+            # NATS monitoring port is typically client_port + 4000 (e.g., 4222 -> 8222)
+            monitor_port = port + 4000  # Try 8222 for default 4222
+            monitor_url = f"http://{host}:{monitor_port}/varz"
+
+            # Try to get server info with a short timeout
+            req = urllib.request.Request(monitor_url)
+            with urllib.request.urlopen(req, timeout=2) as response:
+                data = json.loads(response.read().decode())
+                return data
+        except Exception:
+            # Try alternative monitoring port
+            try:
+                monitor_port = 8222  # Standard NATS monitoring port
+                monitor_url = f"http://{host}:{monitor_port}/varz"
+
+                req = urllib.request.Request(monitor_url)
+                with urllib.request.urlopen(req, timeout=2) as response:
+                    data = json.loads(response.read().decode())
+                    return data
+            except Exception:
+                pass
+        return None
+
+    def _format_uptime(self, uptime_seconds) -> str:
+        """Format uptime from seconds to human readable format."""
+        try:
+            # NATS uptime is typically in format like "1h2m3.456s" or just seconds
+            if isinstance(uptime_seconds, str):
+                # If it's already formatted (like "1h2m3s"), return as is
+                if (
+                    "h" in uptime_seconds
+                    or "m" in uptime_seconds
+                    or "s" in uptime_seconds
+                ):
+                    return uptime_seconds
+                # Otherwise try to parse as seconds
+                uptime_seconds = float(uptime_seconds.rstrip("s"))
+
+            seconds = int(float(uptime_seconds))
+
+            if seconds < 60:
+                return f"{seconds}s"
+            elif seconds < 3600:
+                minutes = seconds // 60
+                secs = seconds % 60
+                return f"{minutes}m{secs}s"
+            elif seconds < 86400:
+                hours = seconds // 3600
+                minutes = (seconds % 3600) // 60
+                return f"{hours}h{minutes}m"
+            else:
+                days = seconds // 86400
+                hours = (seconds % 86400) // 3600
+                return f"{days}d{hours}h"
+        except (ValueError, TypeError):
+            return str(uptime_seconds)
+
+    def _add_nats_subscriptions(self, host: str, port: int):
+        """Add NATS subscription and subject information."""
+        try:
+            import json
+            import urllib.request
+
+            # NATS monitoring port is typically client_port + 4000 (e.g., 4222 -> 8222)
+            monitor_port = port + 4000  # Try 8222 for default 4222
+
+            # Get subscription statistics
+            subsz_url = f"http://{host}:{monitor_port}/subsz"
+            req = urllib.request.Request(subsz_url)
+            with urllib.request.urlopen(req, timeout=2) as response:
+                subsz_data = json.loads(response.read().decode())
+
+                if "num_subscriptions" in subsz_data:
+                    subs_node = NodeInfo(
+                        label="Subscriptions",
+                        desc=f"{subsz_data['num_subscriptions']} active",
+                        status=NodeStatus.INFO,
+                    )
+                    self.add_child(subs_node)
+
+            # Get detailed subscription list to find Dynamo-related subjects
+            subsz_detail_url = f"http://{host}:{monitor_port}/subsz?subs=1"
+            req = urllib.request.Request(subsz_detail_url)
+            with urllib.request.urlopen(req, timeout=2) as response:
+                subsz_detail = json.loads(response.read().decode())
+
+                dynamo_subjects = []
+                for sub in subsz_detail.get("subscriptions_list", []):
+                    subject = sub.get("subject", "")
+                    if any(
+                        pattern in subject.lower() for pattern in ["dynamo", "backend"]
+                    ):
+                        msgs = sub.get("msgs", 0)
+                        cid = sub.get("cid", 0)
+                        dynamo_subjects.append((subject, msgs, cid))
+
+                if dynamo_subjects:
+                    subjects_node = NodeInfo(
+                        label="Dynamo Subjects",
+                        desc=f"{len(dynamo_subjects)} subjects found",
+                        status=NodeStatus.INFO,
+                    )
+                    self.add_child(subjects_node)
+
+                    # Show all Dynamo subjects
+                    for i, (subject, msgs, cid) in enumerate(dynamo_subjects):
+                        subject_node = NodeInfo(
+                            label=f"Subject {i+1}",
+                            desc=f"{subject} (msgs: {msgs}, conn: {cid})",
+                            status=NodeStatus.INFO,
+                        )
+                        subjects_node.add_child(subject_node)
+                else:
+                    no_subjects_node = NodeInfo(
+                        label="Dynamo Subjects",
+                        desc="no Dynamo-related subjects found",
+                        status=NodeStatus.INFO,
+                    )
+                    self.add_child(no_subjects_node)
+
+        except Exception as e:
+            error_node = NodeInfo(
+                label="Subscriptions",
+                desc=f"Could not retrieve subscription info: {str(e)[:50]}...",
+                status=NodeStatus.WARNING,
+            )
+            self.add_child(error_node)
+
+
+class EtcdInfo(ServiceInfo):
+    """etcd service information"""
+
+    def __init__(self, thorough_check: bool = False):
+        super().__init__("etcd", thorough_check)
+
+    def _parse_service_config(self) -> tuple:
+        """Parse etcd configuration from environment variables.
+
+        Uses the same environment variables as the actual Dynamo codebase:
+        - ETCD_ENDPOINTS: Used in lib/runtime/src/transports/etcd.rs (default_servers function)
+        - Set by components/backends/sglang/slurm_jobs/scripts/worker_setup.py
+        - Also configured in deploy/helm/chart/values.yaml and docker-compose.yml
+        """
+        # Check for ETCD_ENDPOINTS first (primary environment variable used in Rust/Python code)
+        # See: lib/runtime/src/transports/etcd.rs:499 (default_servers function)
+        etcd_endpoints = os.environ.get("ETCD_ENDPOINTS")
+        if etcd_endpoints:
+            try:
+                # Parse URL like "http://localhost:2379" (take first endpoint if comma-separated)
+                import re
+
+                first_endpoint = etcd_endpoints.split(",")[0].strip()
+                match = re.match(r"https?://([^:]+):(\d+)", first_endpoint)
+                if match:
+                    host = match.group(1)
+                    port = int(match.group(2))
+                    return host, port
+            except Exception:
+                pass
+
+        # Check for ETCD_LISTEN_CLIENT_URLS (alternative format)
+        if "ETCD_LISTEN_CLIENT_URLS" in os.environ:
+            try:
+                import re
+
+                urls = os.environ["ETCD_LISTEN_CLIENT_URLS"]
+                # Parse URL like "http://localhost:2379" (take first URL if comma-separated)
+                first_url = urls.split(",")[0].strip()
+                match = re.match(r"https?://([^:]+):(\d+)", first_url)
+                if match:
+                    host = match.group(1)
+                    if host == "0.0.0.0":
+                        host = "localhost"  # Convert bind-all to localhost for client access
+                    port = int(match.group(2))
+                    return host, port
+            except Exception:
+                pass
+
+        # Fallback to defaults (same as Rust code default: "http://localhost:2379")
+        # See: lib/runtime/src/transports/etcd.rs:504
+        return "localhost", 2379
+
+    def _add_service_details(self, host: str, port: int):
+        """Add etcd keys and cluster details in thorough mode."""
+        try:
+            etcd_ver = self._get_etcd_info(host, port)  # /version
+            etcd_stats = self._get_etcd_stats(host, port) or {}
+            if etcd_ver and "etcdserver" in etcd_ver:
+                self.add_child(
+                    NodeInfo(
+                        label="Version",
+                        desc=etcd_ver["etcdserver"],
+                        status=NodeStatus.INFO,
+                    )
+                )
+            # derive IDs from v3 APIs
+            cid = (etcd_stats.get("header") or {}).get("cluster_id")
+            mid = (etcd_stats.get("header") or {}).get("member_id")
+            if cid:
+                self.add_child(
+                    NodeInfo(label="Cluster ID", desc=str(cid), status=NodeStatus.INFO)
+                )
+            if mid:
+                self.add_child(
+                    NodeInfo(label="Member ID", desc=str(mid), status=NodeStatus.INFO)
+                )
+
+            # Add uptime and member info from etcd_stats
+            if etcd_stats:
+                # Add uptime from leader stats
+                if "uptime" in etcd_stats:
+                    uptime_str = self._format_etcd_uptime(etcd_stats["uptime"])
+                    uptime_node = NodeInfo(
+                        label="Uptime", desc=uptime_str, status=NodeStatus.INFO
+                    )
+                    self.add_child(uptime_node)
+
+                # Add member count from cluster stats
+                if "members" in etcd_stats:
+                    members_node = NodeInfo(
+                        label="Cluster Members",
+                        desc=str(etcd_stats["members"]),
+                        status=NodeStatus.INFO,
+                    )
+                    self.add_child(members_node)
+
+            # Try to get all keys from etcd
+            all_keys = self._get_all_keys(host, port)
+            if all_keys:
+                keys_node = NodeInfo(
+                    label="Keys",
+                    desc=f"{len(all_keys)} keys found",
+                    status=NodeStatus.INFO,
+                )
+                self.add_child(keys_node)
+
+                # Show all keys with their metadata
+                for i, (key, create_rev, mod_rev, version) in enumerate(all_keys):
+                    if create_rev is not None:
+                        # v3 API with revision info
+                        desc = f"{key} (rev:{create_rev}"
+                        if mod_rev != create_rev:
+                            desc += f", mod:{mod_rev}"
+                        if version and version != 1:
+                            desc += f", v:{version}"
+                        desc += ")"
+                    else:
+                        # v2 API or no revision info
+                        desc = key
+
+                    key_node = NodeInfo(
+                        label=f"Key {i+1}", desc=desc, status=NodeStatus.INFO
+                    )
+                    keys_node.add_child(key_node)
+            else:
+                # Check if we can access etcd API at all
+                api_accessible = self._test_etcd_api_access(host, port)
+                if api_accessible:
+                    # API works but no Dynamo keys found - this is normal for fresh etcd
+                    keys_node = NodeInfo(
+                        label="Dynamo Keys",
+                        desc="no Dynamo keys found (empty database)",
+                        status=NodeStatus.INFO,
+                    )
+                    self.add_child(keys_node)
+                else:
+                    # API is not accessible
+                    api_node = NodeInfo(
+                        label="API Access",
+                        desc="etcd API not accessible",
+                        status=NodeStatus.WARNING,
+                    )
+                    self.add_child(api_node)
+
+        except Exception as e:
+            error_node = NodeInfo(
+                label="Details",
+                desc=f"Could not retrieve etcd details: {str(e)[:50]}...",
+                status=NodeStatus.WARNING,
+            )
+            self.add_child(error_node)
+
+    def _get_etcd_info(self, host: str, port: int) -> Optional[dict]:
+        """Get etcd server info from HTTP API."""
+        try:
+            import json
+            import urllib.request
+
+            # Try to get etcd version and cluster info
+            version_url = f"http://{host}:{port}/version"
+
+            req = urllib.request.Request(version_url)
+            with urllib.request.urlopen(req, timeout=2) as response:
+                data = json.loads(response.read().decode())
+                return data
+        except Exception:
+            pass
+        return None
+
+    def _get_etcd_stats(self, host: str, port: int) -> Optional[Dict[str, Any]]:
+        """Get etcd statistics including uptime and member info."""
+        try:
+            import json
+            import urllib.request
+
+            stats: Dict[str, Any] = {}
+
+            # Try to get leader stats for uptime
+            try:
+                leader_url = f"http://{host}:{port}/v2/stats/leader"
+                req = urllib.request.Request(leader_url)
+                with urllib.request.urlopen(req, timeout=2) as response:
+                    leader_data = json.loads(response.read().decode())
+                    if "leader" in leader_data:
+                        # Leader stats contain uptime information
+                        leader_info = leader_data["leader"]
+                        if "uptime" in leader_info:
+                            stats["uptime"] = leader_info["uptime"]
+            except Exception:
+                pass
+
+            # Try to get self stats for uptime (alternative method)
+            try:
+                self_url = f"http://{host}:{port}/v2/stats/self"
+                req = urllib.request.Request(self_url)
+                with urllib.request.urlopen(req, timeout=2) as response:
+                    self_data = json.loads(response.read().decode())
+                    if "startTime" in self_data:
+                        # Calculate uptime from start time
+                        import datetime
+
+                        start_time = datetime.datetime.fromisoformat(
+                            self_data["startTime"].replace("Z", "+00:00")
+                        )
+                        current_time = datetime.datetime.now(datetime.timezone.utc)
+                        uptime_seconds = (current_time - start_time).total_seconds()
+                        stats["uptime"] = uptime_seconds
+            except Exception:
+                pass
+
+            # Try to get cluster member information and header (cluster_id)
+            try:
+                members_url = f"http://{host}:{port}/v2/members"
+                req = urllib.request.Request(members_url)
+                with urllib.request.urlopen(req, timeout=2) as response:
+                    members_data = json.loads(response.read().decode())
+                    if "members" in members_data:
+                        stats["members"] = len(members_data["members"])
+            except Exception:
+                try:
+                    members_url = f"http://{host}:{port}/v3/cluster/member/list"
+                    data: dict[str, str] = {}
+                    req = urllib.request.Request(
+                        members_url,
+                        data=json.dumps(data).encode(),
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(req, timeout=2) as response:
+                        members_data = json.loads(response.read().decode())
+                        if "members" in members_data:
+                            stats["members"] = len(members_data["members"])
+                        if "header" in members_data:
+                            stats["header"] = members_data["header"]
+                except Exception:
+                    pass
+
+            return stats if stats else None
+        except Exception:
+            pass
+        return None
+
+    def _format_etcd_uptime(self, uptime) -> str:
+        """Format etcd uptime to human readable format."""
+        try:
+            # uptime might be in different formats
+            if isinstance(uptime, str):
+                # Try to parse ISO format or duration string
+                if "T" in uptime:  # ISO format
+                    import datetime
+
+                    start_time = datetime.datetime.fromisoformat(
+                        uptime.replace("Z", "+00:00")
+                    )
+                    current_time = datetime.datetime.now(datetime.timezone.utc)
+                    seconds = int((current_time - start_time).total_seconds())
+                else:
+                    # Try to parse as duration string or seconds
+                    seconds = int(float(uptime))
+            else:
+                seconds = int(float(uptime))
+
+            if seconds < 60:
+                return f"{seconds}s"
+            elif seconds < 3600:
+                minutes = seconds // 60
+                secs = seconds % 60
+                return f"{minutes}m{secs}s"
+            elif seconds < 86400:
+                hours = seconds // 3600
+                minutes = (seconds % 3600) // 60
+                return f"{hours}h{minutes}m"
+            else:
+                days = seconds // 86400
+                hours = (seconds % 86400) // 3600
+                return f"{days}d{hours}h"
+        except (ValueError, TypeError):
+            return str(uptime)
+
+    def _test_etcd_api_access(self, host: str, port: int) -> bool:
+        """Test if etcd API is accessible by making a simple version call."""
+        try:
+            import json
+            import urllib.request
+
+            # Try a simple version call to test API access
+            version_url = f"http://{host}:{port}/version"
+            req = urllib.request.Request(version_url)
+            with urllib.request.urlopen(req, timeout=2) as response:
+                data = json.loads(response.read().decode())
+                return "etcdserver" in data or "etcdcluster" in data
+        except Exception:
+            return False
+
+    def _get_all_keys(self, host: str, port: int) -> List[tuple]:
+        """Get all keys from etcd with metadata."""
+        try:
+            import json
+            import urllib.request
+
+            # Try to get all keys first
+            keys_url = f"http://{host}:{port}/v2/keys/?recursive=true"
+
+            req = urllib.request.Request(keys_url)
+            with urllib.request.urlopen(req, timeout=3) as response:
+                data = json.loads(response.read().decode())
+
+                keys = []
+
+                def extract_keys(node):
+                    """Recursively extract keys from etcd node structure."""
+                    if "key" in node:
+                        # v2 API doesn't provide revision info, just the key
+                        keys.append((node["key"], None, None, None))
+
+                    if "nodes" in node:
+                        for child_node in node["nodes"]:
+                            extract_keys(child_node)
+
+                if "node" in data:
+                    extract_keys(data["node"])
+
+                return sorted(keys, key=lambda x: x[0])
+        except Exception:
+            # Try v3 API format - get all keys with metadata
+            try:
+                import base64
+
+                keys_url = f"http://{host}:{port}/v3/kv/range"
+                data = {
+                    "key": "AA==",  # base64 for \x00 to get all keys
+                    "range_end": "AA==",  # Same range_end to get all keys
+                }
+
+                req = urllib.request.Request(
+                    keys_url,
+                    data=json.dumps(data).encode(),
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=3) as response:
+                    result = json.loads(response.read().decode())
+
+                    keys = []
+                    if "kvs" in result:
+                        for kv in result["kvs"]:
+                            if "key" in kv:
+                                # Decode base64 key
+                                import base64
+
+                                key = base64.b64decode(kv["key"]).decode("utf-8")
+                                create_rev = kv.get("create_revision", "unknown")
+                                mod_rev = kv.get("mod_revision", "unknown")
+                                version = kv.get("version", "unknown")
+                                keys.append((key, create_rev, mod_rev, version))
+
+                    return sorted(keys, key=lambda x: x[0])
+            except Exception:
+                pass
+
+        return []
+
+
+class HuggingFaceInfo(NodeInfo):
+    """Hugging Face models cache information"""
+
+    def __init__(self, thorough_check: bool = False):
+        # Check default Hugging Face cache location
+        hf_cache_path = os.path.expanduser("~/.cache/huggingface/hub")
+
+        if os.path.exists(hf_cache_path):
+            models = self._get_cached_models(hf_cache_path)
+            if models:
+                self._init_with_models(hf_cache_path, models, thorough_check)
+            else:
+                self._init_no_models_found(hf_cache_path)
+        else:
+            self._init_cache_not_available()
+
+        # Add HF_TOKEN info if set (common to all cases)
+        self._add_hf_token_info()
+
+    def _init_with_models(
+        self, hf_cache_path: str, models: List[tuple], thorough_check: bool
+    ):
+        """Initialize when models are found in cache."""
+        model_count = len(models)
+        display_path = self._replace_home_with_var(hf_cache_path)
+        super().__init__(
+            label="Hugging Face Cache",
+            desc=f"{model_count} models in {display_path}",
+            status=NodeStatus.OK,
+        )
+
+        # Only show detailed model list in thorough mode
+        if thorough_check:
+            self._add_model_details(models)
+
+    def _init_no_models_found(self, hf_cache_path: str):
+        """Initialize when cache exists but no models found."""
+        display_path = self._replace_home_with_var(hf_cache_path)
+        super().__init__(
+            label="Hugging Face Cache",
+            desc=f"directory exists but no models found in {display_path}",
+            status=NodeStatus.WARNING,
+        )
+
+    def _init_cache_not_available(self):
+        """Initialize when cache directory doesn't exist."""
+        super().__init__(
+            label="Hugging Face Cache",
+            desc="~/.cache/huggingface/hub not available",
+            status=NodeStatus.WARNING,
+        )
+
+    def _add_model_details(self, models: List[tuple]):
+        """Add detailed model information as child nodes."""
+        # Add first few models as children (limit to 5 for readability)
+        for i, model_info in enumerate(models[:5]):
+            model_name, download_date, size_str = model_info
+            model_node = NodeInfo(
+                label=f"Model {i+1}",
+                desc=f"{model_name}, downloaded={download_date}, size={size_str}",
+                status=NodeStatus.INFO,
+            )
+            self.add_child(model_node)
+
+        if len(models) > 5:
+            more_node = NodeInfo(
+                label=f"... and {len(models) - 5} more models",
+                status=NodeStatus.INFO,
+            )
+            self.add_child(more_node)
+
+    def _add_hf_token_info(self):
+        """Add HF_TOKEN information if the environment variable is set."""
+        if os.environ.get("HF_TOKEN"):
+            token_node = NodeInfo(
+                label="HF_TOKEN",
+                desc="<set>",
+                status=NodeStatus.INFO,
+            )
+            self.add_child(token_node)
+
+    def _get_cached_models(self, cache_path: str) -> List[tuple]:
+        """Get list of cached Hugging Face models with metadata.
+
+        Returns:
+            List of tuples: (model_name, download_date, size_str)
+        """
+        models = []
+        try:
+            if os.path.exists(cache_path):
+                for item in os.listdir(cache_path):
+                    item_path = os.path.join(cache_path, item)
+                    if os.path.isdir(item_path):
+                        # Get model name
+                        if item.startswith("models--"):
+                            # Convert "models--org--model-name" to "org/model-name"
+                            parts = item.split("--")
+                            if len(parts) >= 3:
+                                org = parts[1]
+                                model_name = "--".join(
+                                    parts[2:]
+                                )  # Handle model names with dashes
+                                display_name = f"{org}/{model_name}"
+                            else:
+                                display_name = item  # Fallback to raw name
+                        elif not item.startswith("."):  # Skip hidden files/dirs
+                            display_name = item
+                        else:
+                            continue  # Skip hidden directories
+
+                        # Get download date (directory creation/modification time)
+                        try:
+                            stat_info = os.stat(item_path)
+                            # Use the earlier of creation time or modification time
+                            download_time = min(stat_info.st_ctime, stat_info.st_mtime)
+                            download_date = self._format_timestamp_pdt(download_time)
+                        except Exception:
+                            download_date = "unknown"
+
+                        # Get directory size
+                        try:
+                            size_bytes = self._get_directory_size_bytes(item_path)
+                            size_str = self._format_size(size_bytes)
+                        except Exception:
+                            size_str = "unknown"
+
+                        models.append((display_name, download_date, size_str))
+        except Exception:
+            pass
+
+        # Sort by model name
+        return sorted(models, key=lambda x: x[0])
+
+    def _get_directory_size_bytes(self, directory: str) -> int:
+        """Get the total size of a directory in bytes."""
+        total_size = 0
+        try:
+            for dirpath, dirnames, filenames in os.walk(directory):
+                for filename in filenames:
+                    filepath = os.path.join(dirpath, filename)
+                    try:
+                        if not os.path.islink(filepath):  # Skip symbolic links
+                            total_size += os.path.getsize(filepath)
+                    except (OSError, FileNotFoundError):
+                        pass  # Skip files that can't be accessed
+        except Exception:
+            pass
+        return total_size
+
+    def _format_size(self, size_bytes: int) -> str:
+        """Format size in bytes to human readable format."""
+        if size_bytes == 0:
+            return "0 B"
+
+        units = ["B", "KB", "MB", "GB", "TB"]
+        size = float(size_bytes)
+        unit_index = 0
+
+        while size >= 1024.0 and unit_index < len(units) - 1:
+            size /= 1024.0
+            unit_index += 1
+
+        # Format with appropriate precision
+        if unit_index == 0:  # Bytes
+            return f"{int(size)} {units[unit_index]}"
+        elif size >= 100:
+            return f"{size:.0f} {units[unit_index]}"
+        elif size >= 10:
+            return f"{size:.1f} {units[unit_index]}"
+        else:
+            return f"{size:.2f} {units[unit_index]}"
 
 
 class UserInfo(NodeInfo):
     """User information"""
+
+    _always_show_when_terse: bool = True
 
     def __init__(self):
         # Get user info
@@ -422,6 +1331,8 @@ class UserInfo(NodeInfo):
 
 class OSInfo(NodeInfo):
     """Operating system information"""
+
+    _always_show_when_terse: bool = True
 
     def __init__(self):
         # Collect OS information
@@ -482,6 +1393,8 @@ class OSInfo(NodeInfo):
 
 class GPUInfo(NodeInfo):
     """NVIDIA GPU information"""
+
+    _always_show_when_terse: bool = True
 
     def __init__(self):
         # Find nvidia-smi executable (check multiple paths)
@@ -1581,14 +2494,16 @@ class PythonInfo(NodeInfo):
 class FrameworkInfo(NodeInfo):
     """LLM Framework information"""
 
+    _always_show_when_terse: bool = True
+
     def __init__(self):
         super().__init__(label="🤖Framework", status=NodeStatus.INFO)
 
         # Check for framework packages (mandatory to show)
         frameworks_to_check = [
             ("vllm", "vLLM"),
-            ("sglang", "Sglang"),
-            ("tensorrt_llm", "tensorRT LLM"),
+            ("sglang", "SGLang"),
+            ("tensorrt_llm", "TensorRT-LLM"),
         ]
 
         frameworks_found = 0
@@ -1620,9 +2535,28 @@ class FrameworkInfo(NodeInfo):
                     is_installed=True,
                 )
                 self.add_child(package_info)
-            except (ImportError, Exception):
-                # Framework not installed - don't add it
-                pass
+            except (ImportError, Exception) as e:
+                # Framework import failed - check if it's installed but can't be imported
+                if module_name == "tensorrt_llm":
+                    # TensorRT-LLM might be installed but fail to import due to GPU issues
+                    installed_path = self._check_tensorrt_llm_installation()
+                    if installed_path:
+                        # Show as installed but with import error
+                        package_info = PythonPackageInfo(
+                            package_name=display_name,
+                            version="installed (import failed)",
+                            module_path=installed_path,
+                            exec_path=None,
+                            is_framework=True,
+                            is_installed=True,
+                            import_error=str(e),
+                        )
+                        self.add_child(package_info)
+                        frameworks_found += 1
+                    # If not installed, don't add it (same as before)
+                else:
+                    # For other frameworks, don't add if import fails (same as before)
+                    pass
 
         # If no frameworks found, set status to ERROR (X) and show what's missing
         if frameworks_found == 0:
@@ -1633,6 +2567,46 @@ class FrameworkInfo(NodeInfo):
                 missing_frameworks.append(f"no {module_name}")
             missing_text = ", ".join(missing_frameworks)
             self.desc = missing_text
+
+    def _check_tensorrt_llm_installation(self) -> Optional[str]:
+        """Check if TensorRT-LLM is installed by looking for its directory."""
+        try:
+            import site
+
+            # Check in site-packages directories
+            for site_dir in site.getsitepackages():
+                # Look for tensorrt_llm directory
+                tensorrt_path = os.path.join(site_dir, "tensorrt_llm")
+                if os.path.exists(tensorrt_path) and os.path.isdir(tensorrt_path):
+                    return self._replace_home_with_var(tensorrt_path)
+
+                # Also check for dist-info directories
+                import glob
+
+                dist_pattern = os.path.join(site_dir, "*tensorrt*llm*.dist-info")
+                matches = glob.glob(dist_pattern)
+                if matches:
+                    # Found dist-info, look for the actual package
+                    for match in matches:
+                        parent_dir = os.path.dirname(match)
+                        tensorrt_path = os.path.join(parent_dir, "tensorrt_llm")
+                        if os.path.exists(tensorrt_path):
+                            return self._replace_home_with_var(tensorrt_path)
+
+            # Check user site-packages
+            try:
+                user_site = site.getusersitepackages()
+                if user_site:
+                    tensorrt_path = os.path.join(user_site, "tensorrt_llm")
+                    if os.path.exists(tensorrt_path) and os.path.isdir(tensorrt_path):
+                        return self._replace_home_with_var(tensorrt_path)
+            except Exception:
+                pass
+
+        except Exception:
+            pass
+
+        return None
 
 
 class PythonPackageInfo(NodeInfo):
@@ -1648,6 +2622,7 @@ class PythonPackageInfo(NodeInfo):
         install_path: Optional[str] = None,
         is_framework: bool = False,
         is_installed: bool = True,
+        import_error: Optional[str] = None,
     ):
         # Build display value
         display_value = version
@@ -1657,6 +2632,21 @@ class PythonPackageInfo(NodeInfo):
             # Framework not found - show with "-" and use UNKNOWN status for ❓ symbol
             display_value = "-"
             status = NodeStatus.UNKNOWN  # Show ❓ for not found frameworks
+        elif import_error:
+            # Package installed but import failed - show as warning
+            status = NodeStatus.WARNING
+            parts = [version]
+            if module_path:
+                parts.append(f"module={module_path}")
+            if import_error:
+                # Truncate long error messages
+                error_msg = (
+                    import_error[:100] + "..."
+                    if len(import_error) > 100
+                    else import_error
+                )
+                parts.append(f"error={error_msg}")
+            display_value = ", ".join(parts)
         else:
             status = NodeStatus.OK
 
@@ -2030,8 +3020,11 @@ class DynamoFrameworkInfo(NodeInfo):
 class DynamoInfo(NodeInfo):
     """Dynamo workspace information"""
 
-    def __init__(self, thorough_check: bool = False):
+    _always_show_when_terse: bool = True
+
+    def __init__(self, thorough_check: bool = False, terse: bool = False):
         self.thorough_check = thorough_check
+        self.terse = terse
 
         # Find workspace directory
         workspace_dir = DynamoInfo.find_workspace()
@@ -2134,7 +3127,7 @@ class DynamoInfo(NodeInfo):
         # Check DYNAMO_HOME environment variable first
         dynamo_home = os.environ.get("DYNAMO_HOME")
         if dynamo_home:
-            candidates.append(os.path.expanduser(dynamo_home))
+            candidates.append(dynamo_home)
 
         # Then check common locations
         candidates.extend(
