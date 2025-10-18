@@ -16,6 +16,7 @@ pub mod distributed;
 pub mod events;
 pub mod layout;
 pub mod metrics_kvbm;
+pub mod numa_allocator;
 pub mod offload;
 pub mod pool;
 pub mod storage;
