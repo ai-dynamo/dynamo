@@ -12,7 +12,7 @@ ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # Please check https://github.com/ai-dynamo/dynamo/pull/1065
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
-ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+ARG BASE_IMAGE_TAG="25.09-cuda13.0-devel-ubuntu24.04"
 
 # Build configuration
 ARG RELEASE_BUILD=false
