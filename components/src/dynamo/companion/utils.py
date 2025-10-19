@@ -248,6 +248,10 @@ def import_weights_from_tree(
     Uses the same pattern as meta_load.py's import_weights function.
     Recursively merges parameters, buffers, tensor attributes, and submodules.
 
+    Zero-copy reconstruction is used ONLY for parameters. Buffers and tensor
+    attributes are explicitly cloned to allocate new storage (breaking any
+    IPC-backed sharing).
+
     Args:
         target_module: The module to import weights into
         tree: The module tree node from companion server with IPC rebuild info
@@ -265,7 +269,8 @@ def import_weights_from_tree(
     # Import buffers at this level
     for name, rebuild_args in tree.buffers.items():
         logger.debug(f"Importing buffer: {prefix}{name}")
-        tensor = reconstruct_tensor_from_ipc(rebuild_args)
+        # Reconstruct from IPC then clone to force copy (no zero-copy for buffers)
+        tensor = reconstruct_tensor_from_ipc(rebuild_args).clone()
 
         if hasattr(target_module, name):
             delattr(target_module, name)  # Remove the existing buffer
@@ -278,7 +283,8 @@ def import_weights_from_tree(
             tensor_list = []
             for item in attr_value:
                 if item is not None:
-                    tensor = reconstruct_tensor_from_ipc(item)
+                    # Reconstruct from IPC then clone to force copy
+                    tensor = reconstruct_tensor_from_ipc(item).clone()
                     tensor_list.append(tensor)
                 else:
                     # Keep non-cuda placeholder tensors as is
@@ -287,7 +293,8 @@ def import_weights_from_tree(
             setattr(target_module, name, tensor_list)
         else:
             # Handle single tensor
-            tensor = reconstruct_tensor_from_ipc(attr_value)
+            # Reconstruct from IPC then clone to force copy
+            tensor = reconstruct_tensor_from_ipc(attr_value).clone()
             logger.debug(f"Importing tensor attribute: {prefix}{name}")
             setattr(target_module, name, tensor)
 
