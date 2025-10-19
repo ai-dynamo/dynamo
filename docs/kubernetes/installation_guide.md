@@ -111,7 +111,7 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 
 → [Verify Installation](#verify-installation)
 
-## Path C: Custom Development
+## Path B: Custom Development
 
 Build and deploy from source for customization.
 
@@ -144,16 +144,24 @@ kubectl create secret docker-registry docker-imagepullsecret \
   --docker-password=${DOCKER_PASSWORD} \
   --namespace=${NAMESPACE}
 
+cd deploy/cloud/helm
+
 # 4. Install CRDs
 helm upgrade --install dynamo-crds ./crds/ --namespace default
 
 # 5. Install Platform
 helm dep build ./platform/
+
+# To install cluster-wide instead, set NS_RESTRICT_FLAGS="" (empty) or omit that line entirely.
+
+NS_RESTRICT_FLAGS="--set dynamo-operator.namespaceRestriction.enabled=true"
 helm install dynamo-platform ./platform/ \
-  --namespace ${NAMESPACE} \
+  --namespace "${NAMESPACE}" \
   --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
   --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
-  --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret"
+  --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret" \
+  ${NS_RESTRICT_FLAGS}
+
 ```
 
 → [Verify Installation](#verify-installation)
@@ -166,7 +174,7 @@ kubectl get crd | grep dynamo
 
 # Check operator and platform pods
 kubectl get pods -n ${NAMESPACE}
-# Expected: dynamo-operator-* and etcd-* pods Running
+# Expected: dynamo-operator-* and etcd-* and nats-* pods Running
 ```
 
 ## Next Steps
@@ -188,7 +196,7 @@ kubectl get pods -n ${NAMESPACE}
 
 3. **Optional:**
    - [Set up Prometheus & Grafana](metrics.md)
-   - [SLA Planner Quickstart Guide](sla_planner_quickstart.md) (for SLA-aware scheduling and autoscaling)
+   - [SLA Planner Quickstart Guide](../planner/sla_planner_quickstart.md) (for SLA-aware scheduling and autoscaling)
 
 ## Troubleshooting
 

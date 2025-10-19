@@ -9,8 +9,10 @@ from typing import List, Optional, Tuple
 import sglang as sgl
 import zmq
 import zmq.asyncio
-from sglang.srt.utils import get_ip, get_zmq_socket
+from prometheus_client import CollectorRegistry, multiprocess
+from sglang.srt.utils import get_local_ip_auto, get_zmq_socket
 
+from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import (
     ForwardPassMetrics,
     KvStats,
@@ -116,7 +118,7 @@ class DynamoSglangPublisher:
         if self.server_args.kv_events_config:
             kv_events = json.loads(self.server_args.kv_events_config)
             ep = kv_events.get("endpoint")
-            zmq_ep = ep.replace("*", get_ip()) if ep else None
+            zmq_ep = ep.replace("*", get_local_ip_auto()) if ep else None
 
             lease_id = self.generate_endpoint.lease_id()
 
@@ -216,6 +218,16 @@ async def setup_sgl_metrics(
     )
     publisher.init_engine_metrics_publish()
     publisher.init_kv_event_publish()
+
+    # Register Prometheus metrics callback if enabled
+    if engine.server_args.enable_metrics:
+        # SGLang uses multiprocess architecture where metrics are stored in shared memory.
+        # MultiProcessCollector aggregates metrics from all worker processes.
+        registry = CollectorRegistry()
+        multiprocess.MultiProcessCollector(registry)
+        register_engine_metrics_callback(
+            generate_endpoint, registry, "sglang:", "SGLang"
+        )
 
     task = asyncio.create_task(publisher.run())
     logging.info("SGLang metrics loop started")

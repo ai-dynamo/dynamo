@@ -26,13 +26,13 @@ logger = logging.getLogger(__name__)
 def check_prefill_results_exist(output_dir: str, tp_size: int, isl: int) -> bool:
     """Check if prefill results already exist for a given TP size."""
     work_dir = f"{output_dir}/prefill_tp{tp_size}"
-    result_file = f"{work_dir}/gap_isl{isl}/*/profile_export_genai_perf.json"
+    result_file = f"{work_dir}/aiperf_isl{isl}/*/profile_export_aiperf.json"
 
     # Check if the work directory exists
     if not os.path.exists(work_dir):
         return False
 
-    # Look for the genai-perf result file
+    # Look for the aiperf result file
     result_files = glob.glob(result_file)
     if not result_files:
         return False
@@ -65,7 +65,7 @@ def check_decode_results_exist(
 
     # Look for at least one decode result file
     result_pattern = (
-        f"{work_dir}/gap_request*_isl{isl}_osl{osl}_n*/*/profile_export_genai_perf.json"
+        f"{work_dir}/aiperf_request*_isl{isl}_osl{osl}_n*/*/profile_export_aiperf.json"
     )
     result_files = glob.glob(result_pattern)
 
@@ -93,7 +93,7 @@ def load_existing_prefill_results(
 ) -> Tuple[Optional[float], Optional[float]]:
     """Load existing prefill results from disk."""
     work_dir = f"{output_dir}/prefill_tp{tp_size}"
-    result_file = f"{work_dir}/gap_isl{isl}/*/profile_export_genai_perf.json"
+    result_file = f"{work_dir}/aiperf_isl{isl}/*/profile_export_aiperf.json"
 
     result_files = glob.glob(result_file)
     if result_files:
@@ -115,7 +115,7 @@ def load_existing_decode_results(
     work_dir = f"{output_dir}/decode_tp{tp_size}"
 
     result_pattern = (
-        f"{work_dir}/gap_request*_isl{isl}_osl{osl}_n*/*/profile_export_genai_perf.json"
+        f"{work_dir}/aiperf_request*_isl{isl}_osl{osl}_n*/*/profile_export_aiperf.json"
     )
     result_files = glob.glob(result_pattern)
 
@@ -128,7 +128,7 @@ def load_existing_decode_results(
                 thpt_per_gpu = data["output_token_throughput"]["avg"] / tp_size
 
                 # Extract concurrency from filename
-                match = re.search(r"gap_request(\d+)_", result_file)
+                match = re.search(r"aiperf_request(\d+)_", result_file)
                 if match:
                     concurrency = int(match.group(1))
                     decode_results.append((itl, thpt_per_gpu, concurrency))

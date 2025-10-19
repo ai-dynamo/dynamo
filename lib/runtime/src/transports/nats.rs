@@ -326,7 +326,7 @@ impl ClientOptions {
                 client
                     .connect(self.server)
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}"))
+                    .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}. Verify NATS server is running and accessible."))
             },
             NATS_WORKER_THREADS,
         )
@@ -644,6 +644,17 @@ impl NatsQueue {
             let mut stream = client.jetstream().get_stream(&self.stream_name).await?;
             let info = stream.info().await?;
             Ok(info.state.consumer_count)
+        } else {
+            Err(anyhow::anyhow!("Client not connected"))
+        }
+    }
+
+    /// List all consumer names for the stream
+    pub async fn list_consumers(&mut self) -> Result<Vec<String>> {
+        self.ensure_connection().await?;
+
+        if let Some(client) = &self.client {
+            client.list_consumers(&self.stream_name).await
         } else {
             Err(anyhow::anyhow!("Client not connected"))
         }

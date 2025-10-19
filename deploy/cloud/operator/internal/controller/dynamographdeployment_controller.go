@@ -63,6 +63,11 @@ type etcdStorage interface {
 	DeleteKeys(ctx context.Context, prefix string) error
 }
 
+// rbacManager interface for managing RBAC resources
+type rbacManager interface {
+	EnsureServiceAccountWithRBAC(ctx context.Context, targetNamespace, serviceAccountName, clusterRoleName string) error
+}
+
 // DynamoGraphDeploymentReconciler reconciles a DynamoGraphDeployment object
 type DynamoGraphDeploymentReconciler struct {
 	client.Client
@@ -71,6 +76,7 @@ type DynamoGraphDeploymentReconciler struct {
 	DockerSecretRetriever dockerSecretRetriever
 	ScaleClient           scale.ScalesGetter
 	MPISecretReplicator   *secret.SecretReplicator
+	RBACManager           rbacManager
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
@@ -157,6 +163,25 @@ type Resource interface {
 
 func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (State, Reason, Message, error) {
 	logger := log.FromContext(ctx)
+
+	// Ensure planner RBAC exists in cluster-wide mode
+	if r.Config.RestrictedNamespace == "" {
+		if r.RBACManager == nil {
+			return "", "", "", fmt.Errorf("RBAC manager not initialized in cluster-wide mode")
+		}
+		if r.Config.RBAC.PlannerClusterRoleName == "" {
+			return "", "", "", fmt.Errorf("planner ClusterRole name is required in cluster-wide mode")
+		}
+		if err := r.RBACManager.EnsureServiceAccountWithRBAC(
+			ctx,
+			dynamoDeployment.Namespace,
+			consts.PlannerServiceAccountName,
+			r.Config.RBAC.PlannerClusterRoleName,
+		); err != nil {
+			logger.Error(err, "Failed to ensure planner RBAC")
+			return "", "", "", fmt.Errorf("failed to ensure planner RBAC: %w", err)
+		}
+	}
 
 	// Reconcile top-level PVCs first
 	err := r.reconcilePVCs(ctx, dynamoDeployment)

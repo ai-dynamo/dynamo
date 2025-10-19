@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{any::Any, sync::Arc};
+use std::{any::Any, cmp::max, sync::Arc};
 
 use dynamo_llm::{
     block_manager::{
@@ -479,7 +479,7 @@ impl Slot for VllmConnectorSlot {
         &mut self,
         tokens: &[u32],
         block_ids: &[BlockId],
-        _num_computed_tokens: usize,
+        num_computed_tokens: usize,
         num_scheduled_tokens: usize,
     ) -> Result<(), SlotError> {
         if !tokens.is_empty() {
@@ -492,6 +492,11 @@ impl Slot for VllmConnectorSlot {
         } else {
             self.state = SlotState::Prefilling;
         }
+
+        // Use max to advance both current_position and evaluated_blocks at least by num_computed_tokens.
+        // This logic is to prevent redundant block offloading.
+        self.current_position = max(self.current_position, num_computed_tokens);
+        self.evaluated_blocks = max(self.evaluated_blocks, num_computed_tokens / self.block_size);
 
         // apply new block_ids
         if !block_ids.is_empty() {
@@ -1277,11 +1282,6 @@ async fn process_offload_request(
     leader: &Arc<KvbmLeader>,
     kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
-    kvbm_metrics.offload_requests.inc();
-    kvbm_metrics
-        .offload_blocks_d2h
-        .inc_by(offload_req.block_ids.len() as u64);
-
     let request_id = &offload_req.request_id;
     let operation_id = &offload_req.operation_id;
 
@@ -1368,6 +1368,10 @@ async fn process_offload_request(
         "offload - stage 4 complete"
     );
 
+    kvbm_metrics
+        .offload_blocks_d2h
+        .inc_by(blocks_to_register.len() as u64);
+
     // 5. Register the mutable blocks
     let immutable_blocks = block_manager
         .host()
@@ -1389,7 +1393,6 @@ async fn process_onboard_request(
     leader: &Arc<KvbmLeader>,
     kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
-    kvbm_metrics.onboard_requests.inc();
     if onboard_req.src_blocks.storage_pool() == BlockTransferPool::Host {
         kvbm_metrics
             .onboard_blocks_h2d

@@ -5,8 +5,6 @@
 
 import logging
 
-from dynamo._core import AggregatedMetrics as AggregatedMetrics
-
 try:
     from dynamo._core import BlockManager as BlockManager
     from dynamo._core import KvbmLeader as KvbmLeader
@@ -23,7 +21,6 @@ from dynamo._core import HttpAsyncEngine as HttpAsyncEngine
 from dynamo._core import HttpService as HttpService
 from dynamo._core import KvEventPublisher as KvEventPublisher
 from dynamo._core import KvIndexer as KvIndexer
-from dynamo._core import KvMetricsAggregator as KvMetricsAggregator
 from dynamo._core import KvPushRouter as KvPushRouter
 from dynamo._core import KvRecorder as KvRecorder
 from dynamo._core import KvRouterConfig as KvRouterConfig
@@ -42,6 +39,7 @@ from dynamo._core import ZmqKvEventListener as ZmqKvEventListener
 from dynamo._core import ZmqKvEventPublisher as ZmqKvEventPublisher
 from dynamo._core import ZmqKvEventPublisherConfig as ZmqKvEventPublisherConfig
 from dynamo._core import compute_block_hash_for_seq_py as compute_block_hash_for_seq_py
+from dynamo._core import fetch_llm as fetch_llm
 from dynamo._core import make_engine
 from dynamo._core import register_llm as register_llm
 from dynamo._core import run_input

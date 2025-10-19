@@ -101,35 +101,6 @@ pub trait CommonExtProvider {
     fn get_include_stop_str_in_output(&self) -> Option<bool>;
 }
 
-/// Helper function to emit deprecation warnings for nvext parameters
-pub fn emit_nvext_deprecation_warning(
-    field_name: &str,
-    nvext_has_value: bool,
-    common_has_value: bool,
-) {
-    if nvext_has_value && !common_has_value {
-        tracing::warn!(
-            "DEPRECATION WARNING: 'nvext.{field_name}' is deprecated and will be removed in a future release. Use '{field_name}' at the top level or in 'extra_body' instead."
-        );
-    } else if nvext_has_value && common_has_value {
-        tracing::warn!(
-            "DEPRECATION WARNING: 'nvext.{field_name}' is deprecated and will be removed in a future release. Top-level '{field_name}' takes precedence. Use '{field_name}' at the top level or in 'extra_body' instead."
-        );
-    }
-}
-
-/// Helper function to choose between common and nvext values with deprecation warnings
-pub fn choose_with_deprecation<T: Clone>(
-    field: &'static str,
-    common: Option<&T>,
-    nv: Option<&T>,
-) -> Option<T> {
-    if nv.is_some() {
-        emit_nvext_deprecation_warning(field, true, common.is_some());
-    }
-    common.cloned().or_else(|| nv.cloned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,24 +218,5 @@ mod tests {
         assert_eq!(common_ext.repetition_penalty, None);
         assert_eq!(common_ext.include_stop_str_in_output, None);
         assert!(common_ext.validate().is_ok());
-    }
-
-    #[test]
-    fn test_choose_with_deprecation() {
-        // Common takes precedence
-        let result = choose_with_deprecation(
-            "test_field",
-            Some(&"common_value".to_string()),
-            Some(&"nvext_value".to_string()),
-        );
-        assert_eq!(result, Some("common_value".to_string()));
-
-        // Fallback to nvext
-        let result = choose_with_deprecation("test_field", None, Some(&"nvext_value".to_string()));
-        assert_eq!(result, Some("nvext_value".to_string()));
-
-        // Both None
-        let result: Option<String> = choose_with_deprecation("test_field", None, None);
-        assert_eq!(result, None);
     }
 }

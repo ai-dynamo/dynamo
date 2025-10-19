@@ -66,7 +66,9 @@ class AIConfiguratorPerfEstimator:
 
         # NOTE: MOE models error out unless moe_tp_size and moe_ep_size are provided.
         model_config = aiconfigurator.sdk.config.ModelConfig(**model_config_kwargs)
-        model = aiconfigurator.sdk.models.get_model(self.model_name, model_config)
+        model = aiconfigurator.sdk.models.get_model(
+            self.model_name, model_config, self.backend
+        )
         return model
 
     def estimate_perf(

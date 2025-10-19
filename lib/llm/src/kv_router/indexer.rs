@@ -80,9 +80,6 @@ pub enum KvCacheEventError {
     BlockNotFound,
 }
 
-/// Identifier of a LLM worker which emits events to the router.
-pub type WorkerId = i64;
-
 /// A shared reference to a [`RadixBlock`].
 type SharedRadixBlock = Rc<RefCell<RadixBlock>>;
 
@@ -200,9 +197,9 @@ impl RouterEvent {
 struct RadixBlock {
     /// A map of child blocks, keyed by their local block hash.
     children: HashMap<LocalBlockHash, SharedRadixBlock>,
-    /// A map of worker IDs to their external sequence block hash for this block.
+    /// A map of workers (with dp_rank) to their external sequence block hash for this block.
     /// The external hash is preserved to speed up snapshotting.
-    workers: HashMap<WorkerId, ExternalSequenceBlockHash>,
+    workers: HashMap<WorkerWithDpRank, ExternalSequenceBlockHash>,
     /// A buffer of times that this block was last traversed
     recent_uses: VecDeque<Instant>,
 }
@@ -235,7 +232,7 @@ pub struct RadixTree {
     /// Transitioning to a radix tree only would require a change in the messaging structure
     /// as the entire prefix would need to be sent. Alternatively, we could use block_depth
     /// integers to indicate how many blocks to skip and use a radix/prefix tree at each level.
-    lookup: HashMap<WorkerId, HashMap<ExternalSequenceBlockHash, SharedRadixBlock>>,
+    lookup: HashMap<WorkerWithDpRank, HashMap<ExternalSequenceBlockHash, SharedRadixBlock>>,
     /// The time buffer the radix tree should check when considering frequence of block accesses
     expiration_duration: Option<Duration>,
 }
@@ -332,11 +329,15 @@ impl RadixTree {
     ///
     /// * `event` - The `RouterEvent` to apply.
     pub fn apply_event(&mut self, event: RouterEvent) -> Result<(), KvCacheEventError> {
-        let (worker_id, event) = (event.worker_id, event.event);
-        let (id, op) = (event.event_id, event.data);
+        let (worker_id, kv_event) = (event.worker_id, event.event);
+        let (id, op) = (kv_event.event_id, kv_event.data);
+
+        // Construct WorkerWithDpRank from worker_id and dp_rank from the event
+        let worker = WorkerWithDpRank::new(worker_id, kv_event.dp_rank);
+
         tracing::trace!(id, "RadixTree::apply_event: Store operation: {:?}", op);
 
-        let worker_lookup = self.lookup.entry(worker_id).or_default();
+        let worker_lookup = self.lookup.entry(worker).or_default();
 
         match op {
             KvCacheEventData::Stored(op) => {
@@ -352,7 +353,8 @@ impl RadixTree {
                     Some(current) => current.clone(),
                     None => {
                         tracing::warn!(
-                            worker_id = worker_id.to_string(),
+                            worker_id = worker.worker_id.to_string(),
+                            dp_rank = ?worker.dp_rank,
                             id,
                             parent_hash = ?op.parent_hash,
                             "Failed to find parent block; skipping store operation"
@@ -381,11 +383,11 @@ impl RadixTree {
                         }
                     };
 
-                    // add our worker_id to the block with its external hash
+                    // add our worker to the block with its external hash
                     block
                         .borrow_mut()
                         .workers
-                        .insert(worker_id, block_id.block_hash);
+                        .insert(worker, block_id.block_hash);
 
                     // add the block to the worker_id lookup table
                     worker_lookup.insert(block_id.block_hash, block.clone());
@@ -419,7 +421,7 @@ impl RadixTree {
                     };
 
                     let mut guard = entry.borrow_mut();
-                    guard.workers.remove(&worker_id);
+                    guard.workers.remove(&worker);
                     if guard.workers.is_empty() {
                         // if no workers are using this block, that is true for all children
                         guard.children.clear();
@@ -430,43 +432,57 @@ impl RadixTree {
                 Ok(())
             }
             KvCacheEventData::Cleared => {
-                self.clear_all_blocks(worker_id);
+                self.clear_all_blocks(worker.worker_id);
                 Ok(())
             }
         }
     }
 
-    pub fn remove_worker(&mut self, worker: WorkerId) {
-        if let Some((_, blocks)) = self.lookup.remove_entry(&worker) {
-            blocks.iter().for_each(|(_, block)| {
-                block.borrow_mut().workers.remove(&worker);
-                // If no workers are using this block, that is true for all children
-                if block.borrow().workers.is_empty() {
-                    block.borrow_mut().children.clear();
+    /// Helper function to remove or clear blocks for a worker.
+    /// If `keep_worker` is true, the worker remains in lookup with empty blocks.
+    /// If `keep_worker` is false, the worker is completely removed from lookup.
+    fn remove_or_clear_worker_blocks(&mut self, worker_id: WorkerId, keep_worker: bool) {
+        // Collect all WorkerWithDpRank keys that match this worker_id
+        let workers: Vec<WorkerWithDpRank> = self
+            .lookup
+            .keys()
+            .filter(|w| w.worker_id == worker_id)
+            .copied()
+            .collect();
+
+        for worker in workers {
+            if let Some((worker_key, blocks)) = self.lookup.remove_entry(&worker) {
+                blocks.iter().for_each(|(_, block)| {
+                    block.borrow_mut().workers.remove(&worker);
+                    // If no workers are using this block, that is true for all children
+                    if block.borrow().workers.is_empty() {
+                        block.borrow_mut().children.clear();
+                    }
+                });
+
+                if keep_worker {
+                    // Re-insert worker with empty blocks map to keep it tracked
+                    self.lookup.insert(worker_key, HashMap::new());
                 }
-            });
+            }
         }
     }
 
-    pub fn clear_all_blocks(&mut self, worker: WorkerId) {
-        // Check if the worker has any blocks to clear
-        if let Some(blocks) = self.lookup.get(&worker) {
-            let blocks_to_clear: Vec<_> = blocks.values().collect();
+    pub fn remove_worker(&mut self, worker_id: WorkerId) {
+        self.remove_or_clear_worker_blocks(worker_id, false);
+    }
 
-            // Remove the worker from each block's workers map
-            blocks_to_clear.iter().for_each(|block| {
-                block.borrow_mut().workers.remove(&worker);
-                // If no workers are using this block, that is true for all children
-                if block.borrow().workers.is_empty() {
-                    block.borrow_mut().children.clear();
-                }
-            });
+    pub fn clear_all_blocks(&mut self, worker_id: WorkerId) {
+        self.remove_or_clear_worker_blocks(worker_id, true);
+    }
 
-            // Clear the worker's blocks
-            if let Some(worker_lookup) = self.lookup.get_mut(&worker) {
-                worker_lookup.clear();
-            }
-        }
+    /// Get all worker IDs currently tracked in the radix tree.
+    /// Returns unique worker_ids (ignoring dp_rank differences).
+    pub fn get_workers(&self) -> Vec<WorkerId> {
+        let mut worker_ids: Vec<WorkerId> = self.lookup.keys().map(|w| w.worker_id).collect();
+        worker_ids.sort_unstable();
+        worker_ids.dedup();
+        worker_ids
     }
 
     /// Dump the radix tree as a series of RouterEvents that can reconstruct the tree.
@@ -482,10 +498,10 @@ impl RadixTree {
         let mut event_id = 0u64;
 
         // BFS queue: (current_block, parent_hashes_per_worker, tokens_hash)
-        // parent_hashes_per_worker maps WorkerId -> ExternalSequenceBlockHash
+        // parent_hashes_per_worker maps WorkerWithDpRank -> ExternalSequenceBlockHash
         let mut queue: VecDeque<(
             SharedRadixBlock,
-            HashMap<WorkerId, ExternalSequenceBlockHash>,
+            HashMap<WorkerWithDpRank, ExternalSequenceBlockHash>,
             LocalBlockHash,
         )> = VecDeque::new();
 
@@ -509,7 +525,7 @@ impl RadixTree {
 
                 // Create a store event for this worker
                 let event = RouterEvent {
-                    worker_id: *worker_id,
+                    worker_id: worker_id.worker_id,
                     event: KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
@@ -519,6 +535,7 @@ impl RadixTree {
                                 tokens_hash,
                             }],
                         }),
+                        dp_rank: worker_id.dp_rank,
                     },
                 };
                 events.push(event);
@@ -634,11 +651,11 @@ impl KvIndexerMetrics {
     }
 }
 
-/// Scores representing the overlap of workers.
+/// Scores representing the overlap of workers (with their dp_rank).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverlapScores {
-    // map of worker_id to score
-    pub scores: HashMap<WorkerId, u32>,
+    // map of worker (with dp_rank) to score
+    pub scores: HashMap<WorkerWithDpRank, u32>,
     // List of frequencies that the blocks have been accessed. Entries with value 0 are omitted.
     pub frequencies: Vec<usize>,
 }
@@ -666,10 +683,10 @@ impl OverlapScores {
     ///
     /// ### Arguments
     ///
-    /// * `workers` - An iterator over `WorkerId` references.
+    /// * `workers` - An iterator over `WorkerWithDpRank` references.
     pub fn update_scores<'a, I>(&mut self, workers: I)
     where
-        I: IntoIterator<Item = &'a WorkerId>,
+        I: IntoIterator<Item = &'a WorkerWithDpRank>,
     {
         for worker in workers {
             let score = self.scores.entry(*worker).or_insert(0);
@@ -702,6 +719,12 @@ pub struct MatchRequest {
 pub struct DumpRequest {
     /// Channel to send the dumped events
     pub resp: oneshot::Sender<Vec<RouterEvent>>,
+}
+
+/// A request to get all workers currently tracked
+pub struct GetWorkersRequest {
+    /// Channel to send the worker IDs
+    pub resp: oneshot::Sender<Vec<WorkerId>>,
 }
 
 #[async_trait]
@@ -769,6 +792,8 @@ pub struct KvIndexer {
     match_tx: mpsc::Sender<MatchRequest>,
     /// A sender for remove worker requests.
     remove_worker_tx: mpsc::Sender<WorkerId>,
+    /// A sender for get workers requests.
+    get_workers_tx: mpsc::Sender<GetWorkersRequest>,
     /// A sender for dump requests.
     dump_tx: mpsc::Sender<DumpRequest>,
     /// A handle to the background task managing the KV store.
@@ -797,61 +822,61 @@ impl KvIndexer {
         let (event_tx, event_rx) = mpsc::channel::<RouterEvent>(2048);
         let (match_tx, match_rx) = mpsc::channel::<MatchRequest>(128);
         let (remove_worker_tx, remove_worker_rx) = mpsc::channel::<WorkerId>(16);
+        let (get_workers_tx, get_workers_rx) = mpsc::channel::<GetWorkersRequest>(16);
         let (dump_tx, dump_rx) = mpsc::channel::<DumpRequest>(16);
         let cancel_clone = token.clone();
 
         let task = std::thread::spawn(move || {
-            // create a new tokio runtime which will only perform work on a single thread
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1) // Single-threaded environment
+            // Create a single-threaded tokio runtime
+            let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
 
-            let local_set = tokio::task::LocalSet::new();
+            runtime.block_on(async move {
+                let cancel = cancel_clone;
+                let mut match_rx = match_rx;
+                let mut event_rx = event_rx;
+                let mut remove_worker_rx = remove_worker_rx;
+                let mut get_workers_rx = get_workers_rx;
+                let mut dump_rx = dump_rx;
+                let mut trie = RadixTree::new_with_frequency(expiration_duration);
+                loop {
+                    tokio::select! {
+                        biased;
 
-            runtime.block_on(local_set.run_until(async move {
-                tokio::task::spawn_local(async move {
-                    let cancel = cancel_clone;
-                    let mut match_rx = match_rx;
-                    let mut event_rx = event_rx;
-                    let mut remove_worker_rx = remove_worker_rx;
-                    let mut dump_rx = dump_rx;
-                    let mut trie = RadixTree::new_with_frequency(expiration_duration);
-                    loop {
-                        tokio::select! {
-                            biased;
+                        _ = cancel.cancelled() => {
+                            tracing::debug!("KvCacheIndexer progress loop shutting down");
+                            return;
+                        }
 
-                            _ = cancel.cancelled() => {
-                                tracing::debug!("KvCacheIndexer progress loop shutting down");
-                                return;
-                            }
+                        Some(worker) = remove_worker_rx.recv() => {
+                            trie.remove_worker(worker);
+                        }
 
-                            Some(worker) = remove_worker_rx.recv() => {
-                                trie.remove_worker(worker);
-                            }
+                        Some(get_workers_req) = get_workers_rx.recv() => {
+                            let workers = trie.get_workers();
+                            let _ = get_workers_req.resp.send(workers);
+                        }
 
-                            Some(event) = event_rx.recv() => {
-                                let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
-                                let result = trie.apply_event(event);
-                                metrics.increment_event_applied(event_type, result);
-                            }
+                        Some(event) = event_rx.recv() => {
+                            let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
+                            let result = trie.apply_event(event);
+                            metrics.increment_event_applied(event_type, result);
+                        }
 
-                            Some(dump_req) = dump_rx.recv() => {
-                                let events = trie.dump_tree_as_events();
-                                let _ = dump_req.resp.send(events);
-                            }
+                        Some(dump_req) = dump_rx.recv() => {
+                            let events = trie.dump_tree_as_events();
+                            let _ = dump_req.resp.send(events);
+                        }
 
-                            Some(req) = match_rx.recv() => {
-                                let matches = trie.find_matches(req.sequence, req.early_exit);
-                                let _ = req.resp.send(matches);
-                            }
+                        Some(req) = match_rx.recv() => {
+                            let matches = trie.find_matches(req.sequence, req.early_exit);
+                            let _ = req.resp.send(matches);
                         }
                     }
-                })
-                .await
-                .unwrap()
-            }));
+                }
+            });
 
             tracing::debug!("KvCacheIndexer task completed");
         });
@@ -864,6 +889,7 @@ impl KvIndexer {
             event_tx,
             match_tx,
             remove_worker_tx,
+            get_workers_tx,
             dump_tx,
             task: once,
             kv_block_size,
@@ -907,6 +933,15 @@ impl KvIndexer {
     /// A `mpsc::Sender` for `WorkerId`s.
     pub fn remove_worker_sender(&self) -> mpsc::Sender<WorkerId> {
         self.remove_worker_tx.clone()
+    }
+
+    /// Get a sender for get workers requests.
+    ///
+    /// ### Returns
+    ///
+    /// A `mpsc::Sender` for `GetWorkersRequest`s.
+    pub fn get_workers_sender(&self) -> mpsc::Sender<GetWorkersRequest> {
+        self.get_workers_tx.clone()
     }
 }
 
@@ -980,6 +1015,12 @@ impl KvIndexerInterface for KvIndexer {
     }
 }
 
+impl Drop for KvIndexer {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ShardedMatchRequest {
     sequence: Vec<LocalBlockHash>,
@@ -1040,6 +1081,7 @@ impl KvIndexerSharded {
 
         let mut event_tx = Vec::new();
         let mut remove_worker_tx = Vec::new();
+        let mut get_workers_tx = Vec::new();
         let mut dump_tx = Vec::new(); // Add dump channels
         let mut tasks = Vec::new();
 
@@ -1049,6 +1091,8 @@ impl KvIndexerSharded {
             let (shard_event_tx, mut shard_event_rx) = mpsc::channel::<RouterEvent>(2048);
             let (shard_remove_worker_tx, mut shard_remove_worker_rx) =
                 mpsc::channel::<WorkerId>(16);
+            let (shard_get_workers_tx, mut shard_get_workers_rx) =
+                mpsc::channel::<GetWorkersRequest>(16);
             let (shard_dump_tx, mut shard_dump_rx) = mpsc::channel::<DumpRequest>(16); // Add dump channel
             let mut shard_broadcast_rx = request_broadcast_tx.subscribe();
             let cancel = token.clone();
@@ -1056,56 +1100,55 @@ impl KvIndexerSharded {
 
             event_tx.push(shard_event_tx);
             remove_worker_tx.push(shard_remove_worker_tx);
+            get_workers_tx.push(shard_get_workers_tx);
             dump_tx.push(shard_dump_tx); // Store dump sender
 
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
+            let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
 
             tasks.push(std::thread::spawn(move || {
-                let local_set = tokio::task::LocalSet::new();
+                runtime.block_on(async move {
+                    let mut trie = RadixTree::new_with_frequency(expiration_duration);
+                    loop {
+                        tokio::select! {
+                            biased;
 
-                runtime.block_on(local_set.run_until(async move {
-                    tokio::task::spawn_local(async move {
-                        let mut trie = RadixTree::new_with_frequency(expiration_duration);
-                        loop {
-                            tokio::select! {
-                                biased;
+                            _ = cancel.cancelled() => {
+                                tracing::trace!("KvCacheIndexer progress loop shutting down");
+                                return;
+                            }
 
-                                _ = cancel.cancelled() => {
-                                    tracing::trace!("KvCacheIndexer progress loop shutting down");
-                                    return;
-                                }
+                            Some(worker) = shard_remove_worker_rx.recv() => {
+                                trie.remove_worker(worker);
+                            }
 
-                                Some(worker) = shard_remove_worker_rx.recv() => {
-                                    trie.remove_worker(worker);
-                                }
+                            Some(get_workers_req) = shard_get_workers_rx.recv() => {
+                                let workers = trie.get_workers();
+                                let _ = get_workers_req.resp.send(workers);
+                            }
 
-                                Some(event) = shard_event_rx.recv() => {
-                                    let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
-                                    let result = trie.apply_event(event);
-                                    metrics.increment_event_applied(event_type, result);
-                                }
+                            Some(event) = shard_event_rx.recv() => {
+                                let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
+                                let result = trie.apply_event(event);
+                                metrics.increment_event_applied(event_type, result);
+                            }
 
-                                Some(dump_req) = shard_dump_rx.recv() => {
-                                    let events = trie.dump_tree_as_events();
-                                    let _ = dump_req.resp.send(events);
-                                }
+                            Some(dump_req) = shard_dump_rx.recv() => {
+                                let events = trie.dump_tree_as_events();
+                                let _ = dump_req.resp.send(events);
+                            }
 
-                                Ok(req) = shard_broadcast_rx.recv() => {
-                                    let matches = trie.find_matches(req.sequence, req.early_exit);
-                                    if let Err(e) = req.resp.send(matches).await {
-                                        tracing::trace!("Failed to send match response: {:?}", e);
-                                    }
+                            Ok(req) = shard_broadcast_rx.recv() => {
+                                let matches = trie.find_matches(req.sequence, req.early_exit);
+                                if let Err(e) = req.resp.send(matches).await {
+                                    tracing::trace!("Failed to send match response: {:?}", e);
                                 }
                             }
                         }
-                    })
-                    .await
-                    .unwrap()
-                }));
+                    }
+                });
 
                 tracing::debug!("KvCacheIndexer task completed");
             }));
@@ -1263,6 +1306,12 @@ impl KvIndexerInterface for KvIndexerSharded {
     }
 }
 
+impl Drop for KvIndexerSharded {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -1307,6 +1356,7 @@ mod tests {
             event: KvCacheEvent {
                 event_id,
                 data: add_blocks(hashes, parent),
+                dp_rank: 0,
             },
         }
     }
@@ -1322,6 +1372,7 @@ mod tests {
                         .map(|i| ExternalSequenceBlockHash(*i * 100))
                         .collect(),
                 }),
+                dp_rank: 0,
             },
         }
     }
@@ -1342,10 +1393,22 @@ mod tests {
             vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
             false,
         );
-        assert_eq!(scores.scores.get(&worker_1).unwrap(), &3);
+        assert_eq!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                .unwrap(),
+            &3
+        );
 
         assert_eq!(trie.lookup.len(), 1);
-        assert_eq!(trie.lookup.get(&worker_1).unwrap().len(), 3);
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                .unwrap()
+                .len(),
+            3
+        );
         assert_eq!(trie.root.borrow().workers.len(), 0);
         assert_eq!(trie.root.borrow().children.len(), 1);
         assert_eq!(
@@ -1378,12 +1441,36 @@ mod tests {
             vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
             false,
         );
-        assert_eq!(scores.scores.get(&worker_1).unwrap(), &3);
-        assert_eq!(scores.scores.get(&worker_2).unwrap(), &1);
+        assert_eq!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                .unwrap(),
+            &3
+        );
+        assert_eq!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker_2))
+                .unwrap(),
+            &1
+        );
 
         assert_eq!(trie.lookup.len(), 2);
-        assert_eq!(trie.lookup.get(&worker_1).unwrap().len(), 3);
-        assert_eq!(trie.lookup.get(&worker_2).unwrap().len(), 3);
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_2))
+                .unwrap()
+                .len(),
+            3
+        );
         assert_eq!(trie.root.borrow().workers.len(), 0);
         assert_eq!(trie.root.borrow().children.len(), 1);
         assert_eq!(
@@ -1412,8 +1499,20 @@ mod tests {
         trie.apply_event(create_remove_event(worker_2, 2, vec![5]))
             .unwrap();
         assert_eq!(trie.lookup.len(), 2);
-        assert_eq!(trie.lookup.get(&worker_1).unwrap().len(), 3);
-        assert_eq!(trie.lookup.get(&worker_2).unwrap().len(), 2);
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_2))
+                .unwrap()
+                .len(),
+            2
+        );
         assert_eq!(trie.root.borrow().workers.len(), 0);
         assert_eq!(trie.root.borrow().children.len(), 1);
         assert_eq!(
@@ -1443,8 +1542,20 @@ mod tests {
             .unwrap();
 
         assert_eq!(trie.lookup.len(), 2);
-        assert_eq!(trie.lookup.get(&worker_1).unwrap().len(), 3);
-        assert_eq!(trie.lookup.get(&worker_2).unwrap().len(), 1);
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_2))
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(trie.root.borrow().workers.len(), 0);
         assert_eq!(trie.root.borrow().children.len(), 1);
         assert_eq!(
@@ -1482,12 +1593,36 @@ mod tests {
             vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
             false,
         );
-        assert_eq!(scores.scores.get(&worker_1).unwrap(), &3);
-        assert_eq!(scores.scores.get(&worker_2).unwrap(), &2);
+        assert_eq!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                .unwrap(),
+            &3
+        );
+        assert_eq!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker_2))
+                .unwrap(),
+            &2
+        );
 
         assert_eq!(trie.lookup.len(), 2);
-        assert_eq!(trie.lookup.get(&worker_1).unwrap().len(), 3);
-        assert_eq!(trie.lookup.get(&worker_2).unwrap().len(), 4);
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_2))
+                .unwrap()
+                .len(),
+            4
+        );
         assert_eq!(trie.root.borrow().workers.len(), 0);
         assert_eq!(trie.root.borrow().children.len(), 1);
         assert_eq!(
@@ -1514,7 +1649,7 @@ mod tests {
         );
         assert_eq!(
             trie.lookup
-                .get(&worker_1)
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
                 .unwrap()
                 .get(&ExternalSequenceBlockHash(200))
                 .unwrap()
@@ -1525,7 +1660,7 @@ mod tests {
         );
         assert_eq!(
             trie.lookup
-                .get(&worker_2)
+                .get(&WorkerWithDpRank::from_worker_id(worker_2))
                 .unwrap()
                 .get(&ExternalSequenceBlockHash(200))
                 .unwrap()
@@ -1583,12 +1718,16 @@ mod tests {
             .unwrap();
 
         let result = trie.find_matches(vec![LocalBlockHash(0)], false).scores;
-        assert!(result.len() == 2 && result[&worker_0] == 1 && result[&worker_1] == 1);
+        assert!(
+            result.len() == 2
+                && result[&WorkerWithDpRank::from_worker_id(worker_0)] == 1
+                && result[&WorkerWithDpRank::from_worker_id(worker_1)] == 1
+        );
 
         trie.remove_worker(worker_0);
 
         let result = trie.find_matches(vec![LocalBlockHash(0)], false).scores;
-        assert!(result.len() == 1 && result[&worker_1] == 1);
+        assert!(result.len() == 1 && result[&WorkerWithDpRank::from_worker_id(worker_1)] == 1);
     }
 
     #[test]
@@ -1606,7 +1745,11 @@ mod tests {
 
         // Test clearing an empty worker
         trie.clear_all_blocks(worker_0);
-        assert!(!trie.lookup.contains_key(&worker_0));
+        assert!(
+            !trie
+                .lookup
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
+        );
 
         // Test clearing a worker with shared blocks
         trie.apply_event(create_store_event(worker_0, 0, vec![0, 1, 3], None))
@@ -1615,17 +1758,29 @@ mod tests {
             .unwrap();
 
         let result = trie.find_matches(vec![LocalBlockHash(0)], false).scores;
-        assert!(result.len() == 2 && result[&worker_0] == 1 && result[&worker_1] == 1);
+        assert!(
+            result.len() == 2
+                && result[&WorkerWithDpRank::from_worker_id(worker_0)] == 1
+                && result[&WorkerWithDpRank::from_worker_id(worker_1)] == 1
+        );
 
         trie.clear_all_blocks(worker_0);
 
-        assert!(trie.lookup.contains_key(&worker_0));
-        assert!(trie.lookup.get(&worker_0).unwrap().is_empty());
+        assert!(
+            trie.lookup
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
+        );
+        assert!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_0))
+                .unwrap()
+                .is_empty()
+        );
         let result = trie
             .find_matches(vec![LocalBlockHash(0), LocalBlockHash(2)], false)
             .scores;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[&worker_1], 2);
+        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)], 2);
         let result = trie
             .find_matches(
                 vec![LocalBlockHash(0), LocalBlockHash(1), LocalBlockHash(3)],
@@ -1633,7 +1788,7 @@ mod tests {
             )
             .scores;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[&worker_1], 1);
+        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)], 1);
 
         // Test re-adding blocks after clearing worker
         trie.apply_event(create_store_event(worker_0, 0, vec![4, 5], None))
@@ -1642,19 +1797,32 @@ mod tests {
             .find_matches(vec![LocalBlockHash(4), LocalBlockHash(5)], false)
             .scores;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[&worker_0], 2);
+        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_0)], 2);
 
         // Test multiple clears
         trie.clear_all_blocks(worker_0);
         trie.clear_all_blocks(worker_0);
-        assert!(trie.lookup.contains_key(&worker_0));
+        assert!(
+            trie.lookup
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
+        );
 
         // Test clearing all workers
         trie.clear_all_blocks(worker_0);
         trie.clear_all_blocks(worker_1);
         assert!(!trie.lookup.is_empty());
-        assert!(trie.lookup.get(&worker_0).unwrap().is_empty());
-        assert!(trie.lookup.get(&worker_1).unwrap().is_empty());
+        assert!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_0))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                .unwrap()
+                .is_empty()
+        );
 
         // Test clearing a worker that has been removed
         trie.apply_event(create_store_event(worker_0, 0, vec![6], None))
@@ -1663,20 +1831,35 @@ mod tests {
             .unwrap();
         trie.remove_worker(worker_0);
         trie.clear_all_blocks(worker_0);
-        assert!(!trie.lookup.contains_key(&worker_0));
+        assert!(
+            !trie
+                .lookup
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
+        );
         let result = trie.find_matches(vec![LocalBlockHash(6)], false).scores;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[&worker_1], 1);
+        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)], 1);
 
         // Test clearing a worker that doesn't exist
         let worker_fake = 2;
-        assert!(!trie.lookup.contains_key(&worker_fake));
+        assert!(
+            !trie
+                .lookup
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_fake))
+        );
         trie.clear_all_blocks(worker_fake);
-        assert!(!trie.lookup.contains_key(&worker_fake));
-        assert!(trie.lookup.contains_key(&worker_1));
+        assert!(
+            !trie
+                .lookup
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_fake))
+        );
+        assert!(
+            trie.lookup
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_1))
+        );
         let result = trie.find_matches(vec![LocalBlockHash(6)], false).scores;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[&worker_1], 1);
+        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)], 1);
     }
 
     #[test]
@@ -1699,12 +1882,20 @@ mod tests {
             )
             .scores;
 
-        assert!(result.len() == 2 && result[&worker_0] == 2 && result[&worker_1] == 1);
+        assert!(
+            result.len() == 2
+                && result[&WorkerWithDpRank::from_worker_id(worker_0)] == 2
+                && result[&WorkerWithDpRank::from_worker_id(worker_1)] == 1
+        );
 
         let result = trie
             .find_matches(vec![LocalBlockHash(0), LocalBlockHash(1)], true)
             .scores;
-        assert!(result.len() == 2 && result[&worker_0] == 2 && result[&worker_1] == 1);
+        assert!(
+            result.len() == 2
+                && result[&WorkerWithDpRank::from_worker_id(worker_0)] == 2
+                && result[&WorkerWithDpRank::from_worker_id(worker_1)] == 1
+        );
     }
 
     #[rstest]
@@ -1931,6 +2122,7 @@ mod tests {
                     tokens_hash: LocalBlockHash(13226331709069118873),
                 }],
             }),
+            dp_rank: 0,
         };
         let router_event = RouterEvent::new(worker_id, kv_cache_event);
 
@@ -2202,49 +2394,94 @@ mod tests {
             .unwrap();
 
         // Verify worker_0 has 3 blocks in lookup
-        assert_eq!(trie.lookup.get(&worker_0).unwrap().len(), 3);
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_0))
+                .unwrap()
+                .len(),
+            3
+        );
 
         // Verify that blocks have the correct workers
         let block_1 = trie
             .lookup
-            .get(&worker_0)
+            .get(&WorkerWithDpRank::from_worker_id(worker_0))
             .unwrap()
             .get(&ExternalSequenceBlockHash(100))
             .unwrap();
         assert_eq!(block_1.borrow().workers.len(), 3); // worker_0, worker_1, and worker_2 (all have hash 1)
-        assert!(block_1.borrow().workers.contains_key(&worker_0));
-        assert!(block_1.borrow().workers.contains_key(&worker_1));
-        assert!(block_1.borrow().workers.contains_key(&worker_2));
+        assert!(
+            block_1
+                .borrow()
+                .workers
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
+        );
+        assert!(
+            block_1
+                .borrow()
+                .workers
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_1))
+        );
+        assert!(
+            block_1
+                .borrow()
+                .workers
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_2))
+        );
 
         // Remove worker_0
         trie.remove_worker(worker_0);
 
         // Verify worker_0 is completely removed from lookup table
-        assert!(!trie.lookup.contains_key(&worker_0));
+        assert!(
+            !trie
+                .lookup
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
+        );
         assert_eq!(trie.lookup.len(), 2);
 
         // Verify that worker_0's hash is removed from the workers set
         let block_1 = trie
             .lookup
-            .get(&worker_1)
+            .get(&WorkerWithDpRank::from_worker_id(worker_1))
             .unwrap()
             .get(&ExternalSequenceBlockHash(100))
             .unwrap();
         assert_eq!(block_1.borrow().workers.len(), 2); // worker_1 and worker_2 remain
-        assert!(!block_1.borrow().workers.contains_key(&worker_0));
-        assert!(block_1.borrow().workers.contains_key(&worker_1));
-        assert!(block_1.borrow().workers.contains_key(&worker_2));
+        assert!(
+            !block_1
+                .borrow()
+                .workers
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
+        );
+        assert!(
+            block_1
+                .borrow()
+                .workers
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_1))
+        );
+        assert!(
+            block_1
+                .borrow()
+                .workers
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_2))
+        );
 
         // Verify that blocks with no remaining workers have their children cleared
         // This tests the optimization where empty blocks clear their children
         let block_2 = trie
             .lookup
-            .get(&worker_1)
+            .get(&WorkerWithDpRank::from_worker_id(worker_1))
             .unwrap()
             .get(&ExternalSequenceBlockHash(200))
             .unwrap();
         assert_eq!(block_2.borrow().workers.len(), 1); // only worker_1
-        assert!(block_2.borrow().workers.contains_key(&worker_1));
+        assert!(
+            block_2
+                .borrow()
+                .workers
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_1))
+        );
 
         // Verify match results no longer include worker_0
         let result = trie
@@ -2254,8 +2491,8 @@ mod tests {
             )
             .scores;
         assert_eq!(result.len(), 2);
-        assert!(!result.contains_key(&worker_0));
-        assert!(result.contains_key(&worker_1));
-        assert!(result.contains_key(&worker_2));
+        assert!(!result.contains_key(&WorkerWithDpRank::from_worker_id(worker_0)));
+        assert!(result.contains_key(&WorkerWithDpRank::from_worker_id(worker_1)));
+        assert!(result.contains_key(&WorkerWithDpRank::from_worker_id(worker_2)));
     }
 }

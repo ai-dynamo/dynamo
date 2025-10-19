@@ -17,11 +17,11 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 mod mem;
-pub use mem::MemoryStorage;
+pub use mem::MemoryStore;
 mod nats;
-pub use nats::NATSStorage;
+pub use nats::NATSStore;
 mod etcd;
-pub use etcd::EtcdStorage;
+pub use etcd::EtcdStore;
 
 /// A key that is safe to use directly in the KV store.
 #[derive(Debug, Clone, PartialEq)]
@@ -69,12 +69,14 @@ pub trait KeyValueStore: Send + Sync {
         bucket_name: &str,
         // auto-delete items older than this
         ttl: Option<Duration>,
-    ) -> Result<Box<dyn KeyValueBucket>, StorageError>;
+    ) -> Result<Box<dyn KeyValueBucket>, StoreError>;
 
     async fn get_bucket(
         &self,
         bucket_name: &str,
-    ) -> Result<Option<Box<dyn KeyValueBucket>>, StorageError>;
+    ) -> Result<Option<Box<dyn KeyValueBucket>>, StoreError>;
+
+    fn connection_id(&self) -> u64;
 }
 
 pub struct KeyValueStoreManager(Box<dyn KeyValueStore>);
@@ -88,7 +90,7 @@ impl KeyValueStoreManager {
         &self,
         bucket: &str,
         key: &Key,
-    ) -> Result<Option<T>, StorageError> {
+    ) -> Result<Option<T>, StoreError> {
         let Some(bucket) = self.0.get_bucket(bucket).await? else {
             // No bucket means no cards
             return Ok(None);
@@ -101,7 +103,7 @@ impl KeyValueStoreManager {
             Ok(None) => Ok(None),
             Err(err) => {
                 // TODO look at what errors NATS can give us and make more specific wrappers
-                Err(StorageError::NATSError(err.to_string()))
+                Err(StoreError::NATSError(err.to_string()))
             }
         }
     }
@@ -114,7 +116,7 @@ impl KeyValueStoreManager {
         bucket_name: &str,
         bucket_ttl: Option<Duration>,
     ) -> (
-        tokio::task::JoinHandle<Result<(), StorageError>>,
+        tokio::task::JoinHandle<Result<(), StoreError>>,
         tokio::sync::mpsc::UnboundedReceiver<T>,
     ) {
         let bucket_name = bucket_name.to_string();
@@ -139,7 +141,7 @@ impl KeyValueStoreManager {
                 let _ = tx.send(card);
             }
 
-            Ok::<(), StorageError>(())
+            Ok::<(), StoreError>(())
         });
         (watch_task, rx)
     }
@@ -150,14 +152,14 @@ impl KeyValueStoreManager {
         bucket_ttl: Option<Duration>,
         key: &Key,
         obj: &mut T,
-    ) -> anyhow::Result<StorageOutcome> {
+    ) -> anyhow::Result<StoreOutcome> {
         let obj_json = serde_json::to_string(obj)?;
         let bucket = self.0.get_or_create_bucket(bucket_name, bucket_ttl).await?;
 
         let outcome = bucket.insert(key, &obj_json, obj.revision()).await?;
 
         match outcome {
-            StorageOutcome::Created(revision) | StorageOutcome::Exists(revision) => {
+            StoreOutcome::Created(revision) | StoreOutcome::Exists(revision) => {
                 obj.set_revision(revision);
             }
         }
@@ -176,43 +178,43 @@ pub trait KeyValueBucket: Send {
         key: &Key,
         value: &str,
         revision: u64,
-    ) -> Result<StorageOutcome, StorageError>;
+    ) -> Result<StoreOutcome, StoreError>;
 
     /// Fetch an item from the key-value storage
-    async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StorageError>;
+    async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StoreError>;
 
     /// Delete an item from the bucket
-    async fn delete(&self, key: &Key) -> Result<(), StorageError>;
+    async fn delete(&self, key: &Key) -> Result<(), StoreError>;
 
     /// A stream of items inserted into the bucket.
     /// Every time the stream is polled it will either return a newly created entry, or block until
     /// such time.
     async fn watch(
         &self,
-    ) -> Result<Pin<Box<dyn futures::Stream<Item = bytes::Bytes> + Send + 'life0>>, StorageError>;
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = bytes::Bytes> + Send + 'life0>>, StoreError>;
 
-    async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StorageError>;
+    async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StoreError>;
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum StorageOutcome {
+pub enum StoreOutcome {
     /// The operation succeeded and created a new entry with this revision.
     /// Note that "create" also means update, because each new revision is a "create".
     Created(u64),
     /// The operation did not do anything, the value was already present, with this revision.
     Exists(u64),
 }
-impl fmt::Display for StorageOutcome {
+impl fmt::Display for StoreOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StorageOutcome::Created(revision) => write!(f, "Created at {revision}"),
-            StorageOutcome::Exists(revision) => write!(f, "Exists at {revision}"),
+            StoreOutcome::Created(revision) => write!(f, "Created at {revision}"),
+            StoreOutcome::Exists(revision) => write!(f, "Exists at {revision}"),
         }
     }
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum StorageError {
+pub enum StoreError {
     #[error("Could not find bucket '{0}'")]
     MissingBucket(String),
 
@@ -291,12 +293,12 @@ mod tests {
     async fn test_memory_storage() -> anyhow::Result<()> {
         init();
 
-        let s = Arc::new(MemoryStorage::new());
+        let s = Arc::new(MemoryStore::new());
         let s2 = Arc::clone(&s);
 
         let bucket = s.get_or_create_bucket(BUCKET_NAME, None).await?;
         let res = bucket.insert(&"test1".into(), "value1", 0).await?;
-        assert_eq!(res, StorageOutcome::Created(0));
+        assert_eq!(res, StoreOutcome::Created(0));
 
         let (got_first_tx, got_first_rx) = tokio::sync::oneshot::channel();
         let ingress = tokio::spawn(async move {
@@ -315,27 +317,27 @@ mod tests {
             let v = stream.next().await.unwrap();
             assert_eq!(v, "value3".as_bytes());
 
-            Ok::<_, StorageError>(())
+            Ok::<_, StoreError>(())
         });
 
-        // MemoryStorage uses a HashMap with no inherent ordering, so we must ensure test1 is
+        // MemoryStore uses a HashMap with no inherent ordering, so we must ensure test1 is
         // fetched before test2 is inserted, otherwise they can come out in any order, and we
         // wouldn't be testing the watch behavior.
         got_first_rx.await?;
 
         let res = bucket.insert(&"test2".into(), "value2", 0).await?;
-        assert_eq!(res, StorageOutcome::Created(0));
+        assert_eq!(res, StoreOutcome::Created(0));
 
         // Repeat a key and revision. Ignored.
         let res = bucket.insert(&"test2".into(), "value2", 0).await?;
-        assert_eq!(res, StorageOutcome::Exists(0));
+        assert_eq!(res, StoreOutcome::Exists(0));
 
         // Increment revision
         let res = bucket.insert(&"test2".into(), "value2", 1).await?;
-        assert_eq!(res, StorageOutcome::Created(1));
+        assert_eq!(res, StoreOutcome::Created(1));
 
         let res = bucket.insert(&"test3".into(), "value3", 0).await?;
-        assert_eq!(res, StorageOutcome::Created(0));
+        assert_eq!(res, StoreOutcome::Created(0));
 
         // ingress exits once it has received all values
         let _ = ingress.await?;
@@ -347,12 +349,12 @@ mod tests {
     async fn test_broadcast_stream() -> anyhow::Result<()> {
         init();
 
-        let s: &'static _ = Box::leak(Box::new(MemoryStorage::new()));
+        let s: &'static _ = Box::leak(Box::new(MemoryStore::new()));
         let bucket: &'static _ =
             Box::leak(Box::new(s.get_or_create_bucket(BUCKET_NAME, None).await?));
 
         let res = bucket.insert(&"test1".into(), "value1", 0).await?;
-        assert_eq!(res, StorageOutcome::Created(0));
+        assert_eq!(res, StoreOutcome::Created(0));
 
         let stream = bucket.watch().await?;
         let tap = TappableStream::new(stream, 10).await;
