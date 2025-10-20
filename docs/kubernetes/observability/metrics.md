@@ -53,7 +53,7 @@ If the output is empty, you need to install the dcgm-exporter. For more informat
 Let's start by deploying a simple vLLM aggregated deployment:
 
 ```bash
-export NAMESPACE=dynamo # namespace where dynamo operator is installed
+export NAMESPACE=dynamo-system # namespace where dynamo operator is installed
 pushd components/backends/vllm/deploy
 kubectl apply -f agg.yaml -n $NAMESPACE
 popd

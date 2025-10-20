@@ -15,14 +15,26 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Deploying Inference Graphs to Kubernetes
+# Deploying Dynamo on Kubernetes
 
 High-level guide to Dynamo Kubernetes deployments. Start here, then dive into specific guides.
+
+## Important Terminology
+
+**Kubernetes Namespace**: The K8s namespace where your DynamoGraphDeployment resource is created.
+- Used for: Resource isolation, RBAC, organizing deployments
+- Example: `dynamo-system`, `dynamo-cloud`, `team-a-namespace`
+
+**Dynamo Namespace**: The logical namespace used by Dynamo components for service discovery via etcd.
+- Used for: Runtime component communication, service discovery
+- Specified in: `.spec.services.<ServiceName>.dynamoNamespace` field
+- Example: `my-llm`, `production-model`, `dynamo-dev`
+
+These are independent. A single Kubernetes namespace can host multiple Dynamo namespaces, and vice versa.
 
 ## Pre-deployment Checks
 
 Before deploying the platform, it is recommended to run the pre-deployment checks to ensure the cluster is ready for deployment. Please refer to the [pre-deployment checks](/deploy/cloud/pre-deployment/README.md) for more details.
-
 
 ## 1. Install Platform First
 
@@ -31,13 +43,20 @@ Before deploying the platform, it is recommended to run the pre-deployment check
 export NAMESPACE=dynamo-system
 export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
 
-# 2. Install CRDs
+# 2. Install CRDs (skip if on shared cluster where CRDs already exist)
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-${RELEASE_VERSION}.tgz
 helm install dynamo-crds dynamo-crds-${RELEASE_VERSION}.tgz --namespace default
 
 # 3. Install Platform
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
+```
+
+**For Shared/Multi-Tenant Clusters (Nebius, etc.):**
+
+If your cluster has namespace-restricted Dynamo operators, add this flag to step 3:
+```bash
+--set dynamo-operator.namespaceRestriction.enabled=true
 ```
 
 For more details or customization options (including multinode deployments), see **[Installation Guide for Dynamo Kubernetes Platform](/docs/kubernetes/installation_guide.md)**.
@@ -74,6 +93,8 @@ kubectl get dynamoGraphDeployment -n ${NAMESPACE}
 kubectl port-forward svc/vllm-agg-frontend 8000:8000 -n ${NAMESPACE}
 curl http://localhost:8000/v1/models
 ```
+
+For SLA-based autoscaling, see [SLA Planner Quick Start Guide](/docs/planner/sla_planner_quickstart.md).
 
 ## Understanding Dynamo's Custom Resources
 
