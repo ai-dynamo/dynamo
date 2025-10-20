@@ -612,6 +612,15 @@ class RadixTree:
         """
         ...
 
+    def dump_tree_as_events(self) -> List[str]:
+        """
+        Dump the current RadixTree state as a list of JSON-serialized KV cache events.
+
+        Returns:
+            List of JSON-serialized KV cache events as strings
+        """
+        ...
+
 class KvIndexer:
     """
     A KV Indexer that tracks KV Events emitted by workers. Events include add_block and remove_block.
