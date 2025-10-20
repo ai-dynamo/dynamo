@@ -281,11 +281,21 @@ where
     let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
     let migration = Migration::from_mdc(card).into_operator();
+
+    // Create worker monitor only if busy_threshold is set
+    let worker_monitor = busy_threshold.map(|threshold| {
+        Arc::new(crate::discovery::KvWorkerMonitor::new(
+            Arc::new(client.clone()),
+            threshold,
+        )) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>
+    });
+
     let router =
         PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
             client.clone(),
             router_mode,
             busy_threshold,
+            worker_monitor,
         )
         .await?;
     let service_backend = match router_mode {

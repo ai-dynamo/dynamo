@@ -57,19 +57,20 @@ spec:
             aiperf profile --artifact-dir $ARTIFACT_DIR \
                 --model $TARGET_MODEL \
                 --tokenizer /model-cache/hub/models--openai--gpt-oss-120b/snapshots/b5c939de8f754692c1647ca79fbf85e8c1e70f8a  \
-                --endpoint-type chat  --endpoint /v1/chat/completions \
+                --endpoint-type chat  \
+                --endpoint /v1/chat/completions \
                 --streaming \
                 --url http://$ENDPOINT \
                 --synthetic-input-tokens-mean $isl \
                 --synthetic-input-tokens-stddev 0 \
                 --output-tokens-mean $osl \
                 --output-tokens-stddev 0 \
-                --extra-inputs "{\"max_tokens\":$osl}" \
-                --extra-inputs "{\"min_tokens\":$osl}" \
-                --extra-inputs "{\"ignore_eos\":true}" \
+                --extra-inputs "max_tokens:$osl" \
+                --extra-inputs "min_tokens:$osl" \
+                --extra-inputs "ignore_eos:true" \
                 --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
-                --extra-inputs "{\"repetition_penalty\":1.0}" \
-                --extra-inputs "{\"temperature\": 0.0}" \
+                --extra-inputs "repetition_penalty:1.0" \
+                --extra-inputs "temperature: 0.0" \
                 --concurrency $concurrency \
                 --request-count $((10*concurrency)) \
                 --warmup-request-count $concurrency \

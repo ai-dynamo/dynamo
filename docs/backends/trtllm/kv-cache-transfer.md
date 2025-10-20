@@ -24,10 +24,10 @@ In disaggregated serving architectures, KV cache must be transferred between pre
 ## Default Method: UCX
 By default, TensorRT-LLM uses UCX (Unified Communication X) for KV cache transfer between prefill and decode workers. UCX provides high-performance communication optimized for GPU-to-GPU transfers.
 
-## Experimental Method: NIXL
-TensorRT-LLM also provides experimental support for using **NIXL** (NVIDIA Inference Xfer Library) for KV cache transfer. [NIXL](https://github.com/ai-dynamo/nixl) is NVIDIA's high-performance communication library designed for efficient data transfer in distributed GPU environments.
+## Beta Method: NIXL
+TensorRT-LLM also supports using **NIXL** (NVIDIA Inference Xfer Library) for KV cache transfer. [NIXL](https://github.com/ai-dynamo/nixl) is NVIDIA's high-performance communication library designed for efficient data transfer in distributed GPU environments.
 
-**Note:** NIXL support in TensorRT-LLM is experimental and is not suitable for production environments yet.
+**Note:** NIXL support in TensorRT-LLM is currently beta and may have some sharp edges.
 
 ## Using NIXL for KV Cache Transfer
 

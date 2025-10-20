@@ -51,9 +51,7 @@ class PrefillInterpolator:
             try:
                 with np.load(prefill_npz_fn) as raw_data:
                     self.prefill_isl = raw_data["prefill_isl"]
-                    self.prefill_ttft = (
-                        raw_data["prefill_ttft"] / 1000
-                    )  # convert ms to s
+                    self.prefill_ttft = raw_data["prefill_ttft"]  # in milliseconds
                     self.prefill_thpt_per_gpu = raw_data["prefill_thpt_per_gpu"]
             except FileNotFoundError:
                 logger.error(
@@ -64,7 +62,7 @@ class PrefillInterpolator:
 
         elif raw_data:
             self.prefill_isl = raw_data["prefill_isl"]
-            self.prefill_ttft = raw_data["prefill_ttft"] / 1000  # convert ms to s
+            self.prefill_ttft = raw_data["prefill_ttft"]  # in milliseconds
             self.prefill_thpt_per_gpu = raw_data["prefill_thpt_per_gpu"]
         else:
             raise ValueError("Either profile_results_dir or raw_data must be provided")
@@ -150,7 +148,7 @@ class DecodeInterpolator:
                 method="nearest",
             )
             self.itl_interpolator[nan_mask] = itl_nearest[nan_mask]
-        self.itl_interpolator /= 1000  # convert ms to s
+        # ITL values are in milliseconds
 
         self.thpt_interpolator = scipy.interpolate.griddata(
             (self.x_kv_usage, self.y_context_length),
@@ -230,12 +228,12 @@ if __name__ == "__main__":
     parser.add_argument("--profile_results_dir", type=str, required=True)
     parser.add_argument("--isl", type=int, default=3000)
     parser.add_argument("--osl", type=int, default=150)
-    parser.add_argument("--ttft", type=float, default=0.1, help="in s")
-    parser.add_argument("--itl", type=float, default=0.01, help="in s")
+    parser.add_argument("--ttft", type=float, default=100.0, help="in milliseconds")
+    parser.add_argument("--itl", type=float, default=10.0, help="in milliseconds")
     args = parser.parse_args()
 
     print(f"ISL={args.isl}, OSL={args.osl}")
-    print(f"TTFT={args.ttft}s, ITL={args.itl}s")
+    print(f"TTFT={args.ttft}ms, ITL={args.itl}ms")
     print(f"Using profile results from {args.profile_results_dir}")
     print("")
 
@@ -248,11 +246,11 @@ if __name__ == "__main__":
 
     if est_ttft <= args.ttft:
         print(
-            f"\tEstimated TTFT={est_ttft:.3f}s <= target TTFT={args.ttft:.3f}s. Requests can queue {args.ttft - est_ttft:.3f}s maximally while meeting TTFT SLA."
+            f"\tEstimated TTFT={est_ttft:.2f}ms <= target TTFT={args.ttft:.2f}ms. Requests can queue {args.ttft - est_ttft:.2f}ms maximally while meeting TTFT SLA."
         )
     else:
         print(
-            f"\tEstimated TTFT={est_ttft:.3f}s > target TTFT={args.ttft:.3f}s. Cannot meet TTFT SLA."
+            f"\tEstimated TTFT={est_ttft:.2f}ms > target TTFT={args.ttft:.2f}ms. Cannot meet TTFT SLA."
         )
 
     print(
@@ -274,12 +272,12 @@ if __name__ == "__main__":
     ) = decode_interpolator.find_best_throughput_per_gpu(args.itl, context_length)
     if est_itl <= args.itl:
         print(
-            f"\tEstimated ITL={est_itl:.4f}s <= target ITL={args.itl:.4f}s at {est_kv_usage*100:.2f}% active kv usage."
+            f"\tEstimated ITL={est_itl:.2f}ms <= target ITL={args.itl:.2f}ms at {est_kv_usage*100:.2f}% active kv usage."
         )
         print(
             f"\tEstimated throughput: {est_thpt_per_gpu:.2f} token/s/gpu. Request rate at {est_thpt_per_gpu / args.osl:.2f} requests/s will saturate one GPU."
         )
     else:
         print(
-            f"\tEstimated ITL={est_itl:.4f}s > target ITL={args.itl:.4f}s. Cannot meet ITL SLA."
+            f"\tEstimated ITL={est_itl:.2f}ms > target ITL={args.itl:.2f}ms. Cannot meet ITL SLA."
         )

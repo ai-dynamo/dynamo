@@ -73,7 +73,7 @@ python -m dynamo.vllm \
 
 Deploy prefill and decode workers on separate nodes for optimized resource utilization:
 
-**Node 1**: Run ingress and prefill workers
+**Node 1**: Run ingress and decode worker
 ```bash
 # Start ingress
 python -m dynamo.frontend --router-mode kv &
@@ -85,7 +85,7 @@ python -m dynamo.vllm \
   --enforce-eager
 ```
 
-**Node 2**: Run decode workers
+**Node 2**: Run prefill worker
 ```bash
 # Start decode worker
 python -m dynamo.vllm \
@@ -94,14 +94,3 @@ python -m dynamo.vllm \
   --enforce-eager \
   --is-prefill-worker
 ```
-
-## Large Model Deployment
-
-For models requiring more GPUs than available on a single node such as tensor-parallel-size 16:
-
-**Node 1**: First part of tensor-parallel model
-```bash
-# Start ingress
-python -m dynamo.frontend --router-mode kv &
-```
-

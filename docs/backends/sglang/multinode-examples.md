@@ -39,6 +39,7 @@ python3 -m dynamo.sglang \
   --disaggregation-mode prefill \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 30001 \
+  --host 0.0.0.0 \
   --mem-fraction-static 0.82
 ```
 
@@ -58,6 +59,7 @@ python3 -m dynamo.sglang \
   --disaggregation-mode prefill \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 30001 \
+  --host 0.0.0.0 \
   --mem-fraction-static 0.82
 ```
 
@@ -77,6 +79,7 @@ python3 -m dynamo.sglang \
   --disaggregation-mode decode \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 30001 \
+  --host 0.0.0.0 \
   --mem-fraction-static 0.82
 ```
 
@@ -96,6 +99,7 @@ python3 -m dynamo.sglang \
   --disaggregation-mode decode \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 30001 \
+  --host 0.0.0.0 \
   --mem-fraction-static 0.82
 ```
 

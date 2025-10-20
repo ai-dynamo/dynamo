@@ -289,3 +289,48 @@ async def test_server_raise_cancelled(server, client):
     # TODO: Server to gracefully stop the stream?
     assert not handler.context_is_stopped
     assert not handler.context_is_killed
+
+
+@pytest.mark.forked
+@pytest.mark.asyncio
+async def test_client_context_already_cancelled(server, client):
+    _, handler = server
+    context = Context()
+    context.stop_generating()
+    # TODO: (DIS-830) The outgoing call should raise if context is cancelled
+    stream = await client.generate("_generate_until_context_cancelled", context=context)
+
+    async for _ in stream:
+        raise AssertionError(
+            "Request should be cancelled before any responses are generated"
+        )
+
+    # Give server a moment to update status
+    await asyncio.sleep(0.2)
+
+    # Verify server context cancellation status
+    assert handler.context_is_stopped
+    assert not handler.context_is_killed
+
+
+@pytest.mark.forked
+@pytest.mark.asyncio
+async def test_client_context_cancel_before_await_request(server, client):
+    _, handler = server
+    context = Context()
+    request = client.generate("_generate_until_context_cancelled", context=context)
+    context.stop_generating()
+    # TODO: (DIS-830) The outgoing call should raise if context is cancelled
+    stream = await request
+
+    async for _ in stream:
+        raise AssertionError(
+            "Request should be cancelled before any responses are generated"
+        )
+
+    # Give server a moment to update status
+    await asyncio.sleep(0.2)
+
+    # Verify server context cancellation status
+    assert handler.context_is_stopped
+    assert not handler.context_is_killed

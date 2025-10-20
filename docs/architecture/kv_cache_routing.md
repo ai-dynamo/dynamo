@@ -31,10 +31,28 @@ The main KV-aware routing arguments:
 
 - `--no-track-active-blocks`: Disables tracking of active blocks (blocks being used for ongoing generation/decode phases). By default, the router tracks active blocks for load balancing. Disable this when routing to workers that only perform prefill (no decode phase), as tracking decode load is not relevant. This reduces router overhead and simplifies state management.
 
+- `--busy-threshold`: Threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache usage. When a worker's KV cache active blocks exceed this percentage of total blocks, it will be marked as busy and excluded from routing. If not set, busy detection is disabled. This feature works with all routing modes (`--router-mode kv|round-robin|random`) as long as backend engines emit `ForwardPassMetrics`.
+
 >[!Note]
 > State persistence is only available when KV events are enabled (default). When using `--no-kv-events` with `ApproxKvIndexer`, state persistence is not currently supported.
 >
 > When `--kv-overlap-score-weight` is set to 0 or `--no-kv-events` is set, no KvIndexer will be launched to drain and process KV events. It's recommended to disable your backend workers from relaying events through `KvEventPublisher` to avoid event accumulation in JetStream. WIP to enable disabling publishing of KV events completely in these cases.
+
+## Prerequisites and Limitations
+
+>[!Note]
+> **KV Router Requirements**: The KV router currently works only with **dynamic endpoints** that are registered via [`register_llm()`](../development/backend-guide.md#writing-python-workers-in-dynamo) with `model_input=ModelInput.Tokens`. Your backend handler receives pre-tokenized requests with `token_ids` instead of raw text.
+
+**Current Limitations (WIP):**
+- **Static endpoints**: Not yet supported. The KV router requires dynamic model discovery via etcd to track worker instances and their KV cache states.
+- **Multimodal models**: Not yet supported. The KV router currently tracks token-based blocks only.
+
+**What this means for your setup:**
+1. Backend workers must call `register_llm()` with `model_input=ModelInput.Tokens` (see [Backend Guide](../development/backend-guide.md) or [example implementations](https://github.com/ai-dynamo/dynamo/tree/main/lib/bindings/python/examples/hello_world))
+2. Your handler receives requests with pre-tokenized `token_ids`, not raw text or multimodal inputs
+3. You cannot use `--static-endpoint` mode with KV routing (use dynamic discovery instead)
+
+For basic model registration without KV routing, you can use `--router-mode round-robin` or `--router-mode random` with both static and dynamic endpoints.
 
 ## Overview
 
@@ -154,7 +172,7 @@ For improved fault tolerance, you can launch multiple frontend + router replicas
 
 ### Router State Management
 
-The KV Router tracks two types of state (see [KV Router Architecture](../components/router/README.md) for details):
+The KV Router tracks two types of state (see [KV Router Architecture](../router/README.md) for details):
 
 1. **Prefix blocks (cached KV blocks)**: Maintained in a radix tree, tracking which blocks are cached on each worker. This state is **persistent** - backed by NATS JetStream events and object store snapshots. New router replicas automatically sync this state on startup, ensuring consistent cache awareness across restarts.
 
@@ -316,13 +334,20 @@ To manage stream growth, when the message count exceeds `--router-snapshot-thres
 
 Instead of launching the KV Router via command line, you can create a `KvPushRouter` object directly in Python. This allows per-request routing configuration overrides.
 
+>[!Warning]
+> **Multiple Routers in Same Process**: If you need to run multiple `KvPushRouter` instances for fault tolerance or load distribution, you must launch them in **separate processes** (e.g., using `python -m dynamo.frontend` with different ports). Creating multiple `KvPushRouter` objects in the same Python process is not supported - they share the same cancellation token from the component's primary lease, so dropping one router will cancel all routers in that process. For in-process routing, use a single `KvPushRouter` instance.
+
 ### Methods
 
 The `KvPushRouter` provides the following methods:
 
 - **`generate(token_ids, model, ...)`**: Route and execute a request, returning an async stream of responses. Automatically handles worker selection, state tracking, and lifecycle management.
 
-- **`best_worker_id(token_ids, router_config_override=None, request_id=None)`**: Query which worker would be selected for given tokens. Returns `(worker_id, overlap_blocks)`.
+- **`best_worker(token_ids, router_config_override=None, request_id=None)`**: Query which worker would be selected for given tokens. Returns `(worker_id, dp_rank, overlap_blocks)`.
+  - Without `request_id`: Query-only, doesn't update router state
+  - With `request_id`: Updates router state to track the request. **Note**: If used with `request_id`, you must call `mark_prefill_complete()` and `free()` at the appropriate lifecycle points to maintain accurate load tracking
+
+- **`best_worker_id(token_ids, router_config_override=None, request_id=None)`**: **[DEPRECATED - use `best_worker()` instead]** Query which worker would be selected for given tokens. Returns `(worker_id, overlap_blocks)`.
   - Without `request_id`: Query-only, doesn't update router state
   - With `request_id`: Updates router state to track the request. **Note**: If used with `request_id`, you must call `mark_prefill_complete()` and `free()` at the appropriate lifecycle points to maintain accurate load tracking
 
@@ -506,4 +531,4 @@ This approach gives you complete control over routing decisions, allowing you to
 - **Maximize cache reuse**: Use `best_worker_id()` which considers both prefill and decode loads
 - **Balance load**: Consider both `potential_prefill_tokens` and `potential_decode_blocks` together
 
-See [KV Router Architecture](../components/router/README.md) for performance tuning details.
+See [KV Router Architecture](../router/README.md) for performance tuning details.

@@ -14,12 +14,11 @@
 pub mod prompt;
 pub mod tools;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use dynamo_async_openai::types::{ChatCompletionToolChoiceOption, EncodingFormat};
 use futures::Stream;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
@@ -282,8 +281,10 @@ impl OpenAIPreprocessor {
                             if token_batches.len() == 1 {
                                 builder.token_ids(token_batches[0].clone());
                             } else {
-                                builder.batch_token_ids(Some(token_batches));
-                                builder.token_ids(vec![]);
+                                bail!(
+                                    "Batch token input not supported for more than one token in requests (got {})",
+                                    token_batches.len()
+                                );
                             }
                         }
                     }
@@ -345,16 +346,15 @@ impl OpenAIPreprocessor {
                             builder.token_ids(tokens_vec);
                         }
                         TextInput::Batch(texts) => {
-                            let token_batches: Vec<Vec<u32>> = texts
-                                .par_iter()
-                                .map(|text| {
-                                    self.tokenizer
-                                        .encode(text)
-                                        .map(|encoded| encoded.token_ids().to_vec())
-                                })
-                                .collect::<Result<Vec<_>>>()?;
-                            builder.batch_token_ids(Some(token_batches));
-                            builder.token_ids(vec![]);
+                            if texts.len() == 1 {
+                                let encoding = self.tokenizer.encode(&texts[0])?;
+                                builder.token_ids(encoding.token_ids().to_vec());
+                            } else {
+                                bail!(
+                                    "Batch text input not supported for more than one text in requests (got {})",
+                                    texts.len()
+                                );
+                            }
                         }
                     }
                 }
