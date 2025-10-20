@@ -585,7 +585,7 @@ fn main() -> Result<()> {
             let ids = Arc::clone(&thread_ids);
             let handle = tokio::task::spawn_blocking(move || {
                 let thread_id = std::thread::current().id();
-                ids.lock().unwrap().insert(thread_id);
+                ids.lock().insert(thread_id);
             });
             handles.push(handle);
         }
@@ -594,7 +594,7 @@ fn main() -> Result<()> {
             let _ = handle.await;
         }
 
-        let num_workers = thread_ids.lock().unwrap().len();
+        let num_workers = thread_ids.lock().len();
         println!("  Detected {} worker threads", num_workers);
 
         // Now initialize thread-local on all workers using a barrier
