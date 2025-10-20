@@ -41,14 +41,15 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> Controller<Locality, M
         block_manager: KvBlockManager<Locality, Metadata>,
         component: dynamo_runtime::component::Component,
     ) -> anyhow::Result<Self> {
-        let service = component.service_builder().create().await?;
+        component.add_stats_handler().await?;
 
         let handler = ControllerHandler::new(block_manager.clone());
         let engine = Ingress::for_engine(handler.clone())?;
 
+        let component_clone = component.clone();
         let reset_task = CriticalTaskExecutionHandle::new(
             |_cancel_token| async move {
-                service
+                component_clone
                     .endpoint("controller")
                     .endpoint_builder()
                     .handler(engine)
