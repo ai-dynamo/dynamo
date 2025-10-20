@@ -49,15 +49,19 @@ Quickstart
    :hidden:
    :caption: Kubernetes Deployment
 
-   Quickstart (K8s) <../kubernetes/README.md>
-   Detailed Installation Guide <../kubernetes/installation_guide.md>
-   Creating Deployments <../kubernetes/create_deployment.md>
-   API Reference <../kubernetes/api_reference.md>
-   Dynamo Operator <../kubernetes/dynamo_operator.md>
-   Metrics <../kubernetes/metrics.md>
-   Logging <../kubernetes/logging.md>
-   Multinode <../kubernetes/multinode-deployment.md>
-   Minikube Setup <../kubernetes/minikube.md>
+   Kubernetes <_sections/k8s>
+
+   .. toctree::
+   :hidden:
+   :caption: User Guides
+
+   Tool Calling <guides/tool-calling.md>
+   AI Configurator (Pre-Deployment Profiling) <benchmarks/pre_deployment_profiling.md>
+   Benchmarking <benchmarks/benchmarking.md>
+   Tuning Disaggregated Performance <performance/tuning.md>
+   Writing Python Workers in Dynamo <development/backend-guide.md>
+   Observability <_sections/observability>
+   Glossary <reference/glossary.md>
 
 .. toctree::
    :hidden:
@@ -67,19 +71,6 @@ Quickstart
    Router <router/README>
    Planner <planner/planner_intro>
    KVBM <kvbm/kvbm_intro>
-
-.. toctree::
-   :hidden:
-   :caption: Developer Guide
-
-   Benchmarking Guide <benchmarks/benchmarking.md>
-   KV Router A/B Testing <benchmarks/kv-router-ab-testing.md>
-   SLA Planner (Autoscaling) Quickstart <planner/sla_planner_quickstart>
-   Logging <observability/logging.md>
-   Health Checks <observability/health-checks.md>
-   Tuning Disaggregated Serving Performance <performance/tuning.md>
-   Writing Python Workers in Dynamo <development/backend-guide.md>
-   Glossary <reference/glossary.md>
 
 .. toctree::
    :hidden:
