@@ -63,9 +63,42 @@ class KvConnectorLeader:
         leader = KvbmLeader(world_size, drt=self.drt)
 
         print(f"KvConnectorLeader initialized with engine_id: {engine_id}")
-        self._connector = RustKvConnectorLeader(
-            engine_id, self.drt, vllm_config.cache_config.block_size, leader
-        )
+        # Get kv event consolidator endpoints from vllm_config (pre-computed in main.py)
+        consolidator_vllm_endpoint = None
+        consolidator_output_endpoint = None
+        self._consolidator_output_port = None
+
+        if (
+            hasattr(vllm_config, "consolidator_endpoints")
+            and vllm_config.consolidator_endpoints
+        ):
+            (
+                consolidator_vllm_endpoint,
+                consolidator_output_endpoint,
+            ) = vllm_config.consolidator_endpoints
+            self._consolidator_output_port = int(
+                consolidator_output_endpoint.split(":")[-1]
+            )
+
+            # Pass endpoints to Rust
+            self._connector = RustKvConnectorLeader(
+                engine_id,
+                self.drt,
+                vllm_config.cache_config.block_size,
+                leader,
+                consolidator_vllm_endpoint=consolidator_vllm_endpoint,
+                consolidator_output_endpoint=consolidator_output_endpoint,
+            )
+        else:
+            # No kv event consolidator - pass None to Rust
+            self._connector = RustKvConnectorLeader(
+                engine_id,
+                self.drt,
+                vllm_config.cache_config.block_size,
+                leader,
+                consolidator_vllm_endpoint=None,
+                consolidator_output_endpoint=None,
+            )
 
     # KV Connector
 
