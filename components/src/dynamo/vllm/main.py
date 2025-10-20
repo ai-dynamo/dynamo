@@ -109,7 +109,7 @@ def setup_kv_event_publisher(
     generate_endpoint,
     vllm_config,
     consolidator_enabled: bool = False,
-    consolidator_port: int = 5558,
+    consolidator_port: Optional[int] = 5558,
 ) -> Optional[ZmqKvEventPublisher]:
     """
     Set up KV event publishers for prefix caching if enabled.
