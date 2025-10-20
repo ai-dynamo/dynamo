@@ -1412,7 +1412,10 @@ where
     // 4. Wait for the offload request to complete
     match notify_receiver.await {
         Ok(_) => {
-            tracing::debug!("Offloading transfer to {} completed successfully", storage_name);
+            tracing::debug!(
+                "Offloading transfer to {} completed successfully",
+                storage_name
+            );
         }
         Err(_) => {
             return Err(anyhow::anyhow!(
