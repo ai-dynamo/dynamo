@@ -72,6 +72,7 @@ Quickstart
    :caption: Developer Guide
 
    Benchmarking Guide <benchmarks/benchmarking.md>
+   KV Router A/B Testing <benchmarks/kv-router-ab-testing.md>
    SLA Planner (Autoscaling) Quickstart <kubernetes/sla_planner_quickstart>
    Logging <guides/logging.md>
    Health Checks <guides/health_check.md>
