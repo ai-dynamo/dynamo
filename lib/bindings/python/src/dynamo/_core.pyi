@@ -464,6 +464,13 @@ class WorkerMetricsPublisher:
         """
         Similar to Component.create_service, but only service created through
         this method will interact with KV router of the same component.
+
+        Args:
+            component: The component to create the endpoint for
+            metrics_labels: [DEPRECATED] This parameter is no longer used and will be removed in a future version
+
+        .. deprecated::
+            The metrics_labels parameter is deprecated and has no effect.
         """
 
     def publish(
@@ -745,31 +752,6 @@ class KvRecorder:
         """
         ...
 
-class AggregatedMetrics:
-    """
-    A collection of metrics of the endpoints
-    """
-
-    ...
-
-class KvMetricsAggregator:
-    """
-    A metrics aggregator will collect KV metrics of the endpoints.
-    """
-
-    ...
-
-    def __init__(self, component: Component) -> None:
-        """
-        Create a `KvMetricsAggregator` object
-        """
-
-    def get_metrics(self) -> AggregatedMetrics:
-        """
-        Return the aggregated metrics of the endpoints.
-        """
-        ...
-
 class KvEventPublisher:
     """
     A KV event publisher will publish KV events corresponding to the component.
@@ -878,7 +860,12 @@ class ModelInput:
     ...
 
 class ModelType:
-    """What type of request this model needs: Chat, Completions, Embedding or Tensor"""
+    """What type of request this model needs: Chat, Completions, Embedding, Tensor or Prefill"""
+    Chat: ModelType
+    Completions: ModelType
+    Embedding: ModelType
+    TensorBased: ModelType
+    Prefill: ModelType
     ...
 
 class RouterMode:
@@ -901,8 +888,9 @@ async def register_llm(
     model_name: Optional[str] = None,
     context_length: Optional[int] = None,
     kv_cache_block_size: Optional[int] = None,
-    migration_limit: int = 0,
     router_mode: Optional[RouterMode] = None,
+    migration_limit: int = 0,
+    runtime_config: Optional[ModelRuntimeConfig] = None,
     user_data: Optional[Dict[str, Any]] = None,
     custom_template_path: Optional[str] = None,
 ) -> None:

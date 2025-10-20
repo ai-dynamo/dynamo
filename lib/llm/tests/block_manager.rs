@@ -190,12 +190,12 @@ pub mod llm_kvbm {
             bytes: Vec<u8>,
         ) -> Result<()> {
             let subject = format!("{}.{}", self.subject(), event_name.as_ref());
-            self.drt()
-                .nats_client()
-                .client()
-                .publish(subject, bytes.into())
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to publish to NATS: {}", e))
+
+            let Some(nats_client) = self.drt().nats_client() else {
+                anyhow::bail!("KVBMDynamoRuntimeComponent EventPublisher requires NATS");
+            };
+            nats_client.client().publish(subject, bytes.into()).await?;
+            Ok(())
         }
     }
 

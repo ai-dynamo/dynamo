@@ -232,7 +232,7 @@ python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multipli
 > [!Note]
 > At the time of writing this documentation, you may need to install the latest aiperf from the main source branch to loadgen on the trace files:
 > ```bash
-> pip install git+https://github.com/ai-dynamo/aiperf.git#subdirectory=aiperf
+> pip install git+https://github.com/ai-dynamo/aiperf.git
 > ```
 > However, by the time of release, the aiperf version included in the vLLM runtime container should be up to date enough to use as-is.
 

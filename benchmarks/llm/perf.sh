@@ -235,9 +235,8 @@ for concurrency in "${concurrency_array[@]}"; do
     --num-dataset-entries $(($concurrency*12)) \
     --random-seed 100 \
     --artifact-dir ${artifact_dir} \
-    -- \
+    --ui simple \
     -v \
-    --max-threads ${concurrency} \
     -H 'Authorization: Bearer NOT USED' \
     -H 'Accept: text/event-stream'
 
