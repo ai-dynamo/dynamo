@@ -125,7 +125,7 @@ Other ways to install Dynamo platform could be found here https://github.com/ai-
 
 ## Deploy Inference Graph
 
-We will deploy a LLM model to the Dynamo platform. Here we use `google/gemma-3-1b-it` model with VLLM and disaggregated deployment as an example.
+We will deploy a LLM model to the Dynamo platform. Here we use `Qwen/Qwen3-0.6B` model with VLLM and disaggregated deployment as an example.
 
 In the deployment yaml file, some adjustments have to/ could be made:
 
@@ -168,7 +168,7 @@ spec:
             export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
             export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
             /sbin/ldconfig
-            python3 -m dynamo.vllm --model google/gemma-3-1b-it
+            python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
 ```
 
 ## Deploy the model
@@ -207,7 +207,7 @@ kubectl port-forward deployment/vllm-disagg-frontend  8000:8000 -n ${NAMESPACE}
 curl localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "google/gemma-3-1b-it",
+    "model": "Qwen/Qwen3-0.6B",
     "messages": [
     {
         "role": "user",
@@ -222,5 +222,5 @@ curl localhost:8000/v1/chat/completions \
 ### Response
 
 ```json
-{"id":"chatcmpl-bd0670d9-0342-4eea-97c1-99b69f1f931f","choices":[{"index":0,"message":{"content":"Okay, here’s a detailed character background for your intrepid explorer, tailored to fit the premise of Aeloria, with a focus on a","refusal":null,"tool_calls":null,"role":"assistant","function_call":null,"audio":null},"finish_reason":"stop","logprobs":null}],"created":1756336263,"model":"google/gemma-3-1b-it","service_tier":null,"system_fingerprint":null,"object":"chat.completion","usage":{"prompt_tokens":190,"completion_tokens":29,"total_tokens":219,"prompt_tokens_details":null,"completion_tokens_details":null}}
+{"id":"chatcmpl-bd0670d9-0342-4eea-97c1-99b69f1f931f","choices":[{"index":0,"message":{"content":"Okay, here’s a detailed character background for your intrepid explorer, tailored to fit the premise of Aeloria, with a focus on a","refusal":null,"tool_calls":null,"role":"assistant","function_call":null,"audio":null},"finish_reason":"stop","logprobs":null}],"created":1756336263,"model":"Qwen/Qwen3-0.6B","service_tier":null,"system_fingerprint":null,"object":"chat.completion","usage":{"prompt_tokens":190,"completion_tokens":29,"total_tokens":219,"prompt_tokens_details":null,"completion_tokens_details":null}}
 ```
