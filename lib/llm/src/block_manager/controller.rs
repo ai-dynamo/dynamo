@@ -41,7 +41,7 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> Controller<Locality, M
         block_manager: KvBlockManager<Locality, Metadata>,
         component: dynamo_runtime::component::Component,
     ) -> anyhow::Result<Self> {
-        component.add_stats_handler().await?;
+        component.add_stats_service().await?;
 
         let handler = ControllerHandler::new(block_manager.clone());
         let engine = Ingress::for_engine(handler.clone())?;
