@@ -10,7 +10,7 @@ When running SGLang through Dynamo, SGLang engine metrics are automatically pass
 
 For the complete and authoritative list of all SGLang metrics, always refer to the official documentation linked above.
 
-Dynamo runtime metrics are documented in [docs/guides/metrics.md](../../guides/metrics.md).
+Dynamo runtime metrics are documented in [docs/observability/metrics.md](../../observability/metrics.md).
 
 ## Metric Reference
 
@@ -91,7 +91,7 @@ sglang:cache_hit_rate{model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0075
 - [SGLang GitHub - Metrics Collector](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/metrics/collector.py)
 
 ### Dynamo Metrics
-- **Dynamo Metrics Guide**: See `docs/guides/metrics.md` for complete documentation on Dynamo runtime metrics
+- **Dynamo Metrics Guide**: See [docs/observability/metrics.md](../../observability/metrics.md) for complete documentation on Dynamo runtime metrics
 - **Dynamo Runtime Metrics**: Metrics prefixed with `dynamo_*` for runtime, components, endpoints, and namespaces
   - Implementation: `lib/runtime/src/metrics.rs` (Rust runtime metrics)
   - Metric names: `lib/runtime/src/metrics/prometheus_names.rs` (metric name constants)

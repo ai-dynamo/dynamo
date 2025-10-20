@@ -10,7 +10,7 @@ When running vLLM through Dynamo, vLLM engine metrics are automatically passed t
 
 For the complete and authoritative list of all vLLM metrics, always refer to the official documentation linked above.
 
-Dynamo runtime metrics are documented in [docs/guides/metrics.md](../../guides/metrics.md).
+Dynamo runtime metrics are documented in [docs/observability/metrics.md](../../observability/metrics.md).
 
 ## Metric Reference
 
@@ -96,7 +96,7 @@ vllm:time_to_first_token_seconds_sum{model_name="meta-llama/Llama-3.1-8B"} 89.38
 - [vLLM GitHub - Metrics Implementation](https://github.com/vllm-project/vllm/tree/main/vllm/engine/metrics)
 
 ### Dynamo Metrics
-- **Dynamo Metrics Guide**: See `docs/guides/metrics.md` for complete documentation on Dynamo runtime metrics
+- **Dynamo Metrics Guide**: See [docs/observability/metrics.md](../../observability/metrics.md) for complete documentation on Dynamo runtime metrics
 - **Dynamo Runtime Metrics**: Metrics prefixed with `dynamo_*` for runtime, components, endpoints, and namespaces
   - Implementation: `lib/runtime/src/metrics.rs` (Rust runtime metrics)
   - Metric names: `lib/runtime/src/metrics/prometheus_names.rs` (metric name constants)

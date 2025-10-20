@@ -49,39 +49,35 @@ impl WorkerMetricsPublisher {
     }
 
     #[pyo3(signature = (component, metrics_labels = None))]
+    #[allow(unused_variables)]
     fn create_endpoint<'p>(
         &self,
         py: Python<'p>,
         component: Component,
-        metrics_labels: Option<Vec<(String, String)>>,
+        metrics_labels: Option<Vec<(String, String)>>, // TODO: fully remove this
     ) -> PyResult<Bound<'p, PyAny>> {
+        // Emit deprecation warning if metrics_labels is provided
+        if metrics_labels.is_some() {
+            let warnings = py.import("warnings")?;
+            warnings.call_method1(
+                "warn",
+                (
+                    "The 'metrics_labels' parameter is deprecated and no longer used. It will be removed in a future version.",
+                    py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
+                ),
+            )?;
+        }
+
         let rs_publisher = self.inner.clone();
         let rs_component = component.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // Convert Python labels to Option<&[(&str, &str)]> expected by Rust API
-            let metrics_labels_ref: Option<Vec<(&str, &str)>> =
-                if let Some(metrics_labels) = metrics_labels.as_ref() {
-                    if metrics_labels.is_empty() {
-                        None
-                    } else {
-                        Some(
-                            metrics_labels
-                                .iter()
-                                .map(|(k, v)| (k.as_str(), v.as_str()))
-                                .collect(),
-                        )
-                    }
-                } else {
-                    None
-                };
-
             // Register Prometheus metrics first
             rs_publisher
                 .register_prometheus_metrics(&rs_component)
                 .map_err(to_pyerr)?;
 
             rs_publisher
-                .create_endpoint(rs_component, metrics_labels_ref.as_deref())
+                .create_endpoint(rs_component)
                 .await
                 .map_err(to_pyerr)?;
             Ok(())
@@ -548,96 +544,6 @@ impl ApproxKvIndexer {
                 .await
                 .map_err(to_pyerr)?;
             Ok(())
-        })
-    }
-}
-
-#[pyclass]
-#[derive(Clone)]
-pub(crate) struct EndpointKvMetrics {
-    #[pyo3(get, set)]
-    pub worker_id: WorkerId,
-    #[pyo3(get, set)]
-    pub request_active_slots: u64,
-    #[pyo3(get, set)]
-    pub request_total_slots: u64,
-    #[pyo3(get, set)]
-    pub kv_active_blocks: u64,
-    #[pyo3(get, set)]
-    pub kv_total_blocks: u64,
-    #[pyo3(get, set)]
-    pub num_requests_waiting: u64,
-    #[pyo3(get, set)]
-    pub gpu_cache_usage_perc: f32,
-    #[pyo3(get, set)]
-    pub gpu_prefix_cache_hit_rate: f32,
-}
-
-#[pyclass]
-#[derive(Clone)]
-pub(crate) struct AggregatedMetrics {
-    #[pyo3(get, set)]
-    pub endpoints: Vec<EndpointKvMetrics>,
-    #[pyo3(get, set)]
-    pub load_avg: f64,
-    #[pyo3(get, set)]
-    pub load_std: f64,
-}
-
-#[pyclass]
-pub(crate) struct KvMetricsAggregator {
-    inner: Arc<llm_rs::kv_router::metrics_aggregator::KvMetricsAggregator>,
-}
-
-#[pymethods]
-impl KvMetricsAggregator {
-    #[new]
-    fn new(component: Component) -> PyResult<Self> {
-        let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        runtime.block_on(async {
-            let inner = llm_rs::kv_router::metrics_aggregator::KvMetricsAggregator::new(
-                component.inner.clone(),
-                component.inner.drt().runtime().child_token(),
-            )
-            .await;
-            Ok(Self {
-                inner: inner.into(),
-            })
-        })
-    }
-
-    fn get_metrics<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        // TODO: update EndpointKvMetrics to match the new ForwardPassMetrics struct
-        let endpoints = self.inner.get_endpoints();
-        let load_avg = endpoints.load_avg;
-        let load_std = endpoints.load_std;
-
-        let endpoint_kv_metrics = endpoints
-            .endpoints
-            .into_iter()
-            .map(|(worker_id, endpoint)| {
-                let metrics = endpoint.data;
-                let LoadMetrics::EngineLoadMetrics(fwd_pass_metrics) = metrics else {
-                    panic!("Endpoints do not contain forward pass metrics.");
-                };
-                EndpointKvMetrics {
-                    worker_id,
-                    request_active_slots: fwd_pass_metrics.worker_stats.request_active_slots,
-                    request_total_slots: fwd_pass_metrics.worker_stats.request_total_slots,
-                    kv_active_blocks: fwd_pass_metrics.kv_stats.kv_active_blocks,
-                    kv_total_blocks: fwd_pass_metrics.kv_stats.kv_total_blocks,
-                    num_requests_waiting: fwd_pass_metrics.worker_stats.num_requests_waiting,
-                    gpu_cache_usage_perc: fwd_pass_metrics.kv_stats.gpu_cache_usage_perc,
-                    gpu_prefix_cache_hit_rate: fwd_pass_metrics.kv_stats.gpu_prefix_cache_hit_rate,
-                }
-            })
-            .collect();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            Ok(AggregatedMetrics {
-                endpoints: endpoint_kv_metrics,
-                load_avg,
-                load_std,
-            })
         })
     }
 }

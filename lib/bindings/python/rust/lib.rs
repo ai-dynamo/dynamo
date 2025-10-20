@@ -146,9 +146,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::OverlapScores>()?;
     m.add_class::<llm::kv::KvIndexer>()?;
     m.add_class::<llm::kv::ApproxKvIndexer>()?;
-    m.add_class::<llm::kv::EndpointKvMetrics>()?;
-    m.add_class::<llm::kv::AggregatedMetrics>()?;
-    m.add_class::<llm::kv::KvMetricsAggregator>()?;
     m.add_class::<llm::kv::KvEventPublisher>()?;
     m.add_class::<llm::kv::RadixTree>()?;
     m.add_class::<llm::kv::ZmqKvEventListener>()?;
@@ -220,6 +217,20 @@ fn register_llm<'p>(
     user_data: Option<&Bound<'p, PyDict>>,
     custom_template_path: Option<&str>,
 ) -> PyResult<Bound<'p, PyAny>> {
+    // Validate Prefill model type requirements
+    if model_type.inner == llm_rs::model_type::ModelType::Prefill {
+        if !matches!(model_input, ModelInput::Tokens) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "ModelType::Prefill requires model_input to be ModelInput::Tokens",
+            ));
+        }
+        if migration_limit != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "ModelType::Prefill requires migration_limit to be 0",
+            ));
+        }
+    }
+
     let model_input = match model_input {
         ModelInput::Text => llm_rs::model_type::ModelInput::Text,
         ModelInput::Tokens => llm_rs::model_type::ModelInput::Tokens,
@@ -372,6 +383,10 @@ impl ModelType {
     #[classattr]
     const TensorBased: Self = ModelType {
         inner: llm_rs::model_type::ModelType::TensorBased,
+    };
+    #[classattr]
+    const Prefill: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Prefill,
     };
 
     fn __or__(&self, other: &Self) -> Self {
@@ -649,10 +664,11 @@ impl Component {
         })
     }
 
+    /// NATS specific stats/metrics call
     fn create_service<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let builder = self.inner.service_builder();
+        let mut inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let _ = builder.create().await.map_err(to_pyerr)?;
+            inner.add_stats_service().await.map_err(to_pyerr)?;
             Ok(())
         })
     }

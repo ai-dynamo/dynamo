@@ -19,17 +19,7 @@ from typing import List
 
 import pytest
 
-from dynamo.llm import (
-    ApproxKvIndexer,
-    ForwardPassMetrics,
-    KvEventPublisher,
-    KvIndexer,
-    KvMetricsAggregator,
-    KvStats,
-    RadixTree,
-    WorkerMetricsPublisher,
-    WorkerStats,
-)
+from dynamo.llm import ApproxKvIndexer, KvEventPublisher, KvIndexer, RadixTree
 from dynamo.runtime import Component, DistributedRuntime
 
 pytestmark = pytest.mark.pre_merge
@@ -226,80 +216,3 @@ class EventPublisher:
             ],  # block_hashes
         )
         self.event_id_counter += 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.forked
-async def test_metrics_aggregator(distributed_runtime):
-    namespace = "kv_test"
-    component = "metrics"
-    kv_listener = distributed_runtime.namespace(namespace).component(component)
-    await kv_listener.create_service()
-
-    # aggregator
-    metrics_aggregator = KvMetricsAggregator(kv_listener)
-
-    # has nothing to aggregate as worker has not started
-    metrics = await metrics_aggregator.get_metrics()
-    assert not metrics.endpoints
-
-    expected_metrics = {
-        "request_active_slots": 0,
-        "request_total_slots": 1024,
-        "kv_active_blocks": 523,
-        "kv_total_blocks": 777,
-        "num_requests_waiting": 10,
-        "gpu_cache_usage_perc": 0.5,
-        "gpu_prefix_cache_hit_rate": 0.75,
-    }
-
-    # need 'create_task' to put publisher task in the background
-    asyncio.create_task(metrics_publisher_task(kv_listener, expected_metrics))
-
-    # needs time for publisher to spawn up
-    # Using shorter intervals for faster detection in normal cases
-    for i in range(20):  # Try up to 20 times (10 seconds total)
-        await asyncio.sleep(0.5)  # Wait 500ms between retries
-        metrics = await metrics_aggregator.get_metrics()
-        if metrics.endpoints:
-            break
-    assert metrics.endpoints, f"No metrics endpoints found after {(i+1)*0.5}s"
-    for endpoint in metrics.endpoints:
-        # [TODO] not really checking id for now, can't get it as create_endpoint()
-        # create and serve the endpoint internally
-        assert endpoint.worker_id != 0
-        assert endpoint.request_active_slots == expected_metrics["request_active_slots"]
-        assert endpoint.request_total_slots == expected_metrics["request_total_slots"]
-        assert endpoint.kv_active_blocks == expected_metrics["kv_active_blocks"]
-        assert endpoint.kv_total_blocks == expected_metrics["kv_total_blocks"]
-
-
-async def metrics_publisher_task(kv_listener, expected_metrics):
-    # Construct the structured ForwardPassMetrics payload expected by the
-    # current Rust bindings instead of passing the individual scalar values
-    # directly. The API for `WorkerMetricsPublisher.publish`
-    # changed from a list of positional scalars to a single
-    # `ForwardPassMetrics` object.
-
-    metrics_publisher = WorkerMetricsPublisher()
-
-    worker_stats = WorkerStats(
-        expected_metrics["request_active_slots"],
-        expected_metrics["request_total_slots"],
-        expected_metrics["num_requests_waiting"],
-        0,  # data_parallel_rank (0 = DP not enabled)
-    )
-
-    kv_stats = KvStats(
-        expected_metrics["kv_active_blocks"],
-        expected_metrics["kv_total_blocks"],
-        expected_metrics["gpu_cache_usage_perc"],
-        expected_metrics["gpu_prefix_cache_hit_rate"],
-    )
-
-    metrics = ForwardPassMetrics(worker_stats, kv_stats, None)
-
-    # Publish and expose the metrics via the endpoint so that the aggregator
-    # test can discover them.
-    metrics_publisher.publish(metrics)
-    await metrics_publisher.create_endpoint(kv_listener)
