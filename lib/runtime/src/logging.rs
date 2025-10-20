@@ -27,7 +27,7 @@
 //! ```
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Once;
+use std::sync::{Mutex, Once};
 
 use figment::{
     Figment,
@@ -113,6 +113,16 @@ const DEFAULT_OTEL_SERVICE_NAME: &str = "dynamo";
 
 /// Once instance to ensure the logger is only initialized once
 static INIT: Once = Once::new();
+
+/// Reload handle for the OpenTelemetry layer, allowing dynamic activation of OTLP exports
+static OTEL_RELOAD_HANDLE: once_cell::sync::OnceCell<
+    Mutex<
+        tracing_subscriber::reload::Handle<
+            Box<dyn Layer<Registry> + Send + Sync>,
+            Registry,
+        >,
+    >,
+> = once_cell::sync::OnceCell::new();
 
 #[derive(Serialize, Deserialize, Debug)]
 struct LoggingConfig {
@@ -704,6 +714,89 @@ pub fn get_distributed_tracing_context() -> Option<DistributedTraceContext> {
         .flatten()
 }
 
+/// Create an OpenTelemetry layer with or without OTLP exports
+/// Note: Filter must be applied outside this function to allow reloading
+fn create_otel_layer(
+    with_exports: bool,
+) -> Result<Box<dyn Layer<Registry> + Send + Sync>, Box<dyn std::error::Error>> {
+    let service_name = get_service_name();
+
+    if with_exports && otlp_exporter_enabled() {
+        // Export enabled: create OTLP exporter with batch processor
+        let endpoint = std::env::var(OTEL_EXPORT_ENDPOINT_ENV)
+            .unwrap_or_else(|_| DEFAULT_OTLP_ENDPOINT.to_string());
+
+        tracing::info!(
+            "OpenTelemetry OTLP export enabled, endpoint: {}, service: {}",
+            endpoint,
+            service_name
+        );
+
+        // Initialize OTLP exporter using gRPC (Tonic)
+        let otlp_exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint)
+            .build()?;
+
+        // Create tracer provider with batch exporter and service name
+        let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_batch_exporter(otlp_exporter)
+            .with_resource(
+                opentelemetry_sdk::Resource::builder_empty()
+                    .with_service_name(service_name.clone())
+                    .build(),
+            )
+            .build();
+
+        let tracer = tracer_provider.tracer(service_name);
+        Ok(Box::new(tracing_opentelemetry::layer().with_tracer(tracer)))
+    } else {
+        // No export - traces generated locally only (for logging/trace IDs)
+        tracing::info!(
+            "OpenTelemetry OTLP export disabled, traces local only, service: {}",
+            service_name
+        );
+
+        let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_resource(
+                opentelemetry_sdk::Resource::builder_empty()
+                    .with_service_name(service_name.clone())
+                    .build(),
+            )
+            .build();
+
+        let tracer = tracer_provider.tracer(service_name);
+        Ok(Box::new(tracing_opentelemetry::layer().with_tracer(tracer)))
+    }
+}
+
+/// Activate OTLP trace exports if the environment variable is set
+/// This should be called after the Tokio runtime is available
+pub fn activate_otel_exports() -> Result<(), Box<dyn std::error::Error>> {
+    if !otlp_exporter_enabled() {
+        tracing::debug!("OTLP export not enabled, skipping activation");
+        return Ok(());
+    }
+
+    if let Some(handle_mutex) = OTEL_RELOAD_HANDLE.get() {
+        let handle = handle_mutex.lock().map_err(|e| {
+            format!("Failed to acquire OTEL reload handle lock: {}", e)
+        })?;
+
+        // Create new OTEL layer with exports enabled
+        let new_layer = create_otel_layer(true)?;
+        
+        handle.reload(new_layer).map_err(|e| {
+            format!("Failed to reload OTEL layer: {}", e)
+        })?;
+
+        tracing::info!("OTLP trace exports activated successfully");
+        Ok(())
+    } else {
+        Err("OTEL reload handle not initialized".into())
+    }
+}
+
 /// Initialize the logger - must be called when Tokio runtime is available
 pub fn init() {
     INIT.call_once(|| {
@@ -739,7 +832,6 @@ fn setup_logging() {
 fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let fmt_filter_layer = filters(load_config());
     let trace_filter_layer = filters(load_config());
-    let otel_filter_layer = filters(load_config());
 
     if jsonl_logging_enabled() {
         let l = fmt::layer()
@@ -749,61 +841,20 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             .with_writer(std::io::stderr)
             .with_filter(fmt_filter_layer);
 
-        // Create OpenTelemetry tracer - conditionally export to OTLP based on env var
-        let service_name = get_service_name();
+        // Create initial OTEL layer without exports (will be reloaded later if needed)
+        let initial_otel_layer = create_otel_layer(false)?;
+        
+        // Create a reloadable layer
+        let (otel_layer, reload_handle) = tracing_subscriber::reload::Layer::new(initial_otel_layer);
 
-        // Build tracer provider - with or without OTLP export
-        let tracer_provider = if otlp_exporter_enabled() {
-            // Export enabled: create OTLP exporter with batch processor
-            let endpoint = std::env::var(OTEL_EXPORT_ENDPOINT_ENV)
-                .unwrap_or_else(|_| DEFAULT_OTLP_ENDPOINT.to_string());
+        // Store the reload handle globally for later activation
+        OTEL_RELOAD_HANDLE
+            .set(Mutex::new(reload_handle))
+            .map_err(|_| "Failed to set OTEL reload handle")?;
 
-            tracing::info!(
-                "OpenTelemetry OTLP export enabled, endpoint: {}, service: {}",
-                endpoint,
-                service_name
-            );
-
-            // Initialize OTLP exporter using gRPC (Tonic)
-            let otlp_exporter = opentelemetry_otlp::SpanExporter::builder()
-                .with_tonic()
-                .with_endpoint(endpoint)
-                .build()?;
-
-            // Create tracer provider with batch exporter and service name
-            opentelemetry_sdk::trace::SdkTracerProvider::builder()
-                .with_batch_exporter(otlp_exporter)
-                .with_resource(
-                    opentelemetry_sdk::Resource::builder_empty()
-                        .with_service_name(service_name.clone())
-                        .build(),
-                )
-                .build()
-        } else {
-            // No export - traces generated locally only (for logging/trace IDs)
-            tracing::info!(
-                "OpenTelemetry OTLP export disabled, traces local only, service: {}",
-                service_name
-            );
-
-            opentelemetry_sdk::trace::SdkTracerProvider::builder()
-                .with_resource(
-                    opentelemetry_sdk::Resource::builder_empty()
-                        .with_service_name(service_name.clone())
-                        .build(),
-                )
-                .build()
-        };
-
-        // Get a tracer from the provider
-        let tracer = tracer_provider.tracer(service_name);
-
+        // TEMPORARY: No filter on OTEL layer for debugging
         tracing_subscriber::registry()
-            .with(
-                tracing_opentelemetry::layer()
-                    .with_tracer(tracer)
-                    .with_filter(otel_filter_layer),
-            )
+            .with(otel_layer)
             .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
             .with(l)
             .init();

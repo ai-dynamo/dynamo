@@ -93,6 +93,7 @@ fn get_span_for_direct_context(
 /// import the module.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    logging::init();
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
@@ -356,10 +357,11 @@ impl DistributedRuntime {
 
         let runtime = worker.runtime().clone();
 
-        // Initialize logging in context where tokio runtime is available
-        // otel exporter requires it
+        // Activate OTLP exports if enabled - requires tokio runtime
         runtime.secondary().block_on(async {
-            rs::logging::init();
+            if let Err(e) = rs::logging::activate_otel_exports() {
+                eprintln!("Failed to activate OTEL exports: {}", e);
+            }
         });
 
         let inner =
