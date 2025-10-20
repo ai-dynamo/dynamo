@@ -140,7 +140,8 @@ impl NatsWorker {
                                     warn!(error=%e, fails = consecutive_failures, "nats: flush(size) failed");
                                     // Put back the (not flushed) messages: leave in `buf`
                                     // Backoff and possibly trip breaker
-                                    let mut backoff = self.backoff_base.saturating_mul(1 << (consecutive_failures.min(15)));
+                                    let exp = 2u32.saturating_pow(consecutive_failures.min(15));
+                                    let mut backoff = self.backoff_base.saturating_mul(exp);
                                     if backoff > self.max_backoff { backoff = self.max_backoff; }
                                     time::sleep(Self::jittered(backoff)).await;
                                     if consecutive_failures >= self.cb_threshold {
@@ -168,7 +169,8 @@ impl NatsWorker {
                     if let Err(e) = Self::flush(&self.js, &self.subject, &mut buf).await {
                         consecutive_failures += 1;
                         warn!(error=%e, fails=consecutive_failures, "nats: flush(interval) failed");
-                        let mut backoff = self.backoff_base.saturating_mul(1 << (consecutive_failures.min(15)));
+                        let exp = 2u32.saturating_pow(consecutive_failures.min(15));
+                        let mut backoff = self.backoff_base.saturating_mul(exp);
                         if backoff > self.max_backoff { backoff = self.max_backoff; }
                         time::sleep(Self::jittered(backoff)).await;
                         if consecutive_failures >= self.cb_threshold {
