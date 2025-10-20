@@ -217,6 +217,20 @@ fn register_llm<'p>(
     user_data: Option<&Bound<'p, PyDict>>,
     custom_template_path: Option<&str>,
 ) -> PyResult<Bound<'p, PyAny>> {
+    // Validate Prefill model type requirements
+    if model_type.inner == llm_rs::model_type::ModelType::Prefill {
+        if !matches!(model_input, ModelInput::Tokens) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "ModelType::Prefill requires model_input to be ModelInput::Tokens",
+            ));
+        }
+        if migration_limit != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "ModelType::Prefill requires migration_limit to be 0",
+            ));
+        }
+    }
+
     let model_input = match model_input {
         ModelInput::Text => llm_rs::model_type::ModelInput::Text,
         ModelInput::Tokens => llm_rs::model_type::ModelInput::Tokens,
@@ -369,6 +383,10 @@ impl ModelType {
     #[classattr]
     const TensorBased: Self = ModelType {
         inner: llm_rs::model_type::ModelType::TensorBased,
+    };
+    #[classattr]
+    const Prefill: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Prefill,
     };
 
     fn __or__(&self, other: &Self) -> Self {

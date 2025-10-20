@@ -55,7 +55,7 @@ impl DistributedRuntime {
             (Some(etcd_client), store)
         };
 
-        let nats_client = nats_config.clone().connect().await?;
+        let nats_client = Some(nats_config.clone().connect().await?);
 
         // Start system status server for health and metrics if enabled in configuration
         let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
@@ -96,22 +96,24 @@ impl DistributedRuntime {
             system_health,
         };
 
-        let nats_client_metrics = DRTNatsClientPrometheusMetrics::new(
-            &distributed_runtime,
-            nats_client_for_metrics.client().clone(),
-        )?;
-        let mut drt_hierarchies = distributed_runtime.parent_hierarchy();
-        drt_hierarchies.push(distributed_runtime.hierarchy());
-        // Register a callback to update NATS client metrics
-        let nats_client_callback = Arc::new({
-            let nats_client_clone = nats_client_metrics.clone();
-            move || {
-                nats_client_clone.set_from_client_stats();
-                Ok(())
-            }
-        });
-        distributed_runtime
-            .register_prometheus_update_callback(drt_hierarchies, nats_client_callback);
+        if let Some(nats_client_for_metrics) = nats_client_for_metrics {
+            let nats_client_metrics = DRTNatsClientPrometheusMetrics::new(
+                &distributed_runtime,
+                nats_client_for_metrics.client().clone(),
+            )?;
+            let mut drt_hierarchies = distributed_runtime.parent_hierarchy();
+            drt_hierarchies.push(distributed_runtime.hierarchy());
+            // Register a callback to update NATS client metrics
+            let nats_client_callback = Arc::new({
+                let nats_client_clone = nats_client_metrics.clone();
+                move || {
+                    nats_client_clone.set_from_client_stats();
+                    Ok(())
+                }
+            });
+            distributed_runtime
+                .register_prometheus_update_callback(drt_hierarchies, nats_client_callback);
+        }
 
         // Initialize the uptime gauge in SystemHealth
         distributed_runtime
@@ -245,8 +247,8 @@ impl DistributedRuntime {
         )
     }
 
-    pub(crate) fn service_client(&self) -> ServiceClient {
-        ServiceClient::new(self.nats_client.clone())
+    pub(crate) fn service_client(&self) -> Option<ServiceClient> {
+        self.nats_client().map(|nc| ServiceClient::new(nc.clone()))
     }
 
     pub async fn tcp_server(&self) -> Result<Arc<tcp::server::TcpStreamServer>> {
@@ -261,8 +263,8 @@ impl DistributedRuntime {
             .clone())
     }
 
-    pub fn nats_client(&self) -> nats::Client {
-        self.nats_client.clone()
+    pub fn nats_client(&self) -> Option<&nats::Client> {
+        self.nats_client.as_ref()
     }
 
     /// Get system status server information if available

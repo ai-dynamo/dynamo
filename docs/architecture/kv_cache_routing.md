@@ -38,6 +38,22 @@ The main KV-aware routing arguments:
 >
 > When `--kv-overlap-score-weight` is set to 0 or `--no-kv-events` is set, no KvIndexer will be launched to drain and process KV events. It's recommended to disable your backend workers from relaying events through `KvEventPublisher` to avoid event accumulation in JetStream. WIP to enable disabling publishing of KV events completely in these cases.
 
+## Prerequisites and Limitations
+
+>[!Note]
+> **KV Router Requirements**: The KV router currently works only with **dynamic endpoints** that are registered via [`register_llm()`](../development/backend-guide.md#writing-python-workers-in-dynamo) with `model_input=ModelInput.Tokens`. Your backend handler receives pre-tokenized requests with `token_ids` instead of raw text.
+
+**Current Limitations (WIP):**
+- **Static endpoints**: Not yet supported. The KV router requires dynamic model discovery via etcd to track worker instances and their KV cache states.
+- **Multimodal models**: Not yet supported. The KV router currently tracks token-based blocks only.
+
+**What this means for your setup:**
+1. Backend workers must call `register_llm()` with `model_input=ModelInput.Tokens` (see [Backend Guide](../development/backend-guide.md) or [example implementations](https://github.com/ai-dynamo/dynamo/tree/main/lib/bindings/python/examples/hello_world))
+2. Your handler receives requests with pre-tokenized `token_ids`, not raw text or multimodal inputs
+3. You cannot use `--static-endpoint` mode with KV routing (use dynamic discovery instead)
+
+For basic model registration without KV routing, you can use `--router-mode round-robin` or `--router-mode random` with both static and dynamic endpoints.
+
 ## Overview
 
 The KV-aware router operates on two key principles to optimize request routing:

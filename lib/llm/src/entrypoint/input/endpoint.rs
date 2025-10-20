@@ -32,17 +32,18 @@ pub async fn run(
     let cancel_token = distributed_runtime.primary_token().clone();
     let endpoint_id: EndpointId = path.parse()?;
 
-    let component = distributed_runtime
+    let mut component = distributed_runtime
         .namespace(&endpoint_id.namespace)?
         .component(&endpoint_id.component)?;
-    let endpoint = component
-        .service_builder()
-        .create()
-        .await?
-        .endpoint(&endpoint_id.name);
 
-    let (rt_fut, card): (Pin<Box<dyn Future<Output = _> + Send + 'static>>, _) = match engine_config
-    {
+    // We can only make the NATS service if we have NATS
+    if distributed_runtime.nats_client().is_some() {
+        // TODO fix in next PR, ServiceConfigBuilder is silly
+        component = component.service_builder().create().await?;
+    }
+    let endpoint = component.endpoint(&endpoint_id.name);
+
+    let rt_fut: Pin<Box<dyn Future<Output = _> + Send + 'static>> = match engine_config {
         EngineConfig::StaticFull {
             engine,
             mut model,
@@ -61,7 +62,7 @@ pub async fn run(
             }
             let fut_chat = endpoint.endpoint_builder().handler(ingress_chat).start();
 
-            (Box::pin(fut_chat), Some(model.card().clone()))
+            Box::pin(fut_chat)
         }
         EngineConfig::StaticCore {
             engine: inner_engine,
@@ -92,7 +93,7 @@ pub async fn run(
 
             let fut = endpoint.endpoint_builder().handler(ingress).start();
 
-            (Box::pin(fut), Some(model.card().clone()))
+            Box::pin(fut)
         }
         EngineConfig::StaticRemote(_) => {
             panic!("StaticRemote definitions are only for the frontend end node.");
@@ -106,7 +107,7 @@ pub async fn run(
     // Note: We must return rt_result to propagate the actual error back to the user.
     // If we don't return the specific error, the programmer/user won't know what actually
     // caused the endpoint service to fail, making debugging much more difficult.
-    let result = tokio::select! {
+    tokio::select! {
         rt_result = rt_fut => {
             tracing::debug!("Endpoint service completed");
             match rt_result {
@@ -124,21 +125,7 @@ pub async fn run(
             tracing::debug!("Endpoint service cancelled");
             Ok(())
         }
-    };
-
-    // If we got an error, return it
-    result?;
-
-    // Cleanup on shutdown
-    if let Some(mut card) = card
-        && let Err(err) = card
-            .delete_from_nats(distributed_runtime.nats_client())
-            .await
-    {
-        tracing::error!(%err, "delete_from_nats error on shutdown");
     }
-
-    Ok(())
 }
 
 #[cfg(test)]

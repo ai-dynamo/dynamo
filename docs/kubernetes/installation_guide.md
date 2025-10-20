@@ -111,7 +111,7 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 
 → [Verify Installation](#verify-installation)
 
-## Path C: Custom Development
+## Path B: Custom Development
 
 Build and deploy from source for customization.
 

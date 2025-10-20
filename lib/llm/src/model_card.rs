@@ -25,7 +25,7 @@ use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::storage::key_value_store::{
     EtcdStore, Key, KeyValueStore, KeyValueStoreManager,
 };
-use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned, transports::nats};
+use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
 
@@ -350,20 +350,6 @@ impl ModelDeploymentCard {
                 anyhow::bail!("Blank ModelDeploymentCard does not have a tokenizer");
             }
         }
-    }
-
-    /// Delete this card from the key-value store and it's URLs from the object store
-    pub async fn delete_from_nats(&mut self, nats_client: nats::Client) -> Result<()> {
-        let nats_addr = nats_client.addr();
-        let bucket_name = self.slug();
-        tracing::trace!(
-            nats_addr,
-            %bucket_name,
-            "Delete model deployment card from NATS"
-        );
-        nats_client
-            .object_store_delete_bucket(bucket_name.as_ref())
-            .await
     }
 
     /// Allow user to override the name we register this model under.

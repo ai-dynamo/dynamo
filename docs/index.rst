@@ -52,6 +52,8 @@ Quickstart
 
    Quickstart (K8s) <../kubernetes/README.md>
    Detailed Installation Guide <../kubernetes/installation_guide.md>
+   Creating Deployments <../kubernetes/create_deployment.md>
+   API Reference <../kubernetes/api_reference.md>
    Dynamo Operator <../kubernetes/dynamo_operator.md>
    Metrics <../kubernetes/metrics.md>
    Logging <../kubernetes/logging.md>
