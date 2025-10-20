@@ -774,6 +774,15 @@ class DependencyExtractor:
                         # Extract version-related ARGs
                         version_keywords = ["VERSION", "REF", "TAG", "_VER"]
                         if any(kw in key for kw in version_keywords):
+                            # Skip sub-dependency ARGs that are clearly for related projects
+                            # e.g., NIXL_UCX_REF is for UCX (a dependency of NIXL), not NIXL itself
+                            skip_subdeps = [
+                                "_UCX_",  # UCX is a separate dependency
+                                "_NCCL_",  # NCCL is a separate dependency
+                            ]
+                            if any(subdep in key for subdep in skip_subdeps):
+                                continue
+                            
                             category = (
                                 "System"
                                 if key.startswith(
@@ -1849,6 +1858,12 @@ class DependencyExtractor:
         # Convert to lowercase for comparison
         name_lower = name.lower()
 
+        # Special handling for PyTorch-related packages that should NOT be normalized to pytorch
+        # e.g., "pytorch triton" is the Triton compiler, not PyTorch itself
+        pytorch_exceptions = ["pytorch triton", "pytorch_triton", "triton"]
+        if any(exc in name_lower for exc in pytorch_exceptions):
+            return name_lower  # Don't normalize these
+        
         # Common normalization rules (ordered by specificity to avoid false matches)
         normalizations = {
             "tensorrt-llm": "tensorrt-llm",
@@ -1872,6 +1887,35 @@ class DependencyExtractor:
         # This avoids false positives from overly broad matching
         return name_lower.strip()
 
+    def _normalize_version_for_comparison(self, version: str) -> str:
+        """
+        Normalize version string for comparison by removing pinning operators.
+        
+        This allows us to detect true version differences while ignoring
+        differences in how versions are pinned.
+        
+        Examples:
+            - "==0.115.12" -> "0.115.12"
+            - ">=0.115.0" -> "0.115.0"
+            - ">=32.0.1,<33.0.0" -> "32.0.1"
+            - "<=0.6.0" -> "0.6.0"
+            - "2.7.1+cu128" -> "2.7.1+cu128" (unchanged)
+        """
+        import re
+        
+        # Remove common Python version operators
+        # This regex captures: ==, >=, <=, ~=, !=, <, >, and extracts the version
+        version = version.strip()
+        
+        # Handle compound version specs like ">=32.0.1,<33.0.0" - take the first version
+        if "," in version:
+            version = version.split(",")[0].strip()
+        
+        # Remove operators
+        version = re.sub(r"^(==|>=|<=|~=|!=|<|>)\s*", "", version)
+        
+        return version.strip()
+
     def detect_version_discrepancies(self) -> List[Dict[str, any]]:
         """
         Detect dependencies that appear multiple times with different versions.
@@ -1884,6 +1928,7 @@ class DependencyExtractor:
         Note: This intentionally filters out some categories to reduce false positives:
         - Base/Runtime Images (intentionally different per component)
         - Go indirect dependencies (transitive, expected to vary)
+        - Pinning style differences (e.g., "0.6.0" vs "<=0.6.0" are considered the same)
         """
         # Categories to skip (expected to vary by component)
         skip_categories = {
@@ -1939,18 +1984,26 @@ class DependencyExtractor:
             )
 
         # Detect discrepancies: same normalized name with different versions
+        # Use normalized versions to ignore pinning style differences
         discrepancies = []
 
         for normalized_name, instances in dependency_groups.items():
-            # Get unique versions
-            versions = set(inst["version"] for inst in instances)
+            # Get unique normalized versions (ignoring pinning operators)
+            normalized_versions = set(
+                self._normalize_version_for_comparison(inst["version"])
+                for inst in instances
+            )
 
-            # If multiple versions exist, it's a discrepancy
-            if len(versions) > 1:
+            # If multiple normalized versions exist, it's a real discrepancy
+            if len(normalized_versions) > 1:
+                # Get the original versions for display
+                original_versions = sorted(set(inst["version"] for inst in instances))
+                
                 discrepancies.append(
                     {
                         "normalized_name": normalized_name,
-                        "versions": sorted(versions),
+                        "versions": original_versions,
+                        "normalized_versions": sorted(normalized_versions),
                         "instances": instances,
                         "is_critical": any(inst["critical"] for inst in instances),
                     }

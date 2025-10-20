@@ -10,6 +10,14 @@ baseline:
   # The script automatically uses the previous extraction's count as the baseline
   dependency_count: 251
 
+known_version_discrepancies:
+  # Document intentional version discrepancies to reduce noise
+  # These will still be reported but marked as "known" with the provided reason
+  - dependency: "PyTorch"
+    reason: "TensorRT-LLM uses NVIDIA container (2.8.0), vLLM uses 2.7.1+cu128 (ARM64 wheel compatibility)"
+  - dependency: "torchvision"
+    reason: "Matches corresponding PyTorch versions across components"
+
 critical_dependencies:
   # List of critical dependencies (case-insensitive matching)
   # Supports exact names or partial matches (e.g., "CUDA" matches "NVIDIA CUDA")
