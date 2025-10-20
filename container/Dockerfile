@@ -240,10 +240,10 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     if [ "$ARCH" = "arm64" ]; then \
-        cd ${NIXL_SRC_DIR} && uv build . --out-dir /opt/dynamo/wheelhouse/nixl \
+        cd ${NIXL_SRC_DIR} && uv build . --out-dir /opt/dynamo/wheelhouse/nixl --python $PYTHON_VERSION \
         --config-settings=setup-args="-Ddisable_gds_backend=true"; \
     else \
-        cd ${NIXL_SRC_DIR} && uv build . --out-dir /opt/dynamo/wheelhouse/nixl; \
+        cd ${NIXL_SRC_DIR} && uv build . --out-dir /opt/dynamo/wheelhouse/nixl --python $PYTHON_VERSION; \
     fi
 
 ##################################
@@ -294,9 +294,8 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
     PATH=/usr/local/cargo/bin:/opt/dynamo/venv/bin:$PATH
 
 # Install system dependencies
-ARG PYTHON_VERSION
 RUN dnf update -y \
-    && dnf install -y llvm-toolset protobuf-compiler python${PYTHON_VERSION}-devel wget unzip \
+    && dnf install -y llvm-toolset protobuf-compiler wget unzip \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
@@ -322,7 +321,14 @@ ENV PROTOC=/usr/local/bin/protoc
 COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=base $CARGO_HOME $CARGO_HOME
 COPY --from=base $NIXL_PREFIX $NIXL_PREFIX
-COPY --from=base $VIRTUAL_ENV $VIRTUAL_ENV
+
+ARG PYTHON_VERSION
+RUN mkdir -p /opt/dynamo/venv && \
+    uv venv /opt/dynamo/venv --python $PYTHON_VERSION
+
+ENV VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH="/opt/dynamo/venv/bin:${PATH}"
+
 
 # Install SCCACHE if requested
 COPY container/use-sccache.sh /tmp/use-sccache.sh
@@ -378,7 +384,7 @@ COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 # Install Python packages
 COPY benchmarks/ /opt/dynamo/benchmarks/
 RUN uv pip install \
-    /opt/dynamo/wheelhouse/ai_dynamo_runtime*cp312*.whl \
+    /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
     && cd /opt/dynamo/benchmarks \
