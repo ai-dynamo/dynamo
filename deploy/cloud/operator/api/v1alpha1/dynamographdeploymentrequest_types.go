@@ -48,8 +48,8 @@ type ConfigMapKeySelector struct {
 // This structure maps directly to the profile_sla.py config format.
 // See benchmarks/profiler/utils/profiler_argparse.py for the complete schema.
 type ProfilingConfigSpec struct {
-	// Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to profile_sla.py via --profile-config.
-	// The profiler will validate the configuration and report any errors.
+	// Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly
+	// to the profiler via --profile-config. The profiler will validate the configuration and report any errors.
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
@@ -89,8 +89,13 @@ type DeploymentOverridesSpec struct {
 // This CRD serves as the primary interface for users to request model deployments with
 // specific performance constraints and resource requirements, enabling SLA-driven deployments.
 type DynamoGraphDeploymentRequestSpec struct {
+	// ModelName specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
+	// This is a high-level identifier for easy reference in kubectl output and logs.
+	// +kubebuilder:validation:Required
+	ModelName string `json:"modelName"`
+
 	// ProfilingConfig provides the complete configuration for the profiling job.
-	// This configuration is passed directly to profile_sla.py via --profile-config.
+	// This configuration is passed directly to the profiler via --profile-config.
 	// The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).
 	// The profiler will validate the configuration and report any errors.
 	// +kubebuilder:validation:Required
@@ -133,6 +138,11 @@ type DynamoGraphDeploymentRequestStatus struct {
 	// Possible values: "", "Pending", "Profiling", "Deploying", "Ready", "DeploymentDeleted", "Failed"
 	// Empty string ("") represents the initial state before initialization.
 	State string `json:"state,omitempty"`
+
+	// Backend is extracted from profilingConfig.config.engine.backend for display purposes.
+	// This field is populated by the controller and shown in kubectl output.
+	// +kubebuilder:validation:Optional
+	Backend string `json:"backend,omitempty"`
 
 	// ObservedGeneration reflects the generation of the most recently observed spec.
 	// Used to detect spec changes and enforce immutability after profiling starts.
@@ -182,7 +192,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=dgdr
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.modelName`
-// +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.spec.backend`
+// +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.status.backend`
 // +kubebuilder:printcolumn:name="State",type=string,JSONPath=`.status.state`
 // +kubebuilder:printcolumn:name="DGD-State",type=string,JSONPath=`.status.deployment.state`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"

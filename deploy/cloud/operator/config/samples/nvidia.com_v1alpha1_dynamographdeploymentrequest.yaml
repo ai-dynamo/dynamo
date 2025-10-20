@@ -18,6 +18,9 @@ kind: DynamoGraphDeploymentRequest
 metadata:
   name: example-llm-sla
 spec:
+  # ModelName is a high-level identifier for the model being deployed
+  modelName: Qwen/Qwen3-0.6B
+
   # ProfilingConfig maps directly to the profile_sla.py config format
   # See benchmarks/profiler/utils/profiler_argparse.py for complete schema
   profilingConfig:
