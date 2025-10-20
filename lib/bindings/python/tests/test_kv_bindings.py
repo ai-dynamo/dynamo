@@ -15,8 +15,9 @@
 
 
 import asyncio
-from typing import List
 import threading
+from typing import List
+
 import pytest
 
 from dynamo.llm import ApproxKvIndexer, KvEventPublisher, KvIndexer, RadixTree
@@ -90,13 +91,14 @@ async def test_radix_tree_binding(distributed_runtime):
 
     blocks = radix_tree.dump_tree_as_events()
     assert len(blocks) == 1, f"Expected 1 block event, got {len(blocks)}"
-    json.loads(blocks[0]) # check valid json
+    json.loads(blocks[0])  # check valid json
 
     # cleanup
     radix_tree.remove_worker(worker_id)
     blocks_empty = radix_tree.dump_tree_as_events()
-    assert len(blocks_empty) == 0, f"Expected 0 block events after removal, got {len(blocks_empty)}"
-    
+    assert (
+        len(blocks_empty) == 0
+    ), f"Expected 0 block events after removal, got {len(blocks_empty)}"
 
     print(
         f"✓ RadixTree test passed: worker {worker_key} has score {overlap_scores.scores[worker_key]}"
@@ -152,11 +154,16 @@ async def test_radix_tree_thread_safety(distributed_runtime):
         ), f"Expected score 1 for worker {worker_key}, got {overlap_scores.scores[worker_key]}"
     # get all blocks
     blocks = radix_tree.dump_tree_as_events()
-    assert len(blocks) == num_threads, f"Expected {num_threads} block events, got {len(blocks)}"
+    assert (
+        len(blocks) == num_threads
+    ), f"Expected {num_threads} block events, got {len(blocks)}"
     # remove single worker
     radix_tree.remove_worker(0)
     blocks_after_removal = radix_tree.dump_tree_as_events()
-    assert len(blocks_after_removal) == num_threads - 1, f"Expected {num_threads - 1} block events after removal, got {len(blocks_after_removal)}"
+    assert (
+        len(blocks_after_removal) == num_threads - 1
+    ), f"Expected {num_threads - 1} block events after removal, got {len(blocks_after_removal)}"
+
 
 # TODO Figure out how to test with different kv_block_size
 # Right now I get an error in EventPublisher init when I run this test
