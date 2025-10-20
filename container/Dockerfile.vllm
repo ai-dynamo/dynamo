@@ -88,6 +88,10 @@ RUN apt-get update -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# if libmlx5.so not shipped with 24.04 rdma-core packaging, CMAKE will fail when looking for
+# generic dev name .so so we symlink .s0.1 -> .so
+RUN ln -sf /usr/lib/aarch64-linux-gnu/libmlx5.so.1 /usr/lib/aarch64-linux-gnu/libmlx5.so || true
+
 ### VIRTUAL ENVIRONMENT SETUP ###
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
@@ -188,6 +192,7 @@ RUN apt-get update && \
         # jq and curl for polling various endpoints and health checks
         jq \
         git \
+        git-lfs \
         curl \
         # Libraries required by UCX to find RDMA devices
         libibverbs1 rdma-core ibverbs-utils libibumad3 \
@@ -253,14 +258,17 @@ RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
     && cd /opt/dynamo/benchmarks \
-    && uv pip install . \
+    && UV_GIT_LFS=1 uv pip install --no-cache . \
     && cd - \
     && rm -rf /opt/dynamo/benchmarks
 
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    uv pip install --requirement /tmp/requirements.txt --requirement /tmp/requirements.test.txt
+    UV_GIT_LFS=1 uv pip install \
+        --no-cache \
+        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.test.txt
 
 # Copy benchmarks, examples, and tests for CI
 COPY . /workspace/
@@ -323,8 +331,6 @@ RUN apt-get update -y && \
     protobuf-compiler && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=runtime /usr/local/bin /usr/local/bin
-
 # Set workspace directory variable
 ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     DYNAMO_HOME=${WORKSPACE_DIR} \
@@ -336,10 +342,6 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
 
 COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
 COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
-
-# This is a slow operation (~40s on my cpu)
-# Much better than chown -R $USERNAME:$USERNAME /opt/dynamo/venv (~10min on my cpu)
-COPY --from=runtime ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 # Install maturin, for maturin develop
 # Editable install of dynamo

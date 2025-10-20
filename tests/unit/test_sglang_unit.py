@@ -29,7 +29,8 @@ pytestmark = [
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
 
 
-def test_custom_jinja_template_invalid_path(mock_sglang_cli):
+@pytest.mark.asyncio
+async def test_custom_jinja_template_invalid_path(mock_sglang_cli):
     """Test that invalid file path raises FileNotFoundError."""
     invalid_path = "/nonexistent/path/to/template.jinja"
     mock_sglang_cli(
@@ -40,14 +41,15 @@ def test_custom_jinja_template_invalid_path(mock_sglang_cli):
         FileNotFoundError,
         match=re.escape(f"Custom Jinja template file not found: {invalid_path}"),
     ):
-        parse_args(sys.argv[1:])
+        await parse_args(sys.argv[1:])
 
 
-def test_custom_jinja_template_valid_path(mock_sglang_cli):
+@pytest.mark.asyncio
+async def test_custom_jinja_template_valid_path(mock_sglang_cli):
     """Test that valid absolute path is stored correctly."""
     mock_sglang_cli(model="Qwen/Qwen3-0.6B", custom_jinja_template=JINJA_TEMPLATE_PATH)
 
-    config = parse_args(sys.argv[1:])
+    config = await parse_args(sys.argv[1:])
 
     assert config.dynamo_args.custom_jinja_template == JINJA_TEMPLATE_PATH, (
         f"Expected custom_jinja_template value to be {JINJA_TEMPLATE_PATH}, "
@@ -55,7 +57,8 @@ def test_custom_jinja_template_valid_path(mock_sglang_cli):
     )
 
 
-def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_sglang_cli):
+@pytest.mark.asyncio
+async def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_sglang_cli):
     """Test that environment variables in paths are expanded by Python code."""
     jinja_dir = str(TEST_DIR / "serve" / "fixtures")
     monkeypatch.setenv("JINJA_DIR", jinja_dir)
@@ -63,7 +66,7 @@ def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_sglang_cli):
     cli_path = "$JINJA_DIR/custom_template.jinja"
     mock_sglang_cli(model="Qwen/Qwen3-0.6B", custom_jinja_template=cli_path)
 
-    config = parse_args(sys.argv[1:])
+    config = await parse_args(sys.argv[1:])
 
     assert "$JINJA_DIR" not in config.dynamo_args.custom_jinja_template
     assert config.dynamo_args.custom_jinja_template == JINJA_TEMPLATE_PATH, (

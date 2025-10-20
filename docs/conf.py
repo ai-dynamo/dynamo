@@ -9,6 +9,7 @@ import sys
 project = "NVIDIA Dynamo"
 copyright = "2024-2025, NVIDIA CORPORATION & AFFILIATES"
 author = "NVIDIA"
+release = "latest"
 
 # -- General configuration ---------------------------------------------------
 
@@ -58,9 +59,30 @@ exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "build"]
 # -- Options for HTML output -------------------------------------------------
 html_theme = "nvidia_sphinx_theme"
 html_static_path = ["_static"]
+html_extra_path = ["project.json", "versions1.json"]
 html_theme_options = {
     "collapse_navigation": False,
-    "github_url": "https://github.com/ai-dynamo/dynamo",
+    "icon_links": [
+        {
+            "name": "GitHub",
+            "url": "https://github.com/ai-dynamo/dynamo",
+            "icon": "fa-brands fa-github",
+        }
+    ],
+    "switcher": {
+        "json_url": "../versions1.json",
+        "version_match": release,
+    },
+    "extra_head": {
+        """
+    <script src="https://assets.adobedtm.com/5d4962a43b79/c1061d2c5e7b/launch-191c2462b890.min.js" ></script>
+    """
+    },
+    "extra_footer": {
+        """
+    <script type="text/javascript">if (typeof _satellite !== "undefined") {_satellite.pageBottom();}</script>
+    """
+    },
     "navbar_start": ["navbar-logo"],
     "primary_sidebar_end": [],
 }
