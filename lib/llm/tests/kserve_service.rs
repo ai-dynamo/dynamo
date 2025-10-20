@@ -18,6 +18,7 @@ pub mod kserve_test {
     use anyhow::Error;
     use async_stream::stream;
     use dynamo_llm::grpc::service::kserve::KserveService;
+    use dynamo_llm::grpc::service::kserve::inference as kserve_inference;
     use dynamo_llm::protocols::{
         Annotated,
         openai::{
@@ -224,6 +225,7 @@ pub mod kserve_test {
                         id: request.id.clone(),
                         model: request.model.clone(),
                         tensors: request.tensors.clone(),
+                        parameters: None,
                     });
                 }
             };
@@ -1210,11 +1212,13 @@ pub mod kserve_test {
                     name: "input".to_string(),
                     data_type: tensor::DataType::Bytes,
                     shape: vec![1],
+                    parameters: None,
                 }],
                 outputs: vec![tensor::TensorMetadata {
                     name: "output".to_string(),
                     data_type: tensor::DataType::Bool,
                     shape: vec![-1],
+                    parameters: None,
                 }],
             }),
             ..Default::default()
@@ -1430,7 +1434,7 @@ pub mod kserve_test {
 
     #[test]
     fn test_parameter_conversion_round_trip() {
-        use inference::infer_parameter::ParameterChoice;
+        use kserve_inference::infer_parameter::ParameterChoice;
 
         // Test all 5 parameter types for round-trip conversion
         let test_cases = vec![
@@ -1442,7 +1446,7 @@ pub mod kserve_test {
         ];
 
         for (name, choice) in test_cases {
-            let kserve_param = inference::InferParameter {
+            let kserve_param = kserve_inference::InferParameter {
                 parameter_choice: Some(choice.clone()),
             };
 
@@ -1469,7 +1473,7 @@ pub mod kserve_test {
     #[test]
     fn test_parameter_conversion_error_cases() {
         // Test conversion of parameter with no value
-        let empty_param = inference::InferParameter {
+        let empty_param = kserve_inference::InferParameter {
             parameter_choice: None,
         };
 

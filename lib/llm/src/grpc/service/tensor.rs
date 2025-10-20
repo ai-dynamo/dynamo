@@ -235,8 +235,8 @@ fn dynamo_param_to_kserve(param: &tensor::ParameterValue) -> inference::InferPar
     }
 }
 
-// Test wrappers to expose conversion functions for unit testing
-#[cfg(test)]
+// Test wrappers to expose conversion functions for integration testing
+#[cfg(any(test, feature = "integration"))]
 pub fn kserve_param_to_dynamo_test(
     key: &str,
     param: &inference::InferParameter,
@@ -244,7 +244,7 @@ pub fn kserve_param_to_dynamo_test(
     kserve_param_to_dynamo(key, param)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "integration"))]
 pub fn dynamo_param_to_kserve_test(param: &tensor::ParameterValue) -> inference::InferParameter {
     dynamo_param_to_kserve(param)
 }
