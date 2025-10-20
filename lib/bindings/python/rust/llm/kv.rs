@@ -447,7 +447,7 @@ impl RadixTree {
                             "RadixTree request was cancelled",
                         )
                     })?
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
+                    .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
                     .map(|overlap_scores| OverlapScores {
                         inner: overlap_scores,
                     })
@@ -486,7 +486,7 @@ impl RadixTree {
                             "RadixTree request was cancelled",
                         )
                     })?
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
+                    .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
             })
         })
     }
@@ -516,7 +516,7 @@ impl RadixTree {
                             "RadixTree request was cancelled",
                         )
                     })?
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
+                    .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
             })
         })
     }
@@ -546,7 +546,7 @@ impl RadixTree {
                             "RadixTree request was cancelled",
                         )
                     })?
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
+                    .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
             })
         })
     }
