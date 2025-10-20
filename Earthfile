@@ -159,7 +159,7 @@ dynamo-base-docker:
     ENV VIRTUAL_ENV=/opt/dynamo/venv
     ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
-    RUN uv pip install -r /tmp/requirements.txt
+    RUN UV_GIT_LFS=1 uv pip install -r /tmp/requirements.txt
 
     # Copy and install wheels -- ai-dynamo-runtime first, then ai-dynamo
     COPY +dynamo-build/ai_dynamo_runtime*.whl /tmp/wheels/

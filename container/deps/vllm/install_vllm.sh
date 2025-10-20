@@ -136,9 +136,9 @@ git checkout $VLLM_REF
 
 echo "\n=== Installing vLLM & FlashInfer ==="
 
-if [[ $VLLM_REF =~ ^v ]] && [ "$ARCH" = "amd64" ]; then
-    # VLLM_REF starts with 'v' and amd64 - use pip install with version tag
-    echo "Installing vLLM $VLLM_REF from PyPI..."
+if [[ $VLLM_REF =~ ^v ]] && { [ "$ARCH" = "amd64" ] || { [ "$ARCH" = "arm64" ] && [ "$TORCH_BACKEND" = "cu129" ]; }; }; then
+    # VLLM_REF starts with 'v' and either amd64, or arm64 with cu129 backend - use PyPI install
+    echo "Installing vLLM $VLLM_REF from PyPI... (ARCH=$ARCH, TORCH_BACKEND=$TORCH_BACKEND)"
 
     uv pip install vllm[flashinfer]==$VLLM_REF --torch-backend=$TORCH_BACKEND
 

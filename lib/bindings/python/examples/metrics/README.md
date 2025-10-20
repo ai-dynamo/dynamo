@@ -290,8 +290,7 @@ graph TB
             NATS[NATS Server<br/>KV_METRICS_SUBJECT]
         end
 
-        subgraph "Aggregator Process Components"
-            AGG[KvMetricsAggregator<br/>llm/src/kv_router/metrics_aggregator.rs]
+        subgraph "Other Consumers (e.g., KvWorkerMonitor)"
             SUB[NATS Subscriber<br/>component/namespace.rs]
         end
 
@@ -303,7 +302,6 @@ graph TB
         style WATCH fill:#ce422b,color:#fff
         style PROM1 fill:#ce422b,color:#fff
         style NATS fill:#27aae1,color:#fff
-        style AGG fill:#ce422b,color:#fff
         style SUB fill:#ce422b,color:#fff
         style SS fill:#6c757d,color:#fff
     end
@@ -316,9 +314,7 @@ graph TB
     WMP -->|"tx.send(metrics)"| WATCH
     WATCH -->|"publish(KV_METRICS_SUBJECT, LoadEvent)"| NATS
     NATS -->|"subscribe_with_type LoadEvent"| SUB
-    SUB -->|"discover endpoints"| AGG
     SS -->|"Worker: gather() from PROM1"| PROM1
-    SS -->|"Aggregator: scrape_stats()"| AGG
 ```
 
 ##### Method 2: Dynamic Registration - Component View
