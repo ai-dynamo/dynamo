@@ -4,8 +4,8 @@
 use axum::Router;
 use dynamo_runtime::metrics::prometheus_names::{
     kvbm::{
-        MATCHED_TOKENS, OFFLOAD_BLOCKS_D2H, OFFLOAD_BLOCKS_H2D, OFFLOAD_BLOCKS_D2D, ONBOARD_BLOCKS_D2D,
-        ONBOARD_BLOCKS_H2D,
+        MATCHED_TOKENS, OFFLOAD_BLOCKS_D2D, OFFLOAD_BLOCKS_D2H, OFFLOAD_BLOCKS_H2D,
+        ONBOARD_BLOCKS_D2D, ONBOARD_BLOCKS_H2D,
     },
     sanitize_prometheus_name,
 };
