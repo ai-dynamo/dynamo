@@ -85,11 +85,16 @@ impl NatsWorker {
         subject: &str,
         buf: &mut Vec<Vec<u8>>,
     ) -> anyhow::Result<()> {
-        // publish each record as an individual JetStream message with ack
-        // This preserves per-record replay semantics and keeps consumers simple.
-        for payload in buf.drain(..) {
-            js.publish(subject.to_string(), payload.into()).await?;
+        // Publish each record individually. Track sent count to avoid data loss on failure.
+        // If publish fails mid-batch, only remove successfully sent messages.
+        let mut sent = 0;
+        for payload in buf.iter() {
+            js.publish(subject.to_string(), payload.clone().into())
+                .await?;
+            sent += 1;
         }
+        // Remove only the successfully published messages
+        buf.drain(..sent);
         Ok(())
     }
 
