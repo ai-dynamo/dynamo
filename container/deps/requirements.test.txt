@@ -29,3 +29,5 @@ pytest-timeout
 # add types library stub for PyYAML
 types-PyYAML
 types-requests
+# Triton client to Dynamo gRPC server
+tritonclient[grpc]
