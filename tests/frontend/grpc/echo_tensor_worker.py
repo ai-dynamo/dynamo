@@ -3,7 +3,6 @@
 
 # Usage: `TEST_END_TO_END=1 python test_tensor.py` to run this worker as tensor based echo worker.
 
-import os
 
 import uvloop
 

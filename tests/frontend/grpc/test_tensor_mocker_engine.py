@@ -7,17 +7,14 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-import time
-from typing import Any, Dict
 
 import pytest
-import requests
+import triton_echo_client
 
 from tests.conftest import EtcdServer, NatsServer
 from tests.utils.constants import QWEN
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
-import triton_echo_client
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +51,7 @@ class MockWorkerProcess(ManagedProcess):
 
         command = [
             "python3",
-            os.path.join(os.path.dirname(__file__), "echo_tensor_worker.py")
+            os.path.join(os.path.dirname(__file__), "echo_tensor_worker.py"),
         ]
 
         env = os.environ.copy()
