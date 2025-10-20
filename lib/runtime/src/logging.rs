@@ -99,6 +99,7 @@ const CONFIG_PATH_ENV: &str = "DYN_LOGGING_CONFIG_PATH";
 /// Enable OTLP trace exporting
 const OTEL_EXPORT_ENABLED_ENV: &str = "OTEL_EXPORT_ENABLED";
 
+/// (OLTP exporter env var spec defined here - https://opentelemetry.io/docs/specs/otel/protocol/exporter/)
 /// OTEL exporter endpoint
 const OTEL_EXPORT_ENDPOINT_ENV: &str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
 
@@ -135,9 +136,9 @@ impl Default for LoggingConfig {
                 ("tonic".to_string(), "error".to_string()),
                 ("mistralrs_core".to_string(), "error".to_string()),
                 ("hf_hub".to_string(), "error".to_string()),
-                // ("opentelemetry".to_string(), "error".to_string()),
-                // ("opentelemetry-otlp".to_string(), "error".to_string()),
-                // ("opentelemetry_sdk".to_string(), "error".to_string()),
+                ("opentelemetry".to_string(), "error".to_string()),
+                ("opentelemetry-otlp".to_string(), "error".to_string()),
+                ("opentelemetry_sdk".to_string(), "error".to_string()),
             ]),
         }
     }
@@ -750,10 +751,9 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
 
         // Create OpenTelemetry tracer - conditionally export to OTLP based on env var
         let service_name = get_service_name();
-        let otlp_enabled = otlp_exporter_enabled();
 
         // Build tracer provider - with or without OTLP export
-        let (tracer_provider, endpoint_opt) = if otlp_enabled {
+        let (tracer_provider, endpoint_opt) = if otlp_exporter_enabled() {
             // Export enabled: create OTLP exporter with batch processor
             let endpoint = std::env::var(OTEL_EXPORT_ENDPOINT_ENV)
                 .unwrap_or_else(|_| DEFAULT_OTLP_ENDPOINT.to_string());
