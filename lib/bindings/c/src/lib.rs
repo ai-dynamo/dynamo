@@ -976,7 +976,7 @@ pub async fn create_worker_selection_pipeline_chat(
         component.drt().clone(),
         model_manager.clone(),
         router_mode,
-        kv_router_config.clone(),
+        kv_router_config,
         busy_threshold,
     );
     let cards = watcher
