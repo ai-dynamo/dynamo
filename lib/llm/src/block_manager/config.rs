@@ -211,3 +211,20 @@ impl KvBlockManagerConfig {
         KvBlockManagerConfigBuilder::default()
     }
 }
+
+/// Determines if CPU memory (G2) should be bypassed for direct G1->G3 (Device->Disk) offloading.
+///
+/// Returns `true` if:
+/// - Disk cache env vars are set (`DYN_KVBM_DISK_CACHE_GB` or `DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS`)
+/// - AND CPU cache env vars are NOT set (`DYN_KVBM_CPU_CACHE_GB` or `DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS`)
+pub fn should_bypass_cpu_cache() -> bool {
+    let cpu_cache_gb_set = std::env::var("DYN_KVBM_CPU_CACHE_GB").is_ok();
+    let cpu_cache_override_set = std::env::var("DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS").is_ok();
+    let disk_cache_gb_set = std::env::var("DYN_KVBM_DISK_CACHE_GB").is_ok();
+    let disk_cache_override_set = std::env::var("DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS").is_ok();
+
+    let cpu_cache_set = cpu_cache_gb_set || cpu_cache_override_set;
+    let disk_cache_set = disk_cache_gb_set || disk_cache_override_set;
+
+    disk_cache_set && !cpu_cache_set
+}
