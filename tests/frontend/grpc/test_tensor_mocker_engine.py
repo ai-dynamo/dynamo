@@ -14,7 +14,6 @@ import triton_echo_client
 from tests.conftest import EtcdServer, NatsServer
 from tests.utils.constants import QWEN
 from tests.utils.managed_process import ManagedProcess
-from tests.utils.payloads import check_models_api
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +70,8 @@ class MockWorkerProcess(ManagedProcess):
             command=command,
             env=env,
             health_check_urls=[
-                ("http://localhost:8000/v1/models", check_models_api),
+                # gRPC doesn't expose endpoint for listing models, so skip this check
+                # ("http://localhost:8000/v1/models", check_models_api),
                 ("http://localhost:8083/health", self.is_ready),
             ],
             timeout=300,
