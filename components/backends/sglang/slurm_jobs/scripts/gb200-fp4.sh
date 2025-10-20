@@ -131,7 +131,7 @@ elif [ "$mode" = "decode" ]; then
     if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix=" "; fi
 
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
-    
+
     SGLANG_NVFP4_CKPT_FP8_GEMM_IN_ATTN=1 \
     SGLANG_PER_TOKEN_GROUP_QUANT_8BIT_V2=1 \
     SGL_JIT_DEEPGEMM_PRECOMPILE=0 \
