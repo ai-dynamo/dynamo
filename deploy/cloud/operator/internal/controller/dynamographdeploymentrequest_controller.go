@@ -336,7 +336,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingState(ctx context.
 	}
 
 	// Record event with appropriate message
-	if dgdr.Spec.Online {
+	if isOnlineProfiling(dgdr) {
 		r.Recorder.Event(dgdr, corev1.EventTypeNormal, EventReasonProfilingJobCreated, MessageProfilingJobCreated)
 	} else {
 		r.Recorder.Event(dgdr, corev1.EventTypeNormal, EventReasonProfilingJobCreated, MessageAICProfilingJobCreated)
@@ -669,15 +669,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleFailedState(ctx context.C
 	return ctrl.Result{}, nil
 }
 
-// getProfilingJobName returns the job name for a DGDR based on profiling mode
+// getProfilingJobName returns the job name for a DGDR
 func getProfilingJobName(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) string {
-	var jobNamePrefix string
-	if dgdr.Spec.Online {
-		jobNamePrefix = JobNamePrefixOnline
-	} else {
-		jobNamePrefix = JobNamePrefixAIC
-	}
-	return fmt.Sprintf("%s%s", jobNamePrefix, dgdr.Name)
+	// Use "profile-" prefix for all profiling jobs
+	return fmt.Sprintf("profile-%s", dgdr.Name)
 }
 
 // getOutputConfigMapName returns the ConfigMap name for profiling output
@@ -685,32 +680,36 @@ func getOutputConfigMapName(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest
 	return fmt.Sprintf("%s%s", ConfigMapOutputPrefix, dgdr.Name)
 }
 
+// isOnlineProfiling determines whether online profiling or AI Configurator is being used
+// based on the sweep.use_ai_configurator config value
+func isOnlineProfiling(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) bool {
+	if dgdr.Spec.ProfilingConfig.Config == nil {
+		return true
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(dgdr.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
+		return true // Default to online on parse error
+	}
+
+	if sweep, ok := config["sweep"].(map[string]interface{}); ok {
+		if useAIC, exists := sweep["use_ai_configurator"].(bool); exists {
+			return !useAIC
+		}
+	}
+	// Default to online profiling if not specified
+	return true
+}
+
 // validateSpec validates the DGDR spec
 func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
-	if dgdr.Spec.ModelName == "" {
-		return errors.New(ValidationErrorModelNameRequired)
+	// Basic validation - check that profilingConfig.config is provided
+	if dgdr.Spec.ProfilingConfig.Config == nil || len(dgdr.Spec.ProfilingConfig.Config.Raw) == 0 {
+		return errors.New("profilingConfig.config is required and must not be empty")
 	}
 
-	if dgdr.Spec.SLA.ITL <= 0 {
-		return errors.New(ValidationErrorITLPositive)
-	}
-
-	if dgdr.Spec.SLA.TTFT <= 0 {
-		return errors.New(ValidationErrorTTFTPositive)
-	}
-
-	// Validate backend
-	validBackends := map[string]bool{
-		BackendVLLM:   true,
-		BackendSGLang: true,
-		BackendTRTLLM: true,
-	}
-	if dgdr.Spec.Backend != "" && !validBackends[dgdr.Spec.Backend] {
-		return fmt.Errorf(ValidationErrorInvalidBackend, dgdr.Spec.Backend)
-	}
-
-	// Validate ConfigMap if provided (for both online and offline/AIC profiling)
-	if dgdr.Spec.ProfilingConfig != nil && dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
+	// Validate ConfigMap if provided (for the DGD base config)
+	if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
 		cm := &corev1.ConfigMap{}
 		err := r.Get(ctx, types.NamespacedName{
 			Name:      dgdr.Spec.ProfilingConfig.ConfigMapRef.Name,
@@ -736,6 +735,24 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 		}
 	}
 
+	// Parse config to validate structure
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(dgdr.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
+		return fmt.Errorf("failed to parse profilingConfig.config: %w", err)
+	}
+
+	// Additional validation: Ensure engine.config is set (either as path or will be set from ConfigMapRef)
+	engineConfig, hasEngine := config["engine"].(map[string]interface{})
+	if hasEngine {
+		_, hasConfig := engineConfig["config"]
+		if !hasConfig && dgdr.Spec.ProfilingConfig.ConfigMapRef == nil {
+			return errors.New("either profilingConfig.config.engine.config must be set, or profilingConfig.configMapRef must be provided")
+		}
+	} else if dgdr.Spec.ProfilingConfig.ConfigMapRef == nil {
+		return errors.New("profilingConfig.config must contain 'engine' section, or profilingConfig.configMapRef must be provided")
+	}
+
+	// The profiler will validate the rest of the configuration
 	return nil
 }
 
@@ -756,33 +773,48 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 	}
 
-	// Use ProfilerImage for both online and offline (AIC) profiling
-	imageName := r.ProfilerImage
-	if imageName == "" {
-		return fmt.Errorf("profiler image not configured: the operator's profilerImage must be set in the Helm chart values (dynamo-operator.dynamo.dgdr.profilerImage). The image must contain the ai-dynamo profiler (python -m benchmarks.profiler.profile_sla entrypoint). For development, build from the ai-dynamo repository Dockerfile and push to your registry. A public image will be available in release 0.6.1")
-	}
-
-	logger.Info("Using profiler image", "image", imageName, "online", dgdr.Spec.Online)
-
-	// Determine label based on profiling mode
-	var labelValue string
-	if dgdr.Spec.Online {
-		labelValue = LabelValueDynamoProfiler
-	} else {
-		labelValue = LabelValueAICProfiler
-	}
-
 	// Use SyncResource to create/update the job
 	modified, job, err := commonController.SyncResource(ctx, r, dgdr, func(ctx context.Context) (*batchv1.Job, bool, error) {
 		jobName := getProfilingJobName(dgdr)
 		outputConfigMapName := getOutputConfigMapName(dgdr)
 
-		// Build profiler container based on online vs offline (AIC) mode
-		var profilerArgs []string
-		var profilerEnv []corev1.EnvVar
+		// Parse the profiling config from JSON
+		var config map[string]interface{}
+		if err := yaml.Unmarshal(dgdr.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
+			return nil, false, fmt.Errorf("failed to parse profiling config: %w", err)
+		}
+
+		// Set deployment.namespace if not already set
+		if _, hasDeployment := config["deployment"]; !hasDeployment {
+			config["deployment"] = make(map[string]interface{})
+		}
+		deploymentConfig := config["deployment"].(map[string]interface{})
+		if _, hasNamespace := deploymentConfig["namespace"]; !hasNamespace {
+			deploymentConfig["namespace"] = dgdr.Namespace
+		}
+
+		// Set output_dir if not already set
+		if _, hasOutputDir := config["output_dir"]; !hasOutputDir {
+			config["output_dir"] = ProfilingOutputPath
+		}
+
+		// If ConfigMapRef is provided, set engine.config path
+		if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
+			if _, hasEngine := config["engine"]; !hasEngine {
+				config["engine"] = make(map[string]interface{})
+			}
+			engineConfig := config["engine"].(map[string]interface{})
+			engineConfig["config"] = fmt.Sprintf("%s/%s", ProfilingConfigPath, ProfilingConfigFile)
+		}
+
+		// Serialize config to YAML for passing to profiler
+		configYAML, err := yaml.Marshal(config)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to marshal profiling config to YAML: %w", err)
+		}
 
 		// Common environment variables
-		profilerEnv = []corev1.EnvVar{
+		profilerEnv := []corev1.EnvVar{
 			{
 				Name: "HUGGING_FACE_HUB_TOKEN",
 				ValueFrom: &corev1.EnvVarSource{
@@ -804,7 +836,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			},
 		}
 
-		// Build container with volume mounts
+		// Build volume mounts
 		volumeMounts := []corev1.VolumeMount{
 			{
 				Name:      VolumeNameProfilingOutput,
@@ -812,55 +844,33 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			},
 		}
 
-		// Determine GPU range for profiling
-		minGPUs := 1
-		maxGPUs := 8
-		if dgdr.Spec.GPU != nil {
-			if dgdr.Spec.GPU.MinNumGPUsPerEngine > 0 {
-				minGPUs = dgdr.Spec.GPU.MinNumGPUsPerEngine
-			}
-			if dgdr.Spec.GPU.MaxNumGPUsPerEngine > 0 {
-				maxGPUs = dgdr.Spec.GPU.MaxNumGPUsPerEngine
-			}
-		}
-
-		// Build common profiler args (shared by both online and offline modes)
-		profilerArgs = []string{
-			"--namespace", dgdr.Namespace,
-			"--backend", dgdr.Spec.Backend,
-			"--ttft", fmt.Sprintf("%d", dgdr.Spec.SLA.TTFT),
-			"--itl", fmt.Sprintf("%d", dgdr.Spec.SLA.ITL),
-			"--isl", fmt.Sprintf("%d", dgdr.Spec.SLA.ISL),
-			"--osl", fmt.Sprintf("%d", dgdr.Spec.SLA.OSL),
-			"--output-dir", ProfilingOutputPath,
-			"--min-num-gpus-per-engine", fmt.Sprintf("%d", minGPUs),
-			"--max-num-gpus-per-engine", fmt.Sprintf("%d", maxGPUs),
-		}
-
-		// Add mode-specific args
-		if !dgdr.Spec.Online {
-			// Offline (AIC) profiling: add AI Configurator args
-			profilerArgs = append(profilerArgs,
-				"--use-ai-configurator",
-				"--aic-model-name", dgdr.Spec.ModelName,
-				"--aic-backend-version", "0.20.0", // TODO: don't hardcode this
-			)
-
-			// Add AIC-specific GPU system type
-			if dgdr.Spec.GPU != nil && dgdr.Spec.GPU.Type != "" {
-				profilerArgs = append(profilerArgs, "--aic-system", dgdr.Spec.GPU.Type)
-			}
-		}
-
-		// Add config if provided (for both online and offline modes)
-		if dgdr.Spec.ProfilingConfig != nil && dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
-			profilerArgs = append(profilerArgs, "--config", fmt.Sprintf("%s/%s", ProfilingConfigPath, ProfilingConfigFile))
+		// Add ConfigMap volume mount if provided
+		if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
 			volumeMounts = append(volumeMounts, corev1.VolumeMount{
 				Name:      VolumeNameProfilingConfig,
 				MountPath: ProfilingConfigPath,
 				ReadOnly:  true,
 			})
 		}
+
+		// Profiler args: just pass the config via --profile-config
+		profilerArgs := []string{
+			"--profile-config", string(configYAML),
+		}
+
+		// Determine profiler image
+		// Try to get it from the config first, then fall back to operator's ProfilerImage
+		imageName := r.ProfilerImage
+		if engineConfig, hasEngine := config["engine"].(map[string]interface{}); hasEngine {
+			if image, hasImage := engineConfig["profiler_image"].(string); hasImage && image != "" {
+				imageName = image
+			}
+		}
+		if imageName == "" {
+			return nil, false, fmt.Errorf("profiler image not configured: either set profilingConfig.raw.engine.profiler_image or configure dynamo-operator.dynamo.dgdr.profilerImage in Helm values")
+		}
+
+		logger.Info("Using profiler image", "image", imageName)
 
 		profilerContainer := corev1.Container{
 			Name:    ContainerNameProfiler,
@@ -917,8 +927,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			},
 		}}
 
-		// Add ConfigMap volume if provided (for both online and offline/AIC)
-		if dgdr.Spec.ProfilingConfig != nil && dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
+		// Add ConfigMap volume if provided
+		if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
 			key := dgdr.Spec.ProfilingConfig.ConfigMapRef.Key
 			if key == "" {
 				key = ProfilingConfigFile
@@ -942,6 +952,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 
 		// Limit retries to prevent infinite loop
 		backoffLimit := int32(3)
+
+		// Determine label based on whether AI Configurator is used
+		labelValue := LabelValueDynamoProfiler
+		if !isOnlineProfiling(dgdr) {
+			labelValue = LabelValueAICProfiler
+		}
 
 		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
@@ -977,11 +993,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 	}
 
 	if modified {
-		if dgdr.Spec.Online {
-			logger.Info("Online profiling job created/updated", "job", job.Name)
-		} else {
-			logger.Info("Offline (AIC) profiling job created/updated", "job", job.Name)
-		}
+		logger.Info("Profiling job created/updated", "job", job.Name)
 	}
 
 	return nil
@@ -1011,10 +1023,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) checkProfilingJobStatus(ctx con
 	return false, nil
 }
 
-// generateDGDSpec generates DGD spec from profiling results (online or offline/AIC)
+// generateDGDSpec generates DGD spec from profiling results
 func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
 	logger := log.FromContext(ctx)
-	logger.Info("Generating DGD spec from profiling results", "name", dgdr.Name, "online", dgdr.Spec.Online)
+	logger.Info("Generating DGD spec from profiling results", "name", dgdr.Name)
 
 	// Read the generated spec from ConfigMap (created by sidecar)
 	outputConfigMapName := getOutputConfigMapName(dgdr)

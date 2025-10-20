@@ -27,10 +27,12 @@ import (
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/yaml"
 )
 
 // MockRBACManager implements RBACManager for testing
@@ -43,6 +45,15 @@ func (m *MockRBACManager) EnsureServiceAccountWithRBAC(ctx context.Context, targ
 		return m.EnsureServiceAccountWithRBACFunc(ctx, targetNamespace, serviceAccountName, clusterRoleName)
 	}
 	return nil
+}
+
+// Helper function to create JSON config for tests
+func createTestConfig(config map[string]interface{}) *apiextensionsv1.JSON {
+	jsonBytes, err := yaml.Marshal(config)
+	if err != nil {
+		panic(err)
+	}
+	return &apiextensionsv1.JSON{Raw: jsonBytes}
 }
 
 var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
@@ -84,15 +95,24 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   BackendVLLM,
-					SLA: nvidiacomv1alpha1.SLASpec{
-						TTFT: 100,
-						ITL:  1500,
-						ISL:  3000,
-						OSL:  5,
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"engine": map[string]interface{}{
+								"backend": "vllm",
+								"config":  "/tmp/test-config.yaml",
+							},
+							"sla": map[string]interface{}{
+								"ttft": 100.0,
+								"itl":  1500.0,
+								"isl":  3000,
+								"osl":  5,
+							},
+							"hardware": map[string]interface{}{
+								"min_num_gpus_per_engine": 1,
+								"max_num_gpus_per_engine": 8,
+							},
+						}),
 					},
-					Online: true,
 				},
 			}
 
@@ -121,7 +141,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(updated.Status.ObservedGeneration).Should(Equal(updated.Generation))
 		})
 
-		It("Should fail validation with missing modelName", func() {
+		It("Should fail validation with missing config", func() {
 			ctx := context.Background()
 			dgdrName := "test-dgdr-invalid"
 			namespace := "default"
@@ -132,12 +152,8 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					Backend: BackendVLLM,
-					SLA: nvidiacomv1alpha1.SLASpec{
-						TTFT: 100,
-						ITL:  1500,
-						ISL:  3000,
-						OSL:  5,
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{}),
 					},
 				},
 			}
@@ -169,7 +185,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			dgdrName := "test-dgdr-profiling-online"
 			namespace := "default"
 
-			// Create ConfigMap for profiling config
+			// Create ConfigMap for DGD base config
 			configMap := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-config",
@@ -198,16 +214,23 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   BackendVLLM,
-					SLA: nvidiacomv1alpha1.SLASpec{
-						TTFT: 100,
-						ITL:  1500,
-						ISL:  3000,
-						OSL:  5,
-					},
-					Online: true,
-					ProfilingConfig: &nvidiacomv1alpha1.ProfilingConfigSpec{
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"engine": map[string]interface{}{
+								"backend":        "vllm",
+								"profiler_image": "test-profiler:latest",
+							},
+							"sla": map[string]interface{}{
+								"ttft": 100.0,
+								"itl":  1500.0,
+								"isl":  3000,
+								"osl":  5,
+							},
+							"hardware": map[string]interface{}{
+								"min_num_gpus_per_engine": 1,
+								"max_num_gpus_per_engine": 8,
+							},
+						}),
 						ConfigMapRef: &nvidiacomv1alpha1.ConfigMapKeySelector{
 							Name: "test-config",
 							Key:  "disagg.yaml",
@@ -288,19 +311,30 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "QWEN3_32B",
-					Backend:   BackendTRTLLM,
-					SLA: nvidiacomv1alpha1.SLASpec{
-						TTFT: 100,
-						ITL:  1500,
-						ISL:  3000,
-						OSL:  5,
-					},
-					Online: false, // Offline profiling
-					GPU: &nvidiacomv1alpha1.GPUSpec{
-						Type:                "h200_sxm",
-						MinNumGPUsPerEngine: 1,
-						MaxNumGPUsPerEngine: 8,
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"engine": map[string]interface{}{
+								"backend":        "trtllm",
+								"config":         "/tmp/test-config.yaml",
+								"profiler_image": "test-profiler:latest",
+							},
+							"sla": map[string]interface{}{
+								"ttft": 100.0,
+								"itl":  1500.0,
+								"isl":  3000,
+								"osl":  5,
+							},
+							"hardware": map[string]interface{}{
+								"min_num_gpus_per_engine": 1,
+								"max_num_gpus_per_engine": 8,
+							},
+							"sweep": map[string]interface{}{
+								"use_ai_configurator": true,
+								"aic_system":          "h200_sxm",
+								"aic_model_name":      "QWEN3_32B",
+								"aic_backend_version": "0.20.0",
+							},
+						}),
 					},
 				},
 			}
@@ -350,15 +384,20 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   BackendVLLM,
-					SLA: nvidiacomv1alpha1.SLASpec{
-						TTFT: 100,
-						ITL:  1500,
-						ISL:  3000,
-						OSL:  5,
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"engine": map[string]interface{}{
+								"backend": "vllm",
+								"config":  "/tmp/test-config.yaml",
+							},
+							"sla": map[string]interface{}{
+								"ttft": 100.0,
+								"itl":  1500.0,
+								"isl":  3000,
+								"osl":  5,
+							},
+						}),
 					},
-					Online: true,
 				},
 			}
 
@@ -457,15 +496,20 @@ spec:
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   BackendVLLM,
-					SLA: nvidiacomv1alpha1.SLASpec{
-						TTFT: 100,
-						ITL:  1500,
-						ISL:  3000,
-						OSL:  5,
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"engine": map[string]interface{}{
+								"backend": "vllm",
+								"config":  "/tmp/test-config.yaml",
+							},
+							"sla": map[string]interface{}{
+								"ttft": 100.0,
+								"itl":  1500.0,
+								"isl":  3000,
+								"osl":  5,
+							},
+						}),
 					},
-					Online:    true,
 					AutoApply: true,
 				},
 			}
@@ -580,15 +624,20 @@ spec:
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   BackendVLLM,
-					SLA: nvidiacomv1alpha1.SLASpec{
-						TTFT: 100,
-						ITL:  1500,
-						ISL:  3000,
-						OSL:  5,
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"engine": map[string]interface{}{
+								"backend": "vllm",
+								"config":  "/tmp/test-config.yaml",
+							},
+							"sla": map[string]interface{}{
+								"ttft": 100.0,
+								"itl":  1500.0,
+								"isl":  3000,
+								"osl":  5,
+							},
+						}),
 					},
-					Online: true,
 				},
 			}
 
@@ -613,7 +662,11 @@ spec:
 
 			// Try to modify spec
 			k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)
-			current.Spec.SLA.TTFT = 200
+			// Unmarshal config, modify it, and marshal back
+			var config map[string]interface{}
+			yaml.Unmarshal(current.Spec.ProfilingConfig.Config.Raw, &config)
+			config["sla"].(map[string]interface{})["ttft"] = 200.0
+			current.Spec.ProfilingConfig.Config = createTestConfig(config)
 			k8sClient.Update(ctx, &current)
 
 			// Reconcile
@@ -652,15 +705,20 @@ spec:
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   BackendVLLM,
-					SLA: nvidiacomv1alpha1.SLASpec{
-						TTFT: 100,
-						ITL:  1500,
-						ISL:  3000,
-						OSL:  5,
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"engine": map[string]interface{}{
+								"backend": "vllm",
+								"config":  "/tmp/test-config.yaml",
+							},
+							"sla": map[string]interface{}{
+								"ttft": 100.0,
+								"itl":  1500.0,
+								"isl":  3000,
+								"osl":  5,
+							},
+						}),
 					},
-					Online:    true,
 					AutoApply: true,
 				},
 			}
@@ -694,28 +752,13 @@ spec:
 
 var _ = Describe("DGDR Helper Functions", func() {
 	Context("getProfilingJobName", func() {
-		It("Should return correct job name for online profiling", func() {
+		It("Should return correct job name", func() {
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-dgdr",
 				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					Online: true,
-				},
 			}
-			Expect(getProfilingJobName(dgdr)).Should(Equal("profile-online-test-dgdr"))
-		})
-
-		It("Should return correct job name for offline profiling", func() {
-			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-dgdr",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					Online: false,
-				},
-			}
-			Expect(getProfilingJobName(dgdr)).Should(Equal("profile-aic-test-dgdr"))
+			Expect(getProfilingJobName(dgdr)).Should(Equal("profile-test-dgdr"))
 		})
 	})
 
@@ -727,6 +770,68 @@ var _ = Describe("DGDR Helper Functions", func() {
 				},
 			}
 			Expect(getOutputConfigMapName(dgdr)).Should(Equal("dgdr-output-test-dgdr"))
+		})
+	})
+
+	Context("isOnlineProfiling", func() {
+		It("Should return true for online profiling (use_ai_configurator=false)", func() {
+			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"sweep": map[string]interface{}{
+								"use_ai_configurator": false,
+							},
+						}),
+					},
+				},
+			}
+			Expect(isOnlineProfiling(dgdr)).Should(BeTrue())
+		})
+
+		It("Should return false for AI Configurator profiling (use_ai_configurator=true)", func() {
+			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"sweep": map[string]interface{}{
+								"use_ai_configurator": true,
+							},
+						}),
+					},
+				},
+			}
+			Expect(isOnlineProfiling(dgdr)).Should(BeFalse())
+		})
+
+		It("Should return true by default when sweep section is missing", func() {
+			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"engine": map[string]interface{}{
+								"backend": "vllm",
+							},
+						}),
+					},
+				},
+			}
+			Expect(isOnlineProfiling(dgdr)).Should(BeTrue())
+		})
+
+		It("Should return true by default when use_ai_configurator is not specified", func() {
+			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"sweep": map[string]interface{}{
+								"force_rerun": true,
+							},
+						}),
+					},
+				},
+			}
+			Expect(isOnlineProfiling(dgdr)).Should(BeTrue())
 		})
 	})
 })
@@ -745,13 +850,19 @@ var _ = Describe("DGDR Validation", func() {
 			ctx := context.Background()
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   BackendVLLM,
-					SLA: nvidiacomv1alpha1.SLASpec{
-						TTFT: 100,
-						ITL:  1500,
-						ISL:  3000,
-						OSL:  5,
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"engine": map[string]interface{}{
+								"backend": "vllm",
+								"config":  "/tmp/test-config.yaml",
+							},
+							"sla": map[string]interface{}{
+								"ttft": 100.0,
+								"itl":  1500.0,
+								"isl":  3000,
+								"osl":  5,
+							},
+						}),
 					},
 				},
 			}
@@ -760,115 +871,62 @@ var _ = Describe("DGDR Validation", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("Should fail validation when modelName is empty", func() {
+		It("Should fail validation when config is empty", func() {
 			ctx := context.Background()
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					Backend: BackendVLLM,
-					SLA: nvidiacomv1alpha1.SLASpec{
-						TTFT: 100,
-						ITL:  1500,
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{}),
 					},
 				},
 			}
 
 			err := reconciler.validateSpec(ctx, dgdr)
 			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).Should(ContainSubstring("modelName"))
+			Expect(err.Error()).Should(ContainSubstring("config"))
 		})
 
-		It("Should fail validation when TTFT is zero", func() {
+		It("Should fail validation when engine section is missing", func() {
 			ctx := context.Background()
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   BackendVLLM,
-					SLA: nvidiacomv1alpha1.SLASpec{
-						TTFT: 0,
-						ITL:  1500,
-						ISL:  3000,
-						OSL:  500,
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"sla": map[string]interface{}{
+								"ttft": 100.0,
+								"itl":  1500.0,
+							},
+						}),
 					},
 				},
 			}
 
 			err := reconciler.validateSpec(ctx, dgdr)
 			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).Should(ContainSubstring("ttft"))
+			Expect(err.Error()).Should(ContainSubstring("engine"))
 		})
 
-		It("Should fail validation when TTFT is negative", func() {
+		It("Should fail validation when engine.config and configMapRef are both missing", func() {
 			ctx := context.Background()
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   BackendVLLM,
-					SLA: nvidiacomv1alpha1.SLASpec{
-						TTFT: -1,
-						ITL:  1500,
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"engine": map[string]interface{}{
+								"backend": "vllm",
+							},
+							"sla": map[string]interface{}{
+								"ttft": 100.0,
+								"itl":  1500.0,
+							},
+						}),
 					},
 				},
 			}
 
 			err := reconciler.validateSpec(ctx, dgdr)
 			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).Should(ContainSubstring("ttft"))
-		})
-
-		It("Should fail validation when ITL is zero", func() {
-			ctx := context.Background()
-			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   BackendVLLM,
-					SLA: nvidiacomv1alpha1.SLASpec{
-						TTFT: 100,
-						ITL:  0,
-						ISL:  3000,
-						OSL:  500,
-					},
-				},
-			}
-
-			err := reconciler.validateSpec(ctx, dgdr)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).Should(ContainSubstring("itl"))
-		})
-
-		It("Should fail validation when ITL is negative", func() {
-			ctx := context.Background()
-			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   BackendVLLM,
-					SLA: nvidiacomv1alpha1.SLASpec{
-						TTFT: 100,
-						ITL:  -1,
-					},
-				},
-			}
-
-			err := reconciler.validateSpec(ctx, dgdr)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).Should(ContainSubstring("itl"))
-		})
-
-		It("Should fail validation for invalid backend", func() {
-			ctx := context.Background()
-			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   "invalid-backend",
-					SLA: nvidiacomv1alpha1.SLASpec{
-						TTFT: 100,
-						ITL:  1500,
-					},
-				},
-			}
-
-			err := reconciler.validateSpec(ctx, dgdr)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).Should(ContainSubstring("invalid backend"))
+			Expect(err.Error()).Should(ContainSubstring("engine.config"))
 		})
 	})
 })
