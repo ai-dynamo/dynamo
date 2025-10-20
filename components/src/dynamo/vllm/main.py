@@ -5,7 +5,6 @@ import asyncio
 import logging
 import os
 import signal
-from typing import Optional
 
 import uvloop
 from vllm.distributed.kv_events import ZmqEventPublisher
@@ -107,33 +106,41 @@ def setup_kv_event_publisher(
     component,
     generate_endpoint,
     vllm_config,
-) -> Optional[ZmqKvEventPublisher]:
+):
     """
-    Set up KV event publisher for prefix caching if enabled.
+    Set up KV event publishers for prefix caching if enabled.
+    Creates one publisher per dp_rank since each dp_rank publishes to a different port.
 
     Returns:
-        ZmqKvEventPublisher if prefix caching is enabled, None otherwise.
+        List of ZmqKvEventPublisher instances (one per dp_rank) if prefix caching is enabled, None otherwise.
     """
     if not config.engine_args.enable_prefix_caching:
         return None
 
-    # TODO: We start off with a valid endpoint, then we increment it by dp_rank
-    # May no longer be valid. Lets remove the increment behavior from vLLM and here
-    zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
-        config.engine_args.kv_events_config.endpoint,
-        data_parallel_rank=config.engine_args.data_parallel_rank or 0,
-    ).replace("*", "127.0.0.1")
+    # Get data_parallel_size to create publishers for all dp_ranks
+    data_parallel_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
+    kv_publishers = []
 
-    zmq_config = ZmqKvEventPublisherConfig(
-        worker_id=generate_endpoint.lease_id(),
-        kv_block_size=vllm_config.cache_config.block_size,
-        zmq_endpoint=zmq_endpoint,
-    )
-    kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
+    for dp_rank in range(data_parallel_size):
+        # Each dp_rank publishes to a different port
+        zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
+            config.engine_args.kv_events_config.endpoint,
+            data_parallel_rank=dp_rank,
+        ).replace("*", "127.0.0.1")
 
-    logger.info(f"Worker reading KV events from {zmq_endpoint}")
+        zmq_config = ZmqKvEventPublisherConfig(
+            worker_id=generate_endpoint.lease_id(),
+            kv_block_size=vllm_config.cache_config.block_size,
+            zmq_endpoint=zmq_endpoint,
+        )
+        kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
+        kv_publishers.append(kv_publisher)
 
-    return kv_publisher
+        logger.info(
+            f"Worker reading KV events for dp_rank={dp_rank} from {zmq_endpoint}"
+        )
+
+    return kv_publishers if kv_publishers else None
 
 
 def setup_vllm_engine(config, stat_logger=None):
@@ -200,12 +207,12 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         runtime, component, engine_client, default_sampling_params
     )
 
-    # Set up KV event publisher for prefix caching if enabled
-    kv_publisher = setup_kv_event_publisher(
+    # Set up KV event publishers for prefix caching if enabled (one per dp_rank)
+    kv_publishers = setup_kv_event_publisher(
         config, component, generate_endpoint, vllm_config
     )
-    if kv_publisher:
-        handler.kv_publisher = kv_publisher
+    if kv_publishers:
+        handler.kv_publishers = kv_publishers
 
     health_check_payload = VllmPrefillHealthCheckPayload(engine_client).to_dict()
 
@@ -285,12 +292,12 @@ async def init(runtime: DistributedRuntime, config: Config):
         prefill_router_client,
     )
 
-    # Set up KV event publisher for prefix caching if enabled
-    kv_publisher = setup_kv_event_publisher(
+    # Set up KV event publishers for prefix caching if enabled (one per dp_rank)
+    kv_publishers = setup_kv_event_publisher(
         config, component, generate_endpoint, vllm_config
     )
-    if kv_publisher:
-        handler.kv_publisher = kv_publisher
+    if kv_publishers:
+        handler.kv_publishers = kv_publishers
 
     if config.engine_args.disable_log_stats is False:
         from prometheus_client import REGISTRY
@@ -310,6 +317,12 @@ async def init(runtime: DistributedRuntime, config: Config):
         runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
         runtime_config.tool_call_parser = config.tool_call_parser
         runtime_config.reasoning_parser = config.reasoning_parser
+
+        # Get data_parallel_size from vllm_config (defaults to 1)
+        data_parallel_size = getattr(
+            vllm_config.parallel_config, "data_parallel_size", 1
+        )
+        runtime_config.data_parallel_size = data_parallel_size
 
         await register_llm(
             ModelInput.Tokens,
