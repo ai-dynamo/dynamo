@@ -34,9 +34,7 @@ use tonic::Status;
 /// Dynamo Annotation for the request ID
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
-
 use inference::infer_parameter::ParameterChoice;
-
 
 /// Tensor Request Handler
 ///
@@ -199,16 +197,15 @@ fn get_or_create_request_id(primary: Option<&str>) -> String {
 /// # Returns
 /// * `Ok(ParameterValue)` - Successfully converted parameter
 /// * `Err(Status)` - Parameter has no value (parameter_choice is None)
-fn kserve_param_to_dynamo(
+#[allow(clippy::result_large_err)]
+pub fn kserve_param_to_dynamo(
     key: &str,
     param: &inference::InferParameter,
 ) -> Result<tensor::ParameterValue, Status> {
     param
         .parameter_choice
         .as_ref()
-        .ok_or_else(|| {
-            Status::invalid_argument(format!("Parameter '{}' has no value", key))
-        })
+        .ok_or_else(|| Status::invalid_argument(format!("Parameter '{}' has no value", key)))
         .map(|choice| match choice {
             ParameterChoice::BoolParam(v) => tensor::ParameterValue::Bool(*v),
             ParameterChoice::Int64Param(v) => tensor::ParameterValue::Int64(*v),
@@ -219,9 +216,7 @@ fn kserve_param_to_dynamo(
 }
 
 /// Convert Dynamo ParameterValue to KServe InferParameter
-fn dynamo_param_to_kserve(param: &tensor::ParameterValue) -> inference::InferParameter {
-
-
+pub fn dynamo_param_to_kserve(param: &tensor::ParameterValue) -> inference::InferParameter {
     let parameter_choice = match param {
         tensor::ParameterValue::Bool(v) => ParameterChoice::BoolParam(*v),
         tensor::ParameterValue::Int64(v) => ParameterChoice::Int64Param(*v),
@@ -233,20 +228,6 @@ fn dynamo_param_to_kserve(param: &tensor::ParameterValue) -> inference::InferPar
     inference::InferParameter {
         parameter_choice: Some(parameter_choice),
     }
-}
-
-// Test wrappers to expose conversion functions for integration testing
-#[cfg(any(test, feature = "integration"))]
-pub fn kserve_param_to_dynamo_test(
-    key: &str,
-    param: &inference::InferParameter,
-) -> Result<tensor::ParameterValue, Status> {
-    kserve_param_to_dynamo(key, param)
-}
-
-#[cfg(any(test, feature = "integration"))]
-pub fn dynamo_param_to_kserve_test(param: &tensor::ParameterValue) -> inference::InferParameter {
-    dynamo_param_to_kserve(param)
 }
 
 impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
@@ -669,7 +650,6 @@ impl TryFrom<NvCreateTensorResponse> for inference::ModelInferResponse {
                             })
                         }
                     },
-                    ..Default::default()
                 });
         }
 

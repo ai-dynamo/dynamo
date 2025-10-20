@@ -1431,7 +1431,6 @@ pub mod kserve_test {
         }
     }
 
-
     #[test]
     fn test_parameter_conversion_round_trip() {
         use kserve_inference::infer_parameter::ParameterChoice;
@@ -1440,8 +1439,11 @@ pub mod kserve_test {
         let test_cases = vec![
             ("bool_param", ParameterChoice::BoolParam(true)),
             ("int64_param", ParameterChoice::Int64Param(42)),
-            ("string_param", ParameterChoice::StringParam("test_value".to_string())),
-            ("double_param", ParameterChoice::DoubleParam(3.14159)),
+            (
+                "string_param",
+                ParameterChoice::StringParam("test_value".to_string()),
+            ),
+            ("double_param", ParameterChoice::DoubleParam(2.5)),
             ("uint64_param", ParameterChoice::Uint64Param(9999)),
         ];
 
@@ -1451,15 +1453,12 @@ pub mod kserve_test {
             };
 
             // Convert KServe -> Dynamo -> KServe
-            let dynamo_param = dynamo_llm::grpc::service::tensor::kserve_param_to_dynamo_test(
-                name,
-                &kserve_param,
-            )
-            .expect("Conversion to Dynamo should succeed");
+            let dynamo_param =
+                dynamo_llm::grpc::service::tensor::kserve_param_to_dynamo(name, &kserve_param)
+                    .expect("Conversion to Dynamo should succeed");
 
-            let back_to_kserve = dynamo_llm::grpc::service::tensor::dynamo_param_to_kserve_test(
-                &dynamo_param,
-            );
+            let back_to_kserve =
+                dynamo_llm::grpc::service::tensor::dynamo_param_to_kserve(&dynamo_param);
 
             // Verify round-trip preserves the value
             assert_eq!(
@@ -1477,17 +1476,15 @@ pub mod kserve_test {
             parameter_choice: None,
         };
 
-        let result = dynamo_llm::grpc::service::tensor::kserve_param_to_dynamo_test(
-            "empty_param",
-            &empty_param,
-        );
+        let result =
+            dynamo_llm::grpc::service::tensor::kserve_param_to_dynamo("empty_param", &empty_param);
 
-        assert!(result.is_err(), "Expected error for parameter with no value");
         assert!(
-            result
-                .unwrap_err()
-                .message()
-                .contains("has no value"),
+            result.is_err(),
+            "Expected error for parameter with no value"
+        );
+        assert!(
+            result.unwrap_err().message().contains("has no value"),
             "Expected error message about missing value"
         );
     }

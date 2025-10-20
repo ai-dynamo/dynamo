@@ -79,7 +79,13 @@ def extract_params(param_map) -> dict:
     """Extract parameters from gRPC response."""
     result = {}
     for key, param in param_map.items():
-        for field in ["bool_param", "int64_param", "double_param", "string_param"]:
+        for field in [
+            "bool_param",
+            "int64_param",
+            "double_param",
+            "string_param",
+            "uint64_param",
+        ]:
             if param.HasField(field):
                 result[key] = getattr(param, field)
                 break
