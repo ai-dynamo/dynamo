@@ -85,7 +85,7 @@ pub enum TransportType {
 #[derive(Default)]
 pub struct RegistryInner {
     services: HashMap<String, Service>,
-    stats_handlers: HashMap<String, Arc<std::sync::Mutex<HashMap<String, EndpointStatsHandler>>>>,
+    stats_handlers: HashMap<String, Arc<parking_lot::Mutex<HashMap<String, EndpointStatsHandler>>>>,
 }
 
 #[derive(Clone)]

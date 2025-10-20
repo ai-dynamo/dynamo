@@ -5,8 +5,9 @@ use async_nats::service::Service as NatsService;
 use async_nats::service::ServiceExt as _;
 use derive_builder::Builder;
 use derive_getters::Dissolve;
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::component::Component;
 
@@ -110,7 +111,7 @@ async fn build_nats_service(
             .description(description)
             .stats_handler(move |name, stats| {
                 tracing::trace!("stats_handler: {name}, {stats:?}");
-                let mut guard = stats_handler_registry.lock().unwrap();
+                let mut guard = stats_handler_registry.lock();
                 match guard.get_mut(&name) {
                     Some(handler) => handler(stats),
                     None => serde_json::Value::Null,

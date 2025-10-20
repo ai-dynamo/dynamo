@@ -574,8 +574,8 @@ fn main() -> Result<()> {
         let permits = Arc::new(tokio::sync::Semaphore::new(1)); // 2 workers - 1
 
         // Detect number of worker threads
+        use parking_lot::Mutex;
         use std::collections::HashSet;
-        use std::sync::Mutex;
 
         let thread_ids = Arc::new(Mutex::new(HashSet::new()));
         let mut handles = Vec::new();

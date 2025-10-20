@@ -206,7 +206,7 @@ pub struct DistributedRuntime {
     instance_sources: Arc<tokio::sync::Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
 
     // Health Status
-    system_health: Arc<std::sync::Mutex<SystemHealth>>,
+    system_health: Arc<parking_lot::Mutex<SystemHealth>>,
 
     // This map associates metric prefixes with their corresponding Prometheus registries and callbacks.
     // Uses RwLock for better concurrency - multiple threads can read (execute callbacks) simultaneously.
