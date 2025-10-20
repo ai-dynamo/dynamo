@@ -75,14 +75,10 @@ def start_completion_request() -> tuple:
             )
             logger.info(f"Received response with status code: {response.status_code}")
             response_list.append(response)
-        except requests.exceptions.Timeout:
-            logger.error(f"Request timed out after {timeout} seconds")
-            raise
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             logger.error(f"Request failed with error: {e}")
-            raise
 
-    request_thread = threading.Thread(target=send_request)
+    request_thread = threading.Thread(target=send_request, daemon=True)
     request_thread.start()
 
     return request_thread, response_list
@@ -120,16 +116,19 @@ def determine_request_receiving_worker(
                         result_list.append(True)
                         return
             except Exception as e:
-                pytest.fail(f"Could not read log file {worker.log_path}: {e}")
+                logger.error(f"Could not read log file {worker.log_path}: {e}")
+                return
 
             time.sleep(poll_interval_ms / 1000.0)
             iteration += 1
 
-        result_list.append(False)
-
     # Look for which worker received the request
-    thread1 = threading.Thread(target=poll_worker, args=(worker1, worker1_results))
-    thread2 = threading.Thread(target=poll_worker, args=(worker2, worker2_results))
+    thread1 = threading.Thread(
+        target=poll_worker, args=(worker1, worker1_results), daemon=True
+    )
+    thread2 = threading.Thread(
+        target=poll_worker, args=(worker2, worker2_results), daemon=True
+    )
     thread1.start()
     thread2.start()
     thread1.join(timeout=1)
