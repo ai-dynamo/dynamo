@@ -42,7 +42,7 @@ kubectl get crd | grep dynamo
 
 ## Installation Paths
 
-Platform is installed using Dynamo Kubernetes Platform [helm chart](/deploy/cloud/helm/platform/README.md).
+Platform is installed using Dynamo Kubernetes Platform [helm chart](../../deploy/cloud/helm/platform/README.md).
 
 **Path A: Pre-built Artifacts**
 - Use case: Production deployment, shared or dedicated clusters
@@ -241,12 +241,12 @@ kubectl get pods -n ${NAMESPACE}
    ```
 
 2. **Explore Backend Guides**
-   - [vLLM Deployments](/components/backends/vllm/deploy/README.md)
-   - [SGLang Deployments](/components/backends/sglang/deploy/README.md)
-   - [TensorRT-LLM Deployments](/components/backends/trtllm/deploy/README.md)
+   - [vLLM Deployments](../../components/backends/vllm/deploy/README.md)
+   - [SGLang Deployments](../../components/backends/sglang/deploy/README.md)
+   - [TensorRT-LLM Deployments](../../components/backends/trtllm/deploy/README.md)
 
 3. **Optional:**
-   - [Set up Prometheus & Grafana](metrics.md)
+   - [Set up Prometheus & Grafana](./observability/metrics.md)
    - [SLA Planner Quickstart Guide](../planner/sla_planner_quickstart.md) (for SLA-aware scheduling and autoscaling)
 
 ## Troubleshooting
@@ -310,8 +310,7 @@ just add the following to the helm install command:
 
 ## Advanced Options
 
-- [Helm Chart Configuration](/deploy/cloud/helm/platform/README.md)
-- [GKE-specific setup](gke_setup.md)
-- [Create custom deployments](create_deployment.md)
-- [Dynamo Operator details](dynamo_operator.md)
+- [Helm Chart Configuration](../../deploy/cloud/helm/platform/README.md)
+- [Create custom deployments](./deployment/create_deployment.md)
+- [Dynamo Operator details](./dynamo_operator.md)
 - [Model Express Server details](https://github.com/ai-dynamo/modelexpress)
