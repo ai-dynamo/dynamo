@@ -25,6 +25,8 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
+          startupProbe:
+            initialDelaySeconds: 180
           image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/vllm
           command:
