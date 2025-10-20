@@ -191,6 +191,60 @@ def setup_vllm_engine(config, stat_logger=None):
     return engine_client, vllm_config, default_sampling_params
 
 
+async def register_vllm_model(
+    model_input: ModelInput,
+    model_type: ModelType,
+    generate_endpoint,
+    config: Config,
+    engine_client: AsyncLLM,
+    vllm_config,
+    migration_limit: int,
+):
+    """
+    Helper function to register a vLLM model with runtime configuration.
+
+    Args:
+        model_input: Input type for the model (e.g., ModelInput.Tokens)
+        model_type: Type of model (e.g., ModelType.Chat, ModelType.Prefill)
+        generate_endpoint: Endpoint to register
+        config: Configuration object
+        engine_client: vLLM engine client
+        vllm_config: vLLM configuration
+        migration_limit: Migration limit for the model
+    """
+    runtime_config = ModelRuntimeConfig()
+
+    # Get runtime configuration from vLLM engine
+    logging.info(
+        f"Getting engine runtime configuration metadata from vLLM engine for {model_type}..."
+    )
+    runtime_values = get_engine_cache_info(engine_client)
+    runtime_config.total_kv_blocks = runtime_values["num_gpu_blocks"]
+    runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
+    runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
+
+    # Add tool/reasoning parsers for decode models
+    if model_type != ModelType.Prefill:
+        runtime_config.tool_call_parser = config.tool_call_parser
+        runtime_config.reasoning_parser = config.reasoning_parser
+
+    # Get data_parallel_size from vllm_config (defaults to 1)
+    data_parallel_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
+    runtime_config.data_parallel_size = data_parallel_size
+
+    await register_llm(
+        model_input,
+        model_type,
+        generate_endpoint,
+        config.model,
+        config.served_model_name,
+        kv_cache_block_size=config.engine_args.block_size,
+        migration_limit=migration_limit,
+        runtime_config=runtime_config,
+        custom_template_path=config.custom_jinja_template,
+    )
+
+
 async def init_prefill(runtime: DistributedRuntime, config: Config):
     """
     Instantiate and serve
@@ -213,6 +267,18 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     )
     if kv_publishers:
         handler.kv_publishers = kv_publishers
+
+    # Register prefill model with ModelType.Prefill
+    if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
+        await register_vllm_model(
+            ModelInput.Tokens,
+            ModelType.Prefill,
+            generate_endpoint,
+            config,
+            engine_client,
+            vllm_config,
+            migration_limit=0,  # Prefill doesn't support migration
+        )
 
     health_check_payload = VllmPrefillHealthCheckPayload(engine_client).to_dict()
 
@@ -255,20 +321,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
-    prefill_router_client = (
-        await runtime.namespace(config.namespace)
-        .component("router")  # Standalone router for prefill workers
-        .endpoint("generate")
-        .client()
-    )
-
-    prefill_worker_client = (
-        await runtime.namespace(config.namespace)
-        .component("prefill")  # TODO don't hardcode
-        .endpoint("generate")
-        .client()
-    )
-
     factory = StatLoggerFactory(
         component,
         config.engine_args.data_parallel_rank or 0,
@@ -288,8 +340,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         component,
         engine_client,
         default_sampling_params,
-        prefill_worker_client,
-        prefill_router_client,
     )
 
     # Set up KV event publishers for prefix caching if enabled (one per dp_rank)
@@ -305,35 +355,14 @@ async def init(runtime: DistributedRuntime, config: Config):
         register_engine_metrics_callback(generate_endpoint, REGISTRY, "vllm:", "vLLM")
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
-        runtime_config = ModelRuntimeConfig()
-
-        # make a `collective_rpc` call to get runtime configuration values
-        logging.info(
-            "Getting engine runtime configuration metadata from vLLM engine..."
-        )
-        runtime_values = get_engine_cache_info(engine_client)
-        runtime_config.total_kv_blocks = runtime_values["num_gpu_blocks"]
-        runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
-        runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
-        runtime_config.tool_call_parser = config.tool_call_parser
-        runtime_config.reasoning_parser = config.reasoning_parser
-
-        # Get data_parallel_size from vllm_config (defaults to 1)
-        data_parallel_size = getattr(
-            vllm_config.parallel_config, "data_parallel_size", 1
-        )
-        runtime_config.data_parallel_size = data_parallel_size
-
-        await register_llm(
+        await register_vllm_model(
             ModelInput.Tokens,
             ModelType.Chat | ModelType.Completions,
             generate_endpoint,
-            config.model,
-            config.served_model_name,
-            kv_cache_block_size=config.engine_args.block_size,
+            config,
+            engine_client,
+            vllm_config,
             migration_limit=config.migration_limit,
-            runtime_config=runtime_config,
-            custom_template_path=config.custom_jinja_template,
         )
 
     health_check_payload = VllmHealthCheckPayload(engine_client).to_dict()

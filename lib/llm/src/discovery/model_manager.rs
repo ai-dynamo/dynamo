@@ -7,23 +7,33 @@ use std::{
 };
 
 use parking_lot::{Mutex, RwLock};
+use tokio::sync::oneshot;
 
-use dynamo_runtime::component::Component;
+use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::prelude::DistributedRuntimeProvider;
 
-use crate::{discovery::KV_ROUTERS_ROOT_PATH, model_card::ModelDeploymentCard};
 use crate::{
-    kv_router::KvRouter,
-    types::generic::tensor::TensorStreamingEngine,
-    types::openai::{
-        chat_completions::OpenAIChatCompletionsStreamingEngine,
-        completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
+    discovery::KV_ROUTERS_ROOT_PATH,
+    kv_router::{KvRouter, KvRouterConfig, scheduler::DefaultWorkerSelector},
+    model_card::ModelDeploymentCard,
+    model_type::ModelType,
+    types::{
+        generic::tensor::TensorStreamingEngine,
+        openai::{
+            chat_completions::OpenAIChatCompletionsStreamingEngine,
+            completions::OpenAICompletionsStreamingEngine,
+            embeddings::OpenAIEmbeddingsStreamingEngine,
+        },
     },
 };
-use crate::{
-    kv_router::{KvRouterConfig, scheduler::DefaultWorkerSelector},
-    model_type::ModelType,
-};
+
+/// State for prefill router activation rendezvous
+enum PrefillActivationState {
+    /// Decode model registered, waiting for prefill endpoint
+    DecodeWaiting(oneshot::Sender<Endpoint>),
+    /// Prefill endpoint arrived, waiting for decode model to register
+    PrefillReady(oneshot::Receiver<Endpoint>),
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ModelManagerError {
@@ -46,6 +56,7 @@ pub struct ModelManager {
     // These are Mutex because we read and write rarely and equally
     cards: Mutex<HashMap<String, ModelDeploymentCard>>,
     kv_choosers: Mutex<HashMap<String, Arc<KvRouter>>>,
+    prefill_router_activators: Mutex<HashMap<String, PrefillActivationState>>,
 }
 
 impl Default for ModelManager {
@@ -64,6 +75,7 @@ impl ModelManager {
             prefill_engines: RwLock::new(ModelEngines::default()),
             cards: Mutex::new(HashMap::new()),
             kv_choosers: Mutex::new(HashMap::new()),
+            prefill_router_activators: Mutex::new(HashMap::new()),
         }
     }
 
@@ -345,6 +357,103 @@ impl ModelManager {
 
     fn get_kv_chooser(&self, model_name: &str) -> Option<Arc<KvRouter>> {
         self.kv_choosers.lock().get(model_name).cloned()
+    }
+
+    /// Register a prefill router for a decode model. Returns a receiver that will be
+    /// activated when the corresponding prefill model is discovered.
+    /// Returns None if the decode model was already registered.
+    pub fn register_prefill_router(
+        &self,
+        model_name: String,
+    ) -> Option<oneshot::Receiver<Endpoint>> {
+        let mut activators = self.prefill_router_activators.lock();
+
+        match activators.remove(&model_name) {
+            Some(PrefillActivationState::PrefillReady(rx)) => {
+                // Prefill endpoint already arrived - rx will immediately resolve
+                tracing::debug!(
+                    model_name = %model_name,
+                    "Prefill endpoint already available, returning receiver with endpoint"
+                );
+                Some(rx)
+            }
+            Some(PrefillActivationState::DecodeWaiting(tx)) => {
+                // Decode already registered - this shouldn't happen, restore state and return None
+                tracing::error!(
+                    model_name = %model_name,
+                    "Decode model already registered for this prefill router"
+                );
+                activators.insert(model_name, PrefillActivationState::DecodeWaiting(tx));
+                None
+            }
+            None => {
+                // New registration: create tx/rx pair, store sender and return receiver
+                let (tx, rx) = oneshot::channel();
+                activators.insert(
+                    model_name.clone(),
+                    PrefillActivationState::DecodeWaiting(tx),
+                );
+                tracing::debug!(
+                    model_name = %model_name,
+                    "No prefill endpoint available yet, storing sender for future activation"
+                );
+                Some(rx)
+            }
+        }
+    }
+
+    /// Activate a prefill router by sending the endpoint through the oneshot channel.
+    /// If no decode model has registered yet, stores the endpoint for future retrieval.
+    pub fn activate_prefill_router(
+        &self,
+        model_name: &str,
+        endpoint: Endpoint,
+    ) -> anyhow::Result<()> {
+        let mut activators = self.prefill_router_activators.lock();
+
+        match activators.remove(model_name) {
+            Some(PrefillActivationState::DecodeWaiting(sender)) => {
+                // Decode model already registered
+                sender.send(endpoint).map_err(|_| {
+                    anyhow::anyhow!(
+                        "Failed to send endpoint to prefill router activator for model: {}",
+                        model_name
+                    )
+                })?;
+
+                tracing::info!(
+                    model_name = %model_name,
+                    "Activated prefill router for already-registered decode model"
+                );
+
+                Ok(())
+            }
+            Some(PrefillActivationState::PrefillReady(_)) => {
+                // Prefill already activated - this shouldn't happen
+                anyhow::bail!("Prefill router for model {} already activated", model_name);
+            }
+            None => {
+                // Decode model not registered yet - create pair and immediately send endpoint
+                let (tx, rx) = oneshot::channel();
+
+                tx.send(endpoint).map_err(|_| {
+                    anyhow::anyhow!("Failed to send endpoint for prefill model: {}", model_name)
+                })?;
+
+                // Store the receiver for when decode model registers
+                activators.insert(
+                    model_name.to_string(),
+                    PrefillActivationState::PrefillReady(rx),
+                );
+
+                tracing::info!(
+                    model_name = %model_name,
+                    "Stored prefill endpoint for future decode model registration"
+                );
+
+                Ok(())
+            }
+        }
     }
 
     pub fn get_model_tool_call_parser(&self, model: &str) -> Option<String> {

@@ -20,7 +20,7 @@ use dynamo_runtime::{
 use crate::{
     backend::Backend,
     entrypoint,
-    kv_router::KvRouterConfig,
+    kv_router::{KvRouterConfig, PrefillRouter},
     model_card::{self, ModelDeploymentCard},
     model_type::{ModelInput, ModelType},
     preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::PromptFormatter},
@@ -318,7 +318,8 @@ impl ModelWatcher {
             .drt
             .namespace(&endpoint_id.namespace)?
             .component(&endpoint_id.component)?;
-        let client = component.endpoint(&endpoint_id.name).client().await?;
+        let endpoint = component.endpoint(&endpoint_id.name);
+        let client = endpoint.client().await?;
         tracing::debug!(model_name = card.name(), "adding model");
         self.manager.save_model_card(key, card.clone())?;
 
@@ -361,6 +362,25 @@ impl ModelWatcher {
             // This is expensive, we are loading ~10MiB JSON, so only do it once
             let tokenizer_hf = card.tokenizer_hf().context("tokenizer_hf")?;
 
+            // Create prefill chooser once if we're building pipelines
+            // Both chat and completions will share the same prefill chooser instance
+            let prefill_chooser = self
+                .manager
+                .register_prefill_router(card.name().to_string())
+                .map(|rx| {
+                    // Create prefill-specific config with track_active_blocks disabled
+                    let mut prefill_config = self.kv_router_config.unwrap_or_default();
+                    prefill_config.router_track_active_blocks = false;
+
+                    PrefillRouter::new(
+                        card.name().to_string(),
+                        rx,
+                        self.manager.clone(),
+                        card.kv_cache_block_size,
+                        Some(prefill_config),
+                    )
+                });
+
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
                 let chat_engine = entrypoint::build_routed_pipeline::<
@@ -373,6 +393,7 @@ impl ModelWatcher {
                     self.busy_threshold,
                     kv_chooser.clone(),
                     tokenizer_hf.clone(),
+                    prefill_chooser.clone(),
                 )
                 .await
                 .context("build_routed_pipeline")?;
@@ -403,6 +424,7 @@ impl ModelWatcher {
                     kv_chooser,
                     preprocessor,
                     tokenizer_hf,
+                    prefill_chooser,
                 )
                 .await
                 .context("build_routed_pipeline_with_preprocessor")?;
@@ -503,11 +525,23 @@ impl ModelWatcher {
                 );
             }
 
-            // This is effectively a guardrail + passthrough for now
-            // TODO: Build proper prefill pipeline with KV router (track_active_blocks=false)
             tracing::info!(
                 model_name = card.name(),
-                "Prefill model registered (passthrough, not yet functional)"
+                "Prefill model detected, activating prefill router"
+            );
+
+            // Activate the prefill router with the endpoint for this prefill model
+            let Ok(()) = self.manager.activate_prefill_router(card.name(), endpoint) else {
+                tracing::warn!(
+                    model_name = card.name(),
+                    "Failed to activate prefill router - prefill model may already be activated"
+                );
+                return Ok(());
+            };
+
+            tracing::info!(
+                model_name = card.name(),
+                "Prefill router activated successfully"
             );
         } else {
             // Reject unsupported combinations

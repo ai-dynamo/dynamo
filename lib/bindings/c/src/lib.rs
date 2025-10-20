@@ -929,6 +929,7 @@ pub async fn build_worker_selection_pipeline_chat(
         busy_threshold,
         chooser,
         hf_tokenizer,
+        None,
     )
     .await?;
 

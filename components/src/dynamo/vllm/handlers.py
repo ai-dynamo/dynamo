@@ -7,7 +7,6 @@ import os
 import uuid
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from copy import deepcopy
 from typing import Any, AsyncGenerator, Dict
 
 import msgspec
@@ -130,12 +129,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         component,
         engine,
         default_sampling_params,
-        prefill_worker_client=None,
-        prefill_router_client=None,
     ):
         super().__init__(runtime, component, engine, default_sampling_params)
-        self.prefill_worker_client = prefill_worker_client
-        self.prefill_router_client = prefill_router_client
 
     async def generate(self, request, context):
         request_id = str(uuid.uuid4().hex)
@@ -154,69 +149,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             if value is not None and hasattr(sampling_params, key):
                 setattr(sampling_params, key, value)
 
-        # Use prefill router or worker if available
-        can_prefill = (
-            self.prefill_worker_client is not None
-        ) and self.prefill_worker_client.instance_ids()
-
-        if can_prefill:
-            # Create prefill sampling params with modifications
-            prefill_sampling_params = deepcopy(sampling_params)
-            if prefill_sampling_params.extra_args is None:
-                prefill_sampling_params.extra_args = {}
-            prefill_sampling_params.extra_args["kv_transfer_params"] = {
-                "do_remote_decode": True,
-            }
-            prefill_sampling_params.max_tokens = 1
-            prefill_sampling_params.min_tokens = 1
-
-            try:
-                # Send request with sampling_params and request_id in extra_args
-                prefill_request = request.copy()
-                # TODO (PeaBrane): this smells a bit bad as not we have two nestings
-                # of extra_args (an inner one again in sampling_params)
-                prefill_request["extra_args"] = {
-                    "sampling_params": msgspec.to_builtins(prefill_sampling_params),
-                    "request_id": request_id,
-                }
-
-                # Try router first if available, fallback to worker
-                if (
-                    self.prefill_router_client is not None
-                    and self.prefill_router_client.instance_ids()
-                ):
-                    # Call router's generate endpoint which returns LLMEngineOutput
-                    prefill_response = await anext(
-                        await self.prefill_router_client.generate(
-                            prefill_request, context=context
-                        )
-                    )
-                else:
-                    # Fallback to direct worker with same format
-                    prefill_response = await anext(
-                        await self.prefill_worker_client.round_robin(
-                            prefill_request, context=context
-                        )
-                    )
-
-                prefill_output = prefill_response.data()
-
-                # Extract kv_transfer_params from response
-                kv_transfer_params = prefill_output.get("extra_args", {}).get(
-                    "kv_transfer_params"
-                )
-                if kv_transfer_params:
-                    if sampling_params.extra_args is None:
-                        sampling_params.extra_args = {}
-                    sampling_params.extra_args[
-                        "kv_transfer_params"
-                    ] = kv_transfer_params
-
-            except Exception as e:
-                if context.is_stopped() or context.is_killed():
-                    logger.debug(f"Aborted Remote Prefill Request ID: {request_id}")
-                    return
-                logger.warning(f"Prefill error: {e}, falling back to local prefill")
+        # Extract disaggregated_params from request (set by prefill router in Rust frontend)
+        disaggregated_params = request.get("disaggregated_params")
+        if disaggregated_params:
+            # Prefill was performed - use the disaggregated params
+            if sampling_params.extra_args is None:
+                sampling_params.extra_args = {}
+            sampling_params.extra_args["kv_transfer_params"] = disaggregated_params.get(
+                "kv_transfer_params"
+            )
+            logger.debug(
+                f"Using disaggregated params from prefill for request {request_id}"
+            )
 
         dp_rank = request.get("dp_rank", None)
 
