@@ -11,18 +11,18 @@
    :maxdepth: 2
    :hidden:
 
-   runtime/README.md
-   API/nixl_connect/connector.md
-   API/nixl_connect/descriptor.md
-   API/nixl_connect/device.md
-   API/nixl_connect/device_kind.md
-   API/nixl_connect/operation_status.md
-   API/nixl_connect/rdma_metadata.md
-   API/nixl_connect/readable_operation.md
-   API/nixl_connect/writable_operation.md
-   API/nixl_connect/read_operation.md
-   API/nixl_connect/write_operation.md
-   API/nixl_connect/README.md
+   development/runtime-guide.md
+   api/nixl_connect/connector.md
+   api/nixl_connect/descriptor.md
+   api/nixl_connect/device.md
+   api/nixl_connect/device_kind.md
+   api/nixl_connect/operation_status.md
+   api/nixl_connect/rdma_metadata.md
+   api/nixl_connect/readable_operation.md
+   api/nixl_connect/writable_operation.md
+   api/nixl_connect/read_operation.md
+   api/nixl_connect/write_operation.md
+   api/nixl_connect/README.md
 
    kubernetes/api_reference.md
    kubernetes/create_deployment.md
@@ -32,14 +32,14 @@
    kubernetes/grove.md
    kubernetes/model_caching_with_fluid.md
    kubernetes/README.md
-   guides/dynamo_run.md
-   guides/metrics.md
-   guides/run_kvbm_in_vllm.md
-   guides/run_kvbm_in_trtllm.md
-   guides/tool_calling.md
+   reference/cli.md
+   observability/metrics.md
+   kvbm/vllm-setup.md
+   kvbm/trtllm-setup.md
+   guides/tool-calling.md
 
    architecture/kv_cache_routing.md
-   architecture/load_planner.md
+   planner/load_planner.md
    architecture/request_migration.md
    architecture/request_cancellation.md
 
