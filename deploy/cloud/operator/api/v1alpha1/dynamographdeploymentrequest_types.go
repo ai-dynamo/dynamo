@@ -48,8 +48,8 @@ type ConfigMapKeySelector struct {
 // This structure maps directly to the profile_sla.py config format.
 // See benchmarks/profiler/utils/profiler_argparse.py for the complete schema.
 type ProfilingConfigSpec struct {
-	// Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly
-	// to the profiler via --profile-config. The profiler will validate the configuration and report any errors.
+	// Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.
+	// The profiler will validate the configuration and report any errors.
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
@@ -95,7 +95,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 	ModelName string `json:"modelName"`
 
 	// ProfilingConfig provides the complete configuration for the profiling job.
-	// This configuration is passed directly to the profiler via --profile-config.
+	// This configuration is passed directly to the profiler.
 	// The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).
 	// The profiler will validate the configuration and report any errors.
 	// +kubebuilder:validation:Required

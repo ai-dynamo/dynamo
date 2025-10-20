@@ -41,7 +41,7 @@ spec:
       # Hardware configuration
       hardware:
         min_num_gpus_per_engine: 1  # Minimum GPUs to test
-        max_num_gpus_per_engine: 8  # Maximum GPUs to test
+        max_num_gpus_per_engine: 4  # Maximum GPUs to test (limited by model's num_heads/4)
         num_gpus_per_node: 8  # GPUs per node (for MoE models)
 
       # Sweep/profiling configuration
