@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import signal
+from typing import Optional
 
 import uvloop
 from vllm.distributed.kv_events import ZmqEventPublisher
@@ -23,6 +24,7 @@ from dynamo.llm import (
     fetch_llm,
     register_llm,
 )
+from dynamo.llm.vllm_integration.consolidator_config import get_consolidator_endpoints
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -106,10 +108,20 @@ def setup_kv_event_publisher(
     component,
     generate_endpoint,
     vllm_config,
-):
+    consolidator_enabled: bool = False,
+    consolidator_port: int = 5558,
+) -> Optional[ZmqKvEventPublisher]:
     """
     Set up KV event publishers for prefix caching if enabled.
     Creates one publisher per dp_rank since each dp_rank publishes to a different port.
+
+    Args:
+        config: Worker configuration
+        component: Component for runtime integration
+        generate_endpoint: Endpoint for worker ID
+        vllm_config: vLLM configuration
+        consolidator_enabled: If True, subscribe to kv eventconsolidator's ZMQ endpoint
+        consolidator_port: Port where kv event consolidator publishes (default: 5558)
 
     Returns:
         List of ZmqKvEventPublisher instances (one per dp_rank) if prefix caching is enabled, None otherwise.
@@ -122,11 +134,21 @@ def setup_kv_event_publisher(
     kv_publishers = []
 
     for dp_rank in range(data_parallel_size):
-        # Each dp_rank publishes to a different port
-        zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
-            config.engine_args.kv_events_config.endpoint,
-            data_parallel_rank=dp_rank,
-        ).replace("*", "127.0.0.1")
+        if consolidator_enabled:
+            # TODO: Use different port for each dp_rank
+            zmq_endpoint = f"tcp://127.0.0.1:{consolidator_port}"
+            logger.info(
+                f"KV event publisher for dp_rank={dp_rank} subscribing to consolidator at {zmq_endpoint}"
+            )
+        else:
+            # Each dp_rank publishes to a different port
+            zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
+                config.engine_args.kv_events_config.endpoint,
+                data_parallel_rank=dp_rank,
+            ).replace("*", "127.0.0.1")
+            logger.info(
+                f"KV event publisher for dp_rank={dp_rank} subscribing to vLLM at {zmq_endpoint}"
+            )
 
         zmq_config = ZmqKvEventPublisherConfig(
             worker_id=generate_endpoint.lease_id(),
@@ -169,6 +191,12 @@ def setup_vllm_engine(config, stat_logger=None):
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+
+    # Set up consolidator endpoints if KVBM is enabled
+    consolidator_endpoints = None
+    if config.connector_list and "kvbm" in config.connector_list:
+        consolidator_endpoints = get_consolidator_endpoints(vllm_config)
+    vllm_config.consolidator_endpoints = consolidator_endpoints
 
     factory = []
     if stat_logger:
@@ -261,9 +289,28 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         runtime, component, engine_client, default_sampling_params
     )
 
+    # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
+    consolidator_enabled = False
+    consolidator_port = None
+
+    if (
+        hasattr(vllm_config, "consolidator_endpoints")
+        and vllm_config.consolidator_endpoints
+    ):
+        # Extract port from "tcp://0.0.0.0:PORT"
+        consolidator_output_endpoint = vllm_config.consolidator_endpoints[1]
+        consolidator_port = int(consolidator_output_endpoint.split(":")[-1])
+        consolidator_enabled = True
+
     # Set up KV event publishers for prefix caching if enabled (one per dp_rank)
+    # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
     kv_publishers = setup_kv_event_publisher(
-        config, component, generate_endpoint, vllm_config
+        config,
+        component,
+        generate_endpoint,
+        vllm_config,
+        consolidator_enabled=consolidator_enabled,
+        consolidator_port=consolidator_port,
     )
     if kv_publishers:
         handler.kv_publishers = kv_publishers
@@ -342,9 +389,28 @@ async def init(runtime: DistributedRuntime, config: Config):
         default_sampling_params,
     )
 
-    # Set up KV event publishers for prefix caching if enabled (one per dp_rank)
+    # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
+    consolidator_enabled = False
+    consolidator_port = None
+
+    if (
+        hasattr(vllm_config, "consolidator_endpoints")
+        and vllm_config.consolidator_endpoints
+    ):
+        # Extract port from "tcp://0.0.0.0:PORT"
+        consolidator_output_endpoint = vllm_config.consolidator_endpoints[1]
+        consolidator_port = int(consolidator_output_endpoint.split(":")[-1])
+        consolidator_enabled = True
+
+    # Set up KV event publisher for prefix caching if enabled
+    # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
     kv_publishers = setup_kv_event_publisher(
-        config, component, generate_endpoint, vllm_config
+        config,
+        component,
+        generate_endpoint,
+        vllm_config,
+        consolidator_enabled=consolidator_enabled,
+        consolidator_port=consolidator_port,
     )
     if kv_publishers:
         handler.kv_publishers = kv_publishers
