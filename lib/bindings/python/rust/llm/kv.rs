@@ -5,6 +5,8 @@ use pythonize::{depythonize, pythonize};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
 use tokio_stream::StreamExt;
+use tokio::sync::{mpsc, oneshot};
+use std::sync::Arc;
 
 use super::*;
 use crate::Component;
@@ -335,10 +337,34 @@ impl OverlapScores {
     }
 }
 
-// NOTE: the user needs to guarantee that this stays single threaded in Python land
-#[pyclass(unsendable)]
+
+#[derive(Debug)]
+enum RadixTreeRequest {
+    FindMatches {
+        sequence: Vec<u64>,
+        early_exit: bool,
+        response_tx: oneshot::Sender<Result<llm_rs::kv_router::indexer::OverlapScores, String>>,
+    },
+    ApplyEvent {
+        worker_id: WorkerId,
+        kv_cache_event_bytes: Vec<u8>,
+        response_tx: oneshot::Sender<Result<(), String>>,
+    },
+    RemoveWorker {
+        worker_id: WorkerId,
+        response_tx: oneshot::Sender<Result<(), String>>,
+    },
+    ClearAllBlocks {
+        worker_id: WorkerId,
+        response_tx: oneshot::Sender<Result<(), String>>,
+    },
+}
+
+// NOTE: RadixTree is now thread-safe with sync lock and GIL release
+#[pyclass]
 pub(crate) struct RadixTree {
-    inner: llm_rs::kv_router::indexer::RadixTree,
+    request_tx: mpsc::UnboundedSender<RadixTreeRequest>,
+    _shutdown_token: tokio_util::sync::CancellationToken,
 }
 
 #[pymethods]
@@ -347,55 +373,236 @@ impl RadixTree {
     #[pyo3(signature = (expiration_duration_secs=None))]
     fn new(expiration_duration_secs: Option<f64>) -> PyResult<Self> {
         let expiration_duration = expiration_duration_secs.map(std::time::Duration::from_secs_f64);
-        let inner = llm_rs::kv_router::indexer::RadixTree::new_with_frequency(expiration_duration);
-        Ok(Self { inner })
+        
+        let (request_tx, request_rx) = mpsc::unbounded_channel::<RadixTreeRequest>();
+        let shutdown_token = tokio_util::sync::CancellationToken::new();
+        let shutdown_token_clone = shutdown_token.clone();
+        
+        // Spawn single blocking task that owns the RadixTree and processes requests in order
+        tokio::task::spawn_blocking(move || {
+            let mut radix_tree = llm_rs::kv_router::indexer::RadixTree::new_with_frequency(expiration_duration);
+            let rt = tokio::runtime::Handle::current();
+            
+            // Block on the async request processing loop
+            rt.block_on(async move {
+                let mut request_rx = request_rx;
+                
+                loop {
+                    tokio::select! {
+                        _ = shutdown_token_clone.cancelled() => {
+                            tracing::debug!("RadixTree blocking task shutting down");
+                            break;
+                        }
+                        request = request_rx.recv() => {
+                            match request {
+                                Some(req) => {
+                                    Self::handle_request(&mut radix_tree, req);
+                                }
+                                None => {
+                                    tracing::debug!("RadixTree request channel closed");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        });
+        
+        Ok(Self {
+            request_tx,
+            _shutdown_token: shutdown_token,
+        })
     }
 
     #[pyo3(signature = (sequence, early_exit=false))]
     fn find_matches(
         &self,
-        _py: Python,
+        py: Python,
         sequence: Vec<u64>,
         early_exit: bool,
     ) -> PyResult<OverlapScores> {
-        let local_block_hashes: Vec<llm_rs::kv_router::protocols::LocalBlockHash> = sequence
-            .into_iter()
-            .map(llm_rs::kv_router::protocols::LocalBlockHash)
-            .collect();
-
-        let rs_overlap_scores = self.inner.find_matches(local_block_hashes, early_exit);
-        Ok(OverlapScores {
-            inner: rs_overlap_scores,
+        let (response_tx, response_rx) = oneshot::channel();
+        
+        let request = RadixTreeRequest::FindMatches {
+            sequence,
+            early_exit,
+            response_tx,
+        };
+        
+        self.request_tx.send(request).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "RadixTree background task has shut down"
+            )
+        })?;
+        
+        // Release GIL while waiting for response from blocking task
+        py.allow_threads(|| {
+            let runtime = pyo3_async_runtimes::tokio::get_runtime();
+            runtime.block_on(async {
+                response_rx.await.map_err(|_| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "RadixTree request was cancelled"
+                    )
+                })?.map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e)
+                }).map(|overlap_scores| OverlapScores {
+                    inner: overlap_scores,
+                })
+            })
         })
     }
 
     fn apply_event(
         &mut self,
-        _py: Python,
+        py: Python,
         worker_id: WorkerId,
         kv_cache_event_bytes: &[u8],
     ) -> PyResult<()> {
-        let kv_cache_event: llm_rs::kv_router::protocols::KvCacheEvent =
-            serde_json::from_slice(kv_cache_event_bytes).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Failed to deserialize KvCacheEvent: {}",
-                    e
-                ))
-            })?;
-
-        let router_event = llm_rs::kv_router::indexer::RouterEvent::new(worker_id, kv_cache_event);
-        let _ = self.inner.apply_event(router_event);
-        Ok(())
+        let (response_tx, response_rx) = oneshot::channel();
+        
+        let request = RadixTreeRequest::ApplyEvent {
+            worker_id,
+            kv_cache_event_bytes: kv_cache_event_bytes.to_vec(),
+            response_tx,
+        };
+        
+        self.request_tx.send(request).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "RadixTree background task has shut down"
+            )
+        })?;
+        
+        // Release GIL while waiting for response from blocking task
+        py.allow_threads(|| {
+            let runtime = pyo3_async_runtimes::tokio::get_runtime();
+            runtime.block_on(async {
+                response_rx.await.map_err(|_| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "RadixTree request was cancelled"
+                    )
+                })?.map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e)
+                })
+            })
+        })
     }
 
-    fn remove_worker(&mut self, _py: Python, worker_id: WorkerId) -> PyResult<()> {
-        self.inner.remove_worker(worker_id);
-        Ok(())
+    fn remove_worker(&mut self, py: Python, worker_id: WorkerId) -> PyResult<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        
+        let request = RadixTreeRequest::RemoveWorker {
+            worker_id,
+            response_tx,
+        };
+        
+        self.request_tx.send(request).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "RadixTree background task has shut down"
+            )
+        })?;
+        
+        // Release GIL while waiting for response from blocking task
+        py.allow_threads(|| {
+            let runtime = pyo3_async_runtimes::tokio::get_runtime();
+            runtime.block_on(async {
+                response_rx.await.map_err(|_| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "RadixTree request was cancelled"
+                    )
+                })?.map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e)
+                })
+            })
+        })
     }
 
-    fn clear_all_blocks(&mut self, _py: Python, worker_id: WorkerId) -> PyResult<()> {
-        self.inner.clear_all_blocks(worker_id);
-        Ok(())
+    fn clear_all_blocks(&mut self, py: Python, worker_id: WorkerId) -> PyResult<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        
+        let request = RadixTreeRequest::ClearAllBlocks {
+            worker_id,
+            response_tx,
+        };
+        
+        self.request_tx.send(request).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "RadixTree background task has shut down"
+            )
+        })?;
+        
+        // Release GIL while waiting for response from blocking task
+        py.allow_threads(|| {
+            let runtime = pyo3_async_runtimes::tokio::get_runtime();
+            runtime.block_on(async {
+                response_rx.await.map_err(|_| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "RadixTree request was cancelled"
+                    )
+                })?.map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e)
+                })
+            })
+        })
+    }
+}
+
+impl RadixTree {
+    fn handle_request(
+        radix_tree: &mut llm_rs::kv_router::indexer::RadixTree,
+        request: RadixTreeRequest,
+    ) {
+        match request {
+            RadixTreeRequest::FindMatches {
+                sequence,
+                early_exit,
+                response_tx,
+            } => {
+                let local_block_hashes: Vec<llm_rs::kv_router::protocols::LocalBlockHash> = 
+                    sequence.into_iter()
+                        .map(llm_rs::kv_router::protocols::LocalBlockHash)
+                        .collect();
+                
+                let result = radix_tree.find_matches(local_block_hashes, early_exit);
+                let _ = response_tx.send(Ok(result));
+            }
+            RadixTreeRequest::ApplyEvent {
+                worker_id,
+                kv_cache_event_bytes,
+                response_tx,
+            } => {
+                let result = match serde_json::from_slice::<llm_rs::kv_router::protocols::KvCacheEvent>(&kv_cache_event_bytes) {
+                    Ok(kv_cache_event) => {
+                        let router_event = llm_rs::kv_router::indexer::RouterEvent::new(worker_id, kv_cache_event);
+                        let _ = radix_tree.apply_event(router_event);
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("Failed to deserialize KvCacheEvent: {}", e)),
+                };
+                let _ = response_tx.send(result);
+            }
+            RadixTreeRequest::RemoveWorker {
+                worker_id,
+                response_tx,
+            } => {
+                radix_tree.remove_worker(worker_id);
+                let _ = response_tx.send(Ok(()));
+            }
+            RadixTreeRequest::ClearAllBlocks {
+                worker_id,
+                response_tx,
+            } => {
+                radix_tree.clear_all_blocks(worker_id);
+                let _ = response_tx.send(Ok(()));
+            }
+        }
+    }
+}
+
+// Cleanup when RadixTree is dropped
+impl Drop for RadixTree {
+    fn drop(&mut self) {
+        self._shutdown_token.cancel();
     }
 }
 
