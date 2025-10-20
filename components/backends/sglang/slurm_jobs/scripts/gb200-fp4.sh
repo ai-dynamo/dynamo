@@ -159,7 +159,7 @@ elif [ "$mode" = "decode" ]; then
         --disable-radix-cache \
         --disable-shared-experts-fusion \
         --watchdog-timeout 1000000 \
-        --disable-chunked-prefix-cache
+        --disable-chunked-prefix-cache \
         --attention-backend trtllm_mla \
         --kv-cache-dtype fp8_e4m3 \
         --enable-dp-attention \
