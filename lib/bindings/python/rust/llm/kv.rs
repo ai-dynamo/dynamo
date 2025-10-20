@@ -382,9 +382,9 @@ impl RadixTree {
             let mut radix_tree =
                 llm_rs::kv_router::indexer::RadixTree::new_with_frequency(expiration_duration);
             let st_runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("Failed to create single-threaded Tokio runtime for RadixTree");
+                .enable_all()
+                .build()
+                .expect("Failed to create single-threaded Tokio runtime for RadixTree");
 
             // Block on the async request processing loop
             st_runtime.block_on(async move {
