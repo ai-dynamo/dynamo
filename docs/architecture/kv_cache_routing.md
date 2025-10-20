@@ -31,10 +31,28 @@ The main KV-aware routing arguments:
 
 - `--no-track-active-blocks`: Disables tracking of active blocks (blocks being used for ongoing generation/decode phases). By default, the router tracks active blocks for load balancing. Disable this when routing to workers that only perform prefill (no decode phase), as tracking decode load is not relevant. This reduces router overhead and simplifies state management.
 
+- `--busy-threshold`: Threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache usage. When a worker's KV cache active blocks exceed this percentage of total blocks, it will be marked as busy and excluded from routing. If not set, busy detection is disabled. This feature works with all routing modes (`--router-mode kv|round-robin|random`) as long as backend engines emit `ForwardPassMetrics`.
+
 >[!Note]
 > State persistence is only available when KV events are enabled (default). When using `--no-kv-events` with `ApproxKvIndexer`, state persistence is not currently supported.
 >
 > When `--kv-overlap-score-weight` is set to 0 or `--no-kv-events` is set, no KvIndexer will be launched to drain and process KV events. It's recommended to disable your backend workers from relaying events through `KvEventPublisher` to avoid event accumulation in JetStream. WIP to enable disabling publishing of KV events completely in these cases.
+
+## Prerequisites and Limitations
+
+>[!Note]
+> **KV Router Requirements**: The KV router currently works only with **dynamic endpoints** that are registered via [`register_llm()`](../development/backend-guide.md#writing-python-workers-in-dynamo) with `model_input=ModelInput.Tokens`. Your backend handler receives pre-tokenized requests with `token_ids` instead of raw text.
+
+**Current Limitations (WIP):**
+- **Static endpoints**: Not yet supported. The KV router requires dynamic model discovery via etcd to track worker instances and their KV cache states.
+- **Multimodal models**: Not yet supported. The KV router currently tracks token-based blocks only.
+
+**What this means for your setup:**
+1. Backend workers must call `register_llm()` with `model_input=ModelInput.Tokens` (see [Backend Guide](../development/backend-guide.md) or [example implementations](https://github.com/ai-dynamo/dynamo/tree/main/lib/bindings/python/examples/hello_world))
+2. Your handler receives requests with pre-tokenized `token_ids`, not raw text or multimodal inputs
+3. You cannot use `--static-endpoint` mode with KV routing (use dynamic discovery instead)
+
+For basic model registration without KV routing, you can use `--router-mode round-robin` or `--router-mode random` with both static and dynamic endpoints.
 
 ## Overview
 
@@ -84,7 +102,7 @@ graph TD
 
 ### Local Active Block Management with Replica Sync
 
-Second, in addition to cached blocks, each router replica needs to track active blocks (blocks being used for ongoing generation) as load metrics. Since this information is highly time-sensitive, it must be predicted immediately when:
+Second, in addition to cached blocks, each router replica needs to track active blocks (blocks being used for ongoing generation) as load metrics. Since this information is highly time-sensitive, it should be predicted immediately when:
 - The router receives and routes a request
 - The first token is generated (prefill complete)
 - The response ends (request freed)
@@ -154,7 +172,7 @@ For improved fault tolerance, you can launch multiple frontend + router replicas
 
 ### Router State Management
 
-The KV Router tracks two types of state (see [KV Router Architecture](../components/router/README.md) for details):
+The KV Router tracks two types of state (see [KV Router Architecture](../router/README.md) for details):
 
 1. **Prefix blocks (cached KV blocks)**: Maintained in a radix tree, tracking which blocks are cached on each worker. This state is **persistent** - backed by NATS JetStream events and object store snapshots. New router replicas automatically sync this state on startup, ensuring consistent cache awareness across restarts.
 
@@ -286,7 +304,7 @@ The publisher can be initialized and used through C bindings or Python bindings.
 
 ### Deterministic Event IDs
 
-For KV-aware routing to work across multiple workers and restarts, engines must emit deterministic block identifiers in KV events. Ensure all workers use identical engine versions/configuration so that block IDs for the same token content remain consistent. If your engine relies on Python's builtin `hash()` for any event IDs, set `PYTHONHASHSEED=0`; otherwise this setting has no effect. The router recomputes local block hashes from tokens for matching, but parent/child links and removals depend on engine-provided IDs being stable.
+Engines do not need to emit deterministic block identifiers in KV events, as the router uses local block hashes (computed from token content) for tracking and matching blocks across workers. However, it is strongly preferred that engines do emit deterministic block identifiers, as this keeps the KvIndexer's internal lookup table smaller and more efficient. To ensure deterministic behavior, all workers should use identical engine versions/configuration. If your engine relies on Python's builtin `hash()` for any event IDs, set `PYTHONHASHSEED=0`; otherwise this setting has no effect.
 
 ### KVIndexer
 The KVIndexer builds and maintains a global view of cached blocks in a prefix tree. We modify the original prefix tree by also storing the worker id on each node. This is so we can return the number of matched blocks for each worker.
@@ -315,6 +333,31 @@ To manage stream growth, when the message count exceeds `--router-snapshot-thres
 ## Using KvPushRouter Python API
 
 Instead of launching the KV Router via command line, you can create a `KvPushRouter` object directly in Python. This allows per-request routing configuration overrides.
+
+>[!Warning]
+> **Multiple Routers in Same Process**: If you need to run multiple `KvPushRouter` instances for fault tolerance or load distribution, you must launch them in **separate processes** (e.g., using `python -m dynamo.frontend` with different ports). Creating multiple `KvPushRouter` objects in the same Python process is not supported - they share the same cancellation token from the component's primary lease, so dropping one router will cancel all routers in that process. For in-process routing, use a single `KvPushRouter` instance.
+
+### Methods
+
+The `KvPushRouter` provides the following methods:
+
+- **`generate(token_ids, model, ...)`**: Route and execute a request, returning an async stream of responses. Automatically handles worker selection, state tracking, and lifecycle management.
+
+- **`best_worker(token_ids, router_config_override=None, request_id=None)`**: Query which worker would be selected for given tokens. Returns `(worker_id, dp_rank, overlap_blocks)`.
+  - Without `request_id`: Query-only, doesn't update router state
+  - With `request_id`: Updates router state to track the request. **Note**: If used with `request_id`, you must call `mark_prefill_complete()` and `free()` at the appropriate lifecycle points to maintain accurate load tracking
+
+- **`best_worker_id(token_ids, router_config_override=None, request_id=None)`**: **[DEPRECATED - use `best_worker()` instead]** Query which worker would be selected for given tokens. Returns `(worker_id, overlap_blocks)`.
+  - Without `request_id`: Query-only, doesn't update router state
+  - With `request_id`: Updates router state to track the request. **Note**: If used with `request_id`, you must call `mark_prefill_complete()` and `free()` at the appropriate lifecycle points to maintain accurate load tracking
+
+- **`get_potential_loads(token_ids)`**: Get detailed load information for all workers, including potential prefill tokens and active decode blocks. Returns a list of load dictionaries.
+
+- **`mark_prefill_complete(request_id)`**: Signal that a request has completed its prefill phase. Only used for [manual lifecycle management](#2-manual-state-management-advanced) when using `best_worker_id()` for manual routing instead of `generate()`.
+
+- **`free(request_id)`**: Signal that a request has completed and its resources should be released. Only used for [manual lifecycle management](#2-manual-state-management-advanced) when using `best_worker_id()` for manual routing instead of `generate()`.
+
+- **`dump_events()`**: Dump all KV cache events from the router's indexer as a JSON string. Useful for debugging and analysis.
 
 ### Setup
 
@@ -377,15 +420,60 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-### Additional Routing Features
+### Routing Patterns
 
-The `KvPushRouter` provides additional methods for fine-grained control:
+The `KvPushRouter` supports multiple usage patterns depending on your control requirements:
 
-- **`best_worker_id()`**: Query which worker would be selected for given tokens without actually routing the request. Returns `(worker_id, overlap_blocks)`.
-- **`get_potential_loads()`**: Get detailed load information for all workers including potential prefill tokens and active decode blocks.
-- **`worker_id` parameter in `generate()`**: Force routing to a specific worker by passing `worker_id=<id>` to bypass the automatic KV-aware selection.
+#### 1. Automatic Routing (Recommended)
+Call `generate()` directly and let the router handle everything:
+```python
+stream = await router.generate(token_ids=tokens, model="model-name")
+```
+- **Best for**: Most use cases
+- **Router automatically**: Selects best worker, updates state, routes request, tracks lifecycle
 
-The `router_config_override` parameter allows you to adjust routing behavior per request without recreating the router. This is useful for implementing different routing strategies based on request characteristics.
+#### 2. Manual State Management (Advanced)
+Use `best_worker_id(request_id=...)` to select and track, then manage the request yourself:
+```python
+worker_id, overlap = await router.best_worker_id(tokens, request_id="req-123")
+response = await client.generate(tokens, request_id="req-123")
+# await anext(response)  # Get first token
+await router.mark_prefill_complete("req-123")  # After first token
+# async for _ in response:  # Continue generating
+#     ...
+await router.free("req-123")  # After completion
+```
+- **Best for**: Custom request handling with router state tracking
+- **Requires**: Calling `mark_prefill_complete()` and `free()` at correct lifecycle points
+- **Caution**: Incorrect lifecycle management degrades load balancing accuracy
+
+#### 3. Hierarchical Router Probing
+Query without state updates, then route through a chosen router:
+```python
+# Probe multiple routers without updating state
+worker_id_1, overlap_1 = await router_1.best_worker_id(tokens)  # No request_id
+worker_id_2, overlap_2 = await router_2.best_worker_id(tokens)
+
+# Pick the best router based on results
+chosen_router = router_1 if overlap_1 > overlap_2 else router_2
+stream = await chosen_router.generate(tokens, model="model-name", worker_id=worker_id)
+```
+- **Best for**: Multi-tier deployments (e.g., Envoy Gateway routing to multiple router groups)
+- **Advantage**: Query multiple routers before committing to one
+
+#### 4. Custom Load-Based Routing
+Use `get_potential_loads()` to implement custom routing logic:
+```python
+loads = await router.get_potential_loads(tokens)
+# Apply custom logic (e.g., weighted scoring, constraints)
+best_worker = min(loads, key=lambda x: custom_cost_fn(x))
+stream = await router.generate(tokens, model="model-name", worker_id=best_worker['worker_id'])
+```
+- **Best for**: Custom optimization strategies beyond the built-in cost function
+- **Advantage**: Full control over worker selection logic
+- **See also**: Detailed example below in "Custom Routing Example: Minimizing TTFT"
+
+All patterns support `router_config_override` to adjust routing behavior per-request without recreating the router.
 
 ### Custom Routing Example: Minimizing TTFT
 
@@ -443,4 +531,4 @@ This approach gives you complete control over routing decisions, allowing you to
 - **Maximize cache reuse**: Use `best_worker_id()` which considers both prefill and decode loads
 - **Balance load**: Consider both `potential_prefill_tokens` and `potential_decode_blocks` together
 
-See [KV Router Architecture](../components/router/README.md) for performance tuning details.
+See [KV Router Architecture](../router/README.md) for performance tuning details.

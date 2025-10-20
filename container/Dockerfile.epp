@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Dockerfile.epp - Custom Dockerfile for GAIE EPP. This is to be used with the deploy/inference-gateway/build-epp-dynamo.sh
+
+ARG BUILDER_IMAGE=golang:1.24
+ARG BASE_IMAGE=ubuntu:22.04
+
+############################
+# Builder
+############################
+FROM ${BUILDER_IMAGE} AS builder
+
+ENV CGO_ENABLED=1
+# be explicit; helps cgo when linking libstdc++
+ENV CC=gcc
+ENV CXX=g++
+
+# C/C++ toolchain for cgo, and libstdc++ for link-time
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc g++ \
+    libc6-dev \
+    ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+ARG COMMIT_SHA=unknown
+ARG BUILD_REF
+
+WORKDIR /src
+
+# deps first (cache)
+COPY go.mod go.sum ./
+RUN go mod download
+
+# source
+COPY cmd/epp ./cmd/epp
+COPY pkg/epp ./pkg/epp
+COPY internal ./internal
+COPY api ./api
+
+# sanity (optional)
+RUN ls -la pkg/epp/scheduling/plugins/dynamo_kv_scorer/include/ || echo "Headers not found"
+RUN ls -la pkg/epp/scheduling/plugins/dynamo_kv_scorer/lib/ || echo "Library not found"
+
+# build
+WORKDIR /src/cmd/epp
+RUN go build \
+  -ldflags="-X sigs.k8s.io/gateway-api-inference-extension/pkg/epp/metrics.CommitSHA=${COMMIT_SHA} -X sigs.k8s.io/gateway-api-inference-extension/pkg/epp/metrics.BuildRef=${BUILD_REF}" \
+  -o /epp
+
+############################
+# Runtime
+############################
+FROM ${BASE_IMAGE} AS runtime
+
+# Minimal runtime deps; include libstdc++ runtime for -lstdc++
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libstdc++6 \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd -r nonroot && useradd -r -g nonroot nonroot
+
+WORKDIR /
+COPY --from=builder /epp /epp
+
+USER nonroot:nonroot
+ENTRYPOINT ["/epp"]

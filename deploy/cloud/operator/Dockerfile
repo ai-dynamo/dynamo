@@ -6,7 +6,7 @@ FROM golang:1.24 AS base
 
 # Docker buildx automatically provides these
 ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 
 RUN echo "Building for ${TARGETOS}/${TARGETARCH}"
 
@@ -47,7 +47,7 @@ FROM base AS builder
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o manager ./cmd/main.go
 
 # Runtime stage
-FROM nvcr.io/nvidia/distroless/go:v3.1.12
+FROM nvcr.io/nvidia/distroless/go:v3.1.13
 WORKDIR /
 COPY --from=builder /workspace/manager .
 USER 65532:65532

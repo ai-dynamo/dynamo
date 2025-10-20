@@ -176,6 +176,107 @@ spec:
 ```
 
 
+## Backend-Specific Operator Behavior
+
+When you deploy a multinode workload, the Dynamo operator automatically applies backend-specific configurations to enable distributed execution. Understanding these automatic modifications helps troubleshoot issues and optimize your deployments.
+
+### vLLM Backend
+
+For vLLM multinode deployments, the operator automatically selects and configures the appropriate distributed execution mode based on your parallelism settings:
+
+#### Deployment Modes
+
+The operator automatically determines the deployment mode based on your parallelism configuration:
+
+**1. Ray-Based Mode (Tensor/Pipeline Parallelism across nodes)**
+- **When used**: When `world_size > GPUs_per_node` where `world_size = tensor_parallel_size × pipeline_parallel_size`
+- **Use case**: Distributing a single model instance across multiple nodes using tensor or pipeline parallelism
+
+**Leader Node:**
+- **Ray Head**: The operator prepends `ray start --head --port=6379` to your existing command
+- **Probes**: All health probes remain active (liveness, readiness, startup)
+
+**Worker Nodes:**
+- **Ray Worker**: The command is replaced with `ray start --address=<leader-hostname>:6379 --block`
+- **Probes**: All probes (liveness, readiness, startup) are automatically removed since workers don't expose health endpoints
+
+**2. Data Parallel Mode (Multiple model instances across nodes)**
+- **When used**: When `world_size × data_parallel_size > GPUs_per_node`
+- **Use case**: Running multiple independent model instances across nodes with data parallelism (e.g., MoE models with expert parallelism)
+
+**All Nodes (Leader and Workers):**
+- **Injected Flags**:
+  - `--data-parallel-address <leader-hostname>` - Address of the coordination server
+  - `--data-parallel-size-local <value>` - Number of data parallel workers per node
+  - `--data-parallel-rpc-port 13445` - RPC port for data parallel coordination
+  - `--data-parallel-start-rank <value>` - Starting rank for this node (calculated automatically)
+- **Probes**: Worker probes are removed; leader probes remain active
+
+**Note**: The operator intelligently injects these flags into your command regardless of command structure (direct Python commands or shell wrappers)
+
+#### Compilation Cache Support
+When a volume mount is configured with `useAsCompilationCache: true`, the operator automatically sets:
+- **`VLLM_CACHE_ROOT`**: Environment variable pointing to the cache mount point
+
+### SGLang Backend
+
+For SGLang multinode deployments, the operator injects distributed training parameters:
+
+#### Leader Node
+- **Distributed Flags**: Injects `--dist-init-addr <leader-hostname>:29500 --nnodes <count> --node-rank 0`
+- **Probes**: All health probes remain active
+
+#### Worker Nodes
+- **Distributed Flags**: Injects `--dist-init-addr <leader-hostname>:29500 --nnodes <count> --node-rank <dynamic-rank>`
+  - The `node-rank` is automatically determined from the pod's stateful identity
+- **Probes**: All probes (liveness, readiness, startup) are automatically removed
+
+**Note:** The operator intelligently injects these flags regardless of your command structure (direct Python commands or shell wrappers).
+
+### TensorRT-LLM Backend
+
+For TensorRT-LLM multinode deployments, the operator configures MPI-based communication:
+
+#### Leader Node
+- **SSH Configuration**: Automatically sets up SSH keys and configuration from a Kubernetes secret
+- **MPI Command**: Wraps your command in an `mpirun` command with:
+  - Proper host list including all worker nodes
+  - SSH configuration for passwordless authentication on port 2222
+  - Environment variable propagation to all nodes
+  - Activation of the Dynamo virtual environment
+- **Probes**: All health probes remain active
+
+#### Worker Nodes
+- **SSH Daemon**: Replaces your command with SSH daemon setup and execution
+  - Generates host keys in user-writable directories (non-privileged)
+  - Configures SSH daemon to listen on port 2222
+  - Sets up authorized keys for leader access
+- **Probes**:
+  - **Liveness and Startup**: Removed (workers run SSH daemon, not the main application)
+  - **Readiness**: Replaced with TCP socket check on SSH port 2222
+    - Initial Delay: 20 seconds
+    - Period: 20 seconds
+    - Timeout: 5 seconds
+    - Failure Threshold: 10
+
+#### Additional Configuration
+- **Environment Variable**: `OMPI_MCA_orte_keep_fqdn_hostnames=1` is added to all nodes
+- **SSH Volume**: Automatically mounts the SSH keypair secret (typically named `mpirun-ssh-key-<deployment-name>`)
+
+**Important:** TensorRT-LLM requires an SSH keypair secret to be created before deployment. The secret name follows the pattern `mpirun-ssh-key-<component-name>`.
+
+### Compilation Cache Configuration
+
+The operator supports compilation cache volumes for backend-specific optimization:
+
+| Backend | Support Level | Environment Variables | Default Mount Point |
+|---------|--------------|----------------------|---------------------|
+| vLLM | Fully Supported | `VLLM_CACHE_ROOT` | User-specified |
+| SGLang | Partial Support | _None (pending upstream)_ | User-specified |
+| TensorRT-LLM | Partial Support | _None (pending upstream)_ | User-specified |
+
+To enable compilation cache, add a volume mount with `useAsCompilationCache: true` in your component specification. For vLLM, the operator will automatically configure the necessary environment variables. For other backends, volume mounts are created, but additional environment configuration may be required until upstream support is added.
+
 ## Next Steps
 
 For additional support and examples, see the working multinode configurations in:

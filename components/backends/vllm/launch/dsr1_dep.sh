@@ -101,10 +101,10 @@ for ((i=0; i<GPUS_PER_NODE; i++)); do
         --data_parallel_size $DATA_PARALLEL_SIZE \
         --data-parallel-rank $dp_rank \
         --enable-expert-parallel \
-        --max-model-len 10240 \
+        --max-model-len 4096 \
         --data-parallel-address $MASTER_ADDR \
         --data-parallel-rpc-port 13345 \
-        --gpu-memory-utilization 0.95 \
+        --gpu-memory-utilization 0.9 \
         --enforce-eager 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_rank}.log &
 done
 

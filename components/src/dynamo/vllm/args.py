@@ -4,7 +4,7 @@
 
 import logging
 import os
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_events import KVEventsConfig
@@ -12,6 +12,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
+from dynamo.common.config_dump import add_config_dump_args, register_encoder
 from dynamo.runtime import DistributedRuntime
 
 from . import __version__
@@ -62,6 +63,14 @@ class Config:
     # tool and reasoning parser info
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
+
+    # dump config to file
+    dump_config_to: Optional[str] = None
+
+
+@register_encoder(Config)
+def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
+    return config.__dict__
 
 
 def parse_args() -> Config:
@@ -122,6 +131,7 @@ def parse_args() -> Config:
         default=None,
         help="Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
     )
+    add_config_dump_args(parser)
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
@@ -205,6 +215,8 @@ def parse_args() -> Config:
         logger.debug(
             f"Setting reasonable default of {config.engine_args.block_size} for block_size"
         )
+
+    config.dump_config_to = args.dump_config_to
 
     return config
 
@@ -339,11 +351,12 @@ def create_kv_transfer_config(config: Config) -> Optional[KVTransferConfig]:
         cfg = multi_connectors[0]
         return KVTransferConfig(**cfg)
 
-    # For multiple connectors, use MultiConnector
+    # For multiple connectors, use PdConnector
     return KVTransferConfig(
-        kv_connector="MultiConnector",
+        kv_connector="PdConnector",
         kv_role="kv_both",
         kv_connector_extra_config={"connectors": multi_connectors},
+        kv_connector_module_path="dynamo.llm.vllm_integration.connector",
     )
 
 

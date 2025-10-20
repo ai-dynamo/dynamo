@@ -20,8 +20,6 @@
 package v1alpha1
 
 import (
-	"strings"
-
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -38,22 +36,12 @@ const (
 
 // DynamoComponentDeploymentSpec defines the desired state of DynamoComponentDeployment
 type DynamoComponentDeploymentSpec struct {
-	// DynamoComponent selects the Dynamo component from the archive to deploy.
-	// Typically corresponds to a component defined in the packaged Dynamo artifacts.
-	DynamoComponent string `json:"dynamoComponent,omitempty"`
-	// contains the tag of the DynamoComponent: for example, "my_package:MyService"
-	DynamoTag string `json:"dynamoTag,omitempty"`
-
 	// BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm")
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
 	BackendFramework string `json:"backendFramework,omitempty"`
 
 	// DynamoComponentDeploymentSharedSpec embeds common deployment and runtime
 	// settings that apply to the component (resources, scaling, ingress, etc.).
-	DynamoComponentDeploymentSharedSpec `json:",inline"`
-}
-
-type DynamoComponentDeploymentOverridesSpec struct {
 	DynamoComponentDeploymentSharedSpec `json:",inline"`
 }
 
@@ -229,7 +217,7 @@ func (s *DynamoComponentDeployment) SetSpec(spec any) {
 }
 
 func (s *DynamoComponentDeployment) IsFrontendComponent() bool {
-	return strings.HasSuffix(s.Spec.DynamoTag, s.Spec.ServiceName) || s.Spec.ComponentType == commonconsts.ComponentTypeFrontend
+	return s.Spec.ComponentType == commonconsts.ComponentTypeFrontend
 }
 
 func (s *DynamoComponentDeployment) GetDynamoDeploymentConfig() []byte {

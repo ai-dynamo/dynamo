@@ -15,6 +15,8 @@ from typing import Any, Dict, Generator, List, Optional
 from sglang.srt.server_args import ServerArgs
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
+from dynamo.common.config_dump import register_encoder
+from dynamo.llm import fetch_llm
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang import __version__
 
@@ -85,6 +87,12 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": False,
         "help": "Run as embedding worker component (Dynamo flag, also sets SGLang's --is-embedding)",
     },
+    "dump-config-to": {
+        "flags": ["--dump-config-to"],
+        "type": str,
+        "default": None,
+        "help": "Dump debug config to the specified file path. If not specified, the config will be dumped to stdout at INFO level.",
+    },
 }
 
 
@@ -110,6 +118,8 @@ class DynamoArgs:
 
     # embedding options
     embedding_worker: bool = False
+    # config dump options
+    dump_config_to: Optional[str] = None
 
 
 class DisaggregationMode(Enum):
@@ -135,6 +145,20 @@ class Config:
             return DisaggregationMode.DECODE
         else:
             return DisaggregationMode.AGGREGATED
+
+
+# Register SGLang-specific encoders with the shared system
+@register_encoder(Config)
+def _preprocess_for_encode_config(
+    config: Config,
+) -> Dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
+    return {
+        "server_args": config.server_args,
+        "dynamo_args": config.dynamo_args,
+        "serving_mode": config.serving_mode.value
+        if config.serving_mode is not None
+        else "None",
+    }
 
 
 def _set_parser(
@@ -180,8 +204,9 @@ def _set_parser(
         return dynamo_str
 
 
-def parse_args(args: list[str]) -> Config:
+async def parse_args(args: list[str]) -> Config:
     """Parse CLI arguments and return combined configuration.
+    Download the model if necessary.
 
     Args:
         args: Command-line argument strings.
@@ -293,6 +318,11 @@ def parse_args(args: list[str]) -> Config:
         expanded_template_path = os.path.expandvars(
             os.path.expanduser(parsed_args.custom_jinja_template)
         )
+        # Validate custom Jinja template file exists
+        if not os.path.isfile(expanded_template_path):
+            raise FileNotFoundError(
+                f"Custom Jinja template file not found: {expanded_template_path}"
+            )
 
     dynamo_args = DynamoArgs(
         namespace=parsed_namespace,
@@ -307,8 +337,17 @@ def parse_args(args: list[str]) -> Config:
         multimodal_encode_worker=parsed_args.multimodal_encode_worker,
         multimodal_worker=parsed_args.multimodal_worker,
         embedding_worker=parsed_args.embedding_worker,
+        dump_config_to=parsed_args.dump_config_to,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
+
+    # TODO: sglang downloads the model in `from_cli_args`, so we need to do it here.
+    # That's unfortunate because `parse_args` isn't the right place for this. Fix.
+    model_path = parsed_args.model_path
+    if not parsed_args.served_model_name:
+        parsed_args.served_model_name = model_path
+    if not os.path.exists(model_path):
+        parsed_args.model_path = await fetch_llm(model_path)
 
     server_args = ServerArgs.from_cli_args(parsed_args)
 

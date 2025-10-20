@@ -7,10 +7,10 @@ import logging
 import os
 import random
 import string
-import subprocess
 from typing import Any, Dict, Optional
 
 import aiohttp
+import nats
 import pytest
 
 from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
@@ -219,7 +219,13 @@ def get_runtime():
     except Exception as e:
         # If no existing runtime, create a new one
         logger.info(f"Creating new runtime (detached failed: {e})")
-        loop = asyncio.get_running_loop()
+        try:
+            # Try to get running loop (works in async context)
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop, create a new one (sync context)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
         _runtime_instance = DistributedRuntime(loop, False)
 
     return _runtime_instance
@@ -292,6 +298,7 @@ async def send_request_via_python_kv_router(
     worker_id: Optional[
         int
     ] = None,  # If None, Router will select the best available worker
+    dp_rank: Optional[int] = None,  # Data parallel rank (defaults to 0)
 ):
     """Send a request to the specified mocker instance.
     Returns True if mockers respond, otherwise raises or returns False.
@@ -318,6 +325,7 @@ async def send_request_via_python_kv_router(
                 output_options=output_options,
                 router_config_override=router_config_override,
                 worker_id=worker_id,
+                dp_rank=dp_rank,
             )
 
             if stream is not None:
@@ -545,8 +553,85 @@ def test_mocker_two_kv_router(request, runtime_services, predownload_tokenizers)
             f"Successfully completed {NUM_REQUESTS} requests across {len(router_ports)} routers"
         )
 
+        # Verify durable consumers lifecycle
+        async def verify_consumer_lifecycle():
+            logger.info("Verifying durable consumers lifecycle")
+
+            # Construct the stream name
+            component_subject = f"namespace.{mockers.namespace}.component.mocker"
+            slugified = component_subject.lower().replace(".", "-").replace("_", "-")
+            stream_name = f"{slugified}-kv-events"
+
+            logger.info(f"Checking consumers for stream: {stream_name}")
+
+            # Connect to NATS and list consumers
+            nc = await nats.connect("nats://localhost:4222")
+            try:
+                js = nc.jetstream()
+
+                # List consumers - should have 2 (one for each router process)
+                consumer_infos = await js.consumers_info(stream_name)
+                consumer_names = [info.name for info in consumer_infos]
+                logger.info(f"Found {len(consumer_names)} consumers: {consumer_names}")
+
+                assert (
+                    len(consumer_names) == 2
+                ), f"Expected 2 durable consumers (one per router), found {len(consumer_names)}: {consumer_names}"
+                logger.info("✓ Verified 2 durable consumers exist (one per router)")
+
+                # Kill the first router process
+                logger.info(f"Killing first router on port {router_ports[0]}")
+                kv_routers[0].__exit__(None, None, None)
+
+                # Wait for cleanup to happen (consumer deletion is triggered by etcd watch)
+                await asyncio.sleep(1)
+
+                # Verify only 1 consumer remains
+                consumer_infos = await js.consumers_info(stream_name)
+                consumer_names = [info.name for info in consumer_infos]
+                logger.info(
+                    f"After killing router1, found {len(consumer_names)} consumers: {consumer_names}"
+                )
+
+                assert (
+                    len(consumer_names) == 1
+                ), f"Expected 1 durable consumer after killing router1, found {len(consumer_names)}: {consumer_names}"
+                logger.info(
+                    "✓ Verified 1 durable consumer remains after killing first router"
+                )
+
+                # Kill the second router process
+                logger.info(f"Killing second router on port {router_ports[1]}")
+                kv_routers[1].__exit__(None, None, None)
+
+                # Wait for cleanup to happen
+                await asyncio.sleep(1)
+
+                # Verify no consumers remain
+                consumer_infos = await js.consumers_info(stream_name)
+                consumer_names = [info.name for info in consumer_infos]
+                logger.info(
+                    f"After killing router2, found {len(consumer_names)} consumers: {consumer_names}"
+                )
+
+                assert (
+                    len(consumer_names) == 0
+                ), f"Expected 0 durable consumers after killing both routers, found {len(consumer_names)}: {consumer_names}"
+                logger.info(
+                    "✓ Verified 0 durable consumers remain after killing both routers"
+                )
+
+            finally:
+                await nc.close()
+
+        # Run consumer lifecycle verification
+        asyncio.run(verify_consumer_lifecycle())
+
+        # Clear the kv_routers list since we've already cleaned them up
+        kv_routers = []
+
     finally:
-        # Clean up routers
+        # Clean up any remaining routers (in case of error before consumer verification)
         for kv_router in kv_routers:
             kv_router.__exit__(None, None, None)
 
@@ -983,45 +1068,26 @@ def test_indexers_sync(request, runtime_services, predownload_tokenizers):
             logger.info(f"Verifying NATS object store bucket exists: {expected_bucket}")
             snapshot_verified = False
             try:
-                # List objects in the bucket
-                result = subprocess.run(
-                    [
-                        "nats",
-                        "object",
-                        "ls",
-                        expected_bucket,
-                        "--server",
-                        "nats://localhost:4222",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
+                # Connect to NATS and check object store
+                nc = await nats.connect("nats://localhost:4222")
+                try:
+                    js = nc.jetstream()
+                    obj_store = await js.object_store(expected_bucket)
 
-                if result.returncode == 0:
-                    logger.info(
-                        f"Successfully listed bucket contents:\n{result.stdout}"
-                    )
-                    # Check if the expected file exists
-                    if expected_file in result.stdout:
+                    # Try to get the expected file
+                    try:
+                        result = await obj_store.get(expected_file)
                         logger.info(
-                            f"✓ Snapshot file '{expected_file}' found in bucket '{expected_bucket}'"
+                            f"✓ Snapshot file '{expected_file}' found in bucket '{expected_bucket}' "
+                            f"(size: {len(result.data) if result.data else 0} bytes)"
                         )
                         snapshot_verified = True
-                    else:
+                    except Exception as e:
                         logger.error(
-                            f"Snapshot file '{expected_file}' not found in bucket '{expected_bucket}'"
+                            f"Snapshot file '{expected_file}' not found in bucket '{expected_bucket}': {e}"
                         )
-                        logger.error(f"Bucket contents:\n{result.stdout}")
-                else:
-                    logger.error(f"Failed to list bucket: {result.stderr}")
-            except subprocess.TimeoutExpired:
-                logger.error("Timeout checking NATS object store bucket")
-            except FileNotFoundError:
-                logger.warning(
-                    "nats CLI not found in PATH, skipping bucket verification (test will continue)"
-                )
-                snapshot_verified = True  # Don't fail if nats CLI not installed
+                finally:
+                    await nc.close()
             except Exception as e:
                 logger.error(f"Error checking NATS object store: {e}")
 
@@ -1308,33 +1374,38 @@ def test_query_instance_id_returns_worker_and_tokens(
 @pytest.mark.pre_merge
 @pytest.mark.model(MODEL_NAME)
 def test_router_decisions(request, runtime_services, predownload_tokenizers):
-    """Validate KV cache prefix reuse by sending progressive requests with overlapping prefixes.
+    """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
 
     Flow:
-      - Start two mocker workers sharing a namespace.
+      - Start two mocker workers, each with dp_size=4 (8 total dp ranks).
       - Wait for workers to be ready.
       - Send 4 progressive requests, each extending the previous tokens:
-        * Request 1: BLOCK_SIZE random tokens
-        * Request 2: Request 1 tokens + BLOCK_SIZE new random tokens
-        * Request 3: Request 2 tokens + BLOCK_SIZE new random tokens
-        * Request 4: Request 3 tokens + BLOCK_SIZE new random tokens
+        * Request 1: BLOCK_SIZE random tokens (forced to specific worker_id and dp_rank=1)
+        * Request 2: Request 1 tokens + BLOCK_SIZE new random tokens (naturally routed)
+        * Request 3: Request 2 tokens + BLOCK_SIZE new random tokens (naturally routed)
+        * Request 4: Request 3 tokens + BLOCK_SIZE new random tokens (naturally routed)
       - Dump events from router and verify:
-        * All but one worker should have no events (one worker handles all due to prefix reuse)
-        * The worker with events should have exactly 4 events (one per request)
+        * All but one (worker_id, dp_rank) should have no events (due to prefix reuse)
+        * The (worker_id, dp_rank) with events should have exactly 4 events (one per request)
+        * All events should be on the forced (worker_id, dp_rank=1) (verifying forced routing and prefix reuse)
     """
 
     # runtime_services starts etcd and nats
     logger.info("Starting test router prefix reuse and KV events synchronization")
 
-    # Create mocker args dictionary
-    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
+    # Create mocker args dictionary with dp_size=4
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+        "dp_size": 4,
+    }
 
     try:
-        # Start mocker instances with the new CLI interface
-        logger.info(f"Starting {NUM_MOCKERS} mocker instances")
-        mockers = MockerProcess(
-            request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
+        # Start 2 mocker instances, each with dp_size=4 (8 total dp ranks)
+        logger.info(
+            "Starting 2 mocker instances with dp_size=4 each (8 total dp ranks)"
         )
+        mockers = MockerProcess(request, mocker_args=mocker_args, num_mockers=2)
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         # Initialize mockers
         mockers.__enter__()
@@ -1357,8 +1428,18 @@ def test_router_decisions(request, runtime_services, predownload_tokenizers):
         # Use async to manage the test flow
         async def test_sync():
             # Wait for workers to be ready and get their instance IDs
-            mocker_worker_ids = await wait_for_mockers_ready(endpoint, kv_push_router)
+            mocker_worker_ids = await wait_for_mockers_ready(
+                endpoint, kv_push_router, expected_num_workers=2
+            )
             logger.info(f"Workers ready: {mocker_worker_ids}")
+
+            # Use the first worker_id for forced routing
+            forced_worker_id = mocker_worker_ids[0]
+            forced_dp_rank = 1
+
+            logger.info(
+                f"Will force first request to worker_id={forced_worker_id}, dp_rank={forced_dp_rank}"
+            )
 
             # Send 4 progressive requests with overlapping prefixes
             cumulative_tokens = []
@@ -1368,9 +1449,14 @@ def test_router_decisions(request, runtime_services, predownload_tokenizers):
                 new_tokens = [random.randint(1, 10000) for _ in range(BLOCK_SIZE)]
                 cumulative_tokens.extend(new_tokens)
 
+                # Force first request to specific worker_id and dp_rank=1, let subsequent requests follow naturally
+                worker_id_override = forced_worker_id if i == 0 else None
+                dp_rank_override = forced_dp_rank if i == 0 else None
+
                 logger.info(
                     f"Sending request {i + 1}/4 with {len(cumulative_tokens)} tokens "
                     f"(added {len(new_tokens)} new tokens)"
+                    f"{f' - FORCING worker_id={worker_id_override}, dp_rank={dp_rank_override}' if worker_id_override is not None else ''}"
                 )
 
                 await send_request_via_python_kv_router(
@@ -1382,6 +1468,8 @@ def test_router_decisions(request, runtime_services, predownload_tokenizers):
                         "ignore_eos": True,  # Don't stop on EOS token
                         "max_tokens": 2,  # Generate exactly 2 tokens
                     },
+                    worker_id=worker_id_override,
+                    dp_rank=dp_rank_override,
                 )
 
                 # Wait a bit between requests
@@ -1392,46 +1480,64 @@ def test_router_decisions(request, runtime_services, predownload_tokenizers):
 
             # Dump events from the router
             events_json = await kv_push_router.dump_events()
-            return events_json
+            return events_json, forced_worker_id, forced_dp_rank
 
         # Run the async test
-        events_json = asyncio.run(test_sync())
+        events_json, expected_worker_id, expected_dp_rank = asyncio.run(test_sync())
 
-        # Parse events and count by worker
+        # Parse events and count by (worker_id, dp_rank)
         events = json.loads(events_json)
-        events_by_worker: dict[int, list[Any]] = {}
+        events_by_worker_dp: dict[tuple[int, int], list[Any]] = {}
 
         for event in events:
             worker_id = event.get("worker_id")
-            if worker_id not in events_by_worker:
-                events_by_worker[worker_id] = []
-            events_by_worker[worker_id].append(event)
+            # Extract dp_rank from the event's KvCacheEvent
+            dp_rank = event.get("event", {}).get("dp_rank", 0)
+            key = (worker_id, dp_rank)
+            if key not in events_by_worker_dp:
+                events_by_worker_dp[key] = []
+            events_by_worker_dp[key].append(event)
 
         logger.info(
-            f"Events by worker: {[(wid, len(evts)) for wid, evts in events_by_worker.items()]}"
+            f"Events by (worker_id, dp_rank): {[(key, len(evts)) for key, evts in events_by_worker_dp.items()]}"
         )
 
-        # Verify: All but one worker should have no events
+        # Verify: All but one (worker_id, dp_rank) should have no events
         workers_with_events = [
-            wid for wid, evts in events_by_worker.items() if len(evts) > 0
+            key for key, evts in events_by_worker_dp.items() if len(evts) > 0
         ]
 
         assert len(workers_with_events) == 1, (
-            f"Expected exactly 1 worker to have events (due to prefix reuse), "
-            f"but found {len(workers_with_events)} workers with events: {workers_with_events}"
+            f"Expected exactly 1 (worker_id, dp_rank) to have events (due to prefix reuse), "
+            f"but found {len(workers_with_events)} with events: {workers_with_events}"
         )
 
-        # Verify: The worker with events should have exactly 4 events
-        active_worker = workers_with_events[0]
-        num_events = len(events_by_worker[active_worker])
+        # Verify: The (worker_id, dp_rank) with events should have exactly 4 events
+        active_worker_dp = workers_with_events[0]
+        num_events = len(events_by_worker_dp[active_worker_dp])
 
         assert num_events == 4, (
-            f"Expected worker {active_worker} to have exactly 4 events, "
+            f"Expected (worker_id, dp_rank) {active_worker_dp} to have exactly 4 events, "
             f"but found {num_events} events"
         )
 
+        # Verify: Both worker_id and dp_rank should match the forced values
+        active_worker_id = active_worker_dp[0]
+        active_dp_rank = active_worker_dp[1]
+
+        assert active_worker_id == expected_worker_id, (
+            f"Expected all events to have worker_id={expected_worker_id} (forced in first request), "
+            f"but found worker_id={active_worker_id}"
+        )
+
+        assert active_dp_rank == expected_dp_rank, (
+            f"Expected all events to have dp_rank={expected_dp_rank} (forced in first request), "
+            f"but found dp_rank={active_dp_rank}"
+        )
+
         logger.info(
-            f"Successfully verified: Worker {active_worker} handled all 4 requests with prefix reuse. "
+            f"Successfully verified: Worker {active_worker_id} dp_rank {active_dp_rank} handled all 4 requests with prefix reuse. "
+            f"All events correctly routed to worker_id={expected_worker_id}, dp_rank={expected_dp_rank} as expected. "
             f"KV events synchronized correctly."
         )
 

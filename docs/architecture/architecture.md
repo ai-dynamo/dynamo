@@ -54,8 +54,8 @@ The following diagram outlines Dynamo's high-level architecture. To enable large
 
 - [Dynamo Disaggregated Serving](disagg_serving.md)
 - [Dynamo Smart Router](kv_cache_routing.md)
-- [Dynamo KV Cache Block Manager](kvbm_intro.rst)
-- [Planner](planner_intro.rst)
+- [Dynamo KV Cache Block Manager](../kvbm/kvbm_intro.rst)
+- [Planner](../planner/planner_intro.rst)
 - [NVIDIA Inference Transfer Library (NIXL)](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md)
 
 Every component in the Dynamo architecture is independently scalable and portable. The API server can adapt to task-specific deployment. A smart router processes user requests to route them to the optimal worker for performance. Specifically, for Large Language Models (LLMs), Dynamo employs KV cache-aware routing, which directs requests to the worker with the highest cache hit rate while maintaining load balance, expediting decoding. This routing strategy leverages a KV cache manager that maintains a global radix tree registry for hit rate calculation. The KV cache manager also oversees a multi-tiered memory system, enabling rapid KV cache storage and eviction. This design results in substantial TTFT reductions, increased throughput, and the ability to process extensive context lengths.
@@ -92,11 +92,10 @@ Existing routing methods, including load-based routing, overlook the specific pr
 
 ### KV cache manager
 
-Dynamo's design enables KV cache offloading to system CPU memory. In accelerated servers, the CPU (system) memory is often larger than the GPU memory and fast enough to store and serve KV cache data. The following plot highlights the performance gains achieved through system memory offloading, even with prefix caching enabled via inference engine. In a scenario involving 10 multi-turn conversations with 80 users, system memory offloading resulted in a 40% improvement in TTFT, demonstrating benefits beyond basic prefix caching.
+The Dynamo KV Block Manager (KVBM) enables KV cache offloading to system CPU memory, local SSDs, and network-attached storage, allowing more KV blocks to be reused instead of recomputed. In many cases, KV transfer is faster than recomputation, so KVBM helps reduce time-to-first-token (TTFT). The following plot highlights the performance gains achieved through CPU memory offloading. In a scenario involving 20 multi-turn conversations with 15 users, KVBM with CPU memory offloading achieved a 2.2×–12× improvement in TTFT (depending on QPS), demonstrating benefits that extend beyond basic prefix caching.
+![Line graph comparing Pure GPU prefix caching with vLLM and KVBM host offloading for TTFT (Time To First Token)](../images/kvbm_agg_performance.png)
 
-![Line graph comparing Pure GPU prefix caching and Dynamo KV manager host offloading for TTFT (Time To First Token) across rounds with 80 users](../images/kv_manager.png)
-
-* Tested with 100K requests to R1 using R1 Distilled Llama 70B FP8 on 2 nodes of H100s. Avg 4K ISL / 800 OSL
+* Tested with different QPS using Qwen3-8B on H100. Avg 20K ISL / 100 OSL.
 
 ### NVIDIA Inference Transfer Library (NIXL)
 

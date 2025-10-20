@@ -5,14 +5,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::Context as _;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::storage::key_value_store::Key;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{
     component::Endpoint,
-    storage::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager},
+    storage::key_value_store::{EtcdStore, KeyValueStore, KeyValueStoreManager},
 };
 
 use crate::entrypoint::RouterConfig;
@@ -24,9 +23,6 @@ use crate::request_template::RequestTemplate;
 pub mod runtime_config;
 
 use runtime_config::ModelRuntimeConfig;
-
-/// Prefix for Hugging Face model repository
-const HF_SCHEME: &str = "hf://";
 
 /// What we call a model if the user didn't provide a name. Usually this means the name
 /// is invisible, for example in a text chat.
@@ -42,7 +38,6 @@ pub const DEFAULT_HTTP_PORT: u16 = 8080;
 pub struct LocalModelBuilder {
     model_path: Option<PathBuf>,
     model_name: Option<String>,
-    model_config: Option<PathBuf>,
     endpoint_id: Option<EndpointId>,
     context_length: Option<u32>,
     template_file: Option<PathBuf>,
@@ -59,6 +54,8 @@ pub struct LocalModelBuilder {
     user_data: Option<serde_json::Value>,
     custom_template_path: Option<PathBuf>,
     namespace: Option<String>,
+    custom_backend_metrics_endpoint: Option<String>,
+    custom_backend_metrics_polling_interval: Option<f64>,
 }
 
 impl Default for LocalModelBuilder {
@@ -71,7 +68,6 @@ impl Default for LocalModelBuilder {
             tls_key_path: Default::default(),
             model_path: Default::default(),
             model_name: Default::default(),
-            model_config: Default::default(),
             endpoint_id: Default::default(),
             context_length: Default::default(),
             template_file: Default::default(),
@@ -83,23 +79,21 @@ impl Default for LocalModelBuilder {
             user_data: Default::default(),
             custom_template_path: Default::default(),
             namespace: Default::default(),
+            custom_backend_metrics_endpoint: Default::default(),
+            custom_backend_metrics_polling_interval: Default::default(),
         }
     }
 }
 
 impl LocalModelBuilder {
-    pub fn model_path(&mut self, model_path: Option<PathBuf>) -> &mut Self {
-        self.model_path = model_path;
+    /// The path must exist
+    pub fn model_path(&mut self, model_path: PathBuf) -> &mut Self {
+        self.model_path = Some(model_path);
         self
     }
 
     pub fn model_name(&mut self, model_name: Option<String>) -> &mut Self {
         self.model_name = model_name;
-        self
-    }
-
-    pub fn model_config(&mut self, model_config: Option<PathBuf>) -> &mut Self {
-        self.model_config = model_config;
         self
     }
 
@@ -184,6 +178,16 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn custom_backend_metrics_endpoint(&mut self, endpoint: Option<String>) -> &mut Self {
+        self.custom_backend_metrics_endpoint = endpoint;
+        self
+    }
+
+    pub fn custom_backend_metrics_polling_interval(&mut self, interval: Option<f64>) -> &mut Self {
+        self.custom_backend_metrics_polling_interval = interval;
+        self
+    }
+
     /// Make an LLM ready for use:
     /// - Download it from Hugging Face (and NGC in future) if necessary
     /// - Resolve the path
@@ -192,7 +196,6 @@ impl LocalModelBuilder {
     ///
     /// The model name will depend on what "model_path" is:
     /// - A folder: The last part of the folder name: "/data/llms/Qwen2.5-3B-Instruct" -> "Qwen2.5-3B-Instruct"
-    /// - A file: The GGUF filename: "/data/llms/Qwen2.5-3B-Instruct-Q6_K.gguf" -> "Qwen2.5-3B-Instruct-Q6_K.gguf"
     /// - An HF repo: The HF repo name: "Qwen/Qwen3-0.6B" stays the same
     pub async fn build(&mut self) -> anyhow::Result<LocalModel> {
         // Generate an endpoint ID for this model if the user didn't provide one.
@@ -208,11 +211,26 @@ impl LocalModelBuilder {
             .map(RequestTemplate::load)
             .transpose()?;
 
-        // echo engine doesn't need a path. It's an edge case, move it out of the way.
+        // Override runtime configs with mocker engine args (applies to both paths)
+        if self.is_mocker
+            && let Some(path) = &self.extra_engine_args
+        {
+            let mocker_engine_args = MockEngineArgs::from_json_file(path)
+                .expect("Failed to load mocker engine args for runtime config overriding.");
+            self.kv_cache_block_size = mocker_engine_args.block_size as u32;
+            self.runtime_config.total_kv_blocks = Some(mocker_engine_args.num_gpu_blocks as u64);
+            self.runtime_config.max_num_seqs = mocker_engine_args.max_num_seqs.map(|v| v as u64);
+            self.runtime_config.max_num_batched_tokens =
+                mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
+            self.runtime_config.data_parallel_size = mocker_engine_args.dp_size;
+        }
+
+        // frontend and echo engine don't need a path.
         if self.model_path.is_none() {
             let mut card = ModelDeploymentCard::with_name_only(
                 self.model_name.as_deref().unwrap_or(DEFAULT_NAME),
             );
+            card.kv_cache_block_size = self.kv_cache_block_size;
             card.migration_limit = self.migration_limit;
             card.user_data = self.user_data.take();
             card.runtime_config = self.runtime_config.clone();
@@ -229,49 +247,32 @@ impl LocalModelBuilder {
                 router_config: self.router_config.take().unwrap_or_default(),
                 runtime_config: self.runtime_config.clone(),
                 namespace: self.namespace.clone(),
+                custom_backend_metrics_endpoint: self.custom_backend_metrics_endpoint.clone(),
+                custom_backend_metrics_polling_interval: self
+                    .custom_backend_metrics_polling_interval,
             });
         }
 
         // Main logic. We are running a model.
         let model_path = self.model_path.take().unwrap();
-        let model_path = model_path.to_str().context("Invalid UTF-8 in model path")?;
+        if !model_path.exists() {
+            anyhow::bail!(
+                "Path does not exist: '{}'. Use LocalModel::fetch to download it.",
+                model_path.display(),
+            );
+        }
+        let model_path = fs::canonicalize(model_path)?;
 
-        // Check for hf:// prefix first, in case we really want an HF repo but it conflicts
-        // with a relative path.
-        let is_hf_repo =
-            model_path.starts_with(HF_SCHEME) || !fs::exists(model_path).unwrap_or(false);
-        let relative_path = model_path.trim_start_matches(HF_SCHEME);
-        let full_path = if is_hf_repo {
-            // HF download if necessary
-            super::hub::from_hf(relative_path, self.is_mocker).await?
-        } else {
-            fs::canonicalize(relative_path)?
-        };
-        // --model-config takes precedence over --model-path
-        let model_config_path = self.model_config.as_ref().unwrap_or(&full_path);
-
-        let mut card = ModelDeploymentCard::load_from_disk(
-            model_config_path,
-            self.custom_template_path.as_deref(),
-        )?;
-
-        // Usually we infer from the path, self.model_name is user override
-        let model_name = self.model_name.take().unwrap_or_else(|| {
-            if is_hf_repo {
-                // HF repos use their full name ("org/name") not the folder name
-                relative_path.to_string()
-            } else {
-                full_path
-                    .iter()
-                    .next_back()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| {
-                        // Panic because we can't do anything without a model
-                        panic!("Invalid model path, too short: '{}'", full_path.display())
-                    })
-            }
-        });
-        card.set_name(&model_name);
+        let mut card =
+            ModelDeploymentCard::load_from_disk(&model_path, self.custom_template_path.as_deref())?;
+        // The served model name defaults to the full model path.
+        // This matches what vllm and sglang do.
+        card.set_name(
+            &self
+                .model_name
+                .clone()
+                .unwrap_or_else(|| model_path.display().to_string()),
+        );
 
         card.kv_cache_block_size = self.kv_cache_block_size;
 
@@ -280,25 +281,13 @@ impl LocalModelBuilder {
             card.context_length = context_length;
         }
 
-        // Override runtime configs with mocker engine args
-        if self.is_mocker
-            && let Some(path) = &self.extra_engine_args
-        {
-            let mocker_engine_args = MockEngineArgs::from_json_file(path)
-                .expect("Failed to load mocker engine args for runtime config overriding.");
-            self.runtime_config.total_kv_blocks = Some(mocker_engine_args.num_gpu_blocks as u64);
-            self.runtime_config.max_num_seqs = mocker_engine_args.max_num_seqs.map(|v| v as u64);
-            self.runtime_config.max_num_batched_tokens =
-                mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
-        }
-
         card.migration_limit = self.migration_limit;
         card.user_data = self.user_data.take();
         card.runtime_config = self.runtime_config.clone();
 
         Ok(LocalModel {
             card,
-            full_path,
+            full_path: model_path,
             endpoint_id,
             template,
             http_host: self.http_host.take(),
@@ -308,6 +297,8 @@ impl LocalModelBuilder {
             router_config: self.router_config.take().unwrap_or_default(),
             runtime_config: self.runtime_config.clone(),
             namespace: self.namespace.clone(),
+            custom_backend_metrics_endpoint: self.custom_backend_metrics_endpoint.clone(),
+            custom_backend_metrics_polling_interval: self.custom_backend_metrics_polling_interval,
         })
     }
 }
@@ -325,9 +316,20 @@ pub struct LocalModel {
     router_config: RouterConfig,
     runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
+    custom_backend_metrics_endpoint: Option<String>,
+    custom_backend_metrics_polling_interval: Option<f64>,
 }
 
 impl LocalModel {
+    /// Ensure a model is accessible locally, returning it's path.
+    /// Downloads the model from Hugging Face if necessary.
+    /// If ignore_weights is true, model weight files will be skipped and only the model config
+    /// will be downloaded.
+    /// Returns the path to the model files
+    pub async fn fetch(remote_name: &str, ignore_weights: bool) -> anyhow::Result<PathBuf> {
+        super::hub::from_hf(remote_name, ignore_weights).await
+    }
+
     pub fn card(&self) -> &ModelDeploymentCard {
         &self.card
     }
@@ -379,6 +381,14 @@ impl LocalModel {
         self.namespace.as_deref()
     }
 
+    pub fn custom_backend_metrics_endpoint(&self) -> Option<&str> {
+        self.custom_backend_metrics_endpoint.as_deref()
+    }
+
+    pub fn custom_backend_metrics_polling_interval(&self) -> Option<f64> {
+        self.custom_backend_metrics_polling_interval
+    }
+
     pub fn is_gguf(&self) -> bool {
         // GGUF is the only file (not-folder) we accept, so we don't need to check the extension
         // We will error when we come to parse it
@@ -411,12 +421,8 @@ impl LocalModel {
         self.card.model_type = model_type;
         self.card.model_input = model_input;
 
-        // Store model config files in NATS object store
-        let nats_client = endpoint.drt().nats_client();
-        self.card.move_to_nats(nats_client.clone()).await?;
-
         // Publish the Model Deployment Card to KV store
-        let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
+        let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStore::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
         let lease_id = endpoint.drt().primary_lease().map(|l| l.id()).unwrap_or(0);
         let key = Key::from_raw(endpoint.unique_path(lease_id));

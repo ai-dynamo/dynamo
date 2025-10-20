@@ -39,7 +39,7 @@ ARG SCCACHE_REGION=""
 
 # NIXL configuration
 ARG NIXL_UCX_REF=v1.19.0
-ARG NIXL_REF=0.4.1
+ARG NIXL_REF=0.6.0
 
 # Python configuration
 ARG PYTHON_VERSION=3.12
@@ -79,7 +79,6 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 # Set SCCACHE environment variables
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-    SCCACHE_S3_KEY_PREFIX=${USE_SCCACHE:+${ARCH}} \
     RUSTC_WRAPPER=${USE_SCCACHE:+sccache} \
     CMAKE_C_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
     CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
@@ -117,6 +116,7 @@ RUN apt-get update -y \
         automake \
         cmake \
         git \
+        git-lfs \
         libtool \
         meson \
         net-tools \
@@ -169,6 +169,7 @@ ENV PATH=/usr/local/bin/etcd/:$PATH
 # Build and install UCX
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
     rm -rf /opt/hpcx/ucx && \
     rm -rf /usr/local/ucx && \
     echo "Building UCX with reference $NIXL_UCX_REF" && \
@@ -204,9 +205,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     rm -rf ucx
 
 # UCX environment variables
-ENV CPATH=/usr/include:$CPATH \
+ENV CPATH=/usr/include \
     PATH=/usr/bin:/usr/local/ucx/bin:$PATH \
-    PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
+    PKG_CONFIG_PATH=/usr/lib/pkgconfig
 
 ##################################
 ########## NIXL Setup ############
@@ -261,7 +262,10 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    uv pip install --requirement /tmp/requirements.txt --requirement /tmp/requirements.test.txt
+    UV_GIT_LFS=1 uv pip install \
+        --no-cache \
+        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.test.txt
 
 ##################################
 ##### Wheel Build Image ##########
@@ -333,7 +337,6 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 # Set SCCACHE environment variables
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-    SCCACHE_S3_KEY_PREFIX=${USE_SCCACHE:+${ARCH}} \
     RUSTC_WRAPPER=${USE_SCCACHE:+sccache}
 
 # Copy source code (order matters for layer caching)
@@ -344,6 +347,7 @@ COPY components/ /opt/dynamo/components/
 # Build wheels
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
     uv pip install maturin[patchelf] && \
@@ -366,8 +370,7 @@ FROM base AS dev
 
 # Application environment variables
 ENV DYNAMO_HOME=/opt/dynamo \
-    CARGO_TARGET_DIR=/opt/dynamo/target \
-    PYTHONPATH=/opt/dynamo:$PYTHONPATH
+    CARGO_TARGET_DIR=/opt/dynamo/target
 
 WORKDIR /opt/dynamo
 
@@ -383,7 +386,7 @@ RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
     && cd /opt/dynamo/benchmarks \
-    && uv pip install . \
+    && UV_GIT_LFS=1 uv pip install --no-cache . \
     && cd - \
     && rm -rf /opt/dynamo/benchmarks
 

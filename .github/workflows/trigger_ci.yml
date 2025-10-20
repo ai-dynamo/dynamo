@@ -98,10 +98,6 @@ jobs:
           ci_variables["RUN_SGLANG"]="true"
         fi
 
-        if [ "${{ steps.src_changes.outputs.sdk }}" == "true" ]; then
-          ci_variables["RUN_SDK_CI"]="true"
-        fi
-
         ci_args=""
         for key in "${!ci_variables[@]}"; do
           ci_args+="--form variables[$key]=${ci_variables[$key]} "

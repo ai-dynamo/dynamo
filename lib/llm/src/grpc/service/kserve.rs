@@ -57,11 +57,11 @@ impl State {
         }
     }
 
-    pub fn new_with_etcd(manager: Arc<ModelManager>, etcd_client: Option<etcd::Client>) -> Self {
+    pub fn new_with_etcd(manager: Arc<ModelManager>, etcd_client: etcd::Client) -> Self {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
-            etcd_client,
+            etcd_client: Some(etcd_client),
         }
     }
 
@@ -155,7 +155,10 @@ impl KserveServiceConfigBuilder {
         let config: KserveServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let state = Arc::new(State::new_with_etcd(model_manager, config.etcd_client));
+        let state = match config.etcd_client {
+            Some(etcd_client) => Arc::new(State::new_with_etcd(model_manager, etcd_client)),
+            None => Arc::new(State::new(model_manager)),
+        };
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();

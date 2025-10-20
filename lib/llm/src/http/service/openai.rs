@@ -1061,8 +1061,8 @@ async fn list_models_openai(
         data.push(ModelListing {
             id: model_name.clone(),
             object: "object",
-            created,                        // Where would this come from? The GGUF?
-            owned_by: "nvidia".to_string(), // Get organization from GGUF
+            created,                        // Where would this come from?
+            owned_by: "nvidia".to_string(), // Get organization from config
         });
     }
 
