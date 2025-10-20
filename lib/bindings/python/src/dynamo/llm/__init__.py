@@ -21,6 +21,8 @@ from dynamo._core import EntrypointArgs as EntrypointArgs
 from dynamo._core import ForwardPassMetrics as ForwardPassMetrics
 from dynamo._core import HttpAsyncEngine as HttpAsyncEngine
 from dynamo._core import HttpService as HttpService
+from dynamo._core import KserveGrpcAsyncEngine as KserveGrpcAsyncEngine
+from dynamo._core import KserveGrpcService as KserveGrpcService
 from dynamo._core import KvEventPublisher as KvEventPublisher
 from dynamo._core import KvIndexer as KvIndexer
 from dynamo._core import KvMetricsAggregator as KvMetricsAggregator
