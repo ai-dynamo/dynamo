@@ -116,7 +116,7 @@ def start_services(request, runtime_services):
 
 
 @pytest.mark.usefixtures("start_services")
-@pytest.mark.e2e
+@pytest.mark.pre_merge
 @pytest.mark.model(TEST_MODEL)
 def test_echo() -> None:
     triton_echo_client.run_infer()
