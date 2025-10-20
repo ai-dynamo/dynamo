@@ -160,3 +160,47 @@ jobs:
             echo "📝 A pull request has been created to add this snapshot to the repository." >> $GITHUB_STEP_SUMMARY
           fi
 
+      - name: Create issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const timestamp = new Date().toISOString();
+            const version = '${{ steps.version.outputs.version }}';
+            
+            const issueBody = `## ⚠️ Release Dependency Snapshot Failed
+
+            **Version:** v${version}
+            **Run:** ${runUrl}
+            **Time:** ${timestamp}
+            **Branch:** \`${{ github.ref_name }}\`
+
+            ### Failure Details
+            The automated release dependency snapshot workflow has failed for version v${version}.
+
+            ### Possible Causes
+            - Invalid version format in branch name or input
+            - Parsing errors in dependency files
+            - Permission issues writing to the repository
+            - Python script errors or exceptions
+
+            ### Action Required
+            1. Review the workflow run logs: ${runUrl}
+            2. Verify the version format (X.Y.Z)
+            3. Fix any identified issues
+            4. Re-run the workflow manually to create the snapshot
+            5. Close this issue once resolved
+
+            **Note:** This issue was automatically created by the release dependency snapshot workflow.`;
+            
+            // Create new issue for release failures (don't check for existing as these are version-specific)
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `⚠️ Release Dependency Snapshot Failed - v${version}`,
+              body: issueBody,
+              labels: ['automated', 'dependencies', 'release-snapshot-failure', 'bug']
+            });
+            core.info(`Created failure issue for v${version}`);
+
