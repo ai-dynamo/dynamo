@@ -35,13 +35,10 @@ jobs:
         with:
           fetch-depth: 0 # Need history for comparison
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Setup dependency extraction environment
+        uses: ./.github/actions/dependency-extraction-setup
         with:
           python-version: '3.12'
-
-      - name: Install dependencies
-        run: pip install pyyaml
 
       - name: Run dependency extraction
         run: |

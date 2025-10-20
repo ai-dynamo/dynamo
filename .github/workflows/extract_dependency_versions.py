@@ -1833,6 +1833,123 @@ class DependencyExtractor:
 
         print(f"✓ Written {len(unversioned)} unversioned dependencies to {output_path}")
 
+    def normalize_dependency_name(self, name: str) -> str:
+        """
+        Normalize dependency names to detect the same dependency referred to differently.
+        
+        Examples:
+            - torch, pytorch, PyTorch -> pytorch
+            - tensorflow, TensorFlow -> tensorflow
+            - numpy, NumPy -> numpy
+        
+        Note: This is intentionally conservative to avoid false positives.
+        Only normalizes well-known dependencies with common naming variations.
+        """
+        # Convert to lowercase for comparison
+        name_lower = name.lower()
+        
+        # Common normalization rules (ordered by specificity to avoid false matches)
+        normalizations = {
+            "tensorrt-llm": "tensorrt-llm",
+            "trtllm": "tensorrt-llm",
+            "tensorrt": "tensorrt",
+            "pytorch": "pytorch",
+            "torch": "pytorch",
+            "tensorflow": "tensorflow",
+            "cuda": "cuda",
+            "cudnn": "cudnn",
+            "nccl": "nccl",
+            "nixl": "nixl",
+        }
+        
+        # Check if name matches any normalization rules (exact or starts with)
+        for key, normalized in normalizations.items():
+            if name_lower == key or name_lower.startswith(key + " "):
+                return normalized
+        
+        # Default: return the lowercase name unchanged
+        # This avoids false positives from overly broad matching
+        return name_lower.strip()
+
+    def detect_version_discrepancies(self) -> List[Dict[str, any]]:
+        """
+        Detect dependencies that appear multiple times with different versions.
+        
+        Returns:
+            List of dictionaries containing discrepancy information:
+            - dependency_name: The normalized dependency name
+            - instances: List of {version, source_file, component} for each occurrence
+        """
+        # Group dependencies by normalized name
+        dependency_groups = {}
+        
+        for dep in self.dependencies:
+            normalized_name = self.normalize_dependency_name(dep["Dependency Name"])
+            
+            # Skip unversioned dependencies for discrepancy detection
+            if dep["Version"] in ["unspecified", "N/A", "", "latest"]:
+                continue
+            
+            if normalized_name not in dependency_groups:
+                dependency_groups[normalized_name] = []
+            
+            dependency_groups[normalized_name].append({
+                "original_name": dep["Dependency Name"],
+                "version": dep["Version"],
+                "source_file": dep["Source File"],
+                "component": dep["Component"],
+                "category": dep["Category"],
+                "critical": dep["Critical"] == "Yes",
+            })
+        
+        # Detect discrepancies: same normalized name with different versions
+        discrepancies = []
+        
+        for normalized_name, instances in dependency_groups.items():
+            # Get unique versions
+            versions = set(inst["version"] for inst in instances)
+            
+            # If multiple versions exist, it's a discrepancy
+            if len(versions) > 1:
+                discrepancies.append({
+                    "normalized_name": normalized_name,
+                    "versions": sorted(versions),
+                    "instances": instances,
+                    "is_critical": any(inst["critical"] for inst in instances),
+                })
+        
+        return discrepancies
+
+    def _output_github_warnings(self, discrepancies: List[Dict[str, any]]) -> None:
+        """
+        Output GitHub Actions warning annotations for version discrepancies.
+        
+        This uses the GitHub Actions workflow command format:
+        ::warning file={file},line={line}::{message}
+        
+        See: https://docs.github.com/en/actions/reference/workflow-commands-for-github-actions
+        """
+        for disc in discrepancies:
+            normalized_name = disc["normalized_name"]
+            versions = disc["versions"]
+            is_critical = disc["is_critical"]
+            instances = disc["instances"]
+            
+            # Create a concise message for the annotation
+            critical_prefix = "[CRITICAL] " if is_critical else ""
+            versions_str = ", ".join(versions)
+            
+            # Output a warning for each source file where the dependency appears
+            for inst in instances:
+                message = (
+                    f"{critical_prefix}Version discrepancy detected for '{normalized_name}': "
+                    f"found {inst['version']} here, but also appears as {versions_str} elsewhere"
+                )
+                
+                # Output GitHub Actions warning annotation
+                # Format: ::warning file={name}::{message}
+                print(f"::warning file={inst['source_file']}::{message}")
+
     def print_summary(self) -> None:
         """Print comprehensive summary statistics."""
         components = {}
@@ -1918,6 +2035,47 @@ class DependencyExtractor:
             )
         else:
             print("\n✓ All dependencies have version specifiers")
+
+        # Check for version discrepancies
+        discrepancies = self.detect_version_discrepancies()
+        if discrepancies:
+            print(
+                f"\n⚠️  WARNING: Found {len(discrepancies)} dependencies with version discrepancies!"
+            )
+            print("\nDependencies pinned at different versions across the repo:")
+            
+            for disc in discrepancies[:10]:  # Show first 10
+                critical_flag = " [CRITICAL]" if disc["is_critical"] else ""
+                print(f"\n  • {disc['normalized_name']}{critical_flag}")
+                print(f"    Versions found: {', '.join(disc['versions'])}")
+                print(f"    Locations:")
+                
+                for inst in disc["instances"][:5]:  # Show first 5 instances
+                    print(
+                        f"      - {inst['version']:15s} in {inst['component']:10s} "
+                        f"({inst['source_file']})"
+                    )
+                
+                if len(disc["instances"]) > 5:
+                    print(f"      ... and {len(disc['instances']) - 5} more locations")
+            
+            if len(discrepancies) > 10:
+                print(f"\n  ... and {len(discrepancies) - 10} more discrepancies")
+            
+            print("\n  💡 Tip: Version discrepancies can cause:")
+            print("     - Runtime conflicts and crashes")
+            print("     - Unexpected behavior differences between components")
+            print("     - Build failures due to incompatible APIs")
+            print("     - Security vulnerabilities if older versions are used")
+            print(
+                "\n  Consider standardizing versions across the repo or documenting why "
+                "differences are necessary."
+            )
+            
+            # Output GitHub Actions warnings for CI visibility
+            self._output_github_warnings(discrepancies)
+        else:
+            print("\n✓ No version discrepancies detected")
 
         # Check against baseline and warn if exceeded
         if total_deps > self.baseline_count:
