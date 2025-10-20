@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use async_nats::jetstream;
-use async_nats::{Client, ConnectOptions};
 use rand::Rng;
 use std::time::{Duration, Instant};
 use tokio::{sync::mpsc, time};
@@ -14,7 +13,6 @@ use crate::audit::sink::AuditSink;
 /// Runtime configuration loaded from env.
 #[derive(Clone)]
 struct NatsCfg {
-    url: String,
     subject: String,
     batch: usize,
     flush_every: Duration,
@@ -28,7 +26,6 @@ struct NatsCfg {
 impl Default for NatsCfg {
     fn default() -> Self {
         Self {
-            url: "nats://127.0.0.1:4222".into(),
             subject: "dynamo.audit.v1".into(),
             batch: 128,
             flush_every: Duration::from_millis(100),
@@ -44,9 +41,6 @@ impl Default for NatsCfg {
 impl NatsCfg {
     fn from_env() -> Self {
         let mut cfg = Self::default();
-        if let Ok(v) = std::env::var("DYN_AUDIT_NATS_URL") {
-            cfg.url = v;
-        }
         if let Ok(v) = std::env::var("DYN_AUDIT_NATS_SUBJECT") {
             cfg.subject = v;
         }
@@ -68,18 +62,18 @@ impl NatsCfg {
 
 /// Internals run on a background task so `emit()` is fully non-blocking and cheap.
 struct NatsWorker {
-    cfg: NatsCfg,
+    js: jetstream::Context,
+    subject: String,
+    batch_size: usize,
+    flush_every: Duration,
+    backoff_base: Duration,
+    max_backoff: Duration,
+    cb_threshold: u32,
+    cb_sleep: Duration,
     rx: mpsc::Receiver<Vec<u8>>,
 }
 
 impl NatsWorker {
-    async fn connect(cfg: &NatsCfg) -> anyhow::Result<(Client, jetstream::Context)> {
-        // Keep simple, no TLS/auth for initial scope; ConnectOptions available if needed.
-        let client = ConnectOptions::default().connect(&cfg.url).await?;
-        let js = jetstream::new(client.clone());
-        Ok((client, js))
-    }
-
     fn jittered(delay: Duration) -> Duration {
         let base_ms = delay.as_millis() as i64;
         let j = rand::rng().random_range(0..=base_ms.max(1)) as u64;
@@ -100,25 +94,16 @@ impl NatsWorker {
     }
 
     async fn run(mut self) {
+        info!("nats: using shared NATS connection from DistributedRuntime");
+
         // Batching state
-        let mut buf: Vec<Vec<u8>> = Vec::with_capacity(self.cfg.batch);
-        let mut ticker = time::interval(self.cfg.flush_every);
+        let mut buf: Vec<Vec<u8>> = Vec::with_capacity(self.batch_size);
+        let mut ticker = time::interval(self.flush_every);
         ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
         // Failure / circuit-breaker state
         let mut consecutive_failures: u32 = 0;
         let mut breaker_open_until: Option<Instant> = None;
-
-        // Connection - retry until successful on startup
-        let (mut client, mut js) = loop {
-            match Self::connect(&self.cfg).await {
-                Ok(x) => break x,
-                Err(e) => {
-                    warn!(error = %e, "nats: connect failed; retrying in 5s");
-                    time::sleep(Duration::from_secs(5)).await;
-                }
-            }
-        };
 
         loop {
             // If circuit breaker is open, sleep and drain rx to avoid backpressure.
@@ -130,21 +115,11 @@ impl NatsWorker {
                     continue;
                 } else {
                     breaker_open_until = None;
-                    // Reconnect before resuming normal processing
-                    match Self::connect(&self.cfg).await {
-                        Ok((c, jsc)) => {
-                            client = c;
-                            js = jsc;
-                            info!("nats: reconnected after breaker open");
-                            consecutive_failures = 0;
-                        }
-                        Err(e) => {
-                            warn!(error=%e, "nats: reconnect failed; keeping breaker open");
-                            breaker_open_until =
-                                Some(Instant::now() + Self::jittered(self.cfg.cb_sleep));
-                            continue;
-                        }
-                    }
+                    // Trust the shared client's reconnection logic
+                    info!(
+                        "nats: circuit breaker reopening (relying on shared client reconnection)"
+                    );
+                    consecutive_failures = 0;
                 }
             }
 
@@ -153,19 +128,19 @@ impl NatsWorker {
                     match maybe {
                         Some(payload) => {
                             buf.push(payload);
-                            if buf.len() >= self.cfg.batch {
+                            if buf.len() >= self.batch_size {
                                 // Try to flush immediately on size
-                                if let Err(e) = Self::flush(&js, &self.cfg.subject, &mut buf).await {
+                                if let Err(e) = Self::flush(&self.js, &self.subject, &mut buf).await {
                                     consecutive_failures += 1;
                                     warn!(error=%e, fails = consecutive_failures, "nats: flush(size) failed");
                                     // Put back the (not flushed) messages: leave in `buf`
                                     // Backoff and possibly trip breaker
-                                    let mut backoff = self.cfg.backoff_base.saturating_mul(1 << (consecutive_failures.min(15)));
-                                    if backoff > self.cfg.max_backoff { backoff = self.cfg.max_backoff; }
+                                    let mut backoff = self.backoff_base.saturating_mul(1 << (consecutive_failures.min(15)));
+                                    if backoff > self.max_backoff { backoff = self.max_backoff; }
                                     time::sleep(Self::jittered(backoff)).await;
-                                    if consecutive_failures >= self.cfg.cb_threshold {
+                                    if consecutive_failures >= self.cb_threshold {
                                         error!(fails = consecutive_failures, "nats: consecutive failures; opening circuit breaker");
-                                        breaker_open_until = Some(Instant::now() + Self::jittered(self.cfg.cb_sleep));
+                                        breaker_open_until = Some(Instant::now() + Self::jittered(self.cb_sleep));
                                         // drop buffered messages to avoid unbounded growth
                                         buf.clear();
                                     }
@@ -176,7 +151,7 @@ impl NatsWorker {
                         }
                         None => {
                             // Channel closed: flush best-effort and exit task
-                            if let Err(e) = Self::flush(&js, &self.cfg.subject, &mut buf).await {
+                            if let Err(e) = Self::flush(&self.js, &self.subject, &mut buf).await {
                                 warn!(error=%e, "nats: final flush failed on shutdown");
                             }
                             break;
@@ -185,15 +160,15 @@ impl NatsWorker {
                 }
                 _ = ticker.tick() => {
                     if buf.is_empty() { continue; }
-                    if let Err(e) = Self::flush(&js, &self.cfg.subject, &mut buf).await {
+                    if let Err(e) = Self::flush(&self.js, &self.subject, &mut buf).await {
                         consecutive_failures += 1;
                         warn!(error=%e, fails=consecutive_failures, "nats: flush(interval) failed");
-                        let mut backoff = self.cfg.backoff_base.saturating_mul(1 << (consecutive_failures.min(15)));
-                        if backoff > self.cfg.max_backoff { backoff = self.cfg.max_backoff; }
+                        let mut backoff = self.backoff_base.saturating_mul(1 << (consecutive_failures.min(15)));
+                        if backoff > self.max_backoff { backoff = self.max_backoff; }
                         time::sleep(Self::jittered(backoff)).await;
-                        if consecutive_failures >= self.cfg.cb_threshold {
+                        if consecutive_failures >= self.cb_threshold {
                             error!(fails = consecutive_failures, "nats: consecutive failures; opening circuit breaker");
-                            breaker_open_until = Some(Instant::now() + Self::jittered(self.cfg.cb_sleep));
+                            breaker_open_until = Some(Instant::now() + Self::jittered(self.cb_sleep));
                             buf.clear();
                         }
                     } else {
@@ -202,9 +177,6 @@ impl NatsWorker {
                 }
             }
         }
-
-        // avoid unused warnings when the first connect failed before initialization
-        let _ = client;
     }
 }
 
@@ -214,14 +186,35 @@ pub struct NatsSink {
 }
 
 impl NatsSink {
-    pub fn from_env() -> Self {
+    /// Create a new NatsSink using the shared NATS client from DistributedRuntime.
+    /// Returns None if no NATS client is available.
+    pub fn new(nats_client: Option<&dynamo_runtime::transports::nats::Client>) -> Option<Self> {
+        let Some(client) = nats_client else {
+            warn!(
+                "NATS sink requested but no DistributedRuntime NATS client available; skipping NATS audit sink"
+            );
+            return None;
+        };
+
         let cfg = NatsCfg::from_env();
         let (tx, rx) = mpsc::channel::<Vec<u8>>(cfg.queue_cap);
-        // spawn background worker
+
+        // spawn background worker with shared connection
+        let worker = NatsWorker {
+            js: client.jetstream().clone(),
+            subject: cfg.subject,
+            batch_size: cfg.batch,
+            flush_every: cfg.flush_every,
+            backoff_base: cfg.backoff_base,
+            max_backoff: cfg.max_backoff,
+            cb_threshold: cfg.cb_threshold,
+            cb_sleep: cfg.cb_sleep,
+            rx,
+        };
         tokio::spawn(async move {
-            NatsWorker { cfg, rx }.run().await;
+            worker.run().await;
         });
-        NatsSink { tx }
+        Some(NatsSink { tx })
     }
 }
 
