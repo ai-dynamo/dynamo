@@ -432,19 +432,12 @@ class DependencyExtractor:
             formatted_base = self._format_package_name(base_name, category)
             return f"{self._strip_version_suffixes(formatted_base)} {extras}"
 
-        # Handle Go modules
+        # Handle Go modules - keep full path for uniqueness
         if category == "Go Module":
-            # Extract the last meaningful part of the module path
-            parts = name.split("/")
-            if len(parts) > 1:
-                # Get the package name (last part)
-                pkg_name = parts[-1]
-                # If it's a versioned path, use the second-to-last
-                if pkg_name.startswith("v") and pkg_name[1:].replace(".", "").isdigit():
-                    pkg_name = parts[-2] if len(parts) > 2 else pkg_name
-                return self._strip_version_suffixes(
-                    self._format_package_name(pkg_name, category)
-                )
+            # For Go modules, we want to keep the full import path to avoid ambiguity
+            # Different packages may have the same last component but different domains
+            # e.g., "emperror.dev/errors" vs "github.com/pkg/errors"
+            return name  # Return as-is, no formatting needed
 
         # Handle Docker base images
         if category == "Base Image":
@@ -1833,7 +1826,7 @@ class DependencyExtractor:
 
         print(f"✓ Written {len(unversioned)} unversioned dependencies to {output_path}")
 
-    def normalize_dependency_name(self, name: str) -> str:
+    def normalize_dependency_name(self, name: str, category: str = "") -> str:
         """
         Normalize dependency names to detect the same dependency referred to differently.
 
@@ -1844,7 +1837,15 @@ class DependencyExtractor:
 
         Note: This is intentionally conservative to avoid false positives.
         Only normalizes well-known dependencies with common naming variations.
+        
+        For Go modules, we don't normalize at all since the full import path
+        is significant (e.g., github.com/pkg/errors vs k8s.io/errors are different).
         """
+        # For Go dependencies, use the full name without normalization
+        # Go module paths are unique identifiers and should not be normalized
+        if category == "Go Dependency" or category == "Go Module":
+            return name.strip()
+        
         # Convert to lowercase for comparison
         name_lower = name.lower()
 
@@ -1879,15 +1880,48 @@ class DependencyExtractor:
             List of dictionaries containing discrepancy information:
             - dependency_name: The normalized dependency name
             - instances: List of {version, source_file, component} for each occurrence
+        
+        Note: This intentionally filters out some categories to reduce false positives:
+        - Base/Runtime Images (intentionally different per component)
+        - Go indirect dependencies (transitive, expected to vary)
         """
+        # Categories to skip (expected to vary by component)
+        skip_categories = {
+            "Base Image",
+            "Runtime Image",
+            "Docker Compose Service",  # Services use different base images
+        }
+        
+        # Dependency names to skip (even if they have different categories)
+        skip_names = {
+            "base image",
+            "runtime image",
+            "base",  # Often refers to base images
+        }
+        
         # Group dependencies by normalized name
         dependency_groups = {}
 
         for dep in self.dependencies:
-            normalized_name = self.normalize_dependency_name(dep["Dependency Name"])
+            category = dep["Category"]
+            normalized_name = self.normalize_dependency_name(
+                dep["Dependency Name"], category
+            )
 
             # Skip unversioned dependencies for discrepancy detection
             if dep["Version"] in ["unspecified", "N/A", "", "latest"]:
+                continue
+            
+            # Skip categories that are expected to vary
+            if category in skip_categories:
+                continue
+            
+            # Skip dependency names that are expected to vary
+            if normalized_name in skip_names:
+                continue
+            
+            # Skip Go indirect dependencies (transitive dependencies)
+            if category == "Go Dependency" and "indirect" in dep.get("Notes", "").lower():
                 continue
 
             if normalized_name not in dependency_groups:
