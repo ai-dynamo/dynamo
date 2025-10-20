@@ -12,8 +12,6 @@ use crate::component::Component;
 
 pub use super::endpoint::EndpointStats;
 
-use educe::Educe;
-
 type StatsHandlerRegistry = Arc<Mutex<HashMap<String, EndpointStatsHandler>>>;
 pub type StatsHandler =
     Box<dyn FnMut(String, EndpointStats) -> serde_json::Value + Send + Sync + 'static>;
@@ -23,71 +21,7 @@ pub type EndpointStatsHandler =
 pub const PROJECT_NAME: &str = "Dynamo";
 const SERVICE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Educe, Builder, Dissolve)]
-#[educe(Debug)]
-#[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
-pub struct ServiceConfig {
-    #[builder(private)]
-    component: Component,
-
-    /// Description
-    #[builder(default)]
-    description: Option<String>,
-}
-
-impl ServiceConfigBuilder {
-    /// Create the [`Component`]'s service and store it in the registry.
-    pub async fn create(self) -> anyhow::Result<Component> {
-        let (component, description) = self.build_internal()?.dissolve();
-
-        let service_name = component.service_name();
-
-        // Pre-check to save cost of creating the service, but don't hold the lock
-        if component
-            .drt
-            .component_registry
-            .inner
-            .lock()
-            .await
-            .services
-            .contains_key(&service_name)
-        {
-            anyhow::bail!("Service {service_name} already exists");
-        }
-
-        let Some(nats_client) = component.drt.nats_client() else {
-            anyhow::bail!("Cannot create NATS service without NATS.");
-        };
-        let (nats_service, stats_reg) =
-            build_nats_service(nats_client, &component, description).await?;
-
-        let mut guard = component.drt.component_registry.inner.lock().await;
-        if !guard.services.contains_key(&service_name) {
-            // Normal case
-            guard.services.insert(service_name.clone(), nats_service);
-            guard.stats_handlers.insert(service_name, stats_reg);
-            drop(guard);
-        } else {
-            drop(guard);
-            let _ = nats_service.stop().await;
-            return Err(anyhow::anyhow!(
-                "Service create race for {service_name}, now already exists"
-            ));
-        }
-
-        // Register metrics callback. CRITICAL: Never fail service creation for metrics issues.
-        if let Err(err) = component.start_scraping_nats_service_component_metrics() {
-            tracing::debug!(
-                "Metrics registration failed for '{}': {}",
-                component.service_name(),
-                err
-            );
-        }
-        Ok(component)
-    }
-}
-
-async fn build_nats_service(
+pub async fn build_nats_service(
     nats_client: &crate::transports::nats::Client,
     component: &Component,
     description: Option<String>,
@@ -122,10 +56,4 @@ async fn build_nats_service(
         .map_err(|e| anyhow::anyhow!("Failed to start NATS service: {e}"))?;
 
     Ok((nats_service, stats_handler_registry_clone))
-}
-
-impl ServiceConfigBuilder {
-    pub(crate) fn from_component(component: Component) -> Self {
-        Self::default().component(component)
-    }
 }
