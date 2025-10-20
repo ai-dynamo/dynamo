@@ -9,6 +9,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
+from kvbm.utils import is_cuda_13, is_dyn_runtime_enabled, set_cu13_nixl_plugin_path
+
+if is_cuda_13():
+    set_cu13_nixl_plugin_path()
+
+# Keeping this import is important because it runs the code in nixl’s __init__.py
+# to set up the Nixl plugin path.
+import nixl  # noqa: F401
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
@@ -28,7 +36,6 @@ if TYPE_CHECKING:
 #     KvConnectorWorker as RustKvConnectorWorker,
 # )
 
-from kvbm.utils import is_dyn_runtime_enabled
 from kvbm.vllm_integration.rust import KvConnectorWorker as RustKvConnectorWorker
 
 DistributedRuntime = None
