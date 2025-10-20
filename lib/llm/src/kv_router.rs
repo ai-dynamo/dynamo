@@ -22,7 +22,6 @@ use serde::{Deserialize, Serialize};
 
 pub mod approx;
 pub mod indexer;
-pub mod metrics_aggregator;
 pub mod protocols;
 pub mod publisher;
 pub mod recorder;
@@ -42,7 +41,6 @@ use crate::{
             LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult, WorkerWithDpRank,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
-        scoring::ProcessedEndpoints,
         subscriber::start_kv_router_background,
     },
     local_model::runtime_config::ModelRuntimeConfig,
