@@ -37,7 +37,7 @@ spec:
             export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
             export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
             /sbin/ldconfig
-            python3 -m dynamo.vllm --model google/gemma-3-1b-it
+            python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
     VllmPrefillWorker:
       dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
@@ -57,5 +57,5 @@ spec:
           - dynamo.vllm
           args:
             - --model
-            - google/gemma-3-1b-it
+            - Qwen/Qwen3-0.6B
             - --is-prefill-worker
