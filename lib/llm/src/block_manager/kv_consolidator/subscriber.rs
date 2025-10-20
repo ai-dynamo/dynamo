@@ -101,7 +101,10 @@ async fn run_listener_loop(
     tracker: Arc<RwLock<CacheStatusTracker>>,
     cancellation_token: CancellationToken,
 ) -> Result<()> {
-    tracing::info!("KV event consolidator ZMQ listener connecting to {}", endpoint);
+    tracing::info!(
+        "KV event consolidator ZMQ listener connecting to {}",
+        endpoint
+    );
 
     let mut socket = SubSocket::new();
     socket
@@ -113,7 +116,10 @@ async fn run_listener_loop(
         .await
         .context("Failed to subscribe to ZMQ topics")?;
 
-    tracing::info!("KV event consolidator ZMQ listener successfully connected to {}", endpoint);
+    tracing::info!(
+        "KV event consolidator ZMQ listener successfully connected to {}",
+        endpoint
+    );
 
     loop {
         tokio::select! {
