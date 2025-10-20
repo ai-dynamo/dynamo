@@ -615,7 +615,7 @@ mod integration_tests {
 
                 // Now create a namespace, component, and endpoint to make the system healthy
                 let namespace = drt.namespace("ns1234").unwrap();
-                let component = namespace.component("comp1234").unwrap();
+                let mut component = namespace.component("comp1234").unwrap();
 
                 // Create a simple test handler
                 use crate::pipeline::{async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, SingleIn};
@@ -641,12 +641,8 @@ mod integration_tests {
                 // Start the service and endpoint with a health check payload
                 // This will automatically register the endpoint for health monitoring
                 tokio::spawn(async move {
-                    let _ = component
-                        .service_builder()
-                        .create()
-                        .await
-                        .unwrap()
-                        .endpoint(ENDPOINT_NAME)
+                    component.add_stats_service().await.unwrap();
+                    let _ = component.endpoint(ENDPOINT_NAME)
                         .endpoint_builder()
                         .handler(ingress)
                         .health_check_payload(serde_json::json!({

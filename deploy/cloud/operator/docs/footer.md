@@ -94,7 +94,16 @@ For larger models (typically >70B parameters) or slower storage systems, you may
 For multinode deployments, the operator modifies probes based on the backend framework and node role:
 
 #### VLLM Backend
+
+The operator automatically selects between two deployment modes based on parallelism configuration:
+
+**Ray-Based Mode** (when `world_size > GPUs_per_node`):
 - **Worker nodes**: All probes (liveness, readiness, startup) are removed
+- **Leader nodes**: All probes remain active
+
+**Data Parallel Mode** (when `world_size × data_parallel_size > GPUs_per_node`):
+- **Worker nodes**: All probes (liveness, readiness, startup) are removed
+- **Leader nodes**: All probes remain active
 
 #### SGLang Backend
 - **Worker nodes**: All probes (liveness, readiness, startup) are removed
@@ -192,7 +201,8 @@ Default container ports are configured based on component type:
 ## Backend-Specific Configurations
 
 ### VLLM
-- **Ray Head Port**: 6379 (for multinode deployments)
+- **Ray Head Port**: 6379 (for Ray-based multinode deployments)
+- **Data Parallel RPC Port**: 13445 (for data parallel multinode deployments)
 
 ### SGLang
 - **Distribution Init Port**: 29500 (for multinode deployments)

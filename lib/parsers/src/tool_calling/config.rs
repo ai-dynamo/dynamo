@@ -23,6 +23,10 @@ pub struct JsonParserConfig {
     pub tool_call_start_tokens: Vec<String>,
     /// End token for individual tool calls (e.g., "</TOOLCALL>")
     pub tool_call_end_tokens: Vec<String>,
+    /// Separator tokens between function name and arguments
+    /// (e.g., "<｜tool▁sep｜>" for DeepSeek v3.1)
+    /// Used by some models to separate function name from arguments
+    pub tool_call_separator_tokens: Vec<String>,
     /// The key for the function name in the tool call
     /// i.e. `{"name": "function", "arguments": {...}}` it would be
     /// "name"
@@ -42,6 +46,7 @@ impl Default for JsonParserConfig {
         Self {
             tool_call_start_tokens: vec!["<TOOLCALL>".to_string(), "<|python_tag|>".to_string()],
             tool_call_end_tokens: vec!["</TOOLCALL>".to_string(), "".to_string()],
+            tool_call_separator_tokens: vec![],
             function_name_keys: vec!["name".to_string()],
             arguments_keys: vec!["arguments".to_string(), "parameters".to_string()],
             parser_type: JsonParserType::Basic,
@@ -155,7 +160,11 @@ impl ToolCallConfig {
                     "<｜tool▁calls▁begin｜>".to_string(),
                     "<｜tool▁call▁begin｜>".to_string(),
                 ],
-                tool_call_end_tokens: vec!["<｜tool▁calls▁end｜>".to_string()],
+                tool_call_end_tokens: vec![
+                    "<｜tool▁calls▁end｜>".to_string(),
+                    "<｜tool▁call▁end｜>".to_string(),
+                ],
+                tool_call_separator_tokens: vec!["<｜tool▁sep｜>".to_string()],
                 parser_type: JsonParserType::DeepseekV31,
                 ..Default::default()
             },

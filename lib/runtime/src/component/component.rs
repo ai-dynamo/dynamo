@@ -31,12 +31,11 @@ impl EventPublisher for Component {
         bytes: Vec<u8>,
     ) -> Result<()> {
         let subject = format!("{}.{}", self.subject(), event_name.as_ref());
-        Ok(self
-            .drt()
-            .nats_client()
-            .client()
-            .publish(subject, bytes.into())
-            .await?)
+        let Some(nats_client) = self.drt().nats_client() else {
+            anyhow::bail!("KV router's EventPublisher requires NATS");
+        };
+        nats_client.client().publish(subject, bytes.into()).await?;
+        Ok(())
     }
 }
 
@@ -47,7 +46,10 @@ impl EventSubscriber for Component {
         event_name: impl AsRef<str> + Send + Sync,
     ) -> Result<async_nats::Subscriber> {
         let subject = format!("{}.{}", self.subject(), event_name.as_ref());
-        Ok(self.drt().nats_client().client().subscribe(subject).await?)
+        let Some(nats_client) = self.drt().nats_client() else {
+            anyhow::bail!("KV router's EventSubscriber requires NATS");
+        };
+        Ok(nats_client.client().subscribe(subject).await?)
     }
 
     async fn subscribe_with_type<T: for<'de> Deserialize<'de> + Send + 'static>(
