@@ -16,7 +16,7 @@
 
 import asyncio
 from typing import List
-
+import threading
 import pytest
 
 from dynamo.llm import ApproxKvIndexer, KvEventPublisher, KvIndexer, RadixTree
@@ -88,10 +88,75 @@ async def test_radix_tree_binding(distributed_runtime):
         overlap_scores.scores[worker_key] == 1
     ), f"Expected score 1 for worker {worker_key}, got {overlap_scores.scores[worker_key]}"
 
+    blocks = radix_tree.dump_tree_as_events()
+    assert len(blocks) == 1, f"Expected 1 block event, got {len(blocks)}"
+    json.loads(blocks[0]) # check valid json
+
+    # cleanup
+    radix_tree.remove_worker(worker_id)
+    blocks_empty = radix_tree.dump_tree_as_events()
+    assert len(blocks_empty) == 0, f"Expected 0 block events after removal, got {len(blocks_empty)}"
+    
+
     print(
         f"✓ RadixTree test passed: worker {worker_key} has score {overlap_scores.scores[worker_key]}"
     )
 
+
+@pytest.mark.asyncio
+@pytest.mark.forked
+async def test_radix_tree_thread_safety(distributed_runtime):
+    """Test RadixTree thread safety by applying events from multiple threads."""
+    import json
+
+    radix_tree = RadixTree()
+    num_threads = 10
+    threads = []
+
+    def worker(worker_id):
+        worker_id = worker_id
+        store_event = {
+            "event_id": worker_id,
+            "data": {
+                "stored": {
+                    "parent_hash": None,
+                    "blocks": [
+                        {
+                            "block_hash": worker_id,
+                            "tokens_hash": worker_id,
+                        }
+                    ],
+                }
+            },
+        }
+        event_bytes = json.dumps(store_event).encode("utf-8")
+        radix_tree.apply_event(worker_id, event_bytes)
+
+    for i in range(num_threads):
+        t = threading.Thread(target=worker, args=(i,))
+        threads.append(t)
+        t.start()
+
+    for t in threads:
+        t.join()
+
+    for i in range(num_threads):
+        overlap_scores = radix_tree.find_matches([i])
+        assert overlap_scores.scores is not None
+        worker_key = (i, 0)
+        assert (
+            worker_key in overlap_scores.scores
+        ), f"Worker {worker_key} not found in scores"
+        assert (
+            overlap_scores.scores[worker_key] == 1
+        ), f"Expected score 1 for worker {worker_key}, got {overlap_scores.scores[worker_key]}"
+    # get all blocks
+    blocks = radix_tree.dump_tree_as_events()
+    assert len(blocks) == num_threads, f"Expected {num_threads} block events, got {len(blocks)}"
+    # remove single worker
+    radix_tree.remove_worker(0)
+    blocks_after_removal = radix_tree.dump_tree_as_events()
+    assert len(blocks_after_removal) == num_threads - 1, f"Expected {num_threads - 1} block events after removal, got {len(blocks_after_removal)}"
 
 # TODO Figure out how to test with different kv_block_size
 # Right now I get an error in EventPublisher init when I run this test
