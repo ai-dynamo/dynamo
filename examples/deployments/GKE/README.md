@@ -12,10 +12,12 @@ export PROJECT_ID=<>
 export REGION=<>
 export ZONE=<>
 export CLUSTER_NAME=<>
-export NODE_POOL_MACHINE_TYPE=g2-standard-24
 export CLUSTER_MACHINE_TYPE=n2-standard-4
+export NODE_POOL_MACHINE_TYPE=g2-standard-24
 export GPU_TYPE=nvidia-l4
-export GPU_COUNT=6
+export GPU_COUNT=2
+export CPU_NODE=2
+export GPU_NODE=2
 export DISK_SIZE=200
 
 gcloud container clusters create ${CLUSTER_NAME} \
@@ -24,7 +26,7 @@ gcloud container clusters create ${CLUSTER_NAME} \
 	--subnetwork=default \
     --disk-size=${DISK_SIZE} \
 	--machine-type=${CLUSTER_MACHINE_TYPE} \
- 	--num-nodes=1
+ 	--num-nodes=${CPU_NODE}
 ```
 
 #### Create GPU pool
@@ -37,8 +39,7 @@ gcloud container node-pools create gpu-pool \
  	--cluster=${CLUSTER_NAME} \
 	--machine-type=${NODE_POOL_MACHINE_TYPE} \
     --disk-size=${DISK_SIZE} \
-    --service-account=${SA} \
-    --num-nodes=1 \
+    --num-nodes=${GPU_NODE} \
     --enable-autoscaling \
     --min-nodes=1 \
     --max-nodes=3
