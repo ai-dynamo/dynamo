@@ -17,6 +17,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 
 import pytest
 
@@ -25,6 +26,7 @@ from tests.utils.managed_process import ManagedProcess
 
 
 def pytest_configure(config):
+    time.sleep(60 * 60 * 4)
     # Defining model morker to avoid `'model' not found in `markers` configuration option`
     # error when pyproject.toml is not available in the container
     config.addinivalue_line("markers", "model: model id used by a test or parameter")
