@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
-ARG BASE_IMAGE_TAG="25.06-py3"
+ARG BASE_IMAGE_TAG="25.08-py3" # TODO: test on 25.09-py3
 ARG RELEASE_BUILD
 ARG ENABLE_KVBM=false
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
-ARG RUNTIME_IMAGE_TAG="12.9.1-runtime-ubuntu24.04"
+ARG RUNTIME_IMAGE_TAG="13.0.0-runtime-ubuntu24.04" # TODO: test on 13.0.1
 
 # TensorRT-LLM specific configuration
 ARG HAS_TRTLLM_CONTEXT=0
@@ -82,7 +82,7 @@ RUN apt-get update && \
         python${PYTHON_VERSION}-dev \
         python3-pip \
         # CUDA/ML libraries
-        libcudnn9-cuda-12 \
+        libcudnn9-cuda-13 \
         # Network and communication libraries
         libzmq3-dev \
         # RDMA/UCX libraries required to find RDMA devices
@@ -146,7 +146,7 @@ ENV OPAL_PREFIX=/opt/hpcx/ompi
 
 ### VIRTUAL ENVIRONMENT SETUP ###
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 # Create virtual environment
 RUN mkdir -p /opt/dynamo/venv && \
     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
@@ -156,10 +156,10 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
 # Copy pytorch installation from NGC PyTorch
-ARG TORCH_VER=2.8.0a0+5228986c39.nv25.6
-ARG TORCHVISION_VER=0.22.0a0+95f10a4e
+ARG TORCH_VER=2.8.0a0+34c6371d24.nv25.8
+ARG TORCHVISION_VER=0.23.0a0+428a54c9
 ARG SETUPTOOLS_VER=78.1.1
-ARG PYTORCH_TRITON_VER=3.3.0+git96316ce52.nvinternal
+ARG PYTORCH_TRITON_VER=3.3.1+gitc8757738
 ARG JINJA2_VER=3.1.6
 ARG NETWORKX_VER=3.5
 ARG SYMPY_VER=1.14.0
