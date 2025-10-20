@@ -43,7 +43,6 @@ Quickstart
    Quickstart <self>
    Installation <_sections/installation>
    Support Matrix <reference/support-matrix.md>
-   Architecture <_sections/architecture>
    Examples <_sections/examples>
 
 .. toctree::
@@ -80,3 +79,15 @@ Quickstart
    Tuning Disaggregated Serving Performance <performance/tuning.md>
    Writing Python Workers in Dynamo <development/backend-guide.md>
    Glossary <reference/glossary.md>
+
+.. toctree::
+   :hidden:
+   :caption: Design docs
+
+   Overall Architecture <design_docs/architecture.md>
+   Architecture Flow <design_docs/dynamo_flow.md>
+   Disaggregated Serving <design_docs/disagg_serving.md>
+   Distributed Runtime <design_docs/distributed_runtime.md>
+
+
+
