@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use futures::StreamExt;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -22,11 +22,6 @@ use crate::{
     kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride},
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
 };
-
-/// Error returned when prefill router is not yet activated
-#[derive(Debug, thiserror::Error)]
-#[error("Prefill router not yet activated")]
-struct NoPrefillRouter;
 
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
 /// It optionally calls a prefill worker before routing to decode, extracting disaggregated_params
@@ -126,45 +121,37 @@ impl PrefillRouter {
     async fn call_prefill(
         &self,
         request: SingleIn<PreprocessedRequest>,
-    ) -> Result<Option<serde_json::Value>> {
+    ) -> Result<serde_json::Value> {
         // Get the prefill router, error if not activated
-        let prefill_router = self.prefill_router.get().ok_or(NoPrefillRouter)?;
-
-        // Call prefill router
-        let mut prefill_response = match prefill_router.generate(request).await {
-            Ok(response) => response,
-            Err(e) => {
-                tracing::warn!(error = %e, "Prefill router generate call failed");
-                return Ok(None);
-            }
+        let Some(prefill_router) = self.prefill_router.get() else {
+            bail!("Prefill router not yet activated");
         };
 
+        // Call prefill router
+        let mut prefill_response = prefill_router.generate(request).await?;
+
         let Some(first_output) = prefill_response.next().await else {
-            tracing::debug!("Prefill router returned no output (stream ended)");
-            return Ok(None);
+            bail!("Prefill router returned no output (stream ended)");
         };
 
         if let Some(err) = first_output.err() {
-            tracing::debug!(error = ?err, "Prefill router returned error in output");
             while prefill_response.next().await.is_some() {}
-            return Ok(None);
+            bail!("Prefill router returned error in output: {:?}", err);
         }
 
         let Some(output) = &first_output.data else {
-            tracing::debug!("Prefill router output has no data field");
             while prefill_response.next().await.is_some() {}
-            return Ok(None);
+            bail!("Prefill router output has no data field");
         };
 
-        if output.disaggregated_params.is_none() {
-            tracing::debug!("Prefill router output missing disaggregated_params");
-        }
-
-        let result = output.disaggregated_params.clone();
+        let Some(disaggregated_params) = output.disaggregated_params.clone() else {
+            while prefill_response.next().await.is_some() {}
+            bail!("Prefill router output missing disaggregated_params");
+        };
 
         while prefill_response.next().await.is_some() {}
 
-        Ok(result)
+        Ok(disaggregated_params)
     }
 }
 
@@ -199,7 +186,7 @@ impl
 
         // Attempt prefill and handle results
         match self.call_prefill(prefill_request).await {
-            Ok(Some(disaggregated_params)) => {
+            Ok(disaggregated_params) => {
                 tracing::debug!("Prefill succeeded, using disaggregated params for decode");
 
                 // Update request with disaggregated_params and router config
@@ -215,17 +202,12 @@ impl
 
                 // Map the modified request through with preserved context
                 let decode_request = context.map(|_| decode_req);
-                return next.generate(decode_request).await;
-            }
-            Ok(None) => {
-                tracing::debug!("Prefill returned None, falling back to decode-only");
+                next.generate(decode_request).await
             }
             Err(e) => {
-                tracing::debug!(error = %e, "Prefill error, falling back to decode-only");
+                tracing::debug!(error = %e, "Remote prefill failed, falling back to decode-only");
+                next.generate(context.map(|_| req)).await
             }
         }
-
-        // Fall back to decode-only
-        next.generate(context.map(|_| req)).await
     }
 }
