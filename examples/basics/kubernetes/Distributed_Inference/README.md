@@ -21,7 +21,7 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 3. Model hosting with vLLM backend
 This `agg_router.yaml` is adpated from vLLM deployment [example](https://github.com/ai-dynamo/dynamo/blob/main/components/backends/vllm/deploy/agg_router.yaml). It has following customizations
 - Deployed `Qwen/Qwen2.5-1.5B-Instruct` model
-- Use KV cache based routing in frontend deployment via the `DYN_ROUTER_MODEL=kv` environment variable
+- Use KV cache based routing in frontend deployment via the `DYN_ROUTER_MODE=kv` environment variable
 - Mounted a local cache folder `/YOUR/LOCAL/CACHE/FOLDER` for model artifacts reuse
 - Created 4 replicas for this model deployment by setting `replicas: 4`
 - Added `debug` flag environment variable for observability
@@ -63,7 +63,7 @@ AIConfigurator helps users to find a strong starting configuration for disaggreg
 ```sh
 pip3 install aiconfigurator
 ```
-2. Assume we have 2 GPU nodes with 16 H200 in total, and we want to deploy Llama 3.1-70B-Instruct model with an optimal disagregated serving configuration. Run AI configurator for this model
+2. Assume we have 2 GPU nodes with 16 H200 in total, and we want to deploy Llama 3.1-70B-Instruct model with an optimal disaggregated serving configuration. Run AI configurator for this model
 ```sh
 aiconfigurator cli --model LLAMA3.1_70B --total_gpus 16 --system h200_sxm
 ```
