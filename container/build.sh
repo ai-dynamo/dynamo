@@ -446,7 +446,6 @@ show_help() {
     echo "  [--framework framework one of ${!FRAMEWORKS[*]}]"
     echo "  [--tensorrtllm-pip-wheel-dir path to tensorrtllm pip wheel directory]"
     echo "  [--tensorrtllm-commit tensorrtllm commit to use for building the trtllm wheel if the wheel is not provided]"
-    echo "  [--use-default-experimental-tensorrtllm-commit] Use the default experimental commit (${DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT}) to build TensorRT-LLM. This is a flag (no argument). Do not combine with --tensorrtllm-commit or --tensorrtllm-pip-wheel."
     echo "  [--tensorrtllm-pip-wheel tensorrtllm pip wheel on artifactory]"
     echo "  [--tensorrtllm-index-url tensorrtllm PyPI index URL if providing the wheel from artifactory]"
     echo "  [--tensorrtllm-git-url tensorrtllm git repository URL for cloning]"
