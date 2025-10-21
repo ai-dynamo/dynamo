@@ -5,8 +5,6 @@
 
 import logging
 
-from dynamo._core import AggregatedMetrics as AggregatedMetrics
-
 try:
     from dynamo._core import BlockManager as BlockManager
     from dynamo._core import KvbmLeader as KvbmLeader
@@ -25,7 +23,6 @@ from dynamo._core import KserveGrpcAsyncEngine as KserveGrpcAsyncEngine
 from dynamo._core import KserveGrpcService as KserveGrpcService
 from dynamo._core import KvEventPublisher as KvEventPublisher
 from dynamo._core import KvIndexer as KvIndexer
-from dynamo._core import KvMetricsAggregator as KvMetricsAggregator
 from dynamo._core import KvPushRouter as KvPushRouter
 from dynamo._core import KvRecorder as KvRecorder
 from dynamo._core import KvRouterConfig as KvRouterConfig

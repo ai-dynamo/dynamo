@@ -11,7 +11,7 @@ use dynamo_runtime::{
     prelude::*,
     traits::events::EventPublisher,
     transports::{
-        etcd::{Client as EtcdClient, WatchEvent},
+        etcd::{Client as EtcdClient, DistributedRWLock, WatchEvent},
         nats::{NatsQueue, Slug},
     },
 };
@@ -33,47 +33,27 @@ use crate::{
 struct SnapshotResources {
     nats_client: dynamo_runtime::transports::nats::Client,
     bucket_name: String,
-    lock_name: String,
+    rwlock: DistributedRWLock,
     instances_rx: tokio::sync::watch::Receiver<Vec<dynamo_runtime::component::Instance>>,
     get_workers_tx: mpsc::Sender<GetWorkersRequest>,
     snapshot_tx: mpsc::Sender<DumpRequest>,
 }
 
 impl SnapshotResources {
-    /// Try to acquire distributed lock for snapshot operations
-    /// Returns Some(lock_response) if lock acquired, None if another instance holds it
-    async fn lock(&self, etcd_client: &EtcdClient) -> Option<etcd_client::LockResponse> {
-        match etcd_client
-            .lock(self.lock_name.clone(), Some(etcd_client.lease_id()))
-            .await
-        {
-            Ok(response) => {
-                tracing::debug!(
-                    "Successfully acquired snapshot lock with key: {:?}",
-                    response.key()
-                );
-                Some(response)
-            }
-            Err(e) => {
-                tracing::debug!("Another instance already holds the snapshot lock: {e:?}");
-                None
-            }
-        }
-    }
-
-    /// Release the distributed lock
-    async fn unlock(&self, etcd_client: &EtcdClient, lock_response: etcd_client::LockResponse) {
-        if let Err(e) = etcd_client.unlock(lock_response.key()).await {
-            tracing::warn!("Failed to release snapshot lock: {e:?}");
-        }
-    }
-
-    /// Perform snapshot upload and purge operations
+    /// Perform snapshot upload and purge operations with write lock
     async fn purge_then_snapshot(
         &self,
+        etcd_client: &EtcdClient,
         nats_queue: &mut NatsQueue,
         remove_worker_tx: &mpsc::Sender<WorkerId>,
     ) -> anyhow::Result<()> {
+        // Try to acquire write lock (non-blocking)
+        let Some(_write_guard) = self.rwlock.try_write_lock(etcd_client).await else {
+            tracing::debug!(
+                "Could not acquire write lock for snapshot (readers active or lock held)"
+            );
+            anyhow::bail!("Write lock unavailable");
+        };
         // Purge before snapshot ensures new/warm-restarted routers won't replay already-acknowledged messages.
         // Since KV events are idempotent, this ordering reduces unnecessary reprocessing while maintaining
         // at-least-once delivery guarantees. The snapshot will capture the clean state after purge.
@@ -101,13 +81,11 @@ impl SnapshotResources {
                     for worker_id in indexer_worker_ids {
                         if !current_worker_ids.contains(&worker_id) {
                             tracing::info!(
-                                "Removing stale worker {} from indexer during snapshot",
-                                worker_id
+                                "Removing stale worker {worker_id} from indexer during snapshot"
                             );
                             if let Err(e) = remove_worker_tx.send(worker_id).await {
                                 tracing::warn!(
-                                    "Failed to send remove_worker for stale worker {}: {e:?}",
-                                    worker_id
+                                    "Failed to send remove_worker for stale worker {worker_id}: {e:?}"
                                 );
                             }
                         }
@@ -194,10 +172,20 @@ pub async fn start_kv_router_background(
         .build()?;
     let nats_client = client_options.connect().await?;
 
+    // Get etcd client (needed for both snapshots and router watching)
+    let etcd_client = component
+        .drt()
+        .etcd_client()
+        .ok_or_else(|| anyhow::anyhow!("etcd client not available"))?;
+
     // Create bucket name for snapshots/state
     let bucket_name = Slug::slugify(&format!("{}-{RADIX_STATE_BUCKET}", component.subject()))
         .to_string()
         .replace("_", "-");
+
+    // Create RWLock for snapshot coordination
+    let lock_prefix = format!("{}/{}", ROUTER_SNAPSHOT_LOCK, component.subject());
+    let snapshot_rwlock = DistributedRWLock::new(lock_prefix);
 
     // Handle initial state based on router_reset_states flag
     if router_reset_states {
@@ -207,42 +195,47 @@ pub async fn start_kv_router_background(
             tracing::warn!("Failed to delete bucket (may not exist): {e:?}");
         }
     } else {
-        // Try to download initial state from object store
+        // Try to download initial state from object store with read lock
         let url = url::Url::parse(&format!(
             "nats://{}/{bucket_name}/{RADIX_STATE_FILE}",
             nats_client.addr()
         ))?;
 
-        match nats_client
-            .object_store_download_data::<Vec<RouterEvent>>(&url)
+        // Acquire read lock with default timeout
+        if let Ok(_read_guard) = snapshot_rwlock
+            .read_lock_with_wait(&etcd_client, &consumer_uuid, None)
             .await
         {
-            Ok(events) => {
-                tracing::info!(
-                    "Successfully downloaded {} events from object store",
-                    events.len()
-                );
-                // Send all events to the indexer
-                for event in events {
-                    if let Err(e) = kv_events_tx.send(event).await {
-                        tracing::warn!("Failed to send initial event to indexer: {e:?}");
+            tracing::debug!("Acquired read lock for snapshot download");
+
+            // Download snapshot while holding read lock
+            match nats_client
+                .object_store_download_data::<Vec<RouterEvent>>(&url)
+                .await
+            {
+                Ok(events) => {
+                    tracing::info!(
+                        "Successfully downloaded {} events from object store",
+                        events.len()
+                    );
+                    // Send all events to the indexer
+                    for event in events {
+                        if let Err(e) = kv_events_tx.send(event).await {
+                            tracing::warn!("Failed to send initial event to indexer: {e:?}");
+                        }
                     }
+                    tracing::info!("Successfully sent all initial events to indexer");
                 }
-                tracing::info!("Successfully sent all initial events to indexer");
+                Err(e) => {
+                    tracing::info!(
+                        "Did not initialize radix state from NATS object store (likely no snapshots yet): {e:?}"
+                    );
+                }
             }
-            Err(e) => {
-                tracing::info!(
-                    "Did not initialize radix state from NATs object store (likely no snapshots yet): {e:?}"
-                );
-            }
+        } else {
+            tracing::warn!("Could not acquire read lock for snapshot download (timeout or error)");
         }
     }
-
-    // Get etcd client (needed for both snapshots and router watching)
-    let etcd_client = component
-        .drt()
-        .etcd_client()
-        .ok_or_else(|| anyhow::anyhow!("etcd client not available"))?;
 
     // Cleanup orphaned consumers on startup
     cleanup_orphaned_consumers(&mut nats_queue, &etcd_client, &component, &consumer_uuid).await;
@@ -252,7 +245,6 @@ pub async fn start_kv_router_background(
         .kv_get_and_watch_prefix(&format!("{}/", KV_ROUTERS_ROOT_PATH))
         .await?
         .dissolve();
-    let cleanup_lock_name = format!("{}/{}", ROUTER_CLEANUP_LOCK, component.subject());
 
     // Get the generate endpoint and watch for instance deletions
     let generate_endpoint = component.endpoint("generate");
@@ -276,12 +268,10 @@ pub async fn start_kv_router_background(
         maybe_snapshot_tx,
         router_snapshot_threshold,
     ) {
-        let lock_name = format!("{}/{}", ROUTER_SNAPSHOT_LOCK, component.subject());
-
         Some(SnapshotResources {
             nats_client,
             bucket_name,
-            lock_name,
+            rwlock: snapshot_rwlock.clone(),
             instances_rx,
             get_workers_tx,
             snapshot_tx,
@@ -318,19 +308,19 @@ pub async fn start_kv_router_background(
 
                     // Extract the hex worker ID after the colon (e.g., "generate:694d99badb9f7c07" -> "694d99badb9f7c07")
                     let Some(worker_id_str) = key.split(':').next_back() else {
-                        tracing::warn!("Could not extract worker ID from instance key: {}", key);
+                        tracing::warn!("Could not extract worker ID from instance key: {key}");
                         continue;
                     };
 
                     // Parse as hexadecimal (base 16)
                     let Ok(worker_id) = i64::from_str_radix(worker_id_str, 16) else {
-                        tracing::warn!("Could not parse worker ID from instance key: {}", key);
+                        tracing::warn!("Could not parse worker ID from instance key: {key}");
                         continue;
                     };
 
-                    tracing::info!("Generate endpoint instance deleted, removing worker {}", worker_id);
+                    tracing::info!("Generate endpoint instance deleted, removing worker {worker_id}");
                     if let Err(e) = remove_worker_tx.send(worker_id).await {
-                        tracing::warn!("Failed to send worker removal for worker {}: {}", worker_id, e);
+                        tracing::warn!("Failed to send worker removal for worker {worker_id}: {e}");
                     }
                 }
 
@@ -382,24 +372,17 @@ pub async fn start_kv_router_background(
                         continue;
                     }
 
-                    tracing::info!("Stream has {message_count} messages, attempting to acquire lock for purge and snapshot");
+                    tracing::info!("Stream has {message_count} messages, attempting to acquire write lock for purge and snapshot");
 
-                    // Try to acquire distributed lock
-                    let Some(lock_response) = resources.lock(&etcd_client).await else {
-                        continue;
-                    };
-
-                    // Perform snapshot upload and purge
+                    // Perform snapshot upload and purge (acquires write lock internally)
                     match resources.purge_then_snapshot(
+                        &etcd_client,
                         &mut nats_queue,
                         &remove_worker_tx,
                     ).await {
                         Ok(_) => tracing::info!("Successfully performed purge and snapshot"),
-                        Err(e) => tracing::error!("Failed to perform purge and snapshot: {e:?}"),
+                        Err(e) => tracing::debug!("Could not perform purge and snapshot: {e:?}"),
                     }
-
-                    // Release the lock
-                    resources.unlock(&etcd_client, lock_response).await;
                 }
 
                 // Handle router deletion events
@@ -410,7 +393,7 @@ pub async fn start_kv_router_background(
                     };
 
                     let key = String::from_utf8_lossy(kv.key());
-                    tracing::info!("Detected router replica deletion: {}", key);
+                    tracing::info!("Detected router replica deletion: {key}");
 
                     // Only process deletions for routers on the same component
                     if !key.contains(component.path().as_str()) {
@@ -423,44 +406,37 @@ pub async fn start_kv_router_background(
 
                     // Extract the router UUID from the key
                     let Some(router_uuid) = key.split('/').next_back() else {
-                        tracing::warn!("Could not extract UUID from router key: {}", key);
+                        tracing::warn!("Could not extract UUID from router key: {key}");
                         continue;
                     };
 
                     // The consumer UUID is the router UUID
                     let consumer_to_delete = router_uuid.to_string();
 
-                    tracing::info!("Attempting to delete orphaned consumer: {}", consumer_to_delete);
+                    tracing::info!("Attempting to delete orphaned consumer: {consumer_to_delete}");
 
-                    // Try to acquire cleanup lock before deleting consumer
-                    match etcd_client
-                        .lock(cleanup_lock_name.clone(), Some(etcd_client.lease_id()))
-                        .await
-                    {
-                        Ok(lock_response) => {
-                            tracing::debug!(
-                                "Acquired cleanup lock for deleting consumer: {}",
-                                consumer_to_delete
-                            );
+                    // Create a unique cleanup lock for this specific consumer
+                    let cleanup_lock_name = format!("{}/{}/{}", ROUTER_CLEANUP_LOCK, component.subject(), consumer_to_delete);
+                    let cleanup_rwlock = DistributedRWLock::new(cleanup_lock_name);
 
-                            // Delete the consumer
-                            if let Err(e) = nats_queue.shutdown(Some(consumer_to_delete.clone())).await {
-                                tracing::warn!("Failed to delete consumer {}: {}", consumer_to_delete, e);
-                            } else {
-                                tracing::info!("Successfully deleted orphaned consumer: {}", consumer_to_delete);
-                            }
+                    // Try to acquire cleanup write lock (non-blocking) before deleting consumer
+                    if let Some(_cleanup_guard) = cleanup_rwlock.try_write_lock(&etcd_client).await {
+                        tracing::debug!(
+                            "Acquired cleanup lock for deleting consumer: {consumer_to_delete}"
+                        );
 
-                            // Release the lock
-                            if let Err(e) = etcd_client.unlock(lock_response.key()).await {
-                                tracing::warn!("Failed to release cleanup lock: {e:?}");
-                            }
+                        // Delete the consumer
+                        if let Err(e) = nats_queue.shutdown(Some(consumer_to_delete.clone())).await {
+                            tracing::warn!("Failed to delete consumer {consumer_to_delete}: {e}");
+                        } else {
+                            tracing::info!("Successfully deleted orphaned consumer: {consumer_to_delete}");
                         }
-                        Err(e) => {
-                            tracing::debug!(
-                                "Could not acquire cleanup lock for consumer {}: {e:?}",
-                                consumer_to_delete
-                            );
-                        }
+
+                        // Cleanup lock is automatically released when _cleanup_guard goes out of scope
+                    } else {
+                        tracing::debug!(
+                            "Could not acquire cleanup lock for consumer {consumer_to_delete}"
+                        );
                     }
                 }
             }
@@ -507,7 +483,7 @@ async fn cleanup_orphaned_consumers(
             continue;
         }
         if !active_uuids.contains(&consumer) {
-            tracing::info!("Cleaning up orphaned consumer: {}", consumer);
+            tracing::info!("Cleaning up orphaned consumer: {consumer}");
             let _ = nats_queue.shutdown(Some(consumer)).await;
         }
     }

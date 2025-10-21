@@ -87,8 +87,8 @@ def create_profiler_parser() -> argparse.Namespace:
         sla:
             isl: Int (target input sequence length, default: 3000)
             osl: Int (target output sequence length, default: 500)
-            ttft: Int (target Time To First Token in ms, default: 50)
-            itl: Int (target Inter Token Latency in ms, default: 10)
+            ttft: Float (target Time To First Token in milliseconds, default: 50)
+            itl: Float (target Inter Token Latency in milliseconds, default: 10)
         planner: (planner-bypass arguments, use hyphens or underscores)
             i.e., planner-min-endpoint: 2  # or planner_min_endpoint: 2 (both work)
     """
@@ -179,15 +179,15 @@ def create_profiler_parser() -> argparse.Namespace:
     )
     parser.add_argument(
         "--ttft",
-        type=int,
-        default=config.get("sla", {}).get("ttft", 50),
-        help="target Time To First Token in ms",
+        type=float,
+        default=config.get("sla", {}).get("ttft", 50.0),
+        help="target Time To First Token (float, in milliseconds)",
     )
     parser.add_argument(
         "--itl",
-        type=int,
-        default=config.get("sla", {}).get("itl", 10),
-        help="target Inter Token Latency in ms",
+        type=float,
+        default=config.get("sla", {}).get("itl", 10.0),
+        help="target Inter Token Latency (float, in milliseconds)",
     )
 
     # arguments used for interpolating TTFT and ITL under different ISL/OSL

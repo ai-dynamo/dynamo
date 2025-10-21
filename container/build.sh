@@ -303,9 +303,6 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
-        --release-build)
-            RELEASE_BUILD=true
-            ;;
         --enable-kvbm)
             ENABLE_KVBM=true
             ;;
@@ -704,10 +701,6 @@ fi
 
 if [ -n "${HF_TOKEN}" ]; then
     BUILD_ARGS+=" --build-arg HF_TOKEN=${HF_TOKEN} "
-fi
-if [  ! -z ${RELEASE_BUILD} ]; then
-    echo "Performing a release build!"
-    BUILD_ARGS+=" --build-arg RELEASE_BUILD=${RELEASE_BUILD} "
 fi
 
 if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then

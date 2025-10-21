@@ -2,25 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::kv_router::{
-    KV_EVENT_SUBJECT, KV_METRICS_ENDPOINT, KV_METRICS_SUBJECT,
+    KV_EVENT_SUBJECT, KV_METRICS_SUBJECT,
     indexer::{RouterEvent, compute_block_hash_for_seq},
     protocols::*,
     scoring::LoadEvent,
 };
-use async_trait::async_trait;
 use dynamo_runtime::metrics::{MetricsRegistry, prometheus_names::kvstats};
 use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
 use dynamo_runtime::{
-    Error, Result,
+    Result,
     component::{Component, Namespace},
-    pipeline::{
-        AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
-        network::Ingress,
-    },
-    protocols::annotated::Annotated,
     transports::nats::{NatsQueue, QUEUE_NAME, Slug},
 };
-use futures::stream;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -790,15 +783,7 @@ impl WorkerMetricsPublisher {
         Ok(())
     }
 
-    pub async fn create_endpoint(
-        &self,
-        component: Component,
-        metrics_labels: Option<&[(&str, &str)]>,
-    ) -> Result<()> {
-        let mut metrics_rx = self.rx.clone();
-        let handler = Arc::new(KvLoadEndpointHandler::new(metrics_rx.clone()));
-        let handler = Ingress::for_engine(handler)?;
-
+    pub async fn create_endpoint(&self, component: Component) -> Result<()> {
         let worker_id = component
             .drt()
             .primary_lease()
@@ -809,31 +794,13 @@ impl WorkerMetricsPublisher {
             });
 
         self.start_nats_metrics_publishing(component.namespace().clone(), worker_id);
-
-        let metrics_labels = metrics_labels.map(|v| {
-            v.iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect::<Vec<_>>()
-        });
-
-        component
-            .endpoint(KV_METRICS_ENDPOINT)
-            .endpoint_builder()
-            .stats_handler(move |_| {
-                let metrics = metrics_rx.borrow_and_update().clone();
-                serde_json::to_value(&*metrics).unwrap()
-            })
-            .metrics_labels(metrics_labels)
-            .handler(handler)
-            .start()
-            .await
+        Ok(())
     }
 
     /// Starts a background task to publish metrics over NATS
     ///
     /// This task monitors metric changes (specifically kv_active_blocks and num_requests_waiting)
     /// and publishes stable metrics to NATS after they've been unchanged for 1ms.
-    #[allow(dead_code)]
     fn start_nats_metrics_publishing(&self, namespace: Namespace, worker_id: i64) {
         let nats_rx = self.rx.clone();
 
@@ -904,32 +871,6 @@ impl WorkerMetricsPublisher {
                 }
             }
         });
-    }
-}
-
-struct KvLoadEndpointHandler {
-    metrics_rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>,
-}
-
-impl KvLoadEndpointHandler {
-    pub fn new(metrics_rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>) -> Self {
-        Self { metrics_rx }
-    }
-}
-
-#[async_trait]
-impl AsyncEngine<SingleIn<()>, ManyOut<Annotated<ForwardPassMetrics>>, Error>
-    for KvLoadEndpointHandler
-{
-    async fn generate(
-        &self,
-        request: SingleIn<()>,
-    ) -> Result<ManyOut<Annotated<ForwardPassMetrics>>> {
-        let context = request.context();
-        let metrics = self.metrics_rx.borrow().clone();
-        let metrics = (*metrics).clone();
-        let stream = stream::iter(vec![Annotated::from_data(metrics)]);
-        Ok(ResponseStream::new(Box::pin(stream), context))
     }
 }
 

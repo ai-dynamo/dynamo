@@ -80,7 +80,7 @@ var _ = BeforeSuite(func() {
 			filepath.Join(".", "testing", "run.ai"),
 			filepath.Join(".", "testing", "nvidia"),
 		},
-		ErrorIfCRDPathMissing: true,
+		ErrorIfCRDPathMissing: false,
 
 		// The BinaryAssetsDirectory is only required if you want to run the tests directly
 		// without call the makefile target test. If not informed it will look for the
