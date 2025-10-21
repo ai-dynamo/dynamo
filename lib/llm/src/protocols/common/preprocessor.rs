@@ -29,8 +29,8 @@ pub struct PreprocessedRequest {
 
     // Multimodal data
     #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_modal_data: Option<MultimodalDataMap>,
-
     /// StopConditions are conditions that the inference engine will use to stop generation.
     pub stop_conditions: StopConditions,
 
