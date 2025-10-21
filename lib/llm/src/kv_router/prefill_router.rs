@@ -11,8 +11,8 @@ use tokio_util::sync::CancellationToken;
 use dynamo_runtime::{
     component::Endpoint,
     pipeline::{
-        AsyncEngine, Context, ManyOut, Operator, PushRouter, RouterMode, ServerStreamingEngine,
-        SingleIn, async_trait,
+        AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Context, ManyOut, Operator,
+        PushRouter, RouterMode, ServerStreamingEngine, SingleIn, async_trait,
     },
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
@@ -216,10 +216,14 @@ impl
         let (req, context) = request.into_parts();
         let request_id = context.id().to_string();
 
-        // Prepare prefill request (use fresh context for internal routing)
-        // NOTE: should verify that we should in fact create a new context for the prefill request
+        // Prepare prefill request with linked context for cancellation propagation
         let prefill_req = req.clone();
-        let prefill_request = Context::with_id(prefill_req, request_id);
+        let prefill_context = Context::with_id(prefill_req, request_id.clone());
+
+        // Link the prefill context as a child so that kill signals propagate
+        context.controller().link_child(prefill_context.context());
+
+        let prefill_request = prefill_context;
 
         // Attempt prefill and handle results
         match self.call_prefill(prefill_request).await {

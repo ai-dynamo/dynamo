@@ -265,12 +265,6 @@ def test_request_cancellation_vllm_decode_cancel(
                 )
 
 
-@pytest.mark.skip(
-    reason="Prefill is now too fast to reliably cancel with the new frontend-based routing. "
-    "With the new architecture, prefill routing happens directly in the Rust frontend, "
-    "and prefill completes (~400-500ms) before cancellation can be triggered. "
-    "Cancellation works correctly but happens during decode phase instead."
-)
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
