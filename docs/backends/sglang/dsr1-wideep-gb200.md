@@ -59,7 +59,6 @@ MC_TE_METRIC=true \
 SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \
 SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=100000 \
 SGLANG_DISAGGREGATION_WAITING_TIMEOUT=100000 \
-SGLANG_MOONCAKE_CUSTOM_MEM_POOL=True \
 MC_FORCE_MNNVL=1 \
 NCCL_MNNVL_ENABLE=1 \
 NCCL_CUMEM_ENABLE=1 \
@@ -98,7 +97,7 @@ python3 -m dynamo.sglang \
   --disable-cuda-graph \
   --chunked-prefill-size 16384 \
   --max-total-tokens 32768 \
-  --mem-fraction-static 0.8 \
+  --mem-fraction-static 0.82 \
   --log-level debug
 ```
 
