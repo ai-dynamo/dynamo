@@ -380,18 +380,6 @@ impl RadixTree {
 
         // Spawn dedicated thread with simplified sync processing
         std::thread::spawn(move || {
-            // Install a panic hook local to this thread to capture RefCell panics ("Already borrowed")
-            // and emit a backtrace + contextual message. This helps when instrumentation inside
-            // `apply_event` misses an alternate code path still performing overlapping borrows.
-            // std::panic::set_hook(Box::new(|info| {
-            //     let bt = std::backtrace::Backtrace::capture();
-            //     tracing::error!(
-            //         panic = %info,
-            //         backtrace = %bt,
-            //         "RadixTree thread panic (likely RefCell borrow). Enable RUST_LOG=trace for more context."
-            //     );
-            // }));
-
             let mut radix_tree =
                 llm_rs::kv_router::indexer::RadixTree::new_with_frequency(expiration_duration);
 
