@@ -15,6 +15,7 @@ use super::metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::request_template::RequestTemplate;
+use crate::semrouter::{CategoryPolicy, HeuristicClassifier, MultiClassifier, PolicyConfig, SemRouter};
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
@@ -36,6 +37,7 @@ pub struct State {
     etcd_client: Option<etcd::Client>,
     store: Arc<dyn KeyValueStore>,
     flags: StateFlags,
+    semrouter: Option<Arc<SemRouter<dyn MultiClassifier>>>,
 }
 
 #[derive(Default, Debug)]
@@ -87,6 +89,7 @@ impl State {
                 embeddings_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
             },
+            semrouter: None,
         }
     }
 
@@ -102,6 +105,7 @@ impl State {
                 embeddings_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
             },
+            semrouter: None,
         }
     }
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests
@@ -128,6 +132,38 @@ impl State {
     // TODO
     pub fn sse_keep_alive(&self) -> Option<Duration> {
         None
+    }
+
+    pub fn semrouter(&self) -> Option<&Arc<SemRouter<dyn MultiClassifier>>> {
+        self.semrouter.as_ref()
+    }
+
+    pub fn init_semrouter_from_config(&mut self, config_path: impl AsRef<std::path::Path>) -> Result<()> {
+        let policy_config = PolicyConfig::load(config_path)?;
+        let policy = CategoryPolicy::new(policy_config);
+        let classifier: Arc<dyn MultiClassifier> = Arc::new(HeuristicClassifier);
+        let router = SemRouter::new(policy, classifier);
+        self.semrouter = Some(Arc::new(router));
+        tracing::info!("Semantic router initialized with heuristic classifier");
+        Ok(())
+    }
+
+    pub fn init_semrouter_with_classifier<C: MultiClassifier + 'static>(
+        &mut self,
+        config_path: impl AsRef<std::path::Path>,
+        classifier: Arc<C>,
+    ) -> Result<()> {
+        let policy_config = PolicyConfig::load(config_path)?;
+        let policy = CategoryPolicy::new(policy_config);
+        let classifier_dyn: Arc<dyn MultiClassifier> = classifier;
+        let router = SemRouter::new(policy, classifier_dyn);
+        self.semrouter = Some(Arc::new(router));
+        tracing::info!("Semantic router initialized with custom classifier");
+        Ok(())
+    }
+
+    pub fn is_semrouter_enabled(&self) -> bool {
+        self.semrouter.is_some()
     }
 }
 
@@ -335,10 +371,22 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let state = match config.etcd_client {
-            Some(etcd_client) => Arc::new(State::new_with_etcd(model_manager, etcd_client)),
-            None => Arc::new(State::new(model_manager)),
+        let mut state = match config.etcd_client {
+            Some(etcd_client) => State::new_with_etcd(model_manager, etcd_client),
+            None => State::new(model_manager),
         };
+
+        // Initialize semantic router if enabled via environment variables
+        if let Ok(config_path) = std::env::var("SEMROUTER_CONFIG") {
+            if std::env::var("SEMROUTER_ENABLED").as_deref() == Ok("true") {
+                tracing::info!("Initializing semantic router from config: {}", config_path);
+                if let Err(e) = state.init_semrouter_from_config(&config_path) {
+                    tracing::warn!("Failed to initialize semantic router: {}", e);
+                }
+            }
+        }
+
+        let state = Arc::new(state);
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);

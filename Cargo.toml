@@ -91,7 +91,10 @@ reqwest = { version = "0.12.22", default-features = false, features = [
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
+serde_yaml = { version = "0.9" }
 strum = { version = "0.27", features = ["derive"] }
+once_cell = { version = "1.21" }
+ndarray = { version = "0.16" }
 tempfile = "3"
 thiserror = { version = "2.0.11" }
 tokio = { version = "1", features = ["full"] }
