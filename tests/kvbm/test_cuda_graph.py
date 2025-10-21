@@ -180,7 +180,7 @@ def test_kvbm_without_cuda_graph_enabled(request, runtime_services):
 
             response = send_completion_request(PROMPT, 100, timeout=10)
             assert (
-                response.status_code.ok()
+                response.ok
             ), f"Expected successful status, got {response.status_code}"
             logger.info(f"Completion request succeeded: {response.status_code}")
 
@@ -216,6 +216,6 @@ def test_kvbm_with_cuda_graph_enabled(request, runtime_services):
 
             response = send_completion_request(PROMPT, 100, timeout=10)
             assert (
-                response.status_code.ok()
+                response.ok
             ), f"Expected successful status, got {response.status_code}"
             logger.info(f"Completion request succeeded: {response.status_code}")
