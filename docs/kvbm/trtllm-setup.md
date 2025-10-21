@@ -56,6 +56,10 @@ export DYN_KVBM_DISK_CACHE_GB=8
 # We recommend setting a higher timeout for leader–worker initialization.
 # 1200 means 1200 seconds timeout
 export DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS=1200
+
+# enable disk zerofill fallback for KVBM
+# set to true to enable fallback behavior when disk operations fail
+export DYN_KVBM_DISK_ZEROFILL_FALLBACK=true
 ```
 
 > [!NOTE]

@@ -371,8 +371,48 @@ impl Component {
         unimplemented!("collect_stats")
     }
 
-    pub fn service_builder(&self) -> service::ServiceConfigBuilder {
-        service::ServiceConfigBuilder::from_component(self.clone())
+    pub async fn add_stats_service(&mut self) -> anyhow::Result<()> {
+        let service_name = self.service_name();
+
+        // Pre-check to save cost of creating the service, but don't hold the lock
+        if self
+            .drt
+            .component_registry
+            .inner
+            .lock()
+            .await
+            .services
+            .contains_key(&service_name)
+        {
+            anyhow::bail!("Service {service_name} already exists");
+        }
+
+        let Some(nats_client) = self.drt.nats_client() else {
+            anyhow::bail!("Cannot create NATS service without NATS.");
+        };
+        let description = None;
+        let (nats_service, stats_reg) =
+            service::build_nats_service(nats_client, self, description).await?;
+
+        let mut guard = self.drt.component_registry.inner.lock().await;
+        if !guard.services.contains_key(&service_name) {
+            // Normal case
+            guard.services.insert(service_name.clone(), nats_service);
+            guard.stats_handlers.insert(service_name.clone(), stats_reg);
+            drop(guard);
+        } else {
+            drop(guard);
+            let _ = nats_service.stop().await;
+            return Err(anyhow::anyhow!(
+                "Service create race for {service_name}, now already exists"
+            ));
+        }
+
+        // Register metrics callback. CRITICAL: Never fail service creation for metrics issues.
+        if let Err(err) = self.start_scraping_nats_service_component_metrics() {
+            tracing::debug!(service_name, error = %err, "Metrics registration failed");
+        }
+        Ok(())
     }
 }
 
