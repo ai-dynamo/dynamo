@@ -224,10 +224,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                     output: Dict[str, Any] = {
                         "token_ids": list(token_ids),
-                        "extra_args": (
+                        "disaggregated_params": (
                             {"kv_transfer_params": res.kv_transfer_params}
                             if res.kv_transfer_params
-                            else {}
+                            else None
                         ),
                     }
 

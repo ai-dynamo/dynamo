@@ -146,11 +146,13 @@ impl PrefillRouter {
 
         if let Some(err) = first_output.err() {
             tracing::debug!(error = ?err, "Prefill router returned error in output");
+            while prefill_response.next().await.is_some() {}
             return Ok(None);
         }
 
         let Some(output) = &first_output.data else {
             tracing::debug!("Prefill router output has no data field");
+            while prefill_response.next().await.is_some() {}
             return Ok(None);
         };
 
@@ -158,7 +160,11 @@ impl PrefillRouter {
             tracing::debug!("Prefill router output missing disaggregated_params");
         }
 
-        Ok(output.disaggregated_params.clone())
+        let result = output.disaggregated_params.clone();
+
+        while prefill_response.next().await.is_some() {}
+
+        Ok(result)
     }
 }
 
