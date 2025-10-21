@@ -15,6 +15,7 @@
 
 
 import asyncio
+import json
 import threading
 from typing import List
 
@@ -112,11 +113,13 @@ async def test_radix_tree_binding(distributed_runtime):
 @pytest.mark.parametrize("expiration_duration_secs", [None])
 @pytest.mark.parametrize("is_threaded", [True, False])
 async def test_radix_tree_thread_safety(
-    distributed_runtime, num_threads, prepopulate_worker_ids, expiration_duration_secs, is_threaded
+    distributed_runtime,
+    num_threads,
+    prepopulate_worker_ids,
+    expiration_duration_secs,
+    is_threaded,
 ):
     """Test RadixTree thread safety by applying events from multiple threads."""
-    import json
-
     radix_tree = RadixTree(expiration_duration_secs=expiration_duration_secs)
     threads = []
     done_counter = 0
