@@ -2165,7 +2165,10 @@ dependencies = [
  "axum 0.8.4",
  "axum-server",
  "base64 0.22.1",
+<<<<<<< HEAD
  "bincode",
+=======
+>>>>>>> a0f0e5a18 (feat: Media processing in the frontend - 1st pass)
  "bitflags 2.9.4",
  "blake3",
  "bs62",
