@@ -110,7 +110,7 @@ jobs:
         else
           REF="${{ github.ref }}"
         fi
-          curl --fail-with-body \
+        curl --fail-with-body \
           --request POST \
           --form token=${{ secrets.PIPELINE_TOKEN }} \
           --form ref=${REF} \
