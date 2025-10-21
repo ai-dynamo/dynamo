@@ -319,15 +319,16 @@ where
 
     // Use the provided prefill chooser, or create a disabled one if not provided
     let prefill_chooser = prefill_chooser.unwrap_or_else(PrefillRouter::disabled);
+    let prefill_op = prefill_chooser.into_operator();
 
-    // Link with prefill chooser: migration → prefill_chooser (forward only) → service_backend
-    // Note: prefill_chooser backward edge is NOT linked
+    // Link with prefill chooser including backward edge for response flow
     let engine = frontend
         .link(preprocessor_op.forward_edge())?
         .link(backend.forward_edge())?
         .link(migration.forward_edge())?
-        .link(prefill_chooser.into_operator().forward_edge())?
+        .link(prefill_op.forward_edge())?
         .link(service_backend)?
+        .link(prefill_op.backward_edge())?
         .link(migration.backward_edge())?
         .link(backend.backward_edge())?
         .link(preprocessor_op.backward_edge())?
