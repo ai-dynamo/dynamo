@@ -463,7 +463,7 @@ show_help() {
     echo "  [--release-build perform a release build]"
     echo "  [--make-efa Enables EFA support for NIXL]"
     echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
-    echo "  [--use-sccache enause-default-experimental-tensorrtllm-commitble sccache for Rust/C/C++ compilation caching]"
+    echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
     echo ""
@@ -642,25 +642,25 @@ function determine_user_intention_trtllm() {
 
     if [[ -n "$TENSORRTLLM_INDEX_URL" ]] && [[ -n "$TENSORRTLLM_PIP_WHEEL" ]]; then
         intention_download="true";
-        intention_count=$((intention_count+=1));
+        intention_count=$((intention_count+1));
         TRTLLM_INTENTION="download"
     elif [[ -n "$TENSORRTLLM_PIP_WHEEL" ]]; then
         intention_download="true";
-        intention_count=$((intention_count+=1));
+        intention_count=$((intention_count+1));
         TRTLLM_INTENTION="download"
         echo "INFO: Inferring download because TENSORRTLLM_PIP_WHEEL is set and TENSORRTLLM_INDEX_URL is not."
     fi
 
     if [[ -n "$TENSORRTLLM_PIP_WHEEL_DIR" ]]; then
         intention_install="true";
-        intention_count=$((intention_count+=1));
+        intention_count=$((intention_count+1))
         TRTLLM_INTENTION="install"
     fi
     echo "  Intent to Install TRTLLM: $intention_install"
 
     if [[ -n "$TRTLLM_GIT_URL" ]]; then
         intention_build="true";
-        intention_count=$((intention_count+=1));
+        intention_count=$((intention_count+1))
         TRTLLM_INTENTION="build"
     fi
     echo "  Intent to Build TRTLLM: $intention_build"
@@ -669,7 +669,7 @@ function determine_user_intention_trtllm() {
     # with the defaults sepcified at the top this file.
     if [[ -z "${TENSORRTLLM_INDEX_URL}" ]] && [[ -z "${TENSORRTLLM_PIP_WHEEL}" ]] && [[ "${intention_count}" -eq 0 ]]; then
         intention_download="true";
-        intention_count=$((intention_count+=1));
+        intention_count=$((intention_count+1))
         TRTLLM_INTENTION="download"
         echo "INFO: Inferring download because both TENSORRTLLM_PIP_WHEEL and TENSORRTLLM_INDEX_URL are not set."
     fi
@@ -713,11 +713,11 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
         PRINT_TRTLLM_WHEEL_FILE=${TENSORRTLLM_PIP_WHEEL}
     elif [[ "$TRTLLM_INTENTION" == "install" ]]; then
         echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL_DIR}"
-        if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}" "${ARCH}_${TRTLLM_COMMIT}"; then
+        if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}"; then
             echo "ERROR: Valid trtllm wheel file not found in ${TENSORRTLLM_PIP_WHEEL_DIR}"
             echo "      If this is not intended you can try building from source with the following variables set instead:"
             echo ""
-            echo "      --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM --tensorrtllm-commt $TRTLLM_COMMIT"
+            echo "      --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM --tensorrtllm-commit $TRTLLM_COMMIT"
             exit 1
         fi
         echo "Installing TensorRT-LLM from local wheel directory"
@@ -725,7 +725,7 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
         BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=${TENSORRTLLM_PIP_WHEEL_DIR}"
         PRINT_TRTLLM_WHEEL_FILE=$(find $TENSORRTLLM_PIP_WHEEL_DIR -name "*.whl" | head -n 1)
     elif [[ "$TRTLLM_INTENTION" == "build" ]]; then
-        if [ -z $DRY_RUN ]; then
+        if [ "$DRY_RUN" != "true" ]; then
             GIT_URL_ARG=""
             if [ -n "${TRTLLM_GIT_URL}" ]; then
                 GIT_URL_ARG="-u ${TRTLLM_GIT_URL}"
