@@ -15,14 +15,77 @@
 # limitations under the License.
 
 """
-Extract all dependency versions from Dockerfiles and requirements files.
-Generates a CSV file with all dependencies across trtllm, vllm, sglang, and operator components.
+Dependency Extraction System for Dynamo
+
+This script extracts and tracks software dependencies across all Dynamo components
+(trtllm, vllm, sglang, operator, shared). It parses 10 different source types and
+generates comprehensive CSV reports with version tracking, critical dependency
+flagging, and version discrepancy detection.
+
+SOURCE TYPES SUPPORTED:
+    1. Dockerfiles: Base images, ARGs, binary downloads from wget/curl
+    2. requirements.txt: Python pip dependencies
+    3. pyproject.toml: Python dependencies (main + optional groups)
+    4. go.mod: Go module dependencies (direct + indirect)
+    5. Shell scripts: pip installs, binary downloads
+    6. docker-compose.yml: Service images
+    7. Helm Chart.yaml: Chart dependencies
+    8. rust-toolchain.toml: Rust toolchain version
+    9. Cargo.toml: Rust crate dependencies
+    10. Kubernetes YAML: Container images
+
+HARDCODED VALUES & MAINTENANCE:
+    - NVIDIA_INDICATORS (line ~110): Keywords for auto-detecting NVIDIA products
+      Add new NVIDIA product names here when introduced
+    - SPECIAL_CASES (line ~330): Dependency name normalization rules
+      Add entries for dependencies with inconsistent naming
+    - Component sorting order (line ~1700): Defines CSV output order
+      Update if new components are added
+    - Critical dependencies: Loaded from config.yaml, not hardcoded here
+      Edit .github/dependency-extraction/config.yaml to update
+
+ARCHITECTURE:
+    Main Class: DependencyExtractor
+        - Coordinates all extraction methods
+        - Manages dependency list and error tracking
+        - Handles version comparison and discrepancy detection
+        - Generates CSV output
+
+    Key Methods:
+        - extract_all(): Orchestrates extraction from all sources
+        - add_dependency(): Centralized dependency registration
+        - detect_version_discrepancies(): Finds version conflicts
+        - write_csv(): Generates final output
+
+    For detailed documentation, see:
+    .github/scripts/dependency-extraction/README.md
 
 Usage:
-    python scripts/extract_dependency_versions.py [--output OUTPUT_PATH]
+    python3 .github/workflows/extract_dependency_versions.py [OPTIONS]
+
+    Options:
+        --output PATH           Output CSV path (default: timestamped)
+        --config PATH           Config file (default: .github/dependency-extraction/config.yaml)
+        --previous-latest PATH  Previous nightly CSV for comparison
+        --previous-release PATH Previous release CSV for comparison
+        --release VERSION       Mark as release snapshot (X.Y.Z format)
+        --report-removed PATH   Export removed dependencies to JSON
 
 Output:
-    dependency_versions.csv (or specified output path)
+    CSV with 13 columns:
+    Component | Category | Dependency Name | Version | Source File | GitHub URL |
+    Package Source URL | Status | Diff from Latest | Diff from Release |
+    Critical | NVIDIA Product | Notes
+
+Examples:
+    # Nightly extraction
+    python3 .github/workflows/extract_dependency_versions.py \\
+        --output .github/reports/dependency_versions_latest.csv
+
+    # Release snapshot
+    python3 .github/workflows/extract_dependency_versions.py \\
+        --output .github/reports/releases/dependency_versions_v1.0.0.csv \\
+        --release 1.0.0
 """
 
 import argparse
