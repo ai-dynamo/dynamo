@@ -49,14 +49,16 @@ Quickstart
    :hidden:
    :caption: Kubernetes Deployment
 
-   Kubernetes <_sections/k8s>
+   Deployment Guide <_sections/k8s_deployment>
+   Observability <_sections/k8s_observability>
+   Multinode <_sections/k8s_multinode>
 
-   .. toctree::
+.. toctree::
    :hidden:
    :caption: User Guides
 
    Tool Calling <guides/tool-calling.md>
-   AI Configurator (Pre-Deployment Profiling) <benchmarks/pre_deployment_profiling.md>
+   AIConfigurator <performance/aiconfigurator.md>
    Benchmarking <benchmarks/benchmarking.md>
    Tuning Disaggregated Performance <performance/tuning.md>
    Writing Python Workers in Dynamo <development/backend-guide.md>
@@ -74,7 +76,7 @@ Quickstart
 
 .. toctree::
    :hidden:
-   :caption: Design docs
+   :caption: Design Docs
 
    Overall Architecture <design_docs/architecture.md>
    Architecture Flow <design_docs/dynamo_flow.md>

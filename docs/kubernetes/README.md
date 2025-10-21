@@ -52,7 +52,7 @@ helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
 ```
 
-**For Shared/Multi-Tenant Clusters (Nebius, etc.):**
+**For Shared/Multi-Tenant Clusters:**
 
 If your cluster has namespace-restricted Dynamo operators, add this flag to step 3:
 ```bash
@@ -65,16 +65,16 @@ For more details or customization options (including multinode deployments), see
 
 Each backend has deployment examples and configuration options:
 
-| Backend | Available Configurations |
-|---------|--------------------------|
-| **[vLLM](../../components/backends/vllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router, Disaggregated + Planner, Disaggregated Multi-node |
-| **[SGLang](../../components/backends/sglang/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router, Disaggregated + Planner, Disaggregated Multi-node |
-| **[TensorRT-LLM](../../components/backends/trtllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router, Disaggregated Multi-node |
+| Backend      | Aggregated | Aggregated + Router | Disaggregated | Disaggregated + Router | Disaggregated + Planner | Disaggregated Multi-node |
+|--------------|:----------:|:-------------------:|:-------------:|:----------------------:|:-----------------------:|:------------------------:|
+| **[SGLang](../../components/backends/sglang/deploy/README.md)**       | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[TensorRT-LLM](../../components/backends/trtllm/deploy/README.md)** | ✅ | ✅ | ✅ | ✅ | 🚧 | ✅ |
+| **[vLLM](../../components/backends/vllm/deploy/README.md)**           | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ## 3. Deploy Your First Model
 
 ```bash
-export NAMESPACE=dynamo-cloud
+export NAMESPACE=dynamo-system
 kubectl create namespace ${NAMESPACE}
 
 # to pull model from HF
