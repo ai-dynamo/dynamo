@@ -128,7 +128,13 @@ impl DistributedRWLock {
             )]);
 
         // Execute the atomic transaction
-        match etcd_client.etcd_client().kv_client().txn(txn).await {
+        match etcd_client
+            .etcd_client_async()
+            .await
+            .kv_client()
+            .txn(txn)
+            .await
+        {
             Ok(response) if response.succeeded() => {
                 // Step 2: Immediately check if any readers exist
                 let reader_prefix = format!("v1/{}/readers/", self.lock_prefix);
@@ -220,7 +226,13 @@ impl DistributedRWLock {
                 )]);
 
             // Execute the atomic transaction
-            match etcd_client.etcd_client().kv_client().txn(txn).await {
+            match etcd_client
+                .etcd_client_async()
+                .await
+                .kv_client()
+                .txn(txn)
+                .await
+            {
                 Ok(response) if response.succeeded() => {
                     tracing::debug!("Acquired read lock for reader {}", reader_id);
                     return Ok(ReadLockGuard {

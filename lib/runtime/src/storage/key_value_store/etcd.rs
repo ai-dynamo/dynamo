@@ -110,7 +110,8 @@ impl KeyValueBucket for EtcdBucket {
         tracing::trace!("etcd watch: {k}");
         let (watcher, mut watch_stream) = self
             .client
-            .etcd_client()
+            .etcd_client_async()
+            .await
             .clone()
             .watch(k.as_bytes(), Some(WatchOptions::new().with_prefix()))
             .await
@@ -169,7 +170,8 @@ impl EtcdBucket {
         // Execute the transaction
         let result = self
             .client
-            .etcd_client()
+            .etcd_client_async()
+            .await
             .kv_client()
             .txn(txn)
             .await
