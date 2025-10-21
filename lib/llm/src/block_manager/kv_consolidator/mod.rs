@@ -48,9 +48,9 @@ impl KvEventConsolidatorHandle {
         tracker.handle_store(
             block_hash,
             source,
-            token_ids.into_iter().map(|t| t as i32).collect(),
+            token_ids,
             parent_hash,
-            block_size as i32,
+            block_size,
             lora_id.map(|id| id as i32),
             tier,
             data_parallel_rank,

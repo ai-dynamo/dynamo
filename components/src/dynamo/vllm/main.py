@@ -243,8 +243,9 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         hasattr(vllm_config, "consolidator_endpoints")
         and vllm_config.consolidator_endpoints
     ):
-        # Extract port from "tcp://0.0.0.0:PORT"
-        consolidator_output_endpoint = vllm_config.consolidator_endpoints[1]
+        # Extract connect endpoint (third element) for clients to subscribe
+        # consolidator_endpoints = (vllm_endpoint, bind_endpoint, connect_endpoint)
+        consolidator_output_endpoint = vllm_config.consolidator_endpoints[2]
         consolidator_port = int(consolidator_output_endpoint.split(":")[-1])
         consolidator_enabled = True
 
@@ -347,8 +348,9 @@ async def init(runtime: DistributedRuntime, config: Config):
         hasattr(vllm_config, "consolidator_endpoints")
         and vllm_config.consolidator_endpoints
     ):
-        # Extract port from "tcp://0.0.0.0:PORT"
-        consolidator_output_endpoint = vllm_config.consolidator_endpoints[1]
+        # Extract connect endpoint (third element) for clients to subscribe
+        # consolidator_endpoints = (vllm_endpoint, bind_endpoint, connect_endpoint)
+        consolidator_output_endpoint = vllm_config.consolidator_endpoints[2]
         consolidator_port = int(consolidator_output_endpoint.split(":")[-1])
         consolidator_enabled = True
 

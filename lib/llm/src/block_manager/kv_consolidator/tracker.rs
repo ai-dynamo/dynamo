@@ -183,8 +183,8 @@ pub enum ConsolidatedEvent {
     Store {
         block_hash: String,
         parent_hash: Option<String>,
-        token_ids: Vec<i32>,
-        block_size: i32,
+        token_ids: Vec<u32>,
+        block_size: usize,
         lora_id: Option<i32>,
         source: String, // The source where it was first stored (vllm or kvbm)
     },
@@ -251,18 +251,15 @@ impl CacheStatusTracker {
         &mut self,
         block_hash: String,
         source: EventSource,
-        token_ids: Vec<i32>,
+        token_ids: Vec<u32>,
         parent_hash: Option<String>,
-        block_size: i32,
+        block_size: usize,
         lora_id: Option<i32>,
         tier: Option<StorageTier>,
         data_parallel_rank: Option<i32>,
     ) -> bool {
-        // Convert token_ids to u32 for hash computation
-        let token_ids_u32: Vec<u32> = token_ids.iter().map(|&t| t as u32).collect();
-
         // Compute LocalBlockHash from token IDs (content only)
-        let local_block_hash = compute_local_block_hash(&token_ids_u32);
+        let local_block_hash = compute_local_block_hash(&token_ids);
 
         // Resolve parent sequence hash from parent's external hash (if provided)
         let parent_sequence_hash = parent_hash

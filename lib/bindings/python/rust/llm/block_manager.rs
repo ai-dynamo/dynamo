@@ -8,6 +8,7 @@ use dynamo_llm::block_manager::block::{
 };
 use dynamo_llm::block_manager::offload::filter::FrequencyFilter;
 use dynamo_llm::block_manager::{BasicMetadata, BlockParallelismStrategy};
+use dynamo_llm::block_manager::kv_consolidator::KvEventConsolidatorConfig;
 
 use pyo3::PyResult;
 use std::time::Duration;
@@ -369,7 +370,6 @@ impl BlockManagerBuilder {
         }
 
         if let Some((vllm_ep, output_ep)) = self.consolidator_config {
-            use dynamo_llm::block_manager::kv_consolidator::KvEventConsolidatorConfig;
             let consolidator_config = KvEventConsolidatorConfig::new(vllm_ep, output_ep);
             config_builder = config_builder.consolidator_config(consolidator_config);
         }

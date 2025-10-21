@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use super::block::registry::RegistrationHandle;
 
+use crate::block_manager::kv_consolidator::EventSource;
 use crate::block_manager::kv_consolidator::KvEventConsolidator;
 
 /// The [EventManager] is not responsible for managing the history of the blocks, nor what
@@ -196,40 +197,45 @@ impl DynamoEventManager {
         // Send each block to the consolidator
         let kv_event_consolidator = self.consolidator_handle.clone();
 
-        tokio::spawn(async move {
-            use crate::block_manager::kv_consolidator::EventSource;
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move {
+                for handle in handles {
+                    // Extract block metadata from RegistrationHandle
+                    let block_hash = handle.sequence_hash().to_string();
+                    let parent_hash = handle.parent_sequence_hash().map(|h| h.to_string());
 
-            for handle in handles {
-                // Extract block metadata from RegistrationHandle
-                let block_hash = handle.sequence_hash().to_string();
-                let parent_hash = handle.parent_sequence_hash().map(|h| h.to_string());
+                    // Extract block_size and tokens from RegistrationHandle
+                    let block_size = handle.block_size(); // usize
+                    let tokens: Vec<u32> = handle.tokens().iter().copied().collect();
 
-                // Extract block_size and tokens from RegistrationHandle
-                let block_size = handle.block_size(); // usize
-                let tokens: Vec<u32> = handle.tokens().iter().copied().collect();
-
-                tracing::debug!(
-                    "DynamoEventManager sending store event to kv event consolidator: block_hash={}, block_size={}, tokens={}",
-                    block_hash,
-                    block_size,
-                    tokens.len()
-                );
-
-                // Send to consolidator with EventSource::Kvbm
-                kv_event_consolidator
-                    .handle_store(
+                    tracing::debug!(
+                        "DynamoEventManager sending store event to kv event consolidator: block_hash={}, block_size={}, tokens={}",
                         block_hash,
-                        EventSource::Kvbm,
-                        tokens,
-                        parent_hash,
                         block_size,
-                        None, // lora_id
-                        None, // tier
-                        None, // data_parallel_rank
-                    )
-                    .await;
-            }
-        });
+                        tokens.len()
+                    );
+
+                    // Send to consolidator with EventSource::Kvbm
+                    kv_event_consolidator
+                        .handle_store(
+                            block_hash,
+                            EventSource::Kvbm,
+                            tokens,
+                            parent_hash,
+                            block_size,
+                            None, // lora_id
+                            None, // tier
+                            None, // data_parallel_rank
+                        )
+                        .await;
+                }
+            });
+        } else {
+            tracing::error!(
+                "No Tokio runtime in context; dropping store events for {} blocks",
+                handles.len()
+            );
+        }
     }
 
     /// Send remove event to the kv event consolidator
@@ -245,12 +251,18 @@ impl DynamoEventManager {
 
         let kv_event_consolidator = self.consolidator_handle.clone();
 
-        tokio::spawn(async move {
-            use crate::block_manager::kv_consolidator::EventSource;
-            kv_event_consolidator
-                .handle_remove(&block_hash, EventSource::Kvbm)
-                .await;
-        });
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move {
+                kv_event_consolidator
+                    .handle_remove(&block_hash, EventSource::Kvbm)
+                    .await;
+            });
+        } else {
+            tracing::error!(
+                "No Tokio runtime in context; dropping remove event for block {}",
+                block_hash
+            );
+        }
     }
 }
 
