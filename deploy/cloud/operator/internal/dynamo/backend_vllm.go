@@ -22,7 +22,10 @@ const (
 type VLLMBackend struct{}
 
 func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	isMultinode := numberOfNodes > 1
+	// Check if multinode is explicitly configured
+	// For disaggregated serving, multinode section can be present with nodeCount=1
+	// and still needs distributed initialization flags
+	isMultinode := component.Multinode != nil
 
 	if isMultinode {
 		// Apply multinode-specific argument modifications

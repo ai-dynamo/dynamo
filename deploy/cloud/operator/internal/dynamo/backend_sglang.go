@@ -41,8 +41,10 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		}
 	}
 
-	// For single node, nothing to do
-	if numberOfNodes <= 1 {
+	// Check if multinode is explicitly configured
+	// For disaggregated serving, multinode section can be present with nodeCount=1
+	// and still needs distributed initialization flags
+	if component.Multinode == nil {
 		return
 	}
 
