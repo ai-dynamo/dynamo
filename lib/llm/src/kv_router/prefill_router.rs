@@ -181,6 +181,7 @@ impl
         let request_id = context.id().to_string();
 
         // Prepare prefill request (use fresh context for internal routing)
+        // NOTE: should verify that we should in fact create a new context for the prefill request
         let prefill_req = req.clone();
         let prefill_request = Context::with_id(prefill_req, request_id);
 
