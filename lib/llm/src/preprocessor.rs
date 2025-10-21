@@ -11,11 +11,15 @@
 //!
 //! The Preprocessor will accept any IngressRequest and transform it to a BackendRequest.
 
+pub mod media;
 pub mod prompt;
 pub mod tools;
-
+use anyhow::Context;
 use anyhow::{Result, bail};
-use dynamo_async_openai::types::{ChatCompletionToolChoiceOption, EncodingFormat};
+use dynamo_async_openai::types::{
+    ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
+    ChatCompletionRequestUserMessageContentPart, ChatCompletionToolChoiceOption, EncodingFormat,
+};
 use futures::Stream;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
@@ -23,8 +27,11 @@ use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
+use crate::preprocessor::media::{MediaDecoder, MediaLoader};
 use crate::preprocessor::prompt::OAIChatLikeRequest;
-use crate::protocols::common::preprocessor::PreprocessedRequestBuilder;
+use crate::protocols::common::preprocessor::MultimodalDataMap;
+use crate::protocols::common::preprocessor::{MultimodalData, PreprocessedRequestBuilder};
+
 use crate::tokenizers::Encoding;
 
 use dynamo_parsers::{ReasoningParser, ReasoningParserType};
@@ -107,6 +114,7 @@ pub struct OpenAIPreprocessor {
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
     tool_call_parser: Option<String>,
+    media_loader: Option<MediaLoader>,
 }
 
 impl OpenAIPreprocessor {
@@ -135,6 +143,10 @@ impl OpenAIPreprocessor {
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
+        let media_loader = match mdc.media_decoder.clone() {
+            Some(decoder) => Some(MediaLoader::new(decoder)?),
+            None => Some(MediaLoader::new(MediaDecoder::default())?),
+        };
 
         Ok(Arc::new(Self {
             formatter,
@@ -143,6 +155,7 @@ impl OpenAIPreprocessor {
             mdcsum,
             runtime_config,
             tool_call_parser,
+            media_loader,
         }))
     }
     /// Encode a string to it's tokens
@@ -156,7 +169,7 @@ impl OpenAIPreprocessor {
     /// Annotations evaluated by this method include:
     /// - `formatted_prompt`
     /// - `token_ids`
-    pub fn preprocess_request<
+    pub async fn preprocess_request<
         R: OAIChatLikeRequest
             + AnnotationsProvider
             + SamplingOptionsProvider
@@ -168,8 +181,15 @@ impl OpenAIPreprocessor {
         request: &R,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>)> {
         let mut builder = self.builder(request)?;
-        let formatted_prompt = self.apply_template(request)?;
-        let annotations = self.gather_tokens(request, &mut builder, formatted_prompt)?;
+        let formatted_prompt = self
+            .apply_template(request)
+            .with_context(|| "Failed to apply prompt template")?;
+        let annotations = self
+            .gather_tokens(request, &mut builder, formatted_prompt)
+            .with_context(|| "Failed to gather tokens")?;
+        self.gather_multi_modal_data(request, &mut builder)
+            .await
+            .with_context(|| "Failed to gather multimodal data")?;
 
         Ok((builder.build()?, annotations))
     }
@@ -255,6 +275,63 @@ impl OpenAIPreprocessor {
         }
     }
 
+    pub async fn gather_multi_modal_data<R: OAIChatLikeRequest>(
+        &self,
+        request: &R,
+        builder: &mut PreprocessedRequestBuilder,
+    ) -> Result<()> {
+        let messages = request.messages();
+        let message_count = messages.len().unwrap_or(0);
+        let mut media_map: MultimodalDataMap = HashMap::new();
+
+        for idx in 0..message_count {
+            let msg = messages
+                .get_item_by_index(idx)
+                .map_err(|_| anyhow::Error::msg(format!("Cannot get message at index {idx}")))?;
+
+            let msg_json: serde_json::Value = serde_json::to_value(&msg)?;
+            let message: ChatCompletionRequestMessage = serde_json::from_value(msg_json)?;
+
+            let content_parts = match &message {
+                ChatCompletionRequestMessage::User(u) => match &u.content {
+                    ChatCompletionRequestUserMessageContent::Array(parts) => parts,
+                    _ => continue,
+                },
+                _ => continue,
+            };
+
+            // Iterate over content parts
+            for content_part in content_parts {
+                let (type_str, url) = match content_part {
+                    ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
+                        ("image_url".to_string(), image_part.image_url.url.clone())
+                    }
+                    ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
+                        ("video_url".to_string(), video_part.video_url.url.clone())
+                    }
+                    ChatCompletionRequestUserMessageContentPart::AudioUrl(audio_part) => {
+                        ("audio_url".to_string(), audio_part.audio_url.url.clone())
+                    }
+                    _ => continue,
+                };
+
+                let map_item = media_map.entry(type_str.clone()).or_insert_with(Vec::new);
+
+                if let Some(loader) = &self.media_loader {
+                    let decoded_data = loader.fetch_and_decode_media_part(content_part).await?;
+                    map_item.push(MultimodalData::Decoded(decoded_data));
+                } else {
+                    map_item.push(MultimodalData::Url(url));
+                }
+            }
+        }
+        if !media_map.is_empty() {
+            builder.multi_modal_data(Some(media_map));
+        }
+
+        Ok(())
+    }
+
     pub fn gather_tokens<
         R: OAIChatLikeRequest
             + AnnotationsProvider
@@ -317,6 +394,10 @@ impl OpenAIPreprocessor {
                                 if let Some(tokens) = token_data {
                                     tracing::trace!(
                                         "Using provided tokens from EPP: {} ids",
+                                        tokens.len()
+                                    );
+                                    println!(
+                                        "using provided tokens from EPP: {} ids",
                                         tokens.len()
                                     );
                                     // need ownership for the builder, so clone.
@@ -770,7 +851,7 @@ impl
         let response_generator = request.response_generator(context.id().to_string());
 
         // convert the chat completion request to a common completion request
-        let (common_request, annotations) = self.preprocess_request(&request)?;
+        let (common_request, annotations) = self.preprocess_request(&request).await?;
 
         let mut response_generator = Box::new(response_generator);
 
@@ -789,7 +870,6 @@ impl
 
         // forward the common completion request to the next operator
         let response_stream = next.generate(common_request).await?;
-
         // Extract context once
         let context = response_stream.context();
 
@@ -898,6 +978,8 @@ impl
         // convert the chat completion request to a common completion request
         let mut builder = self.builder(&request)?;
         let annotations = self.gather_tokens(&request, &mut builder, None)?;
+        self.gather_multi_modal_data(&request, &mut builder).await?;
+
         let common_request = builder.build()?;
 
         // update isl

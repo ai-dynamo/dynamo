@@ -13,7 +13,7 @@ readme.workspace = true
 description = "Dynamo LLM Library"
 
 [features]
-default = []
+default = ["media-loading"]
 # todo(ops): get this working in CI as a default.
 # default = ["block-manager", "testing-full"]
 
@@ -24,6 +24,7 @@ testing-etcd = []
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
+media-loading = ["dep:ndarray", "dep:video-rs", "dep:image", "dep:reqwest", "dep:base64", "dep:tokio-rayon"]
 
 [[bench]]
 name = "tokenizer"
@@ -136,6 +137,13 @@ itertools = { version = "0.14.0" }
 minijinja = { version = "2.10.2", features = ["loader"] }
 minijinja-contrib = { version = "2.10.2", features = ["pycompat"] }
 json-five = { version = "0.3" }
+
+# media loading in the preprocessor
+video-rs = { version = "0.10", features = ["ndarray"], optional = true }
+image = { version = "0.25", optional = true }
+reqwest = { workspace = true, optional = true }
+base64 = { version = "0.22", optional = true }
+tokio-rayon = {version = "2", optional = true }
 
 # Publishers
 zeromq = "0.4.1"
