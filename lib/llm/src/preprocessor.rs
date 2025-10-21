@@ -308,7 +308,7 @@ impl OpenAIPreprocessor {
                     _ => continue,
                 };
 
-                let map_item = media_map.entry(type_str.clone()).or_insert_with(Vec::new);
+                let map_item = media_map.entry(type_str.clone()).or_default();
                 map_item.push(MultimodalData::Url(url));
             }
         }
