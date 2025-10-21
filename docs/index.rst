@@ -57,8 +57,8 @@ Quickstart
    :hidden:
    :caption: User Guides
 
-   Tool Calling <guides/tool-calling.md>
-   AIConfigurator <performance/aiconfigurator.md>
+   Tool Calling <agents/tool-calling.md>
+   Finding Best Initial Configs <performance/aiconfigurator.md>
    Benchmarking <benchmarks/benchmarking.md>
    Tuning Disaggregated Performance <performance/tuning.md>
    Writing Python Workers in Dynamo <development/backend-guide.md>
