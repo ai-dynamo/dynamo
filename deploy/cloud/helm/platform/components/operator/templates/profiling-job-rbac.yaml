@@ -78,7 +78,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: dgdr-profiling-job-nodes
+  name: name: {{ include "dynamo-operator.fullname" . }}-dgdr-profiling-nodes
   labels:
     {{- include "dynamo-operator.labels" . | nindent 4 }}
     app.kubernetes.io/component: dgdr-profiling
@@ -92,14 +92,14 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: dgdr-profiling-job-nodes
+  name: name: {{ include "dynamo-operator.fullname" . }}-dgdr-profiling-nodes
   labels:
     {{- include "dynamo-operator.labels" . | nindent 4 }}
     app.kubernetes.io/component: dgdr-profiling
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: dgdr-profiling-job-nodes
+  name: name: {{ include "dynamo-operator.fullname" . }}-dgdr-profiling-nodes
 subjects:
 - kind: ServiceAccount
   name: dgdr-profiling-job
