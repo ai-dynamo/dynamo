@@ -32,7 +32,7 @@ Determine your cluster environment:
 - Can use cluster-wide operator (default)
 
 **Local Development** (Minikube, testing):
-- See [Minikube Setup](minikube.md) first, then follow installation steps below
+- See [Minikube Setup](deployment/minikube.md) first, then follow installation steps below
 
 To check if CRDs already exist:
 ```bash
@@ -93,7 +93,7 @@ docker version           # Running daemon (for Path D only)
 export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
 ```
 
-> No cluster? See [Minikube Setup](minikube.md) for local development.
+> No cluster? See [Minikube Setup](deployment/minikube.md) for local development.
 
 ## Path A: Production Install
 
