@@ -2,11 +2,11 @@
 
 ## 📋 Quick Summary
 
-**Title:** `feat: Add automated dependency version tracking and extraction`  
-**Status:** Open, Mergeable, Review Required  
-**Linear Issue:** DYN-1235  
-**Commits:** 27 (will be squashed to 1 on merge)  
-**Created:** 2025-10-10  
+**Title:** `feat: Add automated dependency version tracking and extraction`
+**Status:** Open, Mergeable, Review Required
+**Linear Issue:** DYN-1235
+**Commits:** 27 (will be squashed to 1 on merge)
+**Created:** 2025-10-10
 **Last Updated:** 2025-10-20
 
 ---
@@ -150,8 +150,8 @@ Extracts from 10 source types:
 
 ### 2. Smart CSV Output (13 Columns)
 ```
-Component | Category | Dependency Name | Version | Source File | GitHub URL | 
-Package Source URL | Status | Diff from Latest | Diff from Release | Critical | 
+Component | Category | Dependency Name | Version | Source File | GitHub URL |
+Package Source URL | Status | Diff from Latest | Diff from Release | Critical |
 NVIDIA Product | Notes
 ```
 
@@ -253,7 +253,7 @@ Created `.github/actions/dependency-extraction-setup/` to eliminate duplication:
 ## 🐛 Known Issues & Action Items
 
 ### 1. Pre-commit Failures ❌
-**Issue:** Latest commit has formatting issues  
+**Issue:** Latest commit has formatting issues
 **Action:** Run `pre-commit run --all-files` and commit fixes
 
 ### 2. Ruff Linting Issues ⚠️
@@ -265,7 +265,7 @@ Created `.github/actions/dependency-extraction-setup/` to eliminate duplication:
 **Action:** Clean up Python code per Ruff/CodeRabbit suggestions
 
 ### 3. DCO Sign-off ⚠️
-**Issue:** Some early merge commits lack DCO  
+**Issue:** Some early merge commits lack DCO
 **Action:** Consider rebasing to fix, or leave as-is (recent commits are signed)
 
 ### 4. CodeRabbit Suggestions 📝
@@ -374,7 +374,7 @@ DYN-1235
 
 ---
 
-**Last Updated:** 2025-10-20  
-**Author:** @dagil-nvidia  
+**Last Updated:** 2025-10-20
+**Author:** @dagil-nvidia
 **Status:** Ready for final review and merge (pending pre-commit fixes)
 

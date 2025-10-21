@@ -1,0 +1,401 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Dependency Extraction
+
+on:
+  schedule:
+    # Run nightly at 2 AM UTC
+    - cron: '0 2 * * *'
+  push:
+    branches:
+      - 'release/**'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Extraction mode: nightly or release'
+        required: true
+        default: 'nightly'
+        type: choice
+        options:
+          - nightly
+          - release
+      version:
+        description: 'Version for release snapshot (X.Y.Z format, only for release mode)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  extract-dependencies:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup dependency extraction environment
+        uses: ./.github/actions/dependency-extraction-setup
+        with:
+          python-version: '3.12'
+          fetch-depth: 0 # Need full history
+
+      - name: Determine extraction mode
+        id: mode
+        run: |
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            echo "mode=nightly" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == refs/heads/release/* ]]; then
+            echo "mode=release" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "mode=${{ github.event.inputs.mode }}" >> $GITHUB_OUTPUT
+          else
+            echo "mode=nightly" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract version (release mode)
+        id: version
+        if: steps.mode.outputs.mode == 'release'
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            # Extract from branch name: release/1.2.3 -> 1.2.3
+            VERSION=$(echo "${{ github.ref_name }}" | sed 's/release\///')
+          fi
+
+          # Validate version format (X.Y.Z)
+          if [[ ! $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "❌ Error: Invalid version format: $VERSION"
+            echo "Expected format: X.Y.Z (e.g., 1.2.3)"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "✅ Validated version: $VERSION"
+
+      - name: Check if release snapshot exists
+        id: check_exists
+        if: steps.mode.outputs.mode == 'release'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if [[ -f ".github/reports/releases/dependency_versions_v${VERSION}.csv" ]]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "⚠️  Snapshot for v${VERSION} already exists"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "✅ Creating new snapshot for v${VERSION}"
+          fi
+
+      - name: Run dependency extraction
+        if: steps.mode.outputs.mode == 'nightly' || steps.check_exists.outputs.exists == 'false'
+        run: |
+          if [[ "${{ steps.mode.outputs.mode }}" == "nightly" ]]; then
+            # Nightly mode: timestamped + latest
+            TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+            OUTPUT_PATH=".github/reports/dependency_versions_${TIMESTAMP}.csv"
+
+            python3 .github/workflows/extract_dependency_versions.py \
+              --output "$OUTPUT_PATH" \
+              --report-removed .github/reports/removed_dependencies.json
+
+            cp "$OUTPUT_PATH" .github/reports/dependency_versions_latest.csv
+            echo "TIMESTAMP=${TIMESTAMP}" >> $GITHUB_ENV
+            echo "OUTPUT_FILE=dependency_versions_latest.csv" >> $GITHUB_ENV
+
+          else
+            # Release mode: versioned snapshot
+            VERSION="${{ steps.version.outputs.version }}"
+            mkdir -p .github/reports/releases
+            OUTPUT_PATH=".github/reports/releases/dependency_versions_v${VERSION}.csv"
+
+            python3 .github/workflows/extract_dependency_versions.py \
+              --output "$OUTPUT_PATH" \
+              --release "$VERSION"
+
+            echo "VERSION=${VERSION}" >> $GITHUB_ENV
+            echo "OUTPUT_FILE=releases/dependency_versions_v${VERSION}.csv" >> $GITHUB_ENV
+          fi
+
+      - name: Check for changes
+        id: check_changes
+        if: steps.mode.outputs.mode == 'nightly' || steps.check_exists.outputs.exists == 'false'
+        run: |
+          if [[ "${{ steps.mode.outputs.mode }}" == "nightly" ]]; then
+            CHANGED_FILES=".github/reports/*_latest.csv"
+          else
+            CHANGED_FILES=".github/reports/releases/dependency_versions_v${{ steps.version.outputs.version }}.csv"
+          fi
+
+          if [[ -n $(git status --porcelain $CHANGED_FILES) ]]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+
+            if [[ "${{ steps.mode.outputs.mode }}" == "nightly" ]]; then
+              # Extract change counts from removed_dependencies.json if it exists
+              if [[ -f ".github/reports/removed_dependencies.json" ]]; then
+                REMOVED_COUNT=$(python3 -c "import json; print(len(json.load(open('.github/reports/removed_dependencies.json'))))" 2>/dev/null || echo "0")
+                REMOVED_LIST=$(python3 -c "import json; deps = json.load(open('.github/reports/removed_dependencies.json')); print('\\n'.join([f\"- **{d['Dependency Name']}** (was: {d['Version']}) from {d['Source File']}\" + (\" [CRITICAL]\" if d.get('Critical') == 'Yes' else \"\") for d in deps[:10]]))" 2>/dev/null || echo "")
+                if [ $REMOVED_COUNT -gt 10 ]; then
+                  REMOVED_LIST="${REMOVED_LIST}\n- ... and $(($REMOVED_COUNT - 10)) more"
+                fi
+              else
+                REMOVED_COUNT="0"
+                REMOVED_LIST=""
+              fi
+
+              # Get counts from CSV using Python (more reliable than grep)
+              NEW_COUNT=$(python3 -c "import csv; print(sum(1 for row in csv.DictReader(open('.github/reports/dependency_versions_latest.csv')) if row['Status'] == 'New'))")
+              CHANGED_COUNT=$(python3 -c "import csv; print(sum(1 for row in csv.DictReader(open('.github/reports/dependency_versions_latest.csv')) if row['Status'] == 'Changed'))")
+              UNCHANGED_COUNT=$(python3 -c "import csv; print(sum(1 for row in csv.DictReader(open('.github/reports/dependency_versions_latest.csv')) if row['Status'] == 'Unchanged'))")
+
+              echo "new_deps=$NEW_COUNT" >> $GITHUB_OUTPUT
+              echo "changed_deps=$CHANGED_COUNT" >> $GITHUB_OUTPUT
+              echo "unchanged_deps=$UNCHANGED_COUNT" >> $GITHUB_OUTPUT
+              echo "removed_deps=$REMOVED_COUNT" >> $GITHUB_OUTPUT
+              echo "removed_list<<EOF" >> $GITHUB_OUTPUT
+              echo -e "$REMOVED_LIST" >> $GITHUB_OUTPUT
+              echo "EOF" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create nightly PR
+        if: steps.mode.outputs.mode == 'nightly' && steps.check_changes.outputs.has_changes == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore(deps): update dependency tracking (nightly)"
+          title: "chore(deps): Update dependency tracking - ${{ env.TIMESTAMP }}"
+          body: |
+            ## 📦 Nightly Dependency Update
+
+            Automated dependency extraction detected changes.
+
+            ### 📊 Summary
+            - **New:** ${{ steps.check_changes.outputs.new_deps }}
+            - **Changed:** ${{ steps.check_changes.outputs.changed_deps }}
+            - **Removed:** ${{ steps.check_changes.outputs.removed_deps }}
+            - **Unchanged:** ${{ steps.check_changes.outputs.unchanged_deps }}
+
+            ### 🗑️ Removed Dependencies
+            ${{ steps.check_changes.outputs.removed_list }}
+
+            ### 📋 Files Updated
+            - ✅ `.github/reports/dependency_versions_latest.csv` - Latest dependency snapshot (includes all dependencies)
+
+            > **Note:** Timestamped versions are stored in GitHub Artifacts (90-day retention) to avoid repo clutter.
+
+            ### ✔️ Review Checklist
+            - [ ] Review new dependencies for security/licensing concerns
+            - [ ] Check version changes for breaking updates
+            - [ ] Review removed dependencies (intentional?)
+            - [ ] Check console output for unversioned dependencies
+            - [ ] Update baseline count if increase is expected
+
+            ---
+
+            🔗 **Documentation:** [Dependency Reports README](../.github/reports/README.md)
+            📦 **Artifacts:** Download timestamped CSVs from workflow run
+          branch: dependency-tracking/nightly-${{ env.TIMESTAMP }}
+          delete-branch: true
+          labels: |
+            automated
+            dependencies
+            documentation
+
+      - name: Create release PR
+        if: steps.mode.outputs.mode == 'release' && steps.check_exists.outputs.exists == 'false'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore(deps): add dependency snapshot for v${{ env.VERSION }}"
+          title: "chore(deps): Add dependency snapshot for v${{ env.VERSION }}"
+          body: |
+            ## 📸 Release Dependency Snapshot
+
+            Automated snapshot of dependencies for **v${{ env.VERSION }}** release.
+
+            ### 📋 Files Added
+            - ✅ `.github/reports/releases/dependency_versions_v${{ env.VERSION }}.csv`
+
+            ### 🎯 Purpose
+            This snapshot captures the exact dependency versions at the time of the v${{ env.VERSION }} release for:
+            - 📊 Historical tracking and auditing
+            - 🔍 Debugging version-specific issues
+            - 📈 Release-to-release comparison
+
+            > **Note:** This is an automated PR created from the `${{ github.ref_name }}` branch.
+
+            ---
+
+            🔗 **Documentation:** [Dependency Reports README](../.github/reports/README.md)
+          branch: dependency-tracking/release-v${{ env.VERSION }}
+          delete-branch: true
+          labels: |
+            automated
+            dependencies
+            documentation
+            release
+
+      - name: Upload artifacts
+        if: always() && (steps.mode.outputs.mode == 'nightly' || steps.check_exists.outputs.exists == 'false')
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-extraction-${{ steps.mode.outputs.mode }}-${{ github.run_number }}
+          path: |
+            .github/reports/dependency_versions_*.csv
+            .github/reports/releases/dependency_versions_v*.csv
+          retention-days: ${{ steps.mode.outputs.mode == 'nightly' && 90 || 365 }}
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Dependency Extraction Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "${{ steps.mode.outputs.mode }}" == "nightly" ]]; then
+            if [[ "${{ steps.check_changes.outputs.has_changes }}" == "true" ]]; then
+              echo "✅ **Changes Detected**" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "- New Dependencies: ${{ steps.check_changes.outputs.new_deps }}" >> $GITHUB_STEP_SUMMARY
+              echo "- Changed Versions: ${{ steps.check_changes.outputs.changed_deps }}" >> $GITHUB_STEP_SUMMARY
+              echo "- Unchanged: ${{ steps.check_changes.outputs.unchanged_deps }}" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "📝 A pull request has been created for review." >> $GITHUB_STEP_SUMMARY
+            else
+              echo "ℹ️ **No Changes Detected**" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "All dependencies remain unchanged since the last extraction." >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            VERSION="${{ steps.version.outputs.version }}"
+            if [[ "${{ steps.check_exists.outputs.exists }}" == "true" ]]; then
+              echo "ℹ️ **Snapshot Already Exists**" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "A dependency snapshot for v${VERSION} already exists in the repository." >> $GITHUB_STEP_SUMMARY
+              echo "No PR will be created." >> $GITHUB_STEP_SUMMARY
+            else
+              echo "✅ **Snapshot Created**" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "- Version: v${VERSION}" >> $GITHUB_STEP_SUMMARY
+              echo "- File: \`.github/reports/releases/dependency_versions_v${VERSION}.csv\`" >> $GITHUB_STEP_SUMMARY
+              echo "- Action: PR created for review" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "📝 A pull request has been created to add this snapshot to the repository." >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
+      - name: Create issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const timestamp = new Date().toISOString();
+            const mode = '${{ steps.mode.outputs.mode }}';
+
+            if (mode === 'nightly') {
+              // Check if there's already an open issue for failed nightly runs
+              const issues = await github.rest.issues.listForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                labels: 'automated,dependencies,nightly-failure',
+                per_page: 1
+              });
+
+              const issueBody = `## ⚠️ Nightly Dependency Extraction Failed
+
+              **Run:** ${runUrl}
+              **Time:** ${timestamp}
+              **Branch:** \`${{ github.ref_name }}\`
+
+              ### Failure Details
+              The automated nightly dependency extraction workflow has failed. Please investigate and resolve the issue.
+
+              ### Possible Causes
+              - Parsing errors in dependency files (Dockerfiles, requirements.txt, go.mod, etc.)
+              - Network issues accessing the repository
+              - Changes to file structure or naming conventions
+              - Python script errors or exceptions
+
+              ### Action Required
+              1. Review the workflow run logs: ${runUrl}
+              2. Fix any identified issues
+              3. Re-run the workflow manually to verify the fix
+              4. Close this issue once resolved
+
+              **Note:** This issue was automatically created by the nightly dependency extraction workflow.`;
+
+              if (issues.data.length > 0) {
+                // Update existing issue with new failure
+                const existingIssue = issues.data[0];
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: existingIssue.number,
+                  body: `### 🔄 Another Failure Detected\n\n**Run:** ${runUrl}\n**Time:** ${timestamp}\n\nThe nightly dependency extraction is still failing. Please prioritize investigation.`
+                });
+                core.info(`Updated existing issue #${existingIssue.number}`);
+              } else {
+                // Create new issue
+                await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title: `⚠️ Nightly Dependency Extraction Failed - ${timestamp.split('T')[0]}`,
+                  body: issueBody,
+                  labels: ['automated', 'dependencies', 'nightly-failure', 'bug']
+                });
+                core.info('Created new failure issue');
+              }
+            } else {
+              // Release mode: create version-specific issue
+              const version = '${{ steps.version.outputs.version }}';
+              const issueBody = `## ⚠️ Release Dependency Snapshot Failed
+
+              **Version:** v${version}
+              **Run:** ${runUrl}
+              **Time:** ${timestamp}
+              **Branch:** \`${{ github.ref_name }}\`
+
+              ### Failure Details
+              The automated release dependency snapshot workflow has failed for version v${version}.
+
+              ### Possible Causes
+              - Invalid version format in branch name or input
+              - Parsing errors in dependency files
+              - Permission issues writing to the repository
+              - Python script errors or exceptions
+
+              ### Action Required
+              1. Review the workflow run logs: ${runUrl}
+              2. Verify the version format (X.Y.Z)
+              3. Fix any identified issues
+              4. Re-run the workflow manually to create the snapshot
+              5. Close this issue once resolved
+
+              **Note:** This issue was automatically created by the release dependency snapshot workflow.`;
+
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `⚠️ Release Dependency Snapshot Failed - v${version}`,
+                body: issueBody,
+                labels: ['automated', 'dependencies', 'release-snapshot-failure', 'bug']
+              });
+              core.info(`Created failure issue for v${version}`);
+            }
+

@@ -38,9 +38,15 @@ CMakeCache.txt
 *pytest_report.md
 *pytest_report.xml
 
-# Dependency extraction timestamped outputs (keep latest only)
+# Dependency extraction outputs
+# The nightly workflow generates timestamped CSV files (dependency_versions_YYYYMMDD_HHMMSS.csv)
+# during execution. We track only the "latest" version and release snapshots in git to:
+# 1. Keep the repo clean (avoid hundreds of timestamped files)
+# 2. Preserve history through release snapshots (releases/dependency_versions_v*.csv)
+# 3. Provide a single "current state" file (dependency_versions_latest.csv)
+# 4. Use artifacts for historical timestamped files (retained for 90 days in GitHub Actions)
+# Note: All dependencies (versioned and unversioned) are in the same CSV now
 dependency_versions_[0-9]*.csv
-unversioned_dependencies_[0-9]*.csv
 .github/reports/*_[0-9]*.csv
 !.github/reports/*_latest.csv
 !.github/reports/README.md

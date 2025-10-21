@@ -255,9 +255,9 @@ class DependencyExtractor:
     def load_config(self, config_path: Optional[Path] = None) -> dict:
         """Load configuration from YAML file."""
         if config_path is None:
-            # Default to extract_dependency_versions_config.yaml in same directory as script
+            # Default to config.yaml in .github/dependency-extraction/
             script_dir = Path(__file__).parent
-            config_path = script_dir / "extract_dependency_versions_config.yaml"
+            config_path = script_dir.parent / "dependency-extraction" / "config.yaml"
 
         if not config_path.exists():
             self.warnings.append(
@@ -1765,6 +1765,25 @@ class DependencyExtractor:
         else:
             print(f"✓ Written {len(self.dependencies)} dependencies to {output_path}")
 
+        # Print unversioned dependencies summary (all in single CSV now)
+        unversioned = [
+            dep
+            for dep in self.dependencies
+            if dep["Version"] in ["unspecified", "N/A", "", "latest"]
+        ]
+        if unversioned:
+            print(f"\n⚠️  Unversioned dependencies detected: {len(unversioned)}")
+            print("    These dependencies lack explicit version pins:")
+            for dep in unversioned[:5]:  # Show first 5
+                critical_flag = " [CRITICAL]" if dep["Critical"] == "Yes" else ""
+                print(
+                    f"    • {dep['Component']}/{dep['Dependency Name']}{critical_flag}"
+                )
+                print(f"      in {dep['Source File']}")
+            if len(unversioned) > 5:
+                print(f"    ... and {len(unversioned) - 5} more")
+            print("    💡 Consider pinning to specific versions for reproducible builds")
+
     def get_removed_dependencies(self) -> List[Dict[str, str]]:
         """
         Detect dependencies that were in the previous CSV but not in the current extraction.
@@ -1795,45 +1814,6 @@ class DependencyExtractor:
                 )
 
         return removed
-
-    def write_unversioned_report(self, output_path: Path) -> None:
-        """Write a separate report of unversioned dependencies."""
-        unversioned = [
-            dep
-            for dep in self.dependencies
-            if dep["Version"] in ["unspecified", "N/A", "", "latest"]
-        ]
-
-        if not unversioned:
-            print("✓ No unversioned dependencies to report")
-            return
-
-        print(f"Writing unversioned dependencies report to {output_path}...")
-
-        with open(output_path, "w", newline="") as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=[
-                    "Component",
-                    "Category",
-                    "Dependency Name",
-                    "Version",
-                    "Source File",
-                    "GitHub URL",
-                    "Notes",
-                    "Recommendation",
-                ],
-            )
-            writer.writeheader()
-
-            for dep in unversioned:
-                dep_copy = dep.copy()
-                dep_copy[
-                    "Recommendation"
-                ] = "Pin to specific version for reproducible builds"
-                writer.writerows([dep_copy])
-
-        print(f"✓ Written {len(unversioned)} unversioned dependencies to {output_path}")
 
     def normalize_dependency_name(self, name: str, category: str = "") -> str:
         """
@@ -2238,11 +2218,6 @@ def main():
         help="Baseline dependency count for warnings (default: 251)",
     )
     parser.add_argument(
-        "--report-unversioned",
-        action="store_true",
-        help="Generate separate report of unversioned dependencies",
-    )
-    parser.add_argument(
         "--report-removed",
         type=str,
         help="Output removed dependencies to JSON file (e.g., removed.json)",
@@ -2251,7 +2226,7 @@ def main():
         "--config",
         type=Path,
         default=None,
-        help="Path to configuration file (default: .github/workflows/extract_dependency_versions_config.yaml)",
+        help="Path to configuration file (default: .github/dependency-extraction/config.yaml)",
     )
     parser.add_argument(
         "--strict",
@@ -2432,13 +2407,6 @@ def main():
 
     # Write CSV
     extractor.write_csv(output_path)
-
-    # Write unversioned report if requested
-    if args.report_unversioned:
-        unversioned_path = (
-            output_path.parent / f"{output_path.stem}_unversioned{output_path.suffix}"
-        )
-        extractor.write_unversioned_report(unversioned_path)
 
     # Write removed dependencies report if requested
     if args.report_removed:

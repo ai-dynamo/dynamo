@@ -20,10 +20,19 @@ inputs:
     description: 'Python version to use'
     required: false
     default: '3.12'
+  fetch-depth:
+    description: 'Depth for git checkout (0 for full history, 1 for shallow)'
+    required: false
+    default: '0'
 
 runs:
   using: "composite"
   steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: ${{ inputs.fetch-depth }}
+
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
@@ -32,4 +41,8 @@ runs:
     - name: Install dependencies
       shell: bash
       run: pip install pyyaml
+
+    - name: Create reports directory
+      shell: bash
+      run: mkdir -p .github/reports
 

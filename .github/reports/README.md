@@ -72,7 +72,7 @@ Critical dependencies are flagged in the CSV to highlight components that requir
 - Production stability
 - Compliance requirements
 
-The list of critical dependencies is **explicitly maintained** in `../workflows/extract_dependency_versions_config.yaml` under the `critical_dependencies` section. Only dependencies listed in this configuration file are marked as critical. Examples include:
+The list of critical dependencies is **explicitly maintained** in `../dependency-extraction/config.yaml` under the `critical_dependencies` section. Only dependencies listed in this configuration file are marked as critical. Examples include:
 - CUDA (compute platform)
 - PyTorch (ML framework)
 - TensorRT-LLM (inference framework)
@@ -128,6 +128,5 @@ python3 .github/workflows/extract_dependency_versions.py --help
 ## Links
 
 - 🤖 [Extraction Script](../workflows/extract_dependency_versions.py)
-- ⚙️ [Configuration](../workflows/extract_dependency_versions_config.yaml)
-- 📋 [Nightly Workflow](../workflows/dependency-extraction-nightly.yml)
-- 📸 [Release Workflow](../workflows/dependency-extraction-release.yml)
+- ⚙️ [Configuration](../dependency-extraction/config.yaml)
+- 🔄 [Unified Workflow](../workflows/dependency-extraction.yml) (handles both nightly and release)
