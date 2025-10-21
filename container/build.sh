@@ -165,20 +165,6 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
-        --use-default-experimental-tensorrtllm-commit)
-            if [ -n "$2" ] && [[ "$2" != --* ]]; then
-                echo "ERROR: --use-default-experimental-tensorrtllm-commit does not take any argument"
-                exit 1
-            fi
-            USE_DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT=true
-            ;;
-        --trtllm-use-nixl-kvcache-experimental)
-            if [ -n "$2" ] && [[ "$2" != --* ]]; then
-                echo "ERROR: --trtllm-use-nixl-kvcache-experimental does not take any argument"
-                exit 1
-            fi
-            TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="1"
-            ;;
         --tensorrtllm-pip-wheel)
             if [ "$2" ]; then
                 TENSORRTLLM_PIP_WHEEL=$2
@@ -270,6 +256,7 @@ get_options() {
             ;;
         --dry-run)
             RUN_PREFIX="echo"
+            DRY_RUN="true"
             echo ""
             echo "=============================="
             echo "DRY RUN: COMMANDS PRINTED ONLY"
@@ -476,8 +463,7 @@ show_help() {
     echo "  [--release-build perform a release build]"
     echo "  [--make-efa Enables EFA support for NIXL]"
     echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
-    echo "  [--trtllm-use-nixl-kvcache-experimental Enables NIXL KVCACHE experimental support for TensorRT-LLM]"
-    echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
+    echo "  [--use-sccache enause-default-experimental-tensorrtllm-commitble sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
     echo ""
@@ -647,7 +633,61 @@ check_wheel_file() {
     fi
 }
 
+function determine_user_intention_trtllm() {
+    # The following options are grouped to be mutually exclusive.
+    # This function determines if the flags set are can be interpreted
+    # without ambiguity.
+    # The three different methods of installing TRTLLM with build.sh are:
+    # 1. Download
+    # --tensorrtllm-index-url
+    # --tensorrtllm-pip-wheel
+    #
+    # 2. Install from pre-built
+    # --tensorrtllm-pip-wheel-dir
+    #
+    # 3. Build from source
+    # --tensorrtllm-commit
+    # --tensorrtllm-git-url
+
+    local intention_download="false"
+    local intention_install="false"
+    local intention_build="false"
+    local intention_count=0
+
+    if [[ -n "$TENSORRTLLM_INDEX_URL" ]] && [[ -n "$TENSORRTLLM_PIP_WHEEL" ]]; then
+        intention_download="true";
+        intention_count=$((intention_count+=1));
+    fi
+    echo "  Intent to Download TRTLLM: $intention_download"
+
+    if [[ -n "$TENSORRTLLM_PIP_WHEEL_DIR" ]]; then
+        intention_install="true";
+        intention_count=$((intention_count+=1));
+    fi
+    echo "  Intent to Install TRTLLM: $intention_install"
+
+    if [[ -n "$TENSORRTLLM_COMMIT" ]] && [[ -n "$TENSORRTLLM_GIT_URL" ]]; then
+        intention_build="true";
+        intention_count=$((intention_count+=1));
+    fi
+    echo "  Intent to Build TRTLLM: $intention_build"
+
+    if [[ ! "$intention_count" -eq 1 ]]; then
+        echo -e "[ERROR] Could not figure out the trtllm installation intent from the current flags. Please check your build.sh command against the following"
+        echo -e "  The grouped flags are mutually exclusive:"
+        echo -e "  To download and install use both: --tensorrtllm-index-url, --tensorrtllm-pip-wheel"
+        echo -e "  To install from a pre-built wheel use: --tensorrtllm-pip-wheel-dir"
+        echo -e "  To build from source and install use both: --tensorrtllm-commit, --tensorrtllm-git-url"
+        exit 1
+    fi
+}
+
+
 if [[ $FRAMEWORK == "TRTLLM" ]]; then
+    echo -e "Determining the user's TRTLLM installation intent..."
+    determine_user_intention_trtllm
+
+
     BUILD_ARGS+=" --build-arg GITHUB_TRTLLM_COMMIT=${TRTLLM_COMMIT}"
     if [ "$USE_DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT" = true ]; then
         if [ -n "$TRTLLM_COMMIT" ] || [ -n "$TENSORRTLLM_PIP_WHEEL" ]; then
@@ -655,15 +695,6 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
             exit 1
         fi
         TRTLLM_COMMIT="$DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT"
-    fi
-
-    if [ -n "${TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL}" ]; then
-        BUILD_ARGS+=" --build-arg TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL=${TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL} "
-    fi
-
-    # If user didn't set both wheel and commit, use default tensorrt_llm pip wheel
-    if [ -z "$TENSORRTLLM_PIP_WHEEL" ] && [ -z "$TRTLLM_COMMIT" ]; then
-        TENSORRTLLM_PIP_WHEEL="$DEFAULT_TENSORRTLLM_PIP_WHEEL"
     fi
 
     if [ -z "${TENSORRTLLM_PIP_WHEEL}" ]; then
@@ -676,12 +707,14 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
         echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL_DIR}"
         if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}" "${ARCH}_${TRTLLM_COMMIT}"; then
             echo "WARN: Valid trtllm wheel file not found in ${TENSORRTLLM_PIP_WHEEL_DIR}, attempting to build from source"
-            GIT_URL_ARG=""
-            if [ -n "${TRTLLM_GIT_URL}" ]; then
-                GIT_URL_ARG="-u ${TRTLLM_GIT_URL}"
-            fi
-            if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH} -n ${NIXL_REF} ${GIT_URL_ARG}; then
-                error "ERROR: Failed to build TensorRT-LLM wheel"
+            if [ -z $DRY_RUN ]; then
+                GIT_URL_ARG=""
+                if [ -n "${TRTLLM_GIT_URL}" ]; then
+                    GIT_URL_ARG="-u ${TRTLLM_GIT_URL}"
+                fi
+                if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH} -n ${NIXL_REF} ${GIT_URL_ARG}; then
+                    error "ERROR: Failed to build TensorRT-LLM wheel"
+                fi
             fi
         fi
         echo "Installing TensorRT-LLM from local wheel directory"
