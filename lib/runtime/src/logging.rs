@@ -33,6 +33,7 @@ use figment::{
     Figment,
     providers::{Format, Serialized, Toml},
 };
+use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use tracing::level_filters::LevelFilter;
 use tracing::{Event, Subscriber};
@@ -113,6 +114,10 @@ const DEFAULT_OTEL_SERVICE_NAME: &str = "dynamo";
 
 /// Once instance to ensure the logger is only initialized once
 static INIT: Once = Once::new();
+
+/// Static runtime for OTLP exports and other async logging tasks
+/// Only created if needed (when OTLP export is enabled and no runtime exists)
+static LOGGING_RT: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
 
 #[derive(Serialize, Deserialize, Debug)]
 struct LoggingConfig {
@@ -704,12 +709,48 @@ pub fn get_distributed_tracing_context() -> Option<DistributedTraceContext> {
         .flatten()
 }
 
-/// Initialize the logger - must be called when Tokio runtime is available
+/// Initialize the logger.
+///
+/// This function is safe to call from any context. If OTLP exports are enabled,
+/// it will ensure a Tokio runtime is available (using an existing one or creating
+/// a dedicated static runtime). If exports are disabled, no runtime is needed.
 pub fn init() {
     INIT.call_once(|| {
-        if let Err(e) = setup_logging() {
-            eprintln!("Failed to initialize logging: {}", e);
-            std::process::exit(1);
+        // Check if we need a runtime (only for OTLP exports)
+        let needs_runtime = jsonl_logging_enabled() && otlp_exporter_enabled();
+
+        if needs_runtime {
+            // Ensure we're in a tokio runtime context for OTLP exporter initialization
+            if tokio::runtime::Handle::try_current().is_ok() {
+                // Already in a runtime, use it
+                if let Err(e) = setup_logging() {
+                    eprintln!("Failed to initialize logging: {}", e);
+                    std::process::exit(1);
+                }
+            } else {
+                // No runtime available, create a dedicated one for logging
+                let rt = LOGGING_RT.get_or_init(|| {
+                    tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(1)
+                        .thread_name("dynamo-logging")
+                        .enable_all()
+                        .build()
+                        .expect("Failed to create logging runtime")
+                });
+
+                // Enter the runtime context and initialize logging
+                let _guard = rt.enter();
+                if let Err(e) = setup_logging() {
+                    eprintln!("Failed to initialize logging: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            // No runtime needed - just basic logging
+            if let Err(e) = setup_logging() {
+                eprintln!("Failed to initialize logging: {}", e);
+                std::process::exit(1);
+            }
         }
     });
 }

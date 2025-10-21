@@ -118,6 +118,9 @@ fn create_request_context(
 /// import the module.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Initialize logging early - it will create its own runtime if needed
+    rs::logging::init();
+
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
@@ -422,12 +425,6 @@ impl DistributedRuntime {
         .map_err(to_pyerr)?;
 
         let runtime = worker.runtime().clone();
-
-        // Initialize logging in context where tokio runtime is available
-        // otel exporter requires it
-        runtime.secondary().block_on(async {
-            rs::logging::init();
-        });
 
         let inner =
             if is_static {
