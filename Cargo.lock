@@ -2160,6 +2160,8 @@ dependencies = [
  "galil-seiferas",
  "hf-hub",
  "humantime",
+ "hyper 1.7.0",
+ "hyper-util",
  "insta",
  "itertools 0.14.0",
  "json-five",

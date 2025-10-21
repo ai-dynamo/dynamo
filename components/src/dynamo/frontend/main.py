@@ -118,6 +118,12 @@ def parse_args():
         help="TLS certificate key path, PEM format.",
     )
     parser.add_argument(
+        "--enable-http2",
+        action="store_true",
+        default=False,
+        help="Enable HTTP/2 cleartext (h2c) without TLS.",
+    )
+    parser.add_argument(
         "--router-mode",
         type=str,
         choices=["round-robin", "random", "kv"],
@@ -299,6 +305,8 @@ async def async_main():
         kwargs["tls_cert_path"] = flags.tls_cert_path
     if flags.tls_key_path:
         kwargs["tls_key_path"] = flags.tls_key_path
+    if flags.enable_http2:
+        kwargs["enable_http2"] = flags.enable_http2
     if flags.namespace:
         kwargs["namespace"] = flags.namespace
     if flags.custom_backend_metrics_endpoint:

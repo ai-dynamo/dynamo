@@ -45,6 +45,7 @@ pub struct LocalModelBuilder {
     kv_cache_block_size: u32,
     http_host: Option<String>,
     http_port: u16,
+    enable_http2: bool,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     migration_limit: u32,
@@ -64,6 +65,7 @@ impl Default for LocalModelBuilder {
             kv_cache_block_size: DEFAULT_KV_CACHE_BLOCK_SIZE,
             http_host: Default::default(),
             http_port: DEFAULT_HTTP_PORT,
+            enable_http2: false,
             tls_cert_path: Default::default(),
             tls_key_path: Default::default(),
             model_path: Default::default(),
@@ -120,6 +122,11 @@ impl LocalModelBuilder {
 
     pub fn http_port(&mut self, port: u16) -> &mut Self {
         self.http_port = port;
+        self
+    }
+
+    pub fn enable_http2(&mut self, enable: bool) -> &mut Self {
+        self.enable_http2 = enable;
         self
     }
 
@@ -242,6 +249,7 @@ impl LocalModelBuilder {
                 template,
                 http_host: self.http_host.take(),
                 http_port: self.http_port,
+                enable_http2: self.enable_http2,
                 tls_cert_path: self.tls_cert_path.take(),
                 tls_key_path: self.tls_key_path.take(),
                 router_config: self.router_config.take().unwrap_or_default(),
@@ -292,6 +300,7 @@ impl LocalModelBuilder {
             template,
             http_host: self.http_host.take(),
             http_port: self.http_port,
+            enable_http2: self.enable_http2,
             tls_cert_path: self.tls_cert_path.take(),
             tls_key_path: self.tls_key_path.take(),
             router_config: self.router_config.take().unwrap_or_default(),
@@ -311,6 +320,7 @@ pub struct LocalModel {
     template: Option<RequestTemplate>,
     http_host: Option<String>,
     http_port: u16,
+    enable_http2: bool,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     router_config: RouterConfig,
@@ -359,6 +369,10 @@ impl LocalModel {
 
     pub fn http_port(&self) -> u16 {
         self.http_port
+    }
+
+    pub fn enable_http2(&self) -> bool {
+        self.enable_http2
     }
 
     pub fn tls_cert_path(&self) -> Option<&Path> {

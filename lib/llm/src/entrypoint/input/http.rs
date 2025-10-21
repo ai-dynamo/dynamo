@@ -38,7 +38,13 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 .tls_key_path(Some(tls_key_path.to_path_buf()))
                 .port(local_model.http_port())
         }
-        (None, None) => service_v2::HttpService::builder().port(local_model.http_port()),
+        (None, None) => {
+            let mut builder = service_v2::HttpService::builder().port(local_model.http_port());
+            if local_model.enable_http2() {
+                builder = builder.enable_http2(true);
+            }
+            builder
+        }
         (_, _) => {
             // CLI should prevent us ever getting here
             anyhow::bail!(

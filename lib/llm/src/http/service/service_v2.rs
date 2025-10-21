@@ -28,6 +28,9 @@ use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as Http2Builder;
+use hyper_util::service::TowerToHyperService;
 
 /// HTTP service shared state
 pub struct State {
@@ -140,6 +143,7 @@ pub struct HttpService {
     port: u16,
     host: String,
     enable_tls: bool,
+    enable_http2: bool,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     route_docs: Vec<RouteDoc>,
@@ -162,6 +166,9 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "false")]
     enable_tls: bool,
+
+    #[builder(default = "false")]
+    enable_http2: bool,
 
     #[builder(default = "None")]
     tls_cert_path: Option<PathBuf>,
@@ -221,7 +228,13 @@ impl HttpService {
 
     pub async fn run(&self, cancel_token: CancellationToken) -> Result<()> {
         let address = format!("{}:{}", self.host, self.port);
-        let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
+        let protocol = if self.enable_tls {
+            "HTTPS"
+        } else if self.enable_http2 {
+            "HTTP/2"
+        } else {
+            "HTTP"
+        };
         tracing::info!(protocol, address, "Starting HTTP(S) service");
 
         let router = self.router.clone();
@@ -264,6 +277,71 @@ impl HttpService {
                     tracing::info!("HTTPS server shutdown requested");
                     handle.graceful_shutdown(Some(Duration::from_secs(5)));
                     // TODO: Do we need to wait?
+                }
+            }
+        } else if self.enable_http2 {
+            // HTTP/2 cleartext (h2c) server using hyper-util
+            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                tracing::error!(
+                    protocol = %protocol,
+                    address = %address,
+                    error = %e,
+                    "Failed to bind server to address"
+                );
+                match e.kind() {
+                    std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
+                        "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
+                        protocol,
+                        self.port
+                    ),
+                    _ => anyhow::anyhow!(
+                        "Failed to start {} server on {}: {}",
+                        protocol,
+                        address,
+                        e
+                    ),
+                }
+            })?;
+
+            loop {
+                tokio::select! {
+                    accept_result = listener.accept() => {
+                        match accept_result {
+                            Ok((stream, _addr)) => {
+                                let router_clone = router.clone();
+                                let cancel_clone = observer.clone();
+
+                                tokio::spawn(async move {
+                                    // Create HTTP/2 connection builder with prior knowledge
+                                    let http2_builder = Http2Builder::new(TokioExecutor::new());
+
+                                    let io = TokioIo::new(stream);
+                                    let tower_service = router_clone.into_service();
+
+                                    // Wrap Tower service for Hyper compatibility
+                                    let hyper_service = TowerToHyperService::new(tower_service);
+
+                                    tokio::select! {
+                                        result = http2_builder.serve_connection(io, hyper_service) => {
+                                            if let Err(e) = result {
+                                                tracing::debug!("HTTP/2 connection error: {}", e);
+                                            }
+                                        }
+                                        _ = cancel_clone.cancelled() => {
+                                            tracing::trace!("HTTP/2 connection cancelled");
+                                        }
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to accept connection: {}", e);
+                            }
+                        }
+                    }
+                    _ = observer.cancelled() => {
+                        tracing::info!("HTTP/2 server shutdown requested");
+                        break;
+                    }
                 }
             }
         } else {
@@ -407,6 +485,7 @@ impl HttpServiceConfigBuilder {
             port: config.port,
             host: config.host,
             enable_tls: config.enable_tls,
+            enable_http2: config.enable_http2,
             tls_cert_path: config.tls_cert_path,
             tls_key_path: config.tls_key_path,
             route_docs: all_docs,
@@ -424,6 +503,11 @@ impl HttpServiceConfigBuilder {
 
     pub fn with_etcd_client(mut self, etcd_client: Option<etcd::Client>) -> Self {
         self.etcd_client = Some(etcd_client);
+        self
+    }
+
+    pub fn enable_http2(mut self) -> Self {
+        self.enable_http2 = Some(true);
         self
     }
 
