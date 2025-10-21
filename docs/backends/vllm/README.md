@@ -38,9 +38,9 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**Disaggregated Serving**](../../../docs/architecture/disagg_serving.md) | ✅ |  |
 | [**Conditional Disaggregation**](../../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP |
 | [**KV-Aware Routing**](../../../docs/architecture/kv_cache_routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | ✅ |  |
-| [**Load Based Planner**](../../../docs/architecture/load_planner.md) | 🚧 | WIP |
-| [**KVBM**](../../../docs/architecture/kvbm_architecture.md) | ✅ |  |
+| [**SLA-Based Planner**](../../../docs/planner/sla_planner.md) | ✅ |  |
+| [**Load Based Planner**](../../../docs/planner/load_planner.md) | 🚧 | WIP |
+| [**KVBM**](../../../docs/kvbm/kvbm_architecture.md) | ✅ |  |
 | [**LMCache**](./LMCache_Integration.md) | ✅ |  |
 
 ### Large Scale P/D and WideEP Features
@@ -189,3 +189,16 @@ python3 -m dynamo.vllm ... --migration-limit=3
 ```
 
 This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../../../docs/architecture/request_migration.md) documentation for details on how this works.
+
+## Request Cancellation
+
+When a user cancels a request (e.g., by disconnecting from the frontend), the request is automatically cancelled across all workers, freeing compute resources for other requests.
+
+### Cancellation Support Matrix
+
+| | Prefill | Decode |
+|-|---------|--------|
+| **Aggregated** | ✅ | ✅ |
+| **Disaggregated** | ✅ | ✅ |
+
+For more details, see the [Request Cancellation Architecture](../../../docs/architecture/request_cancellation.md) documentation.

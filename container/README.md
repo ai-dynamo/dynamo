@@ -86,7 +86,7 @@ run.sh ...
 
 ### 2. local-dev + `run.sh` (runs as the local user):
 ```bash
-run.sh --mount-workspace --image dynamo:latest-vllm-local-dev ...
+run.sh --mount-workspace -it --image dynamo:latest-vllm-local-dev ...
 ```
 
 ### 3. local-dev + Dev Container Extension:
@@ -177,22 +177,22 @@ The `run.sh` script launches Docker containers with the appropriate configuratio
 ./run.sh --image dynamo:latest-vllm -v $HOME/.cache:/home/ubuntu/.cache
 
 # Mount workspace for development (use local-dev image for local host user permissions)
-./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache
+./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -it -v $HOME/.cache:/home/ubuntu/.cache
 
 # Use specific image and framework for development
-./run.sh --image v0.1.0.dev.08cc44965-vllm-local-dev --framework vllm --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache
+./run.sh --image v0.1.0.dev.08cc44965-vllm-local-dev --framework vllm --mount-workspace -it -v $HOME/.cache:/home/ubuntu/.cache
 
 # Interactive development shell with workspace mounted
 ./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache -it -- bash
 
 # Development with custom environment variables
-./run.sh --image dynamo:latest-vllm-local-dev -e CUDA_VISIBLE_DEVICES=0,1 --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache
+./run.sh --image dynamo:latest-vllm-local-dev -e CUDA_VISIBLE_DEVICES=0,1 --mount-workspace -it -v $HOME/.cache:/home/ubuntu/.cache
 
 # Dry run to see docker command
 ./run.sh --dry-run
 
 # Development with custom volume mounts
-./run.sh --image dynamo:latest-vllm-local-dev -v /host/path:/container/path --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache
+./run.sh --image dynamo:latest-vllm-local-dev -v /host/path:/container/path --mount-workspace -it -v $HOME/.cache:/home/ubuntu/.cache
 ```
 
 ### Network Configuration Options
@@ -216,7 +216,7 @@ The `run.sh` script supports different networking modes via the `--network` flag
 #### Bridge Networking (Isolated)
 ```bash
 # CI/testing with isolated bridge networking and host cache sharing
-./run.sh --image dynamo:latest-vllm --mount-workspace --network bridge -v $HOME/.cache:/home/ubuntu/.cache
+./run.sh --image dynamo:latest-vllm --mount-workspace -it --network bridge -v $HOME/.cache:/home/ubuntu/.cache
 ```
 **Use cases:**
 - Secure isolation from host network
@@ -229,10 +229,10 @@ The `run.sh` script supports different networking modes via the `--network` flag
 #### No Networking ⚠️ **LIMITED FUNCTIONALITY**
 ```bash
 # Complete network isolation - no external connectivity
-./run.sh --image dynamo:latest-vllm --network none --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache
+./run.sh --image dynamo:latest-vllm --network none --mount-workspace -it -v $HOME/.cache:/home/ubuntu/.cache
 
 # Same with local user permissions
-./run.sh --image dynamo:latest-vllm-local-dev --network none --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache
+./run.sh --image dynamo:latest-vllm-local-dev --network none --mount-workspace -it -v $HOME/.cache:/home/ubuntu/.cache
 ```
 **⚠️ WARNING: `--network none` severely limits Dynamo functionality:**
 - **No model downloads** - HuggingFace models cannot be downloaded
@@ -307,7 +307,7 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 &
 ./build.sh --framework vllm --no-cache
 
 # 2. Run tests with network isolation for reproducible results
-./run.sh --image dynamo:latest-vllm --mount-workspace --network bridge -v $HOME/.cache:/home/ubuntu/.cache -- python -m pytest tests/
+./run.sh --image dynamo:latest-vllm --mount-workspace -it --network bridge -v $HOME/.cache:/home/ubuntu/.cache -- python -m pytest tests/
 
 # 3. Inside the container with bridge networking, start services
 # Note: Services are only accessible from the same container - no port conflicts with host

@@ -20,7 +20,7 @@ use dynamo_runtime::{
 use crate::{
     backend::Backend,
     entrypoint,
-    kv_router::KvRouterConfig,
+    kv_router::{KvRouterConfig, PrefillRouter},
     model_card::{self, ModelDeploymentCard},
     model_type::{ModelInput, ModelType},
     preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::PromptFormatter},
@@ -61,6 +61,7 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Completions,
     ModelType::Embedding,
     ModelType::TensorBased,
+    ModelType::Prefill,
 ];
 
 impl ModelWatcher {
@@ -246,11 +247,13 @@ impl ModelWatcher {
         let completions_model_remove_err = self.manager.remove_completions_model(&model_name);
         let embeddings_model_remove_err = self.manager.remove_embeddings_model(&model_name);
         let tensor_model_remove_err = self.manager.remove_tensor_model(&model_name);
+        let prefill_model_remove_err = self.manager.remove_prefill_model(&model_name);
 
         let mut chat_model_removed = false;
         let mut completions_model_removed = false;
         let mut embeddings_model_removed = false;
         let mut tensor_model_removed = false;
+        let mut prefill_model_removed = false;
 
         if chat_model_remove_err.is_ok() && self.manager.list_chat_completions_models().is_empty() {
             chat_model_removed = true;
@@ -265,26 +268,32 @@ impl ModelWatcher {
         if tensor_model_remove_err.is_ok() && self.manager.list_tensor_models().is_empty() {
             tensor_model_removed = true;
         }
+        if prefill_model_remove_err.is_ok() && self.manager.list_prefill_models().is_empty() {
+            prefill_model_removed = true;
+        }
 
         if !chat_model_removed
             && !completions_model_removed
             && !embeddings_model_removed
             && !tensor_model_removed
+            && !prefill_model_removed
         {
             tracing::debug!(
-                "No updates to send for model {}: chat_model_removed: {}, completions_model_removed: {}, embeddings_model_removed: {}, tensor_model_removed: {}",
+                "No updates to send for model {}: chat_model_removed: {}, completions_model_removed: {}, embeddings_model_removed: {}, tensor_model_removed: {}, prefill_model_removed: {}",
                 model_name,
                 chat_model_removed,
                 completions_model_removed,
                 embeddings_model_removed,
-                tensor_model_removed
+                tensor_model_removed,
+                prefill_model_removed
             );
         } else {
             for model_type in ALL_MODEL_TYPES {
                 if ((chat_model_removed && *model_type == ModelType::Chat)
                     || (completions_model_removed && *model_type == ModelType::Completions)
                     || (embeddings_model_removed && *model_type == ModelType::Embedding)
-                    || (tensor_model_removed && *model_type == ModelType::TensorBased))
+                    || (tensor_model_removed && *model_type == ModelType::TensorBased)
+                    || (prefill_model_removed && *model_type == ModelType::Prefill))
                     && let Some(tx) = &self.model_update_tx
                 {
                     tx.send(ModelUpdate::Removed(card.clone())).await.ok();
@@ -303,20 +312,32 @@ impl ModelWatcher {
         endpoint_id: &EndpointId,
         card: &mut ModelDeploymentCard,
     ) -> anyhow::Result<()> {
-        card.move_from_nats(self.drt.nats_client()).await?;
+        card.download_config().await?;
+
         let component = self
             .drt
             .namespace(&endpoint_id.namespace)?
             .component(&endpoint_id.component)?;
-        let client = component.endpoint(&endpoint_id.name).client().await?;
+        let endpoint = component.endpoint(&endpoint_id.name);
+        let client = endpoint.client().await?;
         tracing::debug!(model_name = card.name(), "adding model");
         self.manager.save_model_card(key, card.clone())?;
 
-        if self.manager.has_model_any(card.name()) {
+        // Check if we should skip registration:
+        // - Skip if a model with this name already exists
+        // - UNLESS this is a prefill model and no prefill model exists yet for this name
+        let is_new_prefill = card.model_type.supports_prefill()
+            && !self
+                .manager
+                .list_prefill_models()
+                .contains(&card.name().to_string());
+
+        if self.manager.has_model_any(card.name()) && !is_new_prefill {
             tracing::debug!(
                 model_name = card.name(),
                 namespace = endpoint_id.namespace,
-                "New endpoint for existing model"
+                model_type = %card.model_type,
+                "New endpoint for existing model, skipping"
             );
             return Ok(());
         }
@@ -336,12 +357,7 @@ impl ModelWatcher {
             let kv_chooser = if self.router_mode == RouterMode::KV {
                 Some(
                     self.manager
-                        .kv_chooser_for(
-                            card.name(),
-                            &component,
-                            card.kv_cache_block_size,
-                            self.kv_router_config,
-                        )
+                        .kv_chooser_for(&component, card.kv_cache_block_size, self.kv_router_config)
                         .await?,
                 )
             } else {
@@ -350,6 +366,25 @@ impl ModelWatcher {
 
             // This is expensive, we are loading ~10MiB JSON, so only do it once
             let tokenizer_hf = card.tokenizer_hf().context("tokenizer_hf")?;
+
+            // Create prefill chooser once if we're building pipelines
+            // Both chat and completions will share the same prefill chooser instance
+            let prefill_chooser = self
+                .manager
+                .register_prefill_router(card.name().to_string())
+                .map(|rx| {
+                    // Create prefill-specific config with track_active_blocks disabled
+                    let mut prefill_config = self.kv_router_config.unwrap_or_default();
+                    prefill_config.router_track_active_blocks = false;
+
+                    PrefillRouter::new(
+                        rx,
+                        self.manager.clone(),
+                        self.router_mode,
+                        card.kv_cache_block_size,
+                        Some(prefill_config),
+                    )
+                });
 
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
@@ -363,6 +398,7 @@ impl ModelWatcher {
                     self.busy_threshold,
                     kv_chooser.clone(),
                     tokenizer_hf.clone(),
+                    prefill_chooser.clone(),
                 )
                 .await
                 .context("build_routed_pipeline")?;
@@ -393,6 +429,7 @@ impl ModelWatcher {
                     kv_chooser,
                     preprocessor,
                     tokenizer_hf,
+                    prefill_chooser,
                 )
                 .await
                 .context("build_routed_pipeline_with_preprocessor")?;
@@ -407,7 +444,7 @@ impl ModelWatcher {
                 NvCreateEmbeddingRequest,
                 Annotated<NvCreateEmbeddingResponse>,
             >::from_client_with_threshold(
-                client, self.router_mode, self.busy_threshold
+                client, self.router_mode, None, None
             )
             .await?;
             let engine = Arc::new(push_router);
@@ -415,13 +452,12 @@ impl ModelWatcher {
                 .add_embeddings_model(card.name(), checksum, engine)?;
         } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
             // Case 3: Text + Chat
-            let push_router = PushRouter::<
-                NvCreateChatCompletionRequest,
-                Annotated<NvCreateChatCompletionStreamResponse>,
-            >::from_client_with_threshold(
-                client, self.router_mode, self.busy_threshold
-            )
-            .await?;
+            let push_router =
+                PushRouter::<
+                    NvCreateChatCompletionRequest,
+                    Annotated<NvCreateChatCompletionStreamResponse>,
+                >::from_client_with_threshold(client, self.router_mode, None, None)
+                .await?;
             let engine = Arc::new(push_router);
             self.manager
                 .add_chat_completions_model(card.name(), checksum, engine)?;
@@ -431,7 +467,7 @@ impl ModelWatcher {
                 NvCreateCompletionRequest,
                 Annotated<NvCreateCompletionResponse>,
             >::from_client_with_threshold(
-                client, self.router_mode, self.busy_threshold
+                client, self.router_mode, None, None
             )
             .await?;
             let engine = Arc::new(push_router);
@@ -453,11 +489,11 @@ impl ModelWatcher {
                 PreprocessedEmbeddingRequest,
                 Annotated<EmbeddingsEngineOutput>,
             >::from_client_with_threshold(
-                client, self.router_mode, self.busy_threshold
+                client, self.router_mode, None, None
             )
             .await?;
 
-            // Note: Embeddings don't need KV routing complexity
+            // Note: Embeddings don't need KV routing complexity or load monitoring
             let service_backend = ServiceBackend::from_engine(Arc::new(router));
 
             // Link the pipeline: frontend -> preprocessor -> backend -> service_backend -> backend -> preprocessor -> frontend
@@ -473,21 +509,55 @@ impl ModelWatcher {
                 .add_embeddings_model(card.name(), checksum, embedding_engine)?;
         } else if card.model_input == ModelInput::Tensor && card.model_type.supports_tensor() {
             // Case 5: Tensor + Tensor (non-LLM)
+            // No KV cache concepts - not an LLM model
             let push_router = PushRouter::<
                 NvCreateTensorRequest,
                 Annotated<NvCreateTensorResponse>,
             >::from_client_with_threshold(
-                client, self.router_mode, self.busy_threshold
+                client, self.router_mode, None, None
             )
             .await?;
             let engine = Arc::new(push_router);
             self.manager
                 .add_tensor_model(card.name(), checksum, engine)?;
+        } else if card.model_type.supports_prefill() {
+            // Case 6: Prefill
+            // Guardrail: Verify model_input is Tokens
+            if card.model_input != ModelInput::Tokens {
+                anyhow::bail!(
+                    "Prefill models must use ModelInput::Tokens, got {}",
+                    card.model_input.as_str()
+                );
+            }
+
+            tracing::info!(
+                model_name = card.name(),
+                "Prefill model detected, registering and activating prefill router"
+            );
+
+            // Register prefill model for tracking (no engine needed, just lifecycle)
+            self.manager
+                .add_prefill_model(card.name(), checksum)
+                .context("add_prefill_model")?;
+
+            // Activate the prefill router with the endpoint for this prefill model
+            let Ok(()) = self.manager.activate_prefill_router(card.name(), endpoint) else {
+                tracing::warn!(
+                    model_name = card.name(),
+                    "Failed to activate prefill router - prefill model may already be activated"
+                );
+                return Ok(());
+            };
+
+            tracing::info!(
+                model_name = card.name(),
+                "Prefill model registered and router activated successfully"
+            );
         } else {
             // Reject unsupported combinations
             anyhow::bail!(
                 "Unsupported model configuration: {} with {} input. Supported combinations: \
-                Tokens+(Chat|Completions), Text+Chat, Text+Completions, Tokens+Embeddings, Tensor+TensorBased",
+                Tokens+(Chat|Completions|Prefill), Text+Chat, Text+Completions, Tokens+Embeddings, Tensor+TensorBased",
                 card.model_type,
                 card.model_input.as_str()
             );
