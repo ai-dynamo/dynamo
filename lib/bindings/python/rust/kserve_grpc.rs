@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use pyo3::prelude::*;
 use pyo3::PyErr;
+use pyo3::prelude::*;
 
 use crate::{CancellationToken, engine::*, to_pyerr};
 use serde::{Deserialize, Serialize};
@@ -137,7 +137,8 @@ impl KserveGrpcAsyncEngine {
 }
 
 #[async_trait]
-impl<Req, Resp> AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error> for KserveGrpcAsyncEngine
+impl<Req, Resp> AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error>
+    for KserveGrpcAsyncEngine
 where
     Req: Data + Serialize,
     Resp: Data + for<'de> Deserialize<'de>,
