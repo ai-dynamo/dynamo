@@ -637,6 +637,9 @@ function determine_user_intention_trtllm() {
     # The following options are grouped to be mutually exclusive.
     # This function determines if the flags set are can be interpreted
     # without ambiguity.
+    #
+    # /return: Calculated intention. One of "download", "install", "build".
+    #
     # The three different methods of installing TRTLLM with build.sh are:
     # 1. Download
     # --tensorrtllm-index-url
@@ -646,29 +649,32 @@ function determine_user_intention_trtllm() {
     # --tensorrtllm-pip-wheel-dir
     #
     # 3. Build from source
-    # --tensorrtllm-commit
     # --tensorrtllm-git-url
 
     local intention_download="false"
     local intention_install="false"
     local intention_build="false"
     local intention_count=0
+    TRTLLM_INTENTION=${TRTLLM_INTENTION}
 
     if [[ -n "$TENSORRTLLM_INDEX_URL" ]] && [[ -n "$TENSORRTLLM_PIP_WHEEL" ]]; then
         intention_download="true";
         intention_count=$((intention_count+=1));
+        TRTLLM_INTENTION="download"
     fi
     echo "  Intent to Download TRTLLM: $intention_download"
 
     if [[ -n "$TENSORRTLLM_PIP_WHEEL_DIR" ]]; then
         intention_install="true";
         intention_count=$((intention_count+=1));
+        TRTLLM_INTENTION="install"
     fi
     echo "  Intent to Install TRTLLM: $intention_install"
 
-    if [[ -n "$TENSORRTLLM_COMMIT" ]] && [[ -n "$TENSORRTLLM_GIT_URL" ]]; then
+    if [[ -n "$TRTLLM_GIT_URL" ]]; then
         intention_build="true";
         intention_count=$((intention_count+=1));
+        TRTLLM_INTENTION="build"
     fi
     echo "  Intent to Build TRTLLM: $intention_build"
 
@@ -685,42 +691,18 @@ function determine_user_intention_trtllm() {
 
 if [[ $FRAMEWORK == "TRTLLM" ]]; then
     echo -e "Determining the user's TRTLLM installation intent..."
-    determine_user_intention_trtllm
+    determine_user_intention_trtllm   # From this point forward, can assume correct TRTLLM flags
 
-
-    BUILD_ARGS+=" --build-arg GITHUB_TRTLLM_COMMIT=${TRTLLM_COMMIT}"
-    if [ "$USE_DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT" = true ]; then
-        if [ -n "$TRTLLM_COMMIT" ] || [ -n "$TENSORRTLLM_PIP_WHEEL" ]; then
-            echo "ERROR: When using --use-default-experimental-trtllm-commit, do not set --tensorrtllm-commit or --tensorrtllm-pip-wheel."
-            exit 1
-        fi
-        TRTLLM_COMMIT="$DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT"
+    # Need to know the commit of TRTLLM so we can determine the
+    # TensorRT installation associated with TRTLLM. This cannot be
+    # inferred from the wheel.
+    if [[ -n "$TRTLLM_COMMIT" ]]; then
+        echo -e "[ERROR] TRTLLM framework was set as a target but the TRTLLM_COMMIT variable was not set. This variable is needed to install the correct version of TensorRT associated with TensorRT-LLM"
+        exit 1
     fi
 
-    if [ -z "${TENSORRTLLM_PIP_WHEEL}" ]; then
-        # Use option 1
-        if [ ! -d "${TENSORRTLLM_PIP_WHEEL_DIR}" ]; then
-            # Create the directory if it doesn't exist
-            mkdir -p ${TENSORRTLLM_PIP_WHEEL_DIR}
-        fi
-        BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=1"
-        echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL_DIR}"
-        if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}" "${ARCH}_${TRTLLM_COMMIT}"; then
-            echo "WARN: Valid trtllm wheel file not found in ${TENSORRTLLM_PIP_WHEEL_DIR}, attempting to build from source"
-            if [ -z $DRY_RUN ]; then
-                GIT_URL_ARG=""
-                if [ -n "${TRTLLM_GIT_URL}" ]; then
-                    GIT_URL_ARG="-u ${TRTLLM_GIT_URL}"
-                fi
-                if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH} -n ${NIXL_REF} ${GIT_URL_ARG}; then
-                    error "ERROR: Failed to build TensorRT-LLM wheel"
-                fi
-            fi
-        fi
-        echo "Installing TensorRT-LLM from local wheel directory"
-        BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=${TENSORRTLLM_PIP_WHEEL_DIR}"
-
-    else
+    BUILD_ARGS+=" --build-arg GITHUB_TRTLLM_COMMIT=${TRTLLM_COMMIT}"
+    if [[ "$TRTLLM_INTENTION" == "download" ]]; then
         BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=0"
         BUILD_ARGS+=" --build-arg TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL}"
         BUILD_ARGS+=" --build-arg TENSORRTLLM_INDEX_URL=${TENSORRTLLM_INDEX_URL}"
@@ -729,6 +711,31 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
         # There is no way to conditionally copy the build context in dockerfile.
         mkdir -p /tmp/dummy_dir
         BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=/tmp/dummy_dir"
+    elif [[ "$TRTLLM_INTENTION" == "install" ]]; then
+        echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL_DIR}"
+        echo "Installing TensorRT-LLM from local wheel directory"
+        if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}" "${ARCH}_${TRTLLM_COMMIT}"; then
+            echo "ERROR: Valid trtllm wheel file not found in ${TENSORRTLLM_PIP_WHEEL_DIR}"
+            echo "      If this is not intended you can try building from source with the following variables set instead:"
+            echo ""
+            echo "      --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM --tensorrtllm-commt $TRTLLM_COMMIT"
+            exit 1
+        fi
+        BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=1"
+        BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=${TENSORRTLLM_PIP_WHEEL_DIR}"
+    elif [[ "$TRTLLM_INTENTION" == "build" ]]; then
+        if [ -z $DRY_RUN ]; then
+            GIT_URL_ARG=""
+            if [ -n "${TRTLLM_GIT_URL}" ]; then
+                GIT_URL_ARG="-u ${TRTLLM_GIT_URL}"
+            fi
+            if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH} -n ${NIXL_REF} ${GIT_URL_ARG}; then
+                error "ERROR: Failed to build TensorRT-LLM wheel"
+            fi
+        fi
+    else
+        echo 'No intention was set. This error should have been detected in "determine_user_intention_trtllm()". Exiting...'
+        exit 1
     fi
 fi
 
