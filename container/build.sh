@@ -639,6 +639,23 @@ function determine_user_intention_trtllm() {
     local intention_count=0
     TRTLLM_INTENTION=${TRTLLM_INTENTION}
 
+    # Install from pre-built
+    if [[ -n "$TENSORRTLLM_PIP_WHEEL_DIR" ]]; then
+        intention_install="true";
+        intention_count=$((intention_count+1))
+        TRTLLM_INTENTION="install"
+    fi
+    echo "  Intent to Install TRTLLM: $intention_install"
+
+    # Build from source
+    if [[ -n "$TRTLLM_GIT_URL" ]]; then
+        intention_build="true";
+        intention_count=$((intention_count+1))
+        TRTLLM_INTENTION="build"
+    fi
+    echo "  Intent to Build TRTLLM: $intention_build"
+
+    # Download from repository
     if [[ -n "$TENSORRTLLM_INDEX_URL" ]] && [[ -n "$TENSORRTLLM_PIP_WHEEL" ]]; then
         intention_download="true";
         intention_count=$((intention_count+1));
@@ -649,20 +666,6 @@ function determine_user_intention_trtllm() {
         TRTLLM_INTENTION="download"
         echo "INFO: Inferring download because TENSORRTLLM_PIP_WHEEL is set and TENSORRTLLM_INDEX_URL is not."
     fi
-
-    if [[ -n "$TENSORRTLLM_PIP_WHEEL_DIR" ]]; then
-        intention_install="true";
-        intention_count=$((intention_count+1))
-        TRTLLM_INTENTION="install"
-    fi
-    echo "  Intent to Install TRTLLM: $intention_install"
-
-    if [[ -n "$TRTLLM_GIT_URL" ]]; then
-        intention_build="true";
-        intention_count=$((intention_count+1))
-        TRTLLM_INTENTION="build"
-    fi
-    echo "  Intent to Build TRTLLM: $intention_build"
 
     # If nothing is set then we default to downloading the wheel
     # with the defaults sepcified at the top this file.
