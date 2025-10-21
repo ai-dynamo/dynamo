@@ -6,9 +6,11 @@ Helper functions for KV Event Consolidator configuration.
 """
 
 import logging
+import os
 from typing import Optional, Tuple
 
 import zmq
+from vllm.distributed.kv_events import ZmqEventPublisher
 
 logger = logging.getLogger(__name__)
 
@@ -17,41 +19,55 @@ def should_enable_consolidator(vllm_config) -> bool:
     """
     Determine if the KV Event Consolidator should be enabled based on vLLM config.
 
+    The consolidator can be controlled via the DYN_ENABLE_KV_CONSOLIDATOR environment variable:
+    - Set to "false", "0", "no", or "off" to disable
+    - If not set, auto-detects based on KVBM connector and prefix caching settings
+
     Args:
         vllm_config: The vLLM VllmConfig object
 
     Returns:
         True if consolidator should be enabled, False otherwise
     """
-    # Check if KVBM connector is in use
-    if not hasattr(vllm_config, "kv_transfer_config"):
+    # Check environment variable override
+    env_override = os.getenv("DYN_ENABLE_KV_CONSOLIDATOR", "true").lower()
+    if env_override in ("false", "0", "no", "off"):
+        logger.info(
+            "KV Event Consolidator disabled via DYN_ENABLE_KV_CONSOLIDATOR environment variable"
+        )
+        return False
+
+    # Auto-detection: Check if KVBM connector is in use
+    if (
+        not hasattr(vllm_config, "kv_transfer_config")
+        or vllm_config.kv_transfer_config is None
+    ):
+        logger.warning(
+            "KV Event Consolidator is not enabled due to missing kv_transfer_config"
+        )
         return False
 
     kv_transfer_config = vllm_config.kv_transfer_config
-    if not kv_transfer_config:
-        return False
 
     # Check if this is the DynamoConnector
     connector_module = getattr(kv_transfer_config, "kv_connector_module_path", None)
     if connector_module != "dynamo.llm.vllm_integration.connector":
+        logger.warning(
+            f"KV Event Consolidator is not enabled due to invalid kv_connector_module_path: {connector_module}"
+        )
         return False
 
     # Check if prefix caching is enabled (required for KV events)
     if not vllm_config.cache_config.enable_prefix_caching:
         logger.warning(
             "KVBM connector requires prefix caching to be enabled for KV event consolidation. "
-            "Skipping consolidator initialization."
+            "KV Event Consolidator is not enabled."
         )
         return False
 
-    # Check if KV events are configured
-    if not hasattr(vllm_config, "kv_events_config") or not vllm_config.kv_events_config:
-        logger.warning(
-            "KVBM connector requires kv_events_config to be set. "
-            "Skipping consolidator initialization."
-        )
-        return False
-
+    logger.info(
+        "KV Event Consolidator auto-enabled (KVBM connector + prefix caching detected)"
+    )
     return True
 
 
@@ -72,8 +88,6 @@ def get_consolidator_endpoints(vllm_config) -> Optional[Tuple[str, str, str]]:
     """
     if not should_enable_consolidator(vllm_config):
         return None
-
-    from vllm.distributed.kv_events import ZmqEventPublisher
 
     # Get vLLM's ZMQ endpoint (with data_parallel_rank offset)
     base_endpoint = vllm_config.kv_events_config.endpoint
