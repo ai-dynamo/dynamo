@@ -357,12 +357,7 @@ impl ModelWatcher {
             let kv_chooser = if self.router_mode == RouterMode::KV {
                 Some(
                     self.manager
-                        .kv_chooser_for(
-                            card.name(),
-                            &component,
-                            card.kv_cache_block_size,
-                            self.kv_router_config,
-                        )
+                        .kv_chooser_for(&component, card.kv_cache_block_size, self.kv_router_config)
                         .await?,
                 )
             } else {
@@ -383,7 +378,6 @@ impl ModelWatcher {
                     prefill_config.router_track_active_blocks = false;
 
                     PrefillRouter::new(
-                        card.name().to_string(),
                         rx,
                         self.manager.clone(),
                         card.kv_cache_block_size,

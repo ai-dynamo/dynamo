@@ -121,7 +121,6 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 Some(
                     manager
                         .kv_chooser_for(
-                            local_model.display_name(),
                             &component,
                             card.kv_cache_block_size,
                             Some(local_model.router_config().kv_router_config),

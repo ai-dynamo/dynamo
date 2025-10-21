@@ -122,7 +122,6 @@ pub async fn prepare_engine(
                 Some(
                     model_manager
                         .kv_chooser_for(
-                            local_model.display_name(),
                             &component,
                             card.kv_cache_block_size,
                             Some(local_model.router_config().kv_router_config),

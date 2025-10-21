@@ -32,7 +32,6 @@ struct NoPrefillRouter;
 /// It optionally calls a prefill worker before routing to decode, extracting disaggregated_params
 /// from the prefill response and injecting them into the decode request.
 pub struct PrefillRouter {
-    model_name: String,
     prefill_router: OnceLock<Arc<KvPushRouter>>,
     cancel_token: CancellationToken,
 }
@@ -41,14 +40,12 @@ impl PrefillRouter {
     /// Create a disabled prefill router that will never activate (passthrough only)
     pub fn disabled() -> Arc<Self> {
         Arc::new(Self {
-            model_name: String::new(),
             prefill_router: OnceLock::new(),
             cancel_token: CancellationToken::new(),
         })
     }
 
     pub fn new(
-        model_name: String,
         activation_rx: oneshot::Receiver<Endpoint>,
         model_manager: Arc<ModelManager>,
         kv_cache_block_size: u32,
@@ -58,7 +55,6 @@ impl PrefillRouter {
         let cancel_token = CancellationToken::new();
 
         let router = Arc::new(Self {
-            model_name: model_name.clone(),
             prefill_router,
             cancel_token: cancel_token.clone(),
         });
@@ -103,12 +99,7 @@ impl PrefillRouter {
 
         // Create KV chooser using the component from the endpoint
         let kv_chooser = model_manager
-            .kv_chooser_for(
-                &self.model_name,
-                endpoint.component(),
-                kv_cache_block_size,
-                kv_router_config,
-            )
+            .kv_chooser_for(endpoint.component(), kv_cache_block_size, kv_router_config)
             .await?;
 
         // Build the PushRouter for prefill

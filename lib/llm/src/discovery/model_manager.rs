@@ -55,7 +55,7 @@ pub struct ModelManager {
 
     // These are Mutex because we read and write rarely and equally
     cards: Mutex<HashMap<String, ModelDeploymentCard>>,
-    kv_choosers: Mutex<HashMap<String, Arc<KvRouter>>>,
+    kv_choosers: Mutex<HashMap<String, Arc<KvRouter>>>, // Key: component service_name
     prefill_router_activators: Mutex<HashMap<String, PrefillActivationState>>,
 }
 
@@ -300,19 +300,20 @@ impl ModelManager {
 
     pub async fn kv_chooser_for(
         &self,
-        model_name: &str,
         component: &Component,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
     ) -> anyhow::Result<Arc<KvRouter>> {
-        if let Some(kv_chooser) = self.get_kv_chooser(model_name) {
+        let service_name = component.service_name();
+
+        if let Some(kv_chooser) = self.get_kv_chooser(&service_name) {
             // Check if the existing router has a different block size
             if kv_chooser.block_size() != kv_cache_block_size {
                 tracing::warn!(
-                    model_name = %model_name,
+                    component = %service_name,
                     existing_block_size = %kv_chooser.block_size(),
                     requested_block_size = %kv_cache_block_size,
-                    "KV Router block size mismatch! Model is requesting a different kv_cache_block_size than the existing router. \
+                    "KV Router block size mismatch! Component is requesting a different kv_cache_block_size than the existing router. \
                      This will cause routing to fail silently. Consider using the same block size or restarting the router."
                 );
             }
@@ -351,12 +352,12 @@ impl ModelManager {
         let new_kv_chooser = Arc::new(chooser);
         self.kv_choosers
             .lock()
-            .insert(model_name.to_string(), new_kv_chooser.clone());
+            .insert(service_name, new_kv_chooser.clone());
         Ok(new_kv_chooser)
     }
 
-    fn get_kv_chooser(&self, model_name: &str) -> Option<Arc<KvRouter>> {
-        self.kv_choosers.lock().get(model_name).cloned()
+    fn get_kv_chooser(&self, service_name: &str) -> Option<Arc<KvRouter>> {
+        self.kv_choosers.lock().get(service_name).cloned()
     }
 
     /// Register a prefill router for a decode model. Returns a receiver that will be
