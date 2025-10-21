@@ -421,7 +421,7 @@ show_image_options() {
     echo "   Base: '${BASE_IMAGE}'"
     echo "   Base_Image_Tag: '${BASE_IMAGE_TAG}'"
     if [[ $FRAMEWORK == "TRTLLM" ]]; then
-        echo "   Tensorrtllm_Pip_Wheel: '${TENSORRTLLM_PIP_WHEEL}'"
+        echo "   Tensorrtllm_Pip_Wheel: '${PRINT_TRTLLM_WHEEL_FILE}'"
     fi
     echo "   Build Context: '${BUILD_CONTEXT}'"
     echo "   Build Arguments: '${BUILD_ARGS}'"
@@ -612,25 +612,8 @@ check_wheel_file() {
         echo "Warning: Multiple wheel files found in '$wheel_dir'. Will use first one found."
         find "$wheel_dir" -name "*.whl" | head -n 1
         return 0
-    else
-        echo "Found $wheel_count wheel files in '$wheel_dir'"
-        # Check if commit file exists
-        commit_file="$wheel_dir/commit.txt"
-        if [ ! -f "$commit_file" ]; then
-            echo "Error: Commit file '$commit_file' does not exist"
-            return 1
-        fi
-
-        # Check if commit ID matches, otherwise re-build the wheel
-        # Commit ID is of the form <arch>_<commit_id>
-        commit_id=$(cat "$commit_file")
-        if [ "$commit_id" != "$2" ]; then
-            echo "Error: Commit ID mismatch. Expected '$2', got '$commit_id'"
-            rm -rf $wheel_dir/*.whl
-            return 1
-        fi
-        return 0
     fi
+    return 0
 }
 
 function determine_user_intention_trtllm() {
@@ -696,7 +679,7 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
     # Need to know the commit of TRTLLM so we can determine the
     # TensorRT installation associated with TRTLLM. This cannot be
     # inferred from the wheel.
-    if [[ -n "$TRTLLM_COMMIT" ]]; then
+    if [[ -z "$TRTLLM_COMMIT" ]]; then
         echo -e "[ERROR] TRTLLM framework was set as a target but the TRTLLM_COMMIT variable was not set. This variable is needed to install the correct version of TensorRT associated with TensorRT-LLM"
         exit 1
     fi
@@ -711,6 +694,7 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
         # There is no way to conditionally copy the build context in dockerfile.
         mkdir -p /tmp/dummy_dir
         BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=/tmp/dummy_dir"
+        PRINT_TRTLLM_WHEEL_FILE=${TENSORRTLLM_PIP_WHEEL}
     elif [[ "$TRTLLM_INTENTION" == "install" ]]; then
         echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL_DIR}"
         echo "Installing TensorRT-LLM from local wheel directory"
@@ -723,6 +707,7 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
         fi
         BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=1"
         BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=${TENSORRTLLM_PIP_WHEEL_DIR}"
+        PRINT_TRTLLM_WHEEL_FILE=$(find $TENSORRTLLM_PIP_WHEEL_DIR -name "*.whl" | head -n 1)
     elif [[ "$TRTLLM_INTENTION" == "build" ]]; then
         if [ -z $DRY_RUN ]; then
             GIT_URL_ARG=""
