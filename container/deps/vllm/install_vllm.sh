@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-VLLM_REF="v0.11.0"
+VLLM_REF="v0.11.1rc1"
 
 # Basic Configurations
 ARCH=$(uname -m)
