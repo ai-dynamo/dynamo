@@ -76,7 +76,7 @@ jobs:
           cd deploy/cloud/operator
           docker buildx build --load \
               --platform linux/${{ matrix.platform.arch }} \
-              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/library/ \
               -f Dockerfile \
               -t dynamo-operator:latest .
       - name: Docker Tag and Push
