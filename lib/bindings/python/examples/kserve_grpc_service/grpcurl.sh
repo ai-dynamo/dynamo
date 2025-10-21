@@ -9,8 +9,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROTO_DIR="${SCRIPT_DIR}/../../../../llm/src/grpc/protos"
 
 HOST="${HOST:-127.0.0.1}"
-PORT="${PORT:-8000}"
-MODEL="openai/gpt-oss-20b"
+PORT="${PORT:-8787}"
+MODEL="mock_model"
 
 if [[ $# -gt 0 ]]; then
   PROMPTS=("$@")

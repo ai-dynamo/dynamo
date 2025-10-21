@@ -36,7 +36,7 @@ def _generate_proto_modules() -> Tuple[object, object]:
         TEMP_PROTO_DIR = tempfile.TemporaryDirectory()
 
         proto_root = (
-            Path(__file__).resolve().parents[3] / "llm" / "src" / "grpc" / "protos"
+            Path(__file__).resolve().parents[4] / "llm" / "src" / "grpc" / "protos"
         )
         kserve_proto = proto_root / "kserve.proto"
         model_config_proto = proto_root / "model_config.proto"
