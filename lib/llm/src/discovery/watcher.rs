@@ -323,11 +323,21 @@ impl ModelWatcher {
         tracing::debug!(model_name = card.name(), "adding model");
         self.manager.save_model_card(key, card.clone())?;
 
-        if self.manager.has_model_any(card.name()) {
+        // Check if we should skip registration:
+        // - Skip if a model with this name already exists
+        // - UNLESS this is a prefill model and no prefill model exists yet for this name
+        let is_new_prefill = card.model_type.supports_prefill()
+            && !self
+                .manager
+                .list_prefill_models()
+                .contains(&card.name().to_string());
+
+        if self.manager.has_model_any(card.name()) && !is_new_prefill {
             tracing::debug!(
                 model_name = card.name(),
                 namespace = endpoint_id.namespace,
-                "New endpoint for existing model"
+                model_type = %card.model_type,
+                "New endpoint for existing model, skipping"
             );
             return Ok(());
         }
