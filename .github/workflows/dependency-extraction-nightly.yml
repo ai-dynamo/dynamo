@@ -178,7 +178,7 @@ jobs:
           script: |
             const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const timestamp = new Date().toISOString();
-            
+
             // Check if there's already an open issue for failed nightly runs
             const issues = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
@@ -187,7 +187,7 @@ jobs:
               labels: 'automated,dependencies,nightly-failure',
               per_page: 1
             });
-            
+
             const issueBody = `## ⚠️ Nightly Dependency Extraction Failed
 
             **Run:** ${runUrl}
@@ -210,7 +210,7 @@ jobs:
             4. Close this issue once resolved
 
             **Note:** This issue was automatically created by the nightly dependency extraction workflow.`;
-            
+
             if (issues.data.length > 0) {
               // Update existing issue with new failure
               const existingIssue = issues.data[0];

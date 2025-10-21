@@ -168,7 +168,7 @@ jobs:
             const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const timestamp = new Date().toISOString();
             const version = '${{ steps.version.outputs.version }}';
-            
+
             const issueBody = `## ⚠️ Release Dependency Snapshot Failed
 
             **Version:** v${version}
@@ -193,7 +193,7 @@ jobs:
             5. Close this issue once resolved
 
             **Note:** This issue was automatically created by the release dependency snapshot workflow.`;
-            
+
             // Create new issue for release failures (don't check for existing as these are version-specific)
             await github.rest.issues.create({
               owner: context.repo.owner,
