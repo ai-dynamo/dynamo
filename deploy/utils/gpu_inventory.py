@@ -6,8 +6,8 @@ import json
 import logging
 import re
 import shutil
-import sys
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -25,11 +25,10 @@ formatter = logging.Formatter(
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
+
 def run_command(cmd: List[str], capture_output: bool = True, exit_on_error: bool = True):  # type: ignore
     try:
-        return subprocess.run(
-            cmd, capture_output=capture_output, text=True, check=True
-        )
+        return subprocess.run(cmd, capture_output=capture_output, text=True, check=True)
     except subprocess.CalledProcessError as e:  # pragma: no cover - passthrough
         if exit_on_error:
             logger.error(f"Command failed: {' '.join(cmd)}")
@@ -113,7 +112,9 @@ def _extract_inventory(node_obj: Dict) -> NodeGpuInventory:
     mig_resources: Dict[str, str] = {
         k: str(v)
         for k, v in alloc.items()
-        if isinstance(k, str) and k.startswith(f"{NVIDIA_PREFIX}mig-") and _parse_int(str(v))
+        if isinstance(k, str)
+        and k.startswith(f"{NVIDIA_PREFIX}mig-")
+        and _parse_int(str(v))
     }
 
     return NodeGpuInventory(
@@ -149,7 +150,9 @@ def _list_nodes_via_kubectl() -> List[Dict]:
     return data.get("items", [])
 
 
-def collect_gpu_inventory(prefer_client: bool = True) -> Tuple[List[NodeGpuInventory], str]:
+def collect_gpu_inventory(
+    prefer_client: bool = True,
+) -> Tuple[List[NodeGpuInventory], str]:
     sources_tried: List[str] = []
     errors: List[str] = []
 
@@ -200,7 +203,10 @@ def print_table(rows: List[NodeGpuInventory], show_mig: bool = False) -> None:
         mig_str = ""
         if r.mig_capable is True:
             if r.mig_resources:
-                mig_str = ",".join(f"{k.split('/')[-1]}={v}" for k, v in sorted(r.mig_resources.items()))
+                mig_str = ",".join(
+                    f"{k.split('/')[-1]}={v}"
+                    for k, v in sorted(r.mig_resources.items())
+                )
             else:
                 mig_str = "capable"
         elif r.mig_capable is False:
@@ -231,7 +237,9 @@ def print_table(rows: List[NodeGpuInventory], show_mig: bool = False) -> None:
         logger.info(_fmt_row(row))
 
 
-def aggregate_valued_rows(rows: List[NodeGpuInventory]) -> Tuple[Optional[NodeGpuInventory], int]:
+def aggregate_valued_rows(
+    rows: List[NodeGpuInventory],
+) -> Tuple[Optional[NodeGpuInventory], int]:
     """Aggregate rows that have meaningful GPU metadata.
 
     Preference order when multiple distinct values exist:
@@ -240,9 +248,7 @@ def aggregate_valued_rows(rows: List[NodeGpuInventory]) -> Tuple[Optional[NodeGp
     Returns (selected_row_like, distinct_count).
     """
     valued: List[NodeGpuInventory] = [
-        r
-        for r in rows
-        if (r.gpu_product is not None or r.gpu_memory_mib is not None)
+        r for r in rows if (r.gpu_product is not None or r.gpu_memory_mib is not None)
     ]
     if not valued:
         return None, 0
@@ -250,9 +256,10 @@ def aggregate_valued_rows(rows: List[NodeGpuInventory]) -> Tuple[Optional[NodeGp
     # Group by (product, vram_mib)
     from collections import defaultdict
 
-    groups: Dict[Tuple[Optional[str], Optional[int]], Dict[str, Union[int, List[NodeGpuInventory]]]] = defaultdict(
-        lambda: {"max_gpu": 0, "rows": []}
-    )
+    groups: Dict[
+        Tuple[Optional[str], Optional[int]],
+        Dict[str, Union[int, List[NodeGpuInventory]]],
+    ] = defaultdict(lambda: {"max_gpu": 0, "rows": []})
     for r in valued:
         key = (r.gpu_product, r.gpu_memory_mib)
         meta = groups[key]
@@ -261,7 +268,12 @@ def aggregate_valued_rows(rows: List[NodeGpuInventory]) -> Tuple[Optional[NodeGp
         if r.gpu_count is not None:
             meta["max_gpu"] = max(int(meta["max_gpu"]), int(r.gpu_count))  # type: ignore[index]
 
-    def sort_key(item: Tuple[Tuple[Optional[str], Optional[int]], Dict[str, Union[int, List[NodeGpuInventory]]]]):
+    def sort_key(
+        item: Tuple[
+            Tuple[Optional[str], Optional[int]],
+            Dict[str, Union[int, List[NodeGpuInventory]]],
+        ]
+    ):
         (prod, mem_mib), meta = item
         max_gpu = int(meta["max_gpu"])  # type: ignore[index]
         mem_val = mem_mib if mem_mib is not None else -1
@@ -293,7 +305,9 @@ def _get_current_namespace(default: str = "default") -> str:
 
 
 def enrich_with_smi(
-    rows: List[NodeGpuInventory], namespace: Optional[str] = None, timeout_seconds: int = 180
+    rows: List[NodeGpuInventory],
+    namespace: Optional[str] = None,
+    timeout_seconds: int = 180,
 ) -> None:
     """For nodes missing product/memory labels, schedule a short-lived pod on each node
     that requests 1 GPU and runs nvidia-smi to capture model and memory.
@@ -309,7 +323,9 @@ def enrich_with_smi(
     v1 = client.CoreV1Api()
 
     for inv in rows:
-        if not inv.gpu_count or (inv.gpu_product is not None and inv.gpu_memory_mib is not None):
+        if not inv.gpu_count or (
+            inv.gpu_product is not None and inv.gpu_memory_mib is not None
+        ):
             continue
 
         pod_name = f"gpu-inv-smi-{uuid.uuid4().hex[:6]}"
@@ -400,6 +416,7 @@ def get_gpu_summary(
         "vram": vram_val,
     }
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Report GPU inventory per Kubernetes node (count, SKU, VRAM)."
@@ -470,5 +487,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
