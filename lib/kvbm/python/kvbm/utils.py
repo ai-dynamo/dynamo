@@ -55,7 +55,6 @@ def set_cu13_nixl_plugin_path() -> str:
     if cur:
         return cur
 
-    # Prefer importlib.resources for installed wheels
     try:
         # 'kvbm' is the top-level package (adjust if different)
         base = ir.files("kvbm") / "nixl-cu13" / "plugins"
