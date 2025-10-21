@@ -26,8 +26,8 @@ except ImportError:
     VLLM_NOT_AVAILABLE = True
 
 try:
-    from dynamo.llm import BlockManager
-    from dynamo.llm.vllm_integration.kv_cache_manager import KvbmCacheManager
+    from kvbm import BlockManager
+    from kvbm.vllm_integration.kv_cache_manager import KvbmCacheManager
 
     KVBM_NOT_AVAILABLE = False
 except ImportError:

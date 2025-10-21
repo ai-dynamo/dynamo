@@ -84,7 +84,7 @@ pytest -v -m "kvbm" -s
 ## Requirements
 
 - `vllm` executable available in PATH inside the test environment.
-- The connector module path must be valid: `dynamo.llm.vllm_integration.connector`.
+- The connector module path must be valid: `kvbm.vllm_integration.connector`.
 - NATS and etcd services (provided automatically by the `runtime_services` fixture).
 - `datasets` library for IFEval concurrent testing (included in test dependencies).
 - For containerized workflows, follow the top-level `tests/README.md` guidance to build/run the appropriate image, then execute pytest inside the container.

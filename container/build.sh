@@ -119,6 +119,8 @@ NIXL_REF=0.6.0
 NIXL_UCX_REF=v1.19.0
 NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
 
+KVBM_PIP_WHEEL_DIR="/tmp/kvbm_wheel/"
+
 NO_CACHE=""
 
 # sccache configuration for S3
@@ -198,6 +200,14 @@ get_options() {
         --tensorrtllm-git-url)
             if [ "$2" ]; then
                 TRTLLM_GIT_URL=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --kvbm-pip-wheel-dir)
+            if [ "$2" ]; then
+                KVBM_PIP_WHEEL_DIR=$2
                 shift
             else
                 missing_requirement "$1"
@@ -463,6 +473,7 @@ show_help() {
     echo "  [--tensorrtllm-pip-wheel tensorrtllm pip wheel on artifactory]"
     echo "  [--tensorrtllm-index-url tensorrtllm PyPI index URL if providing the wheel from artifactory]"
     echo "  [--tensorrtllm-git-url tensorrtllm git repository URL for cloning]"
+    echo "  [--kvbm-pip-wheel-dir path to kvbm pip wheel directory]"
     echo "  [--build-arg additional build args to pass to docker build]"
     echo "  [--cache-from cache location to start from]"
     echo "  [--cache-to location where to cache the build output]"
@@ -709,8 +720,14 @@ if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
 fi
 
 if [  ! -z ${ENABLE_KVBM} ]; then
-    echo "Enabling the KVBM in the ai-dynamo-runtime"
+    echo "Enabling the KVBM in the dynamo image"
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
+
+    if ! env -i ${SOURCE_DIR}/build_kvbm_wheel.sh -o ${KVBM_PIP_WHEEL_DIR} -n ${NIXL_REF} -a ${ARCH}; then
+        error "ERROR: Failed to build KVBM wheel"
+    fi
+
+    BUILD_CONTEXT_ARG+=" --build-context kvbm_wheel=${KVBM_PIP_WHEEL_DIR}"
 fi
 
 if [ -n "${NIXL_UCX_REF}" ]; then

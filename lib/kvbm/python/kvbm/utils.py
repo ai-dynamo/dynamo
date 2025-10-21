@@ -45,6 +45,9 @@ def is_cuda_13() -> bool:
     return False
 
 
+# WRN: Nixl hasn’t released a `nixl-cu13` package yet.
+# We build a CUDA 13 compatible Nixl ourselves
+# and temporarily vendor it inside KVBM as a workaround.
 def set_cu13_nixl_plugin_path() -> str:
     """
     If NIXL_PLUGIN_DIR is unset/empty, set it to:
@@ -72,6 +75,11 @@ def is_dyn_runtime_enabled() -> bool:
     Return True if DYN_RUNTIME_ENABLED_KVBM is set to '1' or 'true' (case-insensitive).
     DYN_RUNTIME_ENABLED_KVBM indicates if KVBM should use the existing DistributedRuntime
     in the current environment.
+
+    WRN: Calling DistributedRuntime.detached() can crash the entire process if
+    dependencies are not satisfied, and it cannot be caught with try/except in Python.
+    TODO: Make DistributedRuntime.detached() raise a catchable Python exception and
+    avoid crashing the process.
     """
     val = os.environ.get("DYN_RUNTIME_ENABLED_KVBM", "").strip().lower()
     return val in {"1", "true"}

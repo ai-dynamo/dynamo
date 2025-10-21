@@ -342,18 +342,14 @@ COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml 
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
-# Build wheels
+# Build dynamo wheels
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
     uv pip install maturin[patchelf] && \
-    if [ "$ENABLE_KVBM" = "true" ]; then \
-        maturin build --release --features block-manager --out /opt/dynamo/dist; \
-    else \
-        maturin build --release --out /opt/dynamo/dist; \
-    fi && \
+    maturin build --release --out /opt/dynamo/dist && \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
 ##############################################
@@ -361,6 +357,8 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 ##############################################
 
 FROM base AS dev
+
+ARG ENABLE_KVBM
 
 # Application environment variables
 ENV DYNAMO_HOME=/opt/dynamo \
@@ -383,6 +381,17 @@ RUN uv pip install \
     && UV_GIT_LFS=1 uv pip install --no-cache . \
     && cd - \
     && rm -rf /opt/dynamo/benchmarks
+
+# Copy the kvbm wheel from the context and install based on ENABLE_KVBM
+# The KVBM wheel need to be installed after the nixl wheel, or nixl wheel
+# installation will fail
+RUN --mount=type=bind,from=kvbm_wheel,source=.,target=/mnt/kvbm_wheel,ro \
+    set -e; \
+    if [ "${ENABLE_KVBM}" = "true" ]; then \
+      mkdir -p /opt/dynamo/wheelhouse; \
+      cp -v /mnt/kvbm_wheel/kvbm*.whl /opt/dynamo/wheelhouse/; \
+      uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
+    fi
 
 # Setup launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \

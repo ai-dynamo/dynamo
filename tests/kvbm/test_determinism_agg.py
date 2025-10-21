@@ -109,7 +109,7 @@ class LLMServerManager:
             "--port",
             str(self.port),
             "--kv-transfer-config",
-            '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "dynamo.llm.vllm_integration.connector"}',
+            '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"}',
             os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
             "--max-model-len",
             "8000",  # required to fit on L4 GPU when using 8b model
@@ -132,7 +132,7 @@ class LLMServerManager:
             "free_gpu_memory_fraction": 0.10,  # Set a small GPU fraction so that we can evict/reset the on-device kv cache faster
         }
         llm_api_config["kv_connector_config"] = {
-            "connector_module": "dynamo.llm.trtllm_integration.connector",
+            "connector_module": "kvbm.trtllm_integration.connector",
             "connector_scheduler_class": "DynamoKVBMConnectorLeader",
             "connector_worker_class": "DynamoKVBMConnectorWorker",
         }
