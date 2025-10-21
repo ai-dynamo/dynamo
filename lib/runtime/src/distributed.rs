@@ -55,7 +55,7 @@ impl DistributedRuntime {
             (Some(etcd_client), store)
         };
 
-        let nats_client = nats_config.clone().connect().await?;
+        let nats_client = Some(nats_config.clone().connect().await?);
 
         // Start system status server for health and metrics if enabled in configuration
         let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
@@ -70,7 +70,7 @@ impl DistributedRuntime {
         let use_endpoint_health_status = config.use_endpoint_health_status.clone();
         let health_endpoint_path = config.system_health_path.clone();
         let live_endpoint_path = config.system_live_path.clone();
-        let system_health = Arc::new(std::sync::Mutex::new(SystemHealth::new(
+        let system_health = Arc::new(parking_lot::Mutex::new(SystemHealth::new(
             starting_health_status,
             use_endpoint_health_status,
             health_endpoint_path,
@@ -96,28 +96,29 @@ impl DistributedRuntime {
             system_health,
         };
 
-        let nats_client_metrics = DRTNatsClientPrometheusMetrics::new(
-            &distributed_runtime,
-            nats_client_for_metrics.client().clone(),
-        )?;
-        let mut drt_hierarchies = distributed_runtime.parent_hierarchy();
-        drt_hierarchies.push(distributed_runtime.hierarchy());
-        // Register a callback to update NATS client metrics
-        let nats_client_callback = Arc::new({
-            let nats_client_clone = nats_client_metrics.clone();
-            move || {
-                nats_client_clone.set_from_client_stats();
-                Ok(())
-            }
-        });
-        distributed_runtime
-            .register_prometheus_update_callback(drt_hierarchies, nats_client_callback);
+        if let Some(nats_client_for_metrics) = nats_client_for_metrics {
+            let nats_client_metrics = DRTNatsClientPrometheusMetrics::new(
+                &distributed_runtime,
+                nats_client_for_metrics.client().clone(),
+            )?;
+            let mut drt_hierarchies = distributed_runtime.parent_hierarchy();
+            drt_hierarchies.push(distributed_runtime.hierarchy());
+            // Register a callback to update NATS client metrics
+            let nats_client_callback = Arc::new({
+                let nats_client_clone = nats_client_metrics.clone();
+                move || {
+                    nats_client_clone.set_from_client_stats();
+                    Ok(())
+                }
+            });
+            distributed_runtime
+                .register_prometheus_update_callback(drt_hierarchies, nats_client_callback);
+        }
 
         // Initialize the uptime gauge in SystemHealth
         distributed_runtime
             .system_health
             .lock()
-            .unwrap()
             .initialize_uptime_gauge(&distributed_runtime)?;
 
         // Handle system status server initialization
@@ -245,8 +246,8 @@ impl DistributedRuntime {
         )
     }
 
-    pub(crate) fn service_client(&self) -> ServiceClient {
-        ServiceClient::new(self.nats_client.clone())
+    pub(crate) fn service_client(&self) -> Option<ServiceClient> {
+        self.nats_client().map(|nc| ServiceClient::new(nc.clone()))
     }
 
     pub async fn tcp_server(&self) -> Result<Arc<tcp::server::TcpStreamServer>> {
@@ -261,8 +262,8 @@ impl DistributedRuntime {
             .clone())
     }
 
-    pub fn nats_client(&self) -> nats::Client {
-        self.nats_client.clone()
+    pub fn nats_client(&self) -> Option<&nats::Client> {
+        self.nats_client.as_ref()
     }
 
     /// Get system status server information if available
@@ -428,7 +429,7 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
             // Check that uptime is 50+ ms
-            let uptime = drt.system_health.lock().unwrap().uptime();
+            let uptime = drt.system_health.lock().uptime();
             assert!(
                 uptime >= std::time::Duration::from_millis(50),
                 "Expected uptime to be at least 50ms, but got {:?}",
@@ -454,7 +455,7 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
             // Check that uptime is 50+ ms
-            let uptime = drt.system_health.lock().unwrap().uptime();
+            let uptime = drt.system_health.lock().uptime();
             assert!(
                 uptime >= std::time::Duration::from_millis(50),
                 "Expected uptime to be at least 50ms, but got {:?}",
