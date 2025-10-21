@@ -8,7 +8,6 @@ ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
 ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
-ARG RELEASE_BUILD
 ARG ENABLE_KVBM=false
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
@@ -254,7 +253,7 @@ COPY --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 COPY benchmarks/ /opt/dynamo/benchmarks/
 COPY --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
 RUN uv pip install \
-    /opt/dynamo/wheelhouse/ai_dynamo_runtime*cp312*.whl \
+    /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
     && cd /opt/dynamo/benchmarks \

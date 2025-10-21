@@ -38,8 +38,7 @@ pub async fn run(
 
     // We can only make the NATS service if we have NATS
     if distributed_runtime.nats_client().is_some() {
-        // TODO fix in next PR, ServiceConfigBuilder is silly
-        component = component.service_builder().create().await?;
+        component.add_stats_service().await?;
     }
     let endpoint = component.endpoint(&endpoint_id.name);
 

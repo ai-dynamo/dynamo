@@ -1347,17 +1347,17 @@ mod test_metricsregistry_nats {
         // Setup real DRT and registry using the test-friendly constructor
         let drt = create_test_drt_async().await;
 
-        // Create a namespace and components from the DRT
+        // Create a namespace and component from the DRT
         let namespace = drt.namespace("ns789").unwrap();
-        let components = namespace.component("comp789").unwrap();
+        let mut component = namespace.component("comp789").unwrap();
 
         // Create a service to trigger metrics callback registration
-        let _service = components.service_builder().create().await.unwrap();
+        component.add_stats_service().await.unwrap();
 
-        // Get components output which should include NATS client metrics
+        // Get component output which should include NATS client metrics
         // Additional checks for NATS client metrics (without checking specific values)
         let component_nats_metrics =
-            super::test_helpers::extract_nats_lines(&components.prometheus_expfmt().unwrap());
+            super::test_helpers::extract_nats_lines(&component.prometheus_expfmt().unwrap());
         println!(
             "Component NATS metrics count: {}",
             component_nats_metrics.len()
@@ -1371,7 +1371,7 @@ mod test_metricsregistry_nats {
 
         // Check for specific NATS client metric names (without values)
         let component_metrics =
-            super::test_helpers::extract_metrics(&components.prometheus_expfmt().unwrap());
+            super::test_helpers::extract_metrics(&component.prometheus_expfmt().unwrap());
         let actual_component_nats_metrics_sorted: Vec<&str> = component_metrics
             .iter()
             .map(|line| {
@@ -1457,12 +1457,15 @@ mod test_metricsregistry_nats {
         let runtime = Runtime::from_current()?;
         let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
         let namespace = drt.namespace("ns123").unwrap();
-        let component = namespace.component("comp123").unwrap();
+        let mut component = namespace.component("comp123").unwrap();
         let ingress = Ingress::for_engine(MessageHandler::new()).unwrap();
 
         let _backend_handle = tokio::spawn(async move {
-            let service = component.service_builder().create().await.unwrap();
-            let endpoint = service.endpoint("echo").endpoint_builder().handler(ingress);
+            component.add_stats_service().await.unwrap();
+            let endpoint = component
+                .endpoint("echo")
+                .endpoint_builder()
+                .handler(ingress);
             endpoint.start().await.unwrap();
         });
 

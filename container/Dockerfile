@@ -15,7 +15,6 @@ ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 # Build configuration
-ARG RELEASE_BUILD=false
 ARG ENABLE_KVBM=false
 ARG CARGO_BUILD_JOBS
 
@@ -280,7 +279,6 @@ FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
 ARG ARCH
 ARG ARCH_ALT
 ARG CARGO_BUILD_JOBS
-ARG RELEASE_BUILD
 ARG ENABLE_KVBM
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET
@@ -356,10 +354,6 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     else \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \
-    if [ "$RELEASE_BUILD" = "true" ]; then \
-        uv run --python 3.11 maturin build --release --out /opt/dynamo/dist && \
-        uv run --python 3.10 maturin build --release --out /opt/dynamo/dist; \
-    fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
 ##############################################
@@ -382,7 +376,7 @@ COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 # Install Python packages
 COPY benchmarks/ /opt/dynamo/benchmarks/
 RUN uv pip install \
-    /opt/dynamo/wheelhouse/ai_dynamo_runtime*cp312*.whl \
+    /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
     && cd /opt/dynamo/benchmarks \
