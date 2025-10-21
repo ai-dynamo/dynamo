@@ -984,9 +984,14 @@ pub async fn create_worker_selection_pipeline_chat(
         .await
         .with_context(|| format!("Failed to discover model: {}", model_name))?;
 
-    let card = cards.into_iter().next().ok_or_else(|| {
+    let mut card = cards.into_iter().next().ok_or_else(|| {
         anyhow::anyhow!("ModelDeploymentCard not found for model: {}", model_name)
     })?;
+
+    // Download tokenizer and model files from NATS to local disk
+    card.move_from_nats(distributed_runtime.nats_client())
+        .await
+        .with_context(|| "!!! Failed to download model files from NATS")?;
 
     let chooser = if router_mode == RouterMode::KV {
         Some(
