@@ -50,7 +50,7 @@ Quickstart
    :caption: Kubernetes Deployment
 
    Deployment Guide <_sections/k8s_deployment>
-   Observability <_sections/k8s_observability>
+   Observability (K8s) <_sections/k8s_observability>
    Multinode <_sections/k8s_multinode>
 
 .. toctree::
@@ -62,7 +62,7 @@ Quickstart
    Benchmarking <benchmarks/benchmarking.md>
    Tuning Disaggregated Performance <performance/tuning.md>
    Writing Python Workers in Dynamo <development/backend-guide.md>
-   Observability <_sections/observability>
+   Observability (Local) <_sections/observability>
    Glossary <reference/glossary.md>
 
 .. toctree::
