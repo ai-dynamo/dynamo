@@ -121,6 +121,7 @@ async def test_radix_tree_thread_safety(distributed_runtime):
         try:
             nonlocal done_counter
             worker_id = worker_id
+            hash = worker_id 
             store_event = {
                 "event_id": worker_id,
                 "data": {
@@ -128,8 +129,8 @@ async def test_radix_tree_thread_safety(distributed_runtime):
                         "parent_hash": None,
                         "blocks": [
                             {
-                                "block_hash": worker_id,
-                                "tokens_hash": worker_id,
+                                "block_hash": hash,
+                                "tokens_hash": hash,
                             }
                         ],
                     }

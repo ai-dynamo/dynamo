@@ -367,7 +367,6 @@ enum RadixTreeRequest {
 #[pyclass]
 pub(crate) struct RadixTree {
     request_tx: mpsc::Sender<RadixTreeRequest>,
-    shutdown_tx: mpsc::Sender<()>,
 }
 
 #[pymethods]
@@ -378,21 +377,14 @@ impl RadixTree {
         let expiration_duration = expiration_duration_secs.map(std::time::Duration::from_secs_f64);
 
         let (request_tx, request_rx) = mpsc::channel::<RadixTreeRequest>();
-        let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
 
-        // Spawn dedicated thread with pure sync processing
+        // Spawn dedicated thread with simplified sync processing
         std::thread::spawn(move || {
             let mut radix_tree =
                 llm_rs::kv_router::indexer::RadixTree::new_with_frequency(expiration_duration);
 
             loop {
-                // Use select-like behavior with try_recv
-                if shutdown_rx.try_recv().is_ok() {
-                    tracing::debug!("RadixTree thread shutting down");
-                    break;
-                }
-
-                match request_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                match request_rx.recv() {
                     Ok(RadixTreeRequest::Shutdown) => {
                         tracing::debug!("RadixTree thread received shutdown request");
                         break;
@@ -400,11 +392,7 @@ impl RadixTree {
                     Ok(request) => {
                         Self::handle_request(&mut radix_tree, request);
                     }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        // Continue loop to check shutdown_rx
-                        continue;
-                    }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    Err(mpsc::RecvError) => {
                         tracing::debug!("RadixTree request channel disconnected");
                         break;
                     }
@@ -412,10 +400,7 @@ impl RadixTree {
             }
         });
 
-        Ok(Self {
-            request_tx,
-            shutdown_tx,
-        })
+        Ok(Self { request_tx })
     }
 
     #[pyo3(signature = (sequence, early_exit=false))]
@@ -631,10 +616,8 @@ impl RadixTree {
 // Cleanup when RadixTree is dropped
 impl Drop for RadixTree {
     fn drop(&mut self) {
-        // Try graceful shutdown first
+        // Only need graceful shutdown via RadixTreeRequest::Shutdown
         let _ = self.request_tx.send(RadixTreeRequest::Shutdown);
-        // Fallback to force shutdown, // IS TIS THIS NEEDED?
-        let _ = self.shutdown_tx.send(());
     }
 }
 
