@@ -140,25 +140,32 @@ impl PrefillRouter {
         let prefill_router = self.prefill_router.get().ok_or(NoPrefillRouter)?;
 
         // Call prefill router
-        let Ok(mut prefill_response) = prefill_router.generate(request).await else {
-            tracing::warn!("Prefill router generate call failed");
-            return Ok(None);
+        let mut prefill_response = match prefill_router.generate(request).await {
+            Ok(response) => response,
+            Err(e) => {
+                tracing::warn!(error = %e, "Prefill router generate call failed");
+                return Ok(None);
+            }
         };
 
         let Some(first_output) = prefill_response.next().await else {
-            tracing::debug!("Prefill router returned no output");
+            tracing::debug!("Prefill router returned no output (stream ended)");
             return Ok(None);
         };
 
-        if first_output.err().is_some() {
-            tracing::debug!("Prefill router returned error in output");
+        if let Some(err) = first_output.err() {
+            tracing::debug!(error = ?err, "Prefill router returned error in output");
             return Ok(None);
         }
 
         let Some(output) = &first_output.data else {
-            tracing::debug!("Prefill router output has no data");
+            tracing::debug!("Prefill router output has no data field");
             return Ok(None);
         };
+
+        if output.disaggregated_params.is_none() {
+            tracing::debug!("Prefill router output missing disaggregated_params");
+        }
 
         Ok(output.disaggregated_params.clone())
     }
@@ -193,25 +200,35 @@ impl
         let prefill_req = req.clone();
         let prefill_request = Context::with_id(prefill_req, request_id);
 
-        // If prefill fails for any reason, just pass through to decode-only
-        let Ok(Some(disaggregated_params)) = self.call_prefill(prefill_request).await else {
-            tracing::debug!("Remote prefill failed, falling back to decode-only");
-            return next.generate(context.map(|_| req)).await;
-        };
+        // Attempt prefill and handle results
+        match self.call_prefill(prefill_request).await {
+            Ok(Some(disaggregated_params)) => {
+                tracing::debug!("Prefill succeeded, using disaggregated params for decode");
 
-        // Prefill succeeded - update request with disaggregated_params and router config
-        let mut decode_req = req;
-        decode_req.disaggregated_params = Some(disaggregated_params);
+                // Update request with disaggregated_params and router config
+                let mut decode_req = req;
+                decode_req.disaggregated_params = Some(disaggregated_params);
 
-        // Set router_config_override for decode: overlap_score_weight = 0
-        let existing_override = decode_req.router_config_override.take();
-        decode_req.router_config_override = Some(RouterConfigOverride {
-            overlap_score_weight: Some(0.0),
-            ..existing_override.unwrap_or_default()
-        });
+                // Set router_config_override for decode: overlap_score_weight = 0
+                let existing_override = decode_req.router_config_override.take();
+                decode_req.router_config_override = Some(RouterConfigOverride {
+                    overlap_score_weight: Some(0.0),
+                    ..existing_override.unwrap_or_default()
+                });
 
-        // Map the modified request through with preserved context
-        let decode_request = context.map(|_| decode_req);
-        next.generate(decode_request).await
+                // Map the modified request through with preserved context
+                let decode_request = context.map(|_| decode_req);
+                return next.generate(decode_request).await;
+            }
+            Ok(None) => {
+                tracing::debug!("Prefill returned None, falling back to decode-only");
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "Prefill error, falling back to decode-only");
+            }
+        }
+
+        // Fall back to decode-only
+        next.generate(context.map(|_| req)).await
     }
 }
