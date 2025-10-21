@@ -678,12 +678,14 @@ jobs:
         source venv/bin/activate
         pip install --upgrade pip
 
-        # Install core dependencies needed for tests (without full project install)
-        pip install -r container/deps/requirements.test.txt
-        pip install kubernetes==32.0.1 kubernetes_asyncio kr8s pyyaml requests tabulate
+        # Install project dependencies first (this includes pydantic and other core deps)
+        pip install -e .
 
-        # Add project source to PYTHONPATH for test imports
-        export PYTHONPATH=$(pwd):$(pwd)/components/src:$PYTHONPATH
+        # Install test dependencies
+        pip install -r container/deps/requirements.test.txt
+
+        # Install additional kubernetes and fault tolerance test dependencies
+        pip install kubernetes==32.0.1 kubernetes_asyncio kr8s tabulate
 
         echo "Running fault tolerance test: ${{ matrix.test_scenario }}"
         echo "Using namespace: $NAMESPACE"
