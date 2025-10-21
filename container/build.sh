@@ -613,6 +613,7 @@ check_wheel_file() {
         find "$wheel_dir" -name "*.whl" | head -n 1
         return 0
     fi
+    echo "Found $wheel_count wheel in $wheel_dir"
     return 0
 }
 
@@ -650,7 +651,6 @@ function determine_user_intention_trtllm() {
         echo "INFO: Inferring download because TENSORRTLLM_PIP_WHEEL is set and TENSORRTLLM_INDEX_URL is not."
     fi
 
-
     if [[ -n "$TENSORRTLLM_PIP_WHEEL_DIR" ]]; then
         intention_install="true";
         intention_count=$((intention_count+=1));
@@ -665,6 +665,8 @@ function determine_user_intention_trtllm() {
     fi
     echo "  Intent to Build TRTLLM: $intention_build"
 
+    # If nothing is set then we default to downloading the wheel
+    # with the defaults sepcified at the top this file.
     if [[ -z "${TENSORRTLLM_INDEX_URL}" ]] && [[ -z "${TENSORRTLLM_PIP_WHEEL}" ]] && [[ "${intention_count}" -eq 0 ]]; then
         intention_download="true";
         intention_count=$((intention_count+=1));
@@ -711,7 +713,6 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
         PRINT_TRTLLM_WHEEL_FILE=${TENSORRTLLM_PIP_WHEEL}
     elif [[ "$TRTLLM_INTENTION" == "install" ]]; then
         echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL_DIR}"
-        echo "Installing TensorRT-LLM from local wheel directory"
         if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}" "${ARCH}_${TRTLLM_COMMIT}"; then
             echo "ERROR: Valid trtllm wheel file not found in ${TENSORRTLLM_PIP_WHEEL_DIR}"
             echo "      If this is not intended you can try building from source with the following variables set instead:"
@@ -719,6 +720,7 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
             echo "      --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM --tensorrtllm-commt $TRTLLM_COMMIT"
             exit 1
         fi
+        echo "Installing TensorRT-LLM from local wheel directory"
         BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=1"
         BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=${TENSORRTLLM_PIP_WHEEL_DIR}"
         PRINT_TRTLLM_WHEEL_FILE=$(find $TENSORRTLLM_PIP_WHEEL_DIR -name "*.whl" | head -n 1)
@@ -812,7 +814,7 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         #   - NIXL_REF
         #   - NIXL_UCX_REF
         #   - ENABLE_KVBM
-        BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
+        BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE} "
         $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
     else
         $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
