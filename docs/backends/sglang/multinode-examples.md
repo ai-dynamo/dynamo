@@ -39,6 +39,7 @@ python3 -m dynamo.sglang \
   --disaggregation-mode prefill \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 30001 \
+  --load-balance-method round_robin \
   --host 0.0.0.0 \
   --mem-fraction-static 0.82
 ```
@@ -60,6 +61,7 @@ python3 -m dynamo.sglang \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 30001 \
   --host 0.0.0.0 \
+  --load-balance-method round_robin \
   --mem-fraction-static 0.82
 ```
 
@@ -80,6 +82,7 @@ python3 -m dynamo.sglang \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 30001 \
   --host 0.0.0.0 \
+  --prefill-round-robin-balance \
   --mem-fraction-static 0.82
 ```
 
@@ -100,6 +103,7 @@ python3 -m dynamo.sglang \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 30001 \
   --host 0.0.0.0 \
+  --prefill-round-robin-balance \
   --mem-fraction-static 0.82
 ```
 
