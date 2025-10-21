@@ -67,6 +67,8 @@ jobs:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
+          echo "TEST PULL"
+          docker pull ${ECR_HOSTNAME}/dockerhub/golang:1.24
       - name: Build Container
         id: build-image
         shell: bash
@@ -74,9 +76,6 @@ jobs:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           cd deploy/cloud/operator
-          echo "TEST PULL"
-          docker pull ${ECR_HOSTNAME}/dockerhub/golang:1.24
-          echo "BUILD"
           docker buildx build --load \
               --platform linux/${{ matrix.platform.arch }} \
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/
