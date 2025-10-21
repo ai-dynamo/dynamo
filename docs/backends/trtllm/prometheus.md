@@ -127,77 +127,40 @@ trtllm:request_queue_time_seconds_sum{model_name="Qwen/Qwen3-0.6B",engine_type="
 
 ## TensorRT-LLM Specific: Non-Prometheus Performance Metrics
 
-TensorRT-LLM provides extensive performance data beyond the basic Prometheus metrics. These detailed metrics are **not exposed to Prometheus** but offer much richer information for debugging and performance analysis. The functionality can be found in the source code, such as in [tensorrt_llm/serve/openai_server.py](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/serve/openai_server.py) and related modules.
+TensorRT-LLM provides extensive performance data beyond the basic Prometheus metrics. These are **not exposed to Prometheus**.
 
-### Performance Metrics via RequestPerfMetrics Structure
+### Available via Code References:
+- **RequestPerfMetrics Structure**: [tensorrt_llm/executor/result.py](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/executor/result.py) - KV cache, timing, speculative decoding metrics
+- **Engine Statistics**: `engine.llm.get_stats_async()` - System-wide aggregate statistics
+- **KV Cache Events**: `engine.llm.get_kv_cache_events_async()` - Real-time cache operations
 
-When `return_perf_metrics: True` is enabled, TensorRT-LLM provides comprehensive performance data through the `RequestPerfMetrics` structure.
-
-**Available metrics include**:
-- **KV Cache Transfer Metrics**: `kv_cache_size`, `kv_cache_transfer_start`, `kv_cache_transfer_end`
-- **KV Cache Block Metrics**: `num_total_allocated_blocks`, `num_new_allocated_blocks`, `num_reused_blocks`, `num_missed_blocks`
-- **Speculative Decoding Metrics**: `acceptance_rate`, `total_accepted_draft_tokens`, `total_draft_tokens`
-- **Detailed Timing Metrics**: `arrival_time`, `first_scheduled_time`, individual token timing data
-
-### Engine Statistics via get_stats_async()
-
-System-wide aggregate statistics accessible through `engine.llm.get_stats_async()` for monitoring overall engine performance and resource usage.
-
-**Available statistics include**:
-- KV cache usage and allocation statistics
-- Request counts (active, queued, paused)
-- Cache hit rates and block allocation metrics
-
-### KV Cache Events via get_kv_cache_events_async()
-
-Real-time KV cache events accessible through `engine.llm.get_kv_cache_events_async()` for monitoring cache operations and debugging cache behavior.
-
-**Provides**:
-- Real-time cache operation events
-- Cache allocation and deallocation notifications
-- Cache hit/miss event details
-
-### Accessing Performance Metrics
-
-#### 1. Python Bindings Access
-```python
-# Access raw performance metrics from C++ bindings
-from tensorrt_llm.bindings import executor as tllm
-
-# In request handler (res.outputs[0] contains the output)
-output = res.outputs[0]
-if output.request_perf_metrics:
-    timing_metrics = output.request_perf_metrics.timing_metrics
-    kv_metrics = output.request_perf_metrics.kv_cache_metrics
-
-    # Extract specific metrics
-    arrival_time = timing_metrics.arrival_time.total_seconds()
-    kv_cache_size = timing_metrics.kv_cache_size
-    total_blocks = kv_metrics.num_total_allocated_blocks
-```
-
-#### 2. Processed Metrics Dictionary
-- **Available in**: `GenerationResult.metrics_dict` when `return_perf_metrics=True`
-- **Processing**: `_process_req_perf_metrics()` in [tensorrt_llm/executor/result.py](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/executor/result.py)
-- **Contains**: Calculated metrics (TTFT, E2E, TPOT, queue time)
-
-```python
-# Available in res.metrics_dict when requests complete:
+### Example RequestPerfMetrics JSON Structure:
+```json
 {
-    "ttft": 0.045,           # Time to first token (seconds)
-    "e2e": 2.150,            # End-to-end latency (seconds)
-    "tpot": 0.025,           # Time per output token (seconds)
-    "request_queue_time": 0.012,  # Queue waiting time (seconds)
-    "finished_reason": "stop"     # Completion reason
+  "timing_metrics": {
+    "arrival_time": 1234567890.123,
+    "first_scheduled_time": 1234567890.135,
+    "first_token_time": 1234567890.150,
+    "last_token_time": 1234567890.300,
+    "kv_cache_size": 2048576,
+    "kv_cache_transfer_start": 1234567890.140,
+    "kv_cache_transfer_end": 1234567890.145
+  },
+  "kv_cache_metrics": {
+    "num_total_allocated_blocks": 100,
+    "num_new_allocated_blocks": 10,
+    "num_reused_blocks": 90,
+    "num_missed_blocks": 5
+  },
+  "speculative_decoding": {
+    "acceptance_rate": 0.85,
+    "total_accepted_draft_tokens": 42,
+    "total_draft_tokens": 50
+  }
 }
 ```
 
-### Code References
-
-For the complete structure and field definitions, see:
-- **Metrics extraction**: `_get_metrics_dict()` in [tensorrt_llm/executor/worker.py](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/executor/worker.py)
-- **Metrics processing**: `_process_req_perf_metrics()` in [tensorrt_llm/executor/result.py](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/executor/result.py)
-- **TensorRT-LLM Metrics Source Code**: [tensorrt_llm/metrics](https://github.com/NVIDIA/TensorRT-LLM/tree/main/tensorrt_llm/metrics)
+**Note**: These structures are valid as of the date of this documentation but are subject to change with TensorRT-LLM version updates.
 
 ## See Also
 
@@ -205,7 +168,7 @@ For the complete structure and field definitions, see:
 - See the "TensorRT-LLM Specific: Non-Prometheus Performance Metrics" section above for detailed performance data and source code references
 
 ### Dynamo Metrics
-- **Dynamo Metrics Guide**: See `docs/guides/metrics.md` for complete documentation on Dynamo runtime metrics
+- **Dynamo Metrics Guide**: See [docs/guides/metrics.md](../../guides/metrics.md) for complete documentation on Dynamo runtime metrics
 - **Dynamo Runtime Metrics**: Metrics prefixed with `dynamo_*` for runtime, components, endpoints, and namespaces
   - Implementation: `lib/runtime/src/metrics.rs` (Rust runtime metrics)
   - Metric names: `lib/runtime/src/metrics/prometheus_names.rs` (metric name constants)
