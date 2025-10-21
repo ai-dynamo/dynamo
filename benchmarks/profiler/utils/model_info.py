@@ -28,7 +28,7 @@ CONTEXT_LENGTH_ATTRS = [
 ]
 
 # only for MLA + MoE models, treat other MoE models as dense models
-MOE_ARCHITECTURES = {"DeepseekV3ForCausalLM" "DeepseekV32ForCausalLM"}
+MOE_ARCHITECTURES = {"DeepseekV3ForCausalLM", "DeepseekV32ForCausalLM"}
 
 
 def get_local_model_weight_size(
