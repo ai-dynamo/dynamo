@@ -9,7 +9,6 @@ from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict
 
-import msgspec
 from vllm.inputs import TokensPrompt
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.exceptions import EngineDeadError
@@ -20,6 +19,35 @@ from .engine_monitor import VllmEngineMonitor
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+def build_sampling_params(
+    request: Dict[str, Any], default_sampling_params: Dict[str, Any]
+) -> SamplingParams:
+    """
+    Build SamplingParams from a PreprocessedRequest.
+
+    Args:
+        request: The PreprocessedRequest dict with 'sampling_options' and 'stop_conditions'
+        default_sampling_params: Default sampling parameters to initialize with
+
+    Returns:
+        SamplingParams configured from the request
+    """
+    sampling_params = SamplingParams(**default_sampling_params)
+    sampling_params.detokenize = False
+
+    # Apply sampling_options
+    for key, value in request["sampling_options"].items():
+        if value is not None and hasattr(sampling_params, key):
+            setattr(sampling_params, key, value)
+
+    # Apply stop_conditions
+    for key, value in request["stop_conditions"].items():
+        if value is not None and hasattr(sampling_params, key):
+            setattr(sampling_params, key, value)
+
+    return sampling_params
 
 
 class BaseWorkerHandler(ABC):
@@ -138,16 +166,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
 
-        sampling_params = SamplingParams(**self.default_sampling_params)
-
-        sampling_params.detokenize = False
-        for key, value in request["sampling_options"].items():
-            if value is not None and hasattr(sampling_params, key):
-                setattr(sampling_params, key, value)
-
-        for key, value in request["stop_conditions"].items():
-            if value is not None and hasattr(sampling_params, key):
-                setattr(sampling_params, key, value)
+        # Build sampling params from request
+        sampling_params = build_sampling_params(request, self.default_sampling_params)
 
         # Extract disaggregated_params from request (set by prefill router in Rust frontend)
         disaggregated_params = request.get("disaggregated_params")
@@ -182,17 +202,14 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         super().__init__(runtime, component, engine, default_sampling_params)
 
     async def generate(self, request, context):
-        # Extract from PreprocessedRequest format - request_id and sampling_params from extra_args
-        extra_args = request.get("extra_args", {})
-        request_id = extra_args.get("request_id", str(uuid.uuid4().hex))
+        request_id = str(uuid.uuid4().hex)
         logger.debug(f"New Prefill Request ID: {request_id}")
 
         token_ids = request["token_ids"]
         prompt = TokensPrompt(prompt_token_ids=token_ids)
 
-        # Get sampling_params from extra_args
-        sampling_params_dict = extra_args.get("sampling_params", {})
-        sampling_params = msgspec.convert(sampling_params_dict, SamplingParams)
+        # Build sampling params from request using shared utility
+        sampling_params = build_sampling_params(request, self.default_sampling_params)
 
         # Configure for prefill-only mode with remote decode
         if sampling_params.extra_args is None:
@@ -200,6 +217,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         sampling_params.extra_args["kv_transfer_params"] = {
             "do_remote_decode": True,
         }
+        # Override for prefill: only generate 1 token
         sampling_params.max_tokens = 1
         sampling_params.min_tokens = 1
 
