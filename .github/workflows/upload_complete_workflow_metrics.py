@@ -18,6 +18,12 @@ from urllib.parse import urlparse
 
 import requests
 
+# FILTERING CONFIGURATION - Process all jobs except excluded ones
+EXCLUDED_JOB_NAMES = [
+    "Upload Workflow Metrics",  # Avoid infinite loops (reusable workflow display name)
+    "upload-workflow-metrics",  # Avoid infinite loops (job ID variant)
+    # Add other job names to exclude here as needed
+]
 FRAMEWORK_IMAGE_BUILD_JOBS = ["vllm", "sglang", "trtllm"]
 
 # NEW STANDARDIZED FIELD SCHEMA - Using consistent prefixes for OpenSearch mapping
@@ -275,6 +281,18 @@ def mask_sensitive_urls(error_msg: str, url: str) -> str:
     return error_msg
 
 
+def should_exclude_job(job_name: str, excluded_names: list) -> bool:
+    """Check if a job should be excluded based on name matching.
+    
+    Checks both exact match and case-insensitive substring match to handle
+    various job name formats from GitHub API.
+    """
+    return (
+        job_name in excluded_names or
+        any(excluded.lower() in job_name.lower() for excluded in excluded_names)
+    )
+
+
 class WorkflowMetricsUploader:
     def __init__(self):
         self.headers = {"Content-Type": "application/json", "Accept-Charset": "UTF-8"}
@@ -512,12 +530,18 @@ class WorkflowMetricsUploader:
                 print("Could not fetch jobs data from GitHub API")
                 return
 
-            # Process all jobs from the workflow
+            # Count jobs to process (exclude specified jobs)
             workflow_name = workflow_data.get("name", "")
-            jobs_to_process = jobs_data.get("jobs", [])
+            all_jobs = jobs_data.get("jobs", [])
+            
+            jobs_to_process = [
+                job
+                for job in all_jobs
+                if not should_exclude_job(job.get("name", ""), EXCLUDED_JOB_NAMES)
+            ]
 
             if not jobs_to_process:
-                print(f"No jobs found in workflow")
+                print(f"No jobs to process after excluding: {EXCLUDED_JOB_NAMES}")
                 return
 
             print(f"Processing {len(jobs_to_process)} jobs for workflow '{workflow_name}'")
@@ -609,6 +633,12 @@ class WorkflowMetricsUploader:
         for job in jobs_data["jobs"]:
             try:
                 job_name = job.get("name", "")
+
+                # FILTER: Skip excluded jobs to avoid infinite loops and other unwanted jobs
+                if should_exclude_job(job_name, EXCLUDED_JOB_NAMES):
+                    print(f"⏭️  Skipping excluded job '{job_name}'")
+                    continue
+
                 print(f"📤 Uploading job: '{job_name}'")
 
                 # Upload job metrics
