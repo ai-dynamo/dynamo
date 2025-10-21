@@ -40,18 +40,22 @@ class DynamoWorkerProcess(ManagedProcess):
             "3",
         ]
 
-        health_check_urls = [
-            (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
-            (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
-        ]
-
         # Set port based on worker type
         port = "8082" if is_prefill else "8081"
 
-        # Add prefill worker flag if needed
+        # Configure health check based on worker type
         if is_prefill:
+            # Prefill workers check their own status endpoint
             command.append("--is-prefill-worker")
             health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
+        else:
+            # Decode workers should also check their own status endpoint first,
+            # then verify the frontend sees the model
+            health_check_urls = [
+                (f"http://localhost:{port}/health", self.is_ready),
+                (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
+                (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
+            ]
 
         # Set debug logging environment
         env = os.environ.copy()
