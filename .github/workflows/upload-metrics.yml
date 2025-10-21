@@ -62,6 +62,9 @@ jobs:
           JOB_INDEX: ${{ secrets.JOB_INDEX }}
           STEPS_INDEX: ${{ secrets.STEPS_INDEX }}
           CONTAINER_INDEX: ${{ secrets.CONTAINER_INDEX }}
+          # For workflow_run trigger: use the triggering workflow's run ID
+          # For manual/push trigger: use current run ID (for testing only)
+          TARGET_RUN_ID: ${{ github.event.workflow_run.id || github.run_id }}
         run: |
           python3 .github/workflows/upload_complete_workflow_metrics.py
 
