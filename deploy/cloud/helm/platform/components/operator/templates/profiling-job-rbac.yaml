@@ -100,9 +100,13 @@ rules:
 # Pods - needed for listing pods by label selector and getting logs from test deployments
 - apiGroups: [""]
   resources: ["pods"]
-  verbs: ["list", "get"]
+  verbs: ["list", "get", "create", "delete"]
 - apiGroups: [""]
   resources: ["pods/log"]
   verbs: ["get"]
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch"]
 {{- end }}
 # (Remove the trailing blank line at end of file)
