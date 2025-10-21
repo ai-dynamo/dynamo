@@ -4,6 +4,7 @@
 import argparse
 import logging
 import math
+import os
 import yaml
 from benchmarks.profiler.utils.model_info import get_model_info
 from deploy.utils.gpu_inventory import get_gpu_summary
@@ -19,10 +20,8 @@ formatter = logging.Formatter(
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-# sweep over number of GPUs per engine whose weight/VRAM size 
-# is between min and max gpu memory fraction 
-MODEL_GPU_MEM_FRAC_MIN = 0.1
 MODEL_GPU_MEM_FRAC_MAX = 0.9
+MOE_MODEL_MAX_NUM_GPUS = 32
 
 def auto_generate_search_space(args: argparse.Namespace) -> None:
 
@@ -41,6 +40,7 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
         logger.info(f"Updating model in DGD config file to {args.model}")
         config = config_modifier.update_model(config, args.model)
         config_fn = f"{args.output_dir}/disagg_config.yaml"
+        os.makedirs(args.output_dir, exist_ok=True)
         with open(config_fn, "w") as f:
             yaml.dump(config, f)
         args.config = config_fn
@@ -54,10 +54,7 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
         logger.info(f"Cluster has {gpu_info['gpus_per_node']}x{gpu_info['model']} GPUs per node with {gpu_info['vram']} VRAM")
 
         min_gpu = math.ceil(model_info['model_size'] / MODEL_GPU_MEM_FRAC_MAX / gpu_info['vram'])
-        max_gpu = math.floor(model_info['model_size'] / MODEL_GPU_MEM_FRAC_MIN / gpu_info['vram'])
-        if not model_info['is_moe']:
-            # use single node engine for dense model
-            max_gpu = min(max_gpu, gpu_info['gpus_per_node'])
+        max_gpu = gpu_info['gpus_per_node'] if not model_info['is_moe'] else MOE_MODEL_MAX_NUM_GPUS
         if min_gpu > max_gpu:
             logger.error(f"No valid GPU configuration found for model {args.model} on the cluster with {gpu_info['gpus_per_node']}x{gpu_info['model']} GPUs per node")
             exit(1)
@@ -69,4 +66,4 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
         args.max_context_length = model_info['max_context_length']
         args.num_gpus_per_node = gpu_info['gpus_per_node']
 
-    return args
+    return 

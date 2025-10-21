@@ -300,6 +300,6 @@ def create_profiler_parser() -> argparse.Namespace:
     if not args.model and not args.config:
         parser.error("--model or --config is required")
 
-    auto_generate_search_space(args)
-
-    return args
+    args = auto_generate_search_space(args)
+    
+    return vars(args)

@@ -69,7 +69,7 @@ class SGLangConfigModifier:
         
         return cfg.model_dump()
         
-
+    @classmethod
     def convert_config(
         cls,
         config: dict,
