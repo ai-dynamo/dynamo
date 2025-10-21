@@ -37,7 +37,7 @@ Tests end-to-end GPU failure detection and recovery:
 
 import logging
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import pytest
 from kubernetes import client, config
@@ -66,7 +66,7 @@ class KubernetesHelper:
         self.namespace = namespace
         self.nvsentinel_namespace = nvsentinel_namespace
 
-    def check_nvsentinel_installed(self) -> dict:
+    def check_nvsentinel_installed(self) -> dict[str, Any]:
         """Check if NVSentinel core components are running."""
         components = {
             "gpu_health_monitor": "app.kubernetes.io/name=gpu-health-monitor",
@@ -76,7 +76,7 @@ class KubernetesHelper:
             "mongodb": "app.kubernetes.io/name=mongodb",
         }
 
-        result = {"installed": True, "components": {}, "missing": []}
+        result: dict[str, Any] = {"installed": True, "components": {}, "missing": []}
 
         for name, selector in components.items():
             try:
@@ -267,7 +267,7 @@ class KubernetesHelper:
             self.core_v1.patch_node(node_name, body)
 
             # Remove test labels
-            body = {
+            body: dict[str, Any] = {
                 "metadata": {
                     "labels": {"gpu-health": None, "test-simulated-failure": None}
                 }

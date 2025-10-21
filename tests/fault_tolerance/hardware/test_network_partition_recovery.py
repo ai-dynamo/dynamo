@@ -215,7 +215,10 @@ def get_available_model():
 
 
 def send_completion_request(
-    prompt: str, max_tokens: int, timeout: int = REQUEST_TIMEOUT, model: str = None
+    prompt: str,
+    max_tokens: int,
+    timeout: int = REQUEST_TIMEOUT,
+    model: Optional[str] = None,
 ):
     """
     Send a completion request to the frontend.
