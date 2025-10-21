@@ -20,9 +20,7 @@ import requests
 
 # FILTERING CONFIGURATION - Process all jobs except excluded ones
 EXCLUDED_JOB_NAMES = [
-    "Upload Workflow Metrics",  # Avoid infinite loops (reusable workflow display name)
-    "upload-workflow-metrics",  # Avoid infinite loops (job ID variant)
-    # Add other job names to exclude here as needed
+    "Upload Workflow Metrics"
 ]
 FRAMEWORK_IMAGE_BUILD_JOBS = ["vllm", "sglang", "trtllm"]
 
@@ -35,9 +33,8 @@ FIELD_USER_ALIAS = "s_user_alias"
 FIELD_REPO = "s_repo"
 FIELD_WORKFLOW_NAME = "s_workflow_name"
 FIELD_GITHUB_EVENT = "s_github_event"
-FIELD_BRANCH = "s_branch"  # PR target branch (e.g., "pull-request/3654") or main branch
+FIELD_PR_BRANCH = "s_pr_branch"  # PR target branch (e.g., "pull-request/3654") or main branch
 FIELD_SOURCE_BRANCH = "s_source_branch"  # Source branch name (e.g., "nmailhot/feature-branch")
-FIELD_PR_ID = "s_pr_id"  # Pull request ID as string ("N/A" if not a PR)
 FIELD_STATUS = "s_status"
 FIELD_STATUS_NUMBER = "l_status_number"
 FIELD_WORKFLOW_ID = "s_workflow_id"
@@ -281,18 +278,6 @@ def mask_sensitive_urls(error_msg: str, url: str) -> str:
     return error_msg
 
 
-def should_exclude_job(job_name: str, excluded_names: list) -> bool:
-    """Check if a job should be excluded based on name matching.
-    
-    Checks both exact match and case-insensitive substring match to handle
-    various job name formats from GitHub API.
-    """
-    return (
-        job_name in excluded_names or
-        any(excluded.lower() in job_name.lower() for excluded in excluded_names)
-    )
-
-
 class WorkflowMetricsUploader:
     def __init__(self):
         self.headers = {"Content-Type": "application/json", "Accept-Charset": "UTF-8"}
@@ -316,10 +301,6 @@ class WorkflowMetricsUploader:
         self.actor = os.getenv("GITHUB_ACTOR")
         self.event_name = os.getenv("GITHUB_EVENT_NAME")
         self.sha = os.getenv("GITHUB_SHA")
-        
-        # These are only used for debug logging (actual data uses GitHub API)
-        self.ref = os.getenv("GITHUB_REF")
-        self.ref_name = os.getenv("GITHUB_REF_NAME")
 
         if not self.repo or not self.run_id:
             raise ValueError("Missing required GitHub environment variables")
@@ -406,7 +387,6 @@ class WorkflowMetricsUploader:
         # For push events on PR branches (pull-request/3654), fetch PR data if not available
         if event_type == "push" and not pull_requests and head_branch.startswith("pull-request/"):
             # Extract PR number from branch name
-            import re
             pr_match = re.match(r"pull-request/(\d+)", head_branch)
             if pr_match:
                 pr_number = pr_match.group(1)
@@ -418,26 +398,26 @@ class WorkflowMetricsUploader:
         
         if event_type == "pull_request":
             # For pull_request events:
-            # - FIELD_BRANCH = PR target branch (pull-request/3654)
+            # - FIELD_PR_BRANCH = PR target branch (pull-request/3654)
             # - FIELD_SOURCE_BRANCH = contributor's source branch
             if pull_requests and len(pull_requests) > 0:
                 pr_data = pull_requests[0]
                 pr_number = pr_data.get("number")
                 if pr_number:
                     # Target branch (for consistent querying)
-                    db_data[FIELD_BRANCH] = f"pull-request/{pr_number}"
+                    db_data[FIELD_PR_BRANCH] = f"pull-request/{pr_number}"
                     # Source branch (contributor's branch)
                     db_data[FIELD_SOURCE_BRANCH] = head_branch
                 else:
                     # Fallback if PR number not available
-                    db_data[FIELD_BRANCH] = head_branch
+                    db_data[FIELD_PR_BRANCH] = head_branch
                     db_data[FIELD_SOURCE_BRANCH] = head_branch
             else:
-                db_data[FIELD_BRANCH] = head_branch
+                db_data[FIELD_PR_BRANCH] = head_branch
                 db_data[FIELD_SOURCE_BRANCH] = head_branch
         else:
             # For push events on PR branches, head_branch is already "pull-request/3654"
-            db_data[FIELD_BRANCH] = head_branch
+            db_data[FIELD_PR_BRANCH] = head_branch
             
             # Try to extract source branch from PR data if available
             if pull_requests and len(pull_requests) > 0:
@@ -452,14 +432,6 @@ class WorkflowMetricsUploader:
             
         db_data[FIELD_WORKFLOW_ID] = str(self.run_id)
         db_data[FIELD_COMMIT_SHA] = self.sha
-
-        # Extract PR ID from workflow data if available
-        pr_id = "N/A"  # Default to "N/A" for non-PR workflows
-        if pull_requests and len(pull_requests) > 0:
-            pr_number = pull_requests[0].get("number")
-            if pr_number:
-                pr_id = str(pr_number)
-        db_data[FIELD_PR_ID] = pr_id
 
     def add_standardized_timing_fields(
         self,
@@ -536,8 +508,8 @@ class WorkflowMetricsUploader:
             
             jobs_to_process = [
                 job
-                for job in all_jobs
-                if not should_exclude_job(job.get("name", ""), EXCLUDED_JOB_NAMES)
+                for job in jobs_data.get("jobs", [])
+                if job.get("name") not in EXCLUDED_JOB_NAMES
             ]
 
             if not jobs_to_process:
@@ -635,7 +607,7 @@ class WorkflowMetricsUploader:
                 job_name = job.get("name", "")
 
                 # FILTER: Skip excluded jobs to avoid infinite loops and other unwanted jobs
-                if should_exclude_job(job_name, EXCLUDED_JOB_NAMES):
+                if job_name in EXCLUDED_JOB_NAMES:
                     print(f"⏭️  Skipping excluded job '{job_name}'")
                     continue
 
