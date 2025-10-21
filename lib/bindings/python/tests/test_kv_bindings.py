@@ -112,35 +112,47 @@ async def test_radix_tree_thread_safety(distributed_runtime):
     import json
 
     radix_tree = RadixTree()
-    num_threads = 10
+    num_threads = 32
     threads = []
+    done_counter = 0
+    exception_counter = 0
 
     def worker(worker_id):
-        worker_id = worker_id
-        store_event = {
-            "event_id": worker_id,
-            "data": {
-                "stored": {
-                    "parent_hash": None,
-                    "blocks": [
-                        {
-                            "block_hash": worker_id,
-                            "tokens_hash": worker_id,
-                        }
-                    ],
-                }
-            },
-        }
-        event_bytes = json.dumps(store_event).encode("utf-8")
-        radix_tree.apply_event(worker_id, event_bytes)
+        try:
+            nonlocal done_counter
+            worker_id = worker_id
+            store_event = {
+                "event_id": worker_id,
+                "data": {
+                    "stored": {
+                        "parent_hash": None,
+                        "blocks": [
+                            {
+                                "block_hash": worker_id,
+                                "tokens_hash": worker_id,
+                            }
+                        ],
+                    }
+                },
+            }
+            event_bytes = json.dumps(store_event).encode("utf-8")
+            radix_tree.apply_event(worker_id, event_bytes)
+            done_counter += 1
+        except Exception as e:
+            print(f"Exception in worker {worker_id}: {e}") 
+            nonlocal exception_counter
+            exception_counter += 1           
 
     for i in range(num_threads):
         t = threading.Thread(target=worker, args=(i,))
         threads.append(t)
         t.start()
-
+    timeout = 10  # seconds
     for t in threads:
-        t.join()
+        t.join(timeout)
+        assert not t.is_alive(), "Thread timed out"
+    assert exception_counter == 0, f"Expected 0 exceptions, got {exception_counter}"
+    assert done_counter == num_threads, f"Expected {num_threads} done, got {done_counter}"
 
     for i in range(num_threads):
         overlap_scores = radix_tree.find_matches([i])
