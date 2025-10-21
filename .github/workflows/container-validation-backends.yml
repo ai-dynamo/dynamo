@@ -66,9 +66,8 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
+          sleep 10000
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-          echo "TEST PULL"
-          docker pull ${ECR_HOSTNAME}/dockerhub/golang:1.24
       - name: Build Container
         id: build-image
         shell: bash
