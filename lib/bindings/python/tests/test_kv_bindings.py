@@ -20,12 +20,7 @@ from typing import List
 
 import pytest
 
-from dynamo.llm import (
-    ApproxKvIndexer,
-    KvEventPublisher,
-    KvIndexer,
-    RadixTree,
-)
+from dynamo.llm import ApproxKvIndexer, KvEventPublisher, KvIndexer, RadixTree
 from dynamo.runtime import Component, DistributedRuntime
 
 pytestmark = pytest.mark.pre_merge
@@ -112,7 +107,7 @@ async def test_radix_tree_binding(distributed_runtime):
 
 @pytest.mark.asyncio
 @pytest.mark.forked
-@pytest.mark.parametrize("num_threads", [2, 3, 128])
+@pytest.mark.parametrize("num_threads", [2, 3, 5, 128])
 @pytest.mark.parametrize("prepopulate_worker_ids", [True, False])
 @pytest.mark.parametrize("expiration_duration_secs", [None])
 async def test_radix_tree_thread_safety(
