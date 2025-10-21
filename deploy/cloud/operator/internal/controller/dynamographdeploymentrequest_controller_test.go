@@ -29,6 +29,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -928,6 +929,322 @@ var _ = Describe("DGDR Validation", func() {
 			err := reconciler.validateSpec(ctx, dgdr)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).Should(ContainSubstring("engine.config"))
+		})
+	})
+})
+
+var _ = Describe("DGDR Profiler Arguments", func() {
+	var reconciler *DynamoGraphDeploymentRequestReconciler
+
+	BeforeEach(func() {
+		reconciler = &DynamoGraphDeploymentRequestReconciler{
+			Client:        k8sClient,
+			Recorder:      record.NewFakeRecorder(100),
+			ProfilerImage: "test-profiler:latest",
+			Config: commonController.Config{
+				RestrictedNamespace: "",
+			},
+			RBACManager: &MockRBACManager{},
+		}
+	})
+
+	Context("When creating profiling job with inline config", func() {
+		It("Should pass config as --profile-config argument for online profiling", func() {
+			ctx := context.Background()
+			namespace := "default"
+			dgdrName := "test-args-online"
+
+			// Create ServiceAccount
+			sa := &corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      ServiceAccountProfilingJob,
+					Namespace: namespace,
+				},
+			}
+			_ = k8sClient.Create(ctx, sa)
+			defer k8sClient.Delete(ctx, sa)
+
+			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"engine": map[string]interface{}{
+								"backend":        "trtllm",
+								"config":         "/tmp/test-config.yaml",
+								"profiler_image": "test-profiler:latest",
+							},
+							"sla": map[string]interface{}{
+								"ttft": 50.0,
+								"itl":  10.0,
+								"isl":  3000,
+								"osl":  500,
+							},
+							"hardware": map[string]interface{}{
+								"gpu_type":                "h200_sxm",
+								"min_num_gpus_per_engine": 2,
+								"max_num_gpus_per_engine": 4,
+							},
+							"sweep": map[string]interface{}{
+								"use_ai_configurator": false,
+							},
+						}),
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer k8sClient.Delete(ctx, dgdr)
+
+			// Re-fetch DGDR to get proper metadata from API server
+			var fetchedDGDR nvidiacomv1alpha1.DynamoGraphDeploymentRequest
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &fetchedDGDR)).Should(Succeed())
+
+			// Create profiling job with properly initialized DGDR
+			err := reconciler.createProfilingJob(ctx, &fetchedDGDR)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify job was created
+			jobName := getProfilingJobName(&fetchedDGDR)
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, job)).Should(Succeed())
+
+			// Verify profiler container has --profile-config argument
+			profilerContainer := job.Spec.Template.Spec.Containers[0]
+			args := profilerContainer.Args
+
+			// Check that --profile-config argument is present
+			Expect(args).Should(ContainElement("--profile-config"))
+
+			// Clean up
+			k8sClient.Delete(ctx, job)
+		})
+
+		It("Should pass config with AI Configurator settings for offline profiling", func() {
+			ctx := context.Background()
+			namespace := "default"
+			dgdrName := "test-args-offline"
+
+			// Create ServiceAccount
+			sa := &corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      ServiceAccountProfilingJob,
+					Namespace: namespace,
+				},
+			}
+			_ = k8sClient.Create(ctx, sa)
+			defer k8sClient.Delete(ctx, sa)
+
+			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"engine": map[string]interface{}{
+								"backend":        "trtllm",
+								"config":         "/tmp/test-config.yaml",
+								"profiler_image": "test-profiler:latest",
+							},
+							"sla": map[string]interface{}{
+								"ttft": 50.0,
+								"itl":  10.0,
+								"isl":  3000,
+								"osl":  500,
+							},
+							"hardware": map[string]interface{}{
+								"gpu_type":                "h200_sxm",
+								"min_num_gpus_per_engine": 1,
+								"max_num_gpus_per_engine": 8,
+							},
+							"sweep": map[string]interface{}{
+								"use_ai_configurator": true,
+								"aic_system":          "h200_sxm",
+								"aic_model_name":      "QWEN3_32B",
+								"aic_backend_version": "0.20.0",
+							},
+						}),
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer k8sClient.Delete(ctx, dgdr)
+
+			// Re-fetch DGDR to get proper metadata from API server
+			var fetchedDGDR nvidiacomv1alpha1.DynamoGraphDeploymentRequest
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &fetchedDGDR)).Should(Succeed())
+
+			// Create profiling job with properly initialized DGDR
+			err := reconciler.createProfilingJob(ctx, &fetchedDGDR)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify job was created
+			jobName := getProfilingJobName(&fetchedDGDR)
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, job)).Should(Succeed())
+
+			// Verify profiler container has --profile-config argument
+			profilerContainer := job.Spec.Template.Spec.Containers[0]
+			args := profilerContainer.Args
+
+			// Check that --profile-config argument is present
+			Expect(args).Should(ContainElement("--profile-config"))
+
+			// Clean up
+			k8sClient.Delete(ctx, job)
+		})
+	})
+})
+
+var _ = Describe("DGDR Error Handling", func() {
+	var reconciler *DynamoGraphDeploymentRequestReconciler
+	var recorder *record.FakeRecorder
+
+	BeforeEach(func() {
+		recorder = record.NewFakeRecorder(100)
+		reconciler = &DynamoGraphDeploymentRequestReconciler{
+			Client:        k8sClient,
+			Recorder:      recorder,
+			ProfilerImage: "test-profiler:latest",
+			Config: commonController.Config{
+				RestrictedNamespace: "",
+			},
+			RBACManager: &MockRBACManager{},
+		}
+	})
+
+	Context("When profiling job fails", func() {
+		It("Should capture detailed error from pod termination state", func() {
+			ctx := context.Background()
+			namespace := "default"
+			dgdrName := "test-error-capture"
+
+			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"engine": map[string]interface{}{
+								"backend": "vllm",
+								"config":  "/tmp/test-config.yaml",
+							},
+							"sla": map[string]interface{}{
+								"ttft": 100.0,
+								"itl":  1500.0,
+								"isl":  3000,
+								"osl":  5,
+							},
+							"hardware": map[string]interface{}{
+								"min_num_gpus_per_engine": 1,
+								"max_num_gpus_per_engine": 8,
+							},
+						}),
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer k8sClient.Delete(ctx, dgdr)
+
+			// Set status to Profiling
+			dgdr.Status.State = StateProfiling
+			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
+
+			// Create failed job
+			jobName := getProfilingJobName(dgdr)
+			job := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      jobName,
+					Namespace: namespace,
+				},
+				Spec: batchv1.JobSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name:  ContainerNameProfiler,
+								Image: "test",
+							}},
+							RestartPolicy: corev1.RestartPolicyNever,
+						},
+					},
+				},
+				Status: batchv1.JobStatus{
+					Conditions: []batchv1.JobCondition{{
+						Type:    batchv1.JobFailed,
+						Status:  corev1.ConditionTrue,
+						Message: "BackoffLimitExceeded",
+					}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, job)).Should(Succeed())
+			defer k8sClient.Delete(ctx, job)
+
+			// Update job status
+			job.Status.Conditions = []batchv1.JobCondition{{
+				Type:    batchv1.JobFailed,
+				Status:  corev1.ConditionTrue,
+				Message: "BackoffLimitExceeded",
+			}}
+			Expect(k8sClient.Status().Update(ctx, job)).Should(Succeed())
+
+			// Create failed pod with termination details
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      jobName + "-pod",
+					Namespace: namespace,
+					Labels: map[string]string{
+						"job-name": jobName,
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  ContainerNameProfiler,
+						Image: "test",
+					}},
+					RestartPolicy: corev1.RestartPolicyNever,
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodFailed,
+					ContainerStatuses: []corev1.ContainerStatus{{
+						Name: ContainerNameProfiler,
+						State: corev1.ContainerState{
+							Terminated: &corev1.ContainerStateTerminated{
+								ExitCode: 1,
+								Reason:   "Error",
+								Message:  "ValueError: Invalid model name for AI Configurator",
+							},
+						},
+					}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).Should(Succeed())
+			defer k8sClient.Delete(ctx, pod)
+
+			// Reconcile - should capture error details
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify DGDR transitioned to Failed state
+			var updated nvidiacomv1alpha1.DynamoGraphDeploymentRequest
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
+			Expect(updated.Status.State).Should(Equal(StateFailed))
+
+			// Verify error condition contains detailed error
+			condition := meta.FindStatusCondition(updated.Status.Conditions, ConditionTypeProfiling)
+			Expect(condition).NotTo(BeNil())
+			Expect(condition.Status).Should(Equal(metav1.ConditionFalse))
+			Expect(condition.Message).Should(ContainSubstring("profiling job failed"))
 		})
 	})
 })
