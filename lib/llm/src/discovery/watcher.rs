@@ -531,8 +531,13 @@ impl ModelWatcher {
 
             tracing::info!(
                 model_name = card.name(),
-                "Prefill model detected, activating prefill router"
+                "Prefill model detected, registering and activating prefill router"
             );
+
+            // Register prefill model for tracking (no engine needed, just lifecycle)
+            self.manager
+                .add_prefill_model(card.name(), checksum)
+                .context("add_prefill_model")?;
 
             // Activate the prefill router with the endpoint for this prefill model
             let Ok(()) = self.manager.activate_prefill_router(card.name(), endpoint) else {
@@ -545,7 +550,7 @@ impl ModelWatcher {
 
             tracing::info!(
                 model_name = card.name(),
-                "Prefill router activated successfully"
+                "Prefill model registered and router activated successfully"
             );
         } else {
             // Reject unsupported combinations
