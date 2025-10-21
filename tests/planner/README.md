@@ -224,9 +224,9 @@ aiperf profile \
   --endpoint-type chat \
   --url localhost:8000 \ # or the port-forwarded port
   --streaming \
-  --input-file payload:/workspace/rr-5-45_i3000o300.jsonl \ # path to the generated load dataset \
-  --fixed-schedule True \
-  --goodput time_to_first_token:200 inter_token_latency:10 \
+  --input-file /workspace/rr-5-45_i3000o300.jsonl \ # path to the generated load dataset \
+  --custom-dataset-type mooncake_trace \
+  --goodput "time_to_first_token:200 inter_token_latency:10" \
   -v
 ```
 
