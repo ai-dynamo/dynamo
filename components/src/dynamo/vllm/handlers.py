@@ -45,9 +45,8 @@ class BaseWorkerHandler(ABC):
         try:
             await context.async_killed_or_stopped()
             # If we reach here, the context was stopped or killed
-            await self.engine_client.abort(request_id)
             logger.debug(
-                f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
+                f"Cancellation detected, skipping abort {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
             )
         except asyncio.CancelledError:
             # Task was cancelled, normal cleanup if not aborted
@@ -187,16 +186,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 ):
                     # Call router's generate endpoint which returns LLMEngineOutput
                     prefill_response = await anext(
-                        await self.prefill_router_client.generate(
-                            prefill_request, context=context
-                        )
+                        await self.prefill_router_client.generate(prefill_request)
                     )
                 else:
                     # Fallback to direct worker with same format
                     prefill_response = await anext(
-                        await self.prefill_worker_client.round_robin(
-                            prefill_request, context=context
-                        )
+                        await self.prefill_worker_client.round_robin(prefill_request)
                     )
 
                 prefill_output = prefill_response.data()
@@ -225,7 +220,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for tok in self.generate_tokens(
                     prompt, sampling_params, request_id, data_parallel_rank=dp_rank
                 ):
-                    yield tok
+                    # Execution may not continue if yield after cancellation
+                    if not context.is_stopped() and not context.is_killed():
+                        yield tok
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")
                 logger.warning("Initiating Dynamo Runtime shutdown.")
@@ -278,7 +275,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         ),
                     }
 
-                    yield output
+                    # Execution may not continue if yield after cancellation
+                    if not context.is_stopped() and not context.is_killed():
+                        yield output
             except asyncio.CancelledError:
                 # raise the error because we cannot migrate prefill requests
                 raise GeneratorExit(
