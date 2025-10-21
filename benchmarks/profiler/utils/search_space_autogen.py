@@ -27,6 +27,9 @@ MOE_MODEL_MAX_NUM_GPUS = 32
 
 
 def auto_generate_search_space(args: argparse.Namespace) -> None:
+    if args.backend not in CONFIG_MODIFIERS:
+        logger.error(f"Unsupported backend: {args.backend}")
+        exit(1)
     config_modifier = CONFIG_MODIFIERS[args.backend]
 
     # first check if config file exists
@@ -37,10 +40,12 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
             config = config_modifier.load_default_config()
 
             logger.info(
-                f"Saving generated DGDconfig file to {args.output_dir}/disagg_config.yaml"
+                f"Saving generated DGD config file to {args.output_dir}/disagg_config.yaml"
             )
         else:
-            config = yaml.load(args.config)
+            with open(args.config, "r") as f:
+                config = yaml.safe_load(f)
+            
         logger.info(f"Updating model in DGD config file to {args.model}")
         config = config_modifier.update_model(config, args.model)
         config_fn = f"{args.output_dir}/disagg_config.yaml"
