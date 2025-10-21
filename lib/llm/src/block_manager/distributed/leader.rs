@@ -81,28 +81,22 @@ impl KvbmLeaderConfig {
     pub fn sanity_check(&self) -> anyhow::Result<()> {
         let cpu = &self.host_blocks_config;
         let disk = &self.disk_blocks_config;
-        if cpu.num_blocks_overriden == 0 && cpu.cache_size_in_gb == 0.0 {
-            if disk.num_blocks_overriden == 0 && disk.cache_size_in_gb == 0.0 {
-                panic!(
-                    "KVBM Configuration Error: No CPU memory configured.\n\
-                    \n\
-                    To fix this, set one of the following environment variables:\n\
-                    • DYN_KVBM_CPU_CACHE_GB=<size_in_gb>     (e.g., DYN_KVBM_CPU_CACHE_GB=4)\n\
-                    • DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS=<num_blocks>  (e.g., DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS=1000)\n\
-                    \n\
-                    Example: export DYN_KVBM_CPU_CACHE_GB=4"
-                );
-            } else {
-                panic!(
-                    "KVBM Configuration Error: CPU memory must be configured before disk memory.\n\
-                    \n\
-                    To fix this, set one of the following environment variables:\n\
-                    • DYN_KVBM_CPU_CACHE_GB=<size_in_gb>     (e.g., DYN_KVBM_CPU_CACHE_GB=4)\n\
-                    • DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS=<num_blocks>  (e.g., DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS=1000)\n\
-                    \n\
-                    Example: export DYN_KVBM_CPU_CACHE_GB=4"
-                );
-            }
+        let cpu_configured = cpu.num_blocks_overriden > 0 || cpu.cache_size_in_gb > 0.0;
+        let disk_configured = disk.num_blocks_overriden > 0 || disk.cache_size_in_gb > 0.0;
+        if !cpu_configured && !disk_configured {
+            panic!(
+                "KVBM Configuration Error: At least one cache tier must be configured.\n\
+                \n\
+                Configure CPU cache (G2) for CPU memory offloading:\n\
+                • DYN_KVBM_CPU_CACHE_GB=<size_in_gb>     (e.g., DYN_KVBM_CPU_CACHE_GB=4)\n\
+                • DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS=<num_blocks>  (e.g., DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS=1000)\n\
+                \n\
+                OR configure disk cache (G3) for direct GPU->Disk offloading:\n\
+                • DYN_KVBM_DISK_CACHE_GB=<size_in_gb>     (e.g., DYN_KVBM_DISK_CACHE_GB=8)\n\
+                • DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS=<num_blocks>\n\
+                \n\
+                Note: If only disk cache is configured, KVBM will offload directly from GPU (G1) to Disk (G3), bypassing CPU memory (G2)."
+            );
         }
         Ok(())
     }

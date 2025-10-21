@@ -75,13 +75,33 @@ kubectl port-forward svc/vllm-agg-frontend 8000:8000 -n ${NAMESPACE}
 curl http://localhost:8000/v1/models
 ```
 
-## What's a DynamoGraphDeployment (DGD)?
+## Understanding Dynamo's Custom Resources
 
-It's a Kubernetes Custom Resource that defines your inference pipeline:
+Dynamo provides two main Kubernetes Custom Resources for deploying models:
+
+### DynamoGraphDeploymentRequest (DGDR) - Simplified SLA-Driven Configuration
+
+The **recommended approach** for generating optimal configurations. DGDR provides a high-level interface where you specify:
+- Model name and backend framework
+- SLA targets (latency requirements)
+- GPU type (optional)
+
+Dynamo automatically handles profiling and generates an optimized DGD spec in the status. Perfect for:
+- SLA-driven configuration generation
+- Automated resource optimization
+- Users who want simplicity over control
+
+**Note**: DGDR generates a DGD spec which you can then use to deploy.
+
+### DynamoGraphDeployment (DGD) - Direct Configuration
+
+A lower-level interface that defines your complete inference pipeline:
 - Model configuration
 - Resource allocation (GPUs, memory)
 - Scaling policies
 - Frontend/backend connections
+
+Use this when you need fine-grained control or have already completed profiling.
 
 Refer to the [API Reference and Documentation](/docs/kubernetes/api_reference.md) for more details.
 
@@ -89,9 +109,9 @@ Refer to the [API Reference and Documentation](/docs/kubernetes/api_reference.md
 
 For detailed technical specifications of Dynamo's Kubernetes resources:
 
-- **[API Reference](/docs/kubernetes/api_reference.md)** - Complete CRD field specifications for `DynamoGraphDeployment` and `DynamoComponentDeployment`
+- **[API Reference](/docs/kubernetes/api_reference.md)** - Complete CRD field specifications for all Dynamo resources
+- **[Create Deployment](/docs/kubernetes/create_deployment.md)** - Step-by-step deployment creation with DynamoGraphDeployment
 - **[Operator Guide](/docs/kubernetes/dynamo_operator.md)** - Dynamo operator configuration and management
-- **[Create Deployment](/docs/kubernetes/create_deployment.md)** - Step-by-step deployment creation examples
 
 ### Choosing Your Architecture Pattern
 
