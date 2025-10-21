@@ -539,12 +539,8 @@ mod integration_tests {
         tracing::info!("✓ Runtime and distributed runtime created");
 
         // Create component for MockVllmEngine (needed for publishers)
-        let test_component = distributed
-            .namespace("test")?
-            .component(MOCKER_COMPONENT)?
-            .service_builder()
-            .create()
-            .await?;
+        let mut test_component = distributed.namespace("test")?.component(MOCKER_COMPONENT)?;
+        test_component.add_stats_service().await?;
         tracing::info!("✓ Test component created");
 
         // Create MockVllmEngine WITH component (enables publishers)

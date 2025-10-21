@@ -1,18 +1,6 @@
 <!--
 SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
 -->
 
 # Running DeepSeek-R1 Disaggregated with WideEP on GB200s
@@ -26,11 +14,15 @@ Dynamo supports SGLang's GB200 implementation of wide expert parallelism and lar
 > [!Note]
 > Please ensure that you are building this on an ARM64 machine. The correct SGLang image will be selected automatically via the multi-arch manifest.
 
+> [!Note]
+> Please use `--build-arg SGLANG_IMAGE_TAG=nightly-dev-20251019-fda0cb2a` to build the container due to a bug that we found with the DeepEP version being installed. This was fixed in [PR 11773](https://github.com/sgl-project/sglang/pull/11773). When SGLang releases a version > `0.5.3.post3` we will update these instructions.
+
 ```bash
 cd $DYNAMO_ROOT
 docker build \
   -f container/Dockerfile.sglang-wideep \
   -t dynamo-wideep-gb200 \
+  --build-arg SGLANG_IMAGE_TAG=nightly-dev-20251019-fda0cb2a \
   --no-cache \
   .
 ```
@@ -62,17 +54,16 @@ docker run \
 # run ingress
 python3 -m dynamo.frontend --http-port=8000 &
 # run prefill worker
-SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=2048 \
+DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
 MC_TE_METRIC=true \
 SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \
 SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=100000 \
 SGLANG_DISAGGREGATION_WAITING_TIMEOUT=100000 \
-SGLANG_MOONCAKE_CUSTOM_MEM_POOL=True \
 MC_FORCE_MNNVL=1 \
 NCCL_MNNVL_ENABLE=1 \
 NCCL_CUMEM_ENABLE=1 \
 SGLANG_USE_MESSAGE_QUEUE_BROADCASTER=0 \
-SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
+SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
 PYTHONUNBUFFERED=1 \
 python3 -m dynamo.sglang \
   --served-model-name deepseek-ai/DeepSeek-R1 \
@@ -92,8 +83,9 @@ python3 -m dynamo.sglang \
   --max-running-requests 6144 \
   --context-length 2716 \
   --disable-radix-cache \
-  --enable-deepep-moe \
-  --deepep-mode low_latency \
+  --moe-a2a-backend deepep \
+  --load-balance-method round_robin \
+  --deepep-mode normal \
   --moe-dense-tp-size 1 \
   --enable-dp-lm-head \
   --disable-shared-experts-fusion \
@@ -105,9 +97,11 @@ python3 -m dynamo.sglang \
   --disable-cuda-graph \
   --chunked-prefill-size 16384 \
   --max-total-tokens 32768 \
-  --mem-fraction-static 0.8 \
+  --mem-fraction-static 0.82 \
   --log-level debug
 ```
+
+On the other prefill nodes (this example has 2 total prefill nodes), run the same command but change `--node-rank` to 1
 
 4. Run the decode worker on the head decode node
 
@@ -133,21 +127,22 @@ python3 -m dynamo.sglang \
   --disaggregation-mode decode \
   --dist-init-addr ${HEAD_DECODE_NODE_IP}:29500 \
   --disaggregation-bootstrap-port 30001 \
-  --nnodes 12 \
+  --nnodes 2 \
   --node-rank 0 \
-  --tp-size 48 \
-  --dp-size 48 \
+  --tp-size 8 \
+  --dp-size 8 \
   --enable-dp-attention \
   --host 0.0.0.0 \
   --decode-log-interval 1 \
   --max-running-requests 36864 \
   --context-length 2716 \
   --disable-radix-cache \
-  --enable-deepep-moe \
+  --moe-a2a-backend deepep \
+  --prefill-round-robin-balance \
   --deepep-mode low_latency \
   --moe-dense-tp-size 1 \
   --enable-dp-lm-head \
-  --cuda-graph-bs 768 \
+  --cuda-graph-max-bs 256 \
   --disable-shared-experts-fusion \
   --ep-num-redundant-experts 32 \
   --ep-dispatch-algorithm static \
@@ -159,4 +154,4 @@ python3 -m dynamo.sglang \
   --log-level debug
 ```
 
-On the other decode nodes (this example has 12 total decode nodes), run the same command but change `--node-rank` to 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+On the other decode nodes (this example has 2 total decode nodes), run the same command but change `--node-rank` to 1.

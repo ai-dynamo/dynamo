@@ -5,8 +5,9 @@ use std::{any::Any, cmp::max, sync::Arc};
 
 use dynamo_llm::{
     block_manager::{
-        Storage,
+        BlockPool, NixlRegisterableStorage, Storage,
         block::{BlockMetadata, locality::LocalityProvider},
+        config::should_bypass_cpu_cache,
         connector::protocol::{LeaderTransferRequest, RequestType, TransferType},
         distributed::{BlockTransferPool, BlockTransferRequest, KvbmLeader},
     },
@@ -1282,42 +1283,98 @@ async fn process_offload_request(
     leader: &Arc<KvbmLeader>,
     kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
-    let request_id = &offload_req.request_id;
-    let operation_id = &offload_req.operation_id;
+    let request_id = offload_req.request_id.clone();
+    let operation_id = offload_req.operation_id;
 
     tracing::debug!(
         "Processing offload request for {} blocks",
         offload_req.block_ids.len()
     );
 
-    // 1. Acquire mutable host blocks
-    let host_blocks = block_manager
-        .host()
-        .unwrap()
+    // Determine if we should bypass CPU memory (G2) and offload directly from GPU (G1) to Disk (G3)
+    let bypass_cpu_mem = should_bypass_cpu_cache();
+
+    if bypass_cpu_mem {
+        // Direct G1 -> G3 path (Device to Disk, bypassing Host)
+        kvbm_metrics
+            .offload_blocks_d2d
+            .inc_by(offload_req.block_ids.len() as u64);
+
+        tracing::debug!(
+            request_id = %request_id,
+            operation_id = %operation_id,
+            "offloading directly to disk (bypassing host)"
+        );
+
+        process_offload_to_storage(
+            offload_req,
+            block_manager.disk().unwrap(),
+            BlockTransferPool::Disk,
+            leader,
+            &request_id,
+            &operation_id,
+            "disk",
+        )
+        .await?;
+    } else {
+        // Standard path: G1 -> G2 (Device to Host)
+        kvbm_metrics
+            .offload_blocks_d2h
+            .inc_by(offload_req.block_ids.len() as u64);
+
+        process_offload_to_storage(
+            offload_req,
+            block_manager.host().unwrap(),
+            BlockTransferPool::Host,
+            leader,
+            &request_id,
+            &operation_id,
+            "host",
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn process_offload_to_storage<S, L, M>(
+    offload_req: LocalOffloadRequest,
+    storage_pool: &dyn BlockPool<S, L, M>,
+    transfer_pool: BlockTransferPool,
+    leader: &Arc<KvbmLeader>,
+    request_id: &str,
+    operation_id: &uuid::Uuid,
+    storage_name: &str,
+) -> anyhow::Result<()>
+where
+    S: Storage + NixlRegisterableStorage,
+    L: LocalityProvider,
+    M: BlockMetadata,
+{
+    // 1. Acquire mutable blocks
+    let blocks = storage_pool
         .allocate_blocks(offload_req.block_ids.len())
         .await?;
     let token_blocks = offload_req.token_blocks;
 
-    let host_block_ids: Vec<usize> = host_blocks.iter().map(|b| b.block_id()).collect();
+    let allocated_block_ids: Vec<usize> = blocks.iter().map(|b| b.block_id()).collect();
     let block_pairs: Vec<(usize, usize)> = offload_req
         .block_ids
         .into_iter()
-        .zip(host_block_ids.into_iter())
+        .zip(allocated_block_ids.into_iter())
         .collect();
 
     tracing::debug!(
         request_id = request_id,
         operation_id = %operation_id,
-        "offload - stage 1 complete"
+        "offload to {} - stage 1 complete",
+        storage_name
     );
 
     // 2. Apply token blocks
-
-    // create an iterator over the mutable blocks zipped with the token blocks
     let mut blocks_to_register = Vec::new();
-    let zipped_blocks = host_blocks.into_iter().zip(token_blocks.into_iter());
+    let zipped_blocks = blocks.into_iter().zip(token_blocks.into_iter());
 
-    // apply the token blocks to the mutable blocks
     for (mut mutable_block, token_block) in zipped_blocks {
         mutable_block
             .apply_token_block(token_block.clone())
@@ -1328,14 +1385,14 @@ async fn process_offload_request(
     tracing::debug!(
         request_id = request_id,
         operation_id = %operation_id,
-        "offload - stage 2 complete"
+        "offload to {} - stage 2 complete",
+        storage_name
     );
 
     // 3. Issue the offload request using `leader`
-
     let block_xfer_req = BlockTransferRequest {
         from_pool: BlockTransferPool::Device,
-        to_pool: BlockTransferPool::Host,
+        to_pool: transfer_pool,
         blocks: block_pairs,
         connector_req: Some(LeaderTransferRequest {
             request_id: offload_req.request_id.clone(),
@@ -1348,13 +1405,17 @@ async fn process_offload_request(
     tracing::debug!(
         request_id = request_id,
         operation_id = %operation_id,
-        "offload - stage 3 complete"
+        "offload to {} - stage 3 complete",
+        storage_name
     );
 
     // 4. Wait for the offload request to complete
     match notify_receiver.await {
         Ok(_) => {
-            tracing::debug!("Offloading transfer completed successfully");
+            tracing::debug!(
+                "Offloading transfer to {} completed successfully",
+                storage_name
+            );
         }
         Err(_) => {
             return Err(anyhow::anyhow!(
@@ -1365,26 +1426,21 @@ async fn process_offload_request(
     tracing::debug!(
         request_id = request_id,
         operation_id = %operation_id,
-        "offload - stage 4 complete"
+        "offload to {} - stage 4 complete",
+        storage_name
     );
 
-    kvbm_metrics
-        .offload_blocks_d2h
-        .inc_by(blocks_to_register.len() as u64);
-
     // 5. Register the mutable blocks
-    let immutable_blocks = block_manager
-        .host()
-        .unwrap()
-        .register_blocks(blocks_to_register)
-        .await?;
+    let immutable_blocks = storage_pool.register_blocks(blocks_to_register).await?;
 
     tracing::debug!(
         request_id = request_id,
         operation_id = %operation_id,
-        "registered {} blocks",
-        immutable_blocks.len()
+        "registered {} blocks to {}",
+        immutable_blocks.len(),
+        storage_name
     );
+
     Ok(())
 }
 

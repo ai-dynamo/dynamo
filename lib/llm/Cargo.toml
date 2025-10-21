@@ -57,7 +57,7 @@ hf-hub = { workspace = true }
 humantime = { workspace = true }                           # input/batch
 rand = { workspace = true }
 oneshot = { workspace = true }
-parking_lot = "0.12.4"
+parking_lot = { workspace = true }
 prometheus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

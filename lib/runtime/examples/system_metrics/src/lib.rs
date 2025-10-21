@@ -88,13 +88,11 @@ impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for Reques
 pub async fn backend(drt: DistributedRuntime, endpoint_name: Option<&str>) -> Result<()> {
     let endpoint_name = endpoint_name.unwrap_or(DEFAULT_ENDPOINT);
 
-    let endpoint = drt
+    let mut component = drt
         .namespace(DEFAULT_NAMESPACE)?
-        .component(DEFAULT_COMPONENT)?
-        .service_builder()
-        .create()
-        .await?
-        .endpoint(endpoint_name);
+        .component(DEFAULT_COMPONENT)?;
+    component.add_stats_service().await?;
+    let endpoint = component.endpoint(endpoint_name);
 
     // Create custom metrics for system stats
     let system_metrics =

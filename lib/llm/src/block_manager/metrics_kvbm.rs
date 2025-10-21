@@ -4,8 +4,8 @@
 use axum::Router;
 use dynamo_runtime::metrics::prometheus_names::{
     kvbm::{
-        MATCHED_TOKENS, OFFLOAD_BLOCKS_D2H, OFFLOAD_BLOCKS_H2D, ONBOARD_BLOCKS_D2D,
-        ONBOARD_BLOCKS_H2D,
+        MATCHED_TOKENS, OFFLOAD_BLOCKS_D2D, OFFLOAD_BLOCKS_D2H, OFFLOAD_BLOCKS_H2D,
+        ONBOARD_BLOCKS_D2D, ONBOARD_BLOCKS_H2D,
     },
     sanitize_prometheus_name,
 };
@@ -22,6 +22,9 @@ pub struct KvbmMetrics {
 
     // number of blocks offloaded from host to disk
     pub offload_blocks_h2d: IntCounter,
+
+    // number of blocks offloaded from device to disk (bypassing host memory)
+    pub offload_blocks_d2d: IntCounter,
 
     // number of blocks onboarded from host to device
     pub onboard_blocks_h2d: IntCounter,
@@ -54,6 +57,13 @@ impl KvbmMetrics {
                 &[],
             )
             .unwrap();
+        let offload_blocks_d2d = mr
+            .create_intcounter(
+                OFFLOAD_BLOCKS_D2D,
+                "The number of offload blocks from device to disk (bypassing host memory)",
+                &[],
+            )
+            .unwrap();
         let onboard_blocks_h2d = mr
             .create_intcounter(
                 ONBOARD_BLOCKS_H2D,
@@ -77,6 +87,7 @@ impl KvbmMetrics {
             return Self {
                 offload_blocks_d2h,
                 offload_blocks_h2d,
+                offload_blocks_d2d,
                 onboard_blocks_h2d,
                 onboard_blocks_d2d,
                 matched_tokens,
@@ -130,6 +141,7 @@ impl KvbmMetrics {
         Self {
             offload_blocks_d2h,
             offload_blocks_h2d,
+            offload_blocks_d2d,
             onboard_blocks_h2d,
             onboard_blocks_d2d,
             matched_tokens,

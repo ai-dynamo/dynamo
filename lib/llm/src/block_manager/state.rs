@@ -142,6 +142,9 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
             }
         };
 
+        // Determine if we should bypass CPU memory (G2) and offload directly from GPU (G1) to Disk (G3)
+        let bypass_cpu_mem = config::should_bypass_cpu_cache();
+
         let offload_filters = OffloadFilters::builder()
             .device(device_offload_filter)
             .host(host_offload_filter)
@@ -154,6 +157,7 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
             cancellation_token: resources.cancellation_token.clone(),
             model_config,
             kvbm_metrics: resources.config.kvbm_metrics.clone(),
+            bypass_cpu_mem,
         };
 
         let offload_manager = OffloadManager::new(
@@ -270,12 +274,16 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
             .disk(disk_offload_filter)
             .build()?;
 
+        // Determine if we should bypass CPU memory (G2) and offload directly from GPU (G1) to Disk (G3)
+        let bypass_cpu_mem = config::should_bypass_cpu_cache();
+
         let offload_config = OffloadManagerConfig {
             nixl_agent: resources.nixl_agent.clone(),
             async_rt_handle: resources.async_rt_handle.clone(),
             cancellation_token: resources.cancellation_token.clone(),
             model_config,
             kvbm_metrics: resources.config.kvbm_metrics.clone(),
+            bypass_cpu_mem,
         };
 
         let offload_manager = OffloadManager::new(

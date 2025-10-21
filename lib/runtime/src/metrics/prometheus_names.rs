@@ -325,6 +325,9 @@ pub mod kvbm {
     /// The number of offload blocks from host to disk
     pub const OFFLOAD_BLOCKS_H2D: &str = "offload_blocks_h2d";
 
+    /// The number of offload blocks from device to disk (bypassing host memory)
+    pub const OFFLOAD_BLOCKS_D2D: &str = "offload_blocks_d2d";
+
     /// The number of onboard blocks from host to device
     pub const ONBOARD_BLOCKS_H2D: &str = "onboard_blocks_h2d";
 

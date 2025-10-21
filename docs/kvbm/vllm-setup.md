@@ -59,7 +59,25 @@ cd $DYNAMO_HOME/components/backends/vllm
 > To tune the size of CPU or disk cache, set `DYN_KVBM_CPU_CACHE_GB` and `DYN_KVBM_DISK_CACHE_GB` accordingly. We only set `DYN_KVBM_CPU_CACHE_GB=20` in both scripts above.
 
 > [!NOTE]
-> `DYN_KVBM_CPU_CACHE_GB` must be set and `DYN_KVBM_DISK_CACHE_GB` is optional.
+> Configure KVBM cache tiers (choose one of the following options):
+> ```bash
+> # Option 1: CPU cache only (GPU -> CPU offloading)
+> # 4 means 4GB of pinned CPU memory would be used
+> export DYN_KVBM_CPU_CACHE_GB=4
+>
+> # Option 2: Both CPU and Disk cache (GPU -> CPU -> Disk tiered offloading)
+> export DYN_KVBM_CPU_CACHE_GB=4
+> # 8 means 8GB of disk would be used
+> export DYN_KVBM_DISK_CACHE_GB=8
+>
+> # [Experimental] Option 3: Disk cache only (GPU -> Disk direct offloading, bypassing CPU)
+> # NOTE: this option is only experimental and it might give out the best performance.
+> # NOTE: disk offload filtering is not support when using this option.
+> export DYN_KVBM_DISK_CACHE_GB=8
+> ```
+>
+> You can also use "DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS" or
+> "DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS" to specify exact block counts instead of GB
 
 > [!NOTE]
 > When disk offloading is enabled, to extend SSD lifespan, disk offload filtering would be enabled by default. The current policy is only offloading KV blocks from CPU to disk if the blocks have frequency equal or more than `2`. Frequency is determined via doubling on cache hit (init with 1) and decrement by 1 on each time decay step.

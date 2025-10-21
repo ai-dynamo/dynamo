@@ -49,7 +49,7 @@ pub struct SystemHealth {
     /// This solves the race condition where HealthCheckManager starts before endpoints are registered
     /// Using a channel ensures no registrations are lost.
     new_endpoint_tx: mpsc::UnboundedSender<String>,
-    new_endpoint_rx: Arc<std::sync::Mutex<Option<mpsc::UnboundedReceiver<String>>>>,
+    new_endpoint_rx: Arc<parking_lot::Mutex<Option<mpsc::UnboundedReceiver<String>>>>,
     use_endpoint_health_status: Vec<String>,
     health_path: String,
     live_path: String,
@@ -78,7 +78,7 @@ impl SystemHealth {
             health_check_targets: Arc::new(std::sync::RwLock::new(HashMap::new())),
             health_check_notifiers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             new_endpoint_tx: tx,
-            new_endpoint_rx: Arc::new(std::sync::Mutex::new(Some(rx))),
+            new_endpoint_rx: Arc::new(parking_lot::Mutex::new(Some(rx))),
             use_endpoint_health_status,
             health_path,
             live_path,
@@ -238,7 +238,7 @@ impl SystemHealth {
     /// Take the receiver for new endpoint registrations (can only be called once)
     /// This is used by HealthCheckManager to receive notifications of new endpoints
     pub fn take_new_endpoint_receiver(&self) -> Option<mpsc::UnboundedReceiver<String>> {
-        self.new_endpoint_rx.lock().unwrap().take()
+        self.new_endpoint_rx.lock().take()
     }
 
     /// Initialize the uptime gauge using the provided metrics registry

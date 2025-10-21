@@ -70,7 +70,7 @@ impl DistributedRuntime {
         let use_endpoint_health_status = config.use_endpoint_health_status.clone();
         let health_endpoint_path = config.system_health_path.clone();
         let live_endpoint_path = config.system_live_path.clone();
-        let system_health = Arc::new(std::sync::Mutex::new(SystemHealth::new(
+        let system_health = Arc::new(parking_lot::Mutex::new(SystemHealth::new(
             starting_health_status,
             use_endpoint_health_status,
             health_endpoint_path,
@@ -119,7 +119,6 @@ impl DistributedRuntime {
         distributed_runtime
             .system_health
             .lock()
-            .unwrap()
             .initialize_uptime_gauge(&distributed_runtime)?;
 
         // Handle system status server initialization
@@ -430,7 +429,7 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
             // Check that uptime is 50+ ms
-            let uptime = drt.system_health.lock().unwrap().uptime();
+            let uptime = drt.system_health.lock().uptime();
             assert!(
                 uptime >= std::time::Duration::from_millis(50),
                 "Expected uptime to be at least 50ms, but got {:?}",
@@ -456,7 +455,7 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
             // Check that uptime is 50+ ms
-            let uptime = drt.system_health.lock().unwrap().uptime();
+            let uptime = drt.system_health.lock().uptime();
             assert!(
                 uptime >= std::time::Duration::from_millis(50),
                 "Expected uptime to be at least 50ms, but got {:?}",

@@ -107,7 +107,6 @@ impl EndpointConfigBuilder {
         if let Some(stats_handler) = stats_handler {
             handler_map
                 .lock()
-                .unwrap()
                 .insert(endpoint.subject_to(lease_id), stats_handler);
         }
 
@@ -139,7 +138,7 @@ impl EndpointConfigBuilder {
                 transport: TransportType::NatsTcp(subject.clone()),
             };
             tracing::debug!(endpoint_name = %endpoint_name, "Registering endpoint health check target");
-            let guard = system_health.lock().unwrap();
+            let guard = system_health.lock();
             guard.register_health_check_target(
                 &endpoint_name,
                 instance,

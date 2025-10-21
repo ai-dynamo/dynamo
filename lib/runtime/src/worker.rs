@@ -24,7 +24,8 @@ use super::{CancellationToken, Result, Runtime, RuntimeConfig, error};
 
 use futures::Future;
 use once_cell::sync::OnceCell;
-use std::{sync::Mutex, time::Duration};
+use parking_lot::Mutex;
+use std::time::Duration;
 use tokio::{signal, task::JoinHandle};
 
 static RT: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
@@ -190,7 +191,6 @@ impl Worker {
             .get()
             .expect("Application task not initialized")
             .lock()
-            .unwrap()
             .take()
             .expect("Application initialized; but another thread is awaiting it; Worker.execute() can only be called once")
     }
