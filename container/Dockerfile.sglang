@@ -9,7 +9,6 @@ ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
 ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
-ARG RELEASE_BUILD
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 
@@ -104,7 +103,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     cd sglang && \
     git checkout v${SGLANG_VERSION} && \
     # Install in editable mode for development
-    uv pip install -e "python[all]"
+    uv pip install --prerelease=allow -e "python[all]"
 
 # Set env var that allows for forceful shutdown of inflight requests in SGL's TokenizerManager
 ENV SGL_FORCE_SHUTDOWN=1
@@ -204,7 +203,7 @@ COPY --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 COPY benchmarks/ /opt/dynamo/benchmarks/
 COPY --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
 RUN uv pip install \
-    /opt/dynamo/wheelhouse/ai_dynamo_runtime*cp312*.whl \
+    /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
     && cd /opt/dynamo/benchmarks \
