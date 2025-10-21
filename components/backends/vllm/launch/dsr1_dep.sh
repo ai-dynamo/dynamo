@@ -115,38 +115,70 @@ fi
 
 mkdir -p $LOG_DIR
 
-# add is-prefill-worker flag if it's a prefill worker
-IS_PREFILL_WORKER_FLAG=""
-VLLM_ALL2ALL_BACKEND="deepep_low_latency" # this kernel is better for decode workers
-if [ "$IS_PREFILL_WORKER" = "true" ]; then
-    IS_PREFILL_WORKER_FLAG="--is-prefill-worker"
-    VLLM_ALL2ALL_BACKEND="deepep_high_throughput" # this kernel is better for prefill workers
-    LOGFILE_SUFFIX="_prefill"
-    ENFORCE_EAGER_FLAG="--enforce-eager" # deepep_high_throughput is not suppored with cuda graphs, check if this flag is needed
-fi
 
 export GLOO_SOCKET_IFNAME=eth3 # this has to be non-IB network interface
+export NCCL_SOCKET_IFNAME=eth3
+export NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME=eth3
+export NVIDIA_GDRCOPY=enabled
+export NVSHMEM_REMOTE_TRANSPORT=ibgda
+export NVSHMEM_IB_ENABLE_IBGDA="true"
+export VLLM_USE_DEEP_GEMM=1
+export VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1
+export VLLM_SKIP_P2P_CHECK=1
 
 # Data Parallel Attention / Expert Parallelism
 # Routing to DP workers managed by Dynamo
 for ((i=0; i<GPUS_PER_NODE; i++)); do
     dp_rank=$((i + NODE_RANK * GPUS_PER_NODE))
-    CUDA_VISIBLE_DEVICES=$i \
-        VLLM_ALL2ALL_BACKEND=$VLLM_ALL2ALL_BACKEND \
-        VLLM_USE_DEEP_GEMM=1 \
-        VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1 \
-        python3 -m dynamo.vllm \
-        --model $MODEL \
-        --served-model-name $SERVED_MODEL_NAME \
-        --tensor-parallel-size 1 \
-        --data_parallel_size $DATA_PARALLEL_SIZE \
-        --data-parallel-address $MASTER_ADDR \
-        --data-parallel-rpc-port 13345 \
-        --data-parallel-rank $dp_rank \
-        --max-model-len 8192 \
-        --gpu-memory-utilization 0.8 \
-        --enable-expert-parallel \
-        $ENFORCE_EAGER_FLAG $IS_PREFILL_WORKER_FLAG 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_rank}${LOGFILE_SUFFIX}.log &
+    if [ "$IS_PREFILL_WORKER" = "true" ]; then
+        CUDA_VISIBLE_DEVICES=$i \
+            VLLM_ALL2ALL_BACKEND=deepep_high_throughput \
+            python3 -m dynamo.vllm \
+            --model $MODEL \
+            --served-model-name $SERVED_MODEL_NAME \
+            --tensor-parallel-size 1 \
+            --data_parallel_size $DATA_PARALLEL_SIZE \
+            --data-parallel-address $MASTER_ADDR \
+            --data-parallel-rpc-port 13345 \
+            --data-parallel-rank $dp_rank \
+            --max-model-len 1048 \
+            --gpu-memory-utilization 0.8 \
+            --enable-expert-parallel \
+            --data-parallel-hybrid-lb \
+            --async-scheduling \
+            --enable-dbo \
+            --dbo-decode-token-threshold 32 \
+            --enable-eplb \
+            --eplb-config '{"window_size":"1000",
+                            "step_interval":"3000",
+                            "num_redundant_experts":"32",
+                            "log_balancedness":"False"}' \
+            --is-prefill-worker 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_rank}_prefill.log &
+    else
+        CUDA_VISIBLE_DEVICES=$i \
+            VLLM_ALL2ALL_BACKEND=deepep_low_latency \
+            python3 -m dynamo.vllm \
+            --model $MODEL \
+            --served-model-name $SERVED_MODEL_NAME \
+            --tensor-parallel-size 1 \
+            --data_parallel_size $DATA_PARALLEL_SIZE \
+            --data-parallel-address $MASTER_ADDR \
+            --data-parallel-rpc-port 13345 \
+            --data-parallel-rank $dp_rank \
+            --max-model-len 2560 \
+            --gpu-memory-utilization 0.85 \
+            --enable-expert-parallel \
+            --data-parallel-hybrid-lb \
+            --async-scheduling \
+            --enable-dbo \
+            --dbo-decode-token-threshold 32 \
+            --enable-eplb \
+            --eplb-config '{"window_size":"1000",
+                            "step_interval":"3000",
+                            "num_redundant_experts":"32",
+                            "log_balancedness":"False"}' \
+            --compilation_config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_rank}_decode.log &
+        fi
 done
 
 echo "All workers starting. (press Ctrl+C to stop)..."
