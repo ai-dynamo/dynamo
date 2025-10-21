@@ -214,9 +214,9 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         sed -i 's/pip3 install/uv pip install/g' /tmp/install_tensorrt.sh && \
         bash /tmp/install_tensorrt.sh; \
         # Install from local wheel directory in build context
-        WHEEL_FILE="$(find /trtllm_wheel -name "*.whl" | head -n 1 |  tr -d '\n')"; \
-        if [ -n "${WHEEL_FILE}" ]; then \
-            uv pip install "${WHEEL_FILE}"; \
+        WHEEL_FILE="$(find /trtllm_wheel -name "*.whl" | head -n 1)"; \
+        if [ -n "$WHEEL_FILE" ]; then \
+            uv pip install "$WHEEL_FILE"; \
         else \
             echo "No wheel file found in /trtllm_wheel directory."; \
             exit 1; \
