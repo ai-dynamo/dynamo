@@ -137,14 +137,19 @@ async fn run_listener_loop(
                     continue;
                 };
 
-                // Parse multipart message: [topic, sequence, payload]
+                // Parse multipart message: supports both formats
+                // - 2 frames: [topic, payload]
+                // - 3 frames: [topic, sequence, payload]
                 let frames: Vec<Vec<u8>> = msg.into_vec().into_iter().map(|f| f.to_vec()).collect();
-                if frames.len() != 3 {
-                    tracing::warn!("Unexpected frame count: {}", frames.len());
-                    continue;
-                }
 
-                let payload = &frames[2];
+                let payload = match frames.len() {
+                    2 => &frames[1],  // [topic, payload]
+                    3 => &frames[2],  // [topic, sequence, payload]
+                    _ => {
+                        tracing::warn!("Unexpected frame count: {} (expected 2 or 3)", frames.len());
+                        continue;
+                    }
+                };
 
                 // Deserialize event batch
                 let mut deserializer = Deserializer::new(&payload[..]);
@@ -205,9 +210,32 @@ fn process_event(
                 data_parallel_rank
             );
 
-            // Split token_ids into chunks of block_size for each block
-            let token_chunks: Vec<Vec<i32>> = token_ids
-                .chunks(block_size as usize)
+            // Convert block_size from i32 to usize for chunking
+            // SAFETY: Must validate block_size > 0 to prevent panic in chunks()
+            let block_size_usize = match usize::try_from(block_size) {
+                Ok(size) if size > 0 => size,
+                _ => {
+                    tracing::warn!(
+                        "Invalid block_size {} (must be positive), skipping event to avoid chunks() panic",
+                        block_size
+                    );
+                    return;
+                }
+            };
+
+            // Convert token_ids from i32 to u32 and split into chunks
+            let token_ids_u32: Vec<u32> = token_ids
+                .into_iter()
+                .filter_map(|t| {
+                    u32::try_from(t).ok().or_else(|| {
+                        tracing::warn!("Invalid token ID {}, skipping", t);
+                        None
+                    })
+                })
+                .collect();
+
+            let token_chunks: Vec<Vec<u32>> = token_ids_u32
+                .chunks(block_size_usize)
                 .map(|chunk| chunk.to_vec())
                 .collect();
 
@@ -232,7 +260,7 @@ fn process_event(
                     crate::block_manager::kv_consolidator::EventSource::Vllm,
                     block_tokens,
                     current_parent.clone(),
-                    block_size,
+                    block_size_usize,
                     lora_id,
                     Some(storage_tier),
                     data_parallel_rank,

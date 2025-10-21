@@ -6,8 +6,9 @@ Helper functions for KV Event Consolidator configuration.
 """
 
 import logging
-import socket
 from typing import Optional, Tuple
+
+import zmq
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ def should_enable_consolidator(vllm_config) -> bool:
     return True
 
 
-def get_consolidator_endpoints(vllm_config) -> Optional[Tuple[str, str]]:
+def get_consolidator_endpoints(vllm_config) -> Optional[Tuple[str, str, str]]:
     """
     Get consolidator endpoints from vLLM config.
 
@@ -62,8 +63,12 @@ def get_consolidator_endpoints(vllm_config) -> Optional[Tuple[str, str]]:
         vllm_config: The vLLM VllmConfig object
 
     Returns:
-        Tuple of (vllm_endpoint, output_endpoint) if consolidator should be enabled,
-        None otherwise
+        Tuple of (vllm_endpoint, output_bind_endpoint, output_connect_endpoint) if consolidator should be enabled,
+        where:
+        - vllm_endpoint: ZMQ endpoint for consolidator to subscribe to vLLM events
+        - output_bind_endpoint: ZMQ endpoint for consolidator to bind and publish (tcp://0.0.0.0:PORT)
+        - output_connect_endpoint: ZMQ endpoint for clients to connect (tcp://127.0.0.1:PORT)
+        None if consolidator should not be enabled
     """
     if not should_enable_consolidator(vllm_config):
         return None
@@ -81,19 +86,29 @@ def get_consolidator_endpoints(vllm_config) -> Optional[Tuple[str, str]]:
         data_parallel_rank=data_parallel_rank,
     ).replace("*", "127.0.0.1")
 
-    # Allocate dynamic port for consolidator output
-    # Use OS to pick an available port
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # Allocate dynamic port for consolidator output using ZMQ's atomic bind_to_random_port
+    # This eliminates the TOCTOU race and ensures the port is actually reserved
+    context = zmq.Context.instance()
+    temp_socket = context.socket(zmq.PUB)
     try:
-        sock.bind(("", 0))  # Let OS pick an available port
-        output_port = sock.getsockname()[1]
+        # Atomically bind to a random port on all interfaces
+        # Returns the actual port number that was bound
+        output_port = temp_socket.bind_to_random_port("tcp://*")
     finally:
-        sock.close()
+        temp_socket.close()
 
-    output_endpoint = f"tcp://0.0.0.0:{output_port}"
+    # Build a connect-friendly endpoint using localhost (not 0.0.0.0)
+    # Clients will connect to 127.0.0.1, while the consolidator binds to 0.0.0.0
+    output_bind_endpoint = f"tcp://0.0.0.0:{output_port}"
+    output_connect_endpoint = f"tcp://127.0.0.1:{output_port}"
 
     logger.info(
-        f"Consolidator endpoints: vllm={vllm_endpoint}, output={output_endpoint} (port={output_port})"
+        f"Consolidator endpoints: vllm={vllm_endpoint}, "
+        f"output_bind={output_bind_endpoint}, output_connect={output_connect_endpoint} (port={output_port})"
     )
 
-    return vllm_endpoint, output_endpoint
+    # Return both bind and connect endpoints as a tuple
+    # First element is vllm_endpoint (for consolidator to subscribe)
+    # Second element is output_bind_endpoint (for consolidator to bind/publish)
+    # Third element is output_connect_endpoint (for clients to connect)
+    return vllm_endpoint, output_bind_endpoint, output_connect_endpoint

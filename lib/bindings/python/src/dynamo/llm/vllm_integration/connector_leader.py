@@ -72,9 +72,14 @@ class KvConnectorLeader:
             hasattr(vllm_config, "consolidator_endpoints")
             and vllm_config.consolidator_endpoints
         ):
+            # Unpack all three endpoints
+            # [0]: vllm_endpoint (for consolidator to subscribe to vLLM)
+            # [1]: output_bind_endpoint (for consolidator to bind/publish)
+            # [2]: output_connect_endpoint (for clients to connect)
             (
                 consolidator_vllm_endpoint,
                 consolidator_output_endpoint,
+                _consolidator_output_connect_endpoint,  # Not needed here
             ) = vllm_config.consolidator_endpoints
             self._consolidator_output_port = int(
                 consolidator_output_endpoint.split(":")[-1]

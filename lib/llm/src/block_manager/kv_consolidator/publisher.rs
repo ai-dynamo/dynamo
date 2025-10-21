@@ -49,7 +49,9 @@ impl Event {
     /// Convert from ConsolidatedEvent to vLLM Event format
     /// Parses string block hashes back to u64 for router compatibility
     /// Note: source field is kept in ConsolidatedEvent for internal logging but not sent to router
-    fn from_consolidated(event: ConsolidatedEvent) -> Self {
+    ///
+    /// Returns an error if block hash parsing fails to prevent sending corrupted events to the router
+    fn from_consolidated(event: ConsolidatedEvent) -> Result<Self> {
         match event {
             ConsolidatedEvent::Store {
                 block_hash,
@@ -58,20 +60,63 @@ impl Event {
                 block_size,
                 lora_id,
                 source: _, // Source used for logging only, not sent to router
-            } => Event::BlockStored {
-                block_hashes: vec![block_hash.parse().unwrap_or(0)],
-                parent_block_hash: parent_hash.map(|h| h.parse().unwrap_or(0)),
-                token_ids,
-                block_size,
-                lora_id,
-            },
+            } => {
+                // Parse block hash - fail if invalid to prevent corruption
+                let parsed_hash = block_hash
+                    .parse::<u64>()
+                    .with_context(|| format!("Failed to parse block_hash: {}", block_hash))?;
+
+                // Parse parent hash if present - fail if invalid
+                let parsed_parent = parent_hash
+                    .map(|h| {
+                        h.parse::<u64>()
+                            .with_context(|| format!("Failed to parse parent_hash: {}", h))
+                    })
+                    .transpose()?;
+
+                // Convert u32 token_ids to i32 for vLLM compatibility
+                // Token IDs should never exceed i32::MAX in practice, but we handle it gracefully
+                let token_ids_i32: Vec<i32> = token_ids
+                    .into_iter()
+                    .map(|t| {
+                        i32::try_from(t).unwrap_or_else(|_| {
+                            tracing::warn!("Token ID {} exceeds i32::MAX, clamping to i32::MAX", t);
+                            i32::MAX
+                        })
+                    })
+                    .collect();
+
+                // Convert usize block_size to i32 for vLLM compatibility
+                let block_size_i32 = i32::try_from(block_size).unwrap_or_else(|_| {
+                    tracing::warn!(
+                        "Block size {} exceeds i32::MAX, clamping to i32::MAX",
+                        block_size
+                    );
+                    i32::MAX
+                });
+
+                Ok(Event::BlockStored {
+                    block_hashes: vec![parsed_hash],
+                    parent_block_hash: parsed_parent,
+                    token_ids: token_ids_i32,
+                    block_size: block_size_i32,
+                    lora_id,
+                })
+            }
             ConsolidatedEvent::Remove {
                 block_hash,
                 source: _,
-            } => Event::BlockRemoved {
-                block_hashes: vec![block_hash.parse().unwrap_or(0)],
-            },
-            ConsolidatedEvent::ClearAll => Event::AllBlocksCleared {},
+            } => {
+                // Parse block hash - fail if invalid to prevent corruption
+                let parsed_hash = block_hash.parse::<u64>().with_context(|| {
+                    format!("Failed to parse block_hash for removal: {}", block_hash)
+                })?;
+
+                Ok(Event::BlockRemoved {
+                    block_hashes: vec![parsed_hash],
+                })
+            }
+            ConsolidatedEvent::ClearAll => Ok(Event::AllBlocksCleared {}),
         }
     }
 }
@@ -159,9 +204,23 @@ impl KvEventConsolidatorPublisher {
                 events.len()
             );
 
-            // Convert to vLLM format
-            let vllm_events: Vec<Event> =
-                events.into_iter().map(Event::from_consolidated).collect();
+            // Convert to vLLM format, filtering out events with invalid hashes
+            let vllm_events: Vec<Event> = events
+                .into_iter()
+                .filter_map(|event| match Event::from_consolidated(event) {
+                    Ok(e) => Some(e),
+                    Err(err) => {
+                        tracing::error!("Failed to convert consolidated event, skipping: {}", err);
+                        None
+                    }
+                })
+                .collect();
+
+            // Skip publishing if all events were invalid
+            if vllm_events.is_empty() {
+                tracing::warn!("All consolidated events failed validation, skipping publish");
+                continue;
+            }
 
             let num_events = vllm_events.len(); // Save length before move
 
