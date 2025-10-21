@@ -296,6 +296,7 @@ jobs:
   upload-workflow-metrics:
     needs: [backend-status-check]  # Wait for the status check which waits for all build jobs
     if: always()  # Always run, even if other jobs fail
+    continue-on-error: true  # Don't fail the workflow if metrics upload fails
     uses: ./.github/workflows/reusable-metrics-upload.yml
     secrets: inherit
 
