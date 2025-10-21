@@ -69,6 +69,22 @@ Dynamo SGLang uses SGLang's native argument parser, so **most SGLang engine argu
 > [!NOTE]
 > When using `--use-sglang-tokenizer`, only `v1/chat/completions` is available through Dynamo's frontend.
 
+### Request Cancellation
+
+When a user cancels a request (e.g., by disconnecting from the frontend), the request is automatically cancelled across all workers, freeing compute resources for other requests.
+
+#### Cancellation Support Matrix
+
+| | Local Prefill | Remote Prefill | Decode |
+|-|--------------|----------------|--------|
+| **Aggregated** | ✅ | - | ✅ |
+| **Disaggregated** | - | ⚠️ | ✅ |
+
+> [!WARNING]
+> ⚠️ SGLang currently does not support cancellation during the remote prefill phase.
+
+For more details, see the [Request Cancellation Architecture](../../architecture/request_cancellation.md) documentation.
+
 ## Installation
 
 ### Install latest release
