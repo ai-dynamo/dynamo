@@ -324,18 +324,7 @@ class WorkflowMetricsUploader:
         if not self.repo or not self.run_id:
             raise ValueError("Missing required GitHub environment variables")
 
-        print("=" * 80)
-        print("📊 WORKFLOW METRICS UPLOAD - INITIALIZATION")
-        print("=" * 80)
-        print(f"Repository: {self.repo}")
-        print(f"Run ID: {self.run_id}")
-        print(f"Workflow Name: {self.workflow_name}")
-        print(f"Actor: {self.actor}")
-        print(f"Event: {self.event_name}")
-        print(f"Ref: {self.ref}")
-        print(f"Ref Name: {self.ref_name}")
-        print(f"SHA: {self.sha}")
-        print("=" * 80)
+        print(f"Uploading metrics for workflow '{self.workflow_name}' (run {self.run_id}) in {self.repo}")
 
     def handle_upload_error(self, error: Exception, operation: str) -> str:
         """Centralized error handling with URL masking for all upload operations
@@ -426,7 +415,6 @@ class WorkflowMetricsUploader:
                 if pr_data:
                     # Reconstruct pull_requests array format
                     pull_requests = [pr_data]
-                    print(f"   ℹ️  Fetched PR #{pr_number} data from GitHub API for source branch info")
         
         if event_type == "pull_request":
             # For pull_request events:
@@ -440,7 +428,6 @@ class WorkflowMetricsUploader:
                     db_data[FIELD_BRANCH] = f"pull-request/{pr_number}"
                     # Source branch (contributor's branch)
                     db_data[FIELD_SOURCE_BRANCH] = head_branch
-                    print(f"   ℹ️  PR branch mapping: target=pull-request/{pr_number}, source={head_branch}")
                 else:
                     # Fallback if PR number not available
                     db_data[FIELD_BRANCH] = head_branch
@@ -459,8 +446,6 @@ class WorkflowMetricsUploader:
                 pr_head = pr_data.get("head", {})
                 source_branch = pr_head.get("ref", head_branch)
                 db_data[FIELD_SOURCE_BRANCH] = source_branch
-                if source_branch != head_branch:
-                    print(f"   ℹ️  Source branch: {source_branch}")
             else:
                 # Not a PR, both fields have same value
                 db_data[FIELD_SOURCE_BRANCH] = head_branch
@@ -547,24 +532,7 @@ class WorkflowMetricsUploader:
 
             # Count jobs to process (exclude specified jobs)
             workflow_name = workflow_data.get("name", "")
-            
-            # Debug: Log workflow data fields to understand branch naming
-            print(f"\n🔍 Workflow API Debug Info:")
-            print(f"   head_branch: {workflow_data.get('head_branch')}")
-            print(f"   head_ref: {workflow_data.get('head_ref')}")  
-            print(f"   ref: {workflow_data.get('ref')}")
-            print(f"   event: {workflow_data.get('event')}")
-            
-            # Log all jobs found by GitHub API
             all_jobs = jobs_data.get("jobs", [])
-            print(f"\n📋 Found {len(all_jobs)} total jobs from GitHub API:")
-            for job in all_jobs:
-                job_name = job.get("name", "")
-                job_status = job.get("status", "")
-                job_conclusion = job.get("conclusion", "N/A")
-                is_excluded = should_exclude_job(job_name, EXCLUDED_JOB_NAMES)
-                status_marker = "⏭️ EXCLUDED" if is_excluded else "✓ INCLUDED"
-                print(f"   {status_marker}: '{job_name}' (status: {job_status}, conclusion: {job_conclusion})")
             
             jobs_to_process = [
                 job
@@ -573,20 +541,10 @@ class WorkflowMetricsUploader:
             ]
 
             if not jobs_to_process:
-                print(
-                    f"❌ No jobs to process after excluding jobs: {EXCLUDED_JOB_NAMES}"
-                )
-                print(
-                    f"   Available jobs: {[job.get('name') for job in all_jobs]}"
-                )
+                print(f"No jobs to process after excluding: {EXCLUDED_JOB_NAMES}")
                 return
 
-            print(f"\n✅ Processing workflow metrics - proceeding with upload")
-            print(f"   Workflow: '{workflow_name}'")
-            print(
-                f"   Jobs to process: {len(jobs_to_process)} (excluding {EXCLUDED_JOB_NAMES})"
-            )
-            print(f"   Job names: {[job.get('name') for job in jobs_to_process]}")
+            print(f"Processing {len(jobs_to_process)} jobs for workflow '{workflow_name}'")
 
             # Check if workflow is completed
             workflow_status = workflow_data.get("status", "")
