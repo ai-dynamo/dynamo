@@ -259,13 +259,21 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
 # Install common and test dependencies
+RUN uv pip list
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    UV_GIT_LFS=1 uv pip install \
+        --no-cache \
+        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.test.txt --dry-run
+RUN uv pip list
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
     UV_GIT_LFS=1 uv pip install \
         --no-cache \
         --requirement /tmp/requirements.txt \
         --requirement /tmp/requirements.test.txt
-
+RUN uv pip list
 ##################################
 ##### Wheel Build Image ##########
 ##################################
@@ -375,6 +383,7 @@ COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
 # Install Python packages
 COPY benchmarks/ /opt/dynamo/benchmarks/
+RUN uv pip list
 RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
@@ -383,7 +392,7 @@ RUN uv pip install \
     && UV_GIT_LFS=1 uv pip install --no-cache . \
     && cd - \
     && rm -rf /opt/dynamo/benchmarks
-
+RUN uv pip list
 # Setup launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > ~/.launch_screen && \

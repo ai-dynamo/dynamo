@@ -550,7 +550,7 @@ build_local_dev_with_header() {
         set -x
     fi
 
-    $RUN_PREFIX docker build \
+    $RUN_PREFIX docker build --progress=plain  \
         --build-arg DEV_BASE="$dev_base_image" \
         --build-arg USER_UID="$USER_UID" \
         --build-arg USER_GID="$USER_GID" \
@@ -759,7 +759,7 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         #   - PYTHON_PACKAGE_VERSION
         #   - HF_TOKEN
         #   - MAX_JOBS
-        $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        $RUN_PREFIX docker build --progress=plain -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
         # Start framework build
         echo "======================================"
         echo "Starting Build 2: Framework Image"
@@ -774,9 +774,9 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         #   - NIXL_UCX_REF
         #   - ENABLE_KVBM
         BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
-        $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        $RUN_PREFIX docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
     else
-        $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        $RUN_PREFIX docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
     fi
 fi
 
