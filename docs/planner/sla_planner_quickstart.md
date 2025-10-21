@@ -15,7 +15,7 @@ The deployment process consists of two mandatory phases:
 2. **SLA Planner Deployment** (5-10 minutes) - Enables autoscaling
 
 > [!TIP]
-> **Fast Profiling with AI Configurator**: For TensorRT-LLM users, we provide AI Configurator (AIC) that can complete profiling in 20-30 seconds using performance simulation instead of real deployments. Support for vLLM and SGLang coming soon. See [AI Configurator section](/docs/benchmarks/pre_deployment_profiling.md#running-the-profiling-script-with-aiconfigurator) in the Profiling Guide.
+> **Fast Profiling with AI Configurator**: For TensorRT-LLM users, we provide AI Configurator (AIC) that can complete profiling in 20-30 seconds using performance simulation instead of real deployments. Support for vLLM and SGLang coming soon. See [AI Configurator section](/docs/benchmarks/pre_deployment_profiling.md#running-the-profiling-script-with-ai-configurator) in the Profiling Guide.
 
 ```mermaid
 flowchart TD

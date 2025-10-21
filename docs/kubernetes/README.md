@@ -34,7 +34,7 @@ These are independent. A single Kubernetes namespace can host multiple Dynamo na
 
 ## Pre-deployment Checks
 
-Before deploying the platform, it is recommended to run the pre-deployment checks to ensure the cluster is ready for deployment. Please refer to the [pre-deployment checks](../../deploy/cloud/pre-deployment/README.md) for more details.
+Before deploying the platform, it is recommended to run the pre-deployment checks to ensure the cluster is ready for deployment. Please refer to the [pre-deployment checks](./cloud/pre-deployment/README.md) for more details.
 
 ## 1. Install Platform First
 
@@ -59,7 +59,7 @@ If your cluster has namespace-restricted Dynamo operators, add this flag to step
 --set dynamo-operator.namespaceRestriction.enabled=true
 ```
 
-For more details or customization options (including multinode deployments), see **[Installation Guide for Dynamo Kubernetes Platform](./installation_guide.md)**.
+For more details or customization options (including multinode deployments), see **[Installation Guide for Dynamo Kubernetes Platform](../docs/kubernetes/installation_guide.md)**.
 
 ## 2. Choose Your Backend
 
@@ -94,7 +94,7 @@ kubectl port-forward svc/vllm-agg-frontend 8000:8000 -n ${NAMESPACE}
 curl http://localhost:8000/v1/models
 ```
 
-For SLA-based autoscaling, see [SLA Planner Quick Start Guide](../planner/sla_planner_quickstart.md).
+For SLA-based autoscaling, see [SLA Planner Quick Start Guide](../docs/planner/sla_planner_quickstart.md).
 
 ## Understanding Dynamo's Custom Resources
 
@@ -124,15 +124,15 @@ A lower-level interface that defines your complete inference pipeline:
 
 Use this when you need fine-grained control or have already completed profiling.
 
-Refer to the [API Reference and Documentation](./api_reference.md) for more details.
+Refer to the [API Reference and Documentation](../docs/kubernetes/api_reference.md) for more details.
 
 ## 📖 API Reference & Documentation
 
 For detailed technical specifications of Dynamo's Kubernetes resources:
 
-- **[API Reference](./api_reference.md)** - Complete CRD field specifications for all Dynamo resources
-- **[Create Deployment](./deployment/create_deployment.md)** - Step-by-step deployment creation with DynamoGraphDeployment
-- **[Operator Guide](./dynamo_operator.md)** - Dynamo operator configuration and management
+- **[API Reference](../docs/kubernetes/api_reference.md)** - Complete CRD field specifications for all Dynamo resources
+- **[Create Deployment](../docs/kubernetes/deployment/create_deployment.md)** - Step-by-step deployment creation with DynamoGraphDeployment
+- **[Operator Guide](../docs/kubernetes/dynamo_operator.md)** - Dynamo operator configuration and management
 
 ### Choosing Your Architecture Pattern
 
@@ -215,13 +215,13 @@ Key customization points include:
 
 ## Additional Resources
 
-- **[Examples](../../examples/README.md)** - Complete working examples
-- **[Create Custom Deployments](./deployment/create_deployment.md)** - Build your own CRDs
-- **[Operator Documentation](./dynamo_operator.md)** - How the platform works
-- **[Helm Charts](../../deploy/helm/README.md)** - For advanced users
-- **[GitOps Deployment with FluxCD](./fluxcd.md)** - For advanced users
-- **[Logging](./observability/logging.md)** - For logging setup
-- **[Multinode Deployment](./deployment/multinode-deployment.md)** - For multinode deployment
-- **[Grove](./grove.md)** - For grove details and custom installation
-- **[Monitoring](./observability/metrics.md)** - For monitoring setup
-- **[Model Caching with Fluid](./model_caching_with_fluid.md)** - For model caching with Fluid
+- **[Examples](../examples/README.md)** - Complete working examples
+- **[Create Custom Deployments](../docs/kubernetes/deployment/create_deployment.md)** - Build your own CRDs
+- **[Operator Documentation](../docs/kubernetes/dynamo_operator.md)** - How the platform works
+- **[Helm Charts](./helm/README.md)** - For advanced users
+- **[GitOps Deployment with FluxCD](../docs/kubernetes/fluxcd.md)** - For advanced users
+- **[Logging](../docs/kubernetes/observability/logging.md)** - For logging setup
+- **[Multinode Deployment](../docs/kubernetes/deployment/multinode-deployment.md)** - For multinode deployment
+- **[Grove](../docs/kubernetes/grove.md)** - For grove details and custom installation
+- **[Monitoring](../docs/kubernetes/observability/metrics.md)** - For monitoring setup
+- **[Model Caching with Fluid](../docs/kubernetes/model_caching_with_fluid.md)** - For model caching with Fluid
