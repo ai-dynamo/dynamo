@@ -43,7 +43,6 @@ spec:
       # Sweep/profiling configuration
       sweep:
         skip_existing_results: true  # Skip configurations that already have results
-        force_rerun: false  # Force re-running all tests
         prefill_interpolation_granularity: 16  # Samples for TTFT interpolation
         decode_interpolation_granularity: 6  # Samples for ITL interpolation
 
@@ -51,7 +50,6 @@ spec:
         use_ai_configurator: false  # Set to false for online profiling (2-4 hours)
         aic_system: h200_sxm  # Target GPU system for AI Configurator
         aic_model_name: QWEN3_0.6B  # Model name for AI Configurator
-        aic_backend: ""  # Optional: defaults to engine.backend
         aic_backend_version: "0.20.0"  # Backend version for AI Configurator
 
       # SLA targets for profiling

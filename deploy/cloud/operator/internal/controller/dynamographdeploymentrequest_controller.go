@@ -889,7 +889,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			}
 		}
 		if imageName == "" {
-			return nil, false, fmt.Errorf("profiler image not configured: either set profilingConfig.raw.engine.profiler_image or configure dynamo-operator.dynamo.dgdr.profilerImage in Helm values")
+			return nil, false, fmt.Errorf("profiler image not configured: either set profilingConfig.config.engine.profiler_image or configure dynamo-operator.dynamo.dgdr.profilerImage in Helm values")
 		}
 
 		logger.Info("Using profiler image", "image", imageName)

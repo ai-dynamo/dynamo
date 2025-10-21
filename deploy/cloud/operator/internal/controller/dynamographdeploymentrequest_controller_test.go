@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
@@ -49,7 +50,7 @@ func (m *MockRBACManager) EnsureServiceAccountWithRBAC(ctx context.Context, targ
 
 // Helper function to create JSON config for tests
 func createTestConfig(config map[string]interface{}) *apiextensionsv1.JSON {
-	jsonBytes, err := yaml.Marshal(config)
+	jsonBytes, err := json.Marshal(config)
 	if err != nil {
 		panic(err)
 	}
