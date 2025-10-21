@@ -28,20 +28,9 @@ jobs:
         with:
           filters: .github/filters.yaml
 
-  # TEMPORARY DEBUG JOB - REMOVE AFTER TESTING
-  debug-fail-fast:
-    runs-on: ubuntu-latest
-    needs: changed-files
-    steps:
-      - name: Quick fail for metrics testing
-        run: |
-          echo "⚠️ TEMPORARY: Failing quickly to test metrics upload"
-          echo "This job should be removed after debugging is complete"
-          exit 1
-
   backend-status-check:
     runs-on: ubuntu-latest
-    needs: [debug-fail-fast]
+    needs: [vllm, sglang, trtllm]
     if: always()
     steps:
       - name: "Check all dependent jobs"
