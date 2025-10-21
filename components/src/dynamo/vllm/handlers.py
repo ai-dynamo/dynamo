@@ -194,6 +194,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         sampling_params_dict = extra_args.get("sampling_params", {})
         sampling_params = msgspec.convert(sampling_params_dict, SamplingParams)
 
+        # Configure for prefill-only mode with remote decode
+        if sampling_params.extra_args is None:
+            sampling_params.extra_args = {}
+        sampling_params.extra_args["kv_transfer_params"] = {
+            "do_remote_decode": True,
+        }
+        sampling_params.max_tokens = 1
+        sampling_params.min_tokens = 1
+
         dp_rank = request.get("dp_rank", None)
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
