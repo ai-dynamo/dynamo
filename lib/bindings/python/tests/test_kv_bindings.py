@@ -107,12 +107,12 @@ async def test_radix_tree_binding(distributed_runtime):
 
 @pytest.mark.asyncio
 @pytest.mark.forked
-async def test_radix_tree_thread_safety(distributed_runtime):
+@pytest.mark.parametrize("num_threads", [2, 64])
+async def test_radix_tree_thread_safety(distributed_runtime, num_threads):
     """Test RadixTree thread safety by applying events from multiple threads."""
     import json
 
     radix_tree = RadixTree()
-    num_threads = 32
     threads = []
     done_counter = 0
     exception_counter = 0
