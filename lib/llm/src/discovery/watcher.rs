@@ -380,6 +380,7 @@ impl ModelWatcher {
                     PrefillRouter::new(
                         rx,
                         self.manager.clone(),
+                        self.router_mode,
                         card.kv_cache_block_size,
                         Some(prefill_config),
                     )

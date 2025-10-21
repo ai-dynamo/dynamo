@@ -23,26 +23,37 @@ use crate::{
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
 };
 
+/// The inner router used by PrefillRouter
+enum InnerPrefillRouter {
+    /// KV-aware routing using KvPushRouter
+    KvRouter(Arc<KvPushRouter>),
+    /// Simple routing (RoundRobin, Random, Direct)
+    SimpleRouter(Arc<PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>>),
+}
+
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
 /// It optionally calls a prefill worker before routing to decode, extracting disaggregated_params
 /// from the prefill response and injecting them into the decode request.
 pub struct PrefillRouter {
-    prefill_router: OnceLock<Arc<KvPushRouter>>,
+    prefill_router: OnceLock<InnerPrefillRouter>,
     cancel_token: CancellationToken,
+    router_mode: RouterMode,
 }
 
 impl PrefillRouter {
     /// Create a disabled prefill router that will never activate (passthrough only)
-    pub fn disabled() -> Arc<Self> {
+    pub fn disabled(router_mode: RouterMode) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: OnceLock::new(),
             cancel_token: CancellationToken::new(),
+            router_mode,
         })
     }
 
     pub fn new(
         activation_rx: oneshot::Receiver<Endpoint>,
         model_manager: Arc<ModelManager>,
+        router_mode: RouterMode,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
     ) -> Arc<Self> {
@@ -52,6 +63,7 @@ impl PrefillRouter {
         let router = Arc::new(Self {
             prefill_router,
             cancel_token: cancel_token.clone(),
+            router_mode,
         });
 
         // Spawn background task to wait for activation
@@ -90,29 +102,50 @@ impl PrefillRouter {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
     ) -> Result<()> {
-        tracing::info!("Activating prefill router");
+        tracing::info!(
+            router_mode = ?self.router_mode,
+            "Activating prefill router"
+        );
 
-        // Create KV chooser using the component from the endpoint
-        let kv_chooser = model_manager
-            .kv_chooser_for(endpoint.component(), kv_cache_block_size, kv_router_config)
+        let client = endpoint.client().await?;
+
+        let inner_router = if self.router_mode.is_kv_routing() {
+            // Create KV chooser using the component from the endpoint
+            let kv_chooser = model_manager
+                .kv_chooser_for(endpoint.component(), kv_cache_block_size, kv_router_config)
+                .await?;
+
+            // Build the PushRouter for prefill with KV mode
+            let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
+                client,
+                RouterMode::KV,
+                None, // busy_threshold
+                None, // worker_monitor
+            )
             .await?;
 
-        // Build the PushRouter for prefill
-        let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
-            endpoint.client().await?,
-            RouterMode::KV,
-            None, // busy_threshold
-            None, // worker_monitor
-        )
-        .await?;
+            // Wrap it in KvPushRouter
+            InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new(push_router, kv_chooser)))
+        } else {
+            // Create simple push router with the frontend's router mode
+            let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
+                client,
+                self.router_mode,
+                None, // busy_threshold
+                None, // worker_monitor
+            )
+            .await?;
 
-        // Wrap it in KvPushRouter
-        let prefill_router = Arc::new(KvPushRouter::new(push_router, kv_chooser));
+            InnerPrefillRouter::SimpleRouter(Arc::new(push_router))
+        };
 
         // Set the router (ignore error if already set)
-        let _ = self.prefill_router.set(prefill_router);
+        let _ = self.prefill_router.set(inner_router);
 
-        tracing::info!("Prefill router activated successfully");
+        tracing::info!(
+            router_mode = ?self.router_mode,
+            "Prefill router activated successfully"
+        );
 
         Ok(())
     }
@@ -127,8 +160,11 @@ impl PrefillRouter {
             bail!("Prefill router not yet activated");
         };
 
-        // Call prefill router
-        let mut prefill_response = prefill_router.generate(request).await?;
+        // Call the appropriate router based on the type
+        let mut prefill_response = match prefill_router {
+            InnerPrefillRouter::KvRouter(router) => router.generate(request).await?,
+            InnerPrefillRouter::SimpleRouter(router) => router.generate(request).await?,
+        };
 
         let Some(first_output) = prefill_response.next().await else {
             bail!("Prefill router returned no output (stream ended)");
