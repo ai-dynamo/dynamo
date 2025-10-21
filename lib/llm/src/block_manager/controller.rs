@@ -39,16 +39,17 @@ pub struct Controller<Locality: LocalityProvider, Metadata: BlockMetadata> {
 impl<Locality: LocalityProvider, Metadata: BlockMetadata> Controller<Locality, Metadata> {
     pub async fn new(
         block_manager: KvBlockManager<Locality, Metadata>,
-        component: dynamo_runtime::component::Component,
+        mut component: dynamo_runtime::component::Component,
     ) -> anyhow::Result<Self> {
-        let service = component.service_builder().create().await?;
+        component.add_stats_service().await?;
 
         let handler = ControllerHandler::new(block_manager.clone());
         let engine = Ingress::for_engine(handler.clone())?;
 
+        let component_clone = component.clone();
         let reset_task = CriticalTaskExecutionHandle::new(
             |_cancel_token| async move {
-                service
+                component_clone
                     .endpoint("controller")
                     .endpoint_builder()
                     .handler(engine)
