@@ -394,7 +394,11 @@ def get_gpu_summary(
     gpus_val = int(agg.gpu_count) if agg.gpu_count is not None else 0
     model_val = agg.gpu_product or ""
     vram_val = int(agg.gpu_memory_mib) if agg.gpu_memory_mib is not None else 0
-    return gpus_val, model_val, vram_val
+    return {
+        "gpus_per_node": gpus_val,
+        "model": model_val,
+        "vram": vram_val,
+    }
 
 def main() -> None:
     parser = argparse.ArgumentParser(

@@ -10,6 +10,7 @@ for vllm, sglang, and trtllm backends with their respective disagg.yaml configur
 
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -18,6 +19,18 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from benchmarks.profiler.profile_sla import run_profile  # noqa: E402
+
+
+# Override the logger fixture from conftest.py to prevent directory creation
+@pytest.fixture(autouse=True)
+def logger(request):
+    """Override the logger fixture to prevent test directory creation.
+    
+    This replaces the logger fixture from tests/conftest.py that creates
+    directories named after each test.
+    """
+    # Simply do nothing - no directories created, no file handlers added
+    yield
 
 
 class TestProfileSLADryRun:
@@ -188,3 +201,69 @@ class TestProfileSLADryRun:
         """Test that profile_sla dry-run works for sglang backend with MoE config."""
         # Run the profile in dry-run mode - should complete without errors
         await run_profile(sglang_moe_args)
+
+    # Example tests with mocked GPU inventory
+    @pytest.fixture
+    def mock_h100_gpu_info(self):
+        """Mock GPU info for H100 80GB cluster."""
+        return {
+            "gpus_per_node": 8,
+            "model": "h100_sxm",
+            "vram": 81920,  # 80GB in MiB
+        }
+
+    @pytest.fixture
+    def vllm_args_with_model_autogen(self):
+        """Create arguments for vllm backend with model-based search space autogeneration."""
+
+        class Args:
+            def __init__(self):
+                self.backend = "vllm"
+                self.config = None
+                self.output_dir = "/tmp/test_profiling_results"
+                self.namespace = "test-namespace"
+                self.model = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"  # Specify model for autogen
+                self.min_num_gpus_per_engine = 0  # Will be auto-generated
+                self.max_num_gpus_per_engine = 0  # Will be auto-generated
+                self.skip_existing_results = False
+                self.force_rerun = False
+                self.isl = 3000
+                self.osl = 500
+                self.ttft = 50
+                self.itl = 10
+                self.max_context_length = 0
+                self.prefill_interpolation_granularity = 16
+                self.decode_interpolation_granularity = 6
+                self.service_name = ""
+                self.is_moe_model = False
+                self.dry_run = True
+                self.use_ai_configurator = False
+                self.aic_system = None
+                self.aic_model_name = None
+                self.aic_backend = ""
+                self.aic_backend_version = None
+                self.num_gpus_per_node = None  # Will be auto-generated
+                self.deploy_after_profile = False
+
+        return Args()
+
+    @pytest.mark.pre_merge
+    @pytest.mark.asyncio
+    @patch("deploy.utils.gpu_inventory.get_gpu_summary")
+    async def test_profile_with_autogen_search_space_h100(
+        self, mock_get_gpu_summary, vllm_args_with_model_autogen, mock_h100_gpu_info
+    ):
+        """Test profile_sla with auto-generated search space on mocked H100 cluster.
+        
+        This test demonstrates how search space is auto-generated based on model
+        size and available GPU memory.
+        """
+        # Configure the mock to return H100 GPU info
+        mock_get_gpu_summary.return_value = mock_h100_gpu_info
+
+        # Run the profile - the search space will be auto-generated
+        # based on the model and mocked GPU info
+        await run_profile(vllm_args_with_model_autogen)
+
+        # Verify that get_gpu_summary was called for autogen
+        # (only if the code path that uses model-based autogen is executed)

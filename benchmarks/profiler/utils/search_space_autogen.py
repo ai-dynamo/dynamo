@@ -3,7 +3,11 @@
 
 import argparse
 import logging
+import math
+import yaml
+from benchmarks.profiler.utils.model_info import get_model_info
 from deploy.utils.gpu_inventory import get_gpu_summary
+from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -15,5 +19,54 @@ formatter = logging.Formatter(
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
+# sweep over number of GPUs per engine whose weight/VRAM size 
+# is between min and max gpu memory fraction 
+MODEL_GPU_MEM_FRAC_MIN = 0.1
+MODEL_GPU_MEM_FRAC_MAX = 0.9
 
 def auto_generate_search_space(args: argparse.Namespace) -> None:
+
+    config_modifier = CONFIG_MODIFIERS[args.backend]
+
+    # first check if config file exists
+    if args.model is not None:
+        if not args.config:
+            # modify config file from default config file
+            logger.info(f"DGD config file not provided, using default config file")
+            config = config_modifier.load_default_config()
+            
+            logger.info(f"Saving generated DGDconfig file to {args.output_dir}/disagg_config.yaml")
+        else:
+            config = yaml.load(args.config)
+        logger.info(f"Updating model in DGD config file to {args.model}")
+        config = config_modifier.update_model(config, args.model)
+        config_fn = f"{args.output_dir}/disagg_config.yaml"
+        with open(config_fn, "w") as f:
+            yaml.dump(config, f)
+        args.config = config_fn
+
+    # now determine the search space
+    if args.model is not None:
+        model_info = get_model_info(args.model)
+        gpu_info = get_gpu_summary()
+
+        logger.info(f"Model {args.model} has size {model_info['model_size']}, is_moe={model_info['is_moe']}, and max_context_length={model_info['max_context_length']}")
+        logger.info(f"Cluster has {gpu_info['gpus_per_node']}x{gpu_info['model']} GPUs per node with {gpu_info['vram']} VRAM")
+
+        min_gpu = math.ceil(model_info['model_size'] / MODEL_GPU_MEM_FRAC_MAX / gpu_info['vram'])
+        max_gpu = math.floor(model_info['model_size'] / MODEL_GPU_MEM_FRAC_MIN / gpu_info['vram'])
+        if not model_info['is_moe']:
+            # use single node engine for dense model
+            max_gpu = min(max_gpu, gpu_info['gpus_per_node'])
+        if min_gpu > max_gpu:
+            logger.error(f"No valid GPU configuration found for model {args.model} on the cluster with {gpu_info['gpus_per_node']}x{gpu_info['model']} GPUs per node")
+            exit(1)
+        
+        logger.info(f"Auto-generated search space for model {args.model} on the cluster with {gpu_info['gpus_per_node']}x{gpu_info['model']} GPUs per node: {min_gpu} to {max_gpu}")
+        args.min_num_gpus_per_engine = min_gpu
+        args.max_num_gpus_per_engine = max_gpu
+        args.is_moe_model = model_info['is_moe']
+        args.max_context_length = model_info['max_context_length']
+        args.num_gpus_per_node = gpu_info['gpus_per_node']
+
+    return args

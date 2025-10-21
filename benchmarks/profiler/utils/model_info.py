@@ -8,6 +8,32 @@ from transformers import AutoConfig, PretrainedConfig
 from huggingface_hub import model_info
 
 
+DTYPE_BYTES_MAP = {
+    'F32': 4,      # FP32: 4 bytes per parameter
+    'BF16': 2,     # BF16: 2 bytes per parameter
+    'F16': 2,      # FP16: 2 bytes per parameter
+    'F8_E4M3': 1,  # FP8: 1 byte per parameter
+    'F8_E5M2': 1,  # FP8: 1 byte per parameter
+    'F8_E8M0': 1,  # FP8: 1 byte per parameter
+    'I8': 1,       # INT8: 1 byte per parameter
+    'I4': 0.5,     # INT4: 0.5 bytes per parameter
+}
+
+CONTEXT_LENGTH_ATTRS = [
+    'max_position_embeddings',  # Most common (BERT, GPT, LLaMA, etc.)
+    'n_positions',               # GPT-2, GPT-Neo
+    'max_sequence_length',       # Some models
+    'seq_length',                # Some older models
+    'model_max_length',          # Some tokenizer configs
+    'sliding_window',            # Mistral with sliding window attention
+]
+
+# only for MLA + MoE models, treat other MoE models as dense models
+MOE_ARCHITECTURES = {
+    'DeepseekV3ForCausalLM'
+    'DeepseekV32ForCausalLM'
+}
+
 def get_local_model_weight_size(
     model_path: Union[str, Path],
 ) -> float:
@@ -50,21 +76,10 @@ def get_model_weight_size_from_hub(
         
         # If no file sizes were available, try to estimate from safetensors metadata
         if total_size_bytes == 0 and info.safetensors is not None:
-            # SafeTensors info gives us the total parameter count
-            # Estimate size based on the dtype
-            total_params = info.safetensors.total
-            
-            # Check the dtype from parameters dict
-            if 'BF16' in info.safetensors.parameters or 'F16' in info.safetensors.parameters:
-                bytes_per_param = 2  # BF16/FP16 uses 2 bytes per parameter
-            elif 'F32' in info.safetensors.parameters:
-                bytes_per_param = 4  # FP32 uses 4 bytes per parameter
-            elif 'I8' in info.safetensors.parameters:
-                bytes_per_param = 1  # INT8 uses 1 byte per parameter
-            else:
-                bytes_per_param = 2  # Default to FP16/BF16
-            
-            total_size_bytes = total_params * bytes_per_param
+            # SafeTensors info gives parameter counts per dtype
+            for dtype, param_count in info.safetensors.parameters.items():
+                bytes_per_param = DTYPE_BYTES_MAP.get(dtype, 2)  # Default to 2 bytes (FP16/BF16)
+                total_size_bytes += param_count * bytes_per_param
         
         return total_size_bytes / (1024 ** 2)
     except Exception as e:
@@ -89,15 +104,33 @@ def get_model_info(
     model_name_or_path: Union[str, Path],
     trust_remote_code: bool = False,
 ) -> PretrainedConfig:
+    model_size = get_model_weight_size(model_name_or_path)
+
     config = AutoConfig.from_pretrained(
         model_name_or_path,
         trust_remote_code=trust_remote_code,
     )
 
-    model_size = get_model_weight_size(model_name_or_path)
+    if config.architectures[0] in MOE_ARCHITECTURES:
+        config.is_moe = True
+    else:
+        config.is_moe = False
+    
+    # Detect max context length from config
+    # Different models use different attribute names for max context length
+    max_context_length = None
+    for attr in CONTEXT_LENGTH_ATTRS:
+        if hasattr(config, attr):
+            value = getattr(config, attr)
+            if value is not None:
+                max_context_length = value
+                break
 
-    import pdb; pdb.set_trace()
-    return config
+    return {
+        'model_size': model_size,
+        'is_moe': config.is_moe,
+        'max_context_length': max_context_length,
+    }
 
 
 if __name__ == "__main__":
@@ -106,4 +139,4 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, required=True)
     args = parser.parse_args()
 
-    config = get_model_info(args.model)
+    print(get_model_info(args.model))
