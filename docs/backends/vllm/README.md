@@ -196,9 +196,9 @@ When a user cancels a request (e.g., by disconnecting from the frontend), the re
 
 ### Cancellation Support Matrix
 
-| | Local Prefill | Remote Prefill | Decode |
-|-|--------------|----------------|--------|
-| **Aggregated** | ✅ | - | ✅ |
-| **Disaggregated** | - | ✅ | ✅ |
+| | Prefill | Decode |
+|-|---------|--------|
+| **Aggregated** | ✅ | ✅ |
+| **Disaggregated** | ✅ | ✅ |
 
 For more details, see the [Request Cancellation Architecture](../../../docs/architecture/request_cancellation.md) documentation.

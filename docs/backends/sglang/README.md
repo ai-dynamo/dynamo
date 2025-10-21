@@ -75,13 +75,13 @@ When a user cancels a request (e.g., by disconnecting from the frontend), the re
 
 #### Cancellation Support Matrix
 
-| | Local Prefill | Remote Prefill | Decode |
-|-|--------------|----------------|--------|
-| **Aggregated** | ✅ | - | ✅ |
-| **Disaggregated** | - | ⚠️ | ✅ |
+| | Prefill | Decode |
+|-|---------|--------|
+| **Aggregated** | ✅ | ✅ |
+| **Disaggregated** | ⚠️ | ✅ |
 
 > [!WARNING]
-> ⚠️ SGLang currently does not support cancellation during the remote prefill phase.
+> ⚠️ SGLang backend currently does not support cancellation during remote prefill phase in disaggregated mode.
 
 For more details, see the [Request Cancellation Architecture](../../architecture/request_cancellation.md) documentation.
 

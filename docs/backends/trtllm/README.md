@@ -234,11 +234,11 @@ When a user cancels a request (e.g., by disconnecting from the frontend), the re
 
 ### Cancellation Support Matrix
 
-| | Local Prefill | Remote Prefill | Local Decode | Remote Decode |
-|-|--------------|----------------|--------------|---------------|
-| **Aggregated** | ✅ | - | ✅ | - |
-| **Disaggregated (Decode-First)** | - | ✅ | ✅ | - |
-| **Disaggregated (Prefill-First)** | ✅ | - | - | ✅ |
+| | Prefill | Decode |
+|-|---------|--------|
+| **Aggregated** | ✅ | ✅ |
+| **Disaggregated (Decode-First)** | ✅ | ✅ |
+| **Disaggregated (Prefill-First)** | ✅ | ✅ |
 
 For more details, see the [Request Cancellation Architecture](../../../docs/architecture/request_cancellation.md) documentation.
 
