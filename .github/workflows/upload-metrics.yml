@@ -1,26 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Upload Workflow Metrics (Reusable)
+name: Upload Workflow Metrics
 
+# This workflow triggers after ANY other workflow completes
 on:
-  workflow_call:
-    secrets:
-      WORKFLOW_INDEX:
-        required: true
-      JOB_INDEX:
-        required: true
-      STEPS_INDEX:
-        required: true
-      CONTAINER_INDEX:
-        required: false
+  workflow_run:
+    workflows:
+      - "Docker Build and Test"
+      - "NVIDIA Dynamo Github Validation"
+      - "NVIDIA Test Lab Validation"
+      - "pre_merge"
+      - "Rust pre-merge checks"
+      - "Generate Documentation"
+      - "Docs link check"
+      - "CodeQL"
+      - "Copyright Checks"
+    types:
+      - completed
 
 jobs:
   upload-workflow-metrics:
     name: Upload Workflow Metrics
     runs-on: gitlab
-    if: always()  # Always run, even if other jobs fail
-
+    
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -52,6 +55,4 @@ jobs:
           CONTAINER_INDEX: ${{ secrets.CONTAINER_INDEX }}
         run: |
           python3 .github/workflows/upload_complete_workflow_metrics.py
-
-
 
