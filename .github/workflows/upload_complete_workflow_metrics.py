@@ -293,8 +293,7 @@ class WorkflowMetricsUploader:
 
         # Get current workflow information
         self.repo = os.getenv("GITHUB_REPOSITORY")
-        # Use TARGET_RUN_ID when set (for workflow_run trigger), otherwise GITHUB_RUN_ID
-        self.run_id = os.getenv("TARGET_RUN_ID") or os.getenv("GITHUB_RUN_ID")
+        self.run_id = os.getenv("GITHUB_RUN_ID")
         self.workflow_name = os.getenv("GITHUB_WORKFLOW")
         self.actor = os.getenv("GITHUB_ACTOR")
         self.event_name = os.getenv("GITHUB_EVENT_NAME")
