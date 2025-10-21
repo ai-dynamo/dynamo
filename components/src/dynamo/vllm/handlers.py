@@ -4,7 +4,6 @@
 import asyncio
 import logging
 import os
-import uuid
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict
@@ -161,8 +160,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         super().__init__(runtime, component, engine, default_sampling_params)
 
     async def generate(self, request, context):
-        request_id = str(uuid.uuid4().hex)
-        logger.debug(f"New Request ID: {request_id}")
+        # Use context ID for request tracking and correlation
+        request_id = context.id()
+        logger.debug(f"Decode Request ID: {request_id}")
 
         prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
 
@@ -202,8 +202,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         super().__init__(runtime, component, engine, default_sampling_params)
 
     async def generate(self, request, context):
-        request_id = str(uuid.uuid4().hex)
-        logger.debug(f"New Prefill Request ID: {request_id}")
+        # Use context ID for request tracking and correlation with decode phase
+        request_id = context.id()
+        logger.debug(f"Prefill Request ID: {request_id}")
 
         token_ids = request["token_ids"]
         prompt = TokensPrompt(prompt_token_ids=token_ids)
