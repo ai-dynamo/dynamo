@@ -119,8 +119,13 @@ fn create_request_context(
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Initialize logging early unless OTEL export is enabled (which requires tokio runtime)
-    if std::env::var("OTEL_EXPORT_ENABLED").map(|v| v == "1").unwrap_or(false) {
-        eprintln!("Warning: OTEL_EXPORT_ENABLED=1 detected. Logging initialization deferred until runtime is available. Early logs may be dropped.");
+    if std::env::var("OTEL_EXPORT_ENABLED")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        eprintln!(
+            "Warning: OTEL_EXPORT_ENABLED=1 detected. Logging initialization deferred until runtime is available. Early logs may be dropped."
+        );
     } else {
         rs::logging::init();
     }
@@ -432,7 +437,10 @@ impl DistributedRuntime {
 
         // Initialize logging in context where tokio runtime is available
         // otel exporter requires it
-        if std::env::var("OTEL_EXPORT_ENABLED").map(|v| v == "1").unwrap_or(false) {
+        if std::env::var("OTEL_EXPORT_ENABLED")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             runtime.secondary().block_on(async {
                 rs::logging::init();
             });
