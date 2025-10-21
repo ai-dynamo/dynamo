@@ -82,13 +82,20 @@ def main() -> None:
         description="Send a test request to the KServe gRPC mock server."
     )
     parser.add_argument(
-        "--host", default="127.0.0.1", help="Host serving the gRPC endpoint (default: %(default)s)"
+        "--host",
+        default="127.0.0.1",
+        help="Host serving the gRPC endpoint (default: %(default)s)",
     )
     parser.add_argument(
-        "--port", type=int, default=8787, help="Port of the gRPC endpoint (default: %(default)s)"
+        "--port",
+        type=int,
+        default=8787,
+        help="Port of the gRPC endpoint (default: %(default)s)",
     )
     parser.add_argument(
-        "--model", default="mock_model", help="Model name to target (default: %(default)s)"
+        "--model",
+        default="mock_model",
+        help="Model name to target (default: %(default)s)",
     )
     parser.add_argument(
         "--prompt",

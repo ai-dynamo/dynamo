@@ -7,6 +7,7 @@ use pyo3::prelude::*;
 use pyo3::PyErr;
 
 use crate::{CancellationToken, engine::*, to_pyerr};
+use serde::{Deserialize, Serialize};
 
 pub use dynamo_llm::grpc::service::kserve;
 pub use dynamo_runtime::{

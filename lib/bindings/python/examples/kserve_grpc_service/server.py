@@ -75,7 +75,9 @@ async def worker(runtime: DistributedRuntime):
     shutdown_signal = service.run(runtime.child_token())
 
     try:
-        print(f"Serving endpoint: {host}:{port} inference.GRPCInferenceService/ModelInfer")
+        print(
+            f"Serving endpoint: {host}:{port} inference.GRPCInferenceService/ModelInfer"
+        )
         print(f"Serving completions models: {service.list_completions_models()}")
         await shutdown_signal
     except KeyboardInterrupt:
