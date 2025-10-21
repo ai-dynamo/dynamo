@@ -380,6 +380,18 @@ impl RadixTree {
 
         // Spawn dedicated thread with simplified sync processing
         std::thread::spawn(move || {
+            // Install a panic hook local to this thread to capture RefCell panics ("Already borrowed")
+            // and emit a backtrace + contextual message. This helps when instrumentation inside
+            // `apply_event` misses an alternate code path still performing overlapping borrows.
+            // std::panic::set_hook(Box::new(|info| {
+            //     let bt = std::backtrace::Backtrace::capture();
+            //     tracing::error!(
+            //         panic = %info,
+            //         backtrace = %bt,
+            //         "RadixTree thread panic (likely RefCell borrow). Enable RUST_LOG=trace for more context."
+            //     );
+            // }));
+
             let mut radix_tree =
                 llm_rs::kv_router::indexer::RadixTree::new_with_frequency(expiration_duration);
 
@@ -442,7 +454,7 @@ impl RadixTree {
     }
 
     fn apply_event(
-        &mut self,
+        &self,
         py: Python,
         worker_id: WorkerId,
         kv_cache_event_bytes: &[u8],
@@ -469,7 +481,7 @@ impl RadixTree {
         })?
     }
 
-    fn remove_worker(&mut self, py: Python, worker_id: WorkerId) -> PyResult<()> {
+    fn remove_worker(&self, py: Python, worker_id: WorkerId) -> PyResult<()> {
         let (response_tx, response_rx) = mpsc::sync_channel(1);
 
         let request = RadixTreeRequest::RemoveWorker {
@@ -491,7 +503,7 @@ impl RadixTree {
         })
     }
 
-    fn clear_all_blocks(&mut self, py: Python, worker_id: WorkerId) -> PyResult<()> {
+    fn clear_all_blocks(&self, py: Python, worker_id: WorkerId) -> PyResult<()> {
         let (response_tx, response_rx) = mpsc::sync_channel(1);
 
         let request = RadixTreeRequest::ClearAllBlocks {
@@ -513,7 +525,7 @@ impl RadixTree {
         })
     }
 
-    fn dump_tree_as_events(&mut self, py: Python) -> PyResult<Vec<String>> {
+    fn dump_tree_as_events(&self, py: Python) -> PyResult<Vec<String>> {
         let (response_tx, response_rx) = mpsc::sync_channel(1);
 
         let request = RadixTreeRequest::DumpTreeAsEvents { response_tx };

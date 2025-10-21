@@ -110,8 +110,9 @@ async def test_radix_tree_binding(distributed_runtime):
 @pytest.mark.parametrize("num_threads", [2, 3, 5, 128])
 @pytest.mark.parametrize("prepopulate_worker_ids", [True, False])
 @pytest.mark.parametrize("expiration_duration_secs", [None])
+@pytest.mark.parametrize("is_threaded", [True, False])
 async def test_radix_tree_thread_safety(
-    distributed_runtime, num_threads, prepopulate_worker_ids, expiration_duration_secs
+    distributed_runtime, num_threads, prepopulate_worker_ids, expiration_duration_secs, is_threaded
 ):
     """Test RadixTree thread safety by applying events from multiple threads."""
     import json
@@ -162,13 +163,17 @@ async def test_radix_tree_thread_safety(
         ), f"Warmup: expected 0 exceptions, got {exception_counter}"
 
     for i in range(num_threads):
-        t = threading.Thread(target=worker, args=(i,))
-        threads.append(t)
-        t.start()
-    timeout = 10  # seconds
-    for t in threads:
-        t.join(timeout)
-        assert not t.is_alive(), "Thread timed out"
+        if is_threaded:
+            t = threading.Thread(target=worker, args=(i,))
+            threads.append(t)
+            t.start()
+        else:
+            worker(i)
+    if is_threaded:
+        timeout = 10  # seconds
+        for t in threads:
+            t.join(timeout)
+            assert not t.is_alive(), "Thread timed out"
     assert exception_counter == 0, f"Expected 0 exceptions, got {exception_counter}"
     assert (
         done_counter == num_threads
