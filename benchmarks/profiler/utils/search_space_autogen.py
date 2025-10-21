@@ -29,7 +29,7 @@ MOE_MODEL_MAX_NUM_GPUS = 32
 def auto_generate_search_space(args: argparse.Namespace) -> None:
     if args.backend not in CONFIG_MODIFIERS:
         logger.error(f"Unsupported backend: {args.backend}")
-        exit(1)
+        raise RuntimeError(f"Unsupported backend: {args.backend}")
     config_modifier = CONFIG_MODIFIERS[args.backend]
 
     # first check if config file exists
@@ -75,10 +75,11 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
             else MOE_MODEL_MAX_NUM_GPUS
         )
         if min_gpu > max_gpu:
+            error_msg = f"No valid GPU configuration found for model {args.model} on the cluster with {gpu_info['gpus_per_node']}x{gpu_info['model']} GPUs per node"
             logger.error(
-                f"No valid GPU configuration found for model {args.model} on the cluster with {gpu_info['gpus_per_node']}x{gpu_info['model']} GPUs per node"
+                error_msg
             )
-            exit(1)
+            raise RuntimeError(error_msg)
 
         logger.info(
             f"Auto-generated search space for model {args.model} on the cluster with {gpu_info['gpus_per_node']}x{gpu_info['model']} GPUs per node: {min_gpu} to {max_gpu}"
