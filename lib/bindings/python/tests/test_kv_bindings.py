@@ -157,6 +157,9 @@ async def test_radix_tree_thread_safety(
     if prepopulate_worker_ids:
         for i in range(num_threads):
             worker(i, prepopulate_worker_ids=True)
+        assert (
+            exception_counter == 0
+        ), f"Warmup: expected 0 exceptions, got {exception_counter}"
 
     for i in range(num_threads):
         t = threading.Thread(target=worker, args=(i,))
