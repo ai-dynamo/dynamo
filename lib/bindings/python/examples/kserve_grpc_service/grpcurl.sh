@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 
 # Invoke the mock KServe gRPC endpoint using grpcurl. Requires grpcurl installed.
 # The service does not expose server reflection, so we point grpcurl at the proto files directly.
