@@ -839,7 +839,7 @@ class ManagedDeployment:
                 self.deployment_spec.disable_grove()
             else:
                 self._logger.info(
-                    "Grove detected in cluster, deployment will use Grove if configured"
+                    "Grove detected in cluster, deployment will use Grove"
                 )
 
             await self._delete_deployment()
