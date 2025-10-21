@@ -303,9 +303,6 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
-        --enable-kvbm)
-            ENABLE_KVBM=true
-            ;;
         --make-efa)
             NIXL_UCX_REF=$NIXL_UCX_EFA_REF
             ;;
@@ -475,7 +472,6 @@ show_help() {
     echo "  [--build-context name=path to add build context]"
     echo "  [--release-build perform a release build]"
     echo "  [--make-efa Enables EFA support for NIXL]"
-    echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
     echo "  [--trtllm-use-nixl-kvcache-experimental Enables NIXL KVCACHE experimental support for TensorRT-LLM]"
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
