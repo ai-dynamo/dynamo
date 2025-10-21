@@ -57,7 +57,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**KV-Aware Routing**](../../../docs/architecture/kv_cache_routing.md) | ✅ |  |
 | [**SLA-Based Planner**](../../../docs/planner/sla_planner.md) | ✅ |  |
 | [**Load Based Planner**](../../../docs/planner/load_planner.md) | 🚧 | Planned |
-| [**KVBM**](../../../docs/kvbm/kvbm_architecture.md) | 🚧 | Planned |
+| [**KVBM**](../../../docs/kvbm/kvbm_architecture.md) | ✅ | |
 
 ### Large Scale P/D and WideEP Features
 
