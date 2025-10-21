@@ -378,41 +378,10 @@ class ManagedDeployment:
     _port_forward: Optional[Any] = None
     _deployment_name: Optional[str] = None
     _apps_v1: Optional[Any] = None
-    _apis_api: Optional[Any] = None
     _active_port_forwards: List[Any] = field(default_factory=list)
 
     def __post_init__(self):
         self._deployment_name = self.deployment_spec.name
-
-    async def detect_grove_availability(self) -> bool:
-        """
-        Detect if Grove is available in the Kubernetes cluster.
-
-        This checks if the 'grove.io' API group is registered in the cluster,
-        similar to how the operator's DetectGroveAvailability function works.
-
-        Returns:
-            True if Grove is available, False otherwise
-        """
-        if self._apis_api is None:
-            self._logger.warning("Kubernetes API not initialized, cannot detect Grove")
-            return False
-
-        try:
-            # Check for grove.io API group
-            api_groups = await self._apis_api.get_api_versions()
-
-            for group in api_groups.groups:
-                if group.name == "grove.io":
-                    self._logger.info("Grove API group detected - Grove is available")
-                    return True
-
-            self._logger.info("Grove API group not found - Grove is not available")
-            return False
-
-        except Exception as e:
-            self._logger.error(f"Failed to detect Grove availability: {e}")
-            return False
 
     async def _init_kubernetes(self):
         """Initialize kubernetes client"""
@@ -427,7 +396,6 @@ class ManagedDeployment:
         self._custom_api = client.CustomObjectsApi(k8s_client)
         self._core_api = client.CoreV1Api(k8s_client)
         self._apps_v1 = client.AppsV1Api()
-        self._apis_api = client.ApisApi(k8s_client)
 
     async def _wait_for_pods(self, label, expected, timeout=300):
         for _ in range(timeout):
@@ -828,20 +796,6 @@ class ManagedDeployment:
             self._deployment_name = self.deployment_spec.name
             logging.getLogger("httpx").setLevel(logging.WARNING)
             await self._init_kubernetes()
-
-            # Auto-detect Grove availability and disable it if not present in the cluster.
-            # This allows tests to automatically adapt to cluster capabilities without manual configuration.
-            grove_available = await self.detect_grove_availability()
-            if not grove_available:
-                self._logger.info(
-                    "Grove not available in cluster, disabling Grove for deployment"
-                )
-                self.deployment_spec.disable_grove()
-            else:
-                self._logger.info(
-                    "Grove detected in cluster, deployment will use Grove"
-                )
-
             await self._delete_deployment()
             await self._restart_etcd()
             await self._restart_nats()
