@@ -18,7 +18,7 @@ limitations under the License.
 
 # Multimodal Inference in Dynamo:
 
-You can find example workflows and reference implementations for deploying a multimodal model using Dynamo in [multimodal examples](https://github.com/ai-dynamo/dynamo/tree/harryskim/examples/multimodal).
+You can find example workflows and reference implementations for deploying a multimodal model using Dynamo in [multimodal examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal).
 
 ##  EPD vs. PD Disaggregation
 Dynamo supports two primary approaches for processing multimodal inputs, which differ in how the initial media encoding step is handled relative to the main LLM inference engine.
