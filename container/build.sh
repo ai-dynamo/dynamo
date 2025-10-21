@@ -84,8 +84,8 @@ TRTLLM_BASE_IMAGE_TAG=25.08-py3
 # By default, we will use option 1. If you want to use option 2, you can set
 # TENSORRTLLM_PIP_WHEEL to the TensorRT-LLM wheel on artifactory.
 #
-# Path to the local TensorRT-LLM wheel directory or the wheel on artifactory.
-TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
+# DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
+
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
@@ -95,7 +95,7 @@ TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 TRTLLM_GIT_URL=""
 
 # TensorRT-LLM PyPI index URL
-TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
+DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
 # Need to update the Dockerfile.trtllm to use the ai-dynamo[trtllm] package.
 DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.1.0rc5"
@@ -633,7 +633,6 @@ function determine_user_intention_trtllm() {
     #
     # 3. Build from source
     # --tensorrtllm-git-url
-
     local intention_download="false"
     local intention_install="false"
     local intention_build="false"
@@ -644,8 +643,13 @@ function determine_user_intention_trtllm() {
         intention_download="true";
         intention_count=$((intention_count+=1));
         TRTLLM_INTENTION="download"
+    elif [[ -n "$TENSORRTLLM_PIP_WHEEL" ]]; then
+        intention_download="true";
+        intention_count=$((intention_count+=1));
+        TRTLLM_INTENTION="download"
+        echo "INFO: Inferring download because TENSORRTLLM_PIP_WHEEL is set and TENSORRTLLM_INDEX_URL is not."
     fi
-    echo "  Intent to Download TRTLLM: $intention_download"
+
 
     if [[ -n "$TENSORRTLLM_PIP_WHEEL_DIR" ]]; then
         intention_install="true";
@@ -660,6 +664,14 @@ function determine_user_intention_trtllm() {
         TRTLLM_INTENTION="build"
     fi
     echo "  Intent to Build TRTLLM: $intention_build"
+
+    if [[ -z "${TENSORRTLLM_INDEX_URL}" ]] && [[ -z "${TENSORRTLLM_PIP_WHEEL}" ]] && [[ "${intention_count}" -eq 0 ]]; then
+        intention_download="true";
+        intention_count=$((intention_count+=1));
+        TRTLLM_INTENTION="download"
+        echo "INFO: Inferring download because both TENSORRTLLM_PIP_WHEEL and TENSORRTLLM_INDEX_URL are not set."
+    fi
+    echo "  Intent to Download TRTLLM: $intention_download"
 
     if [[ ! "$intention_count" -eq 1 ]]; then
         echo -e "[ERROR] Could not figure out the trtllm installation intent from the current flags. Please check your build.sh command against the following"
@@ -686,6 +698,8 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
 
     BUILD_ARGS+=" --build-arg GITHUB_TRTLLM_COMMIT=${TRTLLM_COMMIT}"
     if [[ "$TRTLLM_INTENTION" == "download" ]]; then
+        TENSORRTLLM_INDEX_URL=${TENSORRTLLM_INDEX_URL:-$DEFAULT_TENSORRTLLM_INDEX_URL}
+        TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL:-$DEFAULT_TENSORRTLLM_PIP_WHEEL}
         BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=0"
         BUILD_ARGS+=" --build-arg TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL}"
         BUILD_ARGS+=" --build-arg TENSORRTLLM_INDEX_URL=${TENSORRTLLM_INDEX_URL}"
