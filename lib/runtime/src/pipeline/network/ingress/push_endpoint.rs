@@ -11,8 +11,8 @@ use crate::protocols::LeaseId;
 use anyhow::Result;
 use async_nats::service::endpoint::Endpoint;
 use derive_builder::Builder;
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::Mutex;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -52,7 +52,6 @@ impl PushEndpoint {
 
         system_health
             .lock()
-            .unwrap()
             .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::Ready);
 
         loop {
@@ -132,7 +131,6 @@ impl PushEndpoint {
 
         system_health
             .lock()
-            .unwrap()
             .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::NotReady);
 
         // await for all inflight requests to complete if graceful shutdown

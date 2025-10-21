@@ -8,9 +8,9 @@
 
 pub mod prometheus_names;
 
+use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use crate::component::ComponentBuilder;
 use anyhow;
