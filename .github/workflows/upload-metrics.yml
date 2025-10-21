@@ -18,6 +18,15 @@ on:
       - "Copyright Checks"
     types:
       - completed
+  
+  # TEMPORARY: For testing on branches (remove after merge to main)
+  workflow_dispatch:  # Manual trigger for testing
+  push:
+    branches:
+      - "pull-request/[0-9]+"
+    paths:
+      - '.github/workflows/upload-metrics.yml'
+      - '.github/workflows/upload_complete_workflow_metrics.py'
 
 jobs:
   upload-workflow-metrics:
