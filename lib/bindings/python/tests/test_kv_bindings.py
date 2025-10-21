@@ -20,7 +20,12 @@ from typing import List
 
 import pytest
 
-from dynamo.llm import ApproxKvIndexer, KvEventPublisher, KvIndexer, RadixTree
+from dynamo.llm import (
+    ApproxKvIndexer,
+    KvEventPublisher,
+    KvIndexer,
+    RadixTree,
+)
 from dynamo.runtime import Component, DistributedRuntime
 
 pytestmark = pytest.mark.pre_merge
@@ -107,21 +112,30 @@ async def test_radix_tree_binding(distributed_runtime):
 
 @pytest.mark.asyncio
 @pytest.mark.forked
-@pytest.mark.parametrize("num_threads", [2, 64])
-async def test_radix_tree_thread_safety(distributed_runtime, num_threads):
+@pytest.mark.parametrize("num_threads", [2, 3, 128])
+@pytest.mark.parametrize("prepopulate_worker_ids", [True, False])
+@pytest.mark.parametrize("expiration_duration_secs", [None])
+async def test_radix_tree_thread_safety(
+    distributed_runtime, num_threads, prepopulate_worker_ids, expiration_duration_secs
+):
     """Test RadixTree thread safety by applying events from multiple threads."""
     import json
 
-    radix_tree = RadixTree()
+    radix_tree = RadixTree(expiration_duration_secs=expiration_duration_secs)
     threads = []
     done_counter = 0
     exception_counter = 0
 
-    def worker(worker_id):
+    def worker(worker_id, prepopulate_worker_ids: bool = False):
         try:
             nonlocal done_counter
             worker_id = worker_id
             hash = worker_id
+            if prepopulate_worker_ids:
+                hash = (
+                    2**32 - worker_id
+                )  # use different hash for prepopulate_worker_ids
+            assert 0 <= hash < 2**64  # needs to be valid u64
             store_event = {
                 "event_id": worker_id,
                 "data": {
@@ -138,11 +152,16 @@ async def test_radix_tree_thread_safety(distributed_runtime, num_threads):
             }
             event_bytes = json.dumps(store_event).encode("utf-8")
             radix_tree.apply_event(worker_id, event_bytes)
-            done_counter += 1
+            if not prepopulate_worker_ids:
+                done_counter += 1
         except Exception as e:
             print(f"Exception in worker {worker_id}: {e}")
             nonlocal exception_counter
             exception_counter += 1
+
+    if prepopulate_worker_ids:
+        for i in range(num_threads):
+            worker(i, prepopulate_worker_ids=True)
 
     for i in range(num_threads):
         t = threading.Thread(target=worker, args=(i,))
@@ -169,15 +188,19 @@ async def test_radix_tree_thread_safety(distributed_runtime, num_threads):
         ), f"Expected score 1 for worker {worker_key}, got {overlap_scores.scores[worker_key]}"
     # get all blocks
     blocks = radix_tree.dump_tree_as_events()
+    expected_blocks = num_threads + (prepopulate_worker_ids * num_threads)
     assert (
-        len(blocks) == num_threads
-    ), f"Expected {num_threads} block events, got {len(blocks)}"
+        len(blocks) == expected_blocks
+    ), f"Expected {expected_blocks} block events, got {len(blocks)}"
     # remove single worker
     radix_tree.remove_worker(0)
+    expected_blocks_after_removal = expected_blocks - (
+        2 if prepopulate_worker_ids else 1
+    )
     blocks_after_removal = radix_tree.dump_tree_as_events()
     assert (
-        len(blocks_after_removal) == num_threads - 1
-    ), f"Expected {num_threads - 1} block events after removal, got {len(blocks_after_removal)}"
+        len(blocks_after_removal) == expected_blocks_after_removal
+    ), f"Expected {expected_blocks_after_removal} block events after removal, got {len(blocks_after_removal)}"
 
 
 # TODO Figure out how to test with different kv_block_size
