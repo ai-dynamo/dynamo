@@ -991,7 +991,7 @@ pub async fn create_worker_selection_pipeline_chat(
     // Download tokenizer and model files from NATS to local disk
     card.move_from_nats(distributed_runtime.nats_client())
         .await
-        .with_context(|| "!!! Failed to download model files from NATS")?;
+        .with_context(|| "Failed to download model files from NATS")?;
 
     let chooser = if router_mode == RouterMode::KV {
         Some(
