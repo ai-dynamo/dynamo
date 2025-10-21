@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::protocols::tensor;
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelRuntimeConfig {
     pub total_kv_blocks: Option<u64>,
 

@@ -20,10 +20,7 @@ class DynamoFrontendProcess(ManagedProcess):
     def __init__(self, request):
         command = ["python", "-m", "dynamo.frontend", "--kserve-grpc-server"]
         log_dir = f"{request.node.name}_frontend"
-        try:
-            shutil.rmtree(log_dir)
-        except FileNotFoundError:
-            pass
+        shutil.rmtree(log_dir, ignore_errors=True)
 
         super().__init__(
             command=command,
@@ -47,10 +44,7 @@ class TensorParamsWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_PORT"] = "8083"
 
         log_dir = f"{request.node.name}_worker"
-        try:
-            shutil.rmtree(log_dir)
-        except FileNotFoundError:
-            pass
+        shutil.rmtree(log_dir, ignore_errors=True)
 
         super().__init__(
             command=command,
