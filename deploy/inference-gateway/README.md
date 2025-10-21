@@ -16,7 +16,7 @@ Currently, these setups are only supported with the kGateway based Inference Gat
 
 - [Prerequisites](#prerequisites)
 - [Installation Steps](#installation-steps)
-- [Usage](#usage)
+- [Usage](#6-usage)
 
 ## Prerequisites
 
