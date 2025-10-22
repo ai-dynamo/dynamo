@@ -45,7 +45,7 @@ The Python `Context` class wraps the Rust `AsyncEngineContext` and exposes the f
 - **`stop_generating()`**: Issues a stop generating signal, equivalent to the Rust method
 - **`async_killed_or_stopped()`**: An async method that completes when the context becomes either killed or stopped, whichever happens first. This combines the functionality of the Rust `killed()` and `stopped()` async methods using `tokio::select!`.
 
-For a working example of request cancellation, see the [cancellation demo](../../examples/fault_tolerance/cancellation/README.md).
+For a working example of request cancellation, see the [cancellation demo](../../examples/custom_backend/cancellation/README.md).
 
 ### Context Usage in Python
 
