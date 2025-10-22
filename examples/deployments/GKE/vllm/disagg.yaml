@@ -52,10 +52,11 @@ spec:
           image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/vllm
           command:
-          - python3
-          - -m
-          - dynamo.vllm
+            - /bin/sh
+            - -c
           args:
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --is-prefill-worker
+          - |
+            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
+            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
+            /sbin/ldconfig
+            python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-prefill-worker
