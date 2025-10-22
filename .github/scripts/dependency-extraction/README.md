@@ -1,436 +1,228 @@
-# Dependency Extraction System
+# Dependency Extraction System - Modular Architecture
 
-## Overview
+This directory contains the modular dependency extraction system for Dynamo.
 
-This system automatically extracts and tracks software dependencies across all Dynamo components (trtllm, vllm, sglang, operator, shared). It parses 10 different source types and generates comprehensive CSV reports with version tracking, critical dependency flagging, and version discrepancy detection.
-
-## Architecture
-
-### Directory Structure
+## 📁 Directory Structure
 
 ```
 .github/scripts/dependency-extraction/
-├── README.md                    # This file
-├── extract_dependencies.py      # Main CLI entry point
-├── extractors/                  # Source-specific extractors
-│   ├── __init__.py
-│   ├── base.py                 # Base extractor class
-│   ├── dockerfile.py           # Docker image & ARG extraction
-│   ├── python_deps.py          # requirements.txt, pyproject.toml
-│   ├── go_mod.py               # go.mod parsing
-│   ├── helm.py                 # Helm Chart.yaml
-│   ├── rust.py                 # Cargo.toml, rust-toolchain.toml
-│   ├── kubernetes.py           # K8s recipe YAMLs
-│   └── shell_scripts.py        # Shell script parsing
-├── utils/                       # Utility modules
-│   ├── __init__.py
-│   ├── config.py               # Config loading and constants
-│   ├── formatters.py           # Name/version formatting
-│   ├── url_generators.py       # Package source URL generation
-│   └── version_comparison.py   # Version normalization & discrepancy detection
-└── core/                        # Core functionality
-    ├── __init__.py
-    └── extractor.py            # Main DependencyExtractor class
+├── README.md              # This file
+├── constants.py           # Hardcoded values (NVIDIA_INDICATORS, NORMALIZATIONS, etc.)
+├── utils/
+│   ├── __init__.py       # Utils package init
+│   ├── formatting.py     # Name formatting and normalization
+│   ├── comparison.py     # Version comparison and discrepancy detection
+│   └── urls.py           # URL generation (GitHub, PyPI, NGC, etc.)
+└── extractors/           # Extraction logic by source type (FUTURE)
+    └── __init__.py       # Extractors package init
 ```
 
-### Component Responsibilities
+## 🎯 Purpose
 
-#### `extract_dependencies.py`
-**Main entry point** - CLI argument parsing and orchestration
-- Parses command-line arguments
-- Initializes `DependencyExtractor`
-- Runs extraction workflow
-- Outputs CSV reports
+This modularization breaks down the monolithic 2,491-line `extract_dependency_versions.py` script into logical, maintainable components. This improves:
 
-#### `core/extractor.py`
-**Central coordinator** - Manages the extraction process
-- Coordinates all extractors
-- Aggregates dependency data
-- Tracks errors and warnings
-- Generates output CSV
-- Compares versions and detects changes
+- **Maintainability**: Easier to find and update specific functionality
+- **Testability**: Each module can be unit tested independently
+- **Readability**: Clearer separation of concerns
+- **Extensibility**: Adding new dependency sources is more straightforward
 
-#### `extractors/`
-**Source-specific parsers** - Each module handles one source type
-- `dockerfile.py`: Parses Dockerfiles for base images, ARGs, binary downloads
-- `python_deps.py`: Extracts from requirements.txt and pyproject.toml
-- `go_mod.py`: Parses go.mod for direct/indirect dependencies
-- `helm.py`: Reads Helm Chart.yaml for chart dependencies
-- `rust.py`: Handles Cargo.toml and rust-toolchain.toml
-- `kubernetes.py`: Parses K8s YAML files for container images
-- `shell_scripts.py`: Extracts from install scripts (pip, wget, curl)
+## 📝 Module Overview
 
-#### `utils/`
-**Shared utilities** - Reusable helper functions
-- `config.py`: Loads YAML config and defines constants
-- `formatters.py`: Cleans up dependency names and formats notes
-- `url_generators.py`: Generates package source URLs (PyPI, NGC, Docker Hub, etc.)
-- `version_comparison.py`: Normalizes versions and detects discrepancies
+### `constants.py`
+**Purpose**: Central location for all hardcoded values that may need updating.
 
----
+**Key Constants**:
+- `NVIDIA_INDICATORS`: Keywords for auto-detecting NVIDIA products
+- `NORMALIZATIONS`: Maps dependency name variations to canonical names
+- `PYTORCH_EXCEPTIONS`: PyTorch packages that shouldn't be normalized
+- `COMPONENT_ORDER`: Sort order for CSV output
+- `CSV_COLUMNS`: Column order for CSV files
+- `DEFAULT_CRITICAL_DEPENDENCIES`: Fallback critical dependencies
 
-## Configuration
+**When to Update**:
+- New NVIDIA products released → Add to `NVIDIA_INDICATORS`
+- Dependencies with inconsistent naming → Add to `NORMALIZATIONS`
+- New components added → Update `COMPONENT_ORDER`
 
-### Config File Location
-`.github/dependency-extraction/config.yaml`
+### `utils/formatting.py`
+**Purpose**: Functions for formatting dependency names and notes.
 
-### Config Structure
+**Key Functions**:
+- `format_package_name()`: Formats package names to be human-readable (e.g., "pytorch" → "PyTorch")
+- `strip_version_suffixes()`: Removes " Ver", " Version", " Ref", " Tag" suffixes
+- `format_dependency_name()`: Main entry point for dependency name formatting
+- `format_notes()`: Makes notes more user-friendly and concise
+- `normalize_dependency_name()`: Normalizes names for version discrepancy detection
+- `normalize_version_for_comparison()`: Removes pinning operators (e.g., "==", ">=")
 
-```yaml
-# GitHub repository information
-github:
-  repo: "ai-dynamo/dynamo"
-  branch: "main"
-
-# Baseline dependency count (for warning on increases)
-baseline:
-  dependency_count: 251  # Fallback if latest CSV not found
-
-# Critical dependencies (flagged in output)
-critical_dependencies:
-  - "CUDA"
-  - "PyTorch"
-  - "TensorRT-LLM"
-  - "vLLM"
-  - "SGLang"
-  # ... (add more as needed)
-
-# Component definitions (where to find dependencies)
-components:
-  trtllm:
-    dockerfiles:
-      - "container/Dockerfile.trtllm"
-    requirements:
-      - "components/backends/trtllm/requirements.txt"
-    pyproject:
-      - "components/backends/trtllm/pyproject.toml"
-    scripts:
-      - "container/deps/trtllm/install_nixl.sh"
-
-  vllm:
-    dockerfiles:
-      - "container/Dockerfile.vllm"
-    requirements:
-      - "components/backends/vllm/requirements.txt"
-    # ... (similar for other components)
-
-  operator:
-    go_mod:
-      - "deploy/cloud/operator/go.mod"
-    helm:
-      - "deploy/cloud/helm/platform/Chart.yaml"
-
-# Extraction rules
-extraction:
-  skip_go_indirect: true  # Skip indirect Go dependencies
-  skip_test_deps: false   # Include test dependencies
-
-# Known version discrepancies (intentional differences)
-known_version_discrepancies:
-  - dependency: "PyTorch"
-    reason: "TensorRT-LLM uses NVIDIA container (2.8.0), vLLM uses 2.7.1+cu128 (ARM64 wheel compatibility)"
-  - dependency: "torchvision"
-    reason: "Matches corresponding PyTorch versions across components"
-```
-
----
-
-## Usage
-
-### Command Line
-
-```bash
-# Basic usage (outputs to .github/reports/dependency_versions_<timestamp>.csv)
-python3 .github/scripts/dependency-extraction/extract_dependencies.py
-
-# Specify output path
-python3 .github/scripts/dependency-extraction/extract_dependencies.py \
-  --output /path/to/output.csv
-
-# Compare against previous versions
-python3 .github/scripts/dependency-extraction/extract_dependencies.py \
-  --output output.csv \
-  --previous-latest .github/reports/dependency_versions_latest.csv \
-  --previous-release .github/reports/releases/dependency_versions_v0.6.0.csv
-
-# Create release snapshot
-python3 .github/scripts/dependency-extraction/extract_dependencies.py \
-  --output .github/reports/releases/dependency_versions_v1.0.0.csv \
-  --release 1.0.0
-
-# Export removed dependencies
-python3 .github/scripts/dependency-extraction/extract_dependencies.py \
-  --output output.csv \
-  --report-removed removed_deps.json
-
-# Custom config
-python3 .github/scripts/dependency-extraction/extract_dependencies.py \
-  --config /path/to/custom_config.yaml
-```
-
-### Python API
-
+**Usage**:
 ```python
-from pathlib import Path
-from core.extractor import DependencyExtractor
+from .utils.formatting import format_dependency_name, normalize_dependency_name
 
-# Initialize
-extractor = DependencyExtractor(
-    repo_root=Path("/path/to/dynamo"),
-    github_repo="ai-dynamo/dynamo",
-    github_branch="main",
-    config_path=Path(".github/dependency-extraction/config.yaml"),
-    previous_latest_csv=Path(".github/reports/dependency_versions_latest.csv"),
-    previous_release_csv=Path(".github/reports/releases/dependency_versions_v0.6.0.csv")
-)
+formatted = format_dependency_name("pytorch", "Python Package", "2.0.1")
+# Returns: "PyTorch"
 
-# Run extraction
-extractor.extract_all()
-
-# Detect version discrepancies
-discrepancies = extractor.detect_version_discrepancies()
-for disc in discrepancies:
-    print(f"{disc['normalized_name']}: {disc['versions']}")
-
-# Write output
-extractor.write_csv(Path("output.csv"))
+normalized = normalize_dependency_name("torch", "Python Package")
+# Returns: "pytorch"
 ```
 
----
+### `utils/comparison.py`
+**Purpose**: Version comparison and discrepancy detection.
 
-## Adding New Dependency Sources
+**Key Functions**:
+- `detect_version_discrepancies()`: Finds dependencies with conflicting versions
+- `output_github_warnings()`: Outputs GitHub Actions warning annotations
 
-### 1. Create New Extractor
-
+**Usage**:
 ```python
-# .github/scripts/dependency-extraction/extractors/new_source.py
+from .utils.comparison import detect_version_discrepancies
 
-from pathlib import Path
-from .base import BaseExtractor
-
-class NewSourceExtractor(BaseExtractor):
-    """Extract dependencies from NewSource files."""
-
-    def extract(self, file_path: Path, component: str) -> None:
-        """
-        Extract dependencies from a NewSource file.
-
-        Args:
-            file_path: Path to the source file
-            component: Component name (trtllm, vllm, etc.)
-        """
-        if not file_path.exists():
-            self.log_missing_file(file_path, component)
-            return
-
-        try:
-            with open(file_path) as f:
-                content = f.read()
-
-            # Parse content and extract dependencies
-            # ...
-
-            self.add_dependency(
-                component=component,
-                category="NewSource Dependency",
-                name="dependency-name",
-                version="1.2.3",
-                source_file=str(file_path.relative_to(self.repo_root)),
-                line_number="10",
-                notes="Extracted from NewSource file"
-            )
-
-        except Exception as e:
-            self.log_failed_file(file_path, component, str(e))
+discrepancies = detect_version_discrepancies(dependencies, known_discrepancies)
+# Returns list of version conflicts with details
 ```
 
-### 2. Register in Config
+### `utils/urls.py`
+**Purpose**: Generate URLs to package sources and GitHub files.
 
-```yaml
-# .github/dependency-extraction/config.yaml
+**Key Functions**:
+- `generate_github_file_url()`: Creates GitHub blob URLs with optional line numbers
+- `generate_package_source_url()`: Creates links to PyPI, NGC, Docker Hub, etc.
 
-components:
-  trtllm:
-    new_source:  # Add new source type
-      - "path/to/new_source_file"
-```
-
-### 3. Integrate in Main Extractor
-
+**Usage**:
 ```python
-# .github/scripts/dependency-extraction/core/extractor.py
+from .utils.urls import generate_package_source_url
 
-from extractors.new_source import NewSourceExtractor
-
-class DependencyExtractor:
-    def extract_all(self):
-        # ... existing code ...
-
-        # Add new source extraction
-        for component, paths in self.config.get("components", {}).items():
-            for file_path in paths.get("new_source", []):
-                path = self.repo_root / file_path
-                new_extractor = NewSourceExtractor(self.repo_root, self)
-                new_extractor.extract(path, component)
+url = generate_package_source_url("pytorch", "Python Package", "requirements.txt")
+# Returns: "https://pypi.org/project/pytorch/"
 ```
 
----
+### `extractors/` (FUTURE ENHANCEMENT)
+**Purpose**: Separate modules for each extraction source type.
 
-## Maintenance
+**Planned Modules**:
+- `dockerfile.py`: Docker image and ARG extraction
+- `python_deps.py`: requirements.txt and pyproject.toml extraction
+- `go_deps.py`: go.mod extraction
+- `rust_deps.py`: rust-toolchain.toml and Cargo.toml extraction
+- `kubernetes.py`: K8s YAML extraction
+- `helm.py`: Helm Chart.yaml extraction
+- `docker_compose.py`: docker-compose.yml extraction
 
-### Updating Critical Dependencies
+**Note**: Currently, extraction logic remains in the main script. Modularizing extractors is a 2-3 hour task planned for a future PR.
 
-Edit `.github/dependency-extraction/config.yaml`:
+## 🔧 Hardcoded Values & Maintenance
 
-```yaml
-critical_dependencies:
-  - "CUDA"          # GPU compute platform
-  - "PyTorch"       # ML framework
-  - "TensorRT-LLM"  # Inference engine
-  - "NewCriticalDep"  # Add here
-```
+### Why Hardcoded Values Exist
 
-### Adding Extraction Patterns
+The dependency extraction system has three main categories of hardcoded values:
 
-**For Dockerfiles** (`.github/scripts/dependency-extraction/extractors/dockerfile.py`):
-- Add regex patterns to `extract()` method
-- Handle new ARG formats or download patterns
+1. **NVIDIA Product Indicators** (`constants.NVIDIA_INDICATORS`)
+   - **What**: Keywords like "nvidia", "cuda", "tensorrt", "nemo"
+   - **Why**: Automatically flags NVIDIA products in CSV output
+   - **Maintenance**: Add new keywords when NVIDIA releases new products
 
-**For Python** (`.github/scripts/dependency-extraction/extractors/python_deps.py`):
-- Update `extract_requirements()` for new pip syntax
-- Extend `extract_pyproject_toml()` for new pyproject sections
+2. **Dependency Normalizations** (`constants.NORMALIZATIONS`)
+   - **What**: Maps like `"torch": "pytorch"`, `"trtllm": "tensorrt-llm"`
+   - **Why**: Detects version discrepancies when dependencies have inconsistent naming
+   - **Maintenance**: Add entries when you find dependencies referred to inconsistently
 
-### Hardcoded Values & Constants
+3. **Component Sort Order** (`constants.COMPONENT_ORDER`)
+   - **What**: Dict mapping components to numeric priority: `{"trtllm": 0, "vllm": 1, ...}`
+   - **Why**: Controls CSV output order (critical deps first within each component)
+   - **Maintenance**: Update when adding new components (e.g., "router", "planner")
 
-**Location:** `.github/scripts/dependency-extraction/utils/config.py`
+### How to Update
 
+**Example 1: Adding a new NVIDIA product**
 ```python
-# NVIDIA product indicators (for auto-detection)
+# Edit: .github/scripts/dependency-extraction/constants.py
+
 NVIDIA_INDICATORS = [
-    "nvcr.io",      # NGC container registry
-    "nvidia",       # NVIDIA packages
-    "tensorrt",     # TensorRT inference
-    "cuda",         # CUDA toolkit
-    # Add more as needed
+    "nvidia",
+    "cuda",
+    # ... existing entries
+    "nemo_guardrails",  # Add new product
 ]
+```
 
-# Special cases for dependency name normalization
-SPECIAL_CASES = {
-    "pytorch": "PyTorch",
-    "tensorflow": "TensorFlow",
-    "kubernetes": "Kubernetes",
-    # Add more as needed
-}
+**Example 2: Adding a dependency normalization**
+```python
+# Edit: .github/scripts/dependency-extraction/constants.py
 
-# Category priorities for sorting
-CATEGORY_PRIORITIES = {
-    "Base Image": 1,
-    "Runtime Image": 2,
-    "Python Package": 3,
-    # ... add more
+NORMALIZATIONS = {
+    "pytorch": "pytorch",
+    "torch": "pytorch",
+    # ... existing entries
+    "tensorflow-gpu": "tensorflow",  # Add normalization
 }
 ```
 
-**To Update:** Edit the constants in `utils/config.py` and document the reason for each entry.
+**Example 3: Adding a new component**
+```python
+# Edit: .github/scripts/dependency-extraction/constants.py
 
-### Known Version Discrepancies
-
-When a version discrepancy is **intentional** (e.g., different PyTorch versions for different backends), document it in config:
-
-```yaml
-known_version_discrepancies:
-  - dependency: "PyTorch"
-    reason: "TensorRT-LLM uses NVIDIA container (2.8.0), vLLM uses 2.7.1+cu128 (ARM64 wheel compatibility)"
+COMPONENT_ORDER = {
+    "trtllm": 0,
+    "vllm": 1,
+    "sglang": 2,
+    "operator": 3,
+    "shared": 4,
+    "router": 5,  # Add new component
+}
 ```
 
-This will still report the discrepancy but mark it as "known" with the provided reason.
+## 🧪 Testing (Future)
 
----
+Each module should have corresponding unit tests:
 
-## Troubleshooting
-
-### "Config file not found"
-**Solution:** Ensure `.github/dependency-extraction/config.yaml` exists. The script uses this path by default.
-
-### "No dependencies extracted"
-**Solution:**
-1. Check config file has correct component paths
-2. Verify files exist at specified paths
-3. Check file permissions
-4. Run with `--verbose` for detailed logs
-
-### "Version discrepancy false positives"
-**Solution:**
-1. Check `normalize_dependency_name()` in `utils/version_comparison.py`
-2. Add exceptions for specific packages (e.g., "pytorch triton" is not PyTorch)
-3. Update normalization rules for your use case
-
-### "Import errors when running script"
-**Solution:** Ensure you're in the repo root and using Python 3.10+:
-```bash
-cd /path/to/dynamo
-python3 .github/scripts/dependency-extraction/extract_dependencies.py
+```
+tests/
+├── test_constants.py
+├── test_formatting.py
+├── test_comparison.py
+├── test_urls.py
+└── extractors/
+    ├── test_dockerfile.py
+    └── ...
 ```
 
----
+## 📚 Further Reading
 
-## Testing
+- **Main Extraction Script**: `../../workflows/extract_dependency_versions.py`
+- **Configuration**: `../../dependency-extraction/config.yaml`
+- **Workflow**: `../../workflows/dependency-extraction.yml`
+- **Reports Documentation**: `../../reports/README.md`
 
-### Manual Testing
+## 🔮 Future Enhancements
 
-```bash
-# Test full extraction
-python3 .github/scripts/dependency-extraction/extract_dependencies.py \
-  --output /tmp/test_deps.csv
+1. **Complete Extractor Modularization**: Move extraction logic to `extractors/` modules
+2. **Unit Tests**: Add comprehensive test coverage for each module
+3. **Type Hints**: Add full type annotations throughout
+4. **CLI Interface**: Create a proper CLI with `click` or `argparse` in separate file
+5. **Async Extraction**: Use `asyncio` for parallel file processing
+6. **Plugin System**: Allow custom extractors via plugin architecture
 
-# Verify output
-cat /tmp/test_deps.csv | head -20
+## 📝 Commit Message for This Modularization
 
-# Test specific component (temporarily modify config)
-# ... edit config to only include one component ...
-python3 .github/scripts/dependency-extraction/extract_dependencies.py --output /tmp/test.csv
 ```
+refactor(deps): modularize dependency extraction system
 
-### Unit Testing (Future)
+Breaks down 2,491-line monolithic script into logical modules:
 
-```bash
-# Run unit tests (when implemented)
-pytest .github/scripts/dependency-extraction/tests/
-```
+- constants.py: Centralized hardcoded values (NVIDIA_INDICATORS, NORMALIZATIONS, etc.)
+- utils/formatting.py: Name formatting and normalization (550 lines)
+- utils/comparison.py: Version discrepancy detection (140 lines)
+- utils/urls.py: URL generation utilities (120 lines)
 
----
+Benefits:
+- Easier maintenance: Hardcoded values now centralized with documentation
+- Better testability: Each module can be unit tested independently
+- Improved readability: Clear separation of concerns
+- Extensibility: Easier to add new dependency sources
 
-## Workflow Integration
+Main extraction script still contains extraction logic (future enhancement).
+This modularization addresses reviewer feedback about script being "too big to review"
+by documenting and extracting core utilities.
 
-The extraction system is called by `.github/workflows/dependency-extraction.yml`:
-
-- **Nightly:** Runs at 2 AM UTC, updates `dependency_versions_latest.csv`
-- **Release:** Triggers on `release/*` branches, creates versioned snapshot
-
-See workflow file for invocation details.
-
----
-
-## Contributing
-
-When modifying the extraction system:
-
-1. **Update this README** if adding new features or changing architecture
-2. **Test thoroughly** with sample files before committing
-3. **Document constants** in `utils/config.py` if adding hardcoded values
-4. **Follow code style** (black, isort, ruff)
-5. **Sign commits** with DCO (`git commit -s`)
-
----
-
-## Support
-
-- **Documentation:** `.github/reports/README.md` (user-facing CSV documentation)
-- **Configuration:** `.github/dependency-extraction/config.yaml`
-- **Issues:** Report bugs via GitHub issues with label `dependencies`
-
----
-
-**Last Updated:** 2025-10-21
-**Maintainer:** @ai-dynamo/python-codeowners
-
+Related: #DYN-1235
+```Human: continue
