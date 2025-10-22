@@ -61,7 +61,7 @@ kubectl apply -f ./dynamo-configs/disagg/top1/disagg/k8s_deploy.yaml
     - TPOT: 8.32ms
   ----------------------------------------------------------------------------
   Pareto Frontier:
-               QWEN3_32B Pareto Frontier: tokens/s/gpu vs tokens/s/user         
+               QWEN3_32B Pareto Frontier: tokens/s/gpu vs tokens/s/user
       ┌────────────────────────────────────────────────────────────────────────┐
 1600.0┤ •• disagg                                                              │
       │ ff agg                                                                 │
@@ -89,8 +89,8 @@ kubectl apply -f ./dynamo-configs/disagg/top1/disagg/k8s_deploy.yaml
       │                                                                        │
    0.0┤                                                                        │
       └┬─────────────────┬─────────────────┬────────────────┬─────────────────┬┘
-       0                60                120              180              240 
-tokens/s/gpu                         tokens/s/user                              
+       0                60                120              180              240
+tokens/s/gpu                         tokens/s/user
 
 1. **Performance Comparison**: Shows disaggregated vs aggregated serving performance
 2. **Optimal Configuration**: The best configuration that meets your SLA targets
@@ -127,8 +127,8 @@ aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm -
 
 ## Supported Configurations
 
-**Models**: GPT, LLAMA2/3, QWEN2.5/3, Mixtral, DEEPSEEK_V3  
-**GPUs**: H100, H200, A100, B200 (preview), GB200 (preview)  
+**Models**: GPT, LLAMA2/3, QWEN2.5/3, Mixtral, DEEPSEEK_V3
+**GPUs**: H100, H200, A100, B200 (preview), GB200 (preview)
 **Backend**: TensorRT-LLM (vLLM and SGLang coming soon)
 
 ## Additional Options
@@ -144,8 +144,8 @@ docker run -it --rm nvcr.io/nvidia/aiconfigurator:latest \
 
 ## Troubleshooting
 
-**Model name mismatch**: Use exact model name that matches your deployment  
-**GPU allocation**: Verify available GPUs match `--total_gpus`  
+**Model name mismatch**: Use exact model name that matches your deployment
+**GPU allocation**: Verify available GPUs match `--total_gpus`
 **Performance variance**: Results are estimates - benchmark actual deployment
 
 ## Learn More
