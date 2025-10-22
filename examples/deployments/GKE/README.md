@@ -59,7 +59,7 @@ git checkout release/0.6.0
 ###  Set environment variables for GKE
 
 ```bash
-export NAMESPACE=dynamo-cloud
+export NAMESPACE=dynamo-system
 kubectl create namespace $NAMESPACE
 kubectl config set-context --current --namespace=$NAMESPACE
 
@@ -115,7 +115,7 @@ For example, refer to the following from [`examples/deployments/GKE/vllm/disagg_
 ```yaml
 metadata:
   name: vllm-disagg
-  namespace: dynamo-cloud
+  namespace: dynamo-system
 spec:
   services:
     Frontend:
