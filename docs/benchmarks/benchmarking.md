@@ -526,7 +526,7 @@ The Python benchmarking module provides a complete end-to-end benchmarking exper
 
 ## Testing with Mocker Backend
 
-For development and testing purposes, Dynamo provides a [mocker backend](/components/src/dynamo/mocker/) that simulates LLM inference without requiring actual GPU resources. This is useful for:
+For development and testing purposes, Dynamo provides a [mocker backend](../../components/src/dynamo/mocker/) that simulates LLM inference without requiring actual GPU resources. This is useful for:
 
 - **Testing deployments** without expensive GPU infrastructure
 - **Developing and debugging** router, planner, or frontend logic
@@ -535,4 +535,4 @@ For development and testing purposes, Dynamo provides a [mocker backend](/compon
 
 The mocker backend mimics the API and behavior of real backends (vLLM, SGLang, TensorRT-LLM) but generates mock responses instead of running actual inference.
 
-See the [mocker directory](/components/src/dynamo/mocker/) for usage examples and configuration options.
+See the [mocker directory](../../components/src/dynamo/mocker/) for usage examples and configuration options.
