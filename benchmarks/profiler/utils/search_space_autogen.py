@@ -36,9 +36,6 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
             logger.info("DGD config file not provided, using default config file")
             config = config_modifier.load_default_config()
 
-            logger.info(
-                f"Saving generated disagg DGD config for profiling to {args.output_dir}/disagg_config.yaml"
-            )
         else:
             with open(args.config, "r") as f:
                 config = yaml.safe_load(f)
@@ -46,6 +43,7 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
         logger.info(f"Updating model in DGD config file to {args.model}")
         config = config_modifier.update_model(config, args.model)
         config_fn = f"{args.output_dir}/disagg_config.yaml"
+        logger.info(f"Saving generated disagg DGD config for profiling to {config_fn}")
         os.makedirs(args.output_dir, exist_ok=True)
         with open(config_fn, "w") as f:
             yaml.dump(config, f)
