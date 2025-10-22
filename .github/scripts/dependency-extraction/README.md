@@ -96,19 +96,41 @@ url = generate_package_source_url("pytorch", "Python Package", "requirements.txt
 # Returns: "https://pypi.org/project/pytorch/"
 ```
 
-### `extractors/` (FUTURE ENHANCEMENT)
+### `extractors/` 
 **Purpose**: Separate modules for each extraction source type.
 
-**Planned Modules**:
+**Architecture**:
+- `base.py`: Base extractor class that all extractors inherit from
+- `python_deps.py`: ✅ **IMPLEMENTED** - requirements.txt and pyproject.toml extraction
+
+**Planned Modules** (Future):
 - `dockerfile.py`: Docker image and ARG extraction
-- `python_deps.py`: requirements.txt and pyproject.toml extraction
 - `go_deps.py`: go.mod extraction
 - `rust_deps.py`: rust-toolchain.toml and Cargo.toml extraction
 - `kubernetes.py`: K8s YAML extraction
 - `helm.py`: Helm Chart.yaml extraction
 - `docker_compose.py`: docker-compose.yml extraction
 
-**Note**: Currently, extraction logic remains in the main script. Modularizing extractors is a 2-3 hour task planned for a future PR.
+**Usage Example**:
+```python
+from extractors.python_deps import PythonDependencyExtractor
+
+extractor = PythonDependencyExtractor(
+    repo_root=Path("/path/to/repo"),
+    component="vllm",
+    github_repo="ai-dynamo/dynamo",
+    github_branch="main"
+)
+
+# Extract from requirements.txt
+deps = extractor.extract_requirements(
+    Path("requirements.txt"),
+    category="Python Package"
+)
+
+# Extract from pyproject.toml
+deps = extractor.extract_pyproject_toml(Path("pyproject.toml"))
+```
 
 ## 🔧 Hardcoded Values & Maintenance
 
@@ -171,18 +193,52 @@ COMPONENT_ORDER = {
 }
 ```
 
-## 🧪 Testing (Future)
+## 🧪 Testing
 
-Each module should have corresponding unit tests:
+Each module has corresponding unit tests. Tests are located in the `tests/` directory.
+
+### Current Test Coverage
+
+✅ **Implemented**:
+- `test_formatting.py` (95+ test cases)
+  - Tests for format_package_name, normalize_dependency_name, normalize_version_for_comparison
+  - Covers special cases, edge cases, and known issues
+- `test_python_extractor.py` (50+ test cases)
+  - Tests for PythonDependencyExtractor
+  - Covers requirements.txt and pyproject.toml parsing
+
+**Planned** (Future):
+- `test_comparison.py`: Version discrepancy detection tests
+- `test_urls.py`: URL generation tests
+- `test_constants.py`: Constants validation tests
+- `test_extractors/*.py`: Tests for each extractor module
+
+### Running Tests
+
+```bash
+# Run all tests
+pytest .github/scripts/dependency-extraction/tests/
+
+# Run specific test file
+pytest .github/scripts/dependency-extraction/tests/test_formatting.py -v
+
+# Run with coverage
+pytest .github/scripts/dependency-extraction/tests/ --cov=.github/scripts/dependency-extraction --cov-report=html
+```
+
+### Test Organization
 
 ```
 tests/
-├── test_constants.py
-├── test_formatting.py
-├── test_comparison.py
-├── test_urls.py
-└── extractors/
+├── __init__.py
+├── test_formatting.py       # ✅ Formatting utilities tests
+├── test_python_extractor.py # ✅ Python extractor tests
+├── test_comparison.py       # 📋 Planned
+├── test_urls.py             # 📋 Planned
+└── extractors/              # 📋 Planned
+    ├── __init__.py
     ├── test_dockerfile.py
+    ├── test_go_deps.py
     └── ...
 ```
 
@@ -202,27 +258,32 @@ tests/
 5. **Async Extraction**: Use `asyncio` for parallel file processing
 6. **Plugin System**: Allow custom extractors via plugin architecture
 
-## 📝 Commit Message for This Modularization
+## 📝 Development History
 
+### Phase 1: Initial Modularization (Commit 1)
 ```
 refactor(deps): modularize dependency extraction system
 
-Breaks down 2,491-line monolithic script into logical modules:
+Extracted core utilities from 2,491-line monolithic script:
+- constants.py (100 lines)
+- utils/formatting.py (330 lines)
+- utils/comparison.py (170 lines)
+- utils/urls.py (120 lines)
+- README.md (228 lines documentation)
+```
 
-- constants.py: Centralized hardcoded values (NVIDIA_INDICATORS, NORMALIZATIONS, etc.)
-- utils/formatting.py: Name formatting and normalization (550 lines)
-- utils/comparison.py: Version discrepancy detection (140 lines)
-- utils/urls.py: URL generation utilities (120 lines)
+### Phase 2: Extractors & Tests (Commit 2)
+```
+feat(deps): add extractor architecture and unit tests
+
+Created extractor base class and Python extractor:
+- extractors/base.py (130 lines): Base extractor class
+- extractors/python_deps.py (230 lines): requirements.txt & pyproject.toml
+- tests/test_formatting.py (95 test cases)
+- tests/test_python_extractor.py (50 test cases)
 
 Benefits:
-- Easier maintenance: Hardcoded values now centralized with documentation
-- Better testability: Each module can be unit tested independently
-- Improved readability: Clear separation of concerns
-- Extensibility: Easier to add new dependency sources
-
-Main extraction script still contains extraction logic (future enhancement).
-This modularization addresses reviewer feedback about script being "too big to review"
-by documenting and extracting core utilities.
-
-Related: #DYN-1235
+- Reusable extractor pattern for all source types
+- Unit tests ensure correctness and prevent regressions
+- Clear separation: each extractor is self-contained
 ```Human: continue
