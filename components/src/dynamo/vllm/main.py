@@ -118,6 +118,11 @@ def setup_kv_event_publisher(
     if not config.engine_args.enable_prefix_caching:
         return None
 
+    # Skip KV event publishing for decode workers
+    if config.is_decode_worker:
+        logger.info("Skipping KV event publisher setup for decode worker")
+        return None
+
     # Get data_parallel_size to create publishers for all dp_ranks
     data_parallel_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
     kv_publishers = []
