@@ -106,15 +106,7 @@ def get_aiperf_result(artifact_dir: str) -> dict:
         )
 
     with open(json_file_path, "r") as f:
-        data = json.load(f)
-
-    # Extract relevant metrics from the new format
-    records = data.get("records", {})
-
-    return {
-        "time_to_first_token": records.get("ttft", {}),
-        "output_token_throughput": records.get("output_token_throughput", {}),
-    }
+        return json.load(f)
 
 
 def run_benchmark_single_url(
@@ -171,19 +163,21 @@ def aggregate_results(results: List[Optional[Dict]]) -> Optional[Dict]:
 
     # For TTFT, we take the average across all URLs
     # For throughput, we sum across all URLs (total system throughput)
-    ttft_values = [r["time_to_first_token"]["avg"] for r in results if r is not None]
+    ttft_values = [r["records"]["ttft"]["avg"] for r in results if r is not None]
     throughput_values = [
-        r["output_token_throughput"]["avg"] for r in results if r is not None
+        r["records"]["output_token_throughput"]["avg"] for r in results if r is not None
     ]
 
     if not ttft_values or not throughput_values:
         return None
 
     aggregated = {
-        "time_to_first_token": {"avg": sum(ttft_values) / len(ttft_values)},
-        "output_token_throughput": {
-            "avg": sum(throughput_values)  # Total throughput across all URLs
-        },
+        "records": {
+            "ttft": {"avg": sum(ttft_values) / len(ttft_values)},
+            "output_token_throughput": {
+                "avg": sum(throughput_values)  # Total throughput across all URLs
+            },
+        }
     }
 
     return aggregated
@@ -367,8 +361,8 @@ def main():
         )
 
         if result is not None:
-            ttft = result["time_to_first_token"]["avg"]
-            throughput = result["output_token_throughput"]["avg"]
+            ttft = result["records"]["ttft"]["avg"]
+            throughput = result["records"]["output_token_throughput"]["avg"]
 
             prefix_ratios.append(prefix_ratio)
             ttft_values.append(ttft)
