@@ -56,7 +56,7 @@ def parse_config_string(config_str: str) -> Dict[str, Any]:
     )
 
 
-def create_profiler_parser() -> argparse.Namespace:
+def create_profiler_parser() -> Dict[str, Any]:
     """
     Create argument parser with support for YAML config string.
 
@@ -300,6 +300,6 @@ def create_profiler_parser() -> argparse.Namespace:
     if not args.model and not args.config:
         parser.error("--model or --config is required")
 
-    args = auto_generate_search_space(args)
+    auto_generate_search_space(args)
 
     return vars(args)

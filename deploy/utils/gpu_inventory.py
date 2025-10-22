@@ -257,30 +257,30 @@ def aggregate_valued_rows(
 
     groups: Dict[
         Tuple[Optional[str], Optional[int]],
-        Dict[str, Union[int, List[NodeGpuInventory]]],
+        Dict[str, object],
     ] = defaultdict(lambda: {"max_gpu": 0, "rows": []})
     for r in valued:
         key = (r.gpu_product, r.gpu_memory_mib)
         meta = groups[key]
-        meta["rows"].append(r)  # type: ignore[index]
+        meta["rows"].append(r)  # type: ignore[attr-defined, index]
         # Use known gpu_count if available for ranking
         if r.gpu_count is not None:
-            meta["max_gpu"] = max(int(meta["max_gpu"]), int(r.gpu_count))  # type: ignore[index]
+            meta["max_gpu"] = max(int(meta["max_gpu"]), int(r.gpu_count))  # type: ignore[arg-type, call-overload, index]
 
     def sort_key(
         item: Tuple[
             Tuple[Optional[str], Optional[int]],
-            Dict[str, Union[int, List[NodeGpuInventory]]],
+            Dict[str, object],
         ]
     ):
         (prod, mem_mib), meta = item
-        max_gpu = int(meta["max_gpu"])  # type: ignore[index]
+        max_gpu = int(meta["max_gpu"])  # type: ignore[arg-type, call-overload, index]
         mem_val = mem_mib if mem_mib is not None else -1
         return (max_gpu, mem_val)
 
     selected_key, selected_meta = sorted(groups.items(), key=sort_key, reverse=True)[0]
     sel_prod, sel_mem_mib = selected_key
-    sel_gpu = int(selected_meta["max_gpu"])  # type: ignore[index]
+    sel_gpu = int(selected_meta["max_gpu"])  # type: ignore[arg-type, call-overload, index]
 
     selected = NodeGpuInventory(
         node_name="<aggregate>",
@@ -386,12 +386,12 @@ def enrich_with_smi(
 
 def get_gpu_summary(
     prefer_client: bool = True, enrich_smi: bool = True
-) -> Tuple[int, str, int]:
+) -> Dict[str, object]:
     """Return an aggregate GPU summary for the cluster.
 
     Selection policy when multiple values exist: prefer higher GPUs per node,
-    then higher VRAM/GPU. Returns tuple of (gpus_per_node, model, vram_mib).
-    If model/VRAM unavailable anywhere, returns (max_gpus, "", 0).
+    then higher VRAM/GPU. Returns dict with keys: gpus_per_node, model, vram.
+    If model/VRAM unavailable anywhere, returns {"gpus_per_node": max_gpus, "model": "", "vram": 0}.
     """
     rows, _ = collect_gpu_inventory(prefer_client=prefer_client)
     if enrich_smi:
@@ -404,7 +404,7 @@ def get_gpu_summary(
         for r in rows:
             if r.gpu_count is not None:
                 max_gpus = max(max_gpus, int(r.gpu_count))
-        return max_gpus, "", 0
+        return {"gpus_per_node": max_gpus, "model": "", "vram": 0}
 
     gpus_val = int(agg.gpu_count) if agg.gpu_count is not None else 0
     model_val = agg.gpu_product or ""

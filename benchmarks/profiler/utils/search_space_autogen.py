@@ -64,10 +64,10 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
         )
 
         min_gpu = math.ceil(
-            model_info["model_size"] / MODEL_GPU_MEM_FRAC_MAX / gpu_info["vram"]
+            model_info["model_size"] / MODEL_GPU_MEM_FRAC_MAX / gpu_info["vram"]  # type: ignore[operator]
         )
         max_gpu = (
-            gpu_info["gpus_per_node"]
+            gpu_info["gpus_per_node"]  # type: ignore[misc]
             if not model_info["is_moe"]
             else MOE_MODEL_MAX_NUM_GPUS
         )
@@ -81,8 +81,8 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
         )
         args.min_num_gpus_per_engine = min_gpu
         args.max_num_gpus_per_engine = max_gpu
-        args.is_moe_model = model_info["is_moe"]
-        args.max_context_length = model_info["max_context_length"]
-        args.num_gpus_per_node = gpu_info["gpus_per_node"]
+        args.is_moe_model = model_info["is_moe"]  # type: ignore[assignment]
+        args.max_context_length = model_info["max_context_length"]  # type: ignore[assignment]
+        args.num_gpus_per_node = gpu_info["gpus_per_node"]  # type: ignore[assignment]
 
     return

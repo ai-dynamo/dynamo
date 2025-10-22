@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 from huggingface_hub import model_info
-from transformers import AutoConfig, PretrainedConfig
+from transformers import AutoConfig
 
 DTYPE_BYTES_MAP = {
     "F32": 4,  # FP32: 4 bytes per parameter
@@ -69,10 +69,11 @@ def get_model_weight_size_from_hub(
         weight_extensions = [".safetensors", ".bin", ".pt", ".pth"]
         total_size_bytes = 0
 
-        for sibling in info.siblings:
-            if any(sibling.rfilename.endswith(ext) for ext in weight_extensions):
-                if sibling.size is not None:
-                    total_size_bytes += sibling.size
+        if info.siblings is not None:
+            for sibling in info.siblings:
+                if any(sibling.rfilename.endswith(ext) for ext in weight_extensions):
+                    if sibling.size is not None:
+                        total_size_bytes += sibling.size
 
         # If no file sizes were available, try to estimate from safetensors metadata
         if total_size_bytes == 0 and info.safetensors is not None:
@@ -81,7 +82,7 @@ def get_model_weight_size_from_hub(
                 bytes_per_param = DTYPE_BYTES_MAP.get(
                     dtype, 2
                 )  # Default to 2 bytes (FP16/BF16)
-                total_size_bytes += param_count * bytes_per_param
+                total_size_bytes += int(param_count * bytes_per_param)
 
         return total_size_bytes / (1024**2)
     except Exception as e:
@@ -99,13 +100,13 @@ def get_model_weight_size(
         return get_local_model_weight_size(model_name_or_path)
     else:
         # HF Hub model
-        return get_model_weight_size_from_hub(model_name_or_path)
+        return get_model_weight_size_from_hub(str(model_name_or_path))
 
 
 def get_model_info(
     model_name_or_path: Union[str, Path],
     trust_remote_code: bool = False,
-) -> PretrainedConfig:
+) -> dict:
     model_size = get_model_weight_size(model_name_or_path)
 
     config = AutoConfig.from_pretrained(
