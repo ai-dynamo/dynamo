@@ -58,8 +58,16 @@ where
             Ok(Some(value))
         }
 
-        // Accept explicit JSON null or omitted field
+        // Accept omitted field
         fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+
+        // Accept explicit JSON null
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
         where
             E: serde::de::Error,
         {
