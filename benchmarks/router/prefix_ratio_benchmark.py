@@ -106,7 +106,15 @@ def get_aiperf_result(artifact_dir: str) -> dict:
         )
 
     with open(json_file_path, "r") as f:
-        return json.load(f)
+        data = json.load(f)
+
+    # Extract relevant metrics from the new format
+    records = data.get("records", {})
+
+    return {
+        "time_to_first_token": records.get("ttft", {}),
+        "output_token_throughput": records.get("output_token_throughput", {}),
+    }
 
 
 def run_benchmark_single_url(
