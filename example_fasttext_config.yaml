@@ -1,0 +1,26 @@
+# Example configuration for semantic router with fastText classifier
+# Set environment variable: export DYN_SEMROUTER_CONFIG=example_fasttext_config.yaml
+
+semrouter:
+  enabled: true
+  mode: auto
+  model_alias: "router"
+
+  classifier:
+    kind: fasttext
+    model_path: "/path/to/your/model.bin"  # Update this path to your fastText model
+
+  classes:
+    - label: reasoning
+      threshold: 0.55
+      action: { type: override, model: "deepseek-ai/DeepSeek-R1-Distill-Llama-8B" }
+
+    - label: non-reasoning
+      threshold: 0.55
+      action: { type: override, model: "meta-llama/Meta-Llama-3.1-8B-Instruct" }
+
+  # Optional: what to do when no class crosses threshold (acts as abstain/fallback)
+  fallback:
+    type: override
+    model: "meta-llama/Meta-Llama-3.1-8B-Instruct"
+

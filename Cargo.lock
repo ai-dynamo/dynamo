@@ -2250,6 +2250,7 @@ dependencies = [
  "toktrie_hf_tokenizers 1.2.0",
  "tonic 0.13.1",
  "tonic-build",
+ "tower 0.5.2",
  "tower-http",
  "tracing",
  "unicode-segmentation",

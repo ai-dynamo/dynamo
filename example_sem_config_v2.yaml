@@ -1,0 +1,18 @@
+semrouter:
+  enabled: true
+  mode: auto
+  model_alias: "router"
+
+  classifier:
+    kind: keyword
+    classes:
+      reasoning: ["prove", "derive", "theorem"]
+      coding: ["rust", "python", "bug"]
+
+  classes:
+    - label: reasoning
+      threshold: 0.34
+      action: { type: override, model: "gpt-o4-mini" }
+    - label: coding
+      threshold: 0.25
+      action: { type: override, model: "gpt-code" }

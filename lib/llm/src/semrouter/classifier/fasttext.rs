@@ -1,20 +1,19 @@
-use super::Classifier;
+use super::{Classifier, Classification};
 use anyhow::{anyhow, Result};
-use std::collections::HashMap;
 
-#[cfg(feature = "fasttext-classifier")]
+#[cfg(feature = "clf-fasttext")]
 use fasttext::FastText;
 
-#[cfg(feature = "fasttext-classifier")]
+#[cfg(feature = "clf-fasttext")]
 use sha2::{Digest, Sha256};
 
-/// fastText-based classifier for binary classification (pure Rust path)
-#[cfg(feature = "fasttext-classifier")]
+/// fastText-based classifier for multiclass classification (pure Rust path)
+#[cfg(feature = "clf-fasttext")]
 pub struct FasttextClassifier {
     ft: FastText,
 }
 
-#[cfg(feature = "fasttext-classifier")]
+#[cfg(feature = "clf-fasttext")]
 impl FasttextClassifier {
     pub fn new(model_path: &str) -> Result<Self> {
         // Log file size + sha256 to be 100% sure we’re loading the same bytes
@@ -73,9 +72,9 @@ impl FasttextClassifier {
     }
 }
 
-#[cfg(feature = "fasttext-classifier")]
-impl Classifier for FasttextClassifier {
-    fn classify(&self, text: &str) -> Result<HashMap<String, f32>> {
+#[cfg(feature = "clf-fasttext")]
+impl FasttextClassifier {
+    fn classify_sync(&self, text: &str) -> Result<Classification> {
         let start = std::time::Instant::now();
 
         // Preview for logs
@@ -107,72 +106,73 @@ impl Classifier for FasttextClassifier {
             tracing::info!("pred[{}]: label='{}' prob={:.6}", i, p.label, p.prob);
         }
 
-        // Extract our two labels (if one is missing, we’ll complement)
-        let mut p_reason: Option<f32> = None;
-        let mut p_non: Option<f32> = None;
-        for p in &preds {
-            match p.label.as_str() {
-                "__label__reasoning" => p_reason = Some(p.prob as f32),
-                "__label__non-reasoning" => p_non = Some(p.prob as f32),
-                _ => {}
-            }
-        }
+        // Convert fastText labels (with __label__ prefix) to our format
+        let mut labels: Vec<LabelScore> = preds
+            .into_iter()
+            .filter_map(|p| {
+                // Strip __label__ prefix if present
+                let label = p.label.strip_prefix("__label__").unwrap_or(&p.label).to_string();
+                let score = p.prob.clamp(0.0, 1.0) as f32;
+                Some(LabelScore { label, score })
+            })
+            .collect();
 
-        // If only one label arrives, use complement. If both, trust them.
-        let (mut p_reason, mut p_non) = match (p_reason, p_non) {
-            (Some(r), Some(n)) => (r, n),
-            (Some(r), None) => (r, (1.0 - r).max(0.0).min(1.0)),
-            (None, Some(n)) => ((1.0 - n).max(0.0).min(1.0), n),
-            (None, None) => {
-                tracing::warn!("No known labels returned; defaulting to 0.5/0.5");
-                (0.5, 0.5)
-            }
-        };
-
-        // Normalize gently (fastText can emit 1.00000x from rounding)
-        // See: known rounding >1.0 behavior.
-        let sum = (p_reason + p_non).clamp(1e-9, 1e9);
-        p_reason = (p_reason / sum).clamp(0.0, 1.0);
-        p_non = (p_non / sum).clamp(0.0, 1.0);
+        // Sort by score descending
+        labels.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
         let latency = start.elapsed();
-        let predicted_class = if p_reason > p_non { "reasoning" } else { "non-reasoning" };
-        let confidence = p_reason.max(p_non);
+        if !labels.is_empty() {
+            tracing::info!(
+                latency_us = latency.as_micros(),
+                top_label = %labels[0].label,
+                top_score = %format!("{:.3}", labels[0].score),
+                "fastText classification complete"
+            );
+        } else {
+            tracing::warn!("fastText returned no predictions");
+        }
 
-        tracing::info!(
-            latency_us = latency.as_micros(),
-            predicted_class = %predicted_class,
-            confidence = %format!("{:.3}", confidence),
-            reasoning_prob = %format!("{:.3}", p_reason),
-            non_reasoning_prob = %format!("{:.3}", p_non),
-            "fastText classification complete"
-        );
+        Ok(Classification { labels })
+    }
+}
 
-        let mut result = HashMap::with_capacity(2);
-        result.insert("reasoning".to_string(), p_reason);
-        result.insert("non-reasoning".to_string(), p_non);
-        Ok(result)
+#[cfg(feature = "clf-fasttext")]
+#[async_trait::async_trait]
+impl Classifier for FasttextClassifier {
+    async fn predict(&self, text: &str) -> Result<Classification> {
+        // FastText is CPU-bound sync operation, but wrap in async for trait compatibility
+        // Could use spawn_blocking for true non-blocking behavior if needed
+        self.classify_sync(text)
+    }
+
+    fn name(&self) -> &'static str {
+        "fasttext"
     }
 }
 
 // Stub when the feature is not enabled
-#[cfg(not(feature = "fasttext-classifier"))]
+#[cfg(not(feature = "clf-fasttext"))]
 pub struct FasttextClassifier;
 
-#[cfg(not(feature = "fasttext-classifier"))]
+#[cfg(not(feature = "clf-fasttext"))]
 impl FasttextClassifier {
     pub fn new(_model_path: &str) -> Result<Self> {
         Err(anyhow!(
-            "FasttextClassifier requires 'fasttext-classifier' feature"
+            "FasttextClassifier requires 'clf-fasttext' feature"
         ))
     }
 }
 
-#[cfg(not(feature = "fasttext-classifier"))]
+#[cfg(not(feature = "clf-fasttext"))]
+#[async_trait::async_trait]
 impl Classifier for FasttextClassifier {
-    fn classify(&self, _text: &str) -> Result<HashMap<String, f32>> {
+    async fn predict(&self, _text: &str) -> Result<Classification> {
         Err(anyhow!(
-            "FasttextClassifier requires 'fasttext-classifier' feature"
+            "FasttextClassifier requires 'clf-fasttext' feature"
         ))
+    }
+
+    fn name(&self) -> &'static str {
+        "fasttext"
     }
 }

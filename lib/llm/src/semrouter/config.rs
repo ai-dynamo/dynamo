@@ -1,56 +1,104 @@
-use serde::Deserialize;
-use std::{collections::HashMap, fs, path::Path};
+// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct Rule {
-    pub when_any: Vec<RuleCond>,
-    pub route_onprem_model: String,
-    pub rationale: String,
-}
+//! Configuration for semantic router
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct RuleCond {
+use std::collections::HashMap;
+
+use super::{Mode, OverridePolicy, RouteAction};
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ClassRoute {
+    /// Label id (classifier output key).
     pub label: String,
-    #[serde(default = "default_min_conf")]
-    pub min_conf: f32,
+    /// Threshold to accept this class's route.
+    pub threshold: f32,
+    /// What to do when label score >= threshold.
+    pub action: RouteAction,
 }
 
-fn default_min_conf() -> f32 {
-    0.5
+/// Which classifier is used and any init params.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ClassifierConfig {
+    /// Simple keyword-based baseline (always available).
+    Keyword {
+        /// label -> list of indicative keywords (case-insensitive)
+        classes: HashMap<String, Vec<String>>,
+    },
+    /// fastText classifier (requires clf-fasttext feature).
+    Fasttext {
+        /// Path to .bin model file
+        model_path: String,
+    },
+    // Future extensions:
+    // Onnx { model_path: String, vocab_path: Option<String> },
+    // Candle { model_path: String, tokenizer_path: String },
+    // Http { endpoint: String, api_key: Option<String> },
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct PolicyConfig {
-    // Binary classification fields (new)
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SemRouterConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
     #[serde(default)]
-    pub reasoning_model: Option<String>,
+    pub mode: Mode,
+    /// Policy when request already has a model set.
     #[serde(default)]
-    pub general_model: Option<String>,
-
-    // Fallback model (used for both binary and multi-class)
-    #[serde(default = "default_abstain_model")]
-    pub abstain_onprem_model: String,
-
-    // Confidence threshold
-    #[serde(default = "default_min_conf")]
-    pub threshold_min_conf: f32,
-
-    // Multi-class fields (deprecated but kept for backwards compatibility)
+    pub default_policy: OverridePolicy,
+    /// If present, treat this model value as an explicit "routing alias".
+    /// E.g. user sends `model: "router"` to ask for routing.
+    pub model_alias: Option<String>,
+    /// Per-class routing actions (N classes supported).
     #[serde(default)]
-    pub weights: HashMap<String, i32>,
+    pub classes: Vec<ClassRoute>,
+    /// Fallback action when no class crosses threshold (default: passthrough).
     #[serde(default)]
-    pub rules: Vec<Rule>,
+    pub fallback: Option<RouteAction>,
+    /// Classifier selection.
+    pub classifier: ClassifierConfig,
 }
 
-fn default_abstain_model() -> String {
-    "meta-llama/Meta-Llama-3.1-8B-Instruct".to_string()
-}
+fn default_enabled() -> bool { true }
 
-impl PolicyConfig {
-    pub fn load(path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let data = fs::read_to_string(path)?;
-        let cfg = serde_yaml::from_str::<PolicyConfig>(&data)?;
-        Ok(cfg)
+impl Default for SemRouterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: Mode::Auto,
+            default_policy: OverridePolicy::NeverWhenExplicit,
+            model_alias: Some("router".to_string()),
+            classes: vec![],
+            fallback: None,
+            classifier: ClassifierConfig::Keyword {
+                classes: HashMap::new(),
+            },
+        }
     }
 }
 
+impl SemRouterConfig {
+    /// Load config from YAML file specified by env var, or use defaults.
+    /// Looks for DYN_SEMROUTER_CONFIG env var pointing to a YAML file.
+    pub fn load_from_env_and_defaults() -> anyhow::Result<Self> {
+        if let Ok(config_path) = std::env::var("DYN_SEMROUTER_CONFIG") {
+            tracing::info!("Loading semantic router config from: {}", config_path);
+            let yaml_str = std::fs::read_to_string(&config_path)
+                .map_err(|e| anyhow::anyhow!("Failed to read config file {}: {}", config_path, e))?;
+
+            // Parse YAML with a top-level "semrouter" key (like example_sem_config_v2.yaml)
+            #[derive(serde::Deserialize)]
+            struct ConfigWrapper {
+                semrouter: SemRouterConfig,
+            }
+
+            let wrapper: ConfigWrapper = serde_yaml::from_str(&yaml_str)
+                .map_err(|e| anyhow::anyhow!("Failed to parse YAML config: {}", e))?;
+
+            Ok(wrapper.semrouter)
+        } else {
+            tracing::debug!("DYN_SEMROUTER_CONFIG not set, using default config (disabled)");
+            Ok(Self::default())
+        }
+    }
+}

@@ -24,8 +24,17 @@ testing-etcd = []
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
-candle-classifier = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers"]
-fasttext-classifier = ["dep:fasttext", "dep:sha2"]
+
+# Semantic router features
+semrouter = []
+clf-candle = ["semrouter", "dep:candle-core", "dep:candle-nn", "dep:candle-transformers"]
+clf-fasttext = ["semrouter", "dep:fasttext", "dep:sha2"]
+# clf-onnx = ["semrouter"]  # TODO: implement ONNX classifier
+# clf-http = ["semrouter"]  # TODO: implement HTTP classifier
+
+# Legacy feature names (deprecated, will be removed)
+candle-classifier = ["clf-candle"]
+fasttext-classifier = ["clf-fasttext"]
 
 [[bench]]
 name = "tokenizer"
@@ -118,6 +127,7 @@ unicode-segmentation = "1.12"
 # http-service
 axum = { workspace = true }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
+tower = "0.5"
 tower-http = { workspace = true }
 rustls = { version = "0.23" }
 utoipa = { version = "5.3", features = ["axum_extras"] }

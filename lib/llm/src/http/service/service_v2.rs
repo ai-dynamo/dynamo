@@ -15,7 +15,7 @@ use super::metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::request_template::RequestTemplate;
-use crate::semrouter::{Classifier, SemRouter};
+use crate::semrouter::{build_router_handle, SemRouterConfig, SemRouterHandle, SemRouterLayer};
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
@@ -37,7 +37,7 @@ pub struct State {
     etcd_client: Option<etcd::Client>,
     store: Arc<dyn KeyValueStore>,
     flags: StateFlags,
-    semrouter: Option<Arc<SemRouter>>,
+    semrouter: Option<Arc<SemRouterHandle>>,
 }
 
 #[derive(Default, Debug)]
@@ -134,30 +134,18 @@ impl State {
         None
     }
 
-    pub fn semrouter(&self) -> Option<&Arc<SemRouter>> {
+    pub fn semrouter(&self) -> Option<&Arc<SemRouterHandle>> {
         self.semrouter.as_ref()
     }
 
     /// Initialize semantic router from config
-    ///
-    /// This is a thin wrapper that delegates to SemRouter::from_config()
-    /// The actual initialization logic is transport-agnostic and lives in the semrouter module
-    pub fn init_semrouter_from_config(&mut self, config_path: impl AsRef<std::path::Path>) -> Result<()> {
-        let router = SemRouter::from_config(config_path)?;
-        self.semrouter = Some(Arc::new(router));
-        Ok(())
-    }
-
-    /// Initialize semantic router with a custom classifier
-    ///
-    /// This allows using any classifier implementation
-    pub fn init_semrouter_with_custom_classifier(
-        &mut self,
-        config_path: impl AsRef<std::path::Path>,
-        classifier: Arc<dyn Classifier>,
-    ) -> Result<()> {
-        let router = SemRouter::from_config_with_classifier(config_path, classifier)?;
-        self.semrouter = Some(Arc::new(router));
+    pub fn init_semrouter(&mut self) -> Result<()> {
+        let cfg = SemRouterConfig::load_from_env_and_defaults()?;
+        if !cfg.enabled {
+            return Ok(());
+        }
+        let handle = build_router_handle(cfg)?;
+        self.semrouter = Some(Arc::new(handle));
         Ok(())
     }
 
@@ -375,14 +363,9 @@ impl HttpServiceConfigBuilder {
             None => State::new(model_manager),
         };
 
-        // Initialize semantic router if enabled via environment variables
-        if let Ok(config_path) = std::env::var("SEMROUTER_CONFIG") {
-            if std::env::var("SEMROUTER_ENABLED").as_deref() == Ok("true") {
-                tracing::info!("Initializing semantic router from config: {}", config_path);
-                if let Err(e) = state.init_semrouter_from_config(&config_path) {
-                    tracing::warn!("Failed to initialize semantic router: {}", e);
-                }
-            }
+        // Initialize semantic router if enabled
+        if let Err(e) = state.init_semrouter() {
+            tracing::warn!("Failed to initialize semantic router: {}", e);
         }
 
         let state = Arc::new(state);
@@ -447,6 +430,12 @@ impl HttpServiceConfigBuilder {
 
         // Add span for tracing
         router = router.layer(TraceLayer::new_for_http().make_span_with(make_request_span));
+
+        // Add semantic router middleware (if enabled)
+        if let Some(handle) = state.semrouter().cloned() {
+            tracing::info!("Adding SemRouterLayer middleware");
+            router = router.layer(SemRouterLayer::new((*handle).clone()));
+        }
 
         Ok(HttpService {
             state,

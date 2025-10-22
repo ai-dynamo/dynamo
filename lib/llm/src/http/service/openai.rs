@@ -504,18 +504,11 @@ async fn embeddings(
 async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateChatCompletionRequest>,
+    Json(request): Json<NvCreateChatCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    // Apply semantic routing (transport-agnostic, zero-cost when disabled)
-    let _decision = crate::semrouter::process_chat_request(
-        &mut request,
-        state.semrouter().map(|r| r.as_ref()),
-        headers.get("x-dynamo-routing").and_then(|h| h.to_str().ok()),
-        "http",
-    );
 
     // create the context for the request
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);

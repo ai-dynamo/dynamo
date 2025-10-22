@@ -6,21 +6,20 @@
 //! Loads models directly from HuggingFace using safetensors format.
 //! Pure Rust implementation with no Python dependencies.
 
-use super::Classifier;
+use super::{Class, Classifier};
 use anyhow::{anyhow, Result};
-use std::collections::HashMap;
 
-#[cfg(feature = "candle-classifier")]
+#[cfg(any(feature = "clf-candle", feature = "candle-classifier"))]
 use candle_core::{DType, Device, IndexOp, Module, Tensor};
-#[cfg(feature = "candle-classifier")]
+#[cfg(any(feature = "clf-candle", feature = "candle-classifier"))]
 use candle_nn::VarBuilder;
-#[cfg(feature = "candle-classifier")]
+#[cfg(any(feature = "clf-candle", feature = "candle-classifier"))]
 use candle_transformers::models::bert::{BertModel, Config as BertConfig, HiddenAct};
-#[cfg(feature = "candle-classifier")]
+#[cfg(any(feature = "clf-candle", feature = "candle-classifier"))]
 use hf_hub::{api::sync::Api, Repo, RepoType};
-#[cfg(feature = "candle-classifier")]
+#[cfg(any(feature = "clf-candle", feature = "candle-classifier"))]
 use std::path::PathBuf;
-#[cfg(feature = "candle-classifier")]
+#[cfg(any(feature = "clf-candle", feature = "candle-classifier"))]
 use tokenizers::Tokenizer;
 
 /// Candle-based classifier for CodeIsAbstract/ReasoningTextClassifier
@@ -28,7 +27,7 @@ use tokenizers::Tokenizer;
 /// This classifier loads ModernBERT-based models directly from HuggingFace
 /// using safetensors format. It's a pure Rust implementation with excellent
 /// CPU and GPU support.
-#[cfg(feature = "candle-classifier")]
+#[cfg(any(feature = "clf-candle", feature = "candle-classifier"))]
 pub struct CandleClassifier {
     model: BertModel,
     classifier_head: candle_nn::Linear,
@@ -38,7 +37,7 @@ pub struct CandleClassifier {
     labels: Vec<String>,
 }
 
-#[cfg(feature = "candle-classifier")]
+#[cfg(any(feature = "clf-candle", feature = "candle-classifier"))]
 impl CandleClassifier {
     /// Create a new CandleClassifier by loading from HuggingFace
     ///
@@ -212,9 +211,9 @@ impl CandleClassifier {
     }
 }
 
-#[cfg(feature = "candle-classifier")]
-impl Classifier for CandleClassifier {
-    fn classify(&self, text: &str) -> Result<HashMap<String, f32>> {
+#[cfg(any(feature = "clf-candle", feature = "candle-classifier"))]
+impl CandleClassifier {
+    fn classify_sync(&self, text: &str) -> Result<Class> {
         let text_preview = if text.len() > 50 {
             format!("{}...", &text[..50])
         } else {
@@ -286,30 +285,42 @@ impl Classifier for CandleClassifier {
 
         tracing::info!("Raw probabilities vector: {:?}", probs_vec);
 
-        // Convert to HashMap
-        if probs_vec.len() != self.labels.len() {
+        // Convert to Class
+        if probs_vec.len() != 2 {
             return Err(anyhow!(
-                "Label count mismatch: {} labels but {} probabilities",
-                self.labels.len(),
+                "Expected 2 probabilities for binary classification, got {}",
                 probs_vec.len()
             ));
         }
 
-        let mut result = HashMap::with_capacity(self.labels.len());
-        for (label, &prob) in self.labels.iter().zip(probs_vec.iter()) {
-            result.insert(label.clone(), prob);
-        }
+        // Labels are ["non-reasoning", "reasoning"]
+        let non_reasoning_prob = probs_vec[0];
+        let reasoning_prob = probs_vec[1];
 
-        tracing::info!("Candle classifier final result: {:?}", result);
+        let result = Class::from_probs(reasoning_prob, non_reasoning_prob);
+        tracing::info!("Candle classifier result: {:?}", result);
         Ok(result)
     }
 }
 
+#[cfg(any(feature = "clf-candle", feature = "candle-classifier"))]
+#[async_trait::async_trait]
+impl Classifier for CandleClassifier {
+    async fn classify(&self, text: &str) -> Result<Class> {
+        // Candle inference is CPU/GPU-bound, wrap for async compatibility
+        self.classify_sync(text)
+    }
+
+    fn name(&self) -> &'static str {
+        "candle"
+    }
+}
+
 // Placeholder implementations when feature is not enabled
-#[cfg(not(feature = "candle-classifier"))]
+#[cfg(not(any(feature = "clf-candle", feature = "candle-classifier")))]
 pub struct CandleClassifier;
 
-#[cfg(not(feature = "candle-classifier"))]
+#[cfg(not(any(feature = "clf-candle", feature = "candle-classifier")))]
 impl CandleClassifier {
     pub fn from_pretrained(
         _model_id: &str,
@@ -330,9 +341,14 @@ impl CandleClassifier {
     }
 }
 
-#[cfg(not(feature = "candle-classifier"))]
+#[cfg(not(any(feature = "clf-candle", feature = "candle-classifier")))]
+#[async_trait::async_trait]
 impl Classifier for CandleClassifier {
-    fn classify(&self, _text: &str) -> Result<HashMap<String, f32>> {
-        Err(anyhow!("CandleClassifier requires 'candle-classifier' feature"))
+    async fn classify(&self, _text: &str) -> Result<Class> {
+        Err(anyhow!("CandleClassifier requires 'clf-candle' or 'candle-classifier' feature"))
+    }
+
+    fn name(&self) -> &'static str {
+        "candle"
     }
 }
