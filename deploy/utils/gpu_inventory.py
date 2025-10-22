@@ -393,6 +393,7 @@ def get_gpu_summary(
     then higher VRAM/GPU. Returns dict with keys: gpus_per_node, model, vram.
     If model/VRAM unavailable anywhere, returns {"gpus_per_node": max_gpus, "model": "", "vram": 0}.
     """
+    # TODO: use proper tools (i.e., DCGM) to get GPU inventory
     rows, _ = collect_gpu_inventory(prefer_client=prefer_client)
     if enrich_smi:
         enrich_with_smi(rows)
