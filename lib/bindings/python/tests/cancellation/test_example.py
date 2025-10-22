@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Tests for the cancellation example in examples/custom_backend/cancellation
+Tests for the cancellation example in examples/fault_tolerance/cancellation
 """
 
 import asyncio
@@ -21,7 +21,7 @@ def example_dir():
     test_dir = os.path.dirname(os.path.abspath(__file__))
     # Navigate to the cancellation example directory relative to this test
     return os.path.normpath(
-        os.path.join(test_dir, "../../../../../examples/custom_backend/cancellation")
+        os.path.join(test_dir, "../../../../../examples/fault_tolerance/cancellation")
     )
 
 
