@@ -33,6 +33,9 @@ static PYO3_TOKIO_INIT: OnceLock<()> = OnceLock::new();
 static PYO3_TOKIO_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static PYO3_TOKIO_CANCEL_TOKEN: OnceLock<CancellationToken> = OnceLock::new();
 
+// The runtime's threads do not survive when passing DistributedRuntime across bindings,
+// so we need to reinitialize the runtime thread pool.
+// This is also required in environments without a DistributedRuntime.
 fn init_pyo3_tokio_rt() {
     PYO3_TOKIO_INIT.get_or_init(|| {
         let cfg =

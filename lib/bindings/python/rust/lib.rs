@@ -630,6 +630,11 @@ impl DistributedRuntime {
         CancellationToken { inner }
     }
 
+    // This is used to pass the DistributedRuntime from the dynamo-runtime bindings
+    // to the KVBM bindings, since KVBM cannot directly use the struct from this cdylib.
+    // TODO: Create a separate crate "dynamo-python" so that all binding crates can import
+    // from it and share the same crate path. This will allow PyO3 to automatically
+    // recognize that both bindings use the same PyClass.
     #[pyo3(name = "to_capsule")]
     fn to_capsule<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
         let arc: Arc<rs::DistributedRuntime> = Arc::new(self.inner.clone());
