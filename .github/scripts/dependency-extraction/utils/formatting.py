@@ -279,4 +279,3 @@ def normalize_version_for_comparison(version: str) -> str:
     version = re.sub(r"^(==|>=|<=|~=|!=|<|>)\s*", "", version)
 
     return version.strip()
-

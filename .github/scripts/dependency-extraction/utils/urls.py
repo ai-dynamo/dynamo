@@ -36,9 +36,7 @@ def generate_github_file_url(
     return url
 
 
-def generate_package_source_url(
-    dep_name: str, category: str, source_file: str
-) -> str:
+def generate_package_source_url(dep_name: str, category: str, source_file: str) -> str:
     """
     Generate a URL to the package's source (PyPI, NGC, Docker Hub, etc.).
 
@@ -68,7 +66,9 @@ def generate_package_source_url(
         # OCI registries
         if "nvcr.io" in dep_name:
             chart_slug = dep_name.split("/")[-1]
-            return f"https://catalog.ngc.nvidia.com/orgs/nvidia/helm-charts/{chart_slug}"
+            return (
+                f"https://catalog.ngc.nvidia.com/orgs/nvidia/helm-charts/{chart_slug}"
+            )
         # Artifact Hub
         if not dep_name.startswith("file://"):
             chart_name = dep_name.split("/")[-1] if "/" in dep_name else dep_name
@@ -77,7 +77,11 @@ def generate_package_source_url(
     # Python packages
     if "Python" in category or "pyproject.toml" in source_file:
         # Special handling for Git dependencies
-        if "git+" in dep_name or dep_name.startswith("http://") or dep_name.startswith("https://"):
+        if (
+            "git+" in dep_name
+            or dep_name.startswith("http://")
+            or dep_name.startswith("https://")
+        ):
             # Return the Git URL directly
             return dep_name
 
@@ -113,4 +117,3 @@ def generate_package_source_url(
 
     # Default: return N/A
     return "N/A"
-

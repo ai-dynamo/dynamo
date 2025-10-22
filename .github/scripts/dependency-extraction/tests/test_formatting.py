@@ -19,10 +19,10 @@ Unit tests for formatting utilities.
 Run with: pytest .github/scripts/dependency-extraction/tests/test_formatting.py
 """
 
-import pytest
-
 import sys
 from pathlib import Path
+
+import pytest
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -36,6 +36,9 @@ from utils.formatting import (
 )
 
 
+@pytest.mark.unit
+@pytest.mark.weekly
+@pytest.mark.gpu_0
 class TestFormatPackageName:
     """Tests for format_package_name function."""
 
@@ -67,6 +70,9 @@ class TestFormatPackageName:
         assert format_package_name("celery", "") == "Celery"
 
 
+@pytest.mark.unit
+@pytest.mark.weekly
+@pytest.mark.gpu_0
 class TestStripVersionSuffixes:
     """Tests for strip_version_suffixes function."""
 
@@ -92,6 +98,9 @@ class TestStripVersionSuffixes:
         assert strip_version_suffixes("CUDA") == "CUDA"
 
 
+@pytest.mark.unit
+@pytest.mark.weekly
+@pytest.mark.gpu_0
 class TestNormalizeDependencyName:
     """Tests for normalize_dependency_name function."""
 
@@ -123,6 +132,9 @@ class TestNormalizeDependencyName:
         assert normalize_dependency_name("UnknownPackage", "") == "unknownpackage"
 
 
+@pytest.mark.unit
+@pytest.mark.weekly
+@pytest.mark.gpu_0
 class TestNormalizeVersionForComparison:
     """Tests for normalize_version_for_comparison function."""
 
@@ -155,6 +167,9 @@ class TestNormalizeVersionForComparison:
         assert normalize_version_for_comparison("1.2.3") == "1.2.3"
 
 
+@pytest.mark.unit
+@pytest.mark.weekly
+@pytest.mark.gpu_0
 class TestFormatDependencyName:
     """Tests for format_dependency_name function."""
 

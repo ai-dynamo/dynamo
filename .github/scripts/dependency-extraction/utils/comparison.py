@@ -181,4 +181,3 @@ def output_github_warnings(discrepancies: List[Dict[str, any]]) -> None:
             # Output GitHub Actions warning annotation
             # Format: ::warning file={name}::{message}
             print(f"::warning file={inst['source_file']}::{message}")
-

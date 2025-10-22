@@ -19,10 +19,10 @@ Unit tests for Python dependency extractor.
 Run with: pytest .github/scripts/dependency-extraction/tests/test_python_extractor.py
 """
 
-import pytest
-import tempfile
-from pathlib import Path
 import sys
+from pathlib import Path
+
+import pytest
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -30,6 +30,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from extractors.python_deps import PythonDependencyExtractor
 
 
+@pytest.mark.unit
+@pytest.mark.weekly
+@pytest.mark.gpu_0
 class TestPythonDependencyExtractor:
     """Tests for PythonDependencyExtractor."""
 
@@ -71,7 +74,8 @@ class TestPythonDependencyExtractor:
         """Test extracting dependencies from requirements.txt."""
         # Create a temporary requirements.txt
         req_file = tmp_path / "requirements.txt"
-        req_file.write_text("""
+        req_file.write_text(
+            """
 # Test requirements file
 pytest==7.0.0
 numpy>=1.20.0
@@ -81,7 +85,8 @@ pandas[excel]>=1.3.0
 fastapi
 
 git+https://github.com/org/repo.git
-""")
+"""
+        )
 
         deps = extractor.extract_requirements(req_file)
 
@@ -98,7 +103,9 @@ git+https://github.com/org/repo.git
 
     def test_parse_pyproject_with_extras(self, extractor):
         """Test parsing pyproject.toml dependency with extras."""
-        dep_name, version = extractor._parse_pyproject_dependency("package[extra]>=1.0.0")
+        dep_name, version = extractor._parse_pyproject_dependency(
+            "package[extra]>=1.0.0"
+        )
         assert dep_name == "package[extra]"
         assert version == ">=1.0.0"
 
@@ -113,4 +120,3 @@ git+https://github.com/org/repo.git
 if __name__ == "__main__":
     # Run tests if executed directly
     pytest.main([__file__, "-v"])
-
