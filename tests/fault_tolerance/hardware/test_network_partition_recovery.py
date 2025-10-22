@@ -10,6 +10,7 @@ and recover gracefully when connectivity is restored.
 """
 
 import logging
+import random
 import sys
 import time
 from typing import List, Optional
@@ -81,7 +82,12 @@ class NetworkFaultInjector:
     def inject_partition(
         self, source_pod: str, target_pod: str, policy_name: Optional[str] = None
     ) -> str:
-        """Inject a network partition between two pods"""
+        """
+        Inject a network partition between two pods.
+        
+        In Dynamo, frontend and workers communicate via NATS message broker,
+        so we block the target pod's access to NATS to simulate a partition.
+        """
         source_full = self.get_pod_by_prefix(source_pod) or source_pod
         target_full = self.get_pod_by_prefix(target_pod) or target_pod
 
@@ -90,14 +96,12 @@ class NetworkFaultInjector:
             raise ValueError(f"Could not find labels for target pod: {target_full}")
 
         if not policy_name:
-            source_short = (
-                source_pod.split("-")[-1] if "-" in source_pod else source_pod
-            )
             target_short = (
                 target_pod.split("-")[-1] if "-" in target_pod else target_pod
             )
-            policy_name = f"network-fault-{source_short}-to-{target_short}"
+            policy_name = f"network-fault-{target_short}-to-nats"
 
+        # Block target pod's egress to NATS (simulates partition from frontend)
         policy = client.V1NetworkPolicy(
             api_version="networking.k8s.io/v1",
             kind="NetworkPolicy",
@@ -111,17 +115,31 @@ class NetworkFaultInjector:
             ),
             spec=client.V1NetworkPolicySpec(
                 pod_selector=client.V1LabelSelector(match_labels=target_labels),
-                policy_types=["Ingress"],
-                ingress=[
-                    client.V1NetworkPolicyIngressRule(
-                        _from=[
+                policy_types=["Egress"],
+                egress=[
+                    # Allow DNS
+                    client.V1NetworkPolicyEgressRule(
+                        to=[
+                            client.V1NetworkPolicyPeer(
+                                namespace_selector=client.V1LabelSelector(
+                                    match_labels={"kubernetes.io/metadata.name": "kube-system"}
+                                )
+                            )
+                        ],
+                        ports=[
+                            client.V1NetworkPolicyPort(protocol="UDP", port=53)
+                        ]
+                    ),
+                    # Allow all traffic EXCEPT to NATS pods
+                    client.V1NetworkPolicyEgressRule(
+                        to=[
                             client.V1NetworkPolicyPeer(
                                 pod_selector=client.V1LabelSelector(
                                     match_expressions=[
                                         client.V1LabelSelectorRequirement(
-                                            key="app.kubernetes.io/instance",
+                                            key="app.kubernetes.io/name",
                                             operator="NotIn",
-                                            values=[source_full.split("-")[0]],
+                                            values=["nats", "dynamo-platform-nats"]
                                         )
                                     ]
                                 )
@@ -137,6 +155,7 @@ class NetworkFaultInjector:
                 namespace=self.namespace, body=policy
             )
             print(f"Network partition injected: {policy_name}")
+            print(f"   Effect: {target_full} cannot reach NATS (simulates partition from {source_full})")
             return policy_name
         except ApiException as e:
             if e.status == 409:
@@ -329,7 +348,9 @@ def test_network_partition_frontend_to_worker_with_recovery():
     print("[OK] Worker pod is ready")
 
     try:
-        response = send_completion_request("Hello", 10, timeout=30)
+        # Use unique prompt to prevent caching
+        unique_prompt = f"Hello {random.randint(1000, 9999)}"
+        response = send_completion_request(unique_prompt, 10, timeout=30)
         validate_completion_response(response)
         print("[OK] Baseline request succeeded")
     except Exception as e:
@@ -351,11 +372,20 @@ def test_network_partition_frontend_to_worker_with_recovery():
 
     print("\nTesting request during partition...")
     try:
-        response = send_completion_request("Test during fault", 10, timeout=15)
-        validate_completion_response(response)
-        print("[OK] Request succeeded (migrated to another worker)")
-    except (requests.Timeout, requests.RequestException):
-        print("[EXPECTED] Request failed (worker unreachable)")
+        # Use unique prompt to prevent caching
+        unique_prompt = f"Test during fault {random.randint(1000, 9999)}"
+        response = send_completion_request(unique_prompt, 10, timeout=15)
+        
+        # Check if request failed (expected during partition)
+        if response.status_code != 200:
+            print(f"[EXPECTED] Request failed (worker unreachable) - Status: {response.status_code}")
+            if response.text:
+                print(f"   Error: {response.text[:200]}")  # First 200 chars
+        else:
+            validate_completion_response(response)
+            print("[WARNING] Request succeeded during partition - possible multiple workers or caching")
+    except (requests.Timeout, requests.RequestException) as e:
+        print(f"[EXPECTED] Request failed (worker unreachable) - Error: {type(e).__name__}")
 
     # AFTER
     print("\n[AFTER] Validate Recovery")
@@ -371,14 +401,18 @@ def test_network_partition_frontend_to_worker_with_recovery():
     print("[OK] Partition removed")
 
     try:
-        response = send_completion_request("Hello after recovery", 10, timeout=30)
+        # Use unique prompt to prevent caching
+        unique_prompt = f"Hello after recovery {random.randint(1000, 9999)}"
+        response = send_completion_request(unique_prompt, 10, timeout=30)
         validate_completion_response(response)
         print("[OK] Recovery request succeeded")
     except Exception as e:
         pytest.fail(f"Recovery failed: {e}")
 
     try:
-        response = send_completion_request("Final validation", 10, timeout=30)
+        # Use unique prompt to prevent caching
+        unique_prompt = f"Final validation {random.randint(1000, 9999)}"
+        response = send_completion_request(unique_prompt, 10, timeout=30)
         validate_completion_response(response)
         print("[OK] No lingering effects - system stable")
     except Exception as e:
