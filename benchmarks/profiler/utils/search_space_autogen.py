@@ -27,7 +27,9 @@ MOE_MODEL_MAX_NUM_GPUS = 32
 
 
 def auto_generate_search_space(args: argparse.Namespace) -> None:
-    config_modifier = CONFIG_MODIFIERS[args.backend] # args.backend is already validated in argparse
+    config_modifier = CONFIG_MODIFIERS[
+        args.backend
+    ]  # args.backend is already validated in argparse
 
     # first check if config file exists
     if args.model is not None:
@@ -39,7 +41,7 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
         else:
             with open(args.config, "r") as f:
                 config = yaml.safe_load(f)
-            
+
         logger.info(f"Updating model in DGD config file to {args.model}")
         config = config_modifier.update_model(config, args.model)
         config_fn = f"{args.output_dir}/disagg_config.yaml"
@@ -71,9 +73,7 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
         )
         if min_gpu > max_gpu:
             error_msg = f"No valid GPU configuration found for model {args.model} on the cluster with {gpu_info['gpus_per_node']}x{gpu_info['model']} GPUs per node"
-            logger.error(
-                error_msg
-            )
+            logger.error(error_msg)
             raise RuntimeError(error_msg)
 
         logger.info(
