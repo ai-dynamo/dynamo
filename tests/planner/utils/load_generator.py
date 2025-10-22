@@ -208,11 +208,16 @@ class LoadGenerator:
             logger.info(f"Parsing results from: {results_file}")
 
             with open(results_file, "r") as f:
-                metrics = json.load(f)
+                data = json.load(f)
+
+            # aiperf now wraps metrics under "records" key
+            metrics = data.get("records", data)
 
             results = {
                 "throughput": metrics.get("output_token_throughput", {}).get("avg", 0),
-                "ttft_mean": metrics.get("time_to_first_token", {}).get("avg", 0),
+                "ttft_mean": metrics.get("ttft", {}).get(
+                    "avg", 0
+                ),  # Changed from "time_to_first_token"
                 "itl_mean": metrics.get("inter_token_latency", {}).get("avg", 0),
                 "end_to_end_latency_mean": metrics.get("request_latency", {}).get(
                     "avg", 0

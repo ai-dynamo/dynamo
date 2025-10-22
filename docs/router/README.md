@@ -9,7 +9,9 @@ SPDX-License-Identifier: Apache-2.0
 
 The Dynamo KV Router intelligently routes requests by evaluating their computational costs across different workers. It considers both decoding costs (from active blocks) and prefill costs (from newly computed blocks). Optimizing the KV Router is critical for achieving maximum throughput and minimum latency in distributed inference setups.
 
-## KV Router Quick Start
+## Quick Start
+
+### Python / CLI Deployment
 
 To launch the Dynamo frontend with the KV Router:
 
@@ -27,9 +29,52 @@ Backend workers register themselves using the `register_llm` API, after which th
 - Makes routing decisions based on KV cache overlap
 - Balances load across available workers
 
-### Important Arguments
+### Kubernetes Deployment
+
+To enable the KV Router in a Kubernetes deployment, add the `DYN_ROUTER_MODE` environment variable to your frontend service:
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-deployment
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: my-namespace
+      componentType: frontend
+      replicas: 1
+      envs:
+        - name: DYN_ROUTER_MODE
+          value: kv  # Enable KV Smart Router
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+    Worker:
+      # ... worker configuration ...
+```
+
+**Key Points:**
+- Set `DYN_ROUTER_MODE=kv` on the **Frontend** service only
+- Workers automatically report KV cache events to the router
+- No worker-side configuration changes needed
+
+**Complete K8s Examples:**
+- [TRT-LLM aggregated router example](../../components/backends/trtllm/deploy/agg_router.yaml)
+- [vLLM aggregated router example](../../components/backends/vllm/deploy/agg_router.yaml)
+- [SGLang aggregated router example](../../components/backends/sglang/deploy/agg_router.yaml)
+- [Distributed inference tutorial](../../examples/basics/kubernetes/Distributed_Inference/agg_router.yaml)
+
+**For A/B Testing and Advanced K8s Setup:**
+See the comprehensive [KV Router A/B Benchmarking Guide](../benchmarks/kv-router-ab-testing.md) for step-by-step instructions on deploying, configuring, and benchmarking the KV router in Kubernetes.
+
+## Configuration Options
+
+### CLI Arguments (Python Deployment)
 
 The KV Router supports several key configuration options:
+
+- **`--router-mode kv`**: Enable KV cache-aware routing (required)
 
 - **`--kv-cache-block-size <size>`**: Sets the KV cache block size (default: backend-specific). Larger blocks reduce overlap detection granularity but improve memory efficiency. This should match your backend configuration.
 
@@ -42,10 +87,71 @@ The KV Router supports several key configuration options:
   - `--kv-events`: Uses real-time events from workers for accurate cache tracking
   - `--no-kv-events`: Uses approximation based on routing decisions (lower overhead, less accurate)
 
+- **`--kv-overlap-score-weight <float>`**: Balance between prefill and decode optimization (default: 1.0)
+  - Higher values (> 1.0): Prioritize reducing prefill cost (better TTFT)
+  - Lower values (< 1.0): Prioritize decode performance (better ITL)
+
 For a complete list of available options:
 ```bash
 python -m dynamo.frontend --help
 ```
+
+### Kubernetes Environment Variables
+
+All CLI arguments can be configured via environment variables in Kubernetes deployments. Use the `DYN_` prefix with uppercase parameter names:
+
+| CLI Argument | K8s Environment Variable | Default | Description |
+|--------------|-------------------------|---------|-------------|
+| `--router-mode kv` | `DYN_ROUTER_MODE=kv` | `round_robin` | Enable KV router |
+| `--router-temperature <float>` | `DYN_ROUTER_TEMPERATURE=<float>` | `0.0` | Routing randomness |
+| `--kv-cache-block-size <size>` | `DYN_KV_CACHE_BLOCK_SIZE=<size>` | Backend-specific | KV cache block size |
+| `--no-kv-events` | `DYN_KV_EVENTS=false` | `true` | Disable KV event tracking |
+| `--kv-overlap-score-weight <float>` | `DYN_KV_OVERLAP_SCORE_WEIGHT=<float>` | `1.0` | Prefill vs decode weight |
+| `--http-port <port>` | `DYN_HTTP_PORT=<port>` | `8000` | HTTP server port |
+
+### Example with Advanced Configuration
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-deployment
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: my-namespace
+      componentType: frontend
+      replicas: 1
+      envs:
+        - name: DYN_ROUTER_MODE
+          value: kv
+        - name: DYN_ROUTER_TEMPERATURE
+          value: "0.5"  # Add some randomness to prevent worker saturation
+        - name: DYN_KV_OVERLAP_SCORE_WEIGHT
+          value: "1.5"  # Prioritize TTFT over ITL
+        - name: DYN_KV_CACHE_BLOCK_SIZE
+          value: "16"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+```
+
+### Alternative: Using Command Args in K8s
+
+You can also pass CLI arguments directly in the container command:
+
+```yaml
+extraPodSpec:
+  mainContainer:
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+    command:
+      - /bin/sh
+      - -c
+    args:
+      - "python3 -m dynamo.frontend --router-mode kv --router-temperature 0.5 --http-port 8000"
+```
+
+**Recommendation:** Use environment variables for easier configuration management and consistency with Dynamo's K8s patterns.
 
 ## KV Router Architecture
 
