@@ -1,12 +1,14 @@
 # Dynamo docs publish workflow
 # - Automatically runs after successful generate-docs workflow on main
-# - Pushes to main: publish to S3 under 'latest' only
-# - Version tags: publish to S3 under the parsed version (vX.Y[.Z][suffix]);
-#   does NOT update 'latest'.
+# - Pushes to main: publish to S3 under 'dev' (development docs)
+# - Version tags: publish to S3 under 'archive/vX.Y[.Z][suffix]' AND update 'latest' to match the release
 # - Akamai: always flushes cache for the target path after publish
 # - Repo variable required: PUBLISH_S3_TARGET_PATH (prefix under s3://brightspot-assets-prod/developer/docs)
 # - Secrets required: AWS credentials (role or keys), AKAMAI_* EdgeGrid creds
-# - To skip publishing 'latest' on main, include a line '/not-latest' in the commit message
+# - Flags: Include in commit message to control behavior:
+#   - '/skip-dev': skip publishing 'dev' on main branch
+#   - '/not-latest': publish version to archive but don't update 'latest'
+
 name: Publish Documentation to S3
 
 on:
@@ -192,15 +194,28 @@ jobs:
       - name: Publish version (if tagged)
         if: ${{ steps.vars.outputs.version != '' }}
         working-directory: ${{ env.DOCS_DIR }}
+        id: publish_version
         env:
           S3_ROOT: ${{ steps.paths.outputs.s3_root }}
           S3_PATH: ${{ steps.paths.outputs.s3_path }}
           VERSION: ${{ steps.vars.outputs.version }}
+          COMMIT_MSG: ${{ github.event.head_commit.message || '' }}
         shell: bash
         run: |
           set -euo pipefail
-          echo "Publishing version ${VERSION} to ${S3_ROOT}/${S3_PATH}/${VERSION}"
-          aws s3 sync . "${S3_ROOT}/${S3_PATH}/${VERSION}" --exclude .buildinfo --exclude .doctrees --delete
+          echo "Publishing version ${VERSION} to ${S3_ROOT}/${S3_PATH}/archive/${VERSION}"
+          aws s3 sync . "${S3_ROOT}/${S3_PATH}/archive/${VERSION}" --exclude .buildinfo --exclude .doctrees --delete
+
+          # Also publish this version as 'latest' unless /not-latest flag is present
+          if [[ ! "${COMMIT_MSG}" =~ /not-latest ]]; then
+            echo "Publishing version ${VERSION} to ${S3_ROOT}/${S3_PATH}/latest"
+            aws s3 sync . "${S3_ROOT}/${S3_PATH}/latest" --exclude .buildinfo --exclude .doctrees --delete
+            echo "published_latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Skipping 'latest' update due to /not-latest flag"
+            echo "published_latest=false" >> "$GITHUB_OUTPUT"
+          fi
+
           # Copy version manifest files if they exist
           for file in versions.json versions1.json; do
             if [[ -f "${file}" ]]; then
@@ -211,27 +226,60 @@ jobs:
             fi
           done
 
-      - name: Publish latest
-        # Skip if commit message contains '/not-latest' anywhere
-        if: ${{ startsWith(github.ref, 'refs/heads/main') && !contains(github.event.head_commit.message, '/not-latest') }}
+          echo "published=true" >> "$GITHUB_OUTPUT"
+
+      - name: Publish dev (main branch)
+        # Publish main branch to 'dev' directory for development docs
+        # Skip if commit message contains '/skip-dev' anywhere
+        if: ${{ startsWith(github.ref, 'refs/heads/main') && !contains(github.event.head_commit.message, '/skip-dev') }}
         working-directory: ${{ env.DOCS_DIR }}
-        id: publish_latest
+        id: publish_dev
         env:
           S3_ROOT: ${{ steps.paths.outputs.s3_root }}
           S3_PATH: ${{ steps.paths.outputs.s3_path }}
         shell: bash
         run: |
           set -euo pipefail
-          echo "Publishing latest to ${S3_ROOT}/${S3_PATH}/latest"
-          aws s3 sync . "${S3_ROOT}/${S3_PATH}/latest" --exclude .buildinfo --exclude .doctrees --delete
+          echo "Publishing development docs to ${S3_ROOT}/${S3_PATH}/dev"
+          aws s3 sync . "${S3_ROOT}/${S3_PATH}/dev" --exclude .buildinfo --exclude .doctrees --delete
           echo "published=true" >> "$GITHUB_OUTPUT"
+
+      - name: Update versions manifest in all archive directories
+        # Update versions*.json in ALL archive directories so old docs show current version list
+        # Only run when publishing a version (not for dev builds)
+        if: ${{ steps.vars.outputs.version != '' }}
+        working-directory: ${{ env.DOCS_DIR }}
+        env:
+          S3_ROOT: ${{ steps.paths.outputs.s3_root }}
+          S3_PATH: ${{ steps.paths.outputs.s3_path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Get list of all archive directories
+          echo "Updating version manifests in all archive directories..."
+          ARCHIVE_DIRS=$(aws s3 ls "${S3_ROOT}/${S3_PATH}/archive/" | grep "PRE" | awk '{print $2}' | tr -d '/')
+
+          for file in versions.json versions1.json; do
+            if [[ -f "${file}" ]]; then
+              for dir in ${ARCHIVE_DIRS}; do
+                echo "Updating ${file} in archive/${dir}/"
+                aws s3 cp "${file}" "${S3_ROOT}/${S3_PATH}/archive/${dir}/${file}" || {
+                  echo "::warning::Failed to update ${file} in archive/${dir}"
+                }
+              done
+            fi
+          done
+
+          echo "✅ Version manifests updated in all archive directories"
 
       - name: Collect publish outputs
         id: publish
         env:
           S3_PATH: ${{ steps.paths.outputs.s3_path }}
           VERSION: ${{ steps.vars.outputs.version }}
-          PUBLISHED_LATEST: ${{ steps.publish_latest.outputs.published || 'false' }}
+          PUBLISHED_VERSION: ${{ steps.publish_version.outputs.published || 'false' }}
+          PUBLISHED_DEV: ${{ steps.publish_dev.outputs.published || 'false' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -239,7 +287,7 @@ jobs:
           echo "request_name=Publish docs from ${GITHUB_REPOSITORY}@${GITHUB_SHA:0:8}" >> "$GITHUB_OUTPUT"
 
           # Only flush cache if we actually published something
-          if [[ -n "${VERSION}" ]] || [[ "${PUBLISHED_LATEST}" == "true" ]]; then
+          if [[ "${PUBLISHED_VERSION}" == "true" ]] || [[ "${PUBLISHED_DEV}" == "true" ]]; then
             echo "perform_flush=true" >> "$GITHUB_OUTPUT"
           else
             echo "perform_flush=false" >> "$GITHUB_OUTPUT"
@@ -253,7 +301,7 @@ jobs:
           REQUEST_NAME: ${{ steps.publish.outputs.request_name }}
           # Use repository variable or secret for notification emails
           # Format: JSON array of email addresses, e.g., '["email1@example.com", "email2@example.com"]'
-          EMAILS_JSON: ${{ vars.AKAMAI_NOTIFICATION_EMAILS || secrets.AKAMAI_NOTIFICATION_EMAILS || '["devops@nvidia.com"]' }}
+          EMAILS_JSON: ${{ secrets.AKAMAI_NOTIFICATION_EMAILS }}
           AKAMAI_CLIENT_SECRET: ${{ secrets.AKAMAI_CLIENT_SECRET }}
           AKAMAI_HOST: ${{ secrets.AKAMAI_HOST }}
           AKAMAI_ACCESS_TOKEN: ${{ secrets.AKAMAI_ACCESS_TOKEN }}
@@ -315,7 +363,9 @@ jobs:
           S3_PATH: ${{ steps.paths.outputs.s3_path }}
           ARTIFACT_NAME: ${{ steps.download.outputs.artifact_name }}
           RUN_ID: ${{ steps.download.outputs.run_id }}
-          PUBLISHED_LATEST: ${{ steps.publish_latest.outputs.published || 'false' }}
+          PUBLISHED_VERSION: ${{ steps.publish_version.outputs.published || 'false' }}
+          PUBLISHED_LATEST: ${{ steps.publish_version.outputs.published_latest || 'false' }}
+          PUBLISHED_DEV: ${{ steps.publish_dev.outputs.published || 'false' }}
           CACHE_FLUSHED: ${{ steps.publish.outputs.perform_flush }}
         run: |
           echo "## 📚 Documentation Publishing Summary" >> $GITHUB_STEP_SUMMARY
@@ -325,14 +375,19 @@ jobs:
           echo "- **From Run:** [#${RUN_ID}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${RUN_ID})" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Published To" >> $GITHUB_STEP_SUMMARY
-          if [[ -n "${VERSION}" ]]; then
-            echo "- ✅ **Version:** \`${VERSION}\` → \`s3://brightspot-assets-prod/developer/docs/${S3_PATH}/${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+          if [[ "${PUBLISHED_VERSION}" == "true" ]]; then
+            echo "- ✅ **Version:** \`${VERSION}\` → \`s3://brightspot-assets-prod/developer/docs/${S3_PATH}/archive/${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+            if [[ "${PUBLISHED_LATEST}" == "true" ]]; then
+              echo "- ✅ **Latest:** \`${VERSION}\` → \`s3://brightspot-assets-prod/developer/docs/${S3_PATH}/latest\` (updated to match release)" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- ⏭️ **Latest:** not updated (version published with /not-latest flag)" >> $GITHUB_STEP_SUMMARY
+            fi
           fi
-          if [[ "${PUBLISHED_LATEST}" == "true" ]]; then
-            echo "- ✅ **Latest:** \`s3://brightspot-assets-prod/developer/docs/${S3_PATH}/latest\`" >> $GITHUB_STEP_SUMMARY
+          if [[ "${PUBLISHED_DEV}" == "true" ]]; then
+            echo "- ✅ **Dev:** \`s3://brightspot-assets-prod/developer/docs/${S3_PATH}/dev\` (main branch)" >> $GITHUB_STEP_SUMMARY
           fi
-          if [[ -z "${VERSION}" ]] && [[ "${PUBLISHED_LATEST}" != "true" ]]; then
-            echo "- ⚠️ No documentation was published (no version tag or latest update)" >> $GITHUB_STEP_SUMMARY
+          if [[ "${PUBLISHED_VERSION}" != "true" ]] && [[ "${PUBLISHED_DEV}" != "true" ]]; then
+            echo "- ⚠️ No documentation was published" >> $GITHUB_STEP_SUMMARY
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Cache" >> $GITHUB_STEP_SUMMARY
