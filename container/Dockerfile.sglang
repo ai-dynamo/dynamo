@@ -40,10 +40,10 @@ ARG BRANCH_TYPE=remote
 ARG DEEPEP_COMMIT=9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee
 ARG CMAKE_BUILD_PARALLEL_LEVEL=2
 ARG FLASHMLA_COMMIT=1408756a88e52a25196b759eaf8db89d2b51b5a1
-ARG FAST_HADAMARD_TRANSFORM_COMMIT=7fd811c2b47f63b0b08d2582619f939e14dad77c
 ARG CMAKE_BUILD_PARALLEL_LEVEL=2
 ARG SGL_KERNEL_VERSION=0.3.15
 ARG SGLANG_COMMIT=0.5.3.post1
+ARG GRACE_BLACKWELL=0
 ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_HOME=/usr/local/cuda \
     GDRCOPY_HOME=/usr/src/gdrdrv-2.4.4/ \
@@ -104,11 +104,6 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
  && rm -rf /var/lib/apt/lists/* \
  && apt-get clean
 
-# Set Python 3.10 as the system default to ensure all subprocesses use it
-# This is critical for build systems like NVSHMEM that spawn subprocesses
-#RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
-# && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
-# && python3 --version
 
 # Install sccache if requested
 COPY container/use-sccache.sh /tmp/use-sccache.sh
@@ -149,6 +144,18 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 ARG SGL_KERNEL_VERSION
 RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel html5lib six \
  && cd sglang \
+ && case "$CUDA_VERSION" in \
+      12.6.1) CUINDEX=126 ;; \
+      12.8.1) CUINDEX=128 ;; \
+      12.9.1) CUINDEX=129 ;; \
+      *) echo "Unsupported CUDA version: $CUDA_VERSION" && exit 1 ;; \
+    esac \
+ && if [ "$CUDA_VERSION" = "12.6.1" ]; then \
+     python3 -m pip install --no-cache-dir https://github.com/sgl-project/whl/releases/download/v${SGL_KERNEL_VERSION}/sgl_kernel-${SGL_KERNEL_VERSION}+cu124-cp310-abi3-manylinux2014_$(uname -m).whl --force-reinstall --no-deps ; \
+   fi \
+&& if [ "$CUDA_VERSION" = "12.8.1" ] || [ "$CUDA_VERSION" = "12.9.1" ]; then \
+     python3 -m pip install --no-cache-dir sgl-kernel==${SGL_KERNEL_VERSION} ; \
+   fi \
  && python3 -m pip install --no-cache-dir -e "python[${BUILD_TYPE}]" --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX} \
  && python3 -m pip install --no-cache-dir nvidia-nccl-cu12==2.27.6 --force-reinstall --no-deps \
  && FLASHINFER_LOGGING_LEVEL=warning python3 -m flashinfer --download-cubin
@@ -156,7 +163,7 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel html5li
 # Download NVSHMEM source files
 # We use Tom's DeepEP fork for GB200 for now
 RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/source/nvshmem_src_cuda12-all-all-3.3.9.tar.gz && \
-    if [ "$BUILD_TYPE" = "blackwell_aarch64" ]; then \
+    if [ "$GRACE_BLACKWELL" = "1" ]; then \
       git clone https://github.com/fzyzcjy/DeepEP.git \
       && cd DeepEP && git checkout 1b14ad661c7640137fcfe93cccb2694ede1220b0 && sed -i 's/#define NUM_CPU_TIMEOUT_SECS 100/#define NUM_CPU_TIMEOUT_SECS 1000/' csrc/kernels/configs.cuh && cd .. ; \
     else \
@@ -169,7 +176,7 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/sour
 
 # Build and install NVSHMEM library only (without python library)
 RUN cd /sgl-workspace/nvshmem && \
-    export CUDA_ARCH="90;100;120" && \
+    if [ "$GRACE_BLACKWELL" = "1" ]; then CUDA_ARCH="90;100;120"; else CUDA_ARCH="90"; fi && \
     NVSHMEM_SHMEM_SUPPORT=0 \
     NVSHMEM_UCX_SUPPORT=0 \
     NVSHMEM_USE_NCCL=0 \
@@ -227,13 +234,6 @@ RUN if [ "${ARCH}" = "amd64" ]; then \
       pip install -v . ; \
     fi
 
-# Install fast-hadamard-transform
-RUN if [ "${ARCH}" = "amd64" ]; then \
-      git clone https://github.com/Dao-AILab/fast-hadamard-transform && \
-      cd fast-hadamard-transform && \
-      git checkout ${FAST_HADAMARD_TRANSFORM_COMMIT} && \
-      pip install . ; \
-    fi
 
 # Essential Python build tools
 RUN python3 -m pip install --no-cache-dir \
@@ -316,8 +316,9 @@ COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
 ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 
 # Install Dynamo wheels from dynamo_base wheelhouse
+COPY benchmarks/ /opt/dynamo/benchmarks/
 COPY --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
-RUN uv pip install \
+RUN pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \

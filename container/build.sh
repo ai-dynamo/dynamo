@@ -329,7 +329,14 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
-
+        --grace-blackwell)
+            if [ "$2" ]; then
+                GRACE_BLACKWELL=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
         --vllm-max-jobs)
             if [ "$2" ]; then
                 MAX_JOBS=$2
@@ -480,6 +487,7 @@ show_help() {
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
+    echo "  [--grace-blackwell build for Grace Blackwell (1) or not (0)]"
     echo ""
     echo "  Note: When using --use-sccache, AWS credentials must be set:"
     echo "        export AWS_ACCESS_KEY_ID=your_access_key"
@@ -732,7 +740,10 @@ if [ "$USE_SCCACHE" = true ]; then
     BUILD_ARGS+=" --secret id=aws-key-id,env=AWS_ACCESS_KEY_ID"
     BUILD_ARGS+=" --secret id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY"
 fi
-
+if [ -n "${GRACE_BLACKWELL}" ] && [ "${FRAMEWORK}" == "SGLANG" ]; then
+    # Add arguments required for sglang blackwell build
+    BUILD_ARGS+=" --build-arg GRACE_BLACKWELL=${GRACE_BLACKWELL} --build-arg BUILD_TYPE=blackwell_aarch64"
+fi
 LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
 if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
     LATEST_TAG="${LATEST_TAG}-${TARGET}"
