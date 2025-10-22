@@ -20,23 +20,8 @@ use super::{ChatCompletionStreamOptions, Choice, CompletionUsage, Prompt, Stop};
 
 /// Custom deserializer for strict boolean validation in Option<bool> fields.
 ///
-/// This deserializer ensures that only JSON booleans (true/false) and null values
-/// are accepted, rejecting integers (e.g., 1, 0) and strings (e.g., "null", "true")
-/// with clear error messages.
-///
-/// # Accepted Values
-/// - `true` or `false` (JSON booleans) → `Ok(Some(bool))`
-/// - `null` or omitted field → `Ok(None)`
-///
-/// # Rejected Values
-/// - Integers (e.g., `1`, `0`) → Error: "invalid type: integer X, expected a boolean (true or false)"
-/// - Strings (e.g., `"null"`, `"true"`) → Error: "invalid type: string \"X\", expected a boolean (true or false)"
-///
-/// # Example Usage
-/// ```ignore
-/// #[serde(deserialize_with = "deserialize_strict_optional_bool")]
-/// pub echo: Option<bool>,
-/// ```
+/// Accepts JSON booleans (true/false), explicit null, and omitted fields.
+/// Rejects integers (1, 0) and strings ("true", "false", "null") with clear error messages.
 fn deserialize_strict_optional_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
 where
     D: serde::Deserializer<'de>,
