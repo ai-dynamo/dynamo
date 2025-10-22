@@ -13,6 +13,8 @@ pub use classifier::mock::MockClassifier;
 pub use classifier::onnx::OnnxClassifier;
 #[cfg(feature = "candle-classifier")]
 pub use classifier::candle::CandleClassifier;
+#[cfg(feature = "fasttext-classifier")]
+pub use classifier::fasttext::FasttextClassifier;
 pub use config::PolicyConfig;
 pub use hook::{RouteDecision, SemRouter};
 pub use policy::CategoryPolicy;

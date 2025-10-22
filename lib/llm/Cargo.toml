@@ -26,6 +26,7 @@ cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
 onnx-classifier = ["dep:ort", "dep:ndarray-ort"]
 candle-classifier = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers"]
+fasttext-classifier = ["dep:fasttext"]
 
 [[bench]]
 name = "tokenizer"
@@ -111,6 +112,9 @@ candle-core = { version = "0.9.1", optional = true }
 candle-nn = { version = "0.9.1", optional = true }
 candle-transformers = { version = "0.9.1", optional = true }
 # Note: hf-hub and serde_json are already in workspace, so no need to declare them here
+
+# fastText (lightweight, blazing fast)
+fasttext = { version = "0.7", optional = true }
 
 # protocols
 unicode-segmentation = "1.12"

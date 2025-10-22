@@ -5,7 +5,7 @@ use crate::semrouter::{
     types::{RequestMeta, RoutePlan, RoutingMode, Target},
     PolicyConfig,
 };
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use std::sync::Arc;
 use tracing::debug;
 
@@ -100,8 +100,24 @@ impl SemRouter {
         Ok(Self::new(policy, classifier))
     }
 
+    /// Create a SemRouter from a config file (uses fastText classifier)
+    #[cfg(all(feature = "fasttext-classifier", not(any(feature = "onnx-classifier", feature = "candle-classifier"))))]
+    pub fn from_config(config_path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let policy_config = PolicyConfig::load(config_path)?;
+        let policy = CategoryPolicy::new(policy_config);
+
+        let model_path = std::env::var("SEMROUTER_MODEL_PATH")
+            .map_err(|_| anyhow!("SEMROUTER_MODEL_PATH not set"))?;
+
+        tracing::info!("Loading fastText classifier from {}", model_path);
+        let classifier = Arc::new(crate::semrouter::FasttextClassifier::new(&model_path)?);
+
+        tracing::info!("Semantic router initialized with fastText classifier");
+        Ok(Self::new(policy, classifier))
+    }
+
     /// Create a SemRouter from a config file (uses MockClassifier when no ML classifier is available)
-    #[cfg(not(any(feature = "onnx-classifier", feature = "candle-classifier")))]
+    #[cfg(not(any(feature = "onnx-classifier", feature = "candle-classifier", feature = "fasttext-classifier")))]
     pub fn from_config(config_path: impl AsRef<std::path::Path>) -> Result<Self> {
         use crate::semrouter::MockClassifier;
 

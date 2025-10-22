@@ -8,6 +8,9 @@ pub mod onnx;
 #[cfg(feature = "candle-classifier")]
 pub mod candle;
 
+#[cfg(feature = "fasttext-classifier")]
+pub mod fasttext;
+
 /// Unified classifier trait for both binary and multi-class classification
 /// Returns label probabilities as a HashMap
 ///
