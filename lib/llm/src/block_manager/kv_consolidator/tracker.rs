@@ -345,8 +345,8 @@ impl CacheStatusTracker {
             });
 
             tracing::debug!(
-                "Queued STORE event for {} (seq_hash={}) from source {:?} (total tracked: {}, hash_mapping: {})",
-                &block_hash[..16.min(block_hash.len())],
+                "Block {} (seq_hash={}) stored in first source {:?}, will publish STORE event (total tracked: {}, hash_mapping: {})",
+                block_hash,
                 sequence_hash,
                 source,
                 self.blocks.len(),
@@ -430,18 +430,12 @@ impl CacheStatusTracker {
                 });
 
                 tracing::debug!(
-                    "Block {} (seq_hash={}) removed from last source {:?}, queued REMOVE event (total tracked: {}, hash_mapping: {})",
-                    &first_block_hash[..16.min(first_block_hash.len())],
+                    "Block {} (seq_hash={}) removed from last source {:?}, will publish REMOVE event (total tracked: {}, hash_mapping: {})",
+                    first_block_hash,
                     sequence_hash,
                     source,
                     self.blocks.len(),
                     self.hash_mapping.len()
-                );
-                tracing::debug!(
-                    "Block {} (seq_hash={}) removed from last source {:?}, will publish REMOVE event",
-                    first_block_hash,
-                    sequence_hash,
-                    source
                 );
                 true
             } else {
