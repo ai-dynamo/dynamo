@@ -25,7 +25,7 @@
    api/nixl_connect/README.md
 
    kubernetes/api_reference.md
-   kubernetes/create_deployment.md
+   kubernetes/deployment/create_deployment.md
 
    kubernetes/fluxcd.md
    kubernetes/gke_setup.md
@@ -36,12 +36,12 @@
    observability/metrics.md
    kvbm/vllm-setup.md
    kvbm/trtllm-setup.md
-   guides/tool-calling.md
+   agents/tool-calling.md
 
-   architecture/kv_cache_routing.md
+   router/kv_cache_routing.md
    planner/load_planner.md
-   architecture/request_migration.md
-   architecture/request_cancellation.md
+   fault_tolerance/request_migration.md
+   fault_tolerance/request_cancellation.md
 
    backends/trtllm/multinode/multinode-examples.md
    backends/trtllm/multinode/multinode-multimodal-example.md
@@ -65,8 +65,8 @@
    examples/README.md
    examples/runtime/hello_world/README.md
 
-   architecture/distributed_runtime.md
-   architecture/dynamo_flow.md
+   design_docs/distributed_runtime.md
+   design_docs/dynamo_flow.md
 
    backends/vllm/deepseek-r1.md
    backends/vllm/gpt-oss.md
