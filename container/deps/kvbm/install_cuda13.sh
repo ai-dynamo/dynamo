@@ -14,11 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Install NIXL for TensorRT-LLM.
-# This script is an adapted version of the NIXL install script from the TensorRT-LLM repository.
-# The original script is located at:
-# https://github.com/NVIDIA/TensorRT-LLM/blob/main/docker/common/install_nixl.sh
-
 # This script installs CUDA 13 during the KVBM wheel build.
 # It compensates for the lack of a public CUDA manylinux image,
 # while still allowing external users to build from source.

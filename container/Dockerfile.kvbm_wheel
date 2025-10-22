@@ -16,6 +16,15 @@
 # Most of the commands in this dockerfile is from
 # https://github.com/ai-dynamo/nixl/blob/main/contrib/Dockerfile.manylinux
 
+# 1. The purpose of this Dockerfile is to ensure that the KVBM pip wheel
+#    and its NIXL dependency are compiled in a glibc 2.28 environment using
+#    a manylinux image, so that the resulting wheel can be used on a much
+#    broader range of Linux systems.
+# 2. There is no public CUDA + manylinux image available, so we need to have
+#    a step to install CUDA 13.
+# 3. A dedicated Dockerfile is provided to allow external users to build
+#    the pip wheel independently, without having to build the entire Dynamo.
+
 ARG ARCH_ALT="x86_64"
 
 FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT}
