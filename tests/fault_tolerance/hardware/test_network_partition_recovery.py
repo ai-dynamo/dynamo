@@ -84,7 +84,7 @@ class NetworkFaultInjector:
     ) -> str:
         """
         Inject a network partition between two pods.
-        
+
         In Dynamo, frontend and workers communicate via NATS message broker,
         so we block the target pod's access to NATS to simulate a partition.
         """
@@ -122,13 +122,13 @@ class NetworkFaultInjector:
                         to=[
                             client.V1NetworkPolicyPeer(
                                 namespace_selector=client.V1LabelSelector(
-                                    match_labels={"kubernetes.io/metadata.name": "kube-system"}
+                                    match_labels={
+                                        "kubernetes.io/metadata.name": "kube-system"
+                                    }
                                 )
                             )
                         ],
-                        ports=[
-                            client.V1NetworkPolicyPort(protocol="UDP", port=53)
-                        ]
+                        ports=[client.V1NetworkPolicyPort(protocol="UDP", port=53)],
                     ),
                     # Allow all traffic EXCEPT to NATS pods
                     client.V1NetworkPolicyEgressRule(
@@ -139,13 +139,13 @@ class NetworkFaultInjector:
                                         client.V1LabelSelectorRequirement(
                                             key="app.kubernetes.io/name",
                                             operator="NotIn",
-                                            values=["nats", "dynamo-platform-nats"]
+                                            values=["nats", "dynamo-platform-nats"],
                                         )
                                     ]
                                 )
                             )
                         ]
-                    )
+                    ),
                 ],
             ),
         )
@@ -155,7 +155,9 @@ class NetworkFaultInjector:
                 namespace=self.namespace, body=policy
             )
             print(f"Network partition injected: {policy_name}")
-            print(f"   Effect: {target_full} cannot reach NATS (simulates partition from {source_full})")
+            print(
+                f"   Effect: {target_full} cannot reach NATS (simulates partition from {source_full})"
+            )
             return policy_name
         except ApiException as e:
             if e.status == 409:
@@ -375,17 +377,23 @@ def test_network_partition_frontend_to_worker_with_recovery():
         # Use unique prompt to prevent caching
         unique_prompt = f"Test during fault {random.randint(1000, 9999)}"
         response = send_completion_request(unique_prompt, 10, timeout=15)
-        
+
         # Check if request failed (expected during partition)
         if response.status_code != 200:
-            print(f"[EXPECTED] Request failed (worker unreachable) - Status: {response.status_code}")
+            print(
+                f"[EXPECTED] Request failed (worker unreachable) - Status: {response.status_code}"
+            )
             if response.text:
                 print(f"   Error: {response.text[:200]}")  # First 200 chars
         else:
             validate_completion_response(response)
-            print("[WARNING] Request succeeded during partition - possible multiple workers or caching")
+            print(
+                "[WARNING] Request succeeded during partition - possible multiple workers or caching"
+            )
     except (requests.Timeout, requests.RequestException) as e:
-        print(f"[EXPECTED] Request failed (worker unreachable) - Error: {type(e).__name__}")
+        print(
+            f"[EXPECTED] Request failed (worker unreachable) - Error: {type(e).__name__}"
+        )
 
     # AFTER
     print("\n[AFTER] Validate Recovery")
