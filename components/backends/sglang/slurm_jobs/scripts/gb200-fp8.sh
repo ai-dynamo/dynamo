@@ -64,13 +64,11 @@ fi
 
 # Construct command based on mode
 if [ "$mode" = "prefill" ]; then
-    # GB200 dynamo prefill command
     set -x
-    # SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=2048 \
-    # timeouts and kernel cache
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
     export SGL_DG_CACHE_DIR="/configs/dgcache/3p1dcache"
 
+    command_suffix=""
     if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix="--init-expert-location /configs/prefill_dsr1-0528_in1000out1000_num40000.json"; fi
 
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
@@ -99,9 +97,8 @@ if [ "$mode" = "prefill" ]; then
         --dp-size "$TOTAL_GPUS" \
         --enable-dp-attention \
         --host 0.0.0.0 \
-        --decode-log-interval 1000 \
-        --max-running-requests 12288 \
-        --context-length 9600 \
+        --max-running-requests 30000 \
+        --context-length 2200 \
         --disable-radix-cache \
         --moe-a2a-backend deepep \
         --load-balance-method round_robin \
@@ -119,28 +116,28 @@ if [ "$mode" = "prefill" ]; then
         --max-total-tokens 524288 \
         --deepep-config /configs/deepep_config.json \
         --stream-interval 50 \
-        --log-level debug ${command_suffix}
+        --mem-fraction-static 0.75 ${command_suffix}
 
 elif [ "$mode" = "decode" ]; then
     set -x
-    command_suffix=""
-    if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix="--init-expert-location /configs/decode_dsr1-0528_loadgen_in1024out1024_num2000_2p12d.json"; fi
-
-    # timeouts and kernel cache
+    set -x
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
     export SGL_DG_CACHE_DIR="/configs/dgcache/3p1dcache"
 
-    # GB200 dynamo decode command
+    command_suffix=""
+    if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix="--init-expert-location /configs/decode_dsr1-0528_loadgen_in1024out1024_num2000_2p12d.json"; fi
+
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
-    SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=512 \
+    export SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=768  \
     MC_TE_METRIC=true \
     SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \
     SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=100000 \
     SGLANG_DISAGGREGATION_WAITING_TIMEOUT=100000 \
+    SGLANG_DECODE_BOOTSTRAP_TIMEOUT=1000 \
     SGLANG_HACK_SEQ_BOOTSTRAP_ROOM=1 \
     SGLANG_MOONCAKE_CUSTOM_MEM_POOL=True \
-    NCCL_MNNVL_ENABLE=1 \
     MC_FORCE_MNNVL=1 \
+    NCCL_MNNVL_ENABLE=1 \
     NCCL_CUMEM_ENABLE=1 \
     SGLANG_USE_MESSAGE_QUEUE_BROADCASTER=0 \
     SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
@@ -160,16 +157,16 @@ elif [ "$mode" = "decode" ]; then
         --enable-dp-attention \
         --host 0.0.0.0 \
         --decode-log-interval 1000 \
-        --max-running-requests 36864 \
-        --context-length 9600 \
+        --max-running-requests 45000 \
+        --context-length 2200 \
         --disable-radix-cache \
         --moe-a2a-backend deepep \
         --prefill-round-robin-balance \
         --deepep-mode low_latency \
         --moe-dense-tp-size 1 \
         --enable-dp-lm-head \
-        --cuda-graph-bs 1 2 4 8 16 24 32 40 48 56 64 80 96 112 128 160 192 224 256 320 384 448 512 \
-        --cuda-graph-max-bs 512 \
+        --cuda-graph-bs 1 2 4 8 16 24 32 40 48 56 64 72 80 88 96 104 112 120 128 136 144 152 160 168 176 184 192 200 208 216 224 232 240 248 256 264 272 280 288 296 304 312 320 328 336 344 352 360 368 376 384 416 448 480 512 544 576 608 640 672 704 736 768 \
+        --cuda-graph-max-bs 768 \
         --disable-shared-experts-fusion \
         --ep-num-redundant-experts 32 \
         --ep-dispatch-algorithm static \
@@ -178,5 +175,6 @@ elif [ "$mode" = "decode" ]; then
         --watchdog-timeout 1000000 \
         --chunked-prefill-size 36864 \
         --stream-interval 50 \
+        --deepep-config /configs/deepep_config.json \
         --mem-fraction-static 0.82 ${command_suffix}
 fi
