@@ -5,7 +5,6 @@
 
 import logging
 
-from dynamo._core import AggregatedMetrics as AggregatedMetrics
 from dynamo._core import ApproxKvIndexer as ApproxKvIndexer
 from dynamo._core import DisaggregatedRouter as DisaggregatedRouter
 from dynamo._core import EngineType
