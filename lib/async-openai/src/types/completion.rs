@@ -18,11 +18,11 @@ use crate::error::OpenAIError;
 
 use super::{ChatCompletionStreamOptions, Choice, CompletionUsage, Prompt, Stop};
 
-/// Custom deserializer for strict boolean validation in Option<bool> fields.
+/// Custom deserializer for strict boolean validation of the echo parameter.
 ///
 /// Accepts JSON booleans (true/false), explicit null, and omitted fields.
 /// Rejects integers (1, 0) and strings ("true", "false", "null") with clear error messages.
-fn deserialize_strict_optional_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+fn deserialize_echo_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -32,7 +32,7 @@ where
         type Value = Option<bool>;
 
         fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-            formatter.write_str("a boolean (true or false) or null")
+            formatter.write_str("echo parameter to be a boolean (true or false) or null")
         }
 
         // Accept JSON boolean values
@@ -66,7 +66,7 @@ where
         {
             Err(E::invalid_type(
                 serde::de::Unexpected::Signed(value),
-                &"a boolean (true or false)",
+                &"echo parameter to be a boolean (true or false)",
             ))
         }
 
@@ -77,7 +77,7 @@ where
         {
             Err(E::invalid_type(
                 serde::de::Unexpected::Unsigned(value),
-                &"a boolean (true or false)",
+                &"echo parameter to be a boolean (true or false)",
             ))
         }
 
@@ -88,7 +88,7 @@ where
         {
             Err(E::invalid_type(
                 serde::de::Unexpected::Str(value),
-                &"a boolean (true or false)",
+                &"echo parameter to be a boolean (true or false)",
             ))
         }
     }
@@ -158,7 +158,7 @@ pub struct CreateCompletionRequest {
 
     /// Echo back the prompt in addition to the completion
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(deserialize_with = "deserialize_strict_optional_bool")]
+    #[serde(deserialize_with = "deserialize_echo_bool")]
     pub echo: Option<bool>,
 
     ///  Up to 4 sequences where the API will stop generating further tokens. The returned text will not contain the stop sequence.
@@ -241,7 +241,7 @@ mod tests {
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("invalid type"));
         assert!(err_msg.contains("integer"));
-        assert!(err_msg.contains("expected a boolean (true or false)"));
+        assert!(err_msg.contains("echo parameter"));
     }
 
     #[test]
@@ -252,6 +252,6 @@ mod tests {
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("invalid type"));
         assert!(err_msg.contains("string"));
-        assert!(err_msg.contains("expected a boolean (true or false)"));
+        assert!(err_msg.contains("echo parameter"));
     }
 }
