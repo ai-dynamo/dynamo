@@ -414,7 +414,8 @@ threshold_min_conf: 0.6
 | Classifier | Build Command | Env Variables Required | Use Case |
 |------------|--------------|------------------------|----------|
 | **MockClassifier** | `maturin develop --uv` | `SEMROUTER_ENABLED`, `SEMROUTER_CONFIG` | Development, testing, CI/CD |
-| **OnnxClassifier** | `maturin develop --uv --features onnx-classifier` | Above + `SEMROUTER_MODEL_PATH`, `SEMROUTER_TOKENIZER_PATH` | Production with ML |
+| **OnnxClassifier** | `maturin develop --uv --features onnx-classifier` | `SEMROUTER_ENABLED`, `SEMROUTER_CONFIG`, `SEMROUTER_MODEL_PATH`, `SEMROUTER_TOKENIZER_PATH` | Production with ML |
+| **OnnxClassifier** | `maturin develop --uv --features candle-classifier` | `SEMROUTER_ENABLED`, `SEMROUTER_CONFIG`, `SEMROUTER_DEVICE` | Production with ML |
 
 **To switch classifiers:**
 1. Rebuild with/without `--features onnx-classifier`

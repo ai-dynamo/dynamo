@@ -12,6 +12,9 @@ use tracing::debug;
 #[cfg(feature = "onnx-classifier")]
 use crate::semrouter::OnnxClassifier;
 
+#[cfg(feature = "candle-classifier")]
+use crate::semrouter::CandleClassifier;
+
 /// Semantic router using a unified classifier
 /// Supports both binary and multi-class classification transparently
 pub struct SemRouter {
@@ -52,8 +55,53 @@ impl SemRouter {
         Ok(Self::new(policy, classifier))
     }
 
-    /// Create a SemRouter from a config file (uses MockClassifier when ONNX is not available)
-    #[cfg(not(feature = "onnx-classifier"))]
+    /// Create a SemRouter from a config file using Candle classifier
+    ///
+    /// Reads classifier configuration from environment variables:
+    /// - SEMROUTER_MODEL_ID: HuggingFace model ID (e.g., "CodeIsAbstract/ReasoningTextClassifier")
+    /// - SEMROUTER_MAX_LENGTH: Optional max sequence length (default: 256)
+    /// - SEMROUTER_DEVICE: Optional device ("cpu" or "cuda:0", default: "cpu")
+    #[cfg(all(feature = "candle-classifier", not(feature = "onnx-classifier")))]
+    pub fn from_config(config_path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let policy_config = PolicyConfig::load(config_path)?;
+        let policy = CategoryPolicy::new(policy_config);
+
+        // Load Candle classifier from environment variables
+        let model_id = std::env::var("SEMROUTER_MODEL_ID")
+            .unwrap_or_else(|_| "CodeIsAbstract/ReasoningTextClassifier".to_string());
+        let max_length = std::env::var("SEMROUTER_MAX_LENGTH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(256);
+
+        let device_str = std::env::var("SEMROUTER_DEVICE").unwrap_or_else(|_| "cpu".to_string());
+        let device = if device_str.starts_with("cuda") {
+            #[cfg(feature = "cuda")]
+            {
+                let device_id = device_str
+                    .strip_prefix("cuda:")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(0);
+                candle_core::Device::new_cuda(device_id)?
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                tracing::warn!("CUDA requested but not available, using CPU");
+                candle_core::Device::Cpu
+            }
+        } else {
+            candle_core::Device::Cpu
+        };
+
+        tracing::info!("Loading Candle classifier: model={}, device={:?}", model_id, device);
+        let classifier = Arc::new(CandleClassifier::from_pretrained(&model_id, max_length, device)?);
+
+        tracing::info!("Semantic router initialized with Candle classifier");
+        Ok(Self::new(policy, classifier))
+    }
+
+    /// Create a SemRouter from a config file (uses MockClassifier when no ML classifier is available)
+    #[cfg(not(any(feature = "onnx-classifier", feature = "candle-classifier")))]
     pub fn from_config(config_path: impl AsRef<std::path::Path>) -> Result<Self> {
         use crate::semrouter::MockClassifier;
 

@@ -883,6 +883,28 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
 [[package]]
 name = "candle-core"
 version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9f51e2ecf6efe9737af8f993433c839f956d2b6ed4fd2dd4a7c6d8b0fa667ff"
+dependencies = [
+ "byteorder",
+ "gemm 0.17.1",
+ "half 2.6.0",
+ "memmap2",
+ "num-traits",
+ "num_cpus",
+ "rand 0.9.2",
+ "rand_distr 0.5.1",
+ "rayon",
+ "safetensors 0.4.5",
+ "thiserror 1.0.69",
+ "ug",
+ "yoke 0.7.5",
+ "zip 1.1.4",
+]
+
+[[package]]
+name = "candle-core"
+version = "0.9.1"
 source = "git+https://github.com/EricLBuehler/candle.git?rev=7511e510#7511e510054973ea4e2043f6d2da14409c195baf"
 dependencies = [
  "byteorder",
@@ -931,9 +953,24 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1980d53280c8f9e2c6cbe1785855d7ff8010208b46e21252b978badf13ad69d"
+dependencies = [
+ "candle-core 0.9.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "half 2.6.0",
+ "num-traits",
+ "rayon",
+ "safetensors 0.4.5",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "candle-nn"
+version = "0.9.1"
 source = "git+https://github.com/EricLBuehler/candle.git?rev=7511e510#7511e510054973ea4e2043f6d2da14409c195baf"
 dependencies = [
- "candle-core",
+ "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
  "candle-metal-kernels",
  "half 2.6.0",
  "metal 0.27.0",
@@ -942,6 +979,25 @@ dependencies = [
  "safetensors 0.6.2",
  "serde",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "candle-transformers"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "186cb80045dbe47e0b387ea6d3e906f02fb3056297080d9922984c90e90a72b0"
+dependencies = [
+ "byteorder",
+ "candle-core 0.9.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "candle-nn 0.9.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "fancy-regex 0.13.0",
+ "num-traits",
+ "rand 0.9.2",
+ "rayon",
+ "serde",
+ "serde_json",
+ "serde_plain",
+ "tracing",
 ]
 
 [[package]]
@@ -2119,6 +2175,9 @@ dependencies = [
  "bs62",
  "bytemuck",
  "bytes",
+ "candle-core 0.9.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "candle-nn 0.9.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "candle-transformers",
  "chrono",
  "criterion 0.3.6",
  "cudarc 0.17.3",
@@ -4672,8 +4731,8 @@ version = "0.6.0"
 source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=a13220255#a132202551f4fdf3a1d9e2da51232581789af7ea"
 dependencies = [
  "anyhow",
- "candle-core",
- "candle-nn",
+ "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
+ "candle-nn 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
  "clap 4.5.48",
  "either",
  "futures",
@@ -4715,8 +4774,8 @@ dependencies = [
  "bm25",
  "bytemuck",
  "bytemuck_derive",
- "candle-core",
- "candle-nn",
+ "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
+ "candle-nn 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
  "cfgrammar",
  "chrono",
  "clap 4.5.48",
@@ -4822,7 +4881,7 @@ source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=a13220255#a1322
 dependencies = [
  "anyhow",
  "bindgen_cuda 0.1.7",
- "candle-core",
+ "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
  "float8",
  "half 2.6.0",
  "metal 0.27.0",
@@ -4837,8 +4896,8 @@ source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=a13220255#a1322
 dependencies = [
  "bindgen_cuda 0.1.7",
  "byteorder",
- "candle-core",
- "candle-nn",
+ "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
+ "candle-nn 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
  "float8",
  "half 2.6.0",
  "hf-hub",
@@ -4863,7 +4922,7 @@ name = "mistralrs-vision"
 version = "0.6.0"
 source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=a13220255#a132202551f4fdf3a1d9e2da51232581789af7ea"
 dependencies = [
- "candle-core",
+ "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
  "image",
  "rayon",
 ]
