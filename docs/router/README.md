@@ -60,10 +60,10 @@ spec:
 - No worker-side configuration changes needed
 
 **Complete K8s Examples:**
-- [TRT-LLM aggregated router example](https://github.com/ai-dynamo/dynamo/blob/main/components/backends/trtllm/deploy/agg_router.yaml)
-- [vLLM aggregated router example](https://github.com/ai-dynamo/dynamo/blob/main/components/backends/vllm/deploy/agg_router.yaml)
-- [SGLang aggregated router example](https://github.com/ai-dynamo/dynamo/blob/main/components/backends/sglang/deploy/agg_router.yaml)
-- [Distributed inference tutorial](https://github.com/ai-dynamo/dynamo/blob/main/examples/basics/kubernetes/Distributed_Inference/agg_router.yaml)
+- [TRT-LLM aggregated router example](../../components/backends/trtllm/deploy/agg_router.yaml)
+- [vLLM aggregated router example](../../components/backends/vllm/deploy/agg_router.yaml)
+- [SGLang aggregated router example](../../components/backends/sglang/deploy/agg_router.yaml)
+- [Distributed inference tutorial](../../examples/basics/kubernetes/Distributed_Inference/agg_router.yaml)
 
 **For A/B Testing and Advanced K8s Setup:**
 See the comprehensive [KV Router A/B Benchmarking Guide](../benchmarks/kv-router-ab-testing.md) for step-by-step instructions on deploying, configuring, and benchmarking the KV router in Kubernetes.
@@ -109,7 +109,7 @@ All CLI arguments can be configured via environment variables in Kubernetes depl
 | `--kv-overlap-score-weight <float>` | `DYN_KV_OVERLAP_SCORE_WEIGHT=<float>` | `1.0` | Prefill vs decode weight |
 | `--http-port <port>` | `DYN_HTTP_PORT=<port>` | `8000` | HTTP server port |
 
-**Example with advanced configuration:**
+### Example with Advanced Configuration
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -136,7 +136,7 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
 ```
 
-**Alternative: Using command args in K8s**
+### Alternative: Using Command Args in K8s
 
 You can also pass CLI arguments directly in the container command:
 
