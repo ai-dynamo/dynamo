@@ -18,6 +18,91 @@ use crate::error::OpenAIError;
 
 use super::{ChatCompletionStreamOptions, Choice, CompletionUsage, Prompt, Stop};
 
+/// Custom deserializer for strict boolean validation in Option<bool> fields.
+///
+/// This deserializer ensures that only JSON booleans (true/false) and null values
+/// are accepted, rejecting integers (e.g., 1, 0) and strings (e.g., "null", "true")
+/// with clear error messages.
+///
+/// # Accepted Values
+/// - `true` or `false` (JSON booleans) → `Ok(Some(bool))`
+/// - `null` or omitted field → `Ok(None)`
+///
+/// # Rejected Values
+/// - Integers (e.g., `1`, `0`) → Error: "invalid type: integer X, expected a boolean (true or false)"
+/// - Strings (e.g., `"null"`, `"true"`) → Error: "invalid type: string \"X\", expected a boolean (true or false)"
+///
+/// # Example Usage
+/// ```ignore
+/// #[serde(deserialize_with = "deserialize_strict_optional_bool")]
+/// pub echo: Option<bool>,
+/// ```
+fn deserialize_strict_optional_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct StrictBoolVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for StrictBoolVisitor {
+        type Value = Option<bool>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a boolean (true or false) or null")
+        }
+
+        // Accept JSON boolean values
+        fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(value))
+        }
+
+        // Accept explicit JSON null or omitted field
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+
+        // Explicitly reject signed integers
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Err(E::invalid_type(
+                serde::de::Unexpected::Signed(value),
+                &"a boolean (true or false)",
+            ))
+        }
+
+        // Explicitly reject unsigned integers
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Err(E::invalid_type(
+                serde::de::Unexpected::Unsigned(value),
+                &"a boolean (true or false)",
+            ))
+        }
+
+        // Explicitly reject strings (including "null", "true", "false")
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Err(E::invalid_type(
+                serde::de::Unexpected::Str(value),
+                &"a boolean (true or false)",
+            ))
+        }
+    }
+
+    deserializer.deserialize_any(StrictBoolVisitor)
+}
+
 #[derive(Clone, Serialize, Deserialize, Default, Debug, Builder, PartialEq)]
 #[builder(name = "CreateCompletionRequestArgs")]
 #[builder(pattern = "mutable")]
@@ -80,6 +165,7 @@ pub struct CreateCompletionRequest {
 
     /// Echo back the prompt in addition to the completion
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_strict_optional_bool")]
     pub echo: Option<bool>,
 
     ///  Up to 4 sequences where the API will stop generating further tokens. The returned text will not contain the stop sequence.
@@ -149,3 +235,30 @@ pub struct CreateCompletionResponse {
 /// Parsed server side events stream until an \[DONE\] is received from server.
 pub type CompletionResponseStream =
     Pin<Box<dyn Stream<Item = Result<CreateCompletionResponse, OpenAIError>> + Send>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn echo_rejects_integer() {
+        let json = r#"{"model": "test_model", "prompt": "test", "echo": 1}"#;
+        let result: Result<CreateCompletionRequest, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("invalid type"));
+        assert!(err_msg.contains("integer"));
+        assert!(err_msg.contains("expected a boolean (true or false)"));
+    }
+
+    #[test]
+    fn echo_rejects_string() {
+        let json = r#"{"model": "test_model", "prompt": "test", "echo": "null"}"#;
+        let result: Result<CreateCompletionRequest, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("invalid type"));
+        assert!(err_msg.contains("string"));
+        assert!(err_msg.contains("expected a boolean (true or false)"));
+    }
+}
