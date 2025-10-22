@@ -9,7 +9,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 import sglang as sgl
 
 from dynamo._core import Client, Component, Context
-from dynamo.sglang.args import Config
+from dynamo.sglang.args import Config, DisaggregationMode
 from dynamo.sglang.protocol import DisaggPreprocessedRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -48,7 +48,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             prefill_client,
         )
         # In decode mode, prefill_client is required
-        if self.serving_mode.name == "DECODE" and self.prefill_client is None:
+        if (
+            self.serving_mode == DisaggregationMode.DECODE
+            and self.prefill_client is None
+        ):
             raise ValueError(
                 "prefill_client must be provided for decode worker handler"
             )
@@ -115,7 +118,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         input_param = self._get_input_param(request)
 
         # Handle aggregated mode directly
-        if self.serving_mode.name != "DECODE":
+        if self.serving_mode != DisaggregationMode.DECODE:
             agg = await self.engine.async_generate(
                 **input_param,
                 sampling_params=sampling_params,
