@@ -1,7 +1,7 @@
 Overview
 ============
 
-.. include:: ../architecture/architecture.md
+.. include:: ../design_docs/architecture.md
    :parser: myst_parser.sphinx_
 
 .. toctree::
