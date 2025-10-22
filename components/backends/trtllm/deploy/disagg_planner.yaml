@@ -86,7 +86,7 @@ spec:
         terminationGracePeriodSeconds: 600
         mainContainer:
           image: my-registry/trtllm-runtime:my-tag
-          workingDir: /workspace/components/backends/trtllm
+          workingDir: /workspace/
           command:
             - python3
           args:
@@ -97,7 +97,7 @@ spec:
             - --served-model-name
             - Qwen/Qwen3-0.6B
             - --extra-engine-args
-            - engine_configs/decode.yaml
+            - ./recipes/qwen3/trtllm/decode.yaml
             - --disaggregation-mode
             - decode
             - --disaggregation-strategy
@@ -115,7 +115,7 @@ spec:
         terminationGracePeriodSeconds: 600
         mainContainer:
           image: my-registry/trtllm-runtime:my-tag
-          workingDir: /workspace/components/backends/trtllm
+          workingDir: /workspace/
           command:
             - python3
           args:
@@ -126,7 +126,7 @@ spec:
             - --served-model-name
             - Qwen/Qwen3-0.6B
             - --extra-engine-args
-            - engine_configs/prefill.yaml
+            - ./recipes/qwen3/trtllm/prefill.yaml
             - --disaggregation-mode
             - prefill
             - --disaggregation-strategy

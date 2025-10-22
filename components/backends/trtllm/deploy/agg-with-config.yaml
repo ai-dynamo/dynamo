@@ -55,7 +55,7 @@ spec:
           # mount the configmap as a volume
           volumeMounts:
           - name: nvidia-config
-            mountPath: /workspace/components/backends/trtllm/engine_configs
+            mountPath: /workspace/
             readOnly: true
           command:
           - python3
@@ -67,4 +67,4 @@ spec:
             - --served-model-name
             - Qwen/Qwen3-0.6B
             - --extra-engine-args
-            - engine_configs/agg.yaml
+            - ./recipes/qwen3/trtllm/agg.yaml

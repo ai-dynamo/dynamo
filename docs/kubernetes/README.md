@@ -182,7 +182,7 @@ args:
   - python3 -m dynamo.trtllm
     --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
     --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-    --extra-engine-args engine_configs/agg.yaml
+    --extra-engine-args $DYNAMO_HOME/recipes/deepseek-r1-distill-llama-8b/agg.yaml
 ```
 
 Key customization points include:
