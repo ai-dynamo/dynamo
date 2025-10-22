@@ -1843,7 +1843,9 @@ class DynamoRuntimeInfo(NodeInfo):
                 # Multiple .so files found - create warning
                 so_file_names = [os.path.basename(f) for f in so_files]
                 warning_desc = (
-                    f"Found {len(so_files)} files: {', '.join(so_file_names)}"
+                    f"Found {len(so_files)} files: {', '.join(so_file_names)}. "
+                    f"Python may load the wrong version causing import errors. "
+                    f"You may need to remove old *.so files and/or rebuild via 'maturin develop'."
                 )
                 return NodeInfo(
                     label="Multiple _core*.so files detected",
