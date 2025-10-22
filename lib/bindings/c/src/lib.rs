@@ -95,7 +95,7 @@ pub unsafe extern "C" fn dynamo_llm_init(
     };
 
     let component_cow = unsafe { cstr_or_default(component_c_str, "backend") };
-    if matches!(component_cow, Cow::Borrowed("backend")) {
+    if component_cow.is_borrowed() && component_cow.as_ref() == "backend" {
         tracing::info!("defaulting to \"backend\" for component");
     }
     let component: String = component_cow.into_owned();
