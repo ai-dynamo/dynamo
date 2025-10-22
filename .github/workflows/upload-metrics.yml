@@ -19,9 +19,18 @@ on:
     types:
       - completed
 
+  # TEMPORARY: For testing on branches (remove after merge to main)
+  workflow_dispatch:  # Manual trigger for testing
+  push:
+    branches:
+      - "pull-request/[0-9]+"
+    paths:
+      - '.github/workflows/upload-metrics.yml'
+      - '.github/workflows/upload_complete_workflow_metrics.py'
+
 # Prevent overlapping metrics uploads for the same workflow on the same branch
 concurrency:
-  group: metrics-upload-${{ github.event.workflow_run.workflow_id }}-${{ github.event.workflow_run.head_branch }}
+  group: metrics-upload-${{ github.event.workflow_run.workflow_id || github.run_id }}-${{ github.event.workflow_run.head_branch || github.ref_name }}
   cancel-in-progress: false  # Queue them instead of cancelling
 
 jobs:
@@ -58,8 +67,9 @@ jobs:
           JOB_INDEX: ${{ secrets.JOB_INDEX }}
           STEPS_INDEX: ${{ secrets.STEPS_INDEX }}
           CONTAINER_INDEX: ${{ secrets.CONTAINER_INDEX }}
-          # Pass the triggering workflow's run ID (not this workflow's run ID)
-          TARGET_RUN_ID: ${{ github.event.workflow_run.id }}
+          # For workflow_run trigger: use the triggering workflow's run ID
+          # For manual/push trigger: use current run ID (for testing only)
+          TARGET_RUN_ID: ${{ github.event.workflow_run.id || github.run_id }}
         run: |
           python3 .github/workflows/upload_complete_workflow_metrics.py
 
