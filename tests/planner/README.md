@@ -160,20 +160,64 @@ PYTHONPATH=../../components/src python -m pytest test_replica_calculation.py -v
 **Note**: The unit tests automatically mock external dependencies (prometheus_client, runtime modules) to ensure they can run in isolation without requiring the full Dynamo environment.
 
 #### Run Full End-to-End Test
-Test complete scaling behavior including Kubernetes deployment and load generation:
+
+Test complete scaling behavior including Kubernetes deployment and load generation.
+
+**Prerequisites:**
+
+- **[kube-prometheus-stack](../../docs/kubernetes/metrics.md) installed and running.** The SLA planner requires Prometheus to observe metrics and make scaling decisions.
+- Ensure the Dynamo operator was installed with the Prometheus endpoint configured (see [SLA Planner Quickstart Guide](../../docs/planner/sla_planner_quickstart.md#prerequisites) for details).
+
+**Prepare the test deployment manifest:**
+
+The test requires modifying `components/backends/vllm/deploy/disagg_planner.yaml` with test-specific planner arguments:
+
+1. Copy the base deployment:
 
 ```bash
-./scaling/run_scaling_test.sh
+cp components/backends/vllm/deploy/disagg_planner.yaml tests/planner/scaling/disagg_planner.yaml
 ```
 
-With custom namespace:
+2. Edit `tests/planner/scaling/disagg_planner.yaml`. Ensure all services use the correct image. Modify the Planner service args:
+
+```yaml
+spec:
+  services:
+    Planner:
+      extraPodSpec:
+        mainContainer:
+          args:
+            - --environment=kubernetes
+            - --backend=vllm
+            - --adjustment-interval=60
+            - --profile-results-dir=/workspace/tests/planner/profiling_results/H200_TP1P_TP1D
+            - --ttft=100
+            - --itl=10
+            - --load-predictor=constant
+            - --no-correction
+```
+
+3. Update the model in VllmPrefillWorker and VllmDecodeWorker services:
+
+```yaml
+args:
+  - -m
+  - dynamo.vllm
+  - --model
+  - nvidia/Llama-3.1-8B-Instruct-FP8
+  - --migration-limit=3
+  - --max-model-len=8192
+```
+
+**Run the test:**
+
 ```bash
 ./scaling/run_scaling_test.sh --namespace <namespace>
 ```
 
 To save results to `tests/planner/e2e_scaling_results` instead of `/tmp`:
 ```bash
-./scaling/run_scaling_test.sh --save-results
+./scaling/run_scaling_test.sh --namespace <namespace> --save-results
 ```
 
 **E2E Test Deployment Management:**
