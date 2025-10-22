@@ -63,6 +63,11 @@ class PrometheusAPIClient:
             Average metric value or 0 if no data/error
         """
         try:
+            # Prepend the frontend metric prefix if not already present
+            if not full_metric_name.startswith(prometheus_names.name_prefix.FRONTEND):
+                full_metric_name = (
+                    f"{prometheus_names.name_prefix.FRONTEND}_{full_metric_name}"
+                )
             query = f"increase({full_metric_name}_sum[{interval}])/increase({full_metric_name}_count[{interval}])"
             result = self.prom.custom_query(query=query)
             if not result:
@@ -121,6 +126,13 @@ class PrometheusAPIClient:
         # This function follows a different query pattern than the other metrics
         try:
             requests_total_metric = prometheus_names.frontend_service.REQUESTS_TOTAL
+            # Prepend the frontend metric prefix if not already present
+            if not requests_total_metric.startswith(
+                prometheus_names.name_prefix.FRONTEND
+            ):
+                requests_total_metric = (
+                    f"{prometheus_names.name_prefix.FRONTEND}_{requests_total_metric}"
+                )
             raw_res = self.prom.custom_query(
                 query=f"increase({requests_total_metric}[{interval}])"
             )
