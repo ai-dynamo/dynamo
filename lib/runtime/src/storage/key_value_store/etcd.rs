@@ -25,25 +25,24 @@ impl EtcdStore {
 
 #[async_trait]
 impl KeyValueStore for EtcdStore {
+    type Bucket = EtcdBucket;
+
     /// A "bucket" in etcd is a path prefix
     async fn get_or_create_bucket(
         &self,
         bucket_name: &str,
         _ttl: Option<Duration>, // TODO ttl not used yet
-    ) -> Result<Box<dyn KeyValueBucket>, StoreError> {
+    ) -> Result<Self::Bucket, StoreError> {
         Ok(self.get_bucket(bucket_name).await?.unwrap())
     }
 
     /// A "bucket" in etcd is a path prefix. This creates an EtcdBucket object without doing
     /// any network calls.
-    async fn get_bucket(
-        &self,
-        bucket_name: &str,
-    ) -> Result<Option<Box<dyn KeyValueBucket>>, StoreError> {
-        Ok(Some(Box::new(EtcdBucket {
+    async fn get_bucket(&self, bucket_name: &str) -> Result<Option<Self::Bucket>, StoreError> {
+        Ok(Some(EtcdBucket {
             client: self.client.clone(),
             bucket_name: bucket_name.to_string(),
-        })))
+        }))
     }
 
     fn connection_id(&self) -> u64 {

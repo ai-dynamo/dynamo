@@ -39,6 +39,12 @@ pub struct Client {
     rt: Arc<tokio::runtime::Runtime>,
 }
 
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "etcd::Client primary_lease={}", self.primary_lease)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Lease {
     /// ETCD lease ID

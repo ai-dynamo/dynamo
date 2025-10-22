@@ -3,16 +3,12 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
+use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::storage::key_value_store::Key;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_runtime::{
-    component::Endpoint,
-    storage::key_value_store::{EtcdStore, KeyValueStore, KeyValueStoreManager},
-};
 
 use crate::entrypoint::RouterConfig;
 use crate::mocker::protocols::MockEngineArgs;
@@ -414,18 +410,12 @@ impl LocalModel {
         model_type: ModelType,
         model_input: ModelInput,
     ) -> anyhow::Result<()> {
-        // A static component doesn't have an etcd_client because it doesn't need to register
-        let Some(etcd_client) = endpoint.drt().etcd_client() else {
-            anyhow::bail!("Cannot attach to static endpoint");
-        };
         self.card.model_type = model_type;
         self.card.model_input = model_input;
 
         // Publish the Model Deployment Card to KV store
-        let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStore::new(etcd_client.clone()));
-        let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
-        let lease_id = endpoint.drt().primary_lease().map(|l| l.id()).unwrap_or(0);
-        let key = Key::from_raw(endpoint.unique_path(lease_id));
+        let card_store = endpoint.drt().store();
+        let key = Key::from_raw(endpoint.unique_path(card_store.connection_id()));
 
         let _outcome = card_store
             .publish(model_card::ROOT_PATH, None, &key, &mut self.card)

@@ -526,11 +526,11 @@ impl Endpoint {
 
     /// The fully path of an instance in etcd
     pub fn etcd_path_with_lease_id(&self, lease_id: i64) -> String {
-        format!("{INSTANCE_ROOT_PATH}/{}", self.unique_path(lease_id))
+        format!("{INSTANCE_ROOT_PATH}/{}", self.unique_path(lease_id as u64))
     }
 
     /// Full path of this endpoint with forward slash separators, including lease id
-    pub fn unique_path(&self, lease_id: i64) -> String {
+    pub fn unique_path(&self, lease_id: u64) -> String {
         let ns = self.component.namespace().name();
         let cp = self.component.name();
         let ep = self.name();
