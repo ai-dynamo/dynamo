@@ -179,8 +179,8 @@ impl Runtime {
 
     /// Detect the number of worker threads in the runtime
     async fn detect_worker_thread_count(&self) -> usize {
+        use parking_lot::Mutex;
         use std::collections::HashSet;
-        use std::sync::Mutex;
 
         let thread_ids = Arc::new(Mutex::new(HashSet::new()));
         let mut handles = Vec::new();
@@ -192,7 +192,7 @@ impl Runtime {
             let ids = Arc::clone(&thread_ids);
             let handle = tokio::task::spawn_blocking(move || {
                 let thread_id = std::thread::current().id();
-                ids.lock().unwrap().insert(thread_id);
+                ids.lock().insert(thread_id);
             });
             handles.push(handle);
         }
@@ -202,7 +202,7 @@ impl Runtime {
             let _ = handle.await;
         }
 
-        let count = thread_ids.lock().unwrap().len();
+        let count = thread_ids.lock().len();
         tracing::debug!("Detected {} worker threads in runtime", count);
         count
     }
