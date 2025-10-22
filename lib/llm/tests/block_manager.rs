@@ -296,7 +296,7 @@ pub mod llm_kvbm {
                         event_id: event_id_counter,
                         dp_rank: 0,
                     };
-                    let router_event = RouterEvent::new(worker_identifier as i64, event);
+                    let router_event = RouterEvent::new(worker_identifier, event);
                     event_id_counter += 1;
                     if let Err(e) = component_clone
                         .batch_tx
@@ -316,7 +316,7 @@ pub mod llm_kvbm {
                         event_id: event_id_counter,
                         dp_rank: 0,
                     };
-                    let router_event = RouterEvent::new(worker_identifier as i64, event);
+                    let router_event = RouterEvent::new(worker_identifier, event);
                     event_id_counter += 1;
                     if let Err(e) = component_clone
                         .batch_tx
