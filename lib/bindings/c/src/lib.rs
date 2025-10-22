@@ -26,11 +26,7 @@ unsafe fn cstr_or_default<'a>(ptr: *const c_char, default_val: &'a str) -> Cow<'
     if ptr.is_null() {
         return Cow::from(default_val);
     }
-    match unsafe { CStr::from_ptr(ptr) }
-        .to_str()
-        .ok()
-        .map(|s| s.trim())
-    {
+    match unsafe { CStr::from_ptr(ptr) }.to_str().ok().map(|s| s.trim()) {
         Some(s) if !s.is_empty() => Cow::from(s.to_owned()),
         _ => Cow::from(default_val),
     }
@@ -95,7 +91,7 @@ pub unsafe extern "C" fn dynamo_llm_init(
     };
 
     let component_cow = unsafe { cstr_or_default(component_c_str, "backend") };
-    if component_cow.is_borrowed() && component_cow.as_ref() == "backend" {
+    if matches!(component_cow, Cow::Borrowed("backend")) {
         tracing::info!("defaulting to \"backend\" for component");
     }
     let component: String = component_cow.into_owned();
