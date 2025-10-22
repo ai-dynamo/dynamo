@@ -166,9 +166,15 @@ impl PrefillRouter {
             InnerPrefillRouter::SimpleRouter(router) => router.generate(request).await?,
         };
 
+        // Get the context before consuming the stream to allow cleanup signaling
+        let prefill_stream_context = prefill_response.context();
+
         let Some(first_output) = prefill_response.next().await else {
             bail!("Prefill router returned no output (stream ended)");
         };
+
+        // This ensures that router state (e.g., active requests) is freed properly
+        prefill_stream_context.stop();
 
         if let Some(err) = first_output.err() {
             bail!("Prefill router returned error in output: {:?}", err);
