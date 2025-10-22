@@ -41,7 +41,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
         (None, None) => {
             let mut builder = service_v2::HttpService::builder().port(local_model.http_port());
             if local_model.enable_http2() {
-                builder = builder.enable_http2(true);
+                builder = builder.enable_http2();
             }
             builder
         }

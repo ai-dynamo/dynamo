@@ -167,7 +167,7 @@ pub struct HttpServiceConfig {
     #[builder(default = "false")]
     enable_tls: bool,
 
-    #[builder(default = "false")]
+    #[builder(default = "false", setter(custom))]
     enable_http2: bool,
 
     #[builder(default = "None")]

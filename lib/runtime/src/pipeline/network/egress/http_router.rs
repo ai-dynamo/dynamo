@@ -26,33 +26,6 @@ use tracing::Instrument;
 /// Default timeout for HTTP requests (ack only, not full response)
 const DEFAULT_HTTP_REQUEST_TIMEOUT_SECS: u64 = 5;
 
-<<<<<<< Updated upstream
-/// HTTP/2 request plane client
-pub struct HttpRequestClient {
-    client: reqwest::Client,
-    request_timeout: Duration,
-}
-
-impl HttpRequestClient {
-    /// Create a new HTTP request client with HTTP/2
-    pub fn new() -> Result<Self> {
-        Self::with_timeout(Duration::from_secs(DEFAULT_HTTP_REQUEST_TIMEOUT_SECS))
-    }
-
-    /// Create a new HTTP request client with custom timeout
-    /// Uses HTTP/2 with prior knowledge to avoid ALPN negotiation overhead
-    pub fn with_timeout(timeout: Duration) -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .pool_max_idle_per_host(50) // Connection pooling
-            .timeout(timeout)
-            .http2_prior_knowledge() // Force HTTP/2 without negotiation
-            .build()?;
-
-        Ok(Self {
-            client,
-            request_timeout: timeout,
-        })
-=======
 /// HTTP/2 Performance Configuration Constants
 const DEFAULT_MAX_FRAME_SIZE: u32 = 1024 * 1024; // 1MB frame size for better throughput
 const DEFAULT_MAX_CONCURRENT_STREAMS: u32 = 1000; // Allow more concurrent streams
@@ -95,50 +68,50 @@ impl Http2Config {
     pub fn from_env() -> Self {
         let mut config = Self::default();
 
-        if let Ok(val) = std::env::var("DYN_HTTP2_MAX_FRAME_SIZE") {
-            if let Ok(size) = val.parse::<u32>() {
-                config.max_frame_size = size;
-            }
+        if let Ok(val) = std::env::var("DYN_HTTP2_MAX_FRAME_SIZE")
+            && let Ok(size) = val.parse::<u32>()
+        {
+            config.max_frame_size = size;
         }
 
-        if let Ok(val) = std::env::var("DYN_HTTP2_MAX_CONCURRENT_STREAMS") {
-            if let Ok(streams) = val.parse::<u32>() {
-                config.max_concurrent_streams = streams;
-            }
+        if let Ok(val) = std::env::var("DYN_HTTP2_MAX_CONCURRENT_STREAMS")
+            && let Ok(streams) = val.parse::<u32>()
+        {
+            config.max_concurrent_streams = streams;
         }
 
-        if let Ok(val) = std::env::var("DYN_HTTP2_POOL_MAX_IDLE_PER_HOST") {
-            if let Ok(pool_size) = val.parse::<usize>() {
-                config.pool_max_idle_per_host = pool_size;
-            }
+        if let Ok(val) = std::env::var("DYN_HTTP2_POOL_MAX_IDLE_PER_HOST")
+            && let Ok(pool_size) = val.parse::<usize>()
+        {
+            config.pool_max_idle_per_host = pool_size;
         }
 
-        if let Ok(val) = std::env::var("DYN_HTTP2_POOL_IDLE_TIMEOUT_SECS") {
-            if let Ok(timeout) = val.parse::<u64>() {
-                config.pool_idle_timeout = Duration::from_secs(timeout);
-            }
+        if let Ok(val) = std::env::var("DYN_HTTP2_POOL_IDLE_TIMEOUT_SECS")
+            && let Ok(timeout) = val.parse::<u64>()
+        {
+            config.pool_idle_timeout = Duration::from_secs(timeout);
         }
 
-        if let Ok(val) = std::env::var("DYN_HTTP2_KEEP_ALIVE_INTERVAL_SECS") {
-            if let Ok(interval) = val.parse::<u64>() {
-                config.keep_alive_interval = Duration::from_secs(interval);
-            }
+        if let Ok(val) = std::env::var("DYN_HTTP2_KEEP_ALIVE_INTERVAL_SECS")
+            && let Ok(interval) = val.parse::<u64>()
+        {
+            config.keep_alive_interval = Duration::from_secs(interval);
         }
 
-        if let Ok(val) = std::env::var("DYN_HTTP2_KEEP_ALIVE_TIMEOUT_SECS") {
-            if let Ok(timeout) = val.parse::<u64>() {
-                config.keep_alive_timeout = Duration::from_secs(timeout);
-            }
+        if let Ok(val) = std::env::var("DYN_HTTP2_KEEP_ALIVE_TIMEOUT_SECS")
+            && let Ok(timeout) = val.parse::<u64>()
+        {
+            config.keep_alive_timeout = Duration::from_secs(timeout);
         }
 
         if let Ok(val) = std::env::var("DYN_HTTP2_ADAPTIVE_WINDOW") {
             config.adaptive_window = val.parse().unwrap_or(DEFAULT_HTTP2_ADAPTIVE_WINDOW);
         }
 
-        if let Ok(val) = std::env::var("DYN_HTTP_REQUEST_TIMEOUT") {
-            if let Ok(timeout) = val.parse::<u64>() {
-                config.request_timeout = Duration::from_secs(timeout);
-            }
+        if let Ok(val) = std::env::var("DYN_HTTP_REQUEST_TIMEOUT")
+            && let Ok(timeout) = val.parse::<u64>()
+        {
+            config.request_timeout = Duration::from_secs(timeout);
         }
 
         config
@@ -160,8 +133,10 @@ impl HttpRequestClient {
     /// Create a new HTTP request client with custom timeout (legacy method)
     /// Uses HTTP/2 with prior knowledge to avoid ALPN negotiation overhead
     pub fn with_timeout(timeout: Duration) -> Result<Self> {
-        let mut config = Http2Config::default();
-        config.request_timeout = timeout;
+        let config = Http2Config {
+            request_timeout: timeout,
+            ..Http2Config::default()
+        };
         Self::with_config(config)
     }
 
@@ -187,26 +162,16 @@ impl HttpRequestClient {
         let client = builder.build()?;
 
         Ok(Self { client, config })
->>>>>>> Stashed changes
     }
 
     /// Create from environment configuration
     pub fn from_env() -> Result<Self> {
-<<<<<<< Updated upstream
-        let timeout_secs = std::env::var("DYN_HTTP_REQUEST_TIMEOUT")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(DEFAULT_HTTP_REQUEST_TIMEOUT_SECS);
-
-        Self::with_timeout(Duration::from_secs(timeout_secs))
-=======
         Self::with_config(Http2Config::from_env())
     }
 
     /// Get the current HTTP/2 configuration
     pub fn config(&self) -> &Http2Config {
         &self.config
->>>>>>> Stashed changes
     }
 }
 
@@ -433,20 +398,19 @@ mod tests {
     fn test_http_client_with_custom_timeout() {
         let client = HttpRequestClient::with_timeout(Duration::from_secs(10));
         assert!(client.is_ok());
-<<<<<<< Updated upstream
-        assert_eq!(client.unwrap().request_timeout, Duration::from_secs(10));
-=======
         assert_eq!(client.unwrap().config.request_timeout, Duration::from_secs(10));
     }
 
     #[test]
     fn test_http2_config_from_env() {
         // Set environment variables
-        std::env::set_var("DYN_HTTP2_MAX_FRAME_SIZE", "2097152"); // 2MB
-        std::env::set_var("DYN_HTTP2_MAX_CONCURRENT_STREAMS", "2000");
-        std::env::set_var("DYN_HTTP2_POOL_MAX_IDLE_PER_HOST", "200");
-        std::env::set_var("DYN_HTTP2_KEEP_ALIVE_INTERVAL_SECS", "60");
-        std::env::set_var("DYN_HTTP2_ADAPTIVE_WINDOW", "false");
+        unsafe {
+            std::env::set_var("DYN_HTTP2_MAX_FRAME_SIZE", "2097152"); // 2MB
+            std::env::set_var("DYN_HTTP2_MAX_CONCURRENT_STREAMS", "2000");
+            std::env::set_var("DYN_HTTP2_POOL_MAX_IDLE_PER_HOST", "200");
+            std::env::set_var("DYN_HTTP2_KEEP_ALIVE_INTERVAL_SECS", "60");
+            std::env::set_var("DYN_HTTP2_ADAPTIVE_WINDOW", "false");
+        }
 
         let config = Http2Config::from_env();
 
@@ -457,11 +421,13 @@ mod tests {
         assert_eq!(config.adaptive_window, false);
 
         // Clean up
-        std::env::remove_var("DYN_HTTP2_MAX_FRAME_SIZE");
-        std::env::remove_var("DYN_HTTP2_MAX_CONCURRENT_STREAMS");
-        std::env::remove_var("DYN_HTTP2_POOL_MAX_IDLE_PER_HOST");
-        std::env::remove_var("DYN_HTTP2_KEEP_ALIVE_INTERVAL_SECS");
-        std::env::remove_var("DYN_HTTP2_ADAPTIVE_WINDOW");
+        unsafe {
+            std::env::remove_var("DYN_HTTP2_MAX_FRAME_SIZE");
+            std::env::remove_var("DYN_HTTP2_MAX_CONCURRENT_STREAMS");
+            std::env::remove_var("DYN_HTTP2_POOL_MAX_IDLE_PER_HOST");
+            std::env::remove_var("DYN_HTTP2_KEEP_ALIVE_INTERVAL_SECS");
+            std::env::remove_var("DYN_HTTP2_ADAPTIVE_WINDOW");
+        }
     }
 
     #[test]
@@ -485,7 +451,6 @@ mod tests {
         assert_eq!(client.config.max_concurrent_streams, 500);
         assert_eq!(client.config.pool_max_idle_per_host, 75);
         assert_eq!(client.config.request_timeout, Duration::from_secs(8));
->>>>>>> Stashed changes
     }
 
     #[tokio::test]
@@ -768,8 +733,6 @@ mod tests {
         // Cleanup
         server_handle.abort();
     }
-<<<<<<< Updated upstream
-=======
 
     #[tokio::test]
     async fn test_http2_performance_benchmark() {
@@ -852,7 +815,7 @@ mod tests {
         let start_time = Instant::now();
         let mut handles = vec![];
 
-        for i in 0..num_requests {
+        for _ in 0..num_requests {
             let client = client.clone();
             let payload = payload.clone();
             let addr = addr;
@@ -903,5 +866,4 @@ mod tests {
         // Cleanup
         server_handle.abort();
     }
->>>>>>> Stashed changes
 }
