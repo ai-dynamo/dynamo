@@ -37,7 +37,7 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
             config = config_modifier.load_default_config()
 
             logger.info(
-                f"Saving generated DGD config file to {args.output_dir}/disagg_config.yaml"
+                f"Saving generated disagg DGD config for profiling to {args.output_dir}/disagg_config.yaml"
             )
         else:
             with open(args.config, "r") as f:
