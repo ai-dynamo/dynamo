@@ -132,7 +132,7 @@ class LLMServerManager:
             os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
             "--block-size",
             "16",
-            "--max-seq-len",
+            "--max-model-len",
             "8000",  # required to fit on L4 GPU when using 8b model
             "--connector",
             "nixl",
@@ -148,7 +148,7 @@ class LLMServerManager:
             "--is-prefill-worker",
             "--block-size",
             "16",
-            "--max-seq-len",
+            "--max-model-len",
             "8000",  # required to fit on L4 GPU when using 8b model
             "--connector",
             "kvbm",

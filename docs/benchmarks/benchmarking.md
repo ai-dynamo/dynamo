@@ -61,7 +61,7 @@ Just quick testing/comparison? Client-side.
 
 ## What This Tool Does
 
-The framework is a Python-based wrapper around `genai-perf` that:
+The framework is a Python-based wrapper around `aiperf` that:
 - Benchmarks any HTTP endpoints
 - Runs concurrency sweeps across configurable load levels
 - Generates comparison plots with your custom labels
@@ -70,7 +70,7 @@ The framework is a Python-based wrapper around `genai-perf` that:
 
 **Default sequence lengths**: Input: 2000 tokens, Output: 256 tokens (configurable with `--isl` and `--osl`)
 
-**Important**: The `--model` parameter configures GenAI-Perf for benchmarking and provides logging context. The default `--model` value in the benchmarking script is `Qwen/Qwen3-0.6B`, but it must match the model deployed at the endpoint(s).
+**Important**: The `--model` parameter configures AIPerf for benchmarking and provides logging context. The default `--model` value in the benchmarking script is `Qwen/Qwen3-0.6B`, but it must match the model deployed at the endpoint(s).
 
 ---
 
@@ -165,7 +165,7 @@ REQUIRED:
 
 OPTIONS:
   -h, --help                    Show help message and examples
-  -m, --model MODEL             Model name for GenAI-Perf configuration and logging (default: Qwen/Qwen3-0.6B)
+  -m, --model MODEL             Model name for AIPerf configuration and logging (default: Qwen/Qwen3-0.6B)
                                 NOTE: This must match the model deployed at the endpoint
   -i, --isl LENGTH              Input sequence length (default: 2000)
   -s, --std STDDEV              Input sequence standard deviation (default: 10)
@@ -179,14 +179,14 @@ OPTIONS:
 - **Benchmark Name**: The benchmark name becomes the label in plots and results
 - **Name Restrictions**: Names can only contain letters, numbers, hyphens, and underscores. The name `plots` is reserved.
 - **Port-Forwarding**: You must have an exposed endpoint before benchmarking
-- **Model Parameter**: The `--model` parameter configures GenAI-Perf for testing and logging, and must match the model deployed at the endpoint
+- **Model Parameter**: The `--model` parameter configures AIPerf for testing and logging, and must match the model deployed at the endpoint
 - **Sequential Benchmarking**: For comparative benchmarks, deploy and benchmark each configuration separately
 
 ### What Happens During Benchmarking
 
 The Python benchmarking module:
 1. **Connects** to your port-forwarded endpoint
-2. **Benchmarks** using GenAI-Perf at various concurrency levels (default: 1, 2, 5, 10, 50, 100, 250)
+2. **Benchmarks** using AIPerf at various concurrency levels (default: 1, 2, 5, 10, 50, 100, 250)
 3. **Measures** key metrics: latency, throughput, time-to-first-token
 4. **Saves** results to an output directory organized by benchmark name
 
@@ -283,7 +283,7 @@ results/                         # Client-side: ./benchmarks/results/ or custom 
 │   └── avg_time_to_first_token_vs_concurrency.png
 ├── <your-benchmark-name>/       # Results for your benchmark (uses your custom name)
 │   ├── c1/                      # Concurrency level 1
-│   │   └── profile_export_genai_perf.json
+│   │   └── profile_export_aiperf.json
 │   ├── c2/                      # Concurrency level 2
 │   ├── c5/                      # Concurrency level 5
 │   └── ...                      # Other concurrency levels (10, 50, 100, 250)
@@ -301,9 +301,9 @@ results/
 ```
 
 Each concurrency directory contains:
-- **`profile_export_genai_perf.json`** - Structured metrics from GenAI-Perf
-- **`profile_export_genai_perf.csv`** - CSV format metrics from GenAI-Perf
-- **`profile_export.json`** - Raw GenAI-Perf results
+- **`profile_export_aiperf.json`** - Structured metrics from AIPerf
+- **`profile_export_aiperf.csv`** - CSV format metrics from AIPerf
+- **`profile_export.json`** - Raw AIPerf results
 - **`inputs.json`** - Generated test inputs
 
 ---
@@ -326,7 +326,7 @@ The server-side benchmarking solution:
 ## Prerequisites
 
 1. **Kubernetes cluster** with NVIDIA GPUs and Dynamo namespace setup (see [Dynamo Cloud/Platform docs](/docs/kubernetes/README.md))
-2. **Storage and service account** PersistentVolumeClaim and service account configured with appropriate permissions (see [deploy/utils README](../../deploy/utils/README.md))
+2. **Storage** PersistentVolumeClaim configured with appropriate permissions (see [deploy/utils README](../../deploy/utils/README.md))
 3. **Docker image** containing the Dynamo benchmarking tools
 
 ## Quick Start
@@ -457,7 +457,7 @@ Results are stored in `/data/results` and follow the same structure as client-si
 /data/results/
 └── <benchmark-name>/                # Results for your benchmark name
     ├── c1/                          # Concurrency level 1
-    │   └── profile_export_genai_perf.json
+    │   └── profile_export_aiperf.json
     ├── c2/                          # Concurrency level 2
     └── ...                          # Other concurrency levels
 ```
@@ -489,7 +489,6 @@ kubectl describe pod <pod-name> -n $NAMESPACE
 ### Common Issues
 
 1. **Service not found**: Ensure your DynamoGraphDeployment frontend service is running
-2. **Service account permissions**: Verify `dynamo-sa` has necessary RBAC permissions
 3. **PVC access**: Check that `dynamo-pvc` is properly configured and accessible
 4. **Image pull issues**: Ensure the Docker image is accessible from the cluster
 5. **Resource constraints**: Adjust resource limits if the job is being evicted
@@ -499,9 +498,6 @@ kubectl describe pod <pod-name> -n $NAMESPACE
 ```bash
 # Check PVC status
 kubectl get pvc dynamo-pvc -n $NAMESPACE
-
-# Verify service account
-kubectl get sa dynamo-sa -n $NAMESPACE
 
 # Check service endpoints
 kubectl get svc -n $NAMESPACE
@@ -516,7 +512,7 @@ kubectl get endpoints "$SVC_NAME" -n "$NAMESPACE"
 
 ## Customize Benchmarking Behavior
 
-The built-in Python workflow connects to endpoints, benchmarks with genai-perf, and generates plots. If you want to modify the behavior:
+The built-in Python workflow connects to endpoints, benchmarks with aiperf, and generates plots. If you want to modify the behavior:
 
 1. **Extend the workflow**: Modify `benchmarks/utils/workflow.py` to add custom deployment types or metrics collection
 

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::protocols::tensor;
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ModelRuntimeConfig {
     pub total_kv_blocks: Option<u64>,
 
@@ -18,6 +18,10 @@ pub struct ModelRuntimeConfig {
     pub tool_call_parser: Option<String>,
 
     pub reasoning_parser: Option<String>,
+
+    /// Total number of data parallel ranks for this worker (1 if DP not enabled)
+    #[serde(default = "default_data_parallel_size")]
+    pub data_parallel_size: u32,
 
     /// Mapping of engine-specific runtime configs
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -32,6 +36,25 @@ pub struct ModelRuntimeConfig {
     // doesn't provide JSON parsing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tensor_model_config: Option<tensor::TensorModelConfig>,
+}
+
+const fn default_data_parallel_size() -> u32 {
+    1
+}
+
+impl Default for ModelRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            total_kv_blocks: None,
+            max_num_seqs: None,
+            max_num_batched_tokens: None,
+            tool_call_parser: None,
+            reasoning_parser: None,
+            data_parallel_size: default_data_parallel_size(),
+            runtime_data: HashMap::new(),
+            tensor_model_config: None,
+        }
+    }
 }
 
 impl ModelRuntimeConfig {

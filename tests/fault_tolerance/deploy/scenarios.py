@@ -223,11 +223,44 @@ def _create_deployments_for_backend(backend):
     return deployments
 
 
+def _create_moe_deployments_for_backend(backend="vllm"):
+    """Create MoE-specific deployment configurations for DeepSeek-V2-Lite."""
+    deployments = {}
+
+    # Only test tp=1, dp=2 for now
+    tp_size = 1
+    dp_replicas = (
+        2  # Note: this is handled internally by vLLM with --data-parallel-size
+    )
+
+    template_dir = "tests/fault_tolerance/deploy/templates"
+    yaml_files = {
+        "agg": f"{template_dir}/{backend}/moe_agg.yaml",
+        "disagg": f"{template_dir}/{backend}/moe_disagg.yaml",
+    }
+
+    for deploy_type in ["agg", "disagg"]:
+        scenario_name = f"{backend}-moe-{deploy_type}-tp-{tp_size}-dp-{dp_replicas}"
+        deployment = {
+            "spec": DeploymentSpec(yaml_files[deploy_type]),
+            "backend": backend,
+            "model": "deepseek-ai/DeepSeek-V2-Lite",
+            "is_moe": True,
+        }
+
+        deployments[scenario_name] = deployment
+
+    return deployments
+
+
 # Create all deployment specifications
 deployment_specs = {}
 deployment_specs.update(_create_deployments_for_backend("vllm"))
 deployment_specs.update(_create_deployments_for_backend("sglang"))
 deployment_specs.update(_create_deployments_for_backend("trtllm"))
+
+# Add MoE deployments for vLLM only
+deployment_specs.update(_create_moe_deployments_for_backend("vllm"))
 
 
 # Each failure scenaro contains a list of failure injections
@@ -378,6 +411,18 @@ def create_legacy_load(
 # Default load configuration (using AI-Perf)
 load = Load()
 
+# MoE-specific load configuration
+moe_load = Load(
+    clients=3,  # Fewer clients for MoE testing
+    requests_per_client=30,  # Reduced for MoE complexity
+    input_token_length=100,
+    output_token_length=100,
+    max_retries=3,
+    sla=None,
+    client_type="aiperf",
+    max_request_rate=0.5,  # Lower rate for MoE
+)
+
 # model = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 
 model = None
@@ -396,6 +441,9 @@ for backend in ["vllm", "sglang", "trtllm"]:
 
 for deployment_name, deployment_info in deployment_specs.items():
     backend = deployment_info["backend"]
+
+    # Check if this is an MoE deployment
+    is_moe = deployment_info.get("is_moe", False)
 
     # Determine deployment type from deployment name
     deploy_type = (
@@ -419,10 +467,17 @@ for deployment_name, deployment_info in deployment_specs.items():
             continue
 
         scenario_name = f"{deployment_name}-{failure_name}"
+
+        # Use MoE-specific load configuration if it's an MoE model
+        load_config = moe_load if is_moe else load
+
+        # Get model from deployment info or use the global model
+        scenario_model = deployment_info.get("model", model)
+
         scenarios[scenario_name] = Scenario(
             deployment=deployment_info["spec"],
-            load=load,
+            load=load_config,
             failures=failure,
-            model=model,
+            model=scenario_model,
             backend=backend,
         )

@@ -303,9 +303,6 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
-        --release-build)
-            RELEASE_BUILD=true
-            ;;
         --enable-kvbm)
             ENABLE_KVBM=true
             ;;
@@ -591,6 +588,13 @@ if [[ $TARGET == "local-dev" ]]; then
     TARGET_STR="--target dev"
 fi
 
+# DEPRECATION: The following build args are not currently used by any Dockerfile and will be removed soon:
+#   - FRAMEWORK
+#   - VLLM_FRAMEWORK (or TRTLLM_FRAMEWORK, SGLANG_FRAMEWORK, etc.)
+#   - VERSION
+#   - PYTHON_PACKAGE_VERSION
+#   - HF_TOKEN
+
 # BUILD DEV IMAGE
 
 BUILD_ARGS+=" --build-arg BASE_IMAGE=$BASE_IMAGE --build-arg BASE_IMAGE_TAG=$BASE_IMAGE_TAG --build-arg FRAMEWORK=$FRAMEWORK --build-arg ${FRAMEWORK}_FRAMEWORK=1 --build-arg VERSION=$VERSION --build-arg PYTHON_PACKAGE_VERSION=$PYTHON_PACKAGE_VERSION"
@@ -698,10 +702,6 @@ fi
 if [ -n "${HF_TOKEN}" ]; then
     BUILD_ARGS+=" --build-arg HF_TOKEN=${HF_TOKEN} "
 fi
-if [  ! -z ${RELEASE_BUILD} ]; then
-    echo "Performing a release build!"
-    BUILD_ARGS+=" --build-arg RELEASE_BUILD=${RELEASE_BUILD} "
-fi
 
 if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
     echo "Forcing enable_kvbm to true in ${FRAMEWORK} image build"
@@ -752,11 +752,27 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         echo "======================================"
         echo "Starting Build 1: Base Image"
         echo "======================================"
+        # Build 1 (container/Dockerfile) does NOT use (will be removed soon):
+        #   - FRAMEWORK
+        #   - VLLM_FRAMEWORK (or TRTLLM_FRAMEWORK, SGLANG_FRAMEWORK, etc.)
+        #   - VERSION
+        #   - PYTHON_PACKAGE_VERSION
+        #   - HF_TOKEN
+        #   - MAX_JOBS
         $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
         # Start framework build
         echo "======================================"
         echo "Starting Build 2: Framework Image"
         echo "======================================"
+        # Build 2 (container/Dockerfile.vllm or .trtllm, .sglang) does NOT use (will be removed soon):
+        #   - FRAMEWORK
+        #   - VLLM_FRAMEWORK (or TRTLLM_FRAMEWORK, SGLANG_FRAMEWORK, etc.)
+        #   - VERSION
+        #   - PYTHON_PACKAGE_VERSION
+        #   - HF_TOKEN
+        #   - NIXL_REF
+        #   - NIXL_UCX_REF
+        #   - ENABLE_KVBM
         BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
         $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
     else

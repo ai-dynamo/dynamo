@@ -107,7 +107,6 @@ impl EndpointConfigBuilder {
         if let Some(stats_handler) = stats_handler {
             handler_map
                 .lock()
-                .unwrap()
                 .insert(endpoint.subject_to(lease_id), stats_handler);
         }
 
@@ -139,7 +138,7 @@ impl EndpointConfigBuilder {
                 transport: TransportType::NatsTcp(subject.clone()),
             };
             tracing::debug!(endpoint_name = %endpoint_name, "Registering endpoint health check target");
-            let guard = system_health.lock().unwrap();
+            let guard = system_health.lock();
             guard.register_health_check_target(
                 &endpoint_name,
                 instance,
@@ -229,9 +228,9 @@ impl EndpointConfigBuilder {
 
         // client.register_service()
         let info = Instance {
-            component: component_name,
-            endpoint: endpoint_name,
-            namespace: namespace_name,
+            component: component_name.clone(),
+            endpoint: endpoint_name.clone(),
+            namespace: namespace_name.clone(),
             instance_id: lease_id,
             transport: TransportType::NatsTcp(subject),
         };
@@ -243,9 +242,16 @@ impl EndpointConfigBuilder {
                 .kv_create(&etcd_path, info, Some(lease_id))
                 .await
         {
-            tracing::error!("Failed to register discoverable service: {:?}", e);
+            tracing::error!(
+                component_name,
+                endpoint_name,
+                error = %e,
+                "Unable to register service for discovery"
+            );
             cancel_token.cancel();
-            return Err(error!("Failed to register discoverable service"));
+            return Err(error!(
+                "Unable to register service for discovery. Check discovery service status"
+            ));
         }
         task.await??;
 
