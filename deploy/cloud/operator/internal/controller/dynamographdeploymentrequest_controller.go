@@ -882,17 +882,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 
 		// Determine profiler image
-		// Try to get it from the config first, then fall back to operator's ProfilerImage
 		imageName := r.ProfilerImage
-		if engineConfig, hasEngine := config["engine"].(map[string]interface{}); hasEngine {
-			if image, hasImage := engineConfig["profiler_image"].(string); hasImage && image != "" {
-				imageName = image
-			}
-		}
 		if imageName == "" {
-			return nil, false, fmt.Errorf("profiler image not configured: either set profilingConfig.config.engine.profiler_image or configure dynamo-operator.dynamo.dgdr.profilerImage in Helm values")
+			return nil, false, fmt.Errorf("profiler image not configured: configure dynamo-operator.dynamo.dgdr.profilerImage in Helm values")
 		}
-
 		logger.Info("Using profiler image", "image", imageName)
 
 		profilerContainer := corev1.Container{
