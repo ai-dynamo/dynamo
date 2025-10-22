@@ -19,7 +19,10 @@ from urllib.parse import urlparse
 import requests
 
 # FILTERING CONFIGURATION - Process all jobs except excluded ones
-EXCLUDED_JOB_NAMES = ["Upload Workflow Metrics"]
+EXCLUDED_JOB_NAMES = [
+    "Upload Workflow Metrics",  # legacy/explicit name
+    "upload-workflow-metrics",  # job id used across workflows
+]
 FRAMEWORK_IMAGE_BUILD_JOBS = ["vllm", "sglang", "trtllm"]
 
 # NEW STANDARDIZED FIELD SCHEMA - Using consistent prefixes for OpenSearch mapping
@@ -571,7 +574,7 @@ class WorkflowMetricsUploader:
             if jobs_processed < total_jobs:
                 excluded_count = total_jobs - jobs_processed
                 print(
-                    f"   ℹ️  Note: {excluded_count} job(s) were excluded (likely the metrics upload job itself)"
+                    f"   Info: {excluded_count} job(s) were excluded (likely the metrics upload job itself)"
                 )
         except Exception as e:
             sanitized_error = self.handle_upload_error(e, "job/step metrics upload")
