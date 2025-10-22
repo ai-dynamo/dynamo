@@ -177,7 +177,7 @@ class PrefillHandler(HandlerBase):
                         if params_dict is not None:
                             # Reconstruct DisaggregatedParams object from dict
                             ep_disaggregated_params = DisaggregatedParams(**params_dict)
-                            logging.info("PREFILL WORKER: ✅ Received ep_disaggregated_params with multimodal handles")
+                            logging.info("PREFILL WORKER: Received ep_disaggregated_params with multimodal handles")
                             logging.info(f"PREFILL WORKER: Input ep_disaggregated_params.multimodal_embedding_handles = {getattr(ep_disaggregated_params, 'multimodal_embedding_handles', 'NOT FOUND')}")
                             ep_disaggregated_params.request_type = "context_only"
                             
@@ -187,18 +187,18 @@ class PrefillHandler(HandlerBase):
                                 request["_epd_processed_prompt"] = encode_response["processed_prompt"]
                                 logging.info(f"PREFILL WORKER: Stored processed prompt from encoder: {request['_epd_processed_prompt']}")
                             else:
-                                logging.warning("PREFILL WORKER: ⚠️ No processed_prompt in encode_response")
+                                logging.warning("PREFILL WORKER: No processed_prompt in encode_response")
                             
                             # Store prompt_token_ids from encoder for consistency with decode worker
                             if "prompt_token_ids" in encode_response and encode_response["prompt_token_ids"]:
                                 request["_epd_prompt_token_ids"] = encode_response["prompt_token_ids"]
                                 logging.info(f"PREFILL WORKER: Stored prompt_token_ids from encoder (length={len(encode_response['prompt_token_ids'])})")
                             else:
-                                logging.warning("PREFILL WORKER: ⚠️ No prompt_token_ids in encode_response")
+                                logging.warning("PREFILL WORKER: No prompt_token_ids in encode_response")
                         else:
-                            logging.warning("PREFILL WORKER: ⚠️ Received None ep_disaggregated_params from encode worker")
+                            logging.warning("PREFILL WORKER: Received None ep_disaggregated_params from encode worker")
                     else:
-                        logging.info("PREFILL WORKER: ❌ Did not receive ep_disaggregated_params from encode worker")
+                        logging.info("PREFILL WORKER: Did not receive ep_disaggregated_params from encode worker")
         # Normal flow: Generate the prefill response locally with embeddings
         prefill_request = copy.deepcopy(request)
         prefill_response = None
