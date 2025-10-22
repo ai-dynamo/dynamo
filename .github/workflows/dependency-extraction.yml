@@ -114,6 +114,13 @@ jobs:
             cp "$OUTPUT_PATH" .github/reports/dependency_versions_latest.csv
             echo "TIMESTAMP=${TIMESTAMP}" >> $GITHUB_ENV
             echo "OUTPUT_FILE=dependency_versions_latest.csv" >> $GITHUB_ENV
+            
+            # Generate FRAMEWORK_VERSIONS.md for easy reference
+            python3 .github/scripts/dependency-extraction/generate_framework_versions.py \
+              --csv .github/reports/dependency_versions_latest.csv \
+              --output FRAMEWORK_VERSIONS.md
+            
+            echo "✅ Generated FRAMEWORK_VERSIONS.md"
 
           else
             # Release mode: versioned snapshot
@@ -134,7 +141,7 @@ jobs:
         if: steps.mode.outputs.mode == 'nightly' || steps.check_exists.outputs.exists == 'false'
         run: |
           if [[ "${{ steps.mode.outputs.mode }}" == "nightly" ]]; then
-            CHANGED_FILES=".github/reports/*_latest.csv"
+            CHANGED_FILES=".github/reports/*_latest.csv FRAMEWORK_VERSIONS.md"
           else
             CHANGED_FILES=".github/reports/releases/dependency_versions_v${{ steps.version.outputs.version }}.csv"
           fi
@@ -193,10 +200,11 @@ jobs:
             ### 🗑️ Removed Dependencies
             ${{ steps.check_changes.outputs.removed_list }}
 
-            ### 📋 Files Updated
-            - ✅ `.github/reports/dependency_versions_latest.csv` - Latest dependency snapshot (includes all dependencies)
+                   ### 📋 Files Updated
+                   - ✅ `.github/reports/dependency_versions_latest.csv` - Latest dependency snapshot (includes all dependencies)
+                   - ✅ `FRAMEWORK_VERSIONS.md` - Auto-generated framework versions document (critical deps only)
 
-            > **Note:** Timestamped versions are stored in GitHub Artifacts (90-day retention) to avoid repo clutter.
+                   > **Note:** Timestamped versions are stored in GitHub Artifacts (90-day retention) to avoid repo clutter.
 
             ### ✔️ Review Checklist
             - [ ] Review new dependencies for security/licensing concerns
