@@ -251,7 +251,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     }
 
                     yield output
-                    break
             except asyncio.CancelledError:
                 # raise the error because we cannot migrate prefill requests
                 raise GeneratorExit(
