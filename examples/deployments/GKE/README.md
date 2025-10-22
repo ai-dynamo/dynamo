@@ -71,45 +71,9 @@ kubectl create secret generic hf-token-secret \
 
 ## Install Dynamo Kubernetes Platform
 
-### Path 1: Production Deployment (Selected)
+[See installation steps](/docs/kubernetes/installation_guide.md#overview)
 
-```bash
-# 1. Set environment
-export NAMESPACE=dynamo-cloud
-export RELEASE_VERSION=0.6.0 # any version of Dynamo 0.5.0+
-
-# 2. Install CRDs
-helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-${RELEASE_VERSION}.tgz
-helm install dynamo-crds dynamo-crds-${RELEASE_VERSION}.tgz \
-  --namespace default \
-  --wait \
-  --atomic
-
-# 3. Install Platform
-helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz
-helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE}
-```
-
-### Path 2: Custom Deployment
-
-```bash
-cd dynamo/deploy/cloud/helm
-
-# Install Custom Resource Definitions (CRDs)
-helm install dynamo-crds ./crds/ \
-  --namespace default \
-  --wait \
-  --atomic
-
-helm dep build ./platform/
-
-# Install platform
-helm install dynamo-platform ./platform/ \
-  --namespace ${NAMESPACE} \
-  --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
-  --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
-  --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret"
-```
+After installation, verify the installation:
 
 **Expected output**
 
@@ -120,8 +84,6 @@ dynamo-platform-dynamo-operator-controller-manager-69b9794fpgv9   2/2     Runnin
 dynamo-platform-etcd-0                                            1/1     Running            0          4m27s
 dynamo-platform-nats-0                                            2/2     Running            0          4m27s
 ```
-
-Other ways to install Dynamo platform could be found here https://github.com/ai-dynamo/dynamo/blob/main/docs/guides/dynamo_deploy/dynamo_cloud.md
 
 ## Deploy Inference Graph
 
