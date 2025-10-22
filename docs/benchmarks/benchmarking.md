@@ -326,7 +326,7 @@ The server-side benchmarking solution:
 ## Prerequisites
 
 1. **Kubernetes cluster** with NVIDIA GPUs and Dynamo namespace setup (see [Dynamo Cloud/Platform docs](/docs/kubernetes/README.md))
-2. **Storage and service account** PersistentVolumeClaim and service account configured with appropriate permissions (see [deploy/utils README](../../deploy/utils/README.md))
+2. **Storage** PersistentVolumeClaim configured with appropriate permissions (see [deploy/utils README](../../deploy/utils/README.md))
 3. **Docker image** containing the Dynamo benchmarking tools
 
 ## Quick Start
@@ -489,7 +489,6 @@ kubectl describe pod <pod-name> -n $NAMESPACE
 ### Common Issues
 
 1. **Service not found**: Ensure your DynamoGraphDeployment frontend service is running
-2. **Service account permissions**: Verify `dynamo-sa` has necessary RBAC permissions
 3. **PVC access**: Check that `dynamo-pvc` is properly configured and accessible
 4. **Image pull issues**: Ensure the Docker image is accessible from the cluster
 5. **Resource constraints**: Adjust resource limits if the job is being evicted
@@ -499,9 +498,6 @@ kubectl describe pod <pod-name> -n $NAMESPACE
 ```bash
 # Check PVC status
 kubectl get pvc dynamo-pvc -n $NAMESPACE
-
-# Verify service account
-kubectl get sa dynamo-sa -n $NAMESPACE
 
 # Check service endpoints
 kubectl get svc -n $NAMESPACE
