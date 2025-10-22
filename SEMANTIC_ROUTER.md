@@ -54,19 +54,19 @@ curl -s localhost:8999/v1/chat/completions \
 
 ### Classifier Comparison
 
-| Feature | MockClassifier | **fastText** (Recommended) | OnnxClassifier | CandleClassifier |
-|---------|---------------|----------------|----------------|------------------|
-| **Latency** | ~0ms | **<1ms** | 50-200ms | ~13s |
-| **Accuracy** | ~60% (heuristic) | **100% validation** | 90-95% | Biased |
-| **Setup Time** | < 1 min | **5 min** | 10+ min | 15+ min |
-| **Use Case** | Testing | **Production** | Heavy models | Experimental |
-| **Build** | default | `--features fasttext-classifier` | `--features onnx-classifier` | `--features candle-classifier` |
+| Feature | MockClassifier | **fastText** (Recommended) | CandleClassifier |
+|---------|---------------|----------------|------------------|
+| **Latency** | ~0ms | **<1ms** | ~13s |
+| **Accuracy** | ~60% (heuristic) | **100% validation** | Biased |
+| **Setup Time** | < 1 min | **5 min** | 15+ min |
+| **Use Case** | Testing | **Production** | Experimental |
+| **Build** | default | `--features fasttext-classifier` | `--features candle-classifier` |
 
 ## Quick Start
 
 ### Option A: Testing with MockClassifier (Recommended for Development)
 
-The MockClassifier allows you to test the routing architecture without ONNX dependencies. Perfect for development, CI/CD, and validating the routing logic.
+The MockClassifier allows you to test the routing architecture without ML dependencies. Perfect for development, CI/CD, and validating the routing logic.
 
 #### 1. Configure Binary Routing
 
@@ -83,7 +83,7 @@ threshold_min_conf: 0.6
 **Terminal 1 - General Model:**
 ```bash
 export HF_TOKEN=<your_token>
-CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm \
+CUDA_VISIBLE_DEVICES=2 python -m dynamo.vllm \
   --model meta-llama/Meta-Llama-3.1-8B-Instruct \
   --port 8100
 ```
@@ -91,15 +91,15 @@ CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm \
 **Terminal 2 - Reasoning Model:**
 ```bash
 export HF_TOKEN=<your_token>
-CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm \
+CUDA_VISIBLE_DEVICES=3 python -m dynamo.vllm \
   --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --port 8101
 ```
 
-#### 3. Build and Start Frontend (Without ONNX)
+#### 3. Build and Start Frontend (Without ML Classifier)
 
 ```bash
-# Build without onnx-classifier feature (uses MockClassifier automatically)
+# Build without ML classifier features (uses MockClassifier automatically)
 cd /home/ubuntu/dynamo/lib/bindings/python
 maturin develop --uv
 
@@ -146,126 +146,11 @@ Test 4: Force routing with X-Dynamo-Routing: force...
 - All other queries → routes to general model
 - Simple, deterministic, perfect for testing routing logic
 
----
-
-### Option B: Production Setup with ONNX Classifier
-
-For production deployments with ML-based classification:
-
-#### 1. Export Model to ONNX
-
-Install requirements:
-```bash
-pip install transformers optimum[onnxruntime]
-```
-
-Export the model:
-```bash
-python scripts/export_reasoning_classifier.py ./reasoning-classifier-onnx
-```
-
-This downloads `CodeIsAbstract/ReasoningTextClassifier` from HuggingFace and exports it to ONNX format.
-
-#### 2. Configure Routing
-
-Create `semantic-router.yaml` (or use the binary config for simpler setup):
-
-```yaml
-# Binary classification configuration
-reasoning_model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-general_model: meta-llama/Meta-Llama-3.1-8B-Instruct
-abstain_onprem_model: meta-llama/Meta-Llama-3.1-8B-Instruct
-threshold_min_conf: 0.6
-```
-
-**Configuration Fields:**
-- `reasoning_model`: Model for queries requiring reasoning (e.g., math, logic proofs)
-- `general_model`: Model for simple queries (e.g., facts, definitions)
-- `abstain_onprem_model`: Fallback model when classifier confidence is below threshold
-- `threshold_min_conf`: Minimum confidence required (0.0-1.0)
-
-### 3. Start Backend Models
-
-**Terminal 1 - General Model:**
-```bash
-export HF_TOKEN=<your_token>
-CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm \
-  --model meta-llama/Meta-Llama-3.1-8B-Instruct \
-  --port 8100
-```
-
-**Terminal 2 - Reasoning Model:**
-```bash
-export HF_TOKEN=<your_token>
-CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm \
-  --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --port 8101
-```
-
-### 4. Build and Start Frontend with Routing
-
-Set environment variables:
-```bash
-export SEMROUTER_ENABLED=true
-export SEMROUTER_CONFIG=./semantic-router.yaml
-export SEMROUTER_MODEL_PATH=./reasoning-classifier-onnx/model.onnx
-export SEMROUTER_TOKENIZER_PATH=./reasoning-classifier-onnx/tokenizer.json
-export SEMROUTER_MAX_LENGTH=256  # Optional, defaults to 256
-```
-
-Build with ONNX classifier support:
-```bash
-cd /home/ubuntu/dynamo/lib/bindings/python
-maturin develop --uv --features onnx-classifier
-```
-
-Start the frontend:
-```bash
-cd /home/ubuntu/dynamo
-python -m dynamo.frontend --http-port 8999
-```
-
-### 5. Test Routing
-
-**Test reasoning query:**
-```bash
-curl -s localhost:8999/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -H 'X-Dynamo-Routing: auto' \
-  -d '{
-    "model": "router",
-    "messages": [{
-      "role": "user",
-      "content": "Prove that the square root of 2 is irrational. Show each step."
-    }],
-    "max_tokens": 256
-  }' | jq '.model'
-```
-
-**Expected output:** `deepseek-ai/DeepSeek-R1-Distill-Llama-8B`
-
-**Test general query:**
-```bash
-curl -s localhost:8999/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -H 'X-Dynamo-Routing: auto' \
-  -d '{
-    "model": "router",
-    "messages": [{
-      "role": "user",
-      "content": "What is the capital of France?"
-    }],
-    "max_tokens": 64
-  }' | jq '.model'
-```
-
-**Expected output:** `meta-llama/Meta-Llama-3.1-8B-Instruct`
-
 ## Architecture
 
 ### Classifier Backends
 
-The semantic router supports two classifier implementations:
+The semantic router supports three classifier implementations:
 
 #### MockClassifier (Development/Testing)
 - **Purpose**: Validate routing architecture without ML dependencies
@@ -277,20 +162,26 @@ The semantic router supports two classifier implementations:
   - CI/CD pipelines
   - Architecture validation
   - Quick prototyping
-- **Activation**: Automatically used when building without `--features onnx-classifier`
+- **Activation**: Automatically used when building without ML classifier features
 - **Configuration**: Same YAML format (binary or multi-class)
 
-#### OnnxClassifier (Production)
-- **Purpose**: ML-based classification for production
-- **Model**: CodeIsAbstract/ReasoningTextClassifier (ModernBERT-based)
-- **Accuracy**: 99.9% on test set
-- **Latency**: 5-20ms on CPU
-- **When to use**: Production deployments requiring accurate classification
-- **Activation**: Build with `--features onnx-classifier`
+#### FasttextClassifier (Production - Recommended)
+- **Purpose**: Lightweight ML-based classification for production
+- **Model**: Custom trained fastText model
+- **Accuracy**: 100% on validation set (Nemotron dataset)
+- **Latency**: <1ms on CPU
+- **When to use**: Production deployments requiring accurate and fast classification
+- **Activation**: Build with `--features fasttext-classifier`
+
+#### CandleClassifier (Experimental)
+- **Purpose**: Pure Rust ML classifier using HuggingFace models
+- **Model**: Any HuggingFace sequence classification model
+- **Latency**: ~13s on CPU (slow)
+- **When to use**: Experimental deployments, GPU inference
+- **Activation**: Build with `--features candle-classifier`
 - **Requirements**:
-  - ONNX model file (`model.onnx`)
-  - Tokenizer configuration (`tokenizer.json`)
-  - Environment variables set
+  - HuggingFace model ID (e.g., `CodeIsAbstract/ReasoningTextClassifier`)
+  - Environment variables: `SEMROUTER_MODEL_ID`, `SEMROUTER_DEVICE`
 
 ### Design Principles
 

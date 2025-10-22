@@ -2,9 +2,6 @@ use std::collections::HashMap;
 
 pub mod mock;
 
-#[cfg(feature = "onnx-classifier")]
-pub mod onnx;
-
 #[cfg(feature = "candle-classifier")]
 pub mod candle;
 

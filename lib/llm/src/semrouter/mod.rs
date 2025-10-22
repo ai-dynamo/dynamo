@@ -9,8 +9,6 @@ pub mod types;
 
 pub use classifier::Classifier;
 pub use classifier::mock::MockClassifier;
-#[cfg(feature = "onnx-classifier")]
-pub use classifier::onnx::OnnxClassifier;
 #[cfg(feature = "candle-classifier")]
 pub use classifier::candle::CandleClassifier;
 #[cfg(feature = "fasttext-classifier")]

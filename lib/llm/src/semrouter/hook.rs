@@ -9,9 +9,6 @@ use anyhow::{anyhow, Result};
 use std::sync::Arc;
 use tracing::debug;
 
-#[cfg(feature = "onnx-classifier")]
-use crate::semrouter::OnnxClassifier;
-
 #[cfg(feature = "candle-classifier")]
 use crate::semrouter::CandleClassifier;
 
@@ -28,40 +25,13 @@ impl SemRouter {
         Self { policy, classifier }
     }
 
-    /// Create a SemRouter from a config file using ONNX classifier
-    ///
-    /// Reads classifier configuration from environment variables:
-    /// - SEMROUTER_MODEL_PATH: Path to ONNX model file
-    /// - SEMROUTER_TOKENIZER_PATH: Path to tokenizer.json
-    /// - SEMROUTER_MAX_LENGTH: Optional max sequence length (default: 256)
-    #[cfg(feature = "onnx-classifier")]
-    pub fn from_config(config_path: impl AsRef<std::path::Path>) -> Result<Self> {
-        let policy_config = PolicyConfig::load(config_path)?;
-        let policy = CategoryPolicy::new(policy_config);
-
-        // Load ONNX classifier from environment variables
-        let model_path = std::env::var("SEMROUTER_MODEL_PATH")
-            .map_err(|_| anyhow::anyhow!("SEMROUTER_MODEL_PATH environment variable not set"))?;
-        let tokenizer_path = std::env::var("SEMROUTER_TOKENIZER_PATH")
-            .map_err(|_| anyhow::anyhow!("SEMROUTER_TOKENIZER_PATH environment variable not set"))?;
-        let max_length = std::env::var("SEMROUTER_MAX_LENGTH")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(256);
-
-        let classifier = Arc::new(OnnxClassifier::new(&model_path, &tokenizer_path, max_length)?);
-
-        tracing::info!("Semantic router initialized with ONNX classifier");
-        Ok(Self::new(policy, classifier))
-    }
-
     /// Create a SemRouter from a config file using Candle classifier
     ///
     /// Reads classifier configuration from environment variables:
     /// - SEMROUTER_MODEL_ID: HuggingFace model ID (e.g., "CodeIsAbstract/ReasoningTextClassifier")
     /// - SEMROUTER_MAX_LENGTH: Optional max sequence length (default: 256)
     /// - SEMROUTER_DEVICE: Optional device ("cpu" or "cuda:0", default: "cpu")
-    #[cfg(all(feature = "candle-classifier", not(feature = "onnx-classifier")))]
+    #[cfg(feature = "candle-classifier")]
     pub fn from_config(config_path: impl AsRef<std::path::Path>) -> Result<Self> {
         let policy_config = PolicyConfig::load(config_path)?;
         let policy = CategoryPolicy::new(policy_config);
@@ -101,7 +71,7 @@ impl SemRouter {
     }
 
     /// Create a SemRouter from a config file (uses fastText classifier)
-    #[cfg(all(feature = "fasttext-classifier", not(any(feature = "onnx-classifier", feature = "candle-classifier"))))]
+    #[cfg(all(feature = "fasttext-classifier", not(feature = "candle-classifier")))]
     pub fn from_config(config_path: impl AsRef<std::path::Path>) -> Result<Self> {
         let policy_config = PolicyConfig::load(config_path)?;
         let policy = CategoryPolicy::new(policy_config);
@@ -117,7 +87,7 @@ impl SemRouter {
     }
 
     /// Create a SemRouter from a config file (uses MockClassifier when no ML classifier is available)
-    #[cfg(not(any(feature = "onnx-classifier", feature = "candle-classifier", feature = "fasttext-classifier")))]
+    #[cfg(not(any(feature = "candle-classifier", feature = "fasttext-classifier")))]
     pub fn from_config(config_path: impl AsRef<std::path::Path>) -> Result<Self> {
         use crate::semrouter::MockClassifier;
 
@@ -134,7 +104,7 @@ impl SemRouter {
 
     /// Create a SemRouter from a config file with a custom classifier
     ///
-    /// This allows using any classifier implementation, not just ONNX
+    /// This allows using any classifier implementation
     pub fn from_config_with_classifier(
         config_path: impl AsRef<std::path::Path>,
         classifier: Arc<dyn Classifier>,

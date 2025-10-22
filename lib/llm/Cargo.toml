@@ -24,9 +24,8 @@ testing-etcd = []
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
-onnx-classifier = ["dep:ort", "dep:ndarray-ort"]
 candle-classifier = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers"]
-fasttext-classifier = ["dep:fasttext"]
+fasttext-classifier = ["dep:fasttext", "dep:sha2"]
 
 [[bench]]
 name = "tokenizer"
@@ -103,10 +102,6 @@ ndarray = { workspace = true, optional = true }
 nix = { version = "0.26", optional = true }
 
 # semantic router classifiers
-# ONNX (currently blocked on dependency issues)
-ort = { version = "2.0.0-rc.10", optional = true, features = ["ndarray", "copy-dylibs", "download-binaries"] }
-ndarray-ort = { package = "ndarray", version = "0.15", optional = true }
-
 # Candle (recommended - pure Rust, direct HuggingFace loading)
 candle-core = { version = "0.9.1", optional = true }
 candle-nn = { version = "0.9.1", optional = true }
@@ -115,6 +110,7 @@ candle-transformers = { version = "0.9.1", optional = true }
 
 # fastText (lightweight, blazing fast)
 fasttext = { version = "0.7", optional = true }
+sha2 = { version = "0.10", optional = true }
 
 # protocols
 unicode-segmentation = "1.12"
