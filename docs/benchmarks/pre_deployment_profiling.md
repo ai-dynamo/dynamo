@@ -217,7 +217,7 @@ If you see `ErrImagePull` or `ImagePullBackOff` errors with 401 unauthorized mes
 
 2. Verify the service account was created with the image pull secret:
   ```bash
-  kubectl get serviceaccount dynamo-sa -n $NAMESPACE -o yaml
+  kubectl get serviceaccount dgdr-profiling-job -n $NAMESPACE -o yaml
    ```
 
 3. The service account should show `imagePullSecrets` containing `nvcr-imagepullsecret`.

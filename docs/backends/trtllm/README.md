@@ -228,6 +228,20 @@ python3 -m dynamo.trtllm ... --migration-limit=3
 
 This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../../../docs/architecture/request_migration.md) documentation for details on how this works.
 
+## Request Cancellation
+
+When a user cancels a request (e.g., by disconnecting from the frontend), the request is automatically cancelled across all workers, freeing compute resources for other requests.
+
+### Cancellation Support Matrix
+
+| | Prefill | Decode |
+|-|---------|--------|
+| **Aggregated** | ✅ | ✅ |
+| **Disaggregated (Decode-First)** | ✅ | ✅ |
+| **Disaggregated (Prefill-First)** | ✅ | ✅ |
+
+For more details, see the [Request Cancellation Architecture](../../../docs/architecture/request_cancellation.md) documentation.
+
 ## Client
 
 See [client](../../../docs/backends/sglang/README.md#testing-the-deployment) section to learn how to send request to the deployment.
