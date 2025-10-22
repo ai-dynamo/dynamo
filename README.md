@@ -355,8 +355,7 @@ uv pip install pip maturin
 ## 5. Build the Rust bindings
 
 ```
-cd lib/bindings/python
-maturin develop --uv
+cd lib/bindings/python && maturin develop --uv && cd -
 ```
 
 ## 6. Install the wheel
