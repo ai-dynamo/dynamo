@@ -94,7 +94,7 @@ kubectl port-forward svc/vllm-agg-frontend 8000:8000 -n ${NAMESPACE}
 curl http://localhost:8000/v1/models
 ```
 
-For SLA-based autoscaling, see [SLA Planner Quick Start Guide](../docs/planner/sla_planner_quickstart.md).
+For SLA-based autoscaling, see [SLA Planner Quick Start Guide](../planner/sla_planner_quickstart.md).
 
 ## Understanding Dynamo's Custom Resources
 
@@ -218,7 +218,7 @@ Key customization points include:
 - **[Examples](../examples/README.md)** - Complete working examples
 - **[Create Custom Deployments](./deployment/create_deployment.md)** - Build your own CRDs
 - **[Operator Documentation](./dynamo_operator.md)** - How the platform works
-- **[Helm Charts](./helm/README.md)** - For advanced users
+- **[Helm Charts](../../deploy/helm/README.md)** - For advanced users
 - **[GitOps Deployment with FluxCD](./fluxcd.md)** - For advanced users
 - **[Logging](./observability/logging.md)** - For logging setup
 - **[Multinode Deployment](./deployment/multinode-deployment.md)** - For multinode deployment
