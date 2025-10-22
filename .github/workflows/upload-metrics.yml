@@ -1,25 +1,33 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Upload Workflow Metrics (Reusable)
+name: Upload Workflow Metrics
 
+# This workflow triggers after ANY other workflow completes
 on:
-  workflow_call:
-    secrets:
-      WORKFLOW_INDEX:
-        required: true
-      JOB_INDEX:
-        required: true
-      STEPS_INDEX:
-        required: true
-      CONTAINER_INDEX:
-        required: false
+  workflow_run:
+    workflows:
+      - "Docker Build and Test"
+      - "NVIDIA Dynamo Github Validation"
+      - "NVIDIA Test Lab Validation"
+      - "pre_merge"
+      - "Rust pre-merge checks"
+      - "Generate Documentation"
+      - "Docs link check"
+      - "CodeQL"
+      - "Copyright Checks"
+    types:
+      - completed
+
+# Prevent overlapping metrics uploads for the same workflow on the same branch
+concurrency:
+  group: metrics-upload-${{ github.event.workflow_run.workflow_id }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false  # Queue them instead of cancelling
 
 jobs:
   upload-workflow-metrics:
     name: Upload Workflow Metrics
     runs-on: gitlab
-    if: always()  # Always run, even if other jobs fail
 
     steps:
       - name: Check out repository
@@ -50,8 +58,8 @@ jobs:
           JOB_INDEX: ${{ secrets.JOB_INDEX }}
           STEPS_INDEX: ${{ secrets.STEPS_INDEX }}
           CONTAINER_INDEX: ${{ secrets.CONTAINER_INDEX }}
+          # Pass the triggering workflow's run ID (not this workflow's run ID)
+          TARGET_RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
           python3 .github/workflows/upload_complete_workflow_metrics.py
-
-
 

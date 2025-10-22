@@ -18,11 +18,8 @@ from urllib.parse import urlparse
 
 import requests
 
-# FILTERING CONFIGURATION - Process all jobs except excluded ones
-EXCLUDED_JOB_NAMES = [
-    "Upload Workflow Metrics",  # legacy/explicit name
-    "upload-workflow-metrics",  # job id used across workflows
-]
+# FILTERING CONFIGURATION - Process all jobs (no exclusions needed with workflow_run)
+EXCLUDED_JOB_NAMES = []
 FRAMEWORK_IMAGE_BUILD_JOBS = ["vllm", "sglang", "trtllm"]
 
 # NEW STANDARDIZED FIELD SCHEMA - Using consistent prefixes for OpenSearch mapping
@@ -301,7 +298,8 @@ class WorkflowMetricsUploader:
 
         # Get current workflow information
         self.repo = os.getenv("GITHUB_REPOSITORY")
-        self.run_id = os.getenv("GITHUB_RUN_ID")
+        # Use TARGET_RUN_ID when set (for workflow_run trigger), otherwise GITHUB_RUN_ID
+        self.run_id = os.getenv("TARGET_RUN_ID") or os.getenv("GITHUB_RUN_ID")
         self.workflow_name = os.getenv("GITHUB_WORKFLOW")
         self.actor = os.getenv("GITHUB_ACTOR")
         self.event_name = os.getenv("GITHUB_EVENT_NAME")

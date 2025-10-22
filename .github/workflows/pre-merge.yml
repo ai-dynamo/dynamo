@@ -31,11 +31,3 @@ jobs:
     - uses: actions/setup-python@v5
     - uses: pre-commit/action@v3.0.0
       timeout-minutes: 3
-
-  # Upload metrics for this workflow and all its jobs
-  upload-workflow-metrics:
-    needs: [pre-commit]  # Wait for main job to complete
-    if: always()  # Always run, even if other jobs fail
-    uses: ./.github/workflows/reusable-metrics-upload.yml
-    secrets: inherit
-

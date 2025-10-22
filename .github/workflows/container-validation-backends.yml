@@ -292,13 +292,6 @@ jobs:
           test_type: "e2e, gpu_1"
           platform_arch: ${{ matrix.platform.arch }}
 
-  # Upload metrics for this workflow and all its jobs
-  upload-workflow-metrics:
-    needs: [backend-status-check]  # Wait for the status check which waits for all build jobs
-    if: always()  # Always run, even if other jobs fail
-    uses: ./.github/workflows/reusable-metrics-upload.yml
-    secrets: inherit
-
   # deploy-test-vllm:
   #   runs-on: cpu-amd-m5-2xlarge
   #   if: needs.changed-files.outputs.has_code_changes == 'true'
