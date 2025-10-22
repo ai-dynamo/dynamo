@@ -236,6 +236,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) FinalizeResource(ctx context.Co
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
@@ -1004,11 +1005,66 @@ func (r *DynamoGraphDeploymentRequestReconciler) checkProfilingJobStatus(ctx con
 			return true, nil
 		}
 		if condition.Type == batchv1.JobFailed && condition.Status == corev1.ConditionTrue {
+			// Get detailed error from pod logs
+			detailedError := r.getProfilingJobErrorDetails(ctx, dgdr, job)
+			if detailedError != "" {
+				return false, fmt.Errorf("profiling job failed: %s. Details: %s", condition.Message, detailedError)
+			}
 			return false, fmt.Errorf("profiling job failed: %s", condition.Message)
 		}
 	}
 
 	return false, nil
+}
+
+// getProfilingJobErrorDetails retrieves detailed error information from failed profiling job pods
+func (r *DynamoGraphDeploymentRequestReconciler) getProfilingJobErrorDetails(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, job *batchv1.Job) string {
+	logger := log.FromContext(ctx)
+
+	// List pods owned by this job
+	podList := &corev1.PodList{}
+	labelSelector := client.MatchingLabels{
+		"job-name": job.Name,
+	}
+
+	if err := r.List(ctx, podList, client.InNamespace(dgdr.Namespace), labelSelector); err != nil {
+		logger.Error(err, "Failed to list pods for profiling job")
+		return ""
+	}
+
+	// Look for failed pods and extract error details
+	for _, pod := range podList.Items {
+		// Check pod phase and container statuses
+		if pod.Status.Phase == corev1.PodFailed {
+			// Get profiler container status (first container)
+			for _, containerStatus := range pod.Status.ContainerStatuses {
+				if containerStatus.Name == ContainerNameProfiler && containerStatus.State.Terminated != nil {
+					terminated := containerStatus.State.Terminated
+					// Construct detailed error message
+					errorMsg := fmt.Sprintf("Pod: %s, Container: %s, ExitCode: %d, Reason: %s",
+						pod.Name, containerStatus.Name, terminated.ExitCode, terminated.Reason)
+					if terminated.Message != "" {
+						errorMsg += fmt.Sprintf(", Message: %s", terminated.Message)
+					}
+					logger.Info("Retrieved profiling job error details", "error", errorMsg)
+					return errorMsg
+				}
+			}
+
+			// If no terminated state found, check waiting state
+			for _, containerStatus := range pod.Status.ContainerStatuses {
+				if containerStatus.Name == ContainerNameProfiler && containerStatus.State.Waiting != nil {
+					waiting := containerStatus.State.Waiting
+					errorMsg := fmt.Sprintf("Pod: %s, Container: %s, Waiting - Reason: %s, Message: %s",
+						pod.Name, containerStatus.Name, waiting.Reason, waiting.Message)
+					logger.Info("Retrieved profiling job waiting details", "error", errorMsg)
+					return errorMsg
+				}
+			}
+		}
+	}
+
+	return ""
 }
 
 // generateDGDSpec generates DGD spec from profiling results (online or offline/AIC)
