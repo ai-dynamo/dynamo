@@ -207,6 +207,7 @@ fn kv_event_create_stored_from_parts(
             parent_hash: kv_params.parent_hash.map(ExternalSequenceBlockHash),
         }),
         event_id: kv_params.event_id,
+        dp_rank: 0,
     }
 }
 
@@ -224,6 +225,7 @@ fn kv_event_create_removed_from_parts(
     KvCacheEvent {
         event_id,
         data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
+        dp_rank: 0,
     }
 }
 
@@ -927,6 +929,7 @@ pub async fn build_worker_selection_pipeline_chat(
         busy_threshold,
         chooser,
         hf_tokenizer,
+        None,
     )
     .await?;
 
@@ -989,12 +992,7 @@ pub async fn create_worker_selection_pipeline_chat(
         let model_manager = std::sync::Arc::new(ModelManager::new());
         Some(
             model_manager
-                .kv_chooser_for(
-                    &card.display_name,
-                    &component,
-                    card.kv_cache_block_size,
-                    kv_router_config,
-                )
+                .kv_chooser_for(&component, card.kv_cache_block_size, kv_router_config)
                 .await?,
         )
     } else {

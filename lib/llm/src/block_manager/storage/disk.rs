@@ -3,15 +3,20 @@
 
 use super::*;
 
+use anyhow::Context;
 use core::ffi::c_char;
 use nix::fcntl::{FallocateFlags, fallocate};
-use nix::unistd::unlink;
+use nix::unistd::{ftruncate, unlink};
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::fs::File;
+use std::io::Write;
+use std::os::unix::io::{FromRawFd, RawFd};
 use std::path::Path;
 
 const DISK_CACHE_KEY: &str = "DYN_KVBM_DISK_CACHE_DIR";
 const DEFAULT_DISK_CACHE_DIR: &str = "/tmp/";
+const DISK_ZEROFILL_FALLBACK_KEY: &str = "DYN_KVBM_DISK_ZEROFILL_FALLBACK";
 
 #[derive(Debug)]
 pub struct DiskStorage {
@@ -24,6 +29,51 @@ pub struct DiskStorage {
 
 impl Local for DiskStorage {}
 impl SystemAccessible for DiskStorage {}
+
+const ZERO_BUF_SIZE: usize = 16 * 1024 * 1024; // 16MB
+
+fn allocate_file(fd: RawFd, size: u64) -> anyhow::Result<()> {
+    match fallocate(fd, FallocateFlags::empty(), 0, size as i64) {
+        Ok(_) => Ok(()),
+        Err(err) => match err {
+            nix::errno::Errno::EOPNOTSUPP => {
+                let do_zero_fill = std::env::var(DISK_ZEROFILL_FALLBACK_KEY).is_ok();
+                if do_zero_fill {
+                    tracing::warn!(
+                        "fallocate() not supported on this filesystem, using zero-fill fallback. \
+                         This may be slower but provides actual disk space allocation."
+                    );
+                    // optional fallback: append zeros until reaching size
+                    let mut written = 0;
+                    let zeros = vec![0u8; ZERO_BUF_SIZE];
+
+                    let mut file =
+                        unsafe { File::from_raw_fd(nix::unistd::dup(fd).context("dup error")?) };
+
+                    while written < size {
+                        let to_write = std::cmp::min(ZERO_BUF_SIZE as u64, size - written) as usize;
+                        file.write_all(&zeros[..to_write])
+                            .context("write all error")?;
+                        written += to_write as u64;
+                    }
+                    file.flush().context("flush error")?;
+                    Ok(())
+                } else {
+                    tracing::warn!(
+                        "fallocate() not supported on this filesystem, using truncate fallback. \
+                         This may may not actually allocate disk space. \
+                         Consider setting {}=true for slower zero-fill fallback.",
+                        DISK_ZEROFILL_FALLBACK_KEY
+                    );
+                    // default fallback: set file length without zero-filling (does not really
+                    // allocate)
+                    ftruncate(fd, size as i64).context("truncate error")
+                }
+            }
+            _ => Err(err.into()),
+        },
+    }
+}
 
 impl DiskStorage {
     pub fn new(size: usize) -> Result<Self, StorageError> {
@@ -62,7 +112,7 @@ impl DiskStorage {
             .to_string();
 
         // We need to use fallocate to actually allocate the storage and create the blocks on disk.
-        fallocate(raw_fd, FallocateFlags::empty(), 0, size as i64).map_err(|e| {
+        allocate_file(raw_fd, size as u64).map_err(|e| {
             StorageError::AllocationFailed(format!("Failed to allocate temp file: {}", e))
         })?;
 

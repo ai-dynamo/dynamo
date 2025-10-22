@@ -61,6 +61,11 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disaggregated_params: Option<serde_json::Value>,
 
+    /// Data parallel rank for the request (used with data parallelism)
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dp_rank: Option<u32>,
+
     /// Additional arguments for extensibility
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]

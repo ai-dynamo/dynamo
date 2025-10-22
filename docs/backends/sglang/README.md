@@ -37,9 +37,9 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**Disaggregated Serving**](../../architecture/disagg_serving.md) | ✅ |  |
 | [**Conditional Disaggregation**](../../architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
 | [**KV-Aware Routing**](../../architecture/kv_cache_routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../architecture/sla_planner.md) | ✅ |  |
+| [**SLA-Based Planner**](../../planner/sla_planner.md) | ✅ |  |
 | [**Multimodal EPD Disaggregation**](multimodal_epd.md) | ✅ |  |
-| [**KVBM**](../../architecture/kvbm_architecture.md) | ❌ | Planned |
+| [**KVBM**](../../kvbm/kvbm_architecture.md) | ❌ | Planned |
 
 
 ## Dynamo SGLang Integration
@@ -68,6 +68,22 @@ Dynamo SGLang uses SGLang's native argument parser, so **most SGLang engine argu
 
 > [!NOTE]
 > When using `--use-sglang-tokenizer`, only `v1/chat/completions` is available through Dynamo's frontend.
+
+### Request Cancellation
+
+When a user cancels a request (e.g., by disconnecting from the frontend), the request is automatically cancelled across all workers, freeing compute resources for other requests.
+
+#### Cancellation Support Matrix
+
+| | Prefill | Decode |
+|-|---------|--------|
+| **Aggregated** | ✅ | ✅ |
+| **Disaggregated** | ⚠️ | ✅ |
+
+> [!WARNING]
+> ⚠️ SGLang backend currently does not support cancellation during remote prefill phase in disaggregated mode.
+
+For more details, see the [Request Cancellation Architecture](../../architecture/request_cancellation.md) documentation.
 
 ## Installation
 
@@ -104,8 +120,8 @@ cd $DYNAMO_HOME
 # installs sglang supported version along with dynamo
 # include the prerelease flag to install flashinfer rc versions
 uv pip install -e .
-# install any sglang version >= 0.5.3
-uv pip install "sglang[all]==0.5.3.post1"
+# install any sglang version >= 0.5.3.post2
+uv pip install "sglang[all]==0.5.3.post2"
 ```
 
 </details>

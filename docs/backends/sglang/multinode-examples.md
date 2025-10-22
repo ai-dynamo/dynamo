@@ -39,6 +39,8 @@ python3 -m dynamo.sglang \
   --disaggregation-mode prefill \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 30001 \
+  --load-balance-method round_robin \
+  --host 0.0.0.0 \
   --mem-fraction-static 0.82
 ```
 
@@ -58,6 +60,8 @@ python3 -m dynamo.sglang \
   --disaggregation-mode prefill \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 30001 \
+  --host 0.0.0.0 \
+  --load-balance-method round_robin \
   --mem-fraction-static 0.82
 ```
 
@@ -77,7 +81,10 @@ python3 -m dynamo.sglang \
   --disaggregation-mode decode \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 30001 \
-  --mem-fraction-static 0.82
+  --host 0.0.0.0 \
+  --prefill-round-robin-balance \
+  --mem-fraction-static 0.82 \
+  --cuda-graph-max-bs 8
 ```
 
 Node 4: Run the remaining 8 shards of the decode worker
@@ -96,7 +103,10 @@ python3 -m dynamo.sglang \
   --disaggregation-mode decode \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 30001 \
-  --mem-fraction-static 0.82
+  --host 0.0.0.0 \
+  --prefill-round-robin-balance \
+  --mem-fraction-static 0.82 \
+  --cuda-graph-max-bs 8
 ```
 
 **Step 2**: Run inference

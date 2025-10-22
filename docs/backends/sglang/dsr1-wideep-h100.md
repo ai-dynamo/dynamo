@@ -58,6 +58,7 @@ python3 -m dynamo.sglang \
   --skip-tokenizer-init \
   --disaggregation-mode prefill \
   --disaggregation-transfer-backend nixl \
+  --host 0.0.0.0 \
   --disaggregation-bootstrap-port 30001 \
   --dist-init-addr ${HEAD_PREFILL_NODE_IP}:29500 \
   --nnodes 4 \
@@ -95,6 +96,7 @@ python3 -m dynamo.sglang \
   --disaggregation-mode decode \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 30001 \
+  --host 0.0.0.0 \
   --dist-init-addr ${HEAD_DECODE_NODE_IP}:29500 \
   --nnodes 4 \
   --node-rank 0 \
