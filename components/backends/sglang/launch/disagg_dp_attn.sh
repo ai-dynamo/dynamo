@@ -24,6 +24,7 @@ python3 -m dynamo.sglang \
   --dp-size 2 \
   --page-size 16 \
   --enable-dp-attention \
+  --host 0.0.0.0 \
   --trust-remote-code \
   --disaggregation-mode prefill \
   --disaggregation-transfer-backend nixl \
@@ -39,6 +40,7 @@ CUDA_VISIBLE_DEVICES=2,3 python3 -m dynamo.sglang \
   --dp-size 2 \
   --page-size 16 \
   --enable-dp-attention \
+  --host 0.0.0.0 \
   --trust-remote-code \
   --disaggregation-mode decode \
   --disaggregation-transfer-backend nixl \
