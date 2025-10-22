@@ -28,7 +28,6 @@
    kubernetes/deployment/create_deployment.md
 
    kubernetes/fluxcd.md
-   kubernetes/gke_setup.md
    kubernetes/grove.md
    kubernetes/model_caching_with_fluid.md
    kubernetes/README.md
@@ -72,6 +71,8 @@
    backends/vllm/gpt-oss.md
    backends/vllm/multi-node.md
    backends/vllm/prometheus.md
+
+   benchmarks/kv-router-ab-testing.md
 
 
 ..   TODO: architecture/distributed_runtime.md and architecture/dynamo_flow.md
