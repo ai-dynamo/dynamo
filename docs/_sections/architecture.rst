@@ -8,4 +8,4 @@ Overview
    :hidden:
 
    Overview <self>
-   Disaggregated Serving <../architecture/disagg_serving>
+   Disaggregated Serving <../design_docs/disagg_serving>
