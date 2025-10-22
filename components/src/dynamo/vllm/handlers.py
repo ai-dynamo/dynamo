@@ -48,15 +48,10 @@ def build_sampling_params(
 
     # Apply output_options (includes logprobs, prompt_logprobs from echo=true, skip_special_tokens, etc.)
     output_options = request.get("output_options", {})
-    logger.info(f"[ECHO DEBUG] output_options from request: {output_options}")
     for key, value in output_options.items():
         if value is not None and hasattr(sampling_params, key):
-            logger.info(f"[ECHO DEBUG] Setting sampling_params.{key} = {value}")
             setattr(sampling_params, key, value)
 
-    logger.info(
-        f"[ECHO DEBUG] Final SamplingParams: logprobs={sampling_params.logprobs}, prompt_logprobs={sampling_params.prompt_logprobs}"
-    )
     return sampling_params
 
 
@@ -130,47 +125,15 @@ class BaseWorkerHandler(ABC):
             )
 
             num_output_tokens_so_far = 0
-            first_iteration = True
             try:
                 async for res in gen:
                     # res is vllm's RequestOutput
-
-                    if first_iteration:
-                        # Log RequestOutput structure on first iteration
-                        logger.info(
-                            f"[ECHO DEBUG] RequestOutput attributes: {[attr for attr in dir(res) if not attr.startswith('_')]}"
-                        )
-                        logger.info(
-                            f"[ECHO DEBUG] Has prompt: {hasattr(res, 'prompt')}"
-                        )
-                        logger.info(
-                            f"[ECHO DEBUG] Has prompt_token_ids: {hasattr(res, 'prompt_token_ids')}"
-                        )
-                        logger.info(
-                            f"[ECHO DEBUG] Has prompt_logprobs: {hasattr(res, 'prompt_logprobs')}"
-                        )
-                        if hasattr(res, "prompt_token_ids"):
-                            logger.info(
-                                f"[ECHO DEBUG] prompt_token_ids: {res.prompt_token_ids}"
-                            )
-                        if hasattr(res, "prompt_logprobs"):
-                            logger.info(
-                                f"[ECHO DEBUG] prompt_logprobs: {res.prompt_logprobs}"
-                            )
-                        first_iteration = False
 
                     if not res.outputs:
                         yield {"finish_reason": "error", "token_ids": []}
                         break
 
                     output = res.outputs[0]
-                    logger.info(
-                        f"[ECHO DEBUG] output.token_ids (cumulative): {output.token_ids}"
-                    )
-                    logger.info(
-                        f"[ECHO DEBUG] num_output_tokens_so_far: {num_output_tokens_so_far}"
-                    )
-
                     next_total_toks = len(output.token_ids)
 
                     # On first iteration, prepend prompt tokens if prompt_logprobs was requested (echo behavior)
@@ -184,18 +147,9 @@ class BaseWorkerHandler(ABC):
                         # Include prompt tokens when prompt_logprobs was requested (echo=true)
                         all_tokens = res.prompt_token_ids + output.token_ids
                         out = {"token_ids": all_tokens}
-                        logger.info(
-                            f"[ECHO DEBUG] First iteration: prepending prompt_token_ids {res.prompt_token_ids}"
-                        )
-                        logger.info(
-                            f"[ECHO DEBUG] Yielding token_ids (with prompt): {out['token_ids']}"
-                        )
                     else:
                         # Normal incremental output
                         out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
-                        logger.info(
-                            f"[ECHO DEBUG] Yielding token_ids: {out['token_ids']}"
-                        )
 
                     if output.finish_reason:
                         out["finish_reason"] = output.finish_reason
