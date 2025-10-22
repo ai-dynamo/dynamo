@@ -11,19 +11,12 @@ export PYTHONHASHSEED=0
 MODEL="Qwen/Qwen3-0.6B"
 BLOCK_SIZE=64
 
-# run decode router with kv-overlap-score-weight 0 for pure load balancing
+# Start frontend with KV routing
+# The frontend will automatically detect prefill workers and activate an internal prefill router
 python -m dynamo.frontend \
     --router-mode kv \
     --http-port 8000 \
-    --kv-overlap-score-weight 0 \
     --router-reset-states &
-
-# run standalone router service for prefill workers
-python -m dynamo.router \
-    --endpoint dynamo.prefill.generate \
-    --block-size $BLOCK_SIZE \
-    --router-reset-states \
-    --no-track-active-blocks &
 
 # two decode workers
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
@@ -38,6 +31,8 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --enforce-eager &
 
 # two prefill workers
+# When registered with --is-prefill-worker, these workers are automatically detected
+# by the frontend, which activates an internal prefill router for KV-aware prefill routing
 CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \

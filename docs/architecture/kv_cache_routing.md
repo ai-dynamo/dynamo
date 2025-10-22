@@ -54,6 +54,51 @@ The main KV-aware routing arguments:
 
 For basic model registration without KV routing, you can use `--router-mode round-robin` or `--router-mode random` with both static and dynamic endpoints.
 
+## Disaggregated Serving (Prefill and Decode)
+
+Dynamo supports disaggregated serving where prefill (prompt processing) and decode (token generation) are handled by separate worker pools. When you register workers with `ModelType.Prefill` (see [Backend Guide](../development/backend-guide.md#model-types)), the frontend automatically detects them and activates an internal prefill router.
+
+### Automatic Prefill Router Activation
+
+The prefill router is automatically created when:
+1. A decode model is registered (e.g., via `register_llm()` with `ModelType.Chat | ModelType.Completions`)
+2. A prefill worker is detected with the same model name and `ModelType.Prefill`
+
+**Key characteristics of the prefill router:**
+- **Always uses KV-aware routing** regardless of the frontend's `--router-mode` setting
+- **Always disables active block tracking** (`track_active_blocks=false`) since prefill workers don't perform decode
+- **Seamlessly integrated** into the request pipeline between preprocessing and decode routing
+- **Falls back gracefully** to decode-only mode if prefill fails or no prefill workers are available
+
+### Setup Example
+
+```python
+# Decode worker registration (in your decode worker)
+await register_llm(
+    model_input=ModelInput.Tokens,
+    model_type=ModelType.Chat | ModelType.Completions,
+    endpoint=generate_endpoint,
+    model_name="meta-llama/Llama-2-7b-hf",
+    # ... other parameters
+)
+
+# Prefill worker registration (in your prefill worker)
+await register_llm(
+    model_input=ModelInput.Tokens,
+    model_type=ModelType.Prefill,  # <-- Mark as prefill worker
+    endpoint=generate_endpoint,
+    model_name="meta-llama/Llama-2-7b-hf",  # Must match decode model name
+    # ... other parameters
+)
+```
+
+When both workers are registered, requests are automatically routed:
+1. **Prefill phase** → Prefill router selects best prefill worker (KV-aware)
+2. **Decode phase** → Decode router selects decode worker (uses frontend's `--router-mode`)
+
+> [!Note]
+> **WIP**: Currently, the prefill router always uses KV routing. Future updates will provide more fine-grained control over prefill routing behavior to match user-specified frontend router modes.
+
 ## Overview
 
 The KV-aware router operates on two key principles to optimize request routing:
