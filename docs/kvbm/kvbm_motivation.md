@@ -28,3 +28,16 @@ Large language models (LLMs) and other AI workloads increasingly rely on KV cach
 * Difficulty in optimizing storage placement across heterogeneous storage tiers (for example, SSDs, object storage, and cloud storage).
 
 Conventional systems either lack dynamic feedback mechanisms or require deep integration into core storage paths, which both increases complexity and reduces portability.
+
+## Benefits of KV Cache offloading
+
+KV Cache offloading avoids expensive KV Cache recomputation, resulting in faster response times and a better user experience. In the end, providers benefit from higher throughput and lower cost per token, making their inference services more scalable and efficient.
+
+## When to offload KV Cache for reuse
+
+Offloading KV cache to CPU or storage is most effective when KV Cache exceeds GPU memory and cache reuse outweighs the overhead of transferring data. It is especially valuable in long-context, high-concurrency, or resource-constrained inference environments such as:
+
+* **Long sessions and multi-turn conversations:** Offloading preserves large prompt prefixes, avoids recomputation, and improves first-token latency and throughput.
+* **High concurrency (future):** Idle or partial conversations can be moved out of GPU memory, allowing active requests to proceed without hitting memory limits.
+* **Shared or repeated content (future):** Reuse across users or sessions (for example, system prompts and templates) increases cache hits, especially with remote or cross-instance sharing.
+* **Memory- or cost-constrained deployments:** Offloading to RAM or SSD reduces GPU demand, allowing longer prompts or more users without adding hardware.

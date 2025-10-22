@@ -98,7 +98,8 @@ python3 -m dynamo.sglang \
   --chunked-prefill-size 16384 \
   --max-total-tokens 32768 \
   --mem-fraction-static 0.82 \
-  --log-level debug
+  --log-level debug \
+  --disaggregation-transfer-backend nixl
 ```
 
 On the other prefill nodes (this example has 2 total prefill nodes), run the same command but change `--node-rank` to 1
@@ -151,7 +152,8 @@ python3 -m dynamo.sglang \
   --watchdog-timeout 1000000 \
   --chunked-prefill-size 36864 \
   --mem-fraction-static 0.82 \
-  --log-level debug
+  --log-level debug \
+  --disaggregation-transfer-backend nixl
 ```
 
 On the other decode nodes (this example has 2 total decode nodes), run the same command but change `--node-rank` to 1.
