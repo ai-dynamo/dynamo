@@ -8,17 +8,18 @@ export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"openai/gpt-oss-120b"}
 export DISAGGREGATION_STRATEGY=${DISAGGREGATION_STRATEGY:-"prefill_first"}
 export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"engine_configs/gpt_oss/prefill.yaml"}
 export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"engine_configs/gpt_oss/decode.yaml"}
+export MPI_CMD=${MPI_CMD:-""}
 
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 
 # run frontend
-python3 -m dynamo.frontend --router-mode round-robin --http-port 8000 &
+$MPI_CMD python3 -m dynamo.frontend --router-mode round-robin --http-port 8000 &
 
 # With tensor_parallel_size=4, each worker needs 4 GPUs
 # run prefill worker
-CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
+CUDA_VISIBLE_DEVICES=0,1,2,3 $MPI_CMD python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$PREFILL_ENGINE_ARGS" \
@@ -33,7 +34,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
   --expert-parallel-size 4 &
 
 # run decode worker
-CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
+CUDA_VISIBLE_DEVICES=4,5,6,7 $MPI_CMD python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$DECODE_ENGINE_ARGS" \

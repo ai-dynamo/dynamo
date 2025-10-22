@@ -9,6 +9,7 @@ export AGG_ENGINE_ARGS=${AGG_ENGINE_ARGS:-"engine_configs/agg.yaml"}
 export MODALITY=${MODALITY:-"text"}
 # If you want to use multimodal, set MODALITY to "multimodal"
 #export MODALITY=${MODALITY:-"multimodal"}
+export MPI_CMD=${MPI_CMD:-""}
 
 # Setup cleanup trap
 cleanup() {
@@ -21,11 +22,11 @@ trap cleanup EXIT INT TERM
 
 
 # run frontend
-python3 -m dynamo.frontend --http-port 8000 &
+$MPI_CMD python3 -m dynamo.frontend --http-port 8000 &
 DYNAMO_PID=$!
 
 # run worker
-python3 -m dynamo.trtllm \
+$MPI_CMD python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --modality "$MODALITY" \
