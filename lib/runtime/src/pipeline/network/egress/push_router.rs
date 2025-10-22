@@ -110,6 +110,45 @@ async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPu
     }
 }
 
+/// Create an adaptive addressed router that discovers transports dynamically
+/// Assumes all instances of a component use the same transport type
+async fn adaptive_addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
+    use crate::pipeline::network::adaptive_client::{AdaptiveRequestPlaneClient, ComponentTransportType};
+    use crate::component::Client as ComponentClient;
+
+    // Create a component client for this endpoint to discover services
+    let component_client = ComponentClient::new_dynamic(endpoint.clone()).await?;
+    
+    // Create adaptive client
+    let nats_client = endpoint.drt().nats_client().map(|nc| nc.client().clone());
+    let adaptive_client = AdaptiveRequestPlaneClient::new(component_client, nats_client).await?;
+
+    // Wait for transport type to be detected (this also waits for instances)
+    let transport_type = adaptive_client.wait_for_transport_detection().await?;
+
+    tracing::info!(
+        endpoint = %endpoint.path(),
+        transport_type = ?transport_type,
+        "Detected component transport type for adaptive router"
+    );
+
+    let tcp_server = endpoint.drt().tcp_server().await?;
+
+    // Create the appropriate router based on detected transport
+    match transport_type {
+        ComponentTransportType::Http => {
+            use crate::config::RequestPlaneMode;
+            AddressedPushRouter::from_mode(RequestPlaneMode::Http, None, tcp_server)
+        }
+        ComponentTransportType::Nats => {
+            let Some(nats_client) = endpoint.drt().nats_client() else {
+                anyhow::bail!("NATS transport detected but NATS client not available");
+            };
+            AddressedPushRouter::new(nats_client.client().clone(), tcp_server)
+        }
+    }
+}
+
 impl<T, U> PushRouter<T, U>
 where
     T: Data + Serialize,
@@ -118,6 +157,41 @@ where
     /// Create a new PushRouter without busy threshold (no busy detection)
     pub async fn from_client(client: Client, router_mode: RouterMode) -> anyhow::Result<Self> {
         Self::from_client_with_threshold(client, router_mode, None, None).await
+    }
+
+    /// Create a new adaptive PushRouter that discovers transports dynamically
+    /// This does not rely on DYN_REQUEST_PLANE environment variable
+    pub async fn adaptive_from_client(client: Client, router_mode: RouterMode) -> anyhow::Result<Self> {
+        Self::adaptive_from_client_with_threshold(client, router_mode, None, None).await
+    }
+
+    /// Create a new adaptive PushRouter with optional busy threshold and worker load monitor
+    /// This does not rely on DYN_REQUEST_PLANE environment variable
+    pub async fn adaptive_from_client_with_threshold(
+        client: Client,
+        router_mode: RouterMode,
+        busy_threshold: Option<f64>,
+        worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
+    ) -> anyhow::Result<Self> {
+        let addressed = adaptive_addressed_router(&client.endpoint).await?;
+
+        // Start worker monitor if provided and in dynamic mode
+        if let Some(monitor) = worker_monitor.as_ref()
+            && matches!(client.instance_source.as_ref(), InstanceSource::Dynamic(_))
+        {
+            monitor.start_monitoring().await?;
+        }
+
+        let router = PushRouter {
+            client: client.clone(),
+            addressed,
+            router_mode,
+            round_robin_counter: Arc::new(AtomicU64::new(0)),
+            busy_threshold,
+            _phantom: PhantomData,
+        };
+
+        Ok(router)
     }
 
     /// Create a new PushRouter with optional busy threshold and worker load monitor
@@ -236,33 +310,36 @@ where
             }
         }
 
-        // Get the address based on transport type
+        // Get the address based on discovered transport type
         let address = {
             use crate::component::TransportType;
-            use crate::config::RequestPlaneMode;
 
-            let mode = RequestPlaneMode::from_env();
-            if mode.is_http() {
-                // In HTTP mode, get the HTTP endpoint URL from the instance
-                let instances = self.client.instances();
-                let instance = instances
-                    .iter()
-                    .find(|i| i.instance_id == instance_id)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("Instance {} not found in available instances", instance_id)
-                    })?;
+            // Get the instance and use its actual transport type
+            let instances = self.client.instances();
+            let instance = instances
+                .iter()
+                .find(|i| i.instance_id == instance_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Instance {} not found in available instances", instance_id)
+                })?;
 
-                match &instance.transport {
-                    TransportType::HttpTcp { http_endpoint, .. } => http_endpoint.clone(),
-                    TransportType::NatsTcp(subject) => {
-                        // Fallback, but shouldn't happen in HTTP mode
-                        tracing::warn!("Expected HTTP transport but found NATS transport");
-                        subject.clone()
-                    }
+            match &instance.transport {
+                TransportType::HttpTcp { http_endpoint } => {
+                    tracing::debug!(
+                        instance_id = instance_id,
+                        http_endpoint = %http_endpoint,
+                        "Using HTTP transport for instance"
+                    );
+                    http_endpoint.clone()
                 }
-            } else {
-                // In NATS mode, use the subject
-                self.client.endpoint.subject_to(instance_id)
+                TransportType::NatsTcp(subject) => {
+                    tracing::debug!(
+                        instance_id = instance_id,
+                        subject = %subject,
+                        "Using NATS transport for instance"
+                    );
+                    subject.clone()
+                }
             }
         };
 

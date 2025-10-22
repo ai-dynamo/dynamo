@@ -5,4 +5,6 @@ pub mod addressed_router;
 pub mod http_router;
 pub mod push_router;
 
+pub use crate::pipeline::network::adaptive_client::AdaptiveRequestPlaneClient;
+
 use super::*;

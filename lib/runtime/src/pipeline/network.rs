@@ -3,9 +3,11 @@
 
 //! TODO - we need to reconcile what is in this crate with distributed::transports
 
+pub mod adaptive_client;
 pub mod codec;
 pub mod egress;
 pub mod ingress;
+pub mod manager;
 pub mod request_plane;
 pub mod tcp;
 pub mod transport_registry;

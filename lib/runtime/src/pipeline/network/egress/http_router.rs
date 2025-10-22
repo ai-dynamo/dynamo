@@ -140,24 +140,17 @@ impl HttpRequestClient {
         Self::with_config(config)
     }
 
-    /// Create a new HTTP request client with full HTTP/2 configuration
+    /// Create a new HTTP request client with basic configuration
+    /// 
+    /// Note: Advanced HTTP/2 configuration methods may not be available in all versions of reqwest.
+    /// This implementation uses only the stable, widely-supported configuration options.
     pub fn with_config(config: Http2Config) -> Result<Self> {
-        let mut builder = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .pool_max_idle_per_host(config.pool_max_idle_per_host)
             .pool_idle_timeout(config.pool_idle_timeout)
             .timeout(config.request_timeout)
-            .http2_prior_knowledge() // Force HTTP/2 without negotiation
-            .http2_initial_stream_window_size(Some(config.max_frame_size * 4)) // 4x frame size for window
-            .http2_initial_connection_window_size(Some(config.max_frame_size * 16)) // 16x frame size for connection
-            .http2_max_frame_size(Some(config.max_frame_size))
-            .http2_keep_alive_interval(config.keep_alive_interval)
-            .http2_keep_alive_timeout(config.keep_alive_timeout)
-            .http2_keep_alive_while_idle(true); // Keep connections alive even when idle
-
-        // Enable adaptive window sizing if configured
-        if config.adaptive_window {
-            builder = builder.http2_adaptive_window(true);
-        }
+            // Use HTTP/2 by default when available (reqwest automatically negotiates)
+            .http2_prior_knowledge(); // Force HTTP/2 without negotiation
 
         let client = builder.build()?;
 
