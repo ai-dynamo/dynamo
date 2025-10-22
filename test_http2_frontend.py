@@ -57,7 +57,6 @@ def test_http2_frontend():
             "--http-port",
             "8787",
             "--enable-http2",
-            "--static-endpoint",
         ]
 
         # Start the frontend process
@@ -69,20 +68,42 @@ def test_http2_frontend():
 
             # Wait for the server to start
             print("⏳ Waiting for server to start...")
-            time.sleep(5)
+            time.sleep(8)  # Increased wait time
+
+            # Check if process is still running
+            if frontend_process.poll() is not None:
+                # Process has terminated
+                stdout, stderr = frontend_process.communicate()
+                print(f"❌ Frontend process terminated unexpectedly!")
+                print(f"   stdout: {stdout[:500]}")
+                print(f"   stderr: {stderr[:500]}")
+                return False
 
             # Test HTTP/2 connection using curl
             print("🔍 Testing HTTP/2 connection...")
 
             # Test 1: Check if server is running
-            health_cmd = "curl -s --http2-prior-knowledge http://localhost:8787/health"
-            returncode, stdout, stderr = run_command(health_cmd)
+            health_cmd = "curl -v --http2-prior-knowledge http://localhost:8787/health"
+            returncode, stdout, stderr = run_command(health_cmd, timeout=15)
 
             if returncode == 0:
                 print("✅ Health check passed!")
-                print(f"   Response: {stdout}")
+                print(f"   Response: {stdout[:200]}")
             else:
-                print(f"❌ Health check failed: {stderr}")
+                print(f"❌ Health check failed!")
+                print(f"   Return code: {returncode}")
+                print(f"   stdout: {stdout[:300]}")
+                print(f"   stderr: {stderr[:300]}")
+
+                # Try to read frontend logs
+                if frontend_process and frontend_process.poll() is None:
+                    # Try simple HTTP/1.1 to see if server is up at all
+                    simple_cmd = "curl -v http://localhost:8787/health"
+                    rc2, out2, err2 = run_command(simple_cmd, timeout=5)
+                    print(f"\n   HTTP/1.1 fallback test:")
+                    print(f"   Return code: {rc2}")
+                    print(f"   stderr: {err2[:300]}")
+
                 return False
 
             # Test 2: Check HTTP/2 protocol

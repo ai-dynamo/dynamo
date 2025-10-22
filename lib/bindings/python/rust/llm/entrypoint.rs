@@ -116,6 +116,7 @@ pub(crate) struct EntrypointArgs {
     http_port: u16,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
+    enable_http2: bool,
     extra_engine_args: Option<PathBuf>,
     namespace: Option<String>,
     custom_backend_metrics_endpoint: Option<String>,
@@ -126,7 +127,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, custom_backend_metrics_endpoint=None, custom_backend_metrics_polling_interval=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, tls_cert_path=None, tls_key_path=None, enable_http2=None, extra_engine_args=None, namespace=None, custom_backend_metrics_endpoint=None, custom_backend_metrics_polling_interval=None))]
     pub fn new(
         engine_type: EngineType,
         model_path: Option<PathBuf>,
@@ -140,6 +141,7 @@ impl EntrypointArgs {
         http_port: Option<u16>,
         tls_cert_path: Option<PathBuf>,
         tls_key_path: Option<PathBuf>,
+        enable_http2: Option<bool>,
         extra_engine_args: Option<PathBuf>,
         namespace: Option<String>,
         custom_backend_metrics_endpoint: Option<String>,
@@ -166,6 +168,7 @@ impl EntrypointArgs {
             http_port: http_port.unwrap_or(DEFAULT_HTTP_PORT),
             tls_cert_path,
             tls_key_path,
+            enable_http2: enable_http2.unwrap_or(false),
             extra_engine_args,
             namespace,
             custom_backend_metrics_endpoint,
@@ -205,6 +208,7 @@ pub fn make_engine<'p>(
         .http_port(args.http_port)
         .tls_cert_path(args.tls_cert_path.clone())
         .tls_key_path(args.tls_key_path.clone())
+        .enable_http2(args.enable_http2)
         .is_mocker(matches!(args.engine_type, EngineType::Mocker))
         .extra_engine_args(args.extra_engine_args.clone())
         .namespace(args.namespace.clone())
