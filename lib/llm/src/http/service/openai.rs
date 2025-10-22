@@ -509,7 +509,6 @@ async fn handler_chat_completions(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-
     // create the context for the request
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
     let request = Context::with_id(request, request_id);
