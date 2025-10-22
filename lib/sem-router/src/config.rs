@@ -3,8 +3,6 @@
 
 //! Configuration for semantic router
 
-use std::collections::HashMap;
-
 use super::{Mode, OverridePolicy, RouteAction};
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -21,20 +19,11 @@ pub struct ClassRoute {
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClassifierConfig {
-    /// Simple keyword-based baseline (always available).
-    Keyword {
-        /// label -> list of indicative keywords (case-insensitive)
-        classes: HashMap<String, Vec<String>>,
-    },
     /// fastText classifier (requires clf-fasttext feature).
     Fasttext {
         /// Path to .bin model file
         model_path: String,
     },
-    // Future extensions:
-    // Onnx { model_path: String, vocab_path: Option<String> },
-    // Candle { model_path: String, tokenizer_path: String },
-    // Http { endpoint: String, api_key: Option<String> },
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -64,14 +53,14 @@ fn default_enabled() -> bool { true }
 impl Default for SemRouterConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             mode: Mode::Auto,
             default_policy: OverridePolicy::NeverWhenExplicit,
             model_alias: Some("router".to_string()),
             classes: vec![],
             fallback: None,
-            classifier: ClassifierConfig::Keyword {
-                classes: HashMap::new(),
+            classifier: ClassifierConfig::Fasttext {
+                model_path: String::new(),
             },
         }
     }
@@ -102,3 +91,4 @@ impl SemRouterConfig {
         }
     }
 }
+

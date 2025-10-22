@@ -1,4 +1,7 @@
-use super::{Classifier, Classification};
+// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use super::{Classifier, Classification, LabelScore};
 use anyhow::{anyhow, Result};
 
 #[cfg(feature = "clf-fasttext")]
@@ -16,7 +19,7 @@ pub struct FasttextClassifier {
 #[cfg(feature = "clf-fasttext")]
 impl FasttextClassifier {
     pub fn new(model_path: &str) -> Result<Self> {
-        // Log file size + sha256 to be 100% sure we’re loading the same bytes
+        // Log file size + sha256 to be 100% sure we're loading the same bytes
         let meta = std::fs::metadata(model_path)?;
         let size_bytes = meta.len();
         let bytes = std::fs::read(model_path)?;
@@ -30,19 +33,10 @@ impl FasttextClassifier {
         ft.load_model(model_path)
             .map_err(|e| anyhow!("Failed to load fastText model from {}: {}", model_path, e))?;
 
-        // Verify expected labels exist
+        // Log available labels for debugging
         let (labels, _) = ft
             .get_labels()
             .map_err(|e| anyhow!("Failed to get labels: {}", e))?;
-        let has_reasoning = labels.iter().any(|s| s == "__label__reasoning");
-        let has_non = labels.iter().any(|s| s == "__label__non-reasoning");
-
-        if !has_reasoning || !has_non {
-            return Err(anyhow!(
-                "Model must have __label__reasoning and __label__non-reasoning labels. Found: {:?}",
-                labels
-            ));
-        }
 
         // Introspect args so we know the loss/ngrams actually used by the model
         let args = ft.get_args();
@@ -176,3 +170,4 @@ impl Classifier for FasttextClassifier {
         "fasttext"
     }
 }
+

@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "sem-router"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Tower/Axum middleware for semantic routing with support for numerous classifiers"
+repository = "https://github.com/NVIDIA/dynamo"
+
+[features]
+default = []
+clf-fasttext = ["dep:fasttext", "dep:sha2"]
+
+[dependencies]
+# Core dependencies - no Dynamo-specific deps
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+http = "1"
+hyper = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tower = "0.5"
+tracing = "0.1"
+
+# Optional fastText backend
+fasttext = { version = "0.7", optional = true }
+sha2 = { version = "0.10", optional = true }
+

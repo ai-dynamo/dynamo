@@ -15,7 +15,6 @@ use super::metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::request_template::RequestTemplate;
-use crate::semrouter::{build_router_handle, SemRouterConfig, SemRouterHandle, SemRouterLayer};
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
@@ -37,7 +36,6 @@ pub struct State {
     etcd_client: Option<etcd::Client>,
     store: Arc<dyn KeyValueStore>,
     flags: StateFlags,
-    semrouter: Option<Arc<SemRouterHandle>>,
 }
 
 #[derive(Default, Debug)]
@@ -89,7 +87,6 @@ impl State {
                 embeddings_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
             },
-            semrouter: None,
         }
     }
 
@@ -105,7 +102,6 @@ impl State {
                 embeddings_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
             },
-            semrouter: None,
         }
     }
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests
@@ -132,25 +128,6 @@ impl State {
     // TODO
     pub fn sse_keep_alive(&self) -> Option<Duration> {
         None
-    }
-
-    pub fn semrouter(&self) -> Option<&Arc<SemRouterHandle>> {
-        self.semrouter.as_ref()
-    }
-
-    /// Initialize semantic router from config
-    pub fn init_semrouter(&mut self) -> Result<()> {
-        let cfg = SemRouterConfig::load_from_env_and_defaults()?;
-        if !cfg.enabled {
-            return Ok(());
-        }
-        let handle = build_router_handle(cfg)?;
-        self.semrouter = Some(Arc::new(handle));
-        Ok(())
-    }
-
-    pub fn is_semrouter_enabled(&self) -> bool {
-        self.semrouter.is_some()
     }
 }
 
@@ -358,17 +335,10 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let mut state = match config.etcd_client {
+        let state = Arc::new(match config.etcd_client {
             Some(etcd_client) => State::new_with_etcd(model_manager, etcd_client),
             None => State::new(model_manager),
-        };
-
-        // Initialize semantic router if enabled
-        if let Err(e) = state.init_semrouter() {
-            tracing::warn!("Failed to initialize semantic router: {}", e);
-        }
-
-        let state = Arc::new(state);
+        });
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -431,10 +401,13 @@ impl HttpServiceConfigBuilder {
         // Add span for tracing
         router = router.layer(TraceLayer::new_for_http().make_span_with(make_request_span));
 
-        // Add semantic router middleware (if enabled)
-        if let Some(handle) = state.semrouter().cloned() {
-            tracing::info!("Adding SemRouterLayer middleware");
-            router = router.layer(SemRouterLayer::new((*handle).clone()));
+        // Add semantic router middleware (if enabled & configured)
+        #[cfg(feature = "semrouter")]
+        {
+            if let Some(layer) = sem_router::maybe_semrouter_layer_from_env() {
+                tracing::info!("SemRouter enabled: adding middleware");
+                router = router.layer(layer);
+            }
         }
 
         Ok(HttpService {

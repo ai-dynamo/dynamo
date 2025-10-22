@@ -26,15 +26,8 @@ cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
 
 # Semantic router features
-semrouter = []
-clf-candle = ["semrouter", "dep:candle-core", "dep:candle-nn", "dep:candle-transformers"]
-clf-fasttext = ["semrouter", "dep:fasttext", "dep:sha2"]
-# clf-onnx = ["semrouter"]  # TODO: implement ONNX classifier
-# clf-http = ["semrouter"]  # TODO: implement HTTP classifier
-
-# Legacy feature names (deprecated, will be removed)
-candle-classifier = ["clf-candle"]
-fasttext-classifier = ["clf-fasttext"]
+semrouter = ["dep:sem-router"]
+semrouter-fasttext = ["semrouter", "sem-router/clf-fasttext"]
 
 [[bench]]
 name = "tokenizer"
@@ -110,16 +103,8 @@ cudarc = { version = "0.17.1", features = ["cuda-12020"], optional = true }
 ndarray = { workspace = true, optional = true }
 nix = { version = "0.26", optional = true }
 
-# semantic router classifiers
-# Candle (recommended - pure Rust, direct HuggingFace loading)
-candle-core = { version = "0.9.1", optional = true }
-candle-nn = { version = "0.9.1", optional = true }
-candle-transformers = { version = "0.9.1", optional = true }
-# Note: hf-hub and serde_json are already in workspace, so no need to declare them here
-
-# fastText (lightweight, blazing fast)
-fasttext = { version = "0.7", optional = true }
-sha2 = { version = "0.10", optional = true }
+# semantic router - now a separate crate
+sem-router = { path = "../sem-router", optional = true }
 
 # protocols
 unicode-segmentation = "1.12"
@@ -127,7 +112,6 @@ unicode-segmentation = "1.12"
 # http-service
 axum = { workspace = true }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
-tower = "0.5"
 tower-http = { workspace = true }
 rustls = { version = "0.23" }
 utoipa = { version = "5.3", features = ["axum_extras"] }

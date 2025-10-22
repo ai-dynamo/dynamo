@@ -24,8 +24,8 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 block-manager = ["dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc"]
-candle-classifier = ["dynamo-llm/candle-classifier"]
-fasttext-classifier = ["dynamo-llm/fasttext-classifier"]
+semrouter = ["dynamo-llm/semrouter"]
+semrouter-fasttext = ["dynamo-llm/semrouter-fasttext"]
 
 [dependencies]
 dynamo-llm = { path = "../../llm" }
