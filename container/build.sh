@@ -727,7 +727,10 @@ if [  ! -z ${ENABLE_KVBM} ]; then
         error "ERROR: Failed to build KVBM wheel"
     fi
 fi
-# add the context even if there could be no wheel in the dir
+
+# Create a kvbm wheel directory to satisfy the build context requirement
+# There is no way to conditionally copy the build context in dockerfile.
+mkdir -p ${KVBM_PIP_WHEEL_DIR}
 BUILD_CONTEXT_ARG+=" --build-context kvbm_wheel=${KVBM_PIP_WHEEL_DIR}"
 
 if [ -n "${NIXL_UCX_REF}" ]; then

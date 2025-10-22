@@ -262,6 +262,7 @@ ENV PATH="/workspace/nixl/.venv/bin:${PATH}"
 # so KVBM works with CUDA 13 Nixl even when Nixl isn’t installed on the system.
 # TODO: Remove this once the Nixl team releases a `nixl-cu13` pip wheel.
 #       That wheel will become a dependency of KVBM.
+RUN bash -lc 'echo soft: $(ulimit -Sn); echo hard: $(ulimit -Hn); cat /proc/self/limits | grep -i "open files"'
 RUN mkdir -p /opt/dynamo/lib/kvbm/python/kvbm/nixl-cu13 && \
     cp -r /usr/local/nixl/lib64/* /opt/dynamo/lib/kvbm/python/kvbm/nixl-cu13/ && \
     rm -rf /opt/dynamo/lib/kvbm/python/kvbm/nixl-cu13/plugins/libplugin_GPUNETIO.so && \
