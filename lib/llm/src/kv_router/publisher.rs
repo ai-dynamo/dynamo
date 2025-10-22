@@ -97,7 +97,7 @@ pub struct KvEventPublisher {
 impl KvEventPublisher {
     pub fn new(
         component: Component,
-        worker_id: i64,
+        worker_id: u64,
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
     ) -> Result<Self> {
@@ -174,7 +174,7 @@ impl Drop for KvEventPublisher {
 
 async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
     publisher: P,
-    worker_id: i64,
+    worker_id: u64,
     cancellation_token: CancellationToken,
     mut rx: mpsc::UnboundedReceiver<KvCacheEvent>,
 ) {
@@ -801,7 +801,7 @@ impl WorkerMetricsPublisher {
     ///
     /// This task monitors metric changes (specifically kv_active_blocks and num_requests_waiting)
     /// and publishes stable metrics to NATS after they've been unchanged for 1ms.
-    fn start_nats_metrics_publishing(&self, namespace: Namespace, worker_id: i64) {
+    fn start_nats_metrics_publishing(&self, namespace: Namespace, worker_id: u64) {
         let nats_rx = self.rx.clone();
 
         tokio::spawn(async move {

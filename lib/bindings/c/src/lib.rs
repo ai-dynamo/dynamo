@@ -136,7 +136,7 @@ fn dynamo_create_kv_publisher(
     {
         Ok(drt) => {
             let backend = drt.namespace(namespace)?.component(component)?;
-            KvEventPublisher::new(backend, worker_id, kv_block_size, None)
+            KvEventPublisher::new(backend, worker_id as u64, kv_block_size, None)
         }
         Err(e) => Err(e),
     }

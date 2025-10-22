@@ -278,7 +278,8 @@ impl DistributedRuntime {
         self.etcd_client.clone()
     }
 
-    // Do not use. This is for the last few bits of the codebase that need upgrading.
+    // Deprecated but our CI blocks us using the feature currently.
+    //#[deprecated(note = "Use KeyValueStoreManager via store(); this will be removed")]
     pub fn deprecated_etcd_client(&self) -> Option<etcd::Client> {
         self.etcd_client.clone()
     }

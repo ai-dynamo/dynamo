@@ -163,6 +163,7 @@ pub struct HttpServiceConfig {
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
 
+    #[builder(default)]
     store: KeyValueStoreManager,
 
     // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.

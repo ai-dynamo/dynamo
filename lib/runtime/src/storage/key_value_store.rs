@@ -64,7 +64,7 @@ impl From<&Key> for String {
 
 #[async_trait]
 pub trait KeyValueStore: Send + Sync {
-    type Bucket: KeyValueBucket;
+    type Bucket: KeyValueBucket + Send + Sync + 'static;
 
     async fn get_or_create_bucket(
         &self,
@@ -184,17 +184,13 @@ impl KeyValueStoreManager {
             // No bucket means no cards
             return Ok(None);
         };
-        match bucket.get(key).await {
-            Ok(Some(card_bytes)) => {
+        Ok(match bucket.get(key).await? {
+            Some(card_bytes) => {
                 let card: T = serde_json::from_slice(card_bytes.as_ref())?;
-                Ok(Some(card))
+                Some(card)
             }
-            Ok(None) => Ok(None),
-            Err(err) => {
-                // TODO Not NATS
-                Err(StoreError::NATSError(err.to_string()))
-            }
-        }
+            None => None,
+        })
     }
 
     /// Returns a receiver that will receive all the existing keys, and
@@ -267,7 +263,7 @@ impl KeyValueStoreManager {
 /// An online storage for key-value config values.
 /// Usually backed by `nats-server`.
 #[async_trait]
-pub trait KeyValueBucket: Send {
+pub trait KeyValueBucket: Send + Sync {
     /// A bucket is a collection of key/value pairs.
     /// Insert a value into a bucket, if it doesn't exist already
     async fn insert(
@@ -288,7 +284,7 @@ pub trait KeyValueBucket: Send {
     /// such time.
     async fn watch(
         &self,
-    ) -> Result<Pin<Box<dyn futures::Stream<Item = bytes::Bytes> + Send + 'life0>>, StoreError>;
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = bytes::Bytes> + Send + '_>>, StoreError>;
 
     async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StoreError>;
 }
@@ -327,7 +323,7 @@ pub enum StoreError {
     #[error("Internal etcd error: {0}")]
     EtcdError(String),
 
-    #[error("Key Value Error: {0} for bucket '{1}")]
+    #[error("Key Value Error: {0} for bucket '{1}'")]
     KeyValueError(String, String),
 
     #[error("Error decoding bytes: {0}")]
