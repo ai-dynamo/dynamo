@@ -42,7 +42,11 @@ sglang_configs = {
         model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         env={},
         models_port=8000,
-        request_payloads=[chat_payload_default(), completion_payload_default()],
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            # TODO: Add metric_payload_default(min_num_requests=N, backend="sglang")
+        ],
     ),
     "disaggregated": SGLangConfig(
         name="disaggregated",
@@ -69,7 +73,7 @@ sglang_configs = {
                 expected_log=[
                     r"ZMQ listener .* received batch with \d+ events \(seq=\d+\)",
                     r"Event processor for worker_id \d+ processing event: Stored\(",
-                    r"Selected worker: \d+, logit: ",
+                    r"Selected worker: worker_id=\d+ dp_rank=.*?, logit: ",
                 ]
             )
         ],

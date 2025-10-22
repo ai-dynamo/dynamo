@@ -296,60 +296,75 @@ def parse_aiperf_client_results(log_dir: str) -> Dict[str, Any]:
                 # AI-Perf format has "records" dictionary at the top level
                 records = client_metrics.get("records", {})
 
-                # Extract request count (this is the total requests made)
+                # Extract successful request count
                 request_count_record = records.get("request_count", {})
-                request_count = (
+                successful_count = (
                     int(request_count_record.get("avg", 0))
                     if request_count_record
                     else 0
                 )
 
+                # Extract error request count
+                error_request_count_record = records.get("error_request_count", {})
+                error_request_count = (
+                    int(error_request_count_record.get("avg", 0))
+                    if error_request_count_record
+                    else 0
+                )
+
+                # Calculate total requests: successful + errors
+                # Note: request_count appears to only track successful requests when errors are present
+                request_count = successful_count + error_request_count
+
+                # Fall back to input config if no requests were recorded
+                if request_count == 0 and "input_config" in client_metrics:
+                    loadgen_config = client_metrics.get("input_config", {}).get(
+                        "loadgen", {}
+                    )
+                    request_count = loadgen_config.get("request_count", 0)
+
                 # Check for errors in error_summary
                 error_summary = client_metrics.get("error_summary", [])
-                error_count = len(error_summary)
+                # Sum up actual error counts from each error type
+                error_count = sum(error.get("count", 0) for error in error_summary)
 
                 # Check if test was cancelled
-                was_cancelled = client_metrics.get("was_cancelled", False)
-                if was_cancelled:
+                if client_metrics.get("was_cancelled", False):
                     error_count = request_count  # Mark all as failed if cancelled
+
+                # Validate data consistency
+                if request_count < error_count:
+                    logging.warning(
+                        f"Data inconsistency in {item}: error_count ({error_count}) > "
+                        f"total_request_count ({request_count}). This may indicate incomplete data from aiperf."
+                    )
 
                 all_metrics["total_requests"] += request_count
                 all_metrics["successful_requests"] += request_count - error_count
                 all_metrics["failed_requests"] += error_count
 
-                # Extract latency from request_latency record
-                request_latency = records.get("request_latency", {})
-
+                # Extract latency metrics
+                request_latency = client_metrics.get("request_latency", None)
                 if request_latency:
-                    # Convert milliseconds to seconds for consistency
-                    if "avg" in request_latency:
-                        all_metrics["latencies"].append(request_latency["avg"] / 1000.0)
-                    if "p50" in request_latency:
-                        all_metrics["p50_latencies"].append(
-                            request_latency["p50"] / 1000.0
-                        )
-                    if "p90" in request_latency:
-                        all_metrics["p90_latencies"].append(
-                            request_latency["p90"] / 1000.0
-                        )
-                    if "p99" in request_latency:
-                        all_metrics["p99_latencies"].append(
-                            request_latency["p99"] / 1000.0
-                        )
+                    all_metrics["latencies"].append(request_latency["avg"] / 1000.0)
+                    all_metrics["p50_latencies"].append(request_latency["p50"] / 1000.0)
+                    all_metrics["p90_latencies"].append(request_latency["p90"] / 1000.0)
+                    all_metrics["p99_latencies"].append(request_latency["p99"] / 1000.0)
 
-                # Time to first token (if available in records)
-                ttft = records.get("time_to_first_token", {}) or records.get("ttft", {})
-                if ttft and "avg" in ttft:
-                    all_metrics["ttft"].append(ttft["avg"] / 1000.0)  # Convert ms to s
+                # Time to first token
+                ttft = client_metrics.get("time_to_first_token", {}).get("avg", None)
+                if ttft:
+                    all_metrics["ttft"].append(ttft / 1000.0)  # Convert ms to s
 
-                # Inter-token latency (if available in records)
-                itl = records.get("inter_token_latency", {}) or records.get("itl", {})
-                if itl and "avg" in itl:
-                    all_metrics["itl"].append(itl["avg"] / 1000.0)  # Convert ms to s
+                # Inter-token latency
+                itl = client_metrics.get("inter_token_latency", {}).get("avg", None)
+                if itl:
+                    all_metrics["itl"].append(itl / 1000.0)  # Convert ms to s
 
                 # Throughput from request_throughput record
-                request_throughput = records.get("request_throughput", {})
-                req_throughput = request_throughput.get("avg", 0)
+                req_throughput = client_metrics.get("request_throughput", {}).get(
+                    "avg", 0
+                )
                 if req_throughput:
                     all_metrics["throughputs"].append(req_throughput)
 

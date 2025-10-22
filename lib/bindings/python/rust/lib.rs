@@ -21,7 +21,7 @@ use tracing::Instrument;
 use dynamo_runtime::{
     self as rs, logging,
     pipeline::{
-        EngineStream, ManyOut, SingleIn, context::Context as RsContext,
+        AsyncEngineContextProvider, EngineStream, ManyOut, SingleIn, context::Context as RsContext,
         network::egress::push_router::RouterMode as RsRouterMode,
     },
     protocols::annotated::Annotated as RsAnnotated,
@@ -90,11 +90,46 @@ fn get_span_for_direct_context(
     )
 }
 
+// Helper to create request context with proper linking and cancellation handling
+fn create_request_context(
+    request: serde_json::Value,
+    parent_ctx: &Option<context::Context>,
+) -> RsContext<serde_json::Value> {
+    match parent_ctx {
+        // If there is a parent context, link the request as a child context of it
+        Some(parent_ctx) => {
+            let child_ctx = RsContext::with_id(request, parent_ctx.inner().id().to_string());
+            parent_ctx.inner().link_child(child_ctx.context());
+            if parent_ctx.inner().is_stopped() || parent_ctx.inner().is_killed() {
+                // Let the server handle the cancellation for now since not all backends are
+                // properly handling request exceptions
+                // TODO: (DIS-830) Return an error if context is cancelled
+                child_ctx.context().stop_generating();
+            }
+            child_ctx
+        }
+        // Otherwise if there is no parent context, use the request as-is
+        _ => request.into(),
+    }
+}
+
 /// A Python module implemented in Rust. The name of this function must match
 /// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
 /// import the module.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Initialize logging early unless OTEL export is enabled (which requires tokio runtime)
+    if std::env::var("OTEL_EXPORT_ENABLED")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        eprintln!(
+            "Warning: OTEL_EXPORT_ENABLED=1 detected. Logging initialization deferred until runtime is available. Early logs may be dropped."
+        );
+    } else {
+        rs::logging::init();
+    }
+
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
@@ -123,9 +158,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::OverlapScores>()?;
     m.add_class::<llm::kv::KvIndexer>()?;
     m.add_class::<llm::kv::ApproxKvIndexer>()?;
-    m.add_class::<llm::kv::EndpointKvMetrics>()?;
-    m.add_class::<llm::kv::AggregatedMetrics>()?;
-    m.add_class::<llm::kv::KvMetricsAggregator>()?;
     m.add_class::<llm::kv::KvEventPublisher>()?;
     m.add_class::<llm::kv::RadixTree>()?;
     m.add_class::<llm::kv::ZmqKvEventListener>()?;
@@ -197,6 +229,20 @@ fn register_llm<'p>(
     user_data: Option<&Bound<'p, PyDict>>,
     custom_template_path: Option<&str>,
 ) -> PyResult<Bound<'p, PyAny>> {
+    // Validate Prefill model type requirements
+    if model_type.inner == llm_rs::model_type::ModelType::Prefill {
+        if !matches!(model_input, ModelInput::Tokens) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "ModelType::Prefill requires model_input to be ModelInput::Tokens",
+            ));
+        }
+        if migration_limit != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "ModelType::Prefill requires migration_limit to be 0",
+            ));
+        }
+    }
+
     let model_input = match model_input {
         ModelInput::Text => llm_rs::model_type::ModelInput::Text,
         ModelInput::Tokens => llm_rs::model_type::ModelInput::Tokens,
@@ -350,6 +396,10 @@ impl ModelType {
     const TensorBased: Self = ModelType {
         inner: llm_rs::model_type::ModelType::TensorBased,
     };
+    #[classattr]
+    const Prefill: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Prefill,
+    };
 
     fn __or__(&self, other: &Self) -> Self {
         ModelType {
@@ -387,9 +437,14 @@ impl DistributedRuntime {
 
         // Initialize logging in context where tokio runtime is available
         // otel exporter requires it
-        runtime.secondary().block_on(async {
-            rs::logging::init();
-        });
+        if std::env::var("OTEL_EXPORT_ENABLED")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            runtime.secondary().block_on(async {
+                rs::logging::init();
+            });
+        }
 
         let inner =
             if is_static {
@@ -626,10 +681,11 @@ impl Component {
         })
     }
 
+    /// NATS specific stats/metrics call
     fn create_service<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let builder = self.inner.service_builder();
+        let mut inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let _ = builder.create().await.map_err(to_pyerr)?;
+            inner.add_stats_service().await.map_err(to_pyerr)?;
             Ok(())
         })
     }
@@ -794,6 +850,7 @@ impl Client {
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -802,17 +859,15 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
-
                     // Always instrument with appropriate span (none if no trace context)
                     let span = get_span_for_context(&context, "round_robin");
-                    let stream_future = client.round_robin(request_ctx).instrument(span);
-
-                    let stream = stream_future.await.map_err(to_pyerr)?;
-                    context.inner().link_child(stream.context());
-                    stream
+                    client
+                        .round_robin(request_ctx)
+                        .instrument(span)
+                        .await
+                        .map_err(to_pyerr)?
                 }
-                _ => client.round_robin(request.into()).await.map_err(to_pyerr)?,
+                _ => client.round_robin(request_ctx).await.map_err(to_pyerr)?,
             };
             tokio::spawn(process_stream(stream, tx));
             Ok(AsyncResponseStream {
@@ -832,6 +887,7 @@ impl Client {
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -840,16 +896,15 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
-
+                    // Always instrument with appropriate span (none if no trace context)
                     let span = get_span_for_context(&context, "random");
-                    let stream_future = client.random(request_ctx).instrument(span);
-
-                    let stream = stream_future.await.map_err(to_pyerr)?;
-                    context.inner().link_child(stream.context());
-                    stream
+                    client
+                        .random(request_ctx)
+                        .instrument(span)
+                        .await
+                        .map_err(to_pyerr)?
                 }
-                _ => client.random(request.into()).await.map_err(to_pyerr)?,
+                _ => client.random(request_ctx).await.map_err(to_pyerr)?,
             };
             tokio::spawn(process_stream(stream, tx));
             Ok(AsyncResponseStream {
@@ -870,6 +925,7 @@ impl Client {
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -878,18 +934,17 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
-
+                    // Always instrument with appropriate span (none if no trace context)
                     let span =
                         get_span_for_direct_context(&context, "direct", &instance_id.to_string());
-                    let stream_future = client.direct(request_ctx, instance_id).instrument(span);
-
-                    let stream = stream_future.await.map_err(to_pyerr)?;
-                    context.inner().link_child(stream.context());
-                    stream
+                    client
+                        .direct(request_ctx, instance_id)
+                        .instrument(span)
+                        .await
+                        .map_err(to_pyerr)?
                 }
                 _ => client
-                    .direct(request.into(), instance_id)
+                    .direct(request_ctx, instance_id)
                     .await
                     .map_err(to_pyerr)?,
             };
@@ -913,6 +968,7 @@ impl Client {
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -921,16 +977,15 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
-
+                    // Always instrument with appropriate span (none if no trace context)
                     let span = get_span_for_context(&context, "static");
-                    let stream_future = client.r#static(request_ctx).instrument(span);
-
-                    let stream = stream_future.await.map_err(to_pyerr)?;
-                    context.inner().link_child(stream.context());
-                    stream
+                    client
+                        .r#static(request_ctx)
+                        .instrument(span)
+                        .await
+                        .map_err(to_pyerr)?
                 }
-                _ => client.r#static(request.into()).await.map_err(to_pyerr)?,
+                _ => client.r#static(request_ctx).await.map_err(to_pyerr)?,
             };
 
             tokio::spawn(process_stream(stream, tx));

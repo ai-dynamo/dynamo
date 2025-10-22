@@ -21,9 +21,11 @@ pub use etcd_client::{ConnectOptions, KeyValue, LeaseClient};
 use tokio::time::{Duration, interval};
 
 mod lease;
+mod lock;
 mod path;
 
 use lease::*;
+pub use lock::*;
 pub use path::*;
 
 use super::utils::build_in_runtime;

@@ -1,0 +1,345 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.4
+    helm.sh/resource-policy: keep
+  name: dynamographdeploymentrequests.nvidia.com
+spec:
+  group: nvidia.com
+  names:
+    kind: DynamoGraphDeploymentRequest
+    listKind: DynamoGraphDeploymentRequestList
+    plural: dynamographdeploymentrequests
+    shortNames:
+      - dgdr
+    singular: dynamographdeploymentrequest
+  scope: Namespaced
+  versions:
+    - additionalPrinterColumns:
+        - jsonPath: .spec.modelName
+          name: Model
+          type: string
+        - jsonPath: .spec.backend
+          name: Backend
+          type: string
+        - jsonPath: .status.state
+          name: State
+          type: string
+        - jsonPath: .status.deployment.state
+          name: DGD-State
+          type: string
+        - jsonPath: .metadata.creationTimestamp
+          name: Age
+          type: date
+      name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          description: |-
+            DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests API.
+            It serves as the primary interface for users to request model deployments with
+            specific performance and resource constraints, enabling SLA-driven deployments.
+
+            Lifecycle:
+             1. Initial → Pending: Validates spec and prepares for profiling
+             2. Pending → Profiling: Creates and runs profiling job (online or AIC)
+             3. Profiling → Ready/Deploying: Generates DGD spec after profiling completes
+             4. Deploying → Ready: When autoApply=true, monitors DGD until Ready
+             5. Ready: Terminal state when DGD is operational or spec is available
+             6. DeploymentDeleted: Terminal state when auto-created DGD is manually deleted
+
+            The spec becomes immutable once profiling starts. Users must delete and recreate
+            the DGDR to modify configuration after this point.
+          properties:
+            apiVersion:
+              description: |-
+                APIVersion defines the versioned schema of this representation of an object.
+                Servers should convert recognized schemas to the latest internal value, and
+                may reject unrecognized values.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+              type: string
+            kind:
+              description: |-
+                Kind is a string value representing the REST resource this object represents.
+                Servers may infer this from the endpoint the client submits requests to.
+                Cannot be updated.
+                In CamelCase.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: Spec defines the desired state for this deployment request.
+              properties:
+                autoApply:
+                  default: false
+                  description: |-
+                    AutoApply indicates whether to automatically create a DynamoGraphDeployment
+                    after profiling completes. If false, only the spec is generated and stored in status.
+                    Users can then manually create a DGD using the generated spec.
+                  type: boolean
+                backend:
+                  default: trtllm
+                  description: |-
+                    Backend specifies the inference backend framework to use.
+                    Supported values are: "vllm", "sglang", "trtllm".
+                  enum:
+                    - vllm
+                    - sglang
+                    - trtllm
+                  type: string
+                deploymentOverrides:
+                  description: |-
+                    DeploymentOverrides allows customizing metadata for the auto-created DGD.
+                    Only applicable when AutoApply is true.
+                  properties:
+                    annotations:
+                      additionalProperties:
+                        type: string
+                      description: Annotations are additional annotations to add to the DynamoGraphDeployment metadata.
+                      type: object
+                    labels:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        Labels are additional labels to add to the DynamoGraphDeployment metadata.
+                        These are merged with auto-generated labels from the profiling process.
+                      type: object
+                    name:
+                      description: |-
+                        Name is the desired name for the created DynamoGraphDeployment.
+                        If not specified, defaults to the DGDR name.
+                      type: string
+                    namespace:
+                      description: |-
+                        Namespace is the desired namespace for the created DynamoGraphDeployment.
+                        If not specified, defaults to the DGDR namespace.
+                      type: string
+                  type: object
+                gpu:
+                  description: |-
+                    GPU defines optional GPU type and resource specifications.
+                    These constraints guide the profiler to find configurations within specified bounds.
+                  properties:
+                    maxNumGPUsPerEngine:
+                      default: 8
+                      description: |-
+                        MaxNumGPUsPerEngine specifies the maximum number of GPUs per engine for profiling.
+                        The profiler will not consider configurations with more GPUs than this value.
+                      minimum: 1
+                      type: integer
+                    minNumGPUsPerEngine:
+                      default: 1
+                      description: |-
+                        MinNumGPUsPerEngine specifies the minimum number of GPUs per engine for profiling.
+                        The profiler will not consider configurations with fewer GPUs than this value.
+                      minimum: 1
+                      type: integer
+                    type:
+                      description: |-
+                        Type specifies the GPU type to target (e.g., "h200", "h100", "a100").
+                        If specified, profiling will focus on configurations optimized for this GPU type.
+                      type: string
+                  type: object
+                modelName:
+                  description: |-
+                    ModelName specifies the model to deploy (e.g., "meta/llama3-70b").
+                    This should be a valid model identifier that the profiler can resolve.
+                  type: string
+                online:
+                  default: false
+                  description: |-
+                    Online indicates whether to use online profiler (true) or AI Configurator (false).
+                    Online profiling uses real deployments for accurate measurements (2-4 hours).
+                    Offline profiling uses AI Configurator for fast simulation-based profiling (20-30 seconds).
+                  type: boolean
+                profilingConfig:
+                  description: |-
+                    ProfilingConfig provides custom configuration for the profiling job.
+                    Applicable to both online and offline (AIC) profiling modes.
+                  properties:
+                    configMapRef:
+                      description: |-
+                        ConfigMapRef is a reference to a ConfigMap containing profiling configuration.
+                        The ConfigMap should contain a key (default: "disagg.yaml") with the configuration file.
+                        This configuration is used by both online and offline (AIC) profiling modes.
+                      properties:
+                        key:
+                          default: disagg.yaml
+                          description: Key in the ConfigMap to select. If not specified, defaults to "disagg.yaml".
+                          type: string
+                        name:
+                          description: Name of the ConfigMap containing the desired data.
+                          type: string
+                      required:
+                        - name
+                      type: object
+                  type: object
+                sla:
+                  description: |-
+                    SLA defines the Service Level Agreement profiling targets.
+                    The profiler uses these targets to find an optimal deployment configuration.
+                  properties:
+                    isl:
+                      default: 3000
+                      description: |-
+                        ISL is the Input Sequence Length for profiling.
+                        Defines the length of input sequences to use during profiling tests.
+                      minimum: 1
+                      type: integer
+                    itl:
+                      default: 10
+                      description: |-
+                        ITL is the target Inter-Token Latency in milliseconds.
+                        This represents the maximum time allowed between consecutive tokens in the output.
+                      type: integer
+                    osl:
+                      default: 500
+                      description: |-
+                        OSL is the Output Sequence Length for profiling.
+                        Defines the expected length of output sequences to generate during profiling tests.
+                      minimum: 1
+                      type: integer
+                    ttft:
+                      default: 50
+                      description: |-
+                        TTFT is the target Time To First Token in milliseconds.
+                        This represents the maximum time allowed from request submission to receiving the first token.
+                      type: integer
+                  type: object
+              required:
+                - modelName
+                - sla
+              type: object
+            status:
+              description: Status reflects the current observed state of this deployment request.
+              properties:
+                conditions:
+                  description: |-
+                    Conditions contains the latest observed conditions of the deployment request.
+                    Standard condition types include: Validation, Profiling, SpecGenerated, DeploymentReady.
+                    Conditions are merged by type on patch updates.
+                  items:
+                    description: Condition contains details for one aspect of the current state of this API Resource.
+                    properties:
+                      lastTransitionTime:
+                        description: |-
+                          lastTransitionTime is the last time the condition transitioned from one status to another.
+                          This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                        format: date-time
+                        type: string
+                      message:
+                        description: |-
+                          message is a human readable message indicating details about the transition.
+                          This may be an empty string.
+                        maxLength: 32768
+                        type: string
+                      observedGeneration:
+                        description: |-
+                          observedGeneration represents the .metadata.generation that the condition was set based upon.
+                          For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                          with respect to the current state of the instance.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      reason:
+                        description: |-
+                          reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                          Producers of specific condition types may define expected values and meanings for this field,
+                          and whether the values are considered a guaranteed API.
+                          The value should be a CamelCase string.
+                          This field may not be empty.
+                        maxLength: 1024
+                        minLength: 1
+                        pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                        type: string
+                      status:
+                        description: status of the condition, one of True, False, Unknown.
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                        type: string
+                      type:
+                        description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                        maxLength: 316
+                        pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                        type: string
+                    required:
+                      - lastTransitionTime
+                      - message
+                      - reason
+                      - status
+                      - type
+                    type: object
+                  type: array
+                deployment:
+                  description: |-
+                    Deployment tracks the auto-created DGD when AutoApply is true.
+                    Contains name, namespace, state, and creation status of the managed DGD.
+                  properties:
+                    created:
+                      description: |-
+                        Created indicates whether the DGD has been successfully created.
+                        Used to prevent recreation if the DGD is manually deleted by users.
+                      type: boolean
+                    name:
+                      description: Name is the name of the created DynamoGraphDeployment.
+                      type: string
+                    namespace:
+                      description: Namespace is the namespace of the created DynamoGraphDeployment.
+                      type: string
+                    state:
+                      description: |-
+                        State is the current state of the DynamoGraphDeployment.
+                        This value is mirrored from the DGD's status.state field.
+                      type: string
+                  type: object
+                generatedDeployment:
+                  description: |-
+                    GeneratedDeployment contains the full generated DynamoGraphDeployment specification
+                    including metadata, based on profiling results. Users can extract this to create
+                    a DGD manually, or it's used automatically when autoApply is true.
+                    Stored as RawExtension to preserve all fields including metadata.
+                  type: object
+                  x-kubernetes-embedded-resource: true
+                  x-kubernetes-preserve-unknown-fields: true
+                observedGeneration:
+                  description: |-
+                    ObservedGeneration reflects the generation of the most recently observed spec.
+                    Used to detect spec changes and enforce immutability after profiling starts.
+                  format: int64
+                  type: integer
+                profilingResults:
+                  description: |-
+                    ProfilingResults contains a reference to the ConfigMap holding profiling data.
+                    Format: "configmap/<name>"
+                  type: string
+                state:
+                  description: |-
+                    State is a high-level textual status of the deployment request lifecycle.
+                    Possible values: "", "Pending", "Profiling", "Deploying", "Ready", "DeploymentDeleted", "Failed"
+                    Empty string ("") represents the initial state before initialization.
+                  type: string
+              type: object
+          type: object
+      served: true
+      storage: true
+      subresources:
+        status: {}

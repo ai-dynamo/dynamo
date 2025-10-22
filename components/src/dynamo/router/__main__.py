@@ -99,6 +99,7 @@ class StandaloneRouterHandler:
             "eos_token_ids": request.get("eos_token_ids", []),
             "annotations": request.get("annotations", []),
             "disaggregated_params": request.get("disaggregated_params"),
+            "dp_rank": request.get("dp_rank"),
             "extra_args": request.get("extra_args", {}),
         }
 

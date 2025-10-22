@@ -1,0 +1,204 @@
+# syntax=docker/dockerfile:1.10.0
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Dockerfile for using local/pre-built vLLM images with Dynamo
+# Based on container/Dockerfile.vllm but uses existing vLLM image instead of building from source
+
+# All ARGs used in FROM statements must be declared before any FROM
+ARG LOCAL_VLLM_IMAGE="vllm-elastic-ep:latest_all2all_buffer_input"
+ARG DYNAMO_BASE_IMAGE="dynamo:latest-none"
+ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
+ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
+
+# Other build arguments
+ARG PYTHON_VERSION=3.12
+ARG ARCH=amd64
+ARG ARCH_ALT=x86_64
+
+# Use local vLLM image as source
+FROM ${LOCAL_VLLM_IMAGE} AS vllm_source
+
+# Use Dynamo base image
+FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
+
+##################################################
+########## Runtime Image ########################
+##################################################
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+
+WORKDIR /workspace
+ENV DYNAMO_HOME=/opt/dynamo
+ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+ARG ARCH_ALT
+ARG PYTHON_VERSION
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+
+# Install Python, build-essential and runtime dependencies
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        # Python runtime - CRITICAL for virtual environment to work
+        python${PYTHON_VERSION}-dev \
+        build-essential \
+        # jq and curl for polling various endpoints and health checks
+        jq \
+        git \
+        curl \
+        # Libraries required by UCX to find RDMA devices
+        libibverbs1 rdma-core ibverbs-utils libibumad3 \
+        libnuma1 librdmacm1 ibverbs-providers \
+        # JIT Kernel Compilation, flashinfer
+        ninja-build \
+        g++ \
+        # prometheus dependencies
+        ca-certificates \
+        # DeepGemm uses 'cuobjdump' which does not come with CUDA image
+        cuda-command-line-tools-12-8 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy CUDA development tools from vLLM image (for JIT compilation)
+COPY --from=vllm_source /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
+COPY --from=vllm_source /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
+COPY --from=vllm_source /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
+COPY --from=vllm_source /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
+COPY --from=vllm_source /usr/local/cuda/include/ /usr/local/cuda/include/
+COPY --from=vllm_source /usr/local/cuda/nvvm /usr/local/cuda/nvvm
+COPY --from=vllm_source /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
+
+### COPY NATS & ETCD ###
+COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+# Add ETCD and CUDA binaries to PATH
+ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
+
+# Copy UCX and NIXL from dynamo base
+COPY --from=dynamo_base /usr/local/ucx /usr/local/ucx
+COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
+ENV PATH=/usr/local/ucx/bin:$PATH
+
+### VIRTUAL ENVIRONMENT SETUP ###
+
+# Copy uv directly from official image (like Dockerfile.vllm does)
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+# Create fresh virtual environment (following Dockerfile.vllm pattern)
+RUN mkdir -p /opt/dynamo/venv && \
+    uv venv /opt/dynamo/venv --python ${PYTHON_VERSION}
+
+# Activate virtual environment
+ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+# Copy vLLM installation from local image
+# vLLM workspace is at /vllm-workspace in the image
+COPY --from=vllm_source /vllm-workspace /opt/vllm
+
+# Copy ALL Python packages from vLLM image directly to venv
+# Since vLLM is already installed (not as wheels), we copy the site-packages
+COPY --from=vllm_source /usr/local/lib/python3.12/dist-packages ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages
+
+# Fix the .pth files to point to the correct location for pplx_kernels and DeepEP
+RUN if [ -f ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/__editable__.pplx_kernels-0.0.1.pth ]; then \
+        echo "/opt/vllm/ep_kernels_workspace/pplx-kernels/src" > ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/__editable__.pplx_kernels-0.0.1.pth; \
+    fi && \
+    if [ -f ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/__editable__.deep_ep-0.0.1.pth ]; then \
+        echo "/opt/vllm/ep_kernels_workspace/DeepEP" > ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/__editable__.deep_ep-0.0.1.pth; \
+    fi && \
+    # Also check for any other .pth files that might reference /vllm-workspace
+    find ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages -name "*.pth" -exec sed -i 's|/vllm-workspace|/opt/vllm|g' {} \;
+
+# Set LD_LIBRARY_PATH for all components
+ENV LD_LIBRARY_PATH=\
+/opt/vllm/ep_kernels_workspace/nvshmem_install/lib:\
+$NIXL_LIB_DIR:\
+$NIXL_PLUGIN_DIR:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+$LD_LIBRARY_PATH
+
+# DeepGemm JIT compilation support
+ENV CPATH=/usr/local/cuda/include
+
+# Install Dynamo and dependencies (following Dockerfile.vllm pattern)
+# First install basic Python packages
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install pip setuptools wheel
+
+# Copy and install Dynamo wheels from dynamo_base
+COPY --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install \
+    /opt/dynamo/wheelhouse/ai_dynamo_runtime*cp312*.whl \
+    /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+    /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+    && rm -rf /opt/dynamo/wheelhouse
+
+# Install common and test dependencies
+COPY container/deps/requirements.txt /tmp/requirements.txt
+COPY container/deps/requirements.test.txt /tmp/requirements.test.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --requirement /tmp/requirements.txt --requirement /tmp/requirements.test.txt && \
+    rm /tmp/requirements*.txt
+
+# Copy workspace files
+COPY . /workspace/
+
+# Copy attribution files
+COPY ATTRIBUTION* LICENSE /workspace/
+
+# Setup entrypoint
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []
+
+###########################################################
+########## Development Image ##############################
+###########################################################
+FROM runtime AS dev
+
+# Install development tools
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends  \
+    nvtop \
+    wget \
+    tmux \
+    vim \
+    openssh-client \
+    iproute2 \
+    rsync \
+    zip \
+    unzip \
+    htop \
+    autoconf \
+    automake \
+    cmake \
+    libtool \
+    meson \
+    net-tools \
+    pybind11-dev \
+    clang \
+    libclang-dev \
+    protobuf-compiler && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set workspace directory
+ENV WORKSPACE_DIR=/workspace \
+    DYNAMO_HOME=/workspace \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
+# Copy Rust toolchain if needed
+COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
+COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
+
+# Install maturin for development
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install maturin[patchelf] && \
+    uv pip install --no-deps -e .
+
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []

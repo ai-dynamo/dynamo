@@ -35,6 +35,7 @@ trtllm_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            # TODO: Add metric_payload_default(min_num_requests=N, backend="trtllm")
         ],
     ),
     "disaggregated": TRTLLMConfig(
@@ -60,7 +61,7 @@ trtllm_configs = {
             chat_payload_default(
                 expected_log=[
                     r"Event processor for worker_id \d+ processing event: Stored\(",
-                    r"Selected worker: \d+, logit: ",
+                    r"Selected worker: worker_id=\d+ dp_rank=.*?, logit: ",
                 ]
             )
         ],
