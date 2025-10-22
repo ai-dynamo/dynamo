@@ -306,8 +306,7 @@ pub async fn start_kv_router_background(
 
                     let key = String::from_utf8_lossy(kv.key());
 
-                    // Extract the hex worker ID after the colon (e.g., "generate:694d99badb9f7c07" -> "694d99badb9f7c07")
-                    let Some(worker_id_str) = key.split(':').next_back() else {
+                    let Some(worker_id_str) = key.split(&['/', ':'][..]).next_back() else {
                         tracing::warn!("Could not extract worker ID from instance key: {key}");
                         continue;
                     };

@@ -27,13 +27,13 @@ To use KVBM in vLLM, you can follow the steps below:
 
 ### Docker Setup
 ```bash
-# start up etcd for KVBM leader/worker registration and discovery
+# Start up etcd for KVBM leader/worker registration and discovery
 docker compose -f deploy/docker-compose.yml up -d
 
-# build a container containing vllm and kvbm
-./container/build.sh --framework vllm --enable-kvbm
+# Build a dynamo vLLM container (KVBM is built in by default)
+./container/build.sh --framework vllm
 
-# launch the container
+# Launch the container
 ./container/run.sh --framework vllm -it --mount-workspace --use-nixl-gds
 ```
 
@@ -55,11 +55,9 @@ cd $DYNAMO_HOME/components/backends/vllm
 cd $DYNAMO_HOME/components/backends/vllm
 ./launch/disagg_kvbm_2p2d.sh
 ```
-> [!NOTE]
-> To tune the size of CPU or disk cache, set `DYN_KVBM_CPU_CACHE_GB` and `DYN_KVBM_DISK_CACHE_GB` accordingly. We only set `DYN_KVBM_CPU_CACHE_GB=20` in both scripts above.
 
 > [!NOTE]
-> Configure KVBM cache tiers (choose one of the following options):
+> Configure or tune KVBM cache tiers (choose one of the following options):
 > ```bash
 > # Option 1: CPU cache only (GPU -> CPU offloading)
 > # 4 means 4GB of pinned CPU memory would be used
@@ -86,7 +84,7 @@ cd $DYNAMO_HOME/components/backends/vllm
 
 ### Sample Request
 ```bash
-# make a request to verify vLLM with KVBM is started up correctly
+# Make a request to verify vLLM with KVBM is started up correctly
 # NOTE: change the model name if served with a different one
 curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
     "model": "Qwen/Qwen3-0.6B",
@@ -113,7 +111,7 @@ Follow below steps to enable metrics collection and view via Grafana dashboard:
 # Start the basic services (etcd & natsd), along with Prometheus and Grafana
 docker compose -f deploy/docker-compose.yml --profile metrics up -d
 
-# set env var DYN_KVBM_METRICS to true, when launch via dynamo
+# Set env var DYN_KVBM_METRICS to true, when launch via dynamo
 # Optionally set DYN_KVBM_METRICS_PORT to choose the /metrics port (default: 6880).
 # NOTE: update launch/disagg_kvbm.sh or launch/disagg_kvbm_2p2d.sh as needed
 DYN_KVBM_METRICS=true \
@@ -122,7 +120,7 @@ python -m dynamo.vllm \
     --enforce-eager \
     --connector kvbm
 
-# optional if firewall blocks KVBM metrics ports to send prometheus metrics
+# Optional, if firewall blocks KVBM metrics ports to send prometheus metrics
 sudo ufw allow 6880/tcp
 ```
 
@@ -134,8 +132,8 @@ Once the model is loaded ready, follow below steps to use LMBenchmark to benchma
 ```bash
 git clone https://github.com/LMCache/LMBenchmark.git
 
-# show case of running the synthetic multi-turn chat dataset.
-# we are passing model, endpoint, output file prefix and qps to the sh script.
+# Show case of running the synthetic multi-turn chat dataset.
+# We are passing model, endpoint, output file prefix and qps to the sh script.
 cd LMBenchmark/synthetic-multi-round-qa
 ./long_input_short_output_run.sh \
     "Qwen/Qwen3-0.6B" \

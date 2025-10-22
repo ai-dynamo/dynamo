@@ -173,13 +173,23 @@ def validate_openai_response(response: requests.Response) -> None:
 
 
 def check_worker_received_request(worker_process: DynamoWorkerProcess) -> bool:
-    """Check if the worker logs contain 'New Request ID:' message indicating it received a request"""
+    """Check if the worker logs contain request ID message indicating it received a request.
+
+    Supports multiple backend patterns:
+    - vLLM: "Decode Request ID:" or "Prefill Request ID:"
+    - SGLang/TensorRT-LLM: "New Request ID:"
+    """
     log_path = worker_process._log_path
     if log_path and os.path.exists(log_path):
         try:
             with open(log_path, "r") as f:
                 log_content = f.read()
-                return "New Request ID: " in log_content
+                # Check for any of the supported patterns
+                return (
+                    "New Request ID: " in log_content
+                    or "Decode Request ID: " in log_content
+                    or "Prefill Request ID: " in log_content
+                )
         except Exception as e:
             logger.warning(f"Could not read worker log file {log_path}: {e}")
     return False

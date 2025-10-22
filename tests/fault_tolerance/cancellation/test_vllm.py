@@ -40,18 +40,22 @@ class DynamoWorkerProcess(ManagedProcess):
             "3",
         ]
 
-        health_check_urls = [
-            (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
-            (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
-        ]
-
         # Set port based on worker type
         port = "8082" if is_prefill else "8081"
 
-        # Add prefill worker flag if needed
+        # Configure health check based on worker type
         if is_prefill:
+            # Prefill workers check their own status endpoint
             command.append("--is-prefill-worker")
             health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
+        else:
+            # Decode workers should also check their own status endpoint first,
+            # then verify the frontend sees the model
+            health_check_urls = [
+                (f"http://localhost:{port}/health", self.is_ready),
+                (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
+                (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
+            ]
 
         # Set debug logging environment
         env = os.environ.copy()
@@ -155,10 +159,10 @@ def test_request_cancellation_vllm_aggregated(
                 # Send the request (non-blocking)
                 cancellable_req = send_cancellable_request(request_type)
 
-                # Poll for "New Request ID" pattern
+                # Poll for "Decode Request ID" pattern (vLLM v2 pattern)
                 request_id, worker_log_offset = poll_for_pattern(
                     process=worker,
-                    pattern="New Request ID: ",
+                    pattern="Decode Request ID: ",
                     log_offset=worker_log_offset,
                     match_type="contains",
                 )
@@ -223,17 +227,17 @@ def test_request_cancellation_vllm_decode_cancel(
                 # Send streaming request (non-blocking)
                 cancellable_req = send_cancellable_request("chat_completion_stream")
 
-                # Poll for "New Request ID" pattern in decode worker
+                # Poll for "Decode Request ID" pattern in decode worker (vLLM v2 pattern)
                 request_id, decode_log_offset = poll_for_pattern(
                     process=decode_worker,
-                    pattern="New Request ID: ",
+                    pattern="Decode Request ID: ",
                     match_type="contains",
                 )
 
-                # Verify same request ID reached prefill worker (as "New Prefill Request ID")
+                # Verify same request ID reached prefill worker (as "Prefill Request ID")
                 _, prefill_log_offset = poll_for_pattern(
                     process=prefill_worker,
-                    pattern=f"New Prefill Request ID: {request_id}",
+                    pattern=f"Prefill Request ID: {request_id}",
                 )
 
                 # Read 5 streaming responses (decode phase)
@@ -288,9 +292,11 @@ def test_request_cancellation_vllm_remote_prefill_cancel(
             with DynamoWorkerProcess(request, is_prefill=False) as decode_worker:
                 logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
 
-                # Step 4: Test request cancellation during remote prefill phase
+                # Step 4: Test request cancellation during prefill phase
+                # Note: With the new architecture, prefill routing happens in the frontend,
+                # so the request goes directly to the prefill worker first
                 logger.info(
-                    "Testing completion request cancellation during remote prefill phase..."
+                    "Testing completion request cancellation during prefill phase..."
                 )
 
                 # Send request with long prompt (non-blocking)
@@ -298,35 +304,23 @@ def test_request_cancellation_vllm_remote_prefill_cancel(
                     "completion", use_long_prompt=True
                 )
 
-                # Poll for "New Request ID" pattern in decode worker
-                request_id, decode_log_offset = poll_for_pattern(
-                    process=decode_worker,
-                    pattern="New Request ID: ",
-                    match_type="contains",
-                )
-
-                # Poll for same request ID in prefill worker (as "New Prefill Request ID")
-                _, prefill_log_offset = poll_for_pattern(
+                # Poll for "Prefill Request ID" pattern in prefill worker (vLLM v2 pattern)
+                # With new architecture, prefill is routed by frontend's internal router
+                request_id, prefill_log_offset = poll_for_pattern(
                     process=prefill_worker,
-                    pattern=f"New Prefill Request ID: {request_id}",
+                    pattern="Prefill Request ID: ",
+                    match_type="contains",
                 )
 
                 # Cancel during prefill phase
                 cancellable_req.cancel()
-                logger.info(f"Cancelled request ID: {request_id} during remote prefill")
+                logger.info(f"Cancelled request ID: {request_id} during prefill")
 
-                # Poll for "Aborted Prefill Request ID" in prefill worker first (where cancellation happens)
+                # Poll for "Aborted Prefill Request ID" in prefill worker (where cancellation happens)
                 _, prefill_log_offset = poll_for_pattern(
                     process=prefill_worker,
                     pattern=f"Aborted Prefill Request ID: {request_id}",
                     log_offset=prefill_log_offset,
-                )
-
-                # Then poll for "Aborted Remote Prefill Request ID" in decode worker
-                _, decode_log_offset = poll_for_pattern(
-                    process=decode_worker,
-                    pattern=f"Aborted Remote Prefill Request ID: {request_id}",
-                    log_offset=decode_log_offset,
                 )
 
                 # Verify frontend log has kill message

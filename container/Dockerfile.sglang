@@ -103,7 +103,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     cd sglang && \
     git checkout v${SGLANG_VERSION} && \
     # Install in editable mode for development
-    uv pip install -e "python[all]"
+    uv pip install --prerelease=allow -e "python[all]"
 
 # Set env var that allows for forceful shutdown of inflight requests in SGL's TokenizerManager
 ENV SGL_FORCE_SHUTDOWN=1

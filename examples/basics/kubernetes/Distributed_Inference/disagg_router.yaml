@@ -4,11 +4,11 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-agg-router
+  name: vllm-v1-disagg-router
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-agg-router
+      dynamoNamespace: vllm-v1-disagg-router
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -18,13 +18,13 @@ spec:
         - name: DYN_ROUTER_MODE
           value: kv
     VllmDecodeWorker:
+      dynamoNamespace: vllm-v1-disagg-router
       envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-agg-router
       componentType: worker
-      replicas: 4
+      replicas: 1
       resources:
         limits:
-          gpu: "1"
+          gpu: "8"
       envs:
         - name: DYN_LOG
           value: "debug"
@@ -36,12 +36,40 @@ spec:
             type: DirectoryOrCreate
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/components/backends/vllm
           volumeMounts:
           - name: local-model-cache
             mountPath: /root/.cache
-          workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
-            - python3 -m dynamo.vllm --model Qwen/Qwen2.5-1.5B-Instruct
+            - python3 -m dynamo.vllm --model meta-llama/Llama-3.1-70B-Instruct -tp 8
+    VllmPrefillWorker:
+      dynamoNamespace: vllm-v1-disagg-router
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+      envs:
+        - name: DYN_LOG
+          value: "debug"
+      extraPodSpec:
+        volumes:
+        - name: local-model-cache
+          hostPath:
+            path: /YOUR/LOCAL/CACHE/FOLDER
+            type: DirectoryOrCreate
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/components/backends/vllm
+          volumeMounts:
+          - name: local-model-cache
+            mountPath: /root/.cache
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 -m dynamo.vllm --model meta-llama/Llama-3.1-70B-Instruct -tp 4 --is-prefill-worker

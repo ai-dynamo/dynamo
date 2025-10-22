@@ -40,7 +40,12 @@ The standalone router exposes two endpoints via the Dynamo runtime:
 
 Clients query the `find_best_worker` endpoint to determine which worker should process each request, then call the selected worker directly.
 
-## Example: Disaggregated Serving with Prefill Workers
+## Example: Manual Disaggregated Serving (Alternative Setup)
+
+> [!Note]
+> **This is an alternative advanced setup.** The recommended approach for disaggregated serving is to use the frontend's automatic prefill routing, which activates when you register workers with `ModelType.Prefill`. See the [KV Cache Routing documentation](/docs/architecture/kv_cache_routing.md#disaggregated-serving-prefill-and-decode) for the default setup.
+>
+> Use this manual setup if you need explicit control over prefill routing configuration or want to manage prefill and decode routers separately.
 
 See [`components/backends/vllm/launch/disagg_router.sh`](/components/backends/vllm/launch/disagg_router.sh) for a complete example.
 

@@ -121,7 +121,6 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 Some(
                     manager
                         .kv_chooser_for(
-                            local_model.display_name(),
                             &component,
                             card.kv_cache_block_size,
                             Some(local_model.router_config().kv_router_config),
@@ -143,6 +142,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 None,
                 kv_chooser.clone(),
                 tokenizer_hf.clone(),
+                None, // No prefill chooser in http static mode
             )
             .await?;
             manager.add_chat_completions_model(
@@ -151,12 +151,19 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 chat_engine,
             )?;
 
-            let completions_engine =
-                entrypoint::build_routed_pipeline::<
-                    NvCreateCompletionRequest,
-                    NvCreateCompletionResponse,
-                >(card, &client, router_mode, None, kv_chooser, tokenizer_hf)
-                .await?;
+            let completions_engine = entrypoint::build_routed_pipeline::<
+                NvCreateCompletionRequest,
+                NvCreateCompletionResponse,
+            >(
+                card,
+                &client,
+                router_mode,
+                None,
+                kv_chooser,
+                tokenizer_hf,
+                None, // No prefill chooser in http static mode
+            )
+            .await?;
             manager.add_completions_model(
                 local_model.display_name(),
                 checksum,

@@ -118,27 +118,14 @@ python -m dynamo.frontend --help
 
 For detailed explanations of router arguments (especially KV cache routing parameters), see the [KV Cache Routing documentation](../../docs/architecture/kv_cache_routing.md).
 
-#### Launching a Standalone Router for Prefill Workers (Optional)
+#### Disaggregated Serving with Automatic Prefill Routing
 
-If you're using disaggregated serving with separate prefill and decode workers, you should also launch a standalone router for prefill workers. This router handles routing prefill requests to dedicated prefill workers. When using a standalone prefill router, it's recommended to start the frontend (decode router) with `--kv-overlap-score-weight 0` for pure load balancing (as prefix-aware routing is now handled by the standalone router):
+When you launch prefill workers using `run_engines.sh --prefill`, the frontend automatically detects them and activates an internal prefill router. This prefill router:
+- Automatically routes initial token processing to dedicated prefill workers
+- Uses KV-aware routing regardless of the frontend's `--router-mode` setting
+- Seamlessly integrates with your decode workers for token generation
 
-```bash
-# Start the decode router with pure load balancing
-python -m dynamo.frontend \
-    --router-mode kv \
-    --router-reset-states \
-    --http-port 8000 \
-    --kv-overlap-score-weight 0
-
-# In another terminal, start the standalone router for prefill workers
-python -m dynamo.router \
-    --endpoint dynamo.prefill.generate \
-    --block-size 64 \
-    --router-reset-states \
-    --no-track-active-blocks
-```
-
-The `--router-reset-states` flag clears any previous state, and `--no-track-active-blocks` disables active block tracking (suitable for prefill-only routing where decode load is not relevant).
+No additional configuration is needed - simply launch both decode and prefill workers, and the system handles the rest. See the [KV Cache Routing documentation](../../docs/architecture/kv_cache_routing.md#disaggregated-serving-prefill-and-decode) for more details.
 
 **Note**: If you're unsure whether your backend engines correctly emit KV events for certain models (e.g., hybrid models like gpt-oss or nemotron nano 2), use the `--no-kv-events` flag to disable KV event tracking and use approximate KV indexing instead:
 

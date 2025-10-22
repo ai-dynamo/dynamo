@@ -24,6 +24,7 @@ dependencies = [
     "typer",
     "click<8.2.0",
     "setuptools",
+    "prometheus_client>=0.23.1,<1.0",
 ]
 
 classifiers = [
