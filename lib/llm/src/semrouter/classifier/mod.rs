@@ -1,27 +1,19 @@
 use std::collections::HashMap;
 
-pub mod modernbert;
+pub mod mock;
 
-pub trait MultiClassifier: Send + Sync {
-    fn probs(&self, text: &str) -> anyhow::Result<HashMap<String, f32>>;
-}
+#[cfg(feature = "onnx-classifier")]
+pub mod onnx;
 
-pub struct HeuristicClassifier;
-
-impl MultiClassifier for HeuristicClassifier {
-    fn probs(&self, text: &str) -> anyhow::Result<HashMap<String, f32>> {
-        let t = text.to_ascii_lowercase();
-        let mut m = HashMap::new();
-        let token_len = t.split_whitespace().count();
-        if t.contains("think step by step")
-            || t.contains("explain your reasoning")
-            || token_len > 120
-        {
-            m.insert("reasoning".into(), 0.8);
-        } else {
-            m.insert("qa".into(), 0.6);
-        }
-        Ok(m)
-    }
+/// Unified classifier trait for both binary and multi-class classification
+/// Returns label probabilities as a HashMap
+///
+/// For binary classification (e.g., reasoning vs non-reasoning):
+///   Returns {"non-reasoning": 0.3, "reasoning": 0.7}
+///
+/// For multi-class classification:
+///   Returns {"math": 0.1, "code": 0.2, "reasoning": 0.6, "general": 0.1}
+pub trait Classifier: Send + Sync {
+    fn classify(&self, text: &str) -> anyhow::Result<HashMap<String, f32>>;
 }
 

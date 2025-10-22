@@ -1,22 +1,86 @@
 use crate::semrouter::{
-    classifier::MultiClassifier,
+    classifier::Classifier,
     metrics::{CLASSIFIER_LATENCY, ROUTE_DECISIONS},
     policy::CategoryPolicy,
     types::{RequestMeta, RoutePlan, RoutingMode, Target},
+    PolicyConfig,
 };
+use anyhow::Result;
 use std::sync::Arc;
 use tracing::debug;
 
-pub struct SemRouter<C: MultiClassifier + ?Sized> {
+#[cfg(feature = "onnx-classifier")]
+use crate::semrouter::OnnxClassifier;
+
+/// Semantic router using a unified classifier
+/// Supports both binary and multi-class classification transparently
+pub struct SemRouter {
     policy: CategoryPolicy,
-    clf: Arc<C>,
+    classifier: Arc<dyn Classifier>,
 }
 
-impl<C: MultiClassifier + ?Sized> SemRouter<C> {
-    pub fn new(policy: CategoryPolicy, clf: Arc<C>) -> Self {
-        Self { policy, clf }
+impl SemRouter {
+    /// Create a new semantic router with the given policy and classifier
+    pub fn new(policy: CategoryPolicy, classifier: Arc<dyn Classifier>) -> Self {
+        Self { policy, classifier }
     }
 
+    /// Create a SemRouter from a config file using ONNX classifier
+    ///
+    /// Reads classifier configuration from environment variables:
+    /// - SEMROUTER_MODEL_PATH: Path to ONNX model file
+    /// - SEMROUTER_TOKENIZER_PATH: Path to tokenizer.json
+    /// - SEMROUTER_MAX_LENGTH: Optional max sequence length (default: 256)
+    #[cfg(feature = "onnx-classifier")]
+    pub fn from_config(config_path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let policy_config = PolicyConfig::load(config_path)?;
+        let policy = CategoryPolicy::new(policy_config);
+
+        // Load ONNX classifier from environment variables
+        let model_path = std::env::var("SEMROUTER_MODEL_PATH")
+            .map_err(|_| anyhow::anyhow!("SEMROUTER_MODEL_PATH environment variable not set"))?;
+        let tokenizer_path = std::env::var("SEMROUTER_TOKENIZER_PATH")
+            .map_err(|_| anyhow::anyhow!("SEMROUTER_TOKENIZER_PATH environment variable not set"))?;
+        let max_length = std::env::var("SEMROUTER_MAX_LENGTH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(256);
+
+        let classifier = Arc::new(OnnxClassifier::new(&model_path, &tokenizer_path, max_length)?);
+
+        tracing::info!("Semantic router initialized with ONNX classifier");
+        Ok(Self::new(policy, classifier))
+    }
+
+    /// Create a SemRouter from a config file (uses MockClassifier when ONNX is not available)
+    #[cfg(not(feature = "onnx-classifier"))]
+    pub fn from_config(config_path: impl AsRef<std::path::Path>) -> Result<Self> {
+        use crate::semrouter::MockClassifier;
+
+        let policy_config = PolicyConfig::load(config_path)?;
+        let policy = CategoryPolicy::new(policy_config.clone());
+
+        // Use MockClassifier in binary mode if reasoning_model is set, multi-class otherwise
+        let binary_mode = policy_config.reasoning_model.is_some();
+        let classifier = Arc::new(MockClassifier::new(binary_mode));
+
+        tracing::info!("Semantic router initialized with MockClassifier (binary_mode={})", binary_mode);
+        Ok(Self::new(policy, classifier))
+    }
+
+    /// Create a SemRouter from a config file with a custom classifier
+    ///
+    /// This allows using any classifier implementation, not just ONNX
+    pub fn from_config_with_classifier(
+        config_path: impl AsRef<std::path::Path>,
+        classifier: Arc<dyn Classifier>,
+    ) -> Result<Self> {
+        let policy_config = PolicyConfig::load(config_path)?;
+        let policy = CategoryPolicy::new(policy_config);
+        Ok(Self::new(policy, classifier))
+    }
+
+    /// Apply semantic routing to a request
     pub fn apply(
         &self,
         req_json: &mut serde_json::Value,
@@ -113,12 +177,17 @@ impl<C: MultiClassifier + ?Sized> SemRouter<C> {
         }
 
         let t0 = std::time::Instant::now();
-        let dist = self.clf.probs(text).ok()?;
+
+        // Run classifier (works for both binary and multi-class)
+        let probs = self.classifier.classify(text).ok()?;
+
         CLASSIFIER_LATENCY
             .with_label_values(&[meta.transport])
             .observe(t0.elapsed().as_secs_f64() * 1000.0);
 
-        let plan = self.policy.decide(&dist);
+        // Policy decides based on probabilities
+        let plan = self.policy.decide(&probs);
+
         let target_str = match &plan.target {
             Target::OnPrem { model } => model.clone(),
         };

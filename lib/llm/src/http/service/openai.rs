@@ -37,7 +37,6 @@ use super::{
     },
     service_v2,
 };
-use crate::semrouter::{RequestMeta, RoutingMode};
 use crate::engines::ValidateRequest;
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
@@ -510,48 +509,13 @@ async fn handler_chat_completions(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    // Apply semantic routing if configured
-    if let Some(router) = state.semrouter() {
-        let routing_mode = RoutingMode::from_header(
-            headers
-                .get("x-dynamo-routing")
-                .and_then(|h| h.to_str().ok()),
-        );
-
-        let request_text = request
-            .inner
-            .messages
-            .iter()
-            .rev()
-            .find_map(|msg| {
-                if let dynamo_async_openai::types::ChatCompletionRequestMessage::User(user_msg) = msg {
-                    match &user_msg.content {
-                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(text) => Some(text.as_str()),
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
-            });
-
-        let mut req_json = serde_json::to_value(&request.inner).ok();
-        if let Some(ref mut json) = req_json {
-            let meta = RequestMeta {
-                tenant: None,
-                region: None,
-                transport: "http",
-                routing_mode,
-                model_field: Some(&request.inner.model),
-                request_text,
-            };
-
-            let _decision = router.apply(json, &meta);
-
-            if let Ok(updated_request) = serde_json::from_value(json.clone()) {
-                request.inner = updated_request;
-            }
-        }
-    }
+    // Apply semantic routing (transport-agnostic, zero-cost when disabled)
+    let _decision = crate::semrouter::process_chat_request(
+        &mut request,
+        state.semrouter().map(|r| r.as_ref()),
+        headers.get("x-dynamo-routing").and_then(|h| h.to_str().ok()),
+        "http",
+    );
 
     // create the context for the request
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);

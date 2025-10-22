@@ -883,28 +883,6 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
 [[package]]
 name = "candle-core"
 version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9f51e2ecf6efe9737af8f993433c839f956d2b6ed4fd2dd4a7c6d8b0fa667ff"
-dependencies = [
- "byteorder",
- "gemm 0.17.1",
- "half 2.6.0",
- "memmap2",
- "num-traits",
- "num_cpus",
- "rand 0.9.2",
- "rand_distr 0.5.1",
- "rayon",
- "safetensors 0.4.5",
- "thiserror 1.0.69",
- "ug",
- "yoke 0.7.5",
- "zip 1.1.4",
-]
-
-[[package]]
-name = "candle-core"
-version = "0.9.1"
 source = "git+https://github.com/EricLBuehler/candle.git?rev=7511e510#7511e510054973ea4e2043f6d2da14409c195baf"
 dependencies = [
  "byteorder",
@@ -955,7 +933,7 @@ name = "candle-nn"
 version = "0.9.1"
 source = "git+https://github.com/EricLBuehler/candle.git?rev=7511e510#7511e510054973ea4e2043f6d2da14409c195baf"
 dependencies = [
- "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
+ "candle-core",
  "candle-metal-kernels",
  "half 2.6.0",
  "metal 0.27.0",
@@ -2141,7 +2119,6 @@ dependencies = [
  "bs62",
  "bytemuck",
  "bytes",
- "candle-core 0.9.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "chrono",
  "criterion 0.3.6",
  "cudarc 0.17.3",
@@ -2168,7 +2145,8 @@ dependencies = [
  "minijinja-contrib",
  "modelexpress-client",
  "modelexpress-common",
- "ndarray",
+ "ndarray 0.15.6",
+ "ndarray 0.16.1",
  "nix 0.26.4",
  "nixl-sys",
  "offset-allocator",
@@ -4694,7 +4672,7 @@ version = "0.6.0"
 source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=a13220255#a132202551f4fdf3a1d9e2da51232581789af7ea"
 dependencies = [
  "anyhow",
- "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
+ "candle-core",
  "candle-nn",
  "clap 4.5.48",
  "either",
@@ -4737,7 +4715,7 @@ dependencies = [
  "bm25",
  "bytemuck",
  "bytemuck_derive",
- "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
+ "candle-core",
  "candle-nn",
  "cfgrammar",
  "chrono",
@@ -4844,7 +4822,7 @@ source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=a13220255#a1322
 dependencies = [
  "anyhow",
  "bindgen_cuda 0.1.7",
- "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
+ "candle-core",
  "float8",
  "half 2.6.0",
  "metal 0.27.0",
@@ -4859,7 +4837,7 @@ source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=a13220255#a1322
 dependencies = [
  "bindgen_cuda 0.1.7",
  "byteorder",
- "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
+ "candle-core",
  "candle-nn",
  "float8",
  "half 2.6.0",
@@ -4885,7 +4863,7 @@ name = "mistralrs-vision"
 version = "0.6.0"
 source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=a13220255#a132202551f4fdf3a1d9e2da51232581789af7ea"
 dependencies = [
- "candle-core 0.9.1 (git+https://github.com/EricLBuehler/candle.git?rev=7511e510)",
+ "candle-core",
  "image",
  "rayon",
 ]
@@ -5006,6 +4984,19 @@ dependencies = [
  "security-framework 2.11.1",
  "security-framework-sys",
  "tempfile",
+]
+
+[[package]]
+name = "ndarray"
+version = "0.15.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "adb12d4e967ec485a5f71c6311fe28158e9d6f4bc4a447b474184d0f91a8fa32"
+dependencies = [
+ "matrixmultiply",
+ "num-complex",
+ "num-integer",
+ "num-traits",
+ "rawpointer",
 ]
 
 [[package]]
@@ -5613,8 +5604,10 @@ version = "2.0.0-rc.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fa7e49bd669d32d7bc2a15ec540a527e7764aec722a45467814005725bcd721"
 dependencies = [
+ "ndarray 0.16.1",
  "ort-sys",
  "smallvec 2.0.0-alpha.10",
+ "tracing",
 ]
 
 [[package]]

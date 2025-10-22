@@ -15,7 +15,7 @@ use super::metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::request_template::RequestTemplate;
-use crate::semrouter::{CategoryPolicy, HeuristicClassifier, MultiClassifier, PolicyConfig, SemRouter};
+use crate::semrouter::{Classifier, SemRouter};
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
@@ -37,7 +37,7 @@ pub struct State {
     etcd_client: Option<etcd::Client>,
     store: Arc<dyn KeyValueStore>,
     flags: StateFlags,
-    semrouter: Option<Arc<SemRouter<dyn MultiClassifier>>>,
+    semrouter: Option<Arc<SemRouter>>,
 }
 
 #[derive(Default, Debug)]
@@ -134,31 +134,30 @@ impl State {
         None
     }
 
-    pub fn semrouter(&self) -> Option<&Arc<SemRouter<dyn MultiClassifier>>> {
+    pub fn semrouter(&self) -> Option<&Arc<SemRouter>> {
         self.semrouter.as_ref()
     }
 
+    /// Initialize semantic router from config
+    ///
+    /// This is a thin wrapper that delegates to SemRouter::from_config()
+    /// The actual initialization logic is transport-agnostic and lives in the semrouter module
     pub fn init_semrouter_from_config(&mut self, config_path: impl AsRef<std::path::Path>) -> Result<()> {
-        let policy_config = PolicyConfig::load(config_path)?;
-        let policy = CategoryPolicy::new(policy_config);
-        let classifier: Arc<dyn MultiClassifier> = Arc::new(HeuristicClassifier);
-        let router = SemRouter::new(policy, classifier);
+        let router = SemRouter::from_config(config_path)?;
         self.semrouter = Some(Arc::new(router));
-        tracing::info!("Semantic router initialized with heuristic classifier");
         Ok(())
     }
 
-    pub fn init_semrouter_with_classifier<C: MultiClassifier + 'static>(
+    /// Initialize semantic router with a custom classifier
+    ///
+    /// This allows using any classifier implementation
+    pub fn init_semrouter_with_custom_classifier(
         &mut self,
         config_path: impl AsRef<std::path::Path>,
-        classifier: Arc<C>,
+        classifier: Arc<dyn Classifier>,
     ) -> Result<()> {
-        let policy_config = PolicyConfig::load(config_path)?;
-        let policy = CategoryPolicy::new(policy_config);
-        let classifier_dyn: Arc<dyn MultiClassifier> = classifier;
-        let router = SemRouter::new(policy, classifier_dyn);
+        let router = SemRouter::from_config_with_classifier(config_path, classifier)?;
         self.semrouter = Some(Arc::new(router));
-        tracing::info!("Semantic router initialized with custom classifier");
         Ok(())
     }
 

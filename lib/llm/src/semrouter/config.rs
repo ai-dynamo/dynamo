@@ -21,10 +21,21 @@ fn default_min_conf() -> f32 {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct PolicyConfig {
+    // Binary classification fields (new)
+    #[serde(default)]
+    pub reasoning_model: Option<String>,
+    #[serde(default)]
+    pub general_model: Option<String>,
+
+    // Fallback model (used for both binary and multi-class)
     #[serde(default = "default_abstain_model")]
     pub abstain_onprem_model: String,
+
+    // Confidence threshold
     #[serde(default = "default_min_conf")]
     pub threshold_min_conf: f32,
+
+    // Multi-class fields (deprecated but kept for backwards compatibility)
     #[serde(default)]
     pub weights: HashMap<String, i32>,
     #[serde(default)]

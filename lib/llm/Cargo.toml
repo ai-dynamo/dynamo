@@ -24,7 +24,7 @@ testing-etcd = []
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
-onnx-classifier = ["dep:ort", "dep:ndarray"]
+onnx-classifier = ["dep:ort", "dep:ndarray-ort"]
 
 [[bench]]
 name = "tokenizer"
@@ -82,7 +82,6 @@ akin = "0.4.0"
 bitflags = { version = "2.4", features = ["serde"] }
 blake3 = { version = "1.8", features = ["mmap", "rayon"] }
 bytemuck = "1.22"
-candle-core = { version = "0.9.1" }
 derive-getters = "0.5"
 offset-allocator = "0.2"
 regex = "1"
@@ -102,7 +101,8 @@ ndarray = { workspace = true, optional = true }
 nix = { version = "0.26", optional = true }
 
 # semantic router ONNX classifier
-ort = { version = "2.0.0-rc.10", optional = true, default-features = false, features = ["copy-dylibs", "download-binaries"] }
+ort = { version = "2.0.0-rc.10", optional = true, features = ["ndarray", "copy-dylibs", "download-binaries"] }
+ndarray-ort = { package = "ndarray", version = "0.15", optional = true }
 
 # protocols
 unicode-segmentation = "1.12"

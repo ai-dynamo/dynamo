@@ -11,7 +11,64 @@ impl CategoryPolicy {
         Self { cfg }
     }
 
-    pub fn decide(&self, dist: &HashMap<String, f32>) -> RoutePlan {
+    /// Make routing decision based on classifier probabilities
+    /// Works for both binary and multi-class classification
+    pub fn decide(&self, probs: &HashMap<String, f32>) -> RoutePlan {
+        // Check if binary mode (has reasoning_model configured)
+        if let Some(ref reasoning_model) = self.cfg.reasoning_model {
+            return self.decide_binary(probs, reasoning_model);
+        }
+
+        // Multi-class mode: use rules
+        self.decide_multiclass(probs)
+    }
+
+    /// Binary classification decision
+    fn decide_binary(&self, probs: &HashMap<String, f32>, reasoning_model: &str) -> RoutePlan {
+        let reasoning_prob = probs.get("reasoning").copied().unwrap_or(0.0);
+        let non_reasoning_prob = probs.get("non-reasoning").copied().unwrap_or(0.0);
+
+        // Get the actual confidence (max of the two)
+        let confidence = reasoning_prob.max(non_reasoning_prob);
+
+        // Check if confidence meets threshold
+        if confidence < self.cfg.threshold_min_conf {
+            return RoutePlan {
+                target: Target::OnPrem {
+                    model: self.cfg.abstain_onprem_model.clone(),
+                },
+                rationale: "abstain_low_confidence",
+                winner_label: if reasoning_prob > non_reasoning_prob {
+                    "reasoning".to_string()
+                } else {
+                    "non-reasoning".to_string()
+                },
+            };
+        }
+
+        // Route based on which probability is higher
+        if reasoning_prob > 0.5 {
+            RoutePlan {
+                target: Target::OnPrem {
+                    model: reasoning_model.to_string(),
+                },
+                rationale: "reasoning",
+                winner_label: "reasoning".to_string(),
+            }
+        } else {
+            RoutePlan {
+                target: Target::OnPrem {
+                    model: self.cfg.general_model.clone()
+                        .unwrap_or_else(|| self.cfg.abstain_onprem_model.clone()),
+                },
+                rationale: "general",
+                winner_label: "non-reasoning".to_string(),
+            }
+        }
+    }
+
+    /// Multi-class classification decision using rules
+    fn decide_multiclass(&self, dist: &HashMap<String, f32>) -> RoutePlan {
         for Rule {
             when_any,
             route_onprem_model,

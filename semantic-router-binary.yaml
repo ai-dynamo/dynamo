@@ -1,0 +1,6 @@
+# Binary classification configuration for testing with MockClassifier
+reasoning_model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+general_model: meta-llama/Meta-Llama-3.1-8B-Instruct
+abstain_onprem_model: meta-llama/Meta-Llama-3.1-8B-Instruct
+threshold_min_conf: 0.6
+
