@@ -209,8 +209,6 @@ async def test_fault_scenario(
 
     logger = logging.getLogger(request.node.name)
 
-    scenario.deployment.disable_grove()
-
     scenario.deployment.name = "fault-tolerance-test"
 
     if image:

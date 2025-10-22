@@ -964,12 +964,7 @@ pub async fn create_worker_selection_pipeline_chat(
     let chooser = if router_mode == RouterMode::KV {
         Some(
             model_manager
-                .kv_chooser_for(
-                    &card.display_name,
-                    &component,
-                    card.kv_cache_block_size,
-                    kv_router_config,
-                )
+                .kv_chooser_for(&component, card.kv_cache_block_size, kv_router_config)
                 .await?,
         )
     } else {
