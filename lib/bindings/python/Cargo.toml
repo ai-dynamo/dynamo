@@ -60,7 +60,7 @@ pyo3 = { version = "0.23.4", default-features = false, features = [
   "experimental-inspect",
   "extension-module",
   "py-clone",
-  # "abi3-py310" # TODO: Add abi feature in follow-up, since docker build can be simplified.
+  "abi3-py310"
 ] }
 
 pyo3-async-runtimes = { version = "0.23.0", default-features = false, features = [

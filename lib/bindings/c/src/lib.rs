@@ -929,6 +929,7 @@ pub async fn build_worker_selection_pipeline_chat(
         busy_threshold,
         chooser,
         hf_tokenizer,
+        None,
     )
     .await?;
 
@@ -991,12 +992,7 @@ pub async fn create_worker_selection_pipeline_chat(
         let model_manager = std::sync::Arc::new(ModelManager::new());
         Some(
             model_manager
-                .kv_chooser_for(
-                    &card.display_name,
-                    &component,
-                    card.kv_cache_block_size,
-                    kv_router_config,
-                )
+                .kv_chooser_for(&component, card.kv_cache_block_size, kv_router_config)
                 .await?,
         )
     } else {

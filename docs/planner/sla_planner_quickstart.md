@@ -206,7 +206,7 @@ kubectl logs -n $NAMESPACE deployment/vllm-disagg-planner-planner --tail=10
 ```
 New adjustment interval started!
 Observed num_req: X.XXX isl: X.XXX osl: X.XXX
-Observed ttft: X.XXXs itl: X.XXXs
+Observed ttft: X.XXms itl: X.XXms
 Number of prefill workers: 1, number of decode workers: 1
 ```
 

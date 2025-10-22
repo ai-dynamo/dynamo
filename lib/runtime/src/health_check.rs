@@ -8,9 +8,10 @@ use crate::protocols::annotated::Annotated;
 use crate::protocols::maybe_error::MaybeError;
 use crate::{DistributedRuntime, HealthStatus, SystemHealth};
 use futures::StreamExt;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval};
@@ -71,7 +72,7 @@ impl HealthCheckManager {
 
         // Check cache first
         {
-            let cache = self.router_cache.lock().unwrap();
+            let cache = self.router_cache.lock();
             if let Some(router) = cache.get(&cache_key) {
                 return Ok(router.clone());
             }
@@ -90,10 +91,7 @@ impl HealthCheckManager {
         );
 
         // Cache it
-        self.router_cache
-            .lock()
-            .unwrap()
-            .insert(cache_key, router.clone());
+        self.router_cache.lock().insert(cache_key, router.clone());
 
         Ok(router)
     }
@@ -102,7 +100,7 @@ impl HealthCheckManager {
     pub async fn start(self: Arc<Self>) -> anyhow::Result<()> {
         // Get all registered endpoints at startup
         let targets = {
-            let system_health = self.drt.system_health.lock().unwrap();
+            let system_health = self.drt.system_health.lock();
             system_health.get_health_check_targets()
         };
 
@@ -134,7 +132,7 @@ impl HealthCheckManager {
 
         // Get the endpoint-specific notifier
         let notifier = {
-            let system_health = self.drt.system_health.lock().unwrap();
+            let system_health = self.drt.system_health.lock();
             system_health
                 .get_endpoint_health_check_notifier(&endpoint_subject)
                 .expect("Notifier should exist for registered endpoint")
@@ -153,7 +151,7 @@ impl HealthCheckManager {
 
                         // Get the health check payload for this endpoint
                         let target = {
-                            let system_health = manager.drt.system_health.lock().unwrap();
+                            let system_health = manager.drt.system_health.lock();
                             system_health.get_health_check_target(&endpoint_subject)
                         };
 
@@ -185,7 +183,6 @@ impl HealthCheckManager {
         // Store the task handle
         self.endpoint_tasks
             .lock()
-            .unwrap()
             .insert(endpoint_subject.clone(), task);
 
         info!(
@@ -201,7 +198,7 @@ impl HealthCheckManager {
 
         // Get the receiver (can only be taken once)
         let mut rx = {
-            let system_health = manager.drt.system_health.lock().unwrap();
+            let system_health = manager.drt.system_health.lock();
             system_health.take_new_endpoint_receiver().ok_or_else(|| {
                 anyhow::anyhow!("Endpoint receiver already taken - this should only be called once")
             })?
@@ -217,7 +214,7 @@ impl HealthCheckManager {
                 );
 
                 let already_exists = {
-                    let tasks = manager.endpoint_tasks.lock().unwrap();
+                    let tasks = manager.endpoint_tasks.lock();
                     tasks.contains_key(&endpoint_subject)
                 };
 
@@ -250,7 +247,7 @@ impl HealthCheckManager {
         payload: &serde_json::Value,
     ) -> anyhow::Result<()> {
         let target = {
-            let system_health = self.drt.system_health.lock().unwrap();
+            let system_health = self.drt.system_health.lock();
             system_health
                 .get_health_check_target(endpoint_subject)
                 .ok_or_else(|| {
@@ -310,7 +307,7 @@ impl HealthCheckManager {
                         };
 
                         // Update health status based on response
-                        system_health.lock().unwrap().set_endpoint_health_status(
+                        system_health.lock().set_endpoint_health_status(
                             &endpoint_subject_owned,
                             if is_healthy {
                                 HealthStatus::Ready
@@ -324,7 +321,7 @@ impl HealthCheckManager {
                             "Health check request failed for {}: {}",
                             endpoint_subject_owned, e
                         );
-                        system_health.lock().unwrap().set_endpoint_health_status(
+                        system_health.lock().set_endpoint_health_status(
                             &endpoint_subject_owned,
                             HealthStatus::NotReady,
                         );
@@ -338,7 +335,6 @@ impl HealthCheckManager {
                 warn!("Health check timeout for {}", endpoint_subject_owned);
                 system_health
                     .lock()
-                    .unwrap()
                     .set_endpoint_health_status(&endpoint_subject_owned, HealthStatus::NotReady);
             }
 
@@ -369,7 +365,7 @@ pub async fn get_health_check_status(
 ) -> anyhow::Result<serde_json::Value> {
     // Get endpoints list from SystemHealth
     let endpoint_subjects: Vec<String> = {
-        let system_health = drt.system_health.lock().unwrap();
+        let system_health = drt.system_health.lock();
         system_health.get_health_check_endpoints()
     };
 
@@ -377,7 +373,7 @@ pub async fn get_health_check_status(
 
     // Check each endpoint's health status
     {
-        let system_health = drt.system_health.lock().unwrap();
+        let system_health = drt.system_health.lock();
         for endpoint_subject in &endpoint_subjects {
             let health_status = system_health
                 .get_endpoint_health_status(endpoint_subject)
@@ -447,36 +443,28 @@ mod integration_tests {
             "_health_check": true
         });
 
-        drt.system_health
-            .lock()
-            .unwrap()
-            .register_health_check_target(
-                endpoint,
-                crate::component::Instance {
-                    component: "test_component".to_string(),
-                    endpoint: "test_endpoint".to_string(),
-                    namespace: "test_namespace".to_string(),
-                    instance_id: 12345,
-                    transport: crate::component::TransportType::NatsTcp(endpoint.to_string()),
-                },
-                payload.clone(),
-            );
+        drt.system_health.lock().register_health_check_target(
+            endpoint,
+            crate::component::Instance {
+                component: "test_component".to_string(),
+                endpoint: "test_endpoint".to_string(),
+                namespace: "test_namespace".to_string(),
+                instance_id: 12345,
+                transport: crate::component::TransportType::NatsTcp(endpoint.to_string()),
+            },
+            payload.clone(),
+        );
 
         let retrieved = drt
             .system_health
             .lock()
-            .unwrap()
             .get_health_check_target(endpoint)
             .map(|t| t.payload);
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap(), payload);
 
         // Verify endpoint appears in the list
-        let endpoints = drt
-            .system_health
-            .lock()
-            .unwrap()
-            .get_health_check_endpoints();
+        let endpoints = drt.system_health.lock().get_health_check_endpoints();
         assert!(endpoints.contains(&endpoint.to_string()));
     }
 
@@ -490,20 +478,17 @@ mod integration_tests {
                 "prompt": format!("test{}", i),
                 "_health_check": true
             });
-            drt.system_health
-                .lock()
-                .unwrap()
-                .register_health_check_target(
-                    &endpoint,
-                    crate::component::Instance {
-                        component: "test_component".to_string(),
-                        endpoint: format!("test_endpoint_{}", i),
-                        namespace: "test_namespace".to_string(),
-                        instance_id: i as i64,
-                        transport: crate::component::TransportType::NatsTcp(endpoint.clone()),
-                    },
-                    payload,
-                );
+            drt.system_health.lock().register_health_check_target(
+                &endpoint,
+                crate::component::Instance {
+                    component: "test_component".to_string(),
+                    endpoint: format!("test_endpoint_{}", i),
+                    namespace: "test_namespace".to_string(),
+                    instance_id: i as i64,
+                    transport: crate::component::TransportType::NatsTcp(endpoint.clone()),
+                },
+                payload,
+            );
         }
 
         let config = HealthCheckConfig {
@@ -515,7 +500,7 @@ mod integration_tests {
         manager.clone().start().await.unwrap();
 
         // Verify all endpoints have their own health check tasks
-        let tasks = manager.endpoint_tasks.lock().unwrap();
+        let tasks = manager.endpoint_tasks.lock();
         // Should have 3 tasks (one for each endpoint)
         assert_eq!(tasks.len(), 3);
         // Check that all endpoints are represented in tasks
@@ -536,26 +521,22 @@ mod integration_tests {
         });
 
         // Register the endpoint
-        drt.system_health
-            .lock()
-            .unwrap()
-            .register_health_check_target(
-                endpoint,
-                crate::component::Instance {
-                    component: "test_component".to_string(),
-                    endpoint: "test_endpoint_notifier".to_string(),
-                    namespace: "test_namespace".to_string(),
-                    instance_id: 999,
-                    transport: crate::component::TransportType::NatsTcp(endpoint.to_string()),
-                },
-                payload.clone(),
-            );
+        drt.system_health.lock().register_health_check_target(
+            endpoint,
+            crate::component::Instance {
+                component: "test_component".to_string(),
+                endpoint: "test_endpoint_notifier".to_string(),
+                namespace: "test_namespace".to_string(),
+                instance_id: 999,
+                transport: crate::component::TransportType::NatsTcp(endpoint.to_string()),
+            },
+            payload.clone(),
+        );
 
         // Verify that a notifier was created for this endpoint
         let notifier = drt
             .system_health
             .lock()
-            .unwrap()
             .get_endpoint_health_check_notifier(endpoint);
 
         assert!(
@@ -572,7 +553,6 @@ mod integration_tests {
         let status = drt
             .system_health
             .lock()
-            .unwrap()
             .get_endpoint_health_status(endpoint);
         assert_eq!(status, Some(HealthStatus::Ready));
     }

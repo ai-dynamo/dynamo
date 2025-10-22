@@ -596,10 +596,11 @@ async def run_profile(args):
             try:
                 await client.wait_for_deployment_ready()
                 logger.info("Deployment is ready")
+
                 skip_profile = False
             except TimeoutError:
                 logger.error(
-                    "Deployment failed to become ready within timeout, skipping profiling"
+                    "Deployment or model failed to become ready within timeout, skipping profiling"
                 )
                 skip_profile = True
 

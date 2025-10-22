@@ -52,6 +52,8 @@ Quickstart
 
    Quickstart (K8s) <../kubernetes/README.md>
    Detailed Installation Guide <../kubernetes/installation_guide.md>
+   Creating Deployments <../kubernetes/create_deployment.md>
+   API Reference <../kubernetes/api_reference.md>
    Dynamo Operator <../kubernetes/dynamo_operator.md>
    Metrics <../kubernetes/metrics.md>
    Logging <../kubernetes/logging.md>
@@ -72,6 +74,7 @@ Quickstart
    :caption: Developer Guide
 
    Benchmarking Guide <benchmarks/benchmarking.md>
+   KV Router A/B Testing <benchmarks/kv-router-ab-testing.md>
    SLA Planner (Autoscaling) Quickstart <planner/sla_planner_quickstart>
    Logging <observability/logging.md>
    Health Checks <observability/health-checks.md>

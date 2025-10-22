@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+{{- if .Values.namespaceRestriction.enabled }}
+# Namespace-restricted mode: Role + ServiceAccount + RoleBinding
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dgdr-profiling-job
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dgdr-profiling
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dgdr-profiling-job
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dgdr-profiling
+rules:
+# ConfigMaps - needed for saving profiling results
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["create", "get", "update", "patch", "delete"]
+# DynamoGraphDeploymentRequests - needed to get DGDR info
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamographdeploymentrequests"]
+  verbs: ["get"]
+# DynamoGraphDeployments - needed for online profiling to create test deployments
+# The operator will handle creating the actual pods, services, and deployments
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamographdeployments"]
+  verbs: ["get", "create", "delete", "list", "watch"]
+# Pods - needed for listing pods by label selector and getting logs from test deployments
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list", "get"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dgdr-profiling-job
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dgdr-profiling
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dgdr-profiling-job
+subjects:
+- kind: ServiceAccount
+  name: dgdr-profiling-job
+  namespace: {{ .Release.Namespace }}
+{{- else }}
+# Cluster-wide mode: ClusterRole for DGDR profiling jobs
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-dgdr-profiling
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dgdr-profiling
+rules:
+# ConfigMaps - needed for saving profiling results
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["create", "get", "update", "patch", "delete"]
+# DynamoGraphDeploymentRequests - needed to get DGDR info
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamographdeploymentrequests"]
+  verbs: ["get"]
+# DynamoGraphDeployments - needed for online profiling to create test deployments
+# The operator will handle creating the actual pods, services, and deployments
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamographdeployments"]
+  verbs: ["get", "create", "delete", "list", "watch"]
+# Pods - needed for listing pods by label selector and getting logs from test deployments
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list", "get"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+{{- end }}
+# (Remove the trailing blank line at end of file)
