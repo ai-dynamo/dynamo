@@ -85,6 +85,7 @@ async def worker(runtime: DistributedRuntime):
             model_name=args.model_name,
             endpoint_id=args.endpoint,
             extra_engine_args=extra_engine_args_path,
+            is_prefill=args.is_prefill,
         )
 
         # Create and run the engine
@@ -215,6 +216,15 @@ def cmd_line_args():
         type=Path,
         help="Path to JSON file with mocker configuration. "
         "If provided, overrides individual CLI arguments.",
+    )
+
+    # Model type configuration
+    parser.add_argument(
+        "--is-prefill-worker",
+        action="store_true",
+        default=False,
+        dest="is_prefill",
+        help="Register as Prefill model type instead of Chat+Completions (default: False)",
     )
 
     return parser.parse_args()
