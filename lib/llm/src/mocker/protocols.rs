@@ -50,7 +50,7 @@ pub struct PrefillCost {
 impl PrefillCost {
     pub fn predict_prefill_compute(&self, new_tokens: Option<usize>) -> f64 {
         let tokens = new_tokens.unwrap_or(self.new_tokens);
-        1.25e-6 * (tokens as f64).powi(2) + 7.41e-2 * (tokens as f64) + 2.62e1
+        4.209989e-07 * (tokens as f64).powi(2) + 1.518344e-02 * (tokens as f64) + 1.650142e+01
     }
 }
 

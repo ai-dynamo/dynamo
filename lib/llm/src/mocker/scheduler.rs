@@ -390,7 +390,7 @@ impl Scheduler {
 
                 // Base time needed for decoding using active percentage and quadratic formula
                 let active_perc = kv_manager_guard.get_active_perc();
-                let decoding_time = -5.47 * active_perc.powi(2) + 43.88 * active_perc + 19.44;
+                let decoding_time = -25.74 * active_perc.powi(2) + 54.01 * active_perc + 5.74;
                 let mut total_time = Duration::from_secs_f64(decoding_time / 1000.0);
 
                 // Process prefilling
