@@ -1,0 +1,149 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-moe-disagg
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: vllm-moe-disagg
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        imagePullSecrets:
+        - name: nvcr-imagepullsecret
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+    VllmDecodeWorker:
+      dynamoNamespace: vllm-moe-disagg
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        requests:
+          memory: "50Gi"
+          gpu: "2"
+        limits:
+          memory: "100Gi"
+          gpu: "2"
+      envs:
+        # MoE-specific environment variables
+        - name: VLLM_ALL2ALL_BACKEND
+          value: "pplx"
+        - name: VLLM_USE_ELASTIC_EP
+          value: "1"
+        - name: VLLM_USE_DEEP_GEMM
+          value: "1"
+        - name: VLLM_USE_V1
+          value: "1"
+        - name: VLLM_WORKER_MULTIPROC_METHOD
+          value: "spawn"
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0,1"
+        - name: VLLM_DEBUG
+          value: "1"
+        - name: VLLM_LOGGING_LEVEL
+          value: "DEBUG"
+      extraPodSpec:
+        imagePullSecrets:
+        - name: nvcr-imagepullsecret
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/components/backends/vllm
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+            - --model
+            - deepseek-ai/DeepSeek-V2-Lite
+            - --trust-remote-code
+            - --disable-log-requests
+            - --tensor-parallel-size
+            - "1"
+            - --data-parallel-size
+            - "2"
+            - --gpu-memory-utilization
+            - "0.5"
+            - --max-model-len
+            - "1024"
+            - --enable-expert-parallel
+            - --enable-elastic-ep
+            - --enable-eplb
+            - --eplb-config.num_redundant_experts
+            - "24"
+            - --eplb-config.window_size
+            - "100"
+            - --eplb-config.step_interval
+            - "10"
+            - --no-enable-prefix-caching
+            - --enforce-eager
+    VllmPrefillWorker:
+      dynamoNamespace: vllm-moe-disagg
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        requests:
+          memory: "50Gi"
+          gpu: "2"
+        limits:
+          memory: "100Gi"
+          gpu: "2"
+      envs:
+        # MoE-specific environment variables
+        - name: VLLM_ALL2ALL_BACKEND
+          value: "pplx"
+        - name: VLLM_USE_ELASTIC_EP
+          value: "1"
+        - name: VLLM_USE_DEEP_GEMM
+          value: "1"
+        - name: VLLM_USE_V1
+          value: "1"
+        - name: VLLM_WORKER_MULTIPROC_METHOD
+          value: "spawn"
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0,1"
+        - name: VLLM_DEBUG
+          value: "1"
+        - name: VLLM_LOGGING_LEVEL
+          value: "DEBUG"
+      extraPodSpec:
+        imagePullSecrets:
+        - name: nvcr-imagepullsecret
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/components/backends/vllm
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+            - --model
+            - deepseek-ai/DeepSeek-V2-Lite
+            - --trust-remote-code
+            - --disable-log-requests
+            - --is-prefill-worker
+            - --tensor-parallel-size
+            - "1"
+            - --data-parallel-size
+            - "2"
+            - --gpu-memory-utilization
+            - "0.5"
+            - --max-model-len
+            - "1024"
+            - --enable-expert-parallel
+            - --enable-elastic-ep
+            - --enable-eplb
+            - --eplb-config.num_redundant_experts
+            - "24"
+            - --eplb-config.window_size
+            - "100"
+            - --eplb-config.step_interval
+            - "10"
+            - --no-enable-prefix-caching
+            - --enforce-eager

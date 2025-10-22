@@ -493,7 +493,24 @@ class ModelRuntimeConfig:
     """
     A model runtime configuration is a collection of runtime information
     """
-    ...
+
+    total_kv_blocks: int | None
+    max_num_seqs: int | None
+    max_num_batched_tokens: int | None
+    tool_call_parser: str | None
+    reasoning_parser: str | None
+    runtime_data: dict[str, Any]
+    tensor_model_config: Any | None
+
+    def __init__(self) -> None: ...
+
+    def set_engine_specific(self, key: str, value: Any) -> None:
+        """Set an engine-specific runtime configuration value"""
+        ...
+
+    def get_engine_specific(self, key: str) -> Any | None:
+        """Get an engine-specific runtime configuration value"""
+        ...
 
 class OAIChatPreprocessor:
     """
@@ -553,7 +570,8 @@ class RadixTree:
     """
     A RadixTree that tracks KV cache blocks and can find prefix matches for sequences.
 
-    NOTE: This class is not thread-safe and should only be used from a single thread in Python.
+    Thread-safe: operations route to a dedicated background thread and long calls
+    release the Python GIL.
     """
 
     def __init__(self, expiration_duration_secs: Optional[float] = None) -> None:
@@ -609,6 +627,15 @@ class RadixTree:
 
         Args:
             worker_id: ID of the worker whose blocks should be cleared
+        """
+        ...
+
+    def dump_tree_as_events(self) -> List[str]:
+        """
+        Dump the current RadixTree state as a list of JSON-serialized KV cache events.
+
+        Returns:
+            List of JSON-serialized KV cache events as strings
         """
         ...
 
