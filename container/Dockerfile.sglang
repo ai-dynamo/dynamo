@@ -137,7 +137,7 @@ WORKDIR /sgl-workspace
 
 # Set up virtual environment so subsequent Python installs land in the venv
 RUN mkdir -p /opt/dynamo/venv && \
-     python${PYTHON_VERSION} -m venv /opt/dynamo/venv 
+     python${PYTHON_VERSION} -m venv /opt/dynamo/venv
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
