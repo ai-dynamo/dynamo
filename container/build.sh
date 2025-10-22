@@ -726,9 +726,9 @@ if [  ! -z ${ENABLE_KVBM} ]; then
     if ! env -i ${SOURCE_DIR}/build_kvbm_wheel.sh -o ${KVBM_PIP_WHEEL_DIR} -n ${NIXL_REF} -a ${ARCH}; then
         error "ERROR: Failed to build KVBM wheel"
     fi
-
-    BUILD_CONTEXT_ARG+=" --build-context kvbm_wheel=${KVBM_PIP_WHEEL_DIR}"
 fi
+# add the context even if there could be no wheel in the dir
+BUILD_CONTEXT_ARG+=" --build-context kvbm_wheel=${KVBM_PIP_WHEEL_DIR}"
 
 if [ -n "${NIXL_UCX_REF}" ]; then
     BUILD_ARGS+=" --build-arg NIXL_UCX_REF=${NIXL_UCX_REF} "
