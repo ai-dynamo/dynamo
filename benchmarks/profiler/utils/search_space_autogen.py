@@ -27,10 +27,7 @@ MOE_MODEL_MAX_NUM_GPUS = 32
 
 
 def auto_generate_search_space(args: argparse.Namespace) -> None:
-    if args.backend not in CONFIG_MODIFIERS:
-        logger.error(f"Unsupported backend: {args.backend}")
-        raise RuntimeError(f"Unsupported backend: {args.backend}")
-    config_modifier = CONFIG_MODIFIERS[args.backend]
+    config_modifier = CONFIG_MODIFIERS[args.backend] # args.backend is already validated in argparse
 
     # first check if config file exists
     if args.model is not None:
