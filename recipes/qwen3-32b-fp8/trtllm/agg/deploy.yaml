@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-32b-fp8-agg-agg
+spec:
+  backendFramework: trtllm
+  pvcs:
+    - name: model-cache-qwen3-32b
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      dynamoNamespace: qwen3-32b-fp8-agg-agg
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - qwen3-32b-fp8-agg-agg-frontend
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          args:
+          - python3 -m dynamo.frontend --router-mode round-robin --http-port 8000
+          command:
+          - /bin/sh
+          - -c
+          image: my-registry/trtllm-runtime:my-tag
+      pvc:
+        create: false
+        mountPoint: /model-store
+        name: model-cache
+      replicas: 1
+    TrtllmWorker:
+      componentType: main
+      dynamoNamespace: qwen3-32b-fp8-agg-agg
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: model-cache-qwen3-32b
+          mountPoint: /root/.cache/huggingface
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: nvidia.com/gpu.present
+                  operator: In
+                  values:
+                  - "true"
+        mainContainer:
+          args:
+          - |
+            python3 -m dynamo.trtllm \
+              --model-path "${MODEL_PATH}" \
+              --served-model-name "qwen/qwen3-32Bb-fp8" \
+              --extra-engine-args "${ENGINE_ARGS}" \
+              --tensor-parallel-size 2 \
+              --max-batch-size 96 \
+              --free-gpu-memory-fraction 0.9
+          command:
+          - /bin/sh
+          - -c
+          image: my-registry/trtllm-runtime:my-tag
+          env:
+          - name: TRTLLM_ENABLE_PDL
+            value: "1"
+          - name: TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL
+            value: "True"
+          - name: SERVED_MODEL_NAME
+            value: "qwen/qwen3-32Bb-fp8"
+          - name: ENGINE_ARGS
+            value: "/opt/dynamo/configs/config.yaml"
+          - name: MODEL_PATH
+            value: "/model-store/hub/models--Qwen--Qwen3-32B-FP8/snapshots/aa55da1ecc13d006e8b8e4f54579b1ea8c3db2df"
+          volumeMounts:
+          - mountPath: /opt/dynamo/configs
+            name: llm-config
+            readOnly: true
+          workingDir: /workspace/components/backends/trtllm
+        volumes:
+        - configMap:
+            name: llm-config
+          name: llm-config
+      pvc:
+        create: false
+        mountPoint: /model-store
+        name: model-cache
+      replicas: 1
+      resources:
+        limits:
+          gpu: "2"
+        requests:
+          gpu: "2"
