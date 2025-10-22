@@ -18,25 +18,35 @@ Complete guide for setting up and using semantic routing with Dynamo.
 
 The semantic router automatically routes requests to the most appropriate model based on content analysis. It classifies queries as "reasoning" or "non-reasoning" to select the optimal backend.
 
-**Recommended: fastText Classifier** - Production-ready, <1ms latency, 100% validation accuracy.
+**Recommended: fastText Classifier** - Production-ready, <1ms latency, 98% validation accuracy.
 
 ### Quick Start: fastText (Recommended)
 
-```bash
-# 1. Train the classifier (5 minutes)
-pip install fasttext datasets
-python3 scripts/train_fasttext_classifier.py
+**Prerequisites:**
+- HuggingFace account with access to:
+  - [nvidia/Nemotron-Post-Training-Dataset-v1](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v1) (CC BY 4.0)
+  - [lmsys/lmsys-chat-1m](https://huggingface.co/datasets/lmsys/lmsys-chat-1m) (gated dataset - request access)
+- Note: The Nemotron chat split references lmsys-chat-1m via `metadata.conversation_id` for non-reasoning examples
 
-# 2. Build with fastText
+```bash
+# 1. Prepare dataset (2-3 minutes, requires HuggingFace auth)
+pip install fasttext datasets pandas
+export HF_TOKEN=<your_huggingface_token>
+python3 scripts/prepare_nemotron_dataset.py --samples 10000 --output data/nemotron_10k
+
+# 2. Train the classifier (2-3 minutes)
+python3 scripts/train_fasttext_nemotron.py --input data/nemotron_10k --output fasttext-reasoning-classifier
+
+# 3. Build with fastText
 export SEMROUTER_MODEL_PATH=/home/ubuntu/dynamo/fasttext-reasoning-classifier/reasoning.bin
 maturin develop --uv --manifest-path lib/bindings/python/Cargo.toml --features fasttext-classifier
 
-# 3. Launch with routing enabled
+# 4. Launch with routing enabled
 export SEMROUTER_ENABLED=true
 export SEMROUTER_CONFIG=./semantic-router-binary.yaml
 python -m dynamo.frontend --http-port 8999
 
-# 4. Test
+# 5. Test
 curl -s localhost:8999/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -H 'X-Dynamo-Routing: auto' \
@@ -48,7 +58,7 @@ curl -s localhost:8999/v1/chat/completions \
 **Key Features:**
 - 🎯 **Unified Architecture**: Single `Classifier` trait supports binary and multi-class
 - ⚡ **Sub-millisecond**: <1ms inference latency
-- 🎓 **Trainable**: Customize on your data with `train_fasttext_classifier.py`
+- 🎓 **Trainable**: Customize on your data with `prepare_nemotron_dataset.py` + `train_fasttext_nemotron.py`
 - 📊 **Observable**: Full Prometheus metrics
 - 🛡️ **Safe**: Configurable fallback model
 
@@ -57,7 +67,7 @@ curl -s localhost:8999/v1/chat/completions \
 | Feature | MockClassifier | **fastText** (Recommended) | CandleClassifier |
 |---------|---------------|----------------|------------------|
 | **Latency** | ~0ms | **<1ms** | ~13s |
-| **Accuracy** | ~60% (heuristic) | **100% validation** | Biased |
+| **Accuracy** | ~60% (heuristic) | **98% validation** | Biased |
 | **Setup Time** | < 1 min | **5 min** | 15+ min |
 | **Use Case** | Testing | **Production** | Experimental |
 | **Build** | default | `--features fasttext-classifier` | `--features candle-classifier` |
@@ -168,10 +178,11 @@ The semantic router supports three classifier implementations:
 #### FasttextClassifier (Production - Recommended)
 - **Purpose**: Lightweight ML-based classification for production
 - **Model**: Custom trained fastText model
-- **Accuracy**: 100% on validation set (Nemotron dataset)
-- **Latency**: <1ms on CPU
+- **Accuracy**: 98% on validation set (Nemotron dataset)
+- **Latency**: <1ms on CPU (~300-600 microseconds)
 - **When to use**: Production deployments requiring accurate and fast classification
 - **Activation**: Build with `--features fasttext-classifier`
+- **Training**: Two-step process with `prepare_nemotron_dataset.py` + `train_fasttext_nemotron.py`
 
 #### CandleClassifier (Experimental)
 - **Purpose**: Pure Rust ML classifier using HuggingFace models
