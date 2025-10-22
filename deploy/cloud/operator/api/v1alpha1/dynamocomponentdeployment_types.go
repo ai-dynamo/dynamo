@@ -244,7 +244,7 @@ func (s *DynamoComponentDeployment) SetDynamoDeploymentConfig(config []byte) {
 }
 
 func (s *DynamoComponentDeployment) IsMultinode() bool {
-	return s.GetNumberOfNodes() > 1
+	return s.Spec.Multinode != nil
 }
 
 func (s *DynamoComponentDeployment) GetNumberOfNodes() int32 {
