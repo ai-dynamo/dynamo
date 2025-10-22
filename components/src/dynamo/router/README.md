@@ -43,7 +43,7 @@ Clients query the `find_best_worker` endpoint to determine which worker should p
 ## Example: Manual Disaggregated Serving (Alternative Setup)
 
 > [!Note]
-> **This is an alternative advanced setup.** The recommended approach for disaggregated serving is to use the frontend's automatic prefill routing, which activates when you register workers with `ModelType.Prefill`. See the [KV Cache Routing documentation](/docs/architecture/kv_cache_routing.md#disaggregated-serving-prefill-and-decode) for the default setup.
+> **This is an alternative advanced setup.** The recommended approach for disaggregated serving is to use the frontend's automatic prefill routing, which activates when you register workers with `ModelType.Prefill`. See the [KV Cache Routing documentation](../../../../docs/router/kv_cache_routing.md#disaggregated-serving-prefill-and-decode) for the default setup.
 >
 > Use this manual setup if you need explicit control over prefill routing configuration or want to manage prefill and decode routers separately.
 

@@ -234,7 +234,7 @@ args:
 
 ## Further Reading
 
-- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/create_deployment.md)
+- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create_deployment.md)
 - **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
 - **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/kubernetes/installation_guide.md)
 - **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/planner/sla_planner_quickstart.md)

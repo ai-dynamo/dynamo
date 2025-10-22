@@ -240,7 +240,7 @@ When a user cancels a request (e.g., by disconnecting from the frontend), the re
 | **Disaggregated (Decode-First)** | ✅ | ✅ |
 | **Disaggregated (Prefill-First)** | ✅ | ✅ |
 
-For more details, see the [Request Cancellation Architecture](../../../docs/architecture/request_cancellation.md) documentation.
+For more details, see the [Request Cancellation Architecture](../../fault_tolerance/request_cancellation.md) documentation.
 
 ## Client
 

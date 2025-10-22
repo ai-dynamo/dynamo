@@ -153,7 +153,7 @@ args:
 
 ### 3. Deploy
 
-See the [Create Deployment Guide](../../../../docs/kubernetes/create_deployment.md) to learn how to deploy the deployment file.
+See the [Create Deployment Guide](../../../../docs/kubernetes/deployment/create_deployment.md) to learn how to deploy the deployment file.
 
 First, create a secret for the HuggingFace token.
 ```bash
@@ -277,7 +277,7 @@ Configure the `model` name and `host` based on your deployment.
 
 ## Further Reading
 
-- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/create_deployment.md)
+- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create_deployment.md)
 - **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
 - **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/kubernetes/installation_guide.md)
 - **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
