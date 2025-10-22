@@ -3,6 +3,7 @@
 
 import copy
 import logging
+import os
 
 from dynamo._core import Context
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -188,6 +189,27 @@ class DecodeHandler(HandlerBase):
     """
 
     def __init__(self, config: RequestHandlerConfig):
+        # Initialize conditional disaggregation attributes
+        self.use_conditional_disaggregation = (
+            os.getenv("DYNAMO_USE_CONDITIONAL_DISAGGREGATION", "false").lower()
+            == "true"
+        )
+        env_val = os.getenv("DYNAMO_SHORT_PREFILL_THRESHOLD_TOKENS")
+        if env_val is not None:
+            try:
+                self.short_prefill_threshold = int(env_val)
+            except ValueError:
+                logging.warning(
+                    "Invalid DYNAMO_SHORT_PREFILL_THRESHOLD_TOKENS='%s', falling back to handler/default",
+                    env_val,
+                )
+                self.short_prefill_threshold = getattr(
+                    config, "short_prefill_threshold", 64
+                )
+        else:
+            self.short_prefill_threshold = getattr(
+                config, "short_prefill_threshold", 64
+            )
         super().__init__(config)
 
     async def remote_prefill(self, request: dict, context: Context):
@@ -225,6 +247,7 @@ class DecodeHandler(HandlerBase):
 
     async def generate(self, request: dict, context: Context):
         logging.debug(f"New Request ID: {context.id()}")
+
         if self.disaggregation_strategy == DisaggregationStrategy.DECODE_FIRST:
             prefill_response = None
             # If operating under decode_first strategy, the decode handler needs to trigger
@@ -232,11 +255,31 @@ class DecodeHandler(HandlerBase):
             response_count = 0
             # Do not yield the prefill response directly.
             # Instead, capture it and extract the state.
-            async for res in self.remote_prefill(request, context):
-                prefill_response = res
-                response_count += 1
-                if response_count > 1:
-                    raise ValueError("Prefill response should be generated only once.")
+
+            isl_tokens = 0
+            use_conditional_disaggregation = False
+            if request is not None:
+                token_ids = request.get("token_ids")
+                use_conditional_disaggregation = self.use_conditional_disaggregation
+                if isinstance(token_ids, (list, tuple)):
+                    isl_tokens = len(token_ids)
+                else:
+                    isl_tokens = request.get("prefill_tokens") or 0
+
+            threshold = self.short_prefill_threshold
+            logging.info("isl_token: {} threshold: {}".format(isl_tokens, threshold))
+            if isl_tokens <= threshold and use_conditional_disaggregation:
+                # Short prefill, handled locally
+                request["conditional_disaggregation"] = {}
+                logging.info("Short prefill, handled locally")
+            else:
+                async for res in self.remote_prefill(request, context):
+                    prefill_response = res
+                    response_count += 1
+                    if response_count > 1:
+                        raise ValueError(
+                            "Prefill response should be generated only once."
+                        )
 
             if context.is_stopped() or context.is_killed():
                 logging.debug(f"Aborted Remote Request ID: {context.id()}")
@@ -246,11 +289,25 @@ class DecodeHandler(HandlerBase):
                 prefill_response.data() if prefill_response is not None else None
             )
             if prefill_response is not None and self.check_error(response_data):
-                yield response_data
-                return
-
-            if prefill_response is not None and response_data is not None:
-                request["disaggregated_params"] = response_data["disaggregated_params"]
+                if response_data is not None:
+                    logging.error(
+                        f"Error in prefill response: {response_data.get('error')}"
+                    )
+                else:
+                    logging.error("Error in prefill response: Unknown error")
+                if use_conditional_disaggregation:
+                    request["conditional_disaggregation"] = {}
+                    logging.info(
+                        "No Prefill worker available, handling prefill locally"
+                    )
+                else:
+                    yield response_data
+                    return
+            else:
+                if prefill_response is not None and response_data is not None:
+                    request["disaggregated_params"] = response_data[
+                        "disaggregated_params"
+                    ]
 
         async for res in self.generate_locally(request, context):
             yield res

@@ -228,6 +228,7 @@ class HandlerBase:
         if (
             self.disaggregation_mode == DisaggregationMode.DECODE
             and disaggregated_params is None
+            and "conditional_disaggregation" not in request
         ):
             raise ValueError("Disaggregated params are required for decode mode")
 
