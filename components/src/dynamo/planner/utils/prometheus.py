@@ -82,7 +82,8 @@ class PrometheusAPIClient:
             for container in metrics_containers:
                 # Frontend lowercases model names for Prometheus labels so we need to do case-insensitive comparison
                 if (
-                    container.metric.model.lower() == model_name.lower()
+                    container.metric.model
+                    and container.metric.model.lower() == model_name.lower()
                     and container.metric.dynamo_namespace == self.dynamo_namespace
                 ):
                     values.append(container.value[1])
@@ -141,7 +142,8 @@ class PrometheusAPIClient:
             for container in metrics_containers:
                 # Frontend lowercases model names for Prometheus labels so we need to do case-insensitive comparison
                 if (
-                    container.metric.model.lower() == model_name.lower()
+                    container.metric.model
+                    and container.metric.model.lower() == model_name.lower()
                     and container.metric.dynamo_namespace == self.dynamo_namespace
                 ):
                     total_count += container.value[1]
