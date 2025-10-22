@@ -26,7 +26,11 @@ unsafe fn cstr_or_default<'a>(ptr: *const c_char, default_val: &'a str) -> Cow<'
     if ptr.is_null() {
         return Cow::from(default_val);
     }
-    match CStr::from_ptr(ptr).to_str().ok().map(|s| s.trim()) {
+    match unsafe { CStr::from_ptr(ptr) }
+        .to_str()
+        .ok()
+        .map(|s| s.trim())
+    {
         Some(s) if !s.is_empty() => Cow::from(s.to_owned()),
         _ => Cow::from(default_val),
     }
