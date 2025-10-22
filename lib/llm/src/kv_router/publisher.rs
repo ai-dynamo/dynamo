@@ -7,7 +7,6 @@ use crate::kv_router::{
     protocols::*,
     scoring::LoadEvent,
 };
-use async_trait::async_trait;
 use dynamo_runtime::config::request_plane::RequestPlaneMode;
 use dynamo_runtime::metrics::{MetricsRegistry, prometheus_names::kvstats};
 use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
