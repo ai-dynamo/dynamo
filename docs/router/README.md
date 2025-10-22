@@ -109,7 +109,11 @@ All CLI arguments can be configured via environment variables in Kubernetes depl
 | `--kv-overlap-score-weight <float>` | `DYN_KV_OVERLAP_SCORE_WEIGHT=<float>` | `1.0` | Prefill vs decode weight |
 | `--http-port <port>` | `DYN_HTTP_PORT=<port>` | `8000` | HTTP server port |
 
+<<<<<<< HEAD
 ### Example with Advanced Configuration
+=======
+**Example with advanced configuration:**
+>>>>>>> b27f7c51e (docs: add Kubernetes deployment guidance to KV router documentation)
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -136,7 +140,11 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
 ```
 
+<<<<<<< HEAD
 ### Alternative: Using Command Args in K8s
+=======
+**Alternative: Using command args in K8s**
+>>>>>>> b27f7c51e (docs: add Kubernetes deployment guidance to KV router documentation)
 
 You can also pass CLI arguments directly in the container command:
 
