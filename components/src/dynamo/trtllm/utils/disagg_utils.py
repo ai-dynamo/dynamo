@@ -41,11 +41,16 @@ class DisaggregatedParamsCodec:
             ctx_request_id=disaggregated_params.ctx_request_id,
             opaque_state=opaque_state,
             draft_tokens=disaggregated_params.draft_tokens,
+            # E-P Disaggregated Params (for full EPD flow)
+            # Use getattr with None default for backward compatibility with text-only requests
+            multimodal_embedding_handles=getattr(disaggregated_params, 'multimodal_embedding_handles', None),
+            multimodal_hashes=getattr(disaggregated_params, 'multimodal_hashes', None),
         )
 
     @staticmethod
     def encode(
         disaggregated_params: DisaggregatedParams,
+        strip_multimodal: bool = False,
     ) -> DisaggregatedParams:
         if disaggregated_params is None:
             return None
@@ -55,10 +60,24 @@ class DisaggregatedParamsCodec:
             if disaggregated_params.opaque_state is not None
             else None
         )
+        
+        # For decode worker, strip multimodal fields (only send KV cache state)
+        # Multimodal embeddings are consumed during prefill
+        if strip_multimodal:
+            mm_handles = None
+            mm_hashes = None
+        else:
+            # Preserve multimodal fields for encoder -> prefill transfer
+            mm_handles = getattr(disaggregated_params, 'multimodal_embedding_handles', None)
+            mm_hashes = getattr(disaggregated_params, 'multimodal_hashes', None)
+        
         return DisaggregatedParams(
             request_type=disaggregated_params.request_type,
             first_gen_tokens=disaggregated_params.first_gen_tokens,
             ctx_request_id=disaggregated_params.ctx_request_id,
             opaque_state=encoded_opaque_state,
             draft_tokens=disaggregated_params.draft_tokens,
+            # E-P Disaggregated Params (for full EPD flow)
+            multimodal_embedding_handles=mm_handles,
+            multimodal_hashes=mm_hashes,
         )

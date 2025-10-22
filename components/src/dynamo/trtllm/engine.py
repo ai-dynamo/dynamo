@@ -3,25 +3,35 @@
 
 import logging
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Optional, Union
 
-from tensorrt_llm import LLM
-
+from tensorrt_llm import LLM, MultimodalEncoder
+from dynamo.trtllm.constants import DisaggregationMode
 logging.basicConfig(level=logging.DEBUG)
 
 
 class TensorRTLLMEngine:
-    def __init__(self, engine_args):
+    def __init__(self, engine_args, disaggregation_mode=None):
         self.engine_args = engine_args
-        self._llm: Optional[LLM] = None
+        self._llm: Optional[Union[LLM, MultimodalEncoder]] = None
+        self.disaggregation_mode = disaggregation_mode
 
     async def initialize(self):
         if not self._llm:
             model = self.engine_args.pop("model")
-            self._llm = LLM(
-                model=model,
-                **self.engine_args,
-            )
+            if self.disaggregation_mode == DisaggregationMode.ENCODE:
+                # Initialize MultimodalEncoder for EPD flow
+                max_batch_size = self.engine_args.pop("max_batch_size", 1)
+                logging.info(f"Initializing MultimodalEncoder with max_batch_size={max_batch_size}")
+                self._llm = MultimodalEncoder(
+                    model=model,
+                    max_batch_size=max_batch_size,
+                )
+            else:
+                self._llm = LLM(
+                    model=model,
+                    **self.engine_args,
+                )
 
     async def cleanup(self):
         if self._llm:
@@ -33,15 +43,15 @@ class TensorRTLLMEngine:
                 self._llm = None
 
     @property
-    def llm(self):
+    def llm(self) -> Union[LLM, MultimodalEncoder]:
         if not self._llm:
             raise RuntimeError("Engine not initialized")
         return self._llm
 
 
 @asynccontextmanager
-async def get_llm_engine(engine_args) -> AsyncGenerator[TensorRTLLMEngine, None]:
-    engine = TensorRTLLMEngine(engine_args)
+async def get_llm_engine(engine_args, disaggregation_mode=None) -> AsyncGenerator[TensorRTLLMEngine, None]:
+    engine = TensorRTLLMEngine(engine_args, disaggregation_mode)
     try:
         await engine.initialize()
         yield engine
