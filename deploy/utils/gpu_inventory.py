@@ -7,7 +7,6 @@ import logging
 import re
 import shutil
 import subprocess
-import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -36,7 +35,7 @@ def run_command(cmd: List[str], capture_output: bool = True, exit_on_error: bool
                 logger.error(e.stdout)
             if e.stderr:
                 logger.error(e.stderr)
-            sys.exit(e.returncode)
+            raise RuntimeError(f"Command failed: {' '.join(cmd)}")
         raise
 
 
