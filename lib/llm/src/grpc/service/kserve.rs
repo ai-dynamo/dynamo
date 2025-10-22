@@ -219,6 +219,8 @@ impl GrpcInferenceService for KserveService {
             return Ok(Response::new(reply));
         }
 
+        // [gluo FIXME] check model existence first, otherwise the true error
+        // is masked by "Failed to parse request" below.
         // Fallback handling by assuming the model is OpenAI Completions model
         let mut completion_request: NvCreateCompletionRequest = request
             .try_into()

@@ -12,13 +12,13 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 @dynamo_worker(static=False)
 async def echo_tensor_worker(runtime: DistributedRuntime):
-    component = runtime.namespace("test").component("tensor")
+    component = runtime.namespace("tensor").component("echo")
     await component.create_service()
 
     endpoint = component.endpoint("generate")
 
     model_config = {
-        "name": "tensor",
+        "name": "echo",
         "inputs": [
             {"name": "dummy_input", "data_type": "Bytes", "shape": [-1]},
         ],
@@ -37,7 +37,7 @@ async def echo_tensor_worker(runtime: DistributedRuntime):
         ModelType.TensorBased,
         endpoint,
         "Qwen/Qwen3-0.6B",
-        "tensor",
+        "echo",
         runtime_config=runtime_config,
     )
 
