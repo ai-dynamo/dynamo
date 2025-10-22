@@ -59,7 +59,6 @@ MC_TE_METRIC=true \
 SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \
 SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=100000 \
 SGLANG_DISAGGREGATION_WAITING_TIMEOUT=100000 \
-SGLANG_MOONCAKE_CUSTOM_MEM_POOL=True \
 MC_FORCE_MNNVL=1 \
 NCCL_MNNVL_ENABLE=1 \
 NCCL_CUMEM_ENABLE=1 \
@@ -129,10 +128,10 @@ python3 -m dynamo.sglang \
   --disaggregation-mode decode \
   --dist-init-addr ${HEAD_DECODE_NODE_IP}:29500 \
   --disaggregation-bootstrap-port 30001 \
-  --nnodes 12 \
+  --nnodes 2 \
   --node-rank 0 \
-  --tp-size 48 \
-  --dp-size 48 \
+  --tp-size 8 \
+  --dp-size 8 \
   --enable-dp-attention \
   --host 0.0.0.0 \
   --decode-log-interval 1 \
@@ -157,4 +156,4 @@ python3 -m dynamo.sglang \
   --disaggregation-transfer-backend nixl
 ```
 
-On the other decode nodes (this example has 2 total decode nodes), run the same command but change `--node-rank` to 1
+On the other decode nodes (this example has 2 total decode nodes), run the same command but change `--node-rank` to 1.
