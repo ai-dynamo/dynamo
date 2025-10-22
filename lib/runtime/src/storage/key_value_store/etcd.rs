@@ -49,9 +49,7 @@ impl KeyValueStore for EtcdStore {
     }
 
     fn connection_id(&self) -> u64 {
-        // This conversion from i64 to u64 is safe because etcd lease IDs are u64 internally.
-        // They present as i64 because of the limitations of the etcd grpc/HTTP JSON API.
-        self.client.lease_id() as u64
+        self.client.lease_id()
     }
 }
 

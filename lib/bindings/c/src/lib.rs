@@ -334,7 +334,7 @@ use std::pin::Pin;
 const GENERATE_ENDPOINT: &str = "generate";
 
 use anyhow::Context;
-use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+use dynamo_runtime::{Runtime, distributed::DistributedConfig, traits::DistributedRuntimeProvider};
 
 use dynamo_llm::discovery::ModelManager;
 use dynamo_llm::entrypoint::build_routed_pipeline;

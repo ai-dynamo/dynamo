@@ -118,8 +118,5 @@ pub async fn keep_alive(
 
 /// Create a deadline for a given time-to-live (TTL).
 fn create_deadline(ttl: u64) -> Result<std::time::Instant> {
-    if ttl <= 0 {
-        return Err(error!("invalid ttl: {}", ttl));
-    }
     Ok(std::time::Instant::now() + std::time::Duration::from_secs(ttl))
 }
