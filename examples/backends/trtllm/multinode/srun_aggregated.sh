@@ -13,17 +13,12 @@ IMAGE="${IMAGE:-""}"
 DEFAULT_MOUNT="${PWD}/../:/mnt"
 MOUNTS="${MOUNTS:-${DEFAULT_MOUNT}}"
 
+# Example values, assuming 4 nodes with 4 GPUs on each node, such as 4xGB200 nodes.
+# For 8xH100 nodes as an example, you may set this to 2 nodes x 8 gpus/node instead.
+NUM_NODES=${NUM_NODES:-4}
 NUM_GPUS_PER_NODE=${NUM_GPUS_PER_NODE:-4}
 
-NUM_PREFILL_NODES=${NUM_PREFILL_NODES:-4}
-NUM_PREFILL_WORKERS=${NUM_PREFILL_WORKERS:-1}
-PREFILL_ENGINE_CONFIG="${PREFILL_ENGINE_CONFIG:-/mnt/engine_configs/deepseek_r1/wide_ep/wide_ep_prefill.yaml}"
-
-NUM_DECODE_NODES=${NUM_DECODE_NODES:-4}
-NUM_DECODE_WORKERS=${NUM_DECODE_WORKERS:-1}
-DECODE_ENGINE_CONFIG="${DECODE_ENGINE_CONFIG:-/mnt/engine_configs/deepseek_r1/wide_ep/wide_ep_decode.yaml}"
-
-DISAGGREGATION_STRATEGY=${DISAGGREGATION_STRATEGY:-"decode_first"}
+export ENGINE_CONFIG="${ENGINE_CONFIG:-/mnt/engine_configs/deepseek_r1/wide_ep/wide_ep_agg.yaml}"
 
 # Automate settings of certain variables for convenience, but you are free
 # to manually set these for more control as well.
@@ -37,7 +32,7 @@ if [[ -z ${IMAGE} ]]; then
   echo "ERROR: You need to set the IMAGE environment variable to the " \
        "Dynamo+TRTLLM docker image or .sqsh file from 'enroot import' " \
        "See how to build one from source here: " \
-       "https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm#build-docker"
+       "https://github.com/ai-dynamo/dynamo/blob/main/docs/backends/trtllm/README.md#build-container"
   exit 1
 fi
 
@@ -61,42 +56,19 @@ srun \
 # NOTE: Output streamed to stdout for ease of understanding the example, but
 # in practice you would probably set `srun --output ... --error ...` to pipe
 # the stdout/stderr to files.
-for ((i=1; i<=${NUM_PREFILL_WORKERS}; i++)); do
-  echo "Launching multi-node prefill worker in background."
-  DISAGGREGATION_MODE=prefill \
-  ENGINE_CONFIG=${PREFILL_ENGINE_CONFIG} \
-  srun \
-    --mpi pmix \
-    --oversubscribe \
-    --container-image "${IMAGE}" \
-    --container-mounts "${MOUNTS}" \
-    --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE,DISAGGREGATION_MODE,DISAGGREGATION_STRATEGY,ENGINE_CONFIG \
-    --verbose \
-    --label \
-    -A "${ACCOUNT}" \
-    -J "${ACCOUNT}-dynamo.trtllm" \
-    --nodes "${NUM_PREFILL_NODES}" \
-    --ntasks-per-node "${NUM_GPUS_PER_NODE}" \
-    --jobid "${SLURM_JOB_ID}" \
-    /mnt/multinode/start_trtllm_worker.sh &
-done
-
-for ((i=1; i<=${NUM_DECODE_WORKERS}; i++)); do
-  echo "Launching multi-node decode worker in background."
-  DISAGGREGATION_MODE=decode \
-  ENGINE_CONFIG=${DECODE_ENGINE_CONFIG} \
-  srun \
-    --mpi pmix \
-    --oversubscribe \
-    --container-image "${IMAGE}" \
-    --container-mounts "${MOUNTS}" \
-    --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE,DISAGGREGATION_MODE,DISAGGREGATION_STRATEGY,ENGINE_CONFIG \
-    --verbose \
-    --label \
-    -A "${ACCOUNT}" \
-    -J "${ACCOUNT}-dynamo.trtllm" \
-    --nodes "${NUM_DECODE_NODES}" \
-    --ntasks-per-node "${NUM_GPUS_PER_NODE}" \
-    --jobid "${SLURM_JOB_ID}" \
-    /mnt/multinode/start_trtllm_worker.sh &
-done
+echo "Launching multi-node worker in background."
+DISAGGREGATION_MODE="prefill_and_decode" \
+srun \
+  --mpi pmix \
+  --oversubscribe \
+  --container-image "${IMAGE}" \
+  --container-mounts "${MOUNTS}" \
+  --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE,DISAGGREGATION_MODE,ENGINE_CONFIG \
+  --verbose \
+  --label \
+  -A "${ACCOUNT}" \
+  -J "${ACCOUNT}-dynamo.trtllm" \
+  --nodes "${NUM_NODES}" \
+  --ntasks-per-node "${NUM_GPUS_PER_NODE}" \
+  --jobid "${SLURM_JOB_ID}" \
+  /mnt/multinode/start_trtllm_worker.sh &

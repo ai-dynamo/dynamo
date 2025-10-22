@@ -75,6 +75,6 @@ After selecting which endpoint to hit, the `Client` sends the serialized request
 We provide native rust and python (through binding) examples for basic usage of `DistributedRuntime`:
 
 - Rust: `/lib/runtime/examples/`
-- Python: We also provide complete examples of using `DistributedRuntime`. Please refer to the engines in `/examples/backends` for full implementation details.
+- Python: We also provide complete examples of using `DistributedRuntime`. Please refer to the engines in `/components/src/dynamo` for full implementation details.
 
 

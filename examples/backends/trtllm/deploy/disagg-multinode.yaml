@@ -125,7 +125,7 @@ spec:
         mainContainer:
           volumeMounts:
             - name: nvidia-config
-              mountPath: /workspace/components/backends/trtllm/engine_configs
+              mountPath: /workspace/examples/backends/trtllm/engine_configs
               readOnly: true
           image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/examples/backends/trtllm
@@ -165,7 +165,7 @@ spec:
         mainContainer:
           volumeMounts:
             - name: nvidia-config
-              mountPath: /workspace/components/backends/trtllm/engine_configs
+              mountPath: /workspace/examples/backends/trtllm/engine_configs
               readOnly: true
           image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/examples/backends/trtllm

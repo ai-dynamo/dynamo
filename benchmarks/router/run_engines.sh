@@ -84,13 +84,13 @@ if [ ${#EXTRA_ARGS[@]} -eq 0 ]; then
         )
     elif [ "$USE_TRTLLM" = true ]; then
         # Default args for TensorRT-LLM engine using predefined YAML configs
-        # Config files located at: ../../components/backends/trtllm/engine_configs/{agg,decode,prefill}.yaml
+        # Config files located at: ../../examples/backends/trtllm/engine_configs/{agg,decode,prefill}.yaml
         if [ "$MODE" = "prefill" ]; then
-            ENGINE_CONFIG="../../components/backends/trtllm/engine_configs/prefill.yaml"
+            ENGINE_CONFIG="../../examples/backends/trtllm/engine_configs/prefill.yaml"
         elif [ "$MODE" = "decode" ]; then
-            ENGINE_CONFIG="../../components/backends/trtllm/engine_configs/decode.yaml"
+            ENGINE_CONFIG="../../examples/backends/trtllm/engine_configs/decode.yaml"
         else
-            ENGINE_CONFIG="../../components/backends/trtllm/engine_configs/agg.yaml"
+            ENGINE_CONFIG="../../examples/backends/trtllm/engine_configs/agg.yaml"
         fi
 
         EXTRA_ARGS=(

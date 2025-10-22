@@ -55,7 +55,7 @@ spec:
           # mount the configmap as a volume
           volumeMounts:
           - name: nvidia-config
-            mountPath: /workspace/components/backends/trtllm/engine_configs
+            mountPath: /workspace/examples/backends/trtllm/engine_configs
             readOnly: true
           command:
           - python3
