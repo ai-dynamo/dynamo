@@ -8,13 +8,9 @@ use derive_getters::Dissolve;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-<<<<<<< HEAD
 use crate::component::Component;
-=======
 use super::*;
 use crate::config::request_plane::RequestPlaneMode;
->>>>>>> 5da9f9a28 (no metrics)
 
 pub use super::endpoint::EndpointStats;
 
@@ -26,6 +22,12 @@ pub type EndpointStatsHandler =
 
 pub const PROJECT_NAME: &str = "Dynamo";
 const SERVICE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Debug, Clone, Builder)]
+#[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
+pub struct ServiceConfig {
+    component: Component,
+}
 
 pub async fn build_nats_service(
     nats_client: &crate::transports::nats::Client,

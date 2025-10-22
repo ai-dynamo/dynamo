@@ -22,7 +22,7 @@ use hyper_util::server::conn::auto::Builder as Http2Builder;
 use hyper_util::service::TowerToHyperService;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -89,7 +89,6 @@ impl SharedHttpServer {
         // Set health status
         system_health
             .lock()
-            .unwrap()
             .set_endpoint_health_status(&endpoint_name, HealthStatus::Ready);
 
         let subject_clone = subject.clone();
@@ -104,7 +103,6 @@ impl SharedHttpServer {
             handler
                 .system_health
                 .lock()
-                .unwrap()
                 .set_endpoint_health_status(endpoint_name, HealthStatus::NotReady);
             tracing::debug!("Unregistered endpoint handler for subject: {}", subject);
         }
@@ -312,7 +310,6 @@ impl HttpEndpoint {
         // Set initial health status
         system_health
             .lock()
-            .unwrap()
             .set_endpoint_health_status(&endpoint_name, HealthStatus::Ready);
 
         // Build the router
@@ -387,7 +384,6 @@ impl HttpEndpoint {
         // Mark as not ready
         system_health
             .lock()
-            .unwrap()
             .set_endpoint_health_status(&endpoint_name, HealthStatus::NotReady);
 
         // Wait for inflight requests if graceful shutdown is enabled

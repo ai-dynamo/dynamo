@@ -32,7 +32,7 @@
 use std::fmt;
 
 use crate::{
-    config::HealthStatus,
+    config::{HealthStatus, RequestPlaneMode},
     discovery::Lease,
     metrics::{MetricsRegistry, prometheus_names},
     service::ServiceSet,
@@ -415,17 +415,17 @@ impl Component {
         // Only enable NATS service metrics collection when using NATS request plane mode
         let request_plane_mode = RequestPlaneMode::from_env();
         if request_plane_mode.is_nats() {
-            if let Err(err) = component.start_scraping_nats_service_component_metrics() {
+            if let Err(err) = self.start_scraping_nats_service_component_metrics() {
                 tracing::debug!(
                     "Metrics registration failed for '{}': {}",
-                    component.service_name(),
+                    self.service_name(),
                     err
                 );
             }
         } else {
             tracing::debug!(
                 "Skipping NATS service metrics collection for '{}' - request plane mode is '{}'",
-                component.service_name(),
+                self.service_name(),
                 request_plane_mode
             );
         }

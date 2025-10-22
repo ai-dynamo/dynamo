@@ -74,7 +74,7 @@ def test_http2_frontend():
             if frontend_process.poll() is not None:
                 # Process has terminated
                 stdout, stderr = frontend_process.communicate()
-                print(f"❌ Frontend process terminated unexpectedly!")
+                print("❌ Frontend process terminated unexpectedly!")
                 print(f"   stdout: {stdout[:500]}")
                 print(f"   stderr: {stderr[:500]}")
                 return False
@@ -90,7 +90,7 @@ def test_http2_frontend():
                 print("✅ Health check passed!")
                 print(f"   Response: {stdout[:200]}")
             else:
-                print(f"❌ Health check failed!")
+                print("❌ Health check failed!")
                 print(f"   Return code: {returncode}")
                 print(f"   stdout: {stdout[:300]}")
                 print(f"   stderr: {stderr[:300]}")
@@ -100,7 +100,7 @@ def test_http2_frontend():
                     # Try simple HTTP/1.1 to see if server is up at all
                     simple_cmd = "curl -v http://localhost:8787/health"
                     rc2, out2, err2 = run_command(simple_cmd, timeout=5)
-                    print(f"\n   HTTP/1.1 fallback test:")
+                    print("\n   HTTP/1.1 fallback test:")
                     print(f"   Return code: {rc2}")
                     print(f"   stderr: {err2[:300]}")
 
