@@ -297,9 +297,9 @@ impl Runtime {
                 tracker.wait_for_completion().await;
             }
 
-            // Phase 3: Now shutdown NATS/ETCD by cancelling the main token
+            // Phase 3: Now connections will be disconnected to NATS/ETCD by cancelling the main token
             tracing::info!(
-                "Phase 3: All graceful endpoints completed, shutting down NATS/ETCD connections"
+                "Phase 3: All endpoints ended gracefully. Connections to NATS/ETCD will now be disconnected"
             );
             main_token.cancel();
         });

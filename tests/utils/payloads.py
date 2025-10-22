@@ -18,7 +18,7 @@ import re
 import time
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from dynamo import prometheus_names
 
@@ -191,11 +191,26 @@ class EmbeddingPayload(BasePayload):
 
 
 @dataclass
+class MetricCheck:
+    """Definition of a metric validation check"""
+
+    name: str
+    pattern: Callable[[str], str]
+    validator: Callable[[Any], bool]
+    error_msg: Callable[[str, Any], str]
+    success_msg: Callable[[str, Any], str]
+    multiline: bool = False
+
+
+@dataclass
 class MetricsPayload(BasePayload):
     endpoint: str = "/metrics"
     method: str = "GET"
     port: int = 8081
     min_num_requests: int = 1
+    backend: Optional[
+        str
+    ] = None  # Backend identifier for metrics validation (e.g., 'vllm', 'sglang', 'trtllm')
 
     def with_model(self, model):
         # Metrics does not use model in request body
@@ -206,27 +221,122 @@ class MetricsPayload(BasePayload):
         return response.text
 
     def validate(self, response: Any, content: str) -> None:
-        requests_total_name = prometheus_names.work_handler.REQUESTS_TOTAL
-        pattern = (
-            rf'{re.escape(requests_total_name)}\{{[^}}]*model="[^"]*"[^}}]*\}}\s+(\d+)'
-        )
-        matches = re.findall(pattern, content)
-        if not matches:
-            raise AssertionError(
-                f"Metric '{requests_total_name}' with model label not found in metrics output"
-            )
+        # Use backend from payload configuration
+        backend = self.backend
 
-        for match in matches:
-            request_count = int(match)
-            if request_count >= self.min_num_requests:
-                logger.info(
-                    f"SUCCESS: Found {requests_total_name} with count: {request_count}"
+        # Filter out _bucket metrics from content (histogram buckets inflate counts)
+        content_lines = content.split("\n")
+        filtered_lines = [line for line in content_lines if "_bucket{" not in line]
+        content = "\n".join(filtered_lines)
+
+        # Build full metric names with prefix
+        prefix = prometheus_names.name_prefix.COMPONENT
+
+        # Define metrics to check
+        # Pattern matches: metric_name{labels} value OR metric_name value (labels optional)
+        # Examples:
+        #   - dynamo_component_requests_total{model="Qwen/Qwen3-0.6B"} 6
+        #   - dynamo_component_uptime_seconds 150.390999059
+        def metric_pattern(name):
+            return rf"{name}(?:\{{[^}}]*\}})?\s+([\d.]+)"
+
+        metrics_to_check = [
+            MetricCheck(
+                # Check: Minimum count of unique dynamo_component_* metrics
+                name=f"{prefix}_*",
+                pattern=lambda name: rf"^{prefix}_\w+",
+                validator=lambda value: len(set(value))
+                >= 23,  # 80% of typical ~29 metrics (excluding _bucket) as of 2025-10-22 (but will grow)
+                error_msg=lambda name, value: f"Expected at least 23 unique {prefix}_* metrics, but found only {len(set(value))}",
+                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique {prefix}_* metrics (minimum required: 23)",
+                multiline=True,
+            ),
+            MetricCheck(
+                name=f"{prefix}_{prometheus_names.work_handler.REQUESTS_TOTAL}",
+                pattern=metric_pattern,
+                validator=lambda value: int(float(value)) >= self.min_num_requests,
+                error_msg=lambda name, value: f"{name} has count {value} which is less than required {self.min_num_requests}",
+                success_msg=lambda name, value: f"SUCCESS: Found {name} with count: {value}",
+            ),
+            MetricCheck(
+                name=f"{prefix}_{prometheus_names.distributed_runtime.UPTIME_SECONDS}",
+                pattern=metric_pattern,
+                validator=lambda value: float(value) > 0,
+                error_msg=lambda name, value: f"{name} should be > 0, but got {value}",
+                success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}s",
+            ),
+            MetricCheck(
+                name=f"{prefix}_{prometheus_names.kvstats.TOTAL_BLOCKS}",
+                pattern=metric_pattern,
+                validator=lambda value: int(float(value)) > 0,
+                error_msg=lambda name, value: f"{name} should be > 0, but got {value}",
+                success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
+            ),
+        ]
+
+        # Add backend-specific metric checks
+        if backend == "vllm":
+            metrics_to_check.append(
+                MetricCheck(
+                    # Check: Minimum count of unique vllm:* metrics
+                    name="vllm:*",
+                    pattern=lambda name: r"^vllm:\w+",
+                    validator=lambda value: len(set(value))
+                    >= 52,  # 80% of typical ~65 vllm metrics (excluding _bucket) as of 2025-10-22 (but will grow)
+                    error_msg=lambda name, value: f"Expected at least 52 unique vllm:* metrics, but found only {len(set(value))}",
+                    success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique vllm:* metrics (minimum required: 52)",
+                    multiline=True,
                 )
-                return
+            )
+        # TODO: Add sglang:* and trtllm:* metrics checks (similar to vllm above)
 
-        raise AssertionError(
-            f"{requests_total_name} exists but has count {request_count} which is less than required {self.min_num_requests}"
-        )
+        # Check all metrics
+        for metric in metrics_to_check:
+            # Special handling for multiline patterns (like counting unique metrics)
+            if metric.multiline:
+                pattern = metric.pattern(metric.name)
+                matches = re.findall(pattern, content, re.MULTILINE)
+                if not matches:
+                    raise AssertionError(
+                        f"Could not find any matches for pattern '{metric.name}'"
+                    )
+
+                # For multiline, pass the entire list to validator
+                if metric.validator(matches):
+                    logger.info(metric.success_msg(metric.name, matches))
+                else:
+                    raise AssertionError(metric.error_msg(metric.name, matches))
+            else:
+                # Standard single-value metric check
+                if metric.name not in content:
+                    raise AssertionError(
+                        f"Metric '{metric.name}' not found in metrics output"
+                    )
+
+                pattern = metric.pattern(metric.name)
+                matches = re.findall(pattern, content)
+                if not matches:
+                    raise AssertionError(
+                        f"Could not parse value for metric '{metric.name}'"
+                    )
+
+                # For metrics with multiple values (like requests_total with different labels),
+                # check if any match passes validation
+                validation_passed = False
+                last_value = None
+                for match in matches:
+                    last_value = match
+                    if metric.validator(match):
+                        logger.info(metric.success_msg(metric.name, match))
+                        validation_passed = True
+                        break
+
+                if not validation_passed:
+                    raise AssertionError(
+                        metric.error_msg(
+                            metric.name, last_value if last_value else "N/A"
+                        )
+                    )
 
 
 def check_models_api(response):
