@@ -74,6 +74,20 @@ subjects:
   name: dgdr-profiling-job
   namespace: {{ .Release.Namespace }}
 
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-dgdr-profiling-nodes
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dgdr-profiling
+rules:
+# Nodes - cluster-scoped resource needed for profiling
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch"]
+
 {{- else }}
 # Cluster-wide mode: ClusterRole for DGDR profiling jobs
 ---
@@ -106,20 +120,6 @@ rules:
   resources: ["pods/log"]
   verbs: ["get"]
 {{- end }}
-
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-dgdr-profiling-nodes
-  labels:
-    {{- include "dynamo-operator.labels" . | nindent 4 }}
-    app.kubernetes.io/component: dgdr-profiling
-rules:
-# Nodes - cluster-scoped resource needed for profiling
-- apiGroups: [""]
-  resources: ["nodes"]
-  verbs: ["get", "list", "watch"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
