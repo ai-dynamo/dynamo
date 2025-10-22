@@ -430,7 +430,8 @@ jobs:
           pytest tests/fault_tolerance/deploy/test_deployment.py::test_fault_scenario[${{ matrix.test_scenario }}] \
             -s -v \
             --namespace ${NAMESPACE} \
-            --image ${IMAGE}
+            --image ${IMAGE} \
+            --client-type legacy
       - name: Cleanup
         if: always()
         timeout-minutes: 5
