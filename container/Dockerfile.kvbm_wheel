@@ -20,11 +20,13 @@ ARG ARCH_ALT="x86_64"
 
 FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT}
 
+ARG CARGO_BUILD_JOBS
 ARG ARCH_ALT
 ARG ARCH=amd64
 ARG NIXL_REF="0.6.0"
 ARG DEFAULT_PYTHON_VERSION="3.12"
 ARG UCX_REF="v1.19.0"
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 
 # Install CUDA 13 as the CUDA library.
 # Note: This is only for building and for adding runtime linking for Nixl plugins.
