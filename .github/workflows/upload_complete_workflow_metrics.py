@@ -31,8 +31,12 @@ FIELD_USER_ALIAS = "s_user_alias"
 FIELD_REPO = "s_repo"
 FIELD_WORKFLOW_NAME = "s_workflow_name"
 FIELD_GITHUB_EVENT = "s_github_event"
-FIELD_PR_BRANCH = "s_branch"  # PR target branch (e.g., "pull-request/3654") or main branch
-FIELD_SOURCE_BRANCH = "s_source_branch"  # Source branch name (e.g., "nmailhot/feature-branch")
+FIELD_PR_BRANCH = (
+    "s_branch"  # PR target branch (e.g., "pull-request/3654") or main branch
+)
+FIELD_SOURCE_BRANCH = (
+    "s_source_branch"  # Source branch name (e.g., "nmailhot/feature-branch")
+)
 FIELD_STATUS = "s_status"
 FIELD_STATUS_NUMBER = "l_status_number"
 FIELD_WORKFLOW_ID = "s_workflow_id"
