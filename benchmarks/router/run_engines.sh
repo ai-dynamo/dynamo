@@ -200,6 +200,8 @@ for i in $(seq 1 $NUM_WORKERS); do
             fi
             if [ "$MODE" = "prefill" ]; then
                 MOCKER_ARGS+=("--is-prefill-worker")
+            elif [ "$MODE" = "decode" ]; then
+                MOCKER_ARGS+=("--is-decode-worker")
             fi
             MOCKER_ARGS+=("${EXTRA_ARGS[@]}")
 

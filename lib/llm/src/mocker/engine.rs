@@ -80,8 +80,8 @@ impl MockVllmEngine {
         Self::start_metrics_publishing(&schedulers, Some(component.clone()), cancel_token.clone())
             .await?;
 
-        // Start KV events publishing with the actual receivers from schedulers
-        if self.engine_args.enable_prefix_caching {
+        // Start KV events publishing only if enabled (disabled for decode workers)
+        if self.engine_args.enable_prefix_caching && self.engine_args.publish_kv_events {
             Self::start_kv_events_publishing(
                 kv_event_receiver,
                 Some(component.clone()),
@@ -356,7 +356,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 
         let active_requests = self.active_requests.clone();
         let async_context = ctx.context();
-        let max_tokens = request.stop_conditions.max_tokens.unwrap_or(100) as usize;
+        let is_prefill = self.engine_args.is_prefill;
+        // Override max_tokens to 1 for prefill workers
+        let max_tokens = if is_prefill {
+            1
+        } else {
+            request.stop_conditions.max_tokens.unwrap() as usize
+        };
 
         // Spawn a task to handle the complex async logic
         tokio::spawn(async move {
@@ -383,7 +389,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             top_logprobs: None,
                             finish_reason: None,
                             index: None,
-                            disaggregated_params: None,
+                            // Add dummy disaggregated_params for prefill workers
+                            disaggregated_params: if is_prefill {
+                                Some(serde_json::json!("dummy"))
+                            } else {
+                                None
+                            },
                             extra_args: None,
                         };
 
