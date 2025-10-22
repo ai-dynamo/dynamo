@@ -271,4 +271,4 @@ RUN mkdir -p /opt/dynamo/lib/kvbm/python/kvbm/nixl-cu13 && \
     rm -rf /opt/dynamo/lib/kvbm/python/kvbm/nixl-cu13/plugins/libplugin_OBJ.so  && \
     cd /opt/dynamo/lib/kvbm && \
     uv pip install maturin[patchelf] && \
-    maturin build -j $(nproc) --release --out /opt/dynamo/dist
+    maturin build --release --out /opt/dynamo/dist
