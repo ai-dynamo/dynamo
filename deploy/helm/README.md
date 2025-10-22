@@ -33,7 +33,7 @@ This approach allows you to install Dynamo directly using a DynamoGraphDeploymen
 Here is how you would install a VLLM inference backend example.
 
 ```bash
-helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud -f ./components/backends/vllm/deploy/agg.yaml
+helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud -f ./examples/backends/vllm/deploy/agg.yaml
 ```
 
 ### Installation using Grove
@@ -41,7 +41,7 @@ helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud -f ./com
 Same example as above, but using Grove PodCliqueSet resources.
 
 ```bash
-helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud -f ./components/backends/vllm/deploy/agg.yaml --set deploymentType=grove
+helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud -f ./examples/backends/vllm/deploy/agg.yaml --set deploymentType=grove
 ```
 
 ### Customizable Properties
@@ -50,7 +50,7 @@ You can override the default configuration by setting the following properties:
 
 ```bash
 helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud \
-  -f ./components/backends/vllm/deploy/agg.yaml \
+  -f ./examples/backends/vllm/deploy/agg.yaml \
   --set "imagePullSecrets[0].name=docker-secret-1" \
   --set etcdAddr="my-etcd-service:2379" \
   --set natsAddr="nats://my-nats-service:4222"

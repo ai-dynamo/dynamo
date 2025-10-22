@@ -30,7 +30,7 @@ class TestProfileSLADryRun:
         class Args:
             def __init__(self):
                 self.backend = "vllm"
-                self.config = "components/backends/vllm/deploy/disagg.yaml"
+                self.config = "examples/backends/vllm/deploy/disagg.yaml"
                 self.output_dir = "/tmp/test_profiling_results"
                 self.namespace = "test-namespace"
                 self.min_num_gpus_per_engine = 1
@@ -64,7 +64,7 @@ class TestProfileSLADryRun:
         class Args:
             def __init__(self):
                 self.backend = "sglang"
-                self.config = "components/backends/sglang/deploy/disagg.yaml"
+                self.config = "examples/backends/sglang/deploy/disagg.yaml"
                 self.output_dir = "/tmp/test_profiling_results"
                 self.namespace = "test-namespace"
                 self.min_num_gpus_per_engine = 1
@@ -112,7 +112,7 @@ class TestProfileSLADryRun:
         class Args:
             def __init__(self):
                 self.backend = "trtllm"
-                self.config = "components/backends/trtllm/deploy/disagg.yaml"
+                self.config = "examples/backends/trtllm/deploy/disagg.yaml"
                 self.output_dir = "/tmp/test_profiling_results"
                 self.namespace = "test-namespace"
                 self.min_num_gpus_per_engine = 1

@@ -100,7 +100,7 @@ Follow these steps to benchmark Dynamo deployments using client-side benchmarkin
 Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Cloud platform. First follow the [installation guide](/docs/kubernetes/installation_guide.md) to install Dynamo Cloud, then use [deploy/utils/README](../../deploy/utils/README.md) to set up benchmarking resources.
 
 ### Step 2: Deploy DynamoGraphDeployments
-Deploy your DynamoGraphDeployments separately using the [deployment documentation](../../components/backends/). Each deployment should have a frontend service exposed.
+Deploy your DynamoGraphDeployments separately using the [deployment documentation](../../examples/backends/). Each deployment should have a frontend service exposed.
 
 ### Step 3: Port-Forward and Benchmark Deployment A
 ```bash
@@ -332,7 +332,7 @@ The server-side benchmarking solution:
 ## Quick Start
 
 ### Step 1: Deploy Your DynamoGraphDeployment
-Deploy your DynamoGraphDeployment using the [deployment documentation](../../components/backends/). Ensure it has a frontend service exposed.
+Deploy your DynamoGraphDeployment using the [deployment documentation](../../examples/backends/). Ensure it has a frontend service exposed.
 
 ### Step 2: Deploy and Run Benchmark Job
 

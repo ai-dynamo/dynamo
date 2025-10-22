@@ -42,7 +42,7 @@ This sequential approach ensures:
 - **Reliable cleanup** between different TP configuration tests
 - **Accurate SLA compliance verification** for each configuration
 
-After the profiling finishes, two plots will be generated in the `output-dir`. For example, here are the profiling results for `components/backends/vllm/deploy/disagg.yaml`:
+After the profiling finishes, two plots will be generated in the `output-dir`. For example, here are the profiling results for `examples/backends/vllm/deploy/disagg.yaml`:
 
 ![Prefill Performance](../../docs/images/h100_prefill_performance.png)
 ![Decode Performance](../../docs/images/h100_decode_performance.png)
@@ -281,7 +281,7 @@ Backends: trtllm (vllm and sglang support coming soon)
 Example command for TensorRT-LLM:
 ```bash
 python3 -m benchmarks.profiler.profile_sla \
-   --config ./components/backends/trtllm/deploy/disagg.yaml \
+   --config ./examples/backends/trtllm/deploy/disagg.yaml \
    --backend trtllm \
    --use-ai-configurator \
    --aic-system h200_sxm \

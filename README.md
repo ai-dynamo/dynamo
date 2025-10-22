@@ -171,7 +171,7 @@ Rerun with `curl -N` and change `stream` in the request to `true` to get the res
 ### Deploying Dynamo
 
 - Follow the [Quickstart Guide](docs/kubernetes/README.md) to deploy on Kubernetes.
-- Check out [Backends](components/backends) to deploy various workflow configurations (e.g. SGLang with router, vLLM with disaggregated serving, etc.)
+- Check out [Backends](examples/backends) to deploy various workflow configurations (e.g. SGLang with router, vLLM with disaggregated serving, etc.)
 - Run some [Examples](examples) to learn about building components in Dynamo and exploring various integrations.
 
 ### Benchmarking Dynamo

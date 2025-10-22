@@ -182,14 +182,14 @@ docker compose -f deploy/docker-compose.yml up -d
 ### Aggregated Serving
 
 ```bash
-cd $DYNAMO_HOME/components/backends/sglang
+cd $DYNAMO_HOME/examples/backends/sglang
 ./launch/agg.sh
 ```
 
 ### Aggregated Serving with KV Routing
 
 ```bash
-cd $DYNAMO_HOME/components/backends/sglang
+cd $DYNAMO_HOME/examples/backends/sglang
 ./launch/agg_router.sh
 ```
 
@@ -198,7 +198,7 @@ cd $DYNAMO_HOME/components/backends/sglang
 Here's an example that uses the [Qwen/Qwen3-Embedding-4B](https://huggingface.co/Qwen/Qwen3-Embedding-4B) model.
 
 ```bash
-cd $DYNAMO_HOME/components/backends/sglang
+cd $DYNAMO_HOME/examples/backends/sglang
 ./launch/agg_embed.sh
 ```
 
@@ -222,14 +222,14 @@ See [SGLang Disaggregation](sglang-disaggregation.md) to learn more about how sg
 
 
 ```bash
-cd $DYNAMO_HOME/components/backends/sglang
+cd $DYNAMO_HOME/examples/backends/sglang
 ./launch/disagg.sh
 ```
 
 ### Disaggregated Serving with KV Aware Prefill Routing
 
 ```bash
-cd $DYNAMO_HOME/components/backends/sglang
+cd $DYNAMO_HOME/examples/backends/sglang
 ./launch/disagg_router.sh
 ```
 
@@ -239,7 +239,7 @@ You can use this configuration to test out disaggregated serving with dp attenti
 
 ```bash
 # note this will require 4 GPUs
-cd $DYNAMO_HOME/components/backends/sglang
+cd $DYNAMO_HOME/examples/backends/sglang
 ./launch/disagg_dp_attn.sh
 ```
 
@@ -285,7 +285,7 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 We currently provide deployment examples for Kubernetes and SLURM.
 
 ## Kubernetes
-- **[Deploying Dynamo with SGLang on Kubernetes](../../../components/backends/sglang/deploy/README.md)**
+- **[Deploying Dynamo with SGLang on Kubernetes](../../../examples/backends/sglang/deploy/README.md)**
 
 ## SLURM
-- **[Deploying Dynamo with SGLang on SLURM](../../../components/backends/sglang/slurm_jobs/README.md)**
+- **[Deploying Dynamo with SGLang on SLURM](../../../examples/backends/sglang/slurm_jobs/README.md)**

@@ -26,7 +26,7 @@ class VLLMConfig(EngineConfig):
     stragglers: list[str] = field(default_factory=lambda: ["VLLM:EngineCore"])
 
 
-vllm_dir = os.environ.get("VLLM_DIR", "/workspace/components/backends/vllm")
+vllm_dir = os.environ.get("VLLM_DIR", "/workspace/examples/backends/vllm")
 
 # vLLM test configurations
 vllm_configs = {

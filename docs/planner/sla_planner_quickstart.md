@@ -68,7 +68,7 @@ Use the injector utility to place your DGD manifest into the PVC:
 
 ```bash
 # Use default disagg.yaml config
-python3 -m deploy.utils.inject_manifest --namespace $NAMESPACE --src components/backends/vllm/deploy/disagg.yaml --dest /data/configs/disagg.yaml
+python3 -m deploy.utils.inject_manifest --namespace $NAMESPACE --src examples/backends/vllm/deploy/disagg.yaml --dest /data/configs/disagg.yaml
 
 # Or use a custom disagg config file
 python3 -m deploy.utils.inject_manifest --namespace $NAMESPACE --src my-custom-disagg.yaml --dest /data/configs/disagg.yaml
@@ -243,7 +243,7 @@ curl http://localhost:8000/metrics | grep nv_llm_http_service
 
 If you encounter the following error when applying the deployment:
 ```bash
-Error from server (BadRequest): error when creating "components/backends/vllm/deploy/disagg.yaml": DynamoGraphDeployment in version "v1alpha1" cannot be handled as a DynamoGraphDeployment: strict decoding error: unknown field "spec.services.DecodeWorker.subComponentType", unknown field "spec.services.PrefillWorker.subComponentType"
+Error from server (BadRequest): error when creating "examples/backends/vllm/deploy/disagg.yaml": DynamoGraphDeployment in version "v1alpha1" cannot be handled as a DynamoGraphDeployment: strict decoding error: unknown field "spec.services.DecodeWorker.subComponentType", unknown field "spec.services.PrefillWorker.subComponentType"
 ```
 This is because the `subComponentType` field has only been added in newer versions of the DynamoGraphDeployment CRD (> 0.5.0). You can upgrade the CRD version by following the instructions [here](/docs/kubernetes/installation_guide.md).
 

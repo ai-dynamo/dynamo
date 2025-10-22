@@ -31,7 +31,7 @@ class SGLangConfig(EngineConfig):
     stragglers: list[str] = field(default_factory=lambda: ["SGLANG:EngineCore"])
 
 
-sglang_dir = os.environ.get("SGLANG_DIR", "/workspace/components/backends/sglang")
+sglang_dir = os.environ.get("SGLANG_DIR", "/workspace/examples/backends/sglang")
 
 sglang_configs = {
     "aggregated": SGLangConfig(

@@ -1,7 +1,7 @@
 # Creating Kubernetes Deployments
 
-The scripts in the `components/<backend>/launch` folder like [agg.sh](../../../components/backends/vllm/launch/agg.sh) demonstrate how you can serve your models locally.
-The corresponding YAML files like [agg.yaml](../../../components/backends/vllm/deploy/agg.yaml) show you how you could create a kubernetes deployment for your inference graph.
+The scripts in the `examples/<backend>/launch` folder like [agg.sh](../../../examples/backends/vllm/launch/agg.sh) demonstrate how you can serve your models locally.
+The corresponding YAML files like [agg.yaml](../../../examples/backends/vllm/deploy/agg.yaml) show you how you could create a kubernetes deployment for your inference graph.
 
 
 This guide explains how to create your own deployment files.
@@ -13,13 +13,13 @@ Select the architecture pattern as your template that best fits your use case.
 For example, when using the `VLLM` inference backend:
 
 - **Development / Testing**
-  Use [`agg.yaml`](/components/backends/vllm/deploy/agg.yaml) as the base configuration.
+  Use [`agg.yaml`](/examples/backends/vllm/deploy/agg.yaml) as the base configuration.
 
 - **Production with Load Balancing**
-  Use [`agg_router.yaml`](/components/backends/vllm/deploy/agg_router.yaml) to enable scalable, load-balanced inference.
+  Use [`agg_router.yaml`](/examples/backends/vllm/deploy/agg_router.yaml) to enable scalable, load-balanced inference.
 
 - **High Performance / Disaggregated Deployment**
-  Use [`disagg_router.yaml`](/components/backends/vllm/deploy/disagg_router.yaml) for maximum throughput and modular scalability.
+  Use [`disagg_router.yaml`](/examples/backends/vllm/deploy/disagg_router.yaml) for maximum throughput and modular scalability.
 
 
 ## Step 2: Customize the Template

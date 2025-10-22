@@ -52,7 +52,7 @@ following environment variables based:
 ```bash
 # NOTE: IMAGE must be set manually for now
 # To build an iamge, see the steps here:
-# https://github.com/ai-dynamo/dynamo/tree/main/components/backends/trtllm#build-docker
+# https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm#build-docker
 export IMAGE="<dynamo_trtllm_image>"
 
 # MOUNTS are the host:container path pairs that are mounted into the containers

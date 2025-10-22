@@ -25,7 +25,7 @@ Please note that you should provide **either image URLs or embedding file paths*
 
 Here are quick steps to launch Llama-4 Maverick BF16 in aggregated mode
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 
 export AGG_ENGINE_ARGS=./engine_configs/multinode/agg.yaml
 export SERVED_MODEL_NAME="meta-llama/Llama-4-Maverick-17B-128E-Instruct"
@@ -75,7 +75,7 @@ Here are quick steps to launch in disaggregated mode.
 
 The following is an example of launching a model in disaggregated mode. While this example uses `Qwen/Qwen2-VL-7B-Instruct`, you can adapt it for other models by modifying the environment variables for the model path and engine configurations.
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 
 export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen2-VL-7B-Instruct"}
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"Qwen/Qwen2-VL-7B-Instruct"}
