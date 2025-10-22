@@ -31,10 +31,6 @@ spec:
           - /bin/sh
           - -c
           image: my-registry/trtllm-runtime:my-tag
-      pvc:
-        create: false
-        mountPoint: /model-store
-        name: model-cache
       replicas: 1
     TrtllmPrefillWorker:
       componentType: worker
@@ -92,10 +88,6 @@ spec:
         - configMap:
             name: llm-config-prefill
           name: llm-config-prefill
-      pvc:
-        create: false
-        mountPoint: /model-store
-        name: model-cache
       replicas: 4
       resources:
         limits:
@@ -158,10 +150,6 @@ spec:
         - configMap:
             name: llm-config-decode
           name: llm-config-decode
-      pvc:
-        create: false
-        mountPoint: /model-store
-        name: model-cache
       replicas: 2
       resources:
         limits:
