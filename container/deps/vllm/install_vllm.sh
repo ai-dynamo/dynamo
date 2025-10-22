@@ -135,7 +135,8 @@ git checkout $VLLM_REF
 # GIT_COMMITTER_NAME="Container Build" GIT_COMMITTER_EMAIL="container@buildkitsandbox.local" git cherry-pick 740f064
 
 echo "\n=== Installing vLLM & FlashInfer ==="
-
+# TODO: remove apache-tvm-ffi once FlashInfer is fixed https://github.com/flashinfer-ai/flashinfer/issues/1962
+uv pip install --pre apache-tvm-ffi==0.1.0b15
 if [[ $VLLM_REF =~ ^v ]] && { [ "$ARCH" = "amd64" ] || { [ "$ARCH" = "arm64" ] && [ "$TORCH_BACKEND" = "cu129" ]; }; }; then
     # VLLM_REF starts with 'v' and either amd64, or arm64 with cu129 backend - use PyPI install
     echo "Installing vLLM $VLLM_REF from PyPI... (ARCH=$ARCH, TORCH_BACKEND=$TORCH_BACKEND)"
