@@ -153,7 +153,7 @@ args:
 
 ### 3. Deploy
 
-See the [Create Deployment Guide](../../../../docs/kubernetes/create_deployment.md) to learn how to deploy the deployment file.
+See the [Create Deployment Guide](../../../../docs/kubernetes/deployment/create_deployment.md) to learn how to deploy the deployment file.
 
 First, create a secret for the HuggingFace token.
 ```bash
@@ -258,7 +258,7 @@ For detailed configuration instructions, see the [KV cache transfer guide](../..
 
 ## Request Migration
 
-You can enable [request migration](../../../../docs/architecture/request_migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
+You can enable [request migration](../../../../docs/fault_tolerance/request_migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
 
 ```yaml
 args:
@@ -277,11 +277,11 @@ Configure the `model` name and `host` based on your deployment.
 
 ## Further Reading
 
-- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/create_deployment.md)
+- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create_deployment.md)
 - **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
 - **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/kubernetes/installation_guide.md)
 - **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
-- **Architecture Docs**: [Disaggregated Serving](../../../../docs/architecture/disagg_serving.md), [KV-Aware Routing](../../../../docs/architecture/kv_cache_routing.md)
+- **Architecture Docs**: [Disaggregated Serving](../../../../docs/design_docs/disagg_serving.md), [KV-Aware Routing](../../../../docs/router/kv_cache_routing.md)
 - **Multinode Deployment**: [Multinode Examples](../../../../docs/backends/trtllm/multinode/multinode-examples.md)
 - **Speculative Decoding**: [Llama 4 + Eagle Guide](../../../../docs/backends/trtllm/llama4_plus_eagle.md)
 - **Kubernetes CRDs**: [Custom Resources Documentation](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
