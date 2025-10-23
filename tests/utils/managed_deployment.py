@@ -823,7 +823,7 @@ async def main():
     )
 
     deployment_spec = DeploymentSpec(
-        "/workspace/components/backends/vllm/deploy/agg.yaml"
+        "/workspace/examples/backends/vllm/deploy/agg.yaml"
     )
 
     deployment_spec.disable_grove()

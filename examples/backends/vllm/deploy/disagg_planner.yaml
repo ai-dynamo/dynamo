@@ -49,7 +49,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
+          workingDir: /workspace/examples/backends/vllm
           command:
             - python3
           args:
@@ -69,7 +69,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
+          workingDir: /workspace/examples/backends/vllm
           command:
             - python3
           args:

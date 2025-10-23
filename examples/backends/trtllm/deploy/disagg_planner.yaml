@@ -17,7 +17,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/trtllm-runtime:my-tag
-          workingDir: /workspace/components/backends/trtllm
+          workingDir: /workspace/examples/backends/trtllm
           command:
             - python3
           args:

@@ -50,7 +50,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
-          workingDir: /workspace/components/backends/sglang
+          workingDir: /workspace/examples/backends/sglang
           command:
             - python3
           args:
@@ -86,7 +86,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
-          workingDir: /workspace/components/backends/sglang
+          workingDir: /workspace/examples/backends/sglang
           command:
             - python3
           args:

@@ -62,7 +62,7 @@ resources:
 extraPodSpec:
   mainContainer:
     image: my-registry/sglang-runtime:my-tag
-    workingDir: /workspace/components/backends/sglang
+    workingDir: /workspace/examples/backends/sglang
     args:
       - "python3"
       - "-m"

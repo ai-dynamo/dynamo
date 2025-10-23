@@ -51,7 +51,7 @@ spec:
             name: nvidia-config
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
-          workingDir: /workspace/components/backends/trtllm
+          workingDir: /workspace/examples/backends/trtllm
           # mount the configmap as a volume
           volumeMounts:
           - name: nvidia-config

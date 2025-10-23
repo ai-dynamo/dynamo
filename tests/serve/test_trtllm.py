@@ -21,7 +21,7 @@ class TRTLLMConfig(EngineConfig):
     stragglers: list[str] = field(default_factory=lambda: ["TRTLLM:EngineCore"])
 
 
-trtllm_dir = os.environ.get("TRTLLM_DIR", "/workspace/components/backends/trtllm")
+trtllm_dir = os.environ.get("TRTLLM_DIR", "/workspace/examples/backends/trtllm")
 
 # trtllm test configurations
 trtllm_configs = {

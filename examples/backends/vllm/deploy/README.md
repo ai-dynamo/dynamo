@@ -70,7 +70,7 @@ resources:
 extraPodSpec:
   mainContainer:
     image: my-registry/vllm-runtime:my-tag
-    workingDir: /workspace/components/backends/vllm
+    workingDir: /workspace/examples/backends/vllm
     args:
       - "python3"
       - "-m"
@@ -141,7 +141,7 @@ Then, deploy the model using the deployment file.
 Export the NAMESPACE you used in your Dynamo Cloud Installation.
 
 ```bash
-cd <dynamo-source-root>/components/backends/vllm/deploy
+cd <dynamo-source-root>/examples/backends/vllm/deploy
 export DEPLOYMENT_FILE=agg.yaml
 
 kubectl apply -f $DEPLOYMENT_FILE -n $NAMESPACE
