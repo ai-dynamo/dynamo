@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// A worker identifier.
-pub type WorkerId = i64;
+pub type WorkerId = u64;
 
 /// A data parallel rank identifier.
 pub type DpRank = u32;

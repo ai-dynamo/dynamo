@@ -25,31 +25,31 @@ impl EtcdStore {
 
 #[async_trait]
 impl KeyValueStore for EtcdStore {
+    type Bucket = EtcdBucket;
+
     /// A "bucket" in etcd is a path prefix
     async fn get_or_create_bucket(
         &self,
         bucket_name: &str,
         _ttl: Option<Duration>, // TODO ttl not used yet
-    ) -> Result<Box<dyn KeyValueBucket>, StoreError> {
-        Ok(self.get_bucket(bucket_name).await?.unwrap())
+    ) -> Result<Self::Bucket, StoreError> {
+        Ok(EtcdBucket {
+            client: self.client.clone(),
+            bucket_name: bucket_name.to_string(),
+        })
     }
 
     /// A "bucket" in etcd is a path prefix. This creates an EtcdBucket object without doing
     /// any network calls.
-    async fn get_bucket(
-        &self,
-        bucket_name: &str,
-    ) -> Result<Option<Box<dyn KeyValueBucket>>, StoreError> {
-        Ok(Some(Box::new(EtcdBucket {
+    async fn get_bucket(&self, bucket_name: &str) -> Result<Option<Self::Bucket>, StoreError> {
+        Ok(Some(EtcdBucket {
             client: self.client.clone(),
             bucket_name: bucket_name.to_string(),
-        })))
+        }))
     }
 
     fn connection_id(&self) -> u64 {
-        // This conversion from i64 to u64 is safe because etcd lease IDs are u64 internally.
-        // They present as i64 because of the limitations of the etcd grpc/HTTP JSON API.
-        self.client.lease_id() as u64
+        self.client.lease_id()
     }
 }
 
@@ -108,7 +108,7 @@ impl KeyValueBucket for EtcdBucket {
     {
         let k = make_key(&self.bucket_name, &"".into());
         tracing::trace!("etcd watch: {k}");
-        let (_watcher, mut watch_stream) = self
+        let (watcher, mut watch_stream) = self
             .client
             .etcd_client()
             .clone()
@@ -116,6 +116,7 @@ impl KeyValueBucket for EtcdBucket {
             .await
             .map_err(|e| StoreError::EtcdError(e.to_string()))?;
         let output = stream! {
+            let _watcher = watcher; // Keep it alive. Not sure if necessary.
             while let Ok(Some(resp)) = watch_stream.message().await {
                 for e in resp.events() {
                     if matches!(e.event_type(), EventType::Put) && e.kv().is_some() {
@@ -155,7 +156,7 @@ impl EtcdBucket {
         tracing::trace!("etcd create: {k}");
 
         // Use atomic transaction to check and create in one operation
-        let put_options = PutOptions::new().with_lease(self.client.primary_lease().id());
+        let put_options = PutOptions::new().with_lease(self.client.primary_lease().id() as i64);
 
         // Build transaction that creates key only if it doesn't exist
         let txn = Txn::new()
@@ -224,7 +225,7 @@ impl EtcdBucket {
         }
 
         let put_options = PutOptions::new()
-            .with_lease(self.client.primary_lease().id())
+            .with_lease(self.client.primary_lease().id() as i64)
             .with_prev_key();
         let mut put_resp = self
             .client

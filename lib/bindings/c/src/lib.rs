@@ -4,6 +4,7 @@
 use async_once_cell::OnceCell as AsyncOnceCell;
 use libc::c_char;
 use once_cell::sync::OnceCell;
+use std::borrow::Cow;
 use std::ffi::CStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -15,6 +16,25 @@ static WK: OnceCell<Worker> = OnceCell::new();
 static DRT: AsyncOnceCell<DistributedRuntime> = AsyncOnceCell::new();
 // [FIXME] shouldn't the publisher be instance passing between API calls?
 static KV_PUB: OnceCell<KvEventPublisher> = OnceCell::new();
+
+/// Convert a C string pointer to a Rust string, falling back to a default when:
+/// - the pointer is NULL,
+/// - the bytes are not valid UTF-8,
+/// - or the resulting string is empty/whitespace.
+#[inline]
+unsafe fn cstr_or_default<'a>(ptr: *const c_char, default_val: &'a str) -> Cow<'a, str> {
+    if ptr.is_null() {
+        return Cow::from(default_val);
+    }
+    match unsafe { CStr::from_ptr(ptr) }
+        .to_str()
+        .ok()
+        .map(|s| s.trim())
+    {
+        Some(s) if !s.is_empty() => Cow::from(s.to_owned()),
+        _ => Cow::from(default_val),
+    }
+}
 
 fn initialize_tracing() {
     // Sets up RUST_LOG environment variable for logging while KV Publishing
@@ -73,13 +93,11 @@ pub unsafe extern "C" fn dynamo_llm_init(
         }
     };
 
-    let component = match unsafe { CStr::from_ptr(component_c_str) }.to_str() {
-        Ok(s) => s.to_string(),
-        Err(e) => {
-            tracing::error!(error = ?e, "Failed to convert C string to Rust string (component)");
-            return DynamoLlmResult::ERR;
-        }
-    };
+    let component_cow = unsafe { cstr_or_default(component_c_str, "backend") };
+    if let Cow::Borrowed("backend") = &component_cow {
+        tracing::info!("defaulting to \"backend\" for component");
+    }
+    let component: String = component_cow.into_owned();
 
     match result {
         Ok(_) => match KV_PUB.get_or_try_init(move || {
@@ -406,13 +424,13 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
             return DynamoLlmResult::ERR;
         }
     };
-    let component = match unsafe { CStr::from_ptr(component_c_str) }.to_str() {
-        Ok(s) => s.to_owned(),
-        Err(e) => {
-            tracing::error!(error = ?e, "bad component");
-            return DynamoLlmResult::ERR;
-        }
-    };
+
+    let component_cow = unsafe { cstr_or_default(component_c_str, "backend") };
+    if let Cow::Borrowed("backend") = &component_cow {
+        tracing::info!("defaulting to \"backend\" for component");
+    }
+    let component: String = component_cow.into_owned();
+
     let model = match unsafe { CStr::from_ptr(model_name_c_str) }.to_str() {
         Ok(s) => s.to_owned(),
         Err(e) => {
