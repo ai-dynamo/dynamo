@@ -10144,9 +10144,10 @@ spec:
                             description: |-
                               Indicates the number of nodes to deploy for multinode components.
                               Total number of GPUs is NumberOfNodes * GPU limit.
-                              Must be greater than 1.
+                              Must be at least 1. For disaggregated serving, each service (e.g., prefill, decode)
+                              can have nodeCount=1 while still requiring multinode/distributed initialization.
                             format: int32
-                            minimum: 2
+                            minimum: 1
                             type: integer
                         required:
                           - nodeCount
