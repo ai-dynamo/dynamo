@@ -30,7 +30,7 @@ jobs:
 
   backend-status-check:
     runs-on: ubuntu-latest
-    needs: [deploy-test-fault-tolerance]
+    needs: [vllm, sglang, trtllm, operator, deploy-test-fault-tolerance]
     if: always()
     steps:
       - name: "Check all dependent jobs"
