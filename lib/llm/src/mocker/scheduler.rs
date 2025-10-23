@@ -33,11 +33,11 @@ use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::kv_manager::KvManager;
 use crate::mocker::protocols::{DirectRequest, MockEngineArgs, MoveBlockResponse};
 use crate::mocker::protocols::{MoveBlock, OutputSignal, PrefillCost, block_response_to_kv_event};
+use crate::mocker::running_mean::RunningMean;
 use crate::mocker::sequence::ActiveSequence;
 use crate::tokens::BlockHash;
 use crate::tokens::blocks::UniqueBlock;
-use std::collections::HashMap;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::Duration;
@@ -268,7 +268,7 @@ impl Scheduler {
             args.block_size,
             block_resp_tx,
         )));
-        let hit_rates = Arc::new(Mutex::new(VecDeque::with_capacity(1000)));
+        let hit_rates = Arc::new(Mutex::new(RunningMean::new(1000)));
 
         // Assert speedup_ratio is greater than 0
         assert!(
@@ -367,10 +367,7 @@ impl Scheduler {
                             let hit_rate = if !active_sequence.is_empty() { 1.0 - (new_tokens as f32 / active_sequence.len() as f32) } else { 0.0 };
                             {
                                 let mut hit_rates_guard = hit_rates.lock().await;
-                                hit_rates_guard.push_back(hit_rate);
-                                if hit_rates_guard.len() > 1000 {
-                                    hit_rates_guard.pop_front();
-                                }
+                                hit_rates_guard.push(hit_rate);
                             }
 
                             state_guard.move_to_prefill(uuid, active_sequence, prefill_cost);
@@ -446,8 +443,8 @@ impl Scheduler {
                 if !uuids.is_empty() {
                     should_schedule = true
                 };
-                for uuid in uuids {
-                    let Some(sequence) = state_guard.run(uuid) else {
+                for uuid in &uuids {
+                    let Some(sequence) = state_guard.run(*uuid) else {
                         continue;
                     };
                     let signals = sequence.generate();
@@ -479,7 +476,7 @@ impl Scheduler {
                     if should_output {
                         send_failed = output_tx_clone.as_ref().is_some_and(|tx| {
                             tx.send(OutputSignal {
-                                uuid,
+                                uuid: *uuid,
                                 completed: is_complete,
                             })
                             .is_err()
@@ -492,21 +489,22 @@ impl Scheduler {
                         }
                     }
 
-                    {
-                        let hit_rates_guard = hit_rates.lock().await;
-                        let metrics = get_fwd_pass_metrics(
-                            &state_guard,
-                            &kv_manager_guard,
-                            &hit_rates_guard,
-                            dp_rank,
-                        );
-                        let _ = metrics_tx.send(metrics);
-                    }
-
                     if send_failed || is_complete {
-                        state_guard.complete(&uuid);
+                        state_guard.complete(uuid);
                         continue;
                     }
+                }
+
+                // Collect metrics once after processing all decode tokens
+                if !uuids.is_empty() {
+                    let hit_rates_guard = hit_rates.lock().await;
+                    let metrics = get_fwd_pass_metrics(
+                        &state_guard,
+                        &kv_manager_guard,
+                        &hit_rates_guard,
+                        dp_rank,
+                    );
+                    let _ = metrics_tx.send(metrics);
                 }
 
                 // Sleep once for the adjusted duration
@@ -572,7 +570,7 @@ impl Scheduler {
 fn get_fwd_pass_metrics(
     state: &SchedulerState,
     kv_manager: &KvManager,
-    hit_rates: &VecDeque<f32>,
+    hit_rates: &RunningMean<f32>,
     dp_rank: u32,
 ) -> ForwardPassMetrics {
     // Get state metrics
@@ -580,7 +578,7 @@ fn get_fwd_pass_metrics(
     let num_requests_waiting = state.waiting.len() as u64;
 
     // Get KV manager metrics
-    let active_blocks_count = kv_manager.active_blocks().len() as u64;
+    let active_blocks_count = kv_manager.num_active_blocks() as u64;
     let total_capacity = kv_manager.max_capacity() as u64;
     let gpu_cache_usage_perc = if total_capacity > 0 {
         active_blocks_count as f32 / total_capacity as f32
@@ -588,13 +586,8 @@ fn get_fwd_pass_metrics(
         0.0
     };
 
-    // Get hit rate metrics
-    let gpu_prefix_cache_hit_rate = if hit_rates.is_empty() {
-        0.0
-    } else {
-        let sum: f32 = hit_rates.iter().sum();
-        sum / hit_rates.len() as f32
-    };
+    // Get hit rate metrics - O(1) access
+    let gpu_prefix_cache_hit_rate = hit_rates.mean();
 
     let worker_stats = WorkerStats {
         data_parallel_rank: Some(dp_rank),

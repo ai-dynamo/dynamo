@@ -412,7 +412,8 @@ impl RadixTree {
                         Some(entry) => entry.clone(),
                         None => {
                             tracing::warn!(
-                                worker_id = worker_id.to_string(),
+                                worker_id = worker.worker_id.to_string(),
+                                dp_rank = ?worker.dp_rank,
                                 id,
                                 "Failed to find block to remove; skipping remove operation"
                             );
