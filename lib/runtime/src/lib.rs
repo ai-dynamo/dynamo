@@ -212,4 +212,7 @@ pub struct DistributedRuntime {
     // This map associates metric prefixes with their corresponding Prometheus registries and callbacks.
     // Uses RwLock for better concurrency - multiple threads can read (execute callbacks) simultaneously.
     hierarchy_to_metricsregistry: Arc<std::sync::RwLock<HashMap<String, MetricsRegistryEntry>>>,
+
+    // Service discovery interface
+    service_discovery: Arc<parking_lot::Mutex<Box<dyn discovery::ServiceDiscovery>>>,
 }

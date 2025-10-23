@@ -5,6 +5,7 @@ pub use crate::component::Component;
 use crate::storage::key_value_store::{
     EtcdStore, KeyValueStore, KeyValueStoreEnum, KeyValueStoreManager, MemoryStore,
 };
+use crate::discovery::{ServiceDiscovery, mock::MockServiceDiscovery};
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
     ErrorContext, PrometheusUpdateCallback,
@@ -43,7 +44,7 @@ impl std::fmt::Debug for DistributedRuntime {
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
-        let (etcd_config, nats_config, is_static) = config.dissolve();
+        let (etcd_config, nats_config, is_static, use_mock_discovery) = config.dissolve();
 
         let runtime_clone = runtime.clone();
 
@@ -79,6 +80,14 @@ impl DistributedRuntime {
 
         let nats_client_for_metrics = nats_client.clone();
 
+        // Initialize service discovery
+        let service_discovery: Box<dyn ServiceDiscovery + Send + Sync> = if use_mock_discovery {
+            Box::new(MockServiceDiscovery::new())
+        } else {
+            // For now, just use mock. Later we'll add ETCD implementation
+            Box::new(MockServiceDiscovery::new())
+        };
+
         let distributed_runtime = Self {
             runtime,
             etcd_client,
@@ -94,6 +103,7 @@ impl DistributedRuntime {
                 crate::MetricsRegistryEntry,
             >::new())),
             system_health,
+            service_discovery: Arc::new(parking_lot::Mutex::new(service_discovery)),
         };
 
         if let Some(nats_client_for_metrics) = nats_client_for_metrics {
@@ -290,6 +300,11 @@ impl DistributedRuntime {
         &self.store
     }
 
+    /// Get the service discovery interface
+    pub fn service_discovery(&self) -> Arc<parking_lot::Mutex<Box<dyn ServiceDiscovery>>> {
+        self.service_discovery.clone()
+    }
+
     pub fn child_token(&self) -> CancellationToken {
         self.runtime.child_token()
     }
@@ -380,6 +395,7 @@ pub struct DistributedConfig {
     pub etcd_config: etcd::ClientOptions,
     pub nats_config: nats::ClientOptions,
     pub is_static: bool,
+    pub use_mock_discovery: bool,  // If true, use mock service discovery
 }
 
 impl DistributedConfig {
@@ -388,6 +404,7 @@ impl DistributedConfig {
             etcd_config: etcd::ClientOptions::default(),
             nats_config: nats::ClientOptions::default(),
             is_static,
+            use_mock_discovery: false,
         }
     }
 
@@ -396,6 +413,7 @@ impl DistributedConfig {
             etcd_config: etcd::ClientOptions::default(),
             nats_config: nats::ClientOptions::default(),
             is_static: false,
+            use_mock_discovery: false,
         };
 
         config.etcd_config.attach_lease = false;
