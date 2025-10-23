@@ -834,7 +834,8 @@ class WorkflowMetricsUploader:
             return
 
         # Look for metadata files to get accurate step and framework info
-        metadata_files = glob.glob(f"{test_results_dir}/test_metadata.json")
+        # Updated pattern to match new unique naming: test_metadata_<framework>_<test_type>_<arch>.json
+        metadata_files = glob.glob(f"{test_results_dir}/test_metadata_*.json")
 
         if not metadata_files:
             print(f"⚠️  No test metadata files found in {test_results_dir}")
