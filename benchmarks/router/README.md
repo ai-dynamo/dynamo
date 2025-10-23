@@ -116,7 +116,7 @@ To see all available router arguments, run:
 python -m dynamo.frontend --help
 ```
 
-For detailed explanations of router arguments (especially KV cache routing parameters), see the [KV Cache Routing documentation](../../docs/architecture/kv_cache_routing.md).
+For detailed explanations of router arguments (especially KV cache routing parameters), see the [KV Cache Routing documentation](../../docs/router/kv_cache_routing.md).
 
 #### Disaggregated Serving with Automatic Prefill Routing
 
@@ -125,7 +125,7 @@ When you launch prefill workers using `run_engines.sh --prefill`, the frontend a
 - Uses KV-aware routing regardless of the frontend's `--router-mode` setting
 - Seamlessly integrates with your decode workers for token generation
 
-No additional configuration is needed - simply launch both decode and prefill workers, and the system handles the rest. See the [KV Cache Routing documentation](../../docs/architecture/kv_cache_routing.md#disaggregated-serving-prefill-and-decode) for more details.
+No additional configuration is needed - simply launch both decode and prefill workers, and the system handles the rest. See the [KV Cache Routing documentation](../../docs/router/kv_cache_routing.md#disaggregated-serving-prefill-and-decode) for more details.
 
 **Note**: If you're unsure whether your backend engines correctly emit KV events for certain models (e.g., hybrid models like gpt-oss or nemotron nano 2), use the `--no-kv-events` flag to disable KV event tracking and use approximate KV indexing instead:
 
