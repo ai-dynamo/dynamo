@@ -16,7 +16,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# ===== Namespace ensure =====
+: "${NAMESPACE:=dynamo}"
 if ! kubectl get ns "$NAMESPACE" >/dev/null 2>&1; then
   kubectl create namespace "$NAMESPACE"
 fi
@@ -30,9 +30,6 @@ info(){ printf "ℹ️  %s\n" "$*"; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "'$1' is required"; }
 
 need kubectl
-
-# ===== Config (env overridable) =====
-: "${NAMESPACE:=dynamo}"
 
 # ===== Pre-flight checks =====
 command -v helm >/dev/null 2>&1 || { echo "ERROR: helm not found"; exit 1; }
