@@ -4757,7 +4757,7 @@ func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 
 	tests := []struct {
 		name                   string
-		component              *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		component              *v1alpha1.DynamoComponentDeploymentSpec
 		expectError            bool
 		expectedResourceClaims []corev1.ResourceClaim
 		expectedPodClaims      []corev1.PodResourceClaim
@@ -4765,7 +4765,7 @@ func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 	}{
 		{
 			name: "component with resource claims",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+			component: &v1alpha1.DynamoComponentDeploymentSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 					ComponentType: commonconsts.ComponentTypeWorker,
 					Resources: &common.Resources{
@@ -4853,7 +4853,7 @@ func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 		},
 		{
 			name: "component with multiple resource claims",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+			component: &v1alpha1.DynamoComponentDeploymentSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 					ComponentType: commonconsts.ComponentTypeWorker,
 					Resources: &common.Resources{
@@ -4909,7 +4909,7 @@ func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 		},
 		{
 			name: "component without resource claims",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+			component: &v1alpha1.DynamoComponentDeploymentSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 					ComponentType: commonconsts.ComponentTypeFrontend,
 					Resources: &common.Resources{
@@ -4929,7 +4929,7 @@ func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			podSpec, err := GenerateBasePodSpec(
-				tt.component,
+				&tt.component.DynamoComponentDeploymentSharedSpec,
 				BackendFrameworkTRTLLM,
 				secretsRetriever,
 				"test-deployment",
