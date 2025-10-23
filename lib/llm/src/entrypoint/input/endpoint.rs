@@ -84,7 +84,6 @@ pub async fn run(
             let ingress = Ingress::for_pipeline(pipeline)?;
 
             if !is_static {
-                // Use Prefill model type if is_prefill flag is set, otherwise default to Chat + Completions
                 let model_type = if is_prefill {
                     ModelType::Prefill
                 } else {
