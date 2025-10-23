@@ -7,7 +7,11 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from tests.serve.common import DYNAMO_HOME, params_with_model_mark, run_serve_deployment
+from tests.serve.common import (
+    SERVE_TEST_DIR,
+    params_with_model_mark,
+    run_serve_deployment,
+)
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
     chat_payload,
@@ -28,17 +32,17 @@ class SGLangConfig(EngineConfig):
     stragglers: list[str] = field(default_factory=lambda: ["SGLANG:EngineCore"])
 
 
-sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
-    DYNAMO_HOME, "components", "backends", "sglang"
-)
+sglang_dir = os.environ.get("SGLANG_DIR", "/workspace/components/backends/sglang")
 
 sglang_configs = {
     "aggregated": SGLangConfig(
+        # Uses backend agg.sh (with metrics enabled) for testing standard
+        # aggregated deployment with metrics collection
         name="aggregated",
         directory=sglang_dir,
-        script_name="sglang_agg.sh",
+        script_name="agg.sh",
         marks=[pytest.mark.gpu_1],
-        model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+        model="Qwen/Qwen3-0.6B",
         env={},
         models_port=8000,
         request_payloads=[
@@ -82,8 +86,10 @@ sglang_configs = {
         # marker 'CUSTOM_TEMPLATE_ACTIVE|' is applied to user messages.
         # The backend (launch/template_verifier.*) checks for this marker
         # and returns "Successfully Applied Chat Template" if found.
+        # Uses SERVE_TEST_DIR (not sglang_dir) because template_verifier.sh/.py
+        # are test-specific mock scripts in tests/serve/launch/
         name="template_verification",
-        directory=sglang_dir,
+        directory=SERVE_TEST_DIR,  # special directory for test-specific scripts
         script_name="template_verifier.sh",
         marks=[pytest.mark.gpu_1],
         model="Qwen/Qwen3-0.6B",
