@@ -86,8 +86,10 @@ runs:
 
           # Create uniquely named metadata file with step context information
           # Use framework-testtype-arch to make it unique per test run
-          METADATA_FILE="test-results/test_metadata_${{ inputs.framework }}_${{ inputs.test_type }}_${{ inputs.platform_arch }}.json"
-          JUNIT_UNIQUE_NAME="pytest_test_report_${{ inputs.framework }}_${{ inputs.test_type }}_${{ inputs.platform_arch }}.xml"
+          # Sanitize test_type to remove commas and spaces for safe filenames
+          TEST_TYPE_SAFE=$(echo "${{ inputs.test_type }}" | tr ', ' '_')
+          METADATA_FILE="test-results/test_metadata_${{ inputs.framework }}_${TEST_TYPE_SAFE}_${{ inputs.platform_arch }}.json"
+          JUNIT_UNIQUE_NAME="pytest_test_report_${{ inputs.framework }}_${TEST_TYPE_SAFE}_${{ inputs.platform_arch }}.xml"
 
           # Rename XML file to unique name
           mv "$JUNIT_FILE" "test-results/$JUNIT_UNIQUE_NAME"
@@ -117,7 +119,5 @@ runs:
       if: always()  # Always upload test results, even if tests failed
       with:
         name: test-results-${{ inputs.framework }}-${{ inputs.test_type }}-${{ env.PLATFORM_ARCH }}
-        path: |
-          test-results/pytest_test_report_${{ inputs.framework }}_${{ inputs.test_type }}_${{ inputs.platform_arch }}.xml
-          test-results/test_metadata_${{ inputs.framework }}_${{ inputs.test_type }}_${{ inputs.platform_arch }}.json
+        path: test-results/
         retention-days: 7
