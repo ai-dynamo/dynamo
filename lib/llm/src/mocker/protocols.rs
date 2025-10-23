@@ -98,13 +98,13 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub startup_time: Option<f64>,
 
-    /// Whether to publish KV events (disabled for decode workers)
-    #[builder(default = "true")]
-    pub publish_kv_events: bool,
-
     /// Whether this is a prefill worker (limits max_tokens to 1, returns dummy disaggregated_params)
     #[builder(default = "false")]
     pub is_prefill: bool,
+
+    /// Whether this is a decode worker (disables KV events, skips prefill cost estimation)
+    #[builder(default = "false")]
+    pub is_decode: bool,
 }
 
 impl Default for MockEngineArgs {
@@ -140,8 +140,8 @@ impl MockEngineArgs {
             "speedup_ratio",
             "dp_size",
             "startup_time",
-            "publish_kv_events",
             "is_prefill",
+            "is_decode",
         ]
         .iter()
         .cloned()
@@ -223,16 +223,16 @@ impl MockEngineArgs {
             builder = builder.startup_time(Some(num));
         }
 
-        if let Some(value) = extra_args.get("publish_kv_events")
-            && let Some(enabled) = value.as_bool()
-        {
-            builder = builder.publish_kv_events(enabled);
-        }
-
         if let Some(value) = extra_args.get("is_prefill")
             && let Some(enabled) = value.as_bool()
         {
             builder = builder.is_prefill(enabled);
+        }
+
+        if let Some(value) = extra_args.get("is_decode")
+            && let Some(enabled) = value.as_bool()
+        {
+            builder = builder.is_decode(enabled);
         }
 
         // Build the MockEngineArgs with either defaults or overridden values

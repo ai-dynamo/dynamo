@@ -79,8 +79,8 @@ impl MockVllmEngine {
         Self::start_metrics_publishing(&schedulers, Some(component.clone()), cancel_token.clone())
             .await?;
 
-        // Start KV events publishing only if enabled (disabled for decode workers)
-        if self.engine_args.enable_prefix_caching && self.engine_args.publish_kv_events {
+        // Start KV events publishing only if not a decode worker
+        if self.engine_args.enable_prefix_caching && !self.engine_args.is_decode {
             Self::start_kv_events_publishing(
                 kv_event_receiver,
                 Some(component.clone()),

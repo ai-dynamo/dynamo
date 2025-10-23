@@ -37,18 +37,12 @@ def create_temp_engine_args_file(args) -> Path:
         "speedup_ratio": getattr(args, "speedup_ratio", None),
         "dp_size": getattr(args, "dp_size", None),
         "startup_time": getattr(args, "startup_time", None),
+        "is_prefill": getattr(args, "is_prefill_worker", None),
+        "is_decode": getattr(args, "is_decode_worker", None),
     }
 
     # Remove None values to only include explicitly set arguments
     engine_args = {k: v for k, v in engine_args.items() if v is not None}
-
-    # Add KV events control
-    if args.is_decode_worker or args.no_kv_events:
-        engine_args["publish_kv_events"] = False
-
-    # Add prefill mode
-    if args.is_prefill_worker:
-        engine_args["is_prefill"] = True
 
     # Create temporary file
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
@@ -188,15 +182,7 @@ def parse_args():
         "--is-decode-worker",
         action="store_true",
         default=False,
-        help="Mark this as a decode worker which does not publish KV events (default: False)",
-    )
-
-    # KV events control
-    parser.add_argument(
-        "--no-kv-events",
-        action="store_true",
-        default=False,
-        help="Disable KV events publishing (default: False)",
+        help="Mark this as a decode worker which does not publish KV events and skips prefill cost estimation (default: False)",
     )
 
     return parser.parse_args()

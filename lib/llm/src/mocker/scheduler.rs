@@ -400,7 +400,10 @@ impl Scheduler {
                 {
                     // NOTE: Prefill cost/time is always incremented for new blocks, even if they
                     // could be cached by other requests in the same batch. This matches vLLM behavior.
-                    total_time += Duration::from_secs_f64(prefill_compute / 1000.0);
+                    // For decode workers, skip adding prefill compute time
+                    if !args.is_decode {
+                        total_time += Duration::from_secs_f64(prefill_compute / 1000.0);
+                    }
 
                     if let Some(creation_signal) = maybe_creation_signal {
                         if !process_signals(
