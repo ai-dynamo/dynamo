@@ -4,11 +4,19 @@
 name: GAIE Deployment with Dynamo (vllm)
 
 on:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
-      - release/*.*.*
+  # workflow_dispatch:
+  # push:
+  #   branches:
+  #     - main
+  #     - release/*.*.*
+  # pull_request:
+  #   paths:
+  #     - lib/bindings/c/src/**
+  #     - lib/runtime/src/**
+  #     - lib/llm/src/**
+  schedule:
+    # Run at 03:00 UTC on the 1st and 15th of each month (approx every 2 weeks)
+    - cron: "0 3 1,15 * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name || github.run_id }}
@@ -16,13 +24,12 @@ concurrency:
 
 jobs:
   gaie:
-    name: Build Images, Deploy Dynamo, Install GAIE, and Run Script
+    name: Build Images, Deploy Dynamo, Install GAIE, create EPP image and make sure it works.
     runs-on: cpu-amd-m5-2xlarge
     env:
       FRAMEWORK: vllm
       PROFILE: agg
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
-      DEPLOYMENT_FILE: deploy/${{ env.PROFILE }}.yaml
       MODEL_NAME: Qwen/Qwen3-0.6B
       OPERATOR_IMAGE_TAG: ${{ github.sha }}-operator-amd64
       VLLM_IMAGE_TAG: ${{ github.sha }}-vllm-amd64
@@ -136,6 +143,7 @@ jobs:
           # Create ephemeral namespace for Dynamo
           PROFILE_SANITIZED="${PROFILE//_/-}"
           echo "NAMESPACE=gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED}" >> $GITHUB_ENV
+          echo "DEPLOYMENT_FILE=deploy/${PROFILE}.yaml" >> $GITHUB_ENV
           kubectl delete namespace gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED} || true
           kubectl create namespace gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED}
           kubectl label namespaces gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED} \
@@ -196,8 +204,8 @@ jobs:
           KUBECONFIG: ${{ github.workspace }}/.kubeconfig
         run: |
           set -euo pipefail
-          # Note: manifests are cluster-scoped; namespace flag kept to match request
-          kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${INFERENCE_EXTENSION_VERSION}/manifests.yaml -n my-model
+          # Note: manifests are cluster-scoped
+          kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${INFERENCE_EXTENSION_VERSION}/manifests.yaml
 
       - name: Install Kgateway CRDs and controller
         shell: bash
@@ -214,17 +222,20 @@ jobs:
           KUBECONFIG: ${{ github.workspace }}/.kubeconfig
         run: |
           set -euo pipefail
-          kubectl create namespace my-model || true
-          kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/raw/main/config/manifests/gateway/kgateway/gateway.yaml -n my-model
+          kubectl create namespace ${NAMESPACE} || true
+          kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/raw/main/config/manifests/gateway/kgateway/gateway.yaml -n ${NAMESPACE}
 
-      - name: Clone GAIE repo and set environment
+      - name: Clone GAIE repo into separate folder and set environment
         shell: bash
         run: |
           set -euo pipefail
-          git clone https://github.com/kubernetes-sigs/gateway-api-inference-extension.git
-          cd gateway-api-inference-extension
+          GAIE_CLONE_DIR="${{ github.workspace }}/external/gateway-api-inference-extension"
+          rm -rf "${GAIE_CLONE_DIR}"
+          mkdir -p "$(dirname "${GAIE_CLONE_DIR}")"
+          git clone https://github.com/kubernetes-sigs/gateway-api-inference-extension.git "${GAIE_CLONE_DIR}"
+          cd "${GAIE_CLONE_DIR}"
           git checkout ${INFERENCE_EXTENSION_VERSION}
-          echo "GAIE_DIR=$(pwd)" >> $GITHUB_ENV
+          echo "GAIE_DIR=${GAIE_CLONE_DIR}" >> $GITHUB_ENV
           echo "DYNAMO_DIR=${{ github.workspace }}" >> $GITHUB_ENV
 
       - name: Run build-epp-dynamo.sh
@@ -247,28 +258,22 @@ jobs:
           DYNAMO_DIR: ${{ env.DYNAMO_DIR }}
         run: |
           set -euo pipefail
-          # Discover the EPP image tag from the previous build
-          cd "${GAIE_DIR}"
-          EPP_IMAGE="$(docker images --format '{{.Repository}}:{{.Tag}}' | grep 'gateway-api-inference-extension/epp' | head -n1 || true)"
-          if [[ -z "${EPP_IMAGE}" ]]; then
-            # Fallback: reconstruct the default tag used by the Makefile
-            GIT_TAG=$(git describe --tags --dirty --always)
-            EPP_IMAGE="us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:${GIT_TAG}"
-          fi
+          # Use the pushed EPP image from the previous step
+          EPP_IMAGE="gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/epp-inference-extension-dynamo:${{ github.run_id }}"
           echo "Using EPP_IMAGE=${EPP_IMAGE}"
           export EPP_IMAGE
 
           # Deploy Helm chart in the Dynamo repo pointing to the EPP image
           cd "${DYNAMO_DIR}/deploy/inference-gateway"
-          helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set-string extension.image=${EPP_IMAGE}
+          helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n ${NAMESPACE} -f ./vllm_agg_qwen.yaml --set-string extension.image=${EPP_IMAGE}
 
-      - name: Verify qwen-epp deployment readiness in my-model
+      - name: Verify qwen-epp deployment readiness
         shell: bash
         env:
           KUBECONFIG: ${{ github.workspace }}/.kubeconfig
         run: |
           set -euo pipefail
-          NS=my-model
+          NS=${NAMESPACE}
           echo "Waiting for Deployment/qwen-epp to appear in namespace ${NS}..."
           ATTEMPTS=60
           SLEEP=10
@@ -286,10 +291,28 @@ jobs:
             exit 1
           fi
           echo "Deployment qwen-epp found. Waiting for rollout to complete..."
+          echo "Deployment image:"
+          kubectl get deploy/qwen-epp -n ${NS} -o jsonpath='{.spec.template.spec.containers[*].image}{"\n"}' || true
+
+          echo "Deriving pod selector from Deployment..."
+          SELECTOR=$(kubectl get deploy/qwen-epp -n ${NS} -o json | jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')
+          if [[ -n "${SELECTOR}" ]]; then
+            echo "Using selector: ${SELECTOR}"
+            echo "Current pods (name, image, ready, waitingReason, restartCount):"
+            kubectl get pods -n ${NS} -l "${SELECTOR}" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[*].image}{"\t"}{range .status.containerStatuses[*]}{.ready}{"\t"}{.state.waiting.reason}{"\t"}{.restartCount}{"\n"}{end}{end}' || true
+
+            # Fail fast on common crash conditions
+            if kubectl get pods -n ${NS} -l "${SELECTOR}" -o json | jq -e '.items[] | select(.status.containerStatuses != null) | .status.containerStatuses[] | select(.state.waiting.reason=="CrashLoopBackOff" or .state.waiting.reason=="ImagePullBackOff" or .state.waiting.reason=="ErrImagePull")' >/dev/null; then
+              echo "Detected CrashLoopBackOff/ImagePullBackOff/ErrImagePull in qwen-epp pods" >&2
+              exit 1
+            fi
+          else
+            echo "Could not derive a label selector from Deployment; skipping pod checks."
+          fi
           kubectl rollout status deploy/qwen-epp -n ${NS} --timeout=600s
           kubectl get deploy qwen-epp -n ${NS} -o wide
 
-      - name: Cleanup (optional)
+      - name: Cleanup
         if: always()
         shell: bash
         env:
@@ -300,6 +323,31 @@ jobs:
           helm uninstall dynamo-platform -n ${NAMESPACE} || true
           kubectl delete dynamographdeployments --all -n ${NAMESPACE} || true
           kubectl delete namespace ${NAMESPACE} || true
-          # GAIE related namespaces
-          kubectl get all -n my-model || true
-          kubectl delete namespace my-model || true
+          # Uninstall Kgateway controller and CRDs (cluster-scoped)
+          helm uninstall kgateway -n kgateway-system || true
+          helm uninstall kgateway-crds -n kgateway-system || true
+          kubectl delete namespace kgateway-system || true
+
+          # Remove Inference Extension CRDs (cluster-scoped)
+          kubectl delete -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${INFERENCE_EXTENSION_VERSION}/manifests.yaml || true
+
+          # Remove Gateway API (cluster-scoped)
+          kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml || true
+
+      # - name: Email on failure
+      # TODO
+      #   if: failure()
+      #   continue-on-error: true
+      #   uses: dawidd6/action-send-mail@v3
+      #   with:
+      #     server_address: ${{ secrets.SMTP_SERVER }}
+      #     server_port: ${{ secrets.SMTP_PORT }}
+      #     username: ${{ secrets.SMTP_USER }}
+      #     password: ${{ secrets.SMTP_PASS }}
+      #     subject: GAIE scheduled run failed
+      #     to: atchernych@nvidia.com
+      #     from: ${{ secrets.SMTP_FROM }}
+      #     secure: true
+      #     html_body: |
+      #       <p>GAIE scheduled run failed.</p>
+      #       <p>Run: <a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}">details</a></p>
