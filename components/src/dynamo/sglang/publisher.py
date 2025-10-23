@@ -60,13 +60,6 @@ class DynamoSglangPublisher:
         self.dp_rank = 0
         # TODO: Get actual GPU blocks from SGLang engine instead of hardcoded value
         # This hardcoded value causes dynamo_component_kvstats_total_blocks to be incorrect.
-        # To implement properly:
-        # 1. Access engine.scheduler_info["max_total_num_tokens"] if available
-        # 2. Get page_size from engine.tokenizer_manager.server_args.page_size
-        # 3. Calculate: total_blocks = (max_total_tokens + page_size - 1) // page_size
-        # 4. Fallback to server_args.max_total_tokens and server_args.page_size
-        # 5. Handle exceptions and provide meaningful error messages
-        # Reference: Previous implementation was at this location before removal
         self.num_gpu_block = 1024
 
         # ZMQ setup for receiving scheduler metrics
