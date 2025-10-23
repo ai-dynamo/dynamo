@@ -10,7 +10,7 @@ Additional performance metrics are available via non-Prometheus APIs in the Requ
 
 As of the date of this documentation, the included TensorRT-LLM version 1.1.0rc5 exposes **5 basic Prometheus metrics**. Note that the `trtllm:` prefix is added by Dynamo.
 
-Dynamo runtime metrics are documented in [docs/guides/metrics.md](../../guides/metrics.md).
+Dynamo runtime metrics are documented in [docs/observability/metrics.md](../../observability/metrics.md).
 
 ## Metric Reference
 
@@ -168,7 +168,7 @@ TensorRT-LLM provides extensive performance data beyond the basic Prometheus met
 - See the "TensorRT-LLM Specific: Non-Prometheus Performance Metrics" section above for detailed performance data and source code references
 
 ### Dynamo Metrics
-- **Dynamo Metrics Guide**: See [docs/guides/metrics.md](../../guides/metrics.md) for complete documentation on Dynamo runtime metrics
+- **Dynamo Metrics Guide**: See [docs/observability/metrics.md](../../observability/metrics.md) for complete documentation on Dynamo runtime metrics
 - **Dynamo Runtime Metrics**: Metrics prefixed with `dynamo_*` for runtime, components, endpoints, and namespaces
   - Implementation: `lib/runtime/src/metrics.rs` (Rust runtime metrics)
   - Metric names: `lib/runtime/src/metrics/prometheus_names.rs` (metric name constants)

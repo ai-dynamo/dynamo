@@ -4751,6 +4751,271 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 	}
 }
 
+func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
+	secretsRetriever := &mockSecretsRetriever{}
+	controllerConfig := controller_common.Config{}
+
+	tests := []struct {
+		name                   string
+		component              *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		expectError            bool
+		expectedResourceClaims []corev1.ResourceClaim
+		expectedPodClaims      []corev1.PodResourceClaim
+		expectedVolumes        []corev1.Volume
+	}{
+		{
+			name: "component with resource claims",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Resources: &common.Resources{
+						Requests: &common.ResourceItem{
+							CPU:    "130",
+							Memory: "800Gi",
+						},
+						Limits: &common.ResourceItem{
+							CPU:    "130",
+							Memory: "800Gi",
+							GPU:    "4",
+						},
+						Claims: []corev1.ResourceClaim{
+							{
+								Name: "compute-domain-channel",
+							},
+						},
+					},
+					ExtraPodSpec: &common.ExtraPodSpec{
+						PodSpec: &corev1.PodSpec{
+							ResourceClaims: []corev1.PodResourceClaim{
+								{
+									Name:                      "compute-domain-channel",
+									ResourceClaimTemplateName: ptr.To("trtllm-test-compute-domain-channel"),
+								},
+							},
+							Volumes: []corev1.Volume{
+								{
+									Name: "model-storage",
+									VolumeSource: corev1.VolumeSource{
+										PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+											ClaimName: "dynamo-pvc",
+										},
+									},
+								},
+							},
+						},
+						MainContainer: &corev1.Container{
+							Image: "rohanv672/dynamo:v0.5.1-trtllm",
+							Args: []string{
+								"python3 -m dynamo.trtllm --model-path /data/deepseek-r1 --served-model-name deepseek-ai/DeepSeek-R1 --extra-engine-args /data/engine_configs/wide_ep_agg.yaml",
+							},
+							Command: []string{"/bin/sh", "-c"},
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      "model-storage",
+									MountPath: "/data",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectError: false,
+			expectedResourceClaims: []corev1.ResourceClaim{
+				{
+					Name: "compute-domain-channel",
+				},
+			},
+			expectedPodClaims: []corev1.PodResourceClaim{
+				{
+					Name:                      "compute-domain-channel",
+					ResourceClaimTemplateName: ptr.To("trtllm-test-compute-domain-channel"),
+				},
+			},
+			expectedVolumes: []corev1.Volume{
+				{
+					Name: "model-storage",
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: "dynamo-pvc",
+						},
+					},
+				},
+				{
+					Name: "shared-memory",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{
+							Medium:    corev1.StorageMediumMemory,
+							SizeLimit: func() *resource.Quantity { q := resource.MustParse(commonconsts.DefaultSharedMemorySize); return &q }(),
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "component with multiple resource claims",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Resources: &common.Resources{
+						Claims: []corev1.ResourceClaim{
+							{
+								Name: "compute-domain-channel",
+							},
+							{
+								Name: "network-domain-channel",
+							},
+						},
+					},
+					ExtraPodSpec: &common.ExtraPodSpec{
+						PodSpec: &corev1.PodSpec{
+							ResourceClaims: []corev1.PodResourceClaim{
+								{
+									Name:                      "compute-domain-channel",
+									ResourceClaimTemplateName: ptr.To("compute-template"),
+								},
+								{
+									Name:                      "network-domain-channel",
+									ResourceClaimTemplateName: ptr.To("network-template"),
+								},
+							},
+						},
+						MainContainer: &corev1.Container{
+							Image:   "test-image",
+							Command: []string{"python3"},
+							Args:    []string{"-m", "dynamo.worker"},
+						},
+					},
+				},
+			},
+			expectError: false,
+			expectedResourceClaims: []corev1.ResourceClaim{
+				{
+					Name: "compute-domain-channel",
+				},
+				{
+					Name: "network-domain-channel",
+				},
+			},
+			expectedPodClaims: []corev1.PodResourceClaim{
+				{
+					Name:                      "compute-domain-channel",
+					ResourceClaimTemplateName: ptr.To("compute-template"),
+				},
+				{
+					Name:                      "network-domain-channel",
+					ResourceClaimTemplateName: ptr.To("network-template"),
+				},
+			},
+		},
+		{
+			name: "component without resource claims",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Resources: &common.Resources{
+						Requests: &common.ResourceItem{
+							CPU:    "1",
+							Memory: "1Gi",
+						},
+					},
+				},
+			},
+			expectError:            false,
+			expectedResourceClaims: nil,
+			expectedPodClaims:      nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			podSpec, err := GenerateBasePodSpec(
+				tt.component,
+				BackendFrameworkTRTLLM,
+				secretsRetriever,
+				"test-deployment",
+				"default",
+				RoleMain,
+				1,
+				controllerConfig,
+				commonconsts.MultinodeDeploymentTypeGrove,
+				"test-service",
+			)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("GenerateBasePodSpec() expected error, got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("GenerateBasePodSpec() unexpected error: %v", err)
+				return
+			}
+
+			// Check containers exist
+			if len(podSpec.Containers) == 0 {
+				t.Errorf("GenerateBasePodSpec() no containers found")
+				return
+			}
+
+			container := podSpec.Containers[0]
+
+			// Check resource claims in container resources using reflect.DeepEqual
+			if !reflect.DeepEqual(container.Resources.Claims, tt.expectedResourceClaims) {
+				t.Errorf("GenerateBasePodSpec() resource claims mismatch:\ngot:  %+v\nwant: %+v",
+					container.Resources.Claims, tt.expectedResourceClaims)
+			}
+
+			// Check pod resource claims using reflect.DeepEqual
+			if !reflect.DeepEqual(podSpec.ResourceClaims, tt.expectedPodClaims) {
+				t.Errorf("GenerateBasePodSpec() pod resource claims mismatch:\ngot:  %+v\nwant: %+v",
+					podSpec.ResourceClaims, tt.expectedPodClaims)
+			}
+
+			// Check expected volumes if specified using reflect.DeepEqual
+			if tt.expectedVolumes != nil {
+				if !reflect.DeepEqual(podSpec.Volumes, tt.expectedVolumes) {
+					t.Errorf("GenerateBasePodSpec() volumes mismatch:\ngot:  %+v\nwant: %+v",
+						podSpec.Volumes, tt.expectedVolumes)
+				}
+			}
+
+			// Verify resource requests and limits are properly set when claims are present
+			if len(tt.expectedResourceClaims) > 0 {
+				// Check that standard resources are still processed correctly
+				if tt.component.Resources != nil {
+					if tt.component.Resources.Requests != nil {
+						if tt.component.Resources.Requests.CPU != "" {
+							if container.Resources.Requests == nil {
+								t.Errorf("GenerateBasePodSpec() expected CPU request to be set")
+							} else if cpu, exists := container.Resources.Requests[corev1.ResourceCPU]; !exists || cpu.IsZero() {
+								t.Errorf("GenerateBasePodSpec() expected CPU request to be set")
+							}
+						}
+						if tt.component.Resources.Requests.Memory != "" {
+							if container.Resources.Requests == nil {
+								t.Errorf("GenerateBasePodSpec() expected Memory request to be set")
+							} else if memory, exists := container.Resources.Requests[corev1.ResourceMemory]; !exists || memory.IsZero() {
+								t.Errorf("GenerateBasePodSpec() expected Memory request to be set")
+							}
+						}
+					}
+					if tt.component.Resources.Limits != nil {
+						if tt.component.Resources.Limits.GPU != "" {
+							if container.Resources.Limits == nil {
+								t.Errorf("GenerateBasePodSpec() expected GPU limit to be set")
+							} else if gpu, exists := container.Resources.Limits[corev1.ResourceName("nvidia.com/gpu")]; !exists || gpu.IsZero() {
+								t.Errorf("GenerateBasePodSpec() expected GPU limit to be set")
+							}
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
 	controllerConfig := controller_common.Config{}
