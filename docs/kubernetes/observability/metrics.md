@@ -28,7 +28,7 @@ helm install prometheus -n monitoring --create-namespace prometheus-community/ku
 > The commands enumerated below assume you have installed the kube-prometheus-stack with the installation method listed above. Depending on your installation configuration of the monitoring stack, you may need to modify the `kubectl` commands that follow in this document accordingly (e.g modifying Namespace or Service names accordingly).
 
 ### Install Dynamo Operator
-Before setting up metrics collection, you'll need to have the Dynamo operator installed in your cluster. Follow our [Installation Guide](/docs/kubernetes/installation_guide.md) for detailed instructions on deploying the Dynamo operator.
+Before setting up metrics collection, you'll need to have the Dynamo operator installed in your cluster. Follow our [Installation Guide](../installation_guide.md) for detailed instructions on deploying the Dynamo operator.
 Make sure to set the `prometheusEndpoint` to the Prometheus endpoint you installed in the previous step.
 
 ```bash
@@ -53,7 +53,7 @@ If the output is empty, you need to install the dcgm-exporter. For more informat
 Let's start by deploying a simple vLLM aggregated deployment:
 
 ```bash
-export NAMESPACE=dynamo # namespace where dynamo operator is installed
+export NAMESPACE=dynamo-system # namespace where dynamo operator is installed
 pushd components/backends/vllm/deploy
 kubectl apply -f agg.yaml -n $NAMESPACE
 popd
@@ -64,8 +64,8 @@ This will create two components:
 - A Worker component exposing metrics on its system port
 
 Both components expose a `/metrics` endpoint following the OpenMetrics format, but with different metrics appropriate to their roles. For details about:
-- Deployment configuration: See the [vLLM README](/docs/backends/vllm/README.md)
-- Available metrics: See the [metrics guide](/docs/observability/metrics.md)
+- Deployment configuration: See the [vLLM README](../../backends/vllm/README.md)
+- Available metrics: See the [metrics guide](../../observability/metrics.md)
 
 ### Validate the Deployment
 
@@ -87,7 +87,7 @@ curl localhost:8000/v1/chat/completions \
   }'
 ```
 
-For more information about validating the deployment, see the [vLLM README](../backends/vllm/README.md).
+For more information about validating the deployment, see the [vLLM README](../../backends/vllm/README.md).
 
 ## Set Up Metrics Collection
 
@@ -137,7 +137,7 @@ Visit http://localhost:9090 and try these example queries:
 - `dynamo_frontend_requests_total`
 - `dynamo_frontend_time_to_first_token_seconds_bucket`
 
-![Prometheus UI showing Dynamo metrics](../images/prometheus-k8s.png)
+![Prometheus UI showing Dynamo metrics](../../images/prometheus-k8s.png)
 
 ### In Grafana
 ```bash
@@ -155,4 +155,4 @@ Visit http://localhost:3000 and log in with the credentials captured above.
 
 Once logged in, find the Dynamo dashboard under General.
 
-![Grafana dashboard showing Dynamo metrics](../images/grafana-k8s.png)
+![Grafana dashboard showing Dynamo metrics](../../images/grafana-k8s.png)

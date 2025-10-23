@@ -36,7 +36,7 @@ spec:
         - jsonPath: .spec.modelName
           name: Model
           type: string
-        - jsonPath: .spec.backend
+        - jsonPath: .status.backend
           name: Backend
           type: string
         - jsonPath: .status.state
@@ -94,16 +94,6 @@ spec:
                     after profiling completes. If false, only the spec is generated and stored in status.
                     Users can then manually create a DGD using the generated spec.
                   type: boolean
-                backend:
-                  default: trtllm
-                  description: |-
-                    Backend specifies the inference backend framework to use.
-                    Supported values are: "vllm", "sglang", "trtllm".
-                  enum:
-                    - vllm
-                    - sglang
-                    - trtllm
-                  type: string
                 deploymentOverrides:
                   description: |-
                     DeploymentOverrides allows customizing metadata for the auto-created DGD.
@@ -132,53 +122,29 @@ spec:
                         If not specified, defaults to the DGDR namespace.
                       type: string
                   type: object
-                gpu:
-                  description: |-
-                    GPU defines optional GPU type and resource specifications.
-                    These constraints guide the profiler to find configurations within specified bounds.
-                  properties:
-                    maxNumGPUsPerEngine:
-                      default: 8
-                      description: |-
-                        MaxNumGPUsPerEngine specifies the maximum number of GPUs per engine for profiling.
-                        The profiler will not consider configurations with more GPUs than this value.
-                      minimum: 1
-                      type: integer
-                    minNumGPUsPerEngine:
-                      default: 1
-                      description: |-
-                        MinNumGPUsPerEngine specifies the minimum number of GPUs per engine for profiling.
-                        The profiler will not consider configurations with fewer GPUs than this value.
-                      minimum: 1
-                      type: integer
-                    type:
-                      description: |-
-                        Type specifies the GPU type to target (e.g., "h200", "h100", "a100").
-                        If specified, profiling will focus on configurations optimized for this GPU type.
-                      type: string
-                  type: object
                 modelName:
                   description: |-
-                    ModelName specifies the model to deploy (e.g., "meta/llama3-70b").
-                    This should be a valid model identifier that the profiler can resolve.
+                    ModelName specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
+                    This is a high-level identifier for easy reference in kubectl output and logs.
                   type: string
-                online:
-                  default: false
-                  description: |-
-                    Online indicates whether to use online profiler (true) or AI Configurator (false).
-                    Online profiling uses real deployments for accurate measurements (2-4 hours).
-                    Offline profiling uses AI Configurator for fast simulation-based profiling (20-30 seconds).
-                  type: boolean
                 profilingConfig:
                   description: |-
-                    ProfilingConfig provides custom configuration for the profiling job.
-                    Applicable to both online and offline (AIC) profiling modes.
+                    ProfilingConfig provides the complete configuration for the profiling job.
+                    This configuration is passed directly to the profiler.
+                    The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).
+                    The profiler will validate the configuration and report any errors.
                   properties:
+                    config:
+                      description: |-
+                        Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.
+                        The profiler will validate the configuration and report any errors.
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
                     configMapRef:
                       description: |-
-                        ConfigMapRef is a reference to a ConfigMap containing profiling configuration.
-                        The ConfigMap should contain a key (default: "disagg.yaml") with the configuration file.
-                        This configuration is used by both online and offline (AIC) profiling modes.
+                        ConfigMapRef is an optional reference to a ConfigMap containing the DynamoGraphDeployment
+                        base config file (disagg.yaml). This is separate from the profiling config above.
+                        The path to this config will be set as engine.config in the profiling config.
                       properties:
                         key:
                           default: disagg.yaml
@@ -191,45 +157,18 @@ spec:
                         - name
                       type: object
                   type: object
-                sla:
-                  description: |-
-                    SLA defines the Service Level Agreement profiling targets.
-                    The profiler uses these targets to find an optimal deployment configuration.
-                  properties:
-                    isl:
-                      default: 3000
-                      description: |-
-                        ISL is the Input Sequence Length for profiling.
-                        Defines the length of input sequences to use during profiling tests.
-                      minimum: 1
-                      type: integer
-                    itl:
-                      default: 10
-                      description: |-
-                        ITL is the target Inter-Token Latency in milliseconds.
-                        This represents the maximum time allowed between consecutive tokens in the output.
-                      type: integer
-                    osl:
-                      default: 500
-                      description: |-
-                        OSL is the Output Sequence Length for profiling.
-                        Defines the expected length of output sequences to generate during profiling tests.
-                      minimum: 1
-                      type: integer
-                    ttft:
-                      default: 50
-                      description: |-
-                        TTFT is the target Time To First Token in milliseconds.
-                        This represents the maximum time allowed from request submission to receiving the first token.
-                      type: integer
-                  type: object
               required:
                 - modelName
-                - sla
+                - profilingConfig
               type: object
             status:
               description: Status reflects the current observed state of this deployment request.
               properties:
+                backend:
+                  description: |-
+                    Backend is extracted from profilingConfig.config.engine.backend for display purposes.
+                    This field is populated by the controller and shown in kubectl output.
+                  type: string
                 conditions:
                   description: |-
                     Conditions contains the latest observed conditions of the deployment request.

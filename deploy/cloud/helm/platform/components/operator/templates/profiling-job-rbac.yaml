@@ -51,7 +51,7 @@ rules:
 # Pods - needed for listing pods by label selector and getting logs from test deployments
 - apiGroups: [""]
   resources: ["pods"]
-  verbs: ["list", "get"]
+  verbs: ["list", "get", "create", "delete"]
 - apiGroups: [""]
   resources: ["pods/log"]
   verbs: ["get"]
@@ -73,6 +73,21 @@ subjects:
 - kind: ServiceAccount
   name: dgdr-profiling-job
   namespace: {{ .Release.Namespace }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-dgdr-profiling-nodes
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dgdr-profiling
+rules:
+# Nodes - cluster-scoped resource needed for profiling
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch"]
+
 {{- else }}
 # Cluster-wide mode: ClusterRole for DGDR profiling jobs
 ---
@@ -100,9 +115,28 @@ rules:
 # Pods - needed for listing pods by label selector and getting logs from test deployments
 - apiGroups: [""]
   resources: ["pods"]
-  verbs: ["list", "get"]
+  verbs: ["list", "get", "create", "delete"]
 - apiGroups: [""]
   resources: ["pods/log"]
   verbs: ["get"]
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch"]
 {{- end }}
-# (Remove the trailing blank line at end of file)
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-dgdr-profiling-nodes
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dgdr-profiling
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "dynamo-operator.fullname" . }}-dgdr-profiling-nodes
+subjects:
+- kind: ServiceAccount
+  name: dgdr-profiling-job
+  namespace: {{ .Release.Namespace }}

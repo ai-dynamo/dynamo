@@ -567,19 +567,22 @@ impl ModelWatcher {
     }
 
     /// All the registered ModelDeploymentCard with the EndpointId they are attached to, one per instance
-    pub async fn all_cards(&self) -> anyhow::Result<Vec<(EndpointId, ModelDeploymentCard)>> {
-        let Some(etcd_client) = self.drt.etcd_client() else {
-            anyhow::bail!("all_cards: Missing etcd client");
+    async fn all_cards(&self) -> anyhow::Result<Vec<(EndpointId, ModelDeploymentCard)>> {
+        let store = self.drt.store();
+
+        //let kvs = etcd_client.kv_get_prefix(model_card::ROOT_PATH).await?;
+        let Some(card_bucket) = store.get_bucket(model_card::ROOT_PATH).await? else {
+            // no cards
+            return Ok(vec![]);
         };
-        let kvs = etcd_client.kv_get_prefix(model_card::ROOT_PATH).await?;
-        let mut results = Vec::with_capacity(kvs.len());
-        for kv in kvs {
-            let maybe_convert = serde_json::from_slice::<ModelDeploymentCard>(kv.value());
-            let r = match maybe_convert {
+        let entries = card_bucket.entries().await?;
+
+        let mut results = Vec::with_capacity(entries.len());
+        for (key, card_bytes) in entries {
+            let r = match serde_json::from_slice::<ModelDeploymentCard>(&card_bytes) {
                 Ok(card) => {
-                    let maybe_endpoint_id = kv.key_str().map_err(|err| err.into()).and_then(|k| {
-                        etcd_key_extract(k).map(|(endpoint_id, _instance_id)| endpoint_id)
-                    });
+                    let maybe_endpoint_id =
+                        etcd_key_extract(&key).map(|(endpoint_id, _instance_id)| endpoint_id);
                     let endpoint_id = match maybe_endpoint_id {
                         Ok(eid) => eid,
                         Err(err) => {
@@ -590,14 +593,8 @@ impl ModelWatcher {
                     (endpoint_id, card)
                 }
                 Err(err) => {
-                    match kv.value_str() {
-                        Ok(value) => {
-                            tracing::error!(%err, value, "Invalid JSON in model card");
-                        }
-                        Err(value_str_err) => {
-                            tracing::error!(original_error=%err, %value_str_err, "Invalid UTF-8 string in model card, expected JSON");
-                        }
-                    }
+                    let value = String::from_utf8_lossy(&card_bytes);
+                    tracing::error!(%err, %value, "Invalid JSON in model card");
                     continue;
                 }
             };
