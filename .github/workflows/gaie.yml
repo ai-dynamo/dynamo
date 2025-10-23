@@ -59,7 +59,7 @@ jobs:
           sudo install -m 0755 kubectl /usr/local/bin/kubectl
 
       - name: Login to NGC (optional for base images)
-        if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
+        if: always()
         run: |
           echo "${{ secrets.NGC_CI_ACCESS_TOKEN }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
 
@@ -136,9 +136,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-          chmod 600 .kubeconfig
-          export KUBECONFIG=$(pwd)/.kubeconfig
+          echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > "${{ github.workspace }}/.kubeconfig"
+          chmod 600 "${{ github.workspace }}/.kubeconfig"
+          # Persist KUBECONFIG for subsequent steps
+          echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig" >> $GITHUB_ENV
+          # Also export for use within this step
+          export KUBECONFIG="${{ github.workspace }}/.kubeconfig"
           # Create ephemeral namespace for Dynamo
           PROFILE_SANITIZED="${PROFILE//_/-}"
           echo "NAMESPACE=gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED}" >> $GITHUB_ENV
@@ -164,7 +167,7 @@ jobs:
             --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
             --set dynamo-operator.controllerManager.manager.image.tag=${{ env.OPERATOR_IMAGE_TAG }} \
             --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
-          timeout 300s kubectl rollout status deployment -n ${NAMESPACE} --watch || true
+          timeout 300s kubectl rollout status deployment -n ${NAMESPACE} --watch
 
       - name: Configure image pull secrets and deploy vllm graph
         shell: bash
@@ -332,6 +335,12 @@ jobs:
 
           # Remove Gateway API (cluster-scoped)
           kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml || true
+
+      - name: Remove kubeconfig file
+        if: always()
+        shell: bash
+        run: |
+          rm -f "${{ github.workspace }}/.kubeconfig"
 
       # - name: Email on failure
       # TODO
