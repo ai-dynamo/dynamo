@@ -125,6 +125,11 @@ RUN apt-get update -y \
         clang \
         libclang-dev \
         protobuf-compiler \
+        # media-loading rust build+runtime dependencies
+        libavcodec-dev \
+        libavutil-dev \
+        libavformat-dev \
+        pkg-config \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

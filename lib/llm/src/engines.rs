@@ -148,7 +148,12 @@ impl
                     dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
                         prompt,
                     ) => prompt,
-                    _ => anyhow::bail!("Invalid request content field, expected Content::Text"),
+                    dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Array(
+                        parts,
+                    ) => parts
+                        .iter()
+                        .map(|part| format!("{:?}", part))
+                        .collect::<String>(),
                 }
             }
             _ => anyhow::bail!("Invalid request type, expected User message"),

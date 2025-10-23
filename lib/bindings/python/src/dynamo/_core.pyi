@@ -512,6 +512,12 @@ class ModelRuntimeConfig:
         """Get an engine-specific runtime configuration value"""
         ...
 
+class MediaDecoder:
+    """
+    Media decoding configuration for the OAI preprocessor
+    """
+    ...
+
 class OAIChatPreprocessor:
     """
     A preprocessor for OpenAI chat completions
