@@ -3,18 +3,11 @@
 
 use std::sync::Arc;
 
-use pyo3::PyErr;
 use pyo3::prelude::*;
 
 use crate::{CancellationToken, engine::*, to_pyerr};
-use serde::{Deserialize, Serialize};
 
 pub use dynamo_llm::grpc::service::kserve;
-pub use dynamo_runtime::{
-    Error, Result, error,
-    pipeline::{AsyncEngine, Data, ManyOut, SingleIn, async_trait},
-    protocols::annotated::Annotated,
-};
 
 #[pyclass]
 pub struct KserveGrpcService {
@@ -41,7 +34,7 @@ impl KserveGrpcService {
         &self,
         model: String,
         checksum: String,
-        engine: KserveGrpcAsyncEngine,
+        engine: PythonAsyncEngine,
     ) -> PyResult<()> {
         let engine = Arc::new(engine);
         self.inner
@@ -54,7 +47,7 @@ impl KserveGrpcService {
         &self,
         model: String,
         checksum: String,
-        engine: KserveGrpcAsyncEngine,
+        engine: PythonAsyncEngine,
     ) -> PyResult<()> {
         let engine = Arc::new(engine);
         self.inner
@@ -67,7 +60,7 @@ impl KserveGrpcService {
         &self,
         model: String,
         checksum: String,
-        engine: KserveGrpcAsyncEngine,
+        engine: PythonAsyncEngine,
     ) -> PyResult<()> {
         let engine = Arc::new(engine);
         self.inner
@@ -115,44 +108,5 @@ impl KserveGrpcService {
             service.run(token.inner).await.map_err(to_pyerr)?;
             Ok(())
         })
-    }
-}
-
-#[pyclass]
-#[derive(Clone)]
-pub struct KserveGrpcAsyncEngine(pub PythonAsyncEngine);
-
-impl From<PythonAsyncEngine> for KserveGrpcAsyncEngine {
-    fn from(engine: PythonAsyncEngine) -> Self {
-        Self(engine)
-    }
-}
-
-#[pymethods]
-impl KserveGrpcAsyncEngine {
-    #[new]
-    pub fn new(generator: PyObject, event_loop: PyObject) -> PyResult<Self> {
-        Ok(PythonAsyncEngine::new(generator, event_loop)?.into())
-    }
-}
-
-#[async_trait]
-impl<Req, Resp> AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error>
-    for KserveGrpcAsyncEngine
-where
-    Req: Data + Serialize,
-    Resp: Data + for<'de> Deserialize<'de>,
-{
-    async fn generate(&self, request: SingleIn<Req>) -> Result<ManyOut<Annotated<Resp>>, Error> {
-        match self.0.generate(request).await {
-            Ok(res) => Ok(res),
-            Err(e) => {
-                if let Some(py_err) = e.downcast_ref::<PyErr>() {
-                    Python::with_gil(|_py| Err(error!("Python Error: {}", py_err.to_string())))
-                } else {
-                    Err(e)
-                }
-            }
-        }
     }
 }

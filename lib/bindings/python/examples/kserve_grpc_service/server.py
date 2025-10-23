@@ -19,7 +19,7 @@ import uuid
 
 import uvloop
 
-from dynamo.llm import KserveGrpcAsyncEngine, KserveGrpcService
+from dynamo.llm import KserveGrpcService, PythonAsyncEngine
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 
@@ -64,7 +64,7 @@ async def worker(runtime: DistributedRuntime):
 
     loop = asyncio.get_running_loop()
     python_engine = MockCompletionEngine(model_name)
-    engine = KserveGrpcAsyncEngine(python_engine.generate, loop)
+    engine = PythonAsyncEngine(python_engine.generate, loop)
 
     host = "0.0.0.0"
     port = 8787

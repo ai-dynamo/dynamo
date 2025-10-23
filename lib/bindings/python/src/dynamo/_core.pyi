@@ -873,6 +873,17 @@ class HttpService:
 
     ...
 
+class PythonAsyncEngine:
+    """
+    Bridge a Python async generator onto Dynamo's AsyncEngine interface.
+    """
+
+    def __init__(self, generator: Any, event_loop: Any) -> None:
+        """Wrap a Python generator and event loop for use with Dynamo services."""
+        ...
+
+
+
 class HttpAsyncEngine:
     """
     An async engine for a distributed Dynamo http service. This is an extension of the
@@ -902,7 +913,7 @@ class KserveGrpcService:
         self,
         model: str,
         checksum: str,
-        engine: KserveGrpcAsyncEngine,
+        engine: PythonAsyncEngine,
     ) -> None:
         """
         Register a completions model with the service.
@@ -918,7 +929,7 @@ class KserveGrpcService:
         self,
         model: str,
         checksum: str,
-        engine: KserveGrpcAsyncEngine,
+        engine: PythonAsyncEngine,
     ) -> None:
         """
         Register a chat completions model with the service.
@@ -934,7 +945,7 @@ class KserveGrpcService:
         self,
         model: str,
         checksum: str,
-        engine: KserveGrpcAsyncEngine,
+        engine: PythonAsyncEngine,
     ) -> None:
         """
         Register a tensor-based model with the service.
@@ -1006,22 +1017,6 @@ class KserveGrpcService:
 
         Args:
             token: Cancellation token to stop the service
-        """
-        ...
-
-class KserveGrpcAsyncEngine:
-    """
-    An async engine for KServe gRPC service that wraps a Python generator
-    to handle streaming requests and responses.
-    """
-
-    def __init__(self, generator: Any, event_loop: Any) -> None:
-        """
-        Create a new KServe gRPC async engine.
-
-        Args:
-            generator: Python generator function for handling requests
-            event_loop: Python event loop to use for async operations
         """
         ...
 
@@ -1581,9 +1576,9 @@ __all__ = [
     "Client",
     "Component",
     "Context",
-    "KserveGrpcAsyncEngine",
     "KserveGrpcService",
     "ModelDeploymentCard",
     "OAIChatPreprocessor",
+    "PythonAsyncEngine",
     "prometheus_names",
 ]
