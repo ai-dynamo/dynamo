@@ -19,6 +19,7 @@ from tests.utils.payload_builder import (
     completion_payload_default,
     embedding_payload,
     embedding_payload_default,
+    metric_payload_default,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
-            # TODO: Add metric_payload_default(min_num_requests=N, backend="sglang")
+            metric_payload_default(min_num_requests=6, backend="sglang"),
         ],
     ),
     "disaggregated": SGLangConfig(

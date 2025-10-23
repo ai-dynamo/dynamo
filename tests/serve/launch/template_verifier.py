@@ -9,8 +9,7 @@ from transformers import AutoTokenizer
 
 from dynamo.llm import ModelInput, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
-
-SERVE_TEST_DIR = "/workspace/tests/serve"
+from tests.serve.common import SERVE_TEST_DIR
 
 
 class TemplateVerificationHandler:

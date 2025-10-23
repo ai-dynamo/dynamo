@@ -15,11 +15,13 @@ trap cleanup EXIT INT TERM
 python3 -m dynamo.frontend --http-port=8000 &
 DYNAMO_PID=$!
 
-# run worker
+# run worker with metrics enabled
+DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
 python3 -m dynamo.sglang \
   --model-path "deepseek-ai/DeepSeek-R1-Distill-Llama-8B" \
   --served-model-name "deepseek-ai/DeepSeek-R1-Distill-Llama-8B" \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
-  --skip-tokenizer-init
+  --skip-tokenizer-init \
+  --enable-metrics
