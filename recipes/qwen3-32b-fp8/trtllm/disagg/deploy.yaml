@@ -306,7 +306,7 @@ spec:
           - |
             python3 -m dynamo.trtllm \
               --model-path "${MODEL_PATH}" \
-              --served-model-name "qwen/qwen3-32Bb-fp8" \
+              --served-model-name "${MODEL_PATH}" \
               --extra-engine-args "${ENGINE_ARGS}" \
               --tensor-parallel-size 2 \
               --max-batch-size 128 \
@@ -322,12 +322,10 @@ spec:
             value: "1"
           - name: TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL
             value: "True"
-          - name: SERVED_MODEL_NAME
-            value: "qwen/qwen3-32Bb-fp8"
           - name: ENGINE_ARGS
             value: "/opt/dynamo/configs/config-decode.yaml"
           - name: MODEL_PATH
-            value: "/model-store/hub/models--qwen--qwen3-32b-fp8/snapshots/aa55da1ecc13d006e8b8e4f54579b1ea8c3db2df"
+            value: "Qwen/Qwen3-32B-FP8"
           volumeMounts:
           - mountPath: /opt/dynamo/configs
             name: llm-config-decode
