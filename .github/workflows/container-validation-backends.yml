@@ -208,16 +208,16 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-      # - name: Run unit tests
-      #   # OPS-1140: Uncomment the below line
-      #   # if: ${{ matrix.platform.arch != 'arm64' }}
-      #   uses: ./.github/actions/pytest
-      #   with:
-      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
-      #     pytest_marks: "unit and sglang and gpu_1"
-      #     framework: "sglang"
-      #     test_type: "unit"
-      #     platform_arch: ${{ matrix.platform.arch }}
+      - name: Run unit tests
+        # OPS-1140: Uncomment the below line
+        # if: ${{ matrix.platform.arch != 'arm64' }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          pytest_marks: "unit and sglang and gpu_1"
+          framework: "sglang"
+          test_type: "unit"
+          platform_arch: ${{ matrix.platform.arch }}
       # - name: Run e2e tests
       #   # OPS-1140: Uncomment the below line
       #   # if: ${{ matrix.platform.arch != 'arm64' }}
