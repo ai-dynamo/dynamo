@@ -1,21 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Nightly Fault Tolerance Tests
+name: Weekly Fault Tolerance Tests
 
 on:
   schedule:
-    # Run every day at 5:30 PM UTC
+    # Run every Sunday at 5:00 PM PST (1:00 AM UTC Monday)
     # Cron syntax: minute hour day-of-month month day-of-week
-    # This runs at 5:30 PM UTC (17:30) every day
-    - cron: '30 17 * * *'
-
-  # TEMPORARY: For testing on feature branch - REMOVE BEFORE MERGING TO MAIN
-  push:
-    branches:
-      - 'ibhosale-nightly-ci'  # Replace with your actual branch name
-    paths:
-      - '.github/workflows/nightly-fault-tolerance.yml'
+    # Note: During PDT (daylight saving), this will run at 5:00 PM PDT (12:00 AM UTC Monday)
+    - cron: '0 1 * * 1'
 
   # Allow manual triggering for testing
   workflow_dispatch:
@@ -27,7 +20,7 @@ on:
         type: string
 
 concurrency:
-  group: ${{ github.workflow }}-nightly-${{ github.ref_name || github.run_id }}
+  group: ${{ github.workflow }}-weekly-${{ github.ref_name || github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -241,9 +234,201 @@ jobs:
       fail-fast: false
       matrix:
         test_scenario:
-          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod
-          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod
+          # SGLang scenarios
+          - sglang-agg-tp-1-dp-1-decode_worker
+          - sglang-agg-tp-1-dp-1-decode_worker_pod
+          - sglang-agg-tp-1-dp-1-frontend
+          - sglang-agg-tp-1-dp-1-frontend_pod
+          - sglang-agg-tp-1-dp-1-none
+          - sglang-agg-tp-1-dp-1-sglang_decode_detokenizer
+          - sglang-agg-tp-1-dp-1-sglang_decode_scheduler
+          - sglang-agg-tp-1-dp-2-decode_worker
+          - sglang-agg-tp-1-dp-2-decode_worker_pod
+          - sglang-agg-tp-1-dp-2-frontend
+          - sglang-agg-tp-1-dp-2-frontend_pod
+          - sglang-agg-tp-1-dp-2-none
+          - sglang-agg-tp-1-dp-2-sglang_decode_detokenizer
+          - sglang-agg-tp-1-dp-2-sglang_decode_scheduler
+          - sglang-agg-tp-2-dp-1-decode_worker
+          - sglang-agg-tp-2-dp-1-decode_worker_pod
+          - sglang-agg-tp-2-dp-1-frontend
+          - sglang-agg-tp-2-dp-1-frontend_pod
+          - sglang-agg-tp-2-dp-1-none
+          - sglang-agg-tp-2-dp-1-sglang_decode_detokenizer
+          - sglang-agg-tp-2-dp-1-sglang_decode_scheduler
+          - sglang-agg-tp-4-dp-1-decode_worker
+          - sglang-agg-tp-4-dp-1-decode_worker_pod
+          - sglang-agg-tp-4-dp-1-frontend
+          - sglang-agg-tp-4-dp-1-frontend_pod
+          - sglang-agg-tp-4-dp-1-none
+          - sglang-agg-tp-4-dp-1-sglang_decode_detokenizer
+          - sglang-agg-tp-4-dp-1-sglang_decode_scheduler
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-1-decode_worker
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-1-decode_worker_pod
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-1-frontend
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-1-frontend_pod
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-1-none
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-1-prefill_worker
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-1-prefill_worker_pod
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-1-sglang_decode_detokenizer
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-1-sglang_decode_scheduler
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-1-sglang_prefill_detokenizer
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-1-sglang_prefill_scheduler
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker
           - sglang-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-2-frontend
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-2-frontend_pod
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-2-none
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-2-prefill_worker
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-2-prefill_worker_pod
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-2-sglang_decode_detokenizer
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-2-sglang_decode_scheduler
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-2-sglang_prefill_detokenizer
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-2-sglang_prefill_scheduler
+          - sglang-disagg-prefill-tp-2-decode-tp-2-dp-1-decode_worker
+          - sglang-disagg-prefill-tp-2-decode-tp-2-dp-1-decode_worker_pod
+          - sglang-disagg-prefill-tp-2-decode-tp-2-dp-1-frontend
+          - sglang-disagg-prefill-tp-2-decode-tp-2-dp-1-frontend_pod
+          - sglang-disagg-prefill-tp-2-decode-tp-2-dp-1-none
+          - sglang-disagg-prefill-tp-2-decode-tp-2-dp-1-prefill_worker
+          - sglang-disagg-prefill-tp-2-decode-tp-2-dp-1-prefill_worker_pod
+          - sglang-disagg-prefill-tp-2-decode-tp-2-dp-1-sglang_decode_detokenizer
+          - sglang-disagg-prefill-tp-2-decode-tp-2-dp-1-sglang_decode_scheduler
+          - sglang-disagg-prefill-tp-2-decode-tp-2-dp-1-sglang_prefill_detokenizer
+          - sglang-disagg-prefill-tp-2-decode-tp-2-dp-1-sglang_prefill_scheduler
+          - sglang-disagg-prefill-tp-4-decode-tp-4-dp-1-decode_worker
+          - sglang-disagg-prefill-tp-4-decode-tp-4-dp-1-decode_worker_pod
+          - sglang-disagg-prefill-tp-4-decode-tp-4-dp-1-frontend
+          - sglang-disagg-prefill-tp-4-decode-tp-4-dp-1-frontend_pod
+          - sglang-disagg-prefill-tp-4-decode-tp-4-dp-1-none
+          - sglang-disagg-prefill-tp-4-decode-tp-4-dp-1-prefill_worker
+          - sglang-disagg-prefill-tp-4-decode-tp-4-dp-1-prefill_worker_pod
+          - sglang-disagg-prefill-tp-4-decode-tp-4-dp-1-sglang_decode_detokenizer
+          - sglang-disagg-prefill-tp-4-decode-tp-4-dp-1-sglang_decode_scheduler
+          - sglang-disagg-prefill-tp-4-decode-tp-4-dp-1-sglang_prefill_detokenizer
+          - sglang-disagg-prefill-tp-4-decode-tp-4-dp-1-sglang_prefill_scheduler
+          # TensorRT-LLM scenarios
+          - trtllm-agg-tp-1-dp-1-decode_worker
+          - trtllm-agg-tp-1-dp-1-decode_worker_pod
+          - trtllm-agg-tp-1-dp-1-frontend
+          - trtllm-agg-tp-1-dp-1-frontend_pod
+          - trtllm-agg-tp-1-dp-1-none
+          - trtllm-agg-tp-1-dp-1-trtllm_decode_engine_core
+          - trtllm-agg-tp-1-dp-2-decode_worker
+          - trtllm-agg-tp-1-dp-2-decode_worker_pod
+          - trtllm-agg-tp-1-dp-2-frontend
+          - trtllm-agg-tp-1-dp-2-frontend_pod
+          - trtllm-agg-tp-1-dp-2-none
+          - trtllm-agg-tp-1-dp-2-trtllm_decode_engine_core
+          - trtllm-agg-tp-2-dp-1-decode_worker
+          - trtllm-agg-tp-2-dp-1-decode_worker_pod
+          - trtllm-agg-tp-2-dp-1-frontend
+          - trtllm-agg-tp-2-dp-1-frontend_pod
+          - trtllm-agg-tp-2-dp-1-none
+          - trtllm-agg-tp-2-dp-1-trtllm_decode_engine_core
+          - trtllm-agg-tp-4-dp-1-decode_worker
+          - trtllm-agg-tp-4-dp-1-decode_worker_pod
+          - trtllm-agg-tp-4-dp-1-frontend
+          - trtllm-agg-tp-4-dp-1-frontend_pod
+          - trtllm-agg-tp-4-dp-1-none
+          - trtllm-agg-tp-4-dp-1-trtllm_decode_engine_core
+          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-1-decode_worker
+          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-1-decode_worker_pod
+          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-1-frontend
+          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-1-frontend_pod
+          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-1-none
+          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-1-prefill_worker
+          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-1-prefill_worker_pod
+          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-1-trtllm_decode_engine_core
+          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-1-trtllm_prefill_engine_core
+          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker
+          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod
+          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-2-frontend
+          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-2-frontend_pod
+          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-2-none
+          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-2-prefill_worker
+          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-2-prefill_worker_pod
+          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-2-trtllm_decode_engine_core
+          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-2-trtllm_prefill_engine_core
+          - trtllm-disagg-prefill-tp-2-decode-tp-2-dp-1-decode_worker
+          - trtllm-disagg-prefill-tp-2-decode-tp-2-dp-1-decode_worker_pod
+          - trtllm-disagg-prefill-tp-2-decode-tp-2-dp-1-frontend
+          - trtllm-disagg-prefill-tp-2-decode-tp-2-dp-1-frontend_pod
+          - trtllm-disagg-prefill-tp-2-decode-tp-2-dp-1-none
+          - trtllm-disagg-prefill-tp-2-decode-tp-2-dp-1-prefill_worker
+          - trtllm-disagg-prefill-tp-2-decode-tp-2-dp-1-prefill_worker_pod
+          - trtllm-disagg-prefill-tp-2-decode-tp-2-dp-1-trtllm_decode_engine_core
+          - trtllm-disagg-prefill-tp-2-decode-tp-2-dp-1-trtllm_prefill_engine_core
+          - trtllm-disagg-prefill-tp-4-decode-tp-4-dp-1-decode_worker
+          - trtllm-disagg-prefill-tp-4-decode-tp-4-dp-1-decode_worker_pod
+          - trtllm-disagg-prefill-tp-4-decode-tp-4-dp-1-frontend
+          - trtllm-disagg-prefill-tp-4-decode-tp-4-dp-1-frontend_pod
+          - trtllm-disagg-prefill-tp-4-decode-tp-4-dp-1-none
+          - trtllm-disagg-prefill-tp-4-decode-tp-4-dp-1-prefill_worker
+          - trtllm-disagg-prefill-tp-4-decode-tp-4-dp-1-prefill_worker_pod
+          - trtllm-disagg-prefill-tp-4-decode-tp-4-dp-1-trtllm_decode_engine_core
+          - trtllm-disagg-prefill-tp-4-decode-tp-4-dp-1-trtllm_prefill_engine_core
+          # vLLM scenarios
+          - vllm-agg-tp-1-dp-1-decode_worker
+          - vllm-agg-tp-1-dp-1-decode_worker_pod
+          - vllm-agg-tp-1-dp-1-frontend
+          - vllm-agg-tp-1-dp-1-frontend_pod
+          - vllm-agg-tp-1-dp-1-none
+          - vllm-agg-tp-1-dp-1-vllm_decode_engine_core
+          - vllm-agg-tp-1-dp-2-decode_worker
+          - vllm-agg-tp-1-dp-2-decode_worker_pod
+          - vllm-agg-tp-1-dp-2-frontend
+          - vllm-agg-tp-1-dp-2-frontend_pod
+          - vllm-agg-tp-1-dp-2-none
+          - vllm-agg-tp-1-dp-2-vllm_decode_engine_core
+          - vllm-agg-tp-2-dp-1-decode_worker
+          - vllm-agg-tp-2-dp-1-decode_worker_pod
+          - vllm-agg-tp-2-dp-1-frontend
+          - vllm-agg-tp-2-dp-1-frontend_pod
+          - vllm-agg-tp-2-dp-1-none
+          - vllm-agg-tp-2-dp-1-vllm_decode_engine_core
+          - vllm-agg-tp-4-dp-1-decode_worker
+          - vllm-agg-tp-4-dp-1-decode_worker_pod
+          - vllm-agg-tp-4-dp-1-frontend
+          - vllm-agg-tp-4-dp-1-frontend_pod
+          - vllm-agg-tp-4-dp-1-none
+          - vllm-agg-tp-4-dp-1-vllm_decode_engine_core
+          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-1-decode_worker
+          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-1-decode_worker_pod
+          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-1-frontend
+          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-1-frontend_pod
+          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-1-none
+          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-1-prefill_worker
+          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-1-prefill_worker_pod
+          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-1-vllm_decode_engine_core
+          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-1-vllm_prefill_engine_core
+          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker
+          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod
+          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-2-frontend
+          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-2-frontend_pod
+          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-2-none
+          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-2-prefill_worker
+          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-2-prefill_worker_pod
+          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-2-vllm_decode_engine_core
+          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-2-vllm_prefill_engine_core
+          - vllm-disagg-prefill-tp-2-decode-tp-2-dp-1-decode_worker
+          - vllm-disagg-prefill-tp-2-decode-tp-2-dp-1-decode_worker_pod
+          - vllm-disagg-prefill-tp-2-decode-tp-2-dp-1-frontend
+          - vllm-disagg-prefill-tp-2-decode-tp-2-dp-1-frontend_pod
+          - vllm-disagg-prefill-tp-2-decode-tp-2-dp-1-none
+          - vllm-disagg-prefill-tp-2-decode-tp-2-dp-1-prefill_worker
+          - vllm-disagg-prefill-tp-2-decode-tp-2-dp-1-prefill_worker_pod
+          - vllm-disagg-prefill-tp-2-decode-tp-2-dp-1-vllm_decode_engine_core
+          - vllm-disagg-prefill-tp-2-decode-tp-2-dp-1-vllm_prefill_engine_core
+          - vllm-disagg-prefill-tp-4-decode-tp-4-dp-1-decode_worker
+          - vllm-disagg-prefill-tp-4-decode-tp-4-dp-1-decode_worker_pod
+          - vllm-disagg-prefill-tp-4-decode-tp-4-dp-1-frontend
+          - vllm-disagg-prefill-tp-4-decode-tp-4-dp-1-frontend_pod
+          - vllm-disagg-prefill-tp-4-decode-tp-4-dp-1-none
+          - vllm-disagg-prefill-tp-4-decode-tp-4-dp-1-prefill_worker
+          - vllm-disagg-prefill-tp-4-decode-tp-4-dp-1-prefill_worker_pod
+          - vllm-disagg-prefill-tp-4-decode-tp-4-dp-1-vllm_decode_engine_core
+          - vllm-disagg-prefill-tp-4-decode-tp-4-dp-1-vllm_prefill_engine_core
     name: deploy-test-fault-tolerance (${{ matrix.test_scenario }})
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
@@ -269,8 +454,8 @@ jobs:
         run: |
           # Extract framework from test scenario for unique namespace
           FRAMEWORK=$(echo "${{ matrix.test_scenario }}" | cut -d'-' -f1)
-          # Create unique namespace per matrix job with nightly prefix
-          echo "NAMESPACE=gh-nightly-${{ github.run_id }}-ft-${FRAMEWORK}" >> $GITHUB_ENV
+          # Create unique namespace per matrix job with weekly prefix
+          echo "NAMESPACE=gh-weekly-${{ github.run_id }}-ft-${FRAMEWORK}" >> $GITHUB_ENV
           set -x
           # Install dependencies
           sudo apt-get update && sudo apt-get install -y curl bash openssl gettext git jq python3 python3-pip python3-venv
@@ -371,7 +556,7 @@ jobs:
           # Add project source to PYTHONPATH for test imports
           export PYTHONPATH=$(pwd):$(pwd)/components/src:$PYTHONPATH
 
-          echo "Running nightly fault tolerance test: ${{ matrix.test_scenario }}"
+          echo "Running weekly fault tolerance test: ${{ matrix.test_scenario }}"
           echo "Using namespace: $NAMESPACE"
           echo "Using image: $IMAGE"
 
@@ -406,7 +591,7 @@ jobs:
           echo "Namespace $NAMESPACE completed."
 
   # Status check job to verify all tests passed
-  nightly-status-check:
+  weekly-status-check:
     runs-on: ubuntu-latest
     needs: [deploy-test-fault-tolerance]
     if: always()
@@ -418,7 +603,7 @@ jobs:
       - name: Send notification on failure
         if: failure()
         run: |
-          echo "Nightly fault tolerance tests failed!"
+          echo "Weekly fault tolerance tests failed!"
           echo "Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           # Add notification logic here (e.g., Slack, email, etc.)
 
