@@ -51,7 +51,7 @@ srun \
   --nodelist "${HEAD_NODE}" \
   --nodes 1 \
   --jobid "${SLURM_JOB_ID}" \
-  /mnt/examples/multimodal/scripts/start_frontend_services.sh &
+  /mnt/examples/basics/multinode/trtllm/start_frontend_services.sh &
 
 # NOTE: Output streamed to stdout for ease of understanding the example, but
 # in practice you would probably set `srun --output ... --error ...` to pipe
@@ -71,4 +71,4 @@ srun \
   --nodes "${NUM_NODES}" \
   --ntasks-per-node "${NUM_GPUS_PER_NODE}" \
   --jobid "${SLURM_JOB_ID}" \
-  /mnt/examples/multimodal/scripts/start_trtllm_worker.sh &
+  /mnt/examples/basics/multinode/trtllm/start_trtllm_worker.sh &
