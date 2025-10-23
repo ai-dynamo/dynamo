@@ -113,7 +113,7 @@ spec:
         - name: ENDPOINT
           value: qwen3-32b-fp8-disagg-frontend:8000
         - name: CONCURRENCY_PER_GPU
-          value: "16"
+          value: "6"
         - name: DEPLOYMENT_GPU_COUNT
           value: "8"
         - name: ISL
