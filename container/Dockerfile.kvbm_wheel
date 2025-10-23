@@ -45,7 +45,7 @@ RUN chmod +x install_cuda13.sh && \
     ./install_cuda13.sh
 
 ENV PATH=/usr/local/nvidia/bin:/usr/local/cuda/bin:$PATH \
-    LD_LIBRARY_PATH==/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64:$LD_LIBRARY_PATH \
+    LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64:$LD_LIBRARY_PATH \
     NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 
 RUN yum groupinstall -y 'Development Tools' &&  \
