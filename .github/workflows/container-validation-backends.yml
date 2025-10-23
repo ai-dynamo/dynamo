@@ -302,10 +302,11 @@ jobs:
       fail-fast: false
       matrix:
         test_scenario:
-          - vllm-agg-tp-1-dp-2-decode_worker_pod
+          - vllm-disagg-tp-1-dp-2-decode_worker_pod
+          - trtllm-disagg-tp-1-dp-2-decode_worker_pod
+          - sglang-disagg-tp-1-dp-2-decode_worker_pod
     name: deploy-test-fault-tolerance (${{ matrix.test_scenario }})
     env:
-      FRAMEWORK: vllm
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
     steps:
       - name: Checkout code
@@ -325,8 +326,8 @@ jobs:
       - name: Set namespace and install dependencies
         run: |
           # Set namespace using test scenario
-          SCENARIO_SANITIZED="test-1"
-          echo "NAMESPACE=gh-job-id-${{ github.run_id }}-ft-${SCENARIO_SANITIZED}" >> $GITHUB_ENV
+          export FRAMEWORK=$(echo ${{ matrix.test_scenario }} | cut -d'-' -f1)
+          echo "NAMESPACE=gh-job-id-${{ github.run_id }}-ft-${FRAMEWORK}" >> $GITHUB_ENV
           set -x
           # Install dependencies
           sudo apt-get update && sudo apt-get install -y curl bash openssl gettext git jq python3 python3-pip python3-venv
@@ -408,6 +409,7 @@ jobs:
           set -x
           export KUBECONFIG=$(pwd)/.kubeconfig
           export NAMESPACE=$NAMESPACE
+          export FRAMEWORK=$(echo ${{ matrix.test_scenario }} | cut -d'-' -f1)
           export IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
 
           # Set up Python virtual environment and install dependencies
@@ -422,7 +424,7 @@ jobs:
           # Add project source to PYTHONPATH for test imports
           export PYTHONPATH=$(pwd):$(pwd)/components/src:$PYTHONPATH
 
-          echo "Running fault tolerance test: ${{ matrix.test_scenario }}"
+          echo "Running fault tolerance test: $FRAMEWORK-${{ matrix.test_scenario }}"
           echo "Using namespace: $NAMESPACE"
           echo "Using image: $IMAGE"
 
