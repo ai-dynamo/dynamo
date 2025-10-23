@@ -225,6 +225,8 @@ for i in $(seq 1 $NUM_WORKERS); do
             fi
             if [ "$MODE" = "prefill" ]; then
                 VLLM_ARGS+=("--is-prefill-worker")
+            elif [ "$MODE" = "decode" ]; then
+                VLLM_ARGS+=("--is-decode-worker")
             fi
             VLLM_ARGS+=("${EXTRA_ARGS[@]}")
 
