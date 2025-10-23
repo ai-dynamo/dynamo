@@ -255,7 +255,7 @@ python -m dynamo.frontend --router-mode kv --port 8002 --router-replica-sync
 
 >[!Note]
 > If you need to start with a fresh state, you have two options:
-> 1. **Recommended**: Use a different namespace/component (see [Distributed Runtime](distributed_runtime.md)) which will start a new stream and NATS object store path
+> 1. **Recommended**: Use a different namespace/component (see [Distributed Runtime](/docs/design_docs/distributed_runtime.md)) which will start a new stream and NATS object store path
 > 2. **Use with caution**: Launch a router with the `--router-reset-states` flag, which will purge the entire stream and radix snapshot. This should only be done when launching the first router replica in a component, as it can bring existing router replicas into an inconsistent state.
 
 ## Understanding KV Cache

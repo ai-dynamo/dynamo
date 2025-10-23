@@ -322,7 +322,7 @@ pub(crate) struct OverlapScores {
 #[pymethods]
 impl OverlapScores {
     #[getter]
-    fn scores(&self) -> HashMap<(i64, u32), u32> {
+    fn scores(&self) -> HashMap<(u64, u32), u32> {
         // Return scores with full WorkerWithDpRank granularity as (worker_id, dp_rank) tuples
         self.inner
             .scores

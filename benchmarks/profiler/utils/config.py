@@ -410,6 +410,14 @@ class ConfigModifierProtocol(Protocol):
     ) -> int:
         ...
 
+    @classmethod
+    def load_default_config(cls) -> dict:
+        ...
+
+    @classmethod
+    def update_model(cls, config: dict, model_name: str) -> dict:
+        ...
+
 
 def generate_dgd_config_with_planner(
     config_path: str,

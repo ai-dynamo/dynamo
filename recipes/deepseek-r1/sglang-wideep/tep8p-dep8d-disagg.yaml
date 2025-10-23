@@ -43,28 +43,36 @@ spec:
               path: /health
               port: 9090
             periodSeconds: 10
-            timeoutSeconds: 1800
-            failureThreshold: 60
+            timeoutSeconds: 10
+            failureThreshold: 600
           image: my-registry/sglang-wideep-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           command:
-            - /bin/sh
-            - -c
+            - python3
+            - -m
+            - dynamo.sglang
           args:
-            - >-
-              exec python3 -m dynamo.sglang
-              --model-path deepseek-ai/DeepSeek-R1
-              --served-model-name deepseek-ai/DeepSeek-R1
-              --tp 8
-              --dp 8
-              --enable-dp-attention
-              --ep-size 8
-              --trust-remote-code
-              --skip-tokenizer-init
-              --disaggregation-mode decode
-              --disaggregation-transfer-backend nixl
-              --disaggregation-bootstrap-port 30001
-              --host 0.0.0.0
+            - --model-path
+            - deepseek-ai/DeepSeek-R1
+            - --served-model-name
+            - deepseek-ai/DeepSeek-R1
+            - --tp
+            - "8"
+            - --dp
+            - "8"
+            - --enable-dp-attention
+            - --ep-size
+            - "8"
+            - --trust-remote-code
+            - --skip-tokenizer-init
+            - --disaggregation-mode
+            - decode
+            - --disaggregation-transfer-backend
+            - nixl
+            - --disaggregation-bootstrap-port
+            - "30001"
+            - --host
+            - 0.0.0.0
     prefill:
       dynamoNamespace: sgl-dsr1-8gpu
       componentType: worker
@@ -84,23 +92,30 @@ spec:
               path: /health
               port: 9090
             periodSeconds: 10
-            timeoutSeconds: 1800
-            failureThreshold: 60
+            timeoutSeconds: 10
+            failureThreshold: 600
           image: my-registry/sglang-wideep-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           command:
-            - /bin/sh
-            - -c
+            - python3
+            - -m
+            - dynamo.sglang
           args:
-            - >-
-              exec python3 -m dynamo.sglang
-              --model-path deepseek-ai/DeepSeek-R1
-              --served-model-name deepseek-ai/DeepSeek-R1
-              --tp 8
-              --ep-size 8
-              --trust-remote-code
-              --skip-tokenizer-init
-              --disaggregation-mode prefill
-              --disaggregation-transfer-backend nixl
-              --disaggregation-bootstrap-port 30001
-              --host 0.0.0.0
+            - --model-path
+            - deepseek-ai/DeepSeek-R1
+            - --served-model-name
+            - deepseek-ai/DeepSeek-R1
+            - --tp
+            - "8"
+            - --ep-size
+            - "8"
+            - --trust-remote-code
+            - --skip-tokenizer-init
+            - --disaggregation-mode
+            - prefill
+            - --disaggregation-transfer-backend
+            - nixl
+            - --disaggregation-bootstrap-port
+            - "30001"
+            - --host
+            - 0.0.0.0

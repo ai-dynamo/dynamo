@@ -45,6 +45,7 @@ class Config:
     component: str
     endpoint: str
     is_prefill_worker: bool
+    is_decode_worker: bool
     migration_limit: int = 0
     kv_port: Optional[int] = None
     port_range: DynamoPortRange
@@ -84,6 +85,11 @@ def parse_args() -> Config:
         "--is-prefill-worker",
         action="store_true",
         help="Enable prefill functionality for this worker. Uses the provided namespace to construct dyn://namespace.prefill.generate",
+    )
+    parser.add_argument(
+        "--is-decode-worker",
+        action="store_true",
+        help="Mark this as a decode worker which does not publish KV events.",
     )
     parser.add_argument(
         "--migration-limit",
@@ -159,6 +165,7 @@ def parse_args() -> Config:
     config.endpoint = "generate"
     config.engine_args = engine_args
     config.is_prefill_worker = args.is_prefill_worker
+    config.is_decode_worker = args.is_decode_worker
     config.migration_limit = args.migration_limit
     config.port_range = DynamoPortRange(
         min=args.dynamo_port_min, max=args.dynamo_port_max

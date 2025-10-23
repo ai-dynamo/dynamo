@@ -34,15 +34,22 @@ use super::utils::build_in_runtime;
 #[derive(Clone)]
 pub struct Client {
     client: etcd_client::Client,
-    primary_lease: i64,
+    primary_lease: u64,
     runtime: Runtime,
     rt: Arc<tokio::runtime::Runtime>,
+}
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "etcd::Client primary_lease={}", self.primary_lease)
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct Lease {
     /// ETCD lease ID
-    id: i64,
+    /// Delivered as i64 by etcd because of documented gRPC limitations.
+    id: u64,
 
     /// [`CancellationToken`] associated with the lease
     cancel_token: CancellationToken,
@@ -50,7 +57,7 @@ pub struct Lease {
 
 impl Lease {
     /// Get the lease ID
-    pub fn id(&self) -> i64 {
+    pub fn id(&self) -> u64 {
         self.id
     }
 
@@ -146,7 +153,7 @@ impl Client {
     }
 
     /// Get the primary lease ID.
-    pub fn lease_id(&self) -> i64 {
+    pub fn lease_id(&self) -> u64 {
         self.primary_lease
     }
 
@@ -160,7 +167,7 @@ impl Client {
 
     /// Create a [`Lease`] with a given time-to-live (TTL).
     /// This [`Lease`] will be tied to the [`Runtime`], specifically a child [`CancellationToken`].
-    pub async fn create_lease(&self, ttl: i64) -> Result<Lease> {
+    pub async fn create_lease(&self, ttl: u64) -> Result<Lease> {
         let token = self.runtime.child_token();
         let lease_client = self.client.lease_client();
         self.rt
@@ -169,14 +176,14 @@ impl Client {
     }
 
     // Revoke an etcd lease given its lease id. A wrapper over etcd_client::LeaseClient::revoke
-    pub async fn revoke_lease(&self, lease_id: i64) -> Result<()> {
+    pub async fn revoke_lease(&self, lease_id: u64) -> Result<()> {
         let lease_client = self.client.lease_client();
         self.rt.spawn(revoke_lease(lease_client, lease_id)).await?
     }
 
-    pub async fn kv_create(&self, key: &str, value: Vec<u8>, lease_id: Option<i64>) -> Result<()> {
+    pub async fn kv_create(&self, key: &str, value: Vec<u8>, lease_id: Option<u64>) -> Result<()> {
         let id = lease_id.unwrap_or(self.lease_id());
-        let put_options = PutOptions::new().with_lease(id);
+        let put_options = PutOptions::new().with_lease(id as i64);
 
         // Build the transaction
         let txn = Txn::new()
@@ -203,10 +210,10 @@ impl Client {
         &self,
         key: String,
         value: Vec<u8>,
-        lease_id: Option<i64>,
+        lease_id: Option<u64>,
     ) -> Result<()> {
         let id = lease_id.unwrap_or(self.lease_id());
-        let put_options = PutOptions::new().with_lease(id);
+        let put_options = PutOptions::new().with_lease(id as i64);
 
         // Build the transaction that either creates the key if it doesn't exist,
         // or validates the existing value matches what we expect
@@ -254,10 +261,10 @@ impl Client {
         &self,
         key: impl AsRef<str>,
         value: impl AsRef<[u8]>,
-        lease_id: Option<i64>,
+        lease_id: Option<u64>,
     ) -> Result<()> {
         let id = lease_id.unwrap_or(self.lease_id());
-        let put_options = PutOptions::new().with_lease(id);
+        let put_options = PutOptions::new().with_lease(id as i64);
         let _ = self
             .client
             .kv_client()
@@ -274,7 +281,7 @@ impl Client {
     ) -> Result<PutResponse> {
         let options = options
             .unwrap_or_default()
-            .with_lease(self.primary_lease().id());
+            .with_lease(self.primary_lease().id() as i64);
         self.client
             .kv_client()
             .put(key.as_ref(), value.as_ref(), Some(options))
@@ -295,12 +302,12 @@ impl Client {
         &self,
         key: impl Into<Vec<u8>>,
         options: Option<DeleteOptions>,
-    ) -> Result<i64> {
+    ) -> Result<u64> {
         self.client
             .kv_client()
             .delete(key, options)
             .await
-            .map(|del_response| del_response.deleted())
+            .map(|del_response| del_response.deleted() as u64)
             .map_err(|err| err.into())
     }
 
@@ -319,11 +326,11 @@ impl Client {
     pub async fn lock(
         &self,
         key: impl Into<Vec<u8>>,
-        lease_id: Option<i64>,
+        lease_id: Option<u64>,
     ) -> Result<LockResponse> {
         let mut lock_client = self.client.lock_client();
         let id = lease_id.unwrap_or(self.lease_id());
-        let options = LockOptions::new().with_lease(id);
+        let options = LockOptions::new().with_lease(id as i64);
         lock_client
             .lock(key, Some(options))
             .await
@@ -629,7 +636,7 @@ impl KvCache {
     }
 
     /// Update a value in both the cache and etcd
-    pub async fn put(&self, key: &str, value: Vec<u8>, lease_id: Option<i64>) -> Result<()> {
+    pub async fn put(&self, key: &str, value: Vec<u8>, lease_id: Option<u64>) -> Result<()> {
         let full_key = format!("{}{}", self.prefix, key);
 
         // Update etcd first

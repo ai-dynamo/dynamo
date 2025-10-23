@@ -5,6 +5,8 @@ import logging
 import re
 from typing import Literal
 
+import yaml
+
 from benchmarks.profiler.utils.config import (
     Config,
     append_argument,
@@ -33,7 +35,43 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
+DEFAULT_SGLANG_CONFIG_PATH = "components/backends/sglang/deploy/disagg.yaml"
+
+
 class SGLangConfigModifier:
+    @classmethod
+    def load_default_config(cls) -> dict:
+        with open(DEFAULT_SGLANG_CONFIG_PATH, "r") as f:
+            return yaml.safe_load(f)
+
+    @classmethod
+    def update_model(cls, config, model_name: str) -> dict:
+        # change the model to serve
+        cfg = Config.model_validate(config)
+
+        # Update model for both prefill and decode workers
+        for sub_component_type in [SubComponentType.PREFILL, SubComponentType.DECODE]:
+            try:
+                worker_service = get_worker_service_from_config(
+                    cfg, backend="sglang", sub_component_type=sub_component_type
+                )
+                args = validate_and_get_worker_args(worker_service, backend="sglang")
+                args = break_arguments(args)
+
+                # Update both --model-path and --served-model-name
+                args = set_argument_value(args, "--model-path", model_name)
+                args = set_argument_value(args, "--served-model-name", model_name)
+
+                worker_service.extraPodSpec.mainContainer.args = args
+            except (ValueError, KeyError):
+                # Service might not exist (e.g., in aggregated mode)
+                logger.debug(
+                    f"Skipping {sub_component_type} service as it doesn't exist"
+                )
+                continue
+
+        return cfg.model_dump()
+
     @classmethod
     def convert_config(
         cls,
