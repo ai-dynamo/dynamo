@@ -6,7 +6,7 @@ toolchain go1.24.3
 
 require (
 	emperror.dev/errors v0.8.1
-	github.com/NVIDIA/grove/operator/api v0.1.0-alpha.2
+	github.com/NVIDIA/grove/operator/api v0.1.0-alpha.3
 	github.com/bsm/gomega v1.27.10
 	github.com/go-logr/logr v1.4.2
 	github.com/google/go-cmp v0.7.0
@@ -25,6 +25,7 @@ require (
 	k8s.io/utils v0.0.0-20250502105355-0f33e8f1c979
 	sigs.k8s.io/controller-runtime v0.21.0
 	sigs.k8s.io/lws v0.6.1
+	sigs.k8s.io/yaml v1.4.0
 	volcano.sh/apis v1.12.2
 )
 
@@ -94,5 +95,4 @@ require (
 	sigs.k8s.io/json v0.0.0-20241010143419-9aa6b5e7a4b3 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.7.0 // indirect
-	sigs.k8s.io/yaml v1.4.0 // indirect
 )

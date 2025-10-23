@@ -15,7 +15,6 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --connecto
 # run prefill workers on GPU 2 and 3 with KVBM enabled using 20GB of CPU cache
 # NOTE: use different barrier id prefixes for each prefill worker to avoid conflicts
 # NOTE: remove --enforce-eager for production use
-DYN_KVBM_BARRIER_ID_PREFIX=kvbm_0 \
 DYN_KVBM_CPU_CACHE_GB=20 \
 CUDA_VISIBLE_DEVICES=2 \
   python3 -m dynamo.vllm \
@@ -24,7 +23,8 @@ CUDA_VISIBLE_DEVICES=2 \
     --connector kvbm nixl \
     --enforce-eager &
 
-DYN_KVBM_BARRIER_ID_PREFIX=kvbm_1 \
+DYN_KVBM_LEADER_ZMQ_PUB_PORT=56003 \
+DYN_KVBM_LEADER_ZMQ_ACK_PORT=56004 \
 DYN_KVBM_CPU_CACHE_GB=20 \
 CUDA_VISIBLE_DEVICES=3 \
   python3 -m dynamo.vllm \
