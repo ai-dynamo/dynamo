@@ -41,7 +41,6 @@ ARG BRANCH_TYPE=remote
 ARG DEEPEP_COMMIT=9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee
 ARG CMAKE_BUILD_PARALLEL_LEVEL=2
 ARG FLASHMLA_COMMIT=1408756a88e52a25196b759eaf8db89d2b51b5a1
-ARG CMAKE_BUILD_PARALLEL_LEVEL=2
 ARG SGL_KERNEL_VERSION=0.3.15
 ARG SGLANG_COMMIT=0.5.3.post1
 ARG GRACE_BLACKWELL=false
@@ -66,7 +65,6 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     # Python (using 3.10 as default system Python)
     python${PYTHON_VERSION}-dev \
-    python${PYTHON_VERSION}-venv \
     python${PYTHON_VERSION}-distutils \
     python3-pip \
     # System essentials
@@ -105,7 +103,13 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
  && rm -rf /var/lib/apt/lists/* \
  && apt-get clean
 
+ # Set Python 3.10 as the default python3 interpreter and create python symlink
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
+update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} && \
+update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1 && \
+update-alternatives --set python /usr/bin/python${PYTHON_VERSION}
 
+ARG USE_SCCACHE
 # Install sccache if requested
 COPY container/use-sccache.sh /tmp/use-sccache.sh
 RUN if [ "$USE_SCCACHE" = "true" ]; then \
@@ -136,9 +140,6 @@ RUN git clone --branch v${SGLANG_COMMIT} --depth 1 https://github.com/sgl-projec
 
 WORKDIR /sgl-workspace
 
-# Set Python 3.10 as the default python3 interpreter
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
-    update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION}
 
 ARG SGL_KERNEL_VERSION
 RUN python3 -m pip install --break-system-packages --no-cache-dir --ignore-installed --upgrade pip setuptools wheel html5lib six \
@@ -174,7 +175,10 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/sour
     && mv /sgl-workspace/nvshmem_src_cuda12-all-all-3.3.9.tar.gz /deps
 
 # Build and install NVSHMEM library only (without python library)
-RUN cd /sgl-workspace/nvshmem && \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    cd /sgl-workspace/nvshmem && \
     if [ "$GRACE_BLACKWELL" = true ]; then CUDA_ARCH="90;100;120"; else CUDA_ARCH="90"; fi && \
     NVSHMEM_SHMEM_SUPPORT=0 \
     NVSHMEM_UCX_SUPPORT=0 \
@@ -190,8 +194,12 @@ RUN cd /sgl-workspace/nvshmem && \
 
 # Build nvshmem4py wheels separately (Python 3.10, CUDA 12) to avoid building the python library twice for multiple python versions
 # Need to reconfigure with PYTHON_LIB=ON to add the nvshmem4py subdirectory
-RUN cd /sgl-workspace/nvshmem && \
-    export CUDA_ARCH="90;100;120" && \
+ARG PYTHON_VERSION
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    cd /sgl-workspace/nvshmem && \
+    if [ "$GRACE_BLACKWELL" = true ]; then CUDA_ARCH="90;100;120"; else CUDA_ARCH="90"; fi && \
     NVSHMEM_SHMEM_SUPPORT=0 \
     NVSHMEM_UCX_SUPPORT=0 \
     NVSHMEM_USE_NCCL=0 \
@@ -201,12 +209,15 @@ RUN cd /sgl-workspace/nvshmem && \
     NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
     NVSHMEM_USE_GDRCOPY=1 \
     cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=${NVSHMEM_DIR} -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} -DNVSHMEM_BUILD_PYTHON_LIB=ON && \
-    cmake --build build --target build_nvshmem4py_wheel_cu12_3.10 -j${CMAKE_BUILD_PARALLEL_LEVEL} && \
+    cmake --build build --target build_nvshmem4py_wheel_cu12_${PYTHON_VERSION} -j${CMAKE_BUILD_PARALLEL_LEVEL} && \
     /tmp/use-sccache.sh show-stats "NVSHMEM4PY"
 
 
 # Install DeepEP
-RUN cd /sgl-workspace/DeepEP && \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    cd /sgl-workspace/DeepEP && \
     case "$CUDA_VERSION" in \
       12.6.1) \
         CHOSEN_TORCH_CUDA_ARCH_LIST='9.0' \
@@ -222,7 +233,10 @@ RUN cd /sgl-workspace/DeepEP && \
 
 ARG ARCH
 # Install flashmla
-RUN if [ "${ARCH}" = "amd64" ]; then \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    if [ "${ARCH}" = "amd64" ]; then \
       git clone https://github.com/deepseek-ai/FlashMLA.git flash-mla && \
       cd flash-mla && \
       git checkout ${FLASHMLA_COMMIT} && \
@@ -293,8 +307,7 @@ ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 
-# Add GKE default lib and bin locations.
-ENV PATH=/usr/local/nvidia/bin:$PATH
+# Add default lib and bin locations.
 ENV LD_LIBRARY_PATH=\
 /opt/nvshmem/install/lib:\
 $NIXL_LIB_DIR:\
