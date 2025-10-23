@@ -71,9 +71,24 @@ impl EndpointConfigBuilder {
         let lease = lease.or(endpoint.drt().primary_lease());
         let lease_id = lease.as_ref().map(|l| l.id()).unwrap_or(0);
 
+        // Get instance_id from service discovery for NATS subject
+        let instance_id = if let Ok(instance_handle) = endpoint.component.instance_handle() {
+            // Parse instance_id as u64, or hash it if not numeric
+            let id_str = instance_handle.instance_id();
+            id_str.parse::<u64>().unwrap_or_else(|_| {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                id_str.hash(&mut hasher);
+                hasher.finish()
+            })
+        } else {
+            lease_id  // Fallback to lease_id if no instance handle
+        };
+
         tracing::debug!(
-            "Starting endpoint: {}",
-            endpoint.etcd_path_with_lease_id(lease_id)
+            "Starting endpoint: {} (instance_id: {})",
+            endpoint.etcd_path_with_lease_id(lease_id),
+            instance_id
         );
 
         let service_name = endpoint.component.service_name();
@@ -107,12 +122,12 @@ impl EndpointConfigBuilder {
         if let Some(stats_handler) = stats_handler {
             handler_map
                 .lock()
-                .insert(endpoint.subject_to(lease_id), stats_handler);
+                .insert(endpoint.subject_to(instance_id), stats_handler);
         }
 
         // creates an endpoint for the service
         let service_endpoint = group
-            .endpoint(&endpoint.name_with_id(lease_id))
+            .endpoint(&endpoint.name_with_id(instance_id))
             .await
             .map_err(|e| anyhow::anyhow!("Failed to start endpoint: {e}"))?;
 
@@ -124,9 +139,7 @@ impl EndpointConfigBuilder {
         let component_name = endpoint.component.name.clone();
         let endpoint_name = endpoint.name.clone();
         let system_health = endpoint.drt().system_health.clone();
-        let subject = endpoint.subject_to(lease_id);
-        let etcd_path = endpoint.etcd_path_with_lease_id(lease_id);
-        let etcd_client = endpoint.component.drt.etcd_client.clone();
+        let subject = endpoint.subject_to(instance_id);
 
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
@@ -134,7 +147,7 @@ impl EndpointConfigBuilder {
                 component: component_name.clone(),
                 endpoint: endpoint_name.clone(),
                 namespace: namespace_name.clone(),
-                instance_id: lease_id,
+                instance_id: instance_id,
                 transport: TransportType::NatsTcp(subject.clone()),
             };
             tracing::debug!(endpoint_name = %endpoint_name, "Registering endpoint health check target");
@@ -224,34 +237,21 @@ impl EndpointConfigBuilder {
             result
         });
 
-        // make the components service endpoint discovery in etcd
-
-        // client.register_service()
-        let info = Instance {
-            component: component_name.clone(),
-            endpoint: endpoint_name.clone(),
-            namespace: namespace_name.clone(),
-            instance_id: lease_id,
-            transport: TransportType::NatsTcp(subject),
-        };
-
-        let info = serde_json::to_vec_pretty(&info)?;
-
-        if let Some(etcd_client) = &etcd_client
-            && let Err(e) = etcd_client
-                .kv_create(&etcd_path, info, Some(lease_id))
-                .await
-        {
-            tracing::error!(
-                component_name,
-                endpoint_name,
-                error = %e,
-                "Unable to register service for discovery"
-            );
-            cancel_token.cancel();
-            return Err(error!(
-                "Unable to register service for discovery. Check discovery service status"
-            ));
+        // Mark instance as ready in service discovery
+        if let Ok(instance_handle) = endpoint.component.instance_handle() {
+            // TODO: what this should really do is to set the global ready status for the instance
+            if let Err(e) = instance_handle.set_ready(crate::discovery::InstanceStatus::Ready).await {
+                tracing::error!(
+                    component_name,
+                    endpoint_name,
+                    error = %e,
+                    "Unable to mark instance as ready"
+                );
+                cancel_token.cancel();
+                return Err(error!(
+                    "Unable to mark instance as ready. Check discovery service status"
+                ));
+            }
         }
         task.await??;
 

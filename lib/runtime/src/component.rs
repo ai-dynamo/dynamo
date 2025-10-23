@@ -174,7 +174,7 @@ pub struct Component {
     /// Handle for this component's registration with service discovery
     #[builder(default)]
     #[educe(Debug(ignore))]
-    instance_handle: Option<Arc<parking_lot::Mutex<Box<dyn crate::discovery::InstanceHandle>>>>,
+    instance_handle: Option<Arc<Box<dyn crate::discovery::InstanceHandle>>>,
 }
 
 impl Hash for Component {
@@ -262,7 +262,7 @@ impl Component {
     }
 
     /// Get the instance handle for this component
-    pub fn instance_handle(&self) -> Result<Arc<parking_lot::Mutex<Box<dyn crate::discovery::InstanceHandle>>>> {
+    pub fn instance_handle(&self) -> Result<Arc<Box<dyn crate::discovery::InstanceHandle>>> {
         self.instance_handle.clone().ok_or_else(|| error!("Component not registered with service discovery"))
     }
 
@@ -438,7 +438,7 @@ impl Component {
         }
 
         // 5. Store instance handle on component
-        self.instance_handle = Some(Arc::new(parking_lot::Mutex::new(instance_handle)));
+        self.instance_handle = Some(Arc::new(instance_handle));
 
         // 6. Register metrics callback. CRITICAL: Never fail service creation for metrics issues.
         if let Err(err) = self.start_scraping_nats_service_component_metrics() {
