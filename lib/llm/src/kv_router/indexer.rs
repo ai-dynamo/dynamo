@@ -354,7 +354,7 @@ impl RadixTree {
                     None => {
                         tracing::warn!(
                             worker_id = worker.worker_id.to_string(),
-                            dp_rank = ?worker.dp_rank,
+                            dp_rank = worker.dp_rank,
                             id,
                             parent_hash = ?op.parent_hash,
                             num_blocks = op.blocks.len(),
@@ -414,7 +414,7 @@ impl RadixTree {
                         None => {
                             tracing::warn!(
                                 worker_id = worker.worker_id.to_string(),
-                                dp_rank = ?worker.dp_rank,
+                                dp_rank = worker.dp_rank,
                                 id,
                                 block_hash = ?block,
                                 "Failed to find block to remove; skipping remove operation"
