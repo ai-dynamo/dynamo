@@ -320,8 +320,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleInitialState(ctx context.
 	// Set observedGeneration to track the spec we're processing
 	dgdr.Status.ObservedGeneration = dgdr.Generation
 
-	// Extract and populate backend from config for display in kubectl output
-	dgdr.Status.Backend = getBackendFromConfig(dgdr)
+	// Populate backend in status from spec for display in kubectl output
+	dgdr.Status.Backend = dgdr.Spec.Backend
 
 	// Initialize status
 	r.Recorder.Event(dgdr, corev1.EventTypeNormal, EventReasonInitialized, MessageInitialized)
@@ -705,25 +705,6 @@ func isOnlineProfiling(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) boo
 	return true
 }
 
-// getBackendFromConfig extracts the backend value from profilingConfig.config.engine.backend
-func getBackendFromConfig(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) string {
-	if dgdr.Spec.ProfilingConfig.Config == nil {
-		return ""
-	}
-
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(dgdr.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
-		return ""
-	}
-
-	if engine, ok := config["engine"].(map[string]interface{}); ok {
-		if backend, ok := engine["backend"].(string); ok {
-			return backend
-		}
-	}
-	return ""
-}
-
 // validateSpec validates the DGDR spec
 func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
 	// Basic validation - check that profilingConfig.config is provided
@@ -764,15 +745,20 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 		return fmt.Errorf("failed to parse profilingConfig.config: %w", err)
 	}
 
-	// Additional validation: Ensure engine.config is set (either as path or will be set from ConfigMapRef)
-	engineConfig, hasEngine := config["engine"].(map[string]interface{})
-	if hasEngine {
-		_, hasConfig := engineConfig["config"]
-		if !hasConfig && dgdr.Spec.ProfilingConfig.ConfigMapRef == nil {
-			return errors.New("either profilingConfig.config.engine.config must be set, or profilingConfig.configMapRef must be provided")
+	// Warn if deployment.model or engine.backend are specified in config (they will be overwritten by spec fields)
+	if engineConfig, ok := config["engine"].(map[string]interface{}); ok {
+		if backend, ok := engineConfig["backend"].(string); ok && backend != "" && backend != dgdr.Spec.Backend {
+			logger := log.FromContext(ctx)
+			logger.Info("Warning: profilingConfig.config.engine.backend will be overwritten by spec.backend",
+				"configBackend", backend, "specBackend", dgdr.Spec.Backend)
 		}
-	} else if dgdr.Spec.ProfilingConfig.ConfigMapRef == nil {
-		return errors.New("profilingConfig.config must contain 'engine' section, or profilingConfig.configMapRef must be provided")
+	}
+	if deployment, ok := config["deployment"].(map[string]interface{}); ok {
+		if model, ok := deployment["model"].(string); ok && model != "" && model != dgdr.Spec.ModelName {
+			logger := log.FromContext(ctx)
+			logger.Info("Warning: profilingConfig.config.deployment.model will be overwritten by spec.modelName",
+				"configModel", model, "specModelName", dgdr.Spec.ModelName)
+		}
 	}
 
 	// The profiler will validate the rest of the configuration
@@ -783,17 +769,15 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
 	logger := log.FromContext(ctx)
 
-	// Ensure profiling job RBAC exists in cluster-wide mode
-	if r.Config.RestrictedNamespace == "" {
-		if err := r.RBACManager.EnsureServiceAccountWithRBAC(
-			ctx,
-			dgdr.Namespace,
-			ServiceAccountProfilingJob,
-			r.Config.RBAC.DGDRProfilingClusterRoleName,
-		); err != nil {
-			logger.Error(err, "Failed to ensure profiling job RBAC")
-			return fmt.Errorf("failed to ensure profiling job RBAC: %w", err)
-		}
+	// Ensure profiling job RBAC exists
+	if err := r.RBACManager.EnsureServiceAccountWithRBAC(
+		ctx,
+		dgdr.Namespace,
+		ServiceAccountProfilingJob,
+		r.Config.RBAC.DGDRProfilingClusterRoleName,
+	); err != nil {
+		logger.Error(err, "Failed to ensure profiling job RBAC")
+		return fmt.Errorf("failed to ensure profiling job RBAC: %w", err)
 	}
 
 	// Use SyncResource to create/update the job
@@ -816,17 +800,23 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			deploymentConfig["namespace"] = dgdr.Namespace
 		}
 
+		// Set deployment.model from spec.modelName
+		deploymentConfig["model"] = dgdr.Spec.ModelName
+
 		// Set output_dir if not already set
 		if _, hasOutputDir := config["output_dir"]; !hasOutputDir {
 			config["output_dir"] = ProfilingOutputPath
 		}
 
+		// Set engine.backend from spec.backend
+		if _, hasEngine := config["engine"]; !hasEngine {
+			config["engine"] = make(map[string]interface{})
+		}
+		engineConfig := config["engine"].(map[string]interface{})
+		engineConfig["backend"] = dgdr.Spec.Backend
+
 		// If ConfigMapRef is provided, set engine.config path
 		if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
-			if _, hasEngine := config["engine"]; !hasEngine {
-				config["engine"] = make(map[string]interface{})
-			}
-			engineConfig := config["engine"].(map[string]interface{})
 			engineConfig["config"] = fmt.Sprintf("%s/%s", ProfilingConfigPath, ProfilingConfigFile)
 		}
 
