@@ -65,6 +65,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     # Python (using 3.10 as default system Python)
     python${PYTHON_VERSION}-dev \
+    python${PYTHON_VERSION}-venv \
     python${PYTHON_VERSION}-distutils \
     python3-pip \
     # System essentials
