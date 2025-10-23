@@ -82,20 +82,11 @@ impl KvManager {
         }
     }
 
-    /// Utility method to send block responses with optional reversing
-    fn send_block_response(
-        &self,
-        mut blocks: Vec<u64>,
-        reverse: bool,
-        store: bool,
-        parent_hash: Option<u64>,
-    ) {
+    /// Utility method to send block responses
+    fn send_block_response(&self, blocks: Vec<u64>, store: bool, parent_hash: Option<u64>) {
         if let Some(ref tx) = self.move_block_response_tx
             && !blocks.is_empty()
         {
-            if reverse {
-                blocks.reverse();
-            }
             let response = if store {
                 MoveBlockResponse::Store(blocks, parent_hash)
             } else {
@@ -140,7 +131,7 @@ impl KvManager {
                         };
                         self.all_blocks.remove(&evicted);
                         if let UniqueBlock::FullBlock(evicted_full_block) = evicted {
-                            self.send_block_response(vec![evicted_full_block], false, false, None);
+                            self.send_block_response(vec![evicted_full_block], false, None);
                         }
                     }
 
@@ -159,14 +150,14 @@ impl KvManager {
                     Some(UniqueBlock::FullBlock(block)) => Some(*block),
                     Some(UniqueBlock::PartialBlock(_)) => panic!("parent block cannot be partial"),
                 };
-                self.send_block_response(blocks_stored, false, true, parent_hash);
+                self.send_block_response(blocks_stored, true, parent_hash);
             }
 
             MoveBlock::Destroy(hashes) => {
                 let mut blocks_destroyed = Vec::<u64>::new();
 
-                // Loop in inverse direction
-                for hash in hashes.iter().rev() {
+                // Process blocks in order (already reversed by caller if needed)
+                for hash in hashes.iter() {
                     self.active_blocks.remove(hash).unwrap();
                     // Remove from all_blocks when destroyed
                     assert!(self.all_blocks.remove(hash));
@@ -179,12 +170,12 @@ impl KvManager {
                     }
                 }
 
-                self.send_block_response(blocks_destroyed, true, false, None);
+                self.send_block_response(blocks_destroyed, false, None);
             }
 
             MoveBlock::Deref(hashes) => {
-                // Loop in inverse direction
-                for hash in hashes.iter().rev() {
+                // Process blocks in order (already reversed by caller if needed)
+                for hash in hashes.iter() {
                     // Decrement reference count and check if we need to move to inactive
                     if let Some(ref_count) = self.active_blocks.get_mut(hash) {
                         if *ref_count == 0 {
@@ -219,7 +210,7 @@ impl KvManager {
                 // Update all_blocks
                 assert!(self.all_blocks.remove(&uuid_block));
                 self.all_blocks.insert(hash_block);
-                self.send_block_response(vec![*hash], false, true, *parent_hash);
+                self.send_block_response(vec![*hash], true, *parent_hash);
             }
         }
 

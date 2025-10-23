@@ -37,10 +37,9 @@ use uuid::Uuid;
 
 pub const MOCKER_COMPONENT: &str = "mocker";
 
-/// Generate a random token ID from 1k to 5k
 fn generate_random_token() -> TokenIdType {
     let mut rng = rand::rng();
-    rng.random_range(1000..5000)
+    rng.random_range(100..200)
 }
 
 /// AsyncEngine wrapper around the Scheduler that generates random character tokens
