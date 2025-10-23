@@ -127,7 +127,9 @@ spec:
         {{- if .Values.dynamo.dgdr.profilerImage }}
           - --profiler-image={{ .Values.dynamo.dgdr.profilerImage }}
         {{- end }}
-        {{- if not .Values.namespaceRestriction.enabled }}
+        {{- if .Values.namespaceRestriction.enabled }}
+          - --dgdr-profiling-cluster-role-name={{ include "dynamo-operator.fullname" . }}-dgdr-profiling-nodes
+        {{- else }}
           - --dgdr-profiling-cluster-role-name={{ include "dynamo-operator.fullname" . }}-dgdr-profiling
           - --planner-cluster-role-name={{ include "dynamo-operator.fullname" . }}-planner
         {{- end }}

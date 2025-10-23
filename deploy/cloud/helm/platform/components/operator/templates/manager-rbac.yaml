@@ -527,3 +527,53 @@ subjects:
 - kind: ServiceAccount
   name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'
   namespace: '{{ .Release.Namespace }}'
+---
+# ClusterRole for node and ClusterRole access
+# This is always a ClusterRole since these resources are cluster-scoped
+# - Nodes: needed for GPU discovery
+# - ClusterRoles: needed for RBAC verification (read-only)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-cluster-resource-reader
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterroles
+  verbs:
+  - get
+  - list
+  - watch
+---
+# ClusterRoleBinding for cluster resource access
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-cluster-resource-reader-binding
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-cluster-resource-reader
+subjects:
+- kind: ServiceAccount
+  name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'
+  namespace: '{{ .Release.Namespace }}'
