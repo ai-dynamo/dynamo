@@ -200,8 +200,9 @@ if [[ "$DOWNLOAD_MODEL" == "true" ]]; then
     $DRY_RUN kubectl apply -n $NAMESPACE -f $MODEL_CACHE_DIR/model-download.yaml
 
     # Wait for the model download to complete
-    echo "Waiting for the model download to complete..."
-    $DRY_RUN kubectl wait --for=condition=Complete job/model-download-${MODEL} -n $NAMESPACE --timeout=6000s
+    MODEL_DOWNLOAD_JOB_NAME=$(grep "name:" $MODEL_CACHE_DIR/model-download.yaml | head -1 | awk '{print $2}')
+    echo "Waiting for job '$MODEL_DOWNLOAD_JOB_NAME' to complete..."
+    $DRY_RUN kubectl wait --for=condition=Complete job/$MODEL_DOWNLOAD_JOB_NAME -n $NAMESPACE --timeout=6000s
 else
     echo "Skipping model download (using existing model cache)..."
     # Still create the PVC in case it doesn't exist
