@@ -9,20 +9,10 @@
 
 import argparse
 
+import numpy as np
+import tritonclient.grpc as triton_grpc
 from google.protobuf.json_format import MessageToDict
-
-try:
-    import numpy as np
-except ImportError as exc:  # pragma: no cover - informational error path
-    raise SystemExit("numpy is required. Install it with 'pip install numpy'.") from exc
-
-try:
-    import tritonclient.grpc as triton_grpc
-    from tritonclient.utils import InferenceServerException
-except ImportError as exc:  # pragma: no cover - informational error path
-    raise SystemExit(
-        "tritonclient[grpc] is required. Install it with 'pip install tritonclient[grpc]'."
-    ) from exc
+from tritonclient.utils import InferenceServerException
 
 
 def main() -> None:
