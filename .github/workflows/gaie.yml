@@ -321,10 +321,15 @@ jobs:
           KUBECONFIG: ${{ github.workspace }}/.kubeconfig
         run: |
           set -euo pipefail
-          kubectl get all -n ${NAMESPACE} || true
-          helm uninstall dynamo-platform -n ${NAMESPACE} || true
-          kubectl delete dynamographdeployments --all -n ${NAMESPACE} || true
-          kubectl delete namespace ${NAMESPACE} || true
+          NS="${NAMESPACE:-}"
+          if [[ -n "${NS}" ]]; then
+            kubectl get all -n ${NS} || true
+            helm uninstall dynamo-platform -n ${NS} || true
+            kubectl delete dynamographdeployments --all -n ${NS} || true
+            kubectl delete namespace ${NS} || true
+          else
+            echo "NAMESPACE is unset; skipping namespace-scoped cleanup." >&2
+          fi
           # Uninstall Kgateway controller and CRDs (cluster-scoped)
           helm uninstall kgateway -n kgateway-system || true
           helm uninstall kgateway-crds -n kgateway-system || true
