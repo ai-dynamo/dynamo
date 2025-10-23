@@ -10,7 +10,7 @@ IMAGE="${IMAGE:-""}"
 # but you may freely customize the mounts based on your cluster. A common practice
 # is to mount paths to NFS storage for common scripts, model weights, etc.
 # NOTE: This can be a comma separated list of multiple mounts as well.
-DEFAULT_MOUNT="${PWD}/../../../:/mnt"
+DEFAULT_MOUNT="${PWD}/../../../../:/mnt"
 MOUNTS="${MOUNTS:-${DEFAULT_MOUNT}}"
 
 # Example values, assuming 4 nodes with 4 GPUs on each node, such as 4xGB200 nodes.
