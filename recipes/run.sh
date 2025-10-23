@@ -176,9 +176,13 @@ if [[ ! -f "$DEPLOY_FILE" ]]; then
     exit 1
 fi
 
-if [[ ! -f "$PERF_FILE" ]]; then
-    echo "Error: Performance file '$PERF_FILE' not found"
-    exit 1
+# Check if perf file exists (optional)
+PERF_AVAILABLE=false
+if [[ -f "$PERF_FILE" ]]; then
+    PERF_AVAILABLE=true
+    echo "Performance benchmark file found: $PERF_FILE"
+else
+    echo "Performance benchmark file not found: $PERF_FILE (skipping benchmarks)"
 fi
 
 # Show deployment information
@@ -213,17 +217,24 @@ fi
 echo "Deploying $MODEL ${FRAMEWORK,,} $DEPLOY_TYPE configuration..."
 $DRY_RUN kubectl apply -n $NAMESPACE -f $DEPLOY_FILE
 
-# Launch the benchmark job
-echo "Launching benchmark job..."
-$DRY_RUN kubectl apply -n $NAMESPACE -f $PERF_FILE
+# Launch the benchmark job (if available)
+if [[ "$PERF_AVAILABLE" == "true" ]]; then
+    echo "Launching benchmark job..."
+    $DRY_RUN kubectl apply -n $NAMESPACE -f $PERF_FILE
 
-# Construct job name from the perf file
-JOB_NAME=$(grep "name:" $PERF_FILE | head -1 | awk '{print $2}')
-echo "Waiting for job '$JOB_NAME' to complete..."
-$DRY_RUN kubectl wait --for=condition=Complete job/$JOB_NAME -n $NAMESPACE --timeout=6000s
+    # Construct job name from the perf file
+    JOB_NAME=$(grep "name:" $PERF_FILE | head -1 | awk '{print $2}')
+    echo "Waiting for job '$JOB_NAME' to complete..."
+    $DRY_RUN kubectl wait --for=condition=Complete job/$JOB_NAME -n $NAMESPACE --timeout=6000s
 
-# Print logs from the benchmark job
-echo "======================================"
-echo "Benchmark completed. Logs:"
-echo "======================================"
-$DRY_RUN kubectl logs job/$JOB_NAME -n $NAMESPACE
+    # Print logs from the benchmark job
+    echo "======================================"
+    echo "Benchmark completed. Logs:"
+    echo "======================================"
+    $DRY_RUN kubectl logs job/$JOB_NAME -n $NAMESPACE
+else
+    echo "======================================"
+    echo "Deployment completed successfully!"
+    echo "No performance benchmark available for this configuration."
+    echo "======================================"
+fi
