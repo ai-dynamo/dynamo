@@ -97,6 +97,14 @@ pub struct MockEngineArgs {
     /// Optional startup time in seconds to simulate engine initialization delay
     #[builder(default = "None")]
     pub startup_time: Option<f64>,
+
+    /// Whether this is a prefill worker (for disaggregated serving)
+    #[builder(default = "false")]
+    pub is_prefill: bool,
+
+    /// Whether this is a decode worker (for disaggregated serving)
+    #[builder(default = "false")]
+    pub is_decode: bool,
 }
 
 impl Default for MockEngineArgs {
@@ -132,6 +140,8 @@ impl MockEngineArgs {
             "speedup_ratio",
             "dp_size",
             "startup_time",
+            "is_prefill",
+            "is_decode",
         ]
         .iter()
         .cloned()
@@ -211,6 +221,18 @@ impl MockEngineArgs {
             && let Some(num) = value.as_f64()
         {
             builder = builder.startup_time(Some(num));
+        }
+
+        if let Some(value) = extra_args.get("is_prefill")
+            && let Some(enabled) = value.as_bool()
+        {
+            builder = builder.is_prefill(enabled);
+        }
+
+        if let Some(value) = extra_args.get("is_decode")
+            && let Some(enabled) = value.as_bool()
+        {
+            builder = builder.is_decode(enabled);
         }
 
         // Build the MockEngineArgs with either defaults or overridden values
