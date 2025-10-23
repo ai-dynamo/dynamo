@@ -5,10 +5,9 @@ name: GAIE Deployment with Dynamo (vllm)
 
 on:
   # workflow_dispatch:
-  # push:
-  #   branches:
-  #     - main
-  #     - release/*.*.*
+  push:
+    branches:
+      - dep-423-test
   # pull_request:
   #   paths:
   #     - lib/bindings/c/src/**
