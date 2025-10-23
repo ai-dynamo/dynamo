@@ -198,6 +198,11 @@ for i in $(seq 1 $NUM_WORKERS); do
             if [ "$DATA_PARALLEL_SIZE" -gt 1 ]; then
                 MOCKER_ARGS+=("--data-parallel-size" "$DATA_PARALLEL_SIZE")
             fi
+            if [ "$MODE" = "prefill" ]; then
+                MOCKER_ARGS+=("--is-prefill-worker")
+            elif [ "$MODE" = "decode" ]; then
+                MOCKER_ARGS+=("--is-decode-worker")
+            fi
             MOCKER_ARGS+=("${EXTRA_ARGS[@]}")
 
             exec python -m dynamo.mocker "${MOCKER_ARGS[@]}"
