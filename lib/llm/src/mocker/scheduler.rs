@@ -32,7 +32,7 @@ use crate::kv_router::protocols::{ForwardPassMetrics, KvStats, WorkerStats};
 use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::kv_manager::KvManager;
 use crate::mocker::protocols::{
-    DirectRequest, MockEngineArgs, MoveBlock, OutputSignal, PrefillCost,
+    DirectRequest, MockEngineArgs, MoveBlock, OutputSignal, PrefillCost, WorkerType,
 };
 use crate::mocker::running_mean::RunningMean;
 use crate::mocker::sequence::ActiveSequence;
@@ -388,7 +388,7 @@ impl Scheduler {
                     // NOTE: Prefill cost/time is always incremented for new blocks, even if they
                     // could be cached by other requests in the same batch. This matches vLLM behavior.
                     // For decode workers, skip adding prefill compute time
-                    if !args.is_decode {
+                    if args.worker_type != WorkerType::Decode {
                         total_time += Duration::from_secs_f64(prefill_compute / 1000.0);
                     }
 

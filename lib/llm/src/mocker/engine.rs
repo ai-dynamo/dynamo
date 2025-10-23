@@ -8,7 +8,7 @@
 
 use crate::kv_router::publisher::WorkerMetricsPublisher;
 use crate::mocker::protocols::DirectRequest;
-use crate::mocker::protocols::{MockEngineArgs, OutputSignal};
+use crate::mocker::protocols::{MockEngineArgs, OutputSignal, WorkerType};
 use crate::mocker::scheduler::Scheduler;
 use crate::protocols::TokenIdType;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
@@ -68,12 +68,13 @@ impl MockVllmEngine {
         }
 
         // Pass component to schedulers only if prefix caching is enabled and not a decode worker
-        let scheduler_component =
-            if self.engine_args.enable_prefix_caching && !self.engine_args.is_decode {
-                Some(component.clone())
-            } else {
-                None
-            };
+        let scheduler_component = if self.engine_args.enable_prefix_caching
+            && self.engine_args.worker_type != WorkerType::Decode
+        {
+            Some(component.clone())
+        } else {
+            None
+        };
 
         let schedulers = self.start_schedulers(
             self.engine_args.clone(),
@@ -265,7 +266,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 
         let active_requests = self.active_requests.clone();
         let async_context = ctx.context();
-        let is_prefill = self.engine_args.is_prefill;
+        let is_prefill = self.engine_args.worker_type == WorkerType::Prefill;
         // Override max_tokens to 1 for prefill workers
         let max_tokens = if is_prefill {
             1
