@@ -98,12 +98,12 @@ pub struct Instance {
     pub component: String,
     pub endpoint: String,
     pub namespace: String,
-    pub instance_id: i64,
+    pub instance_id: u64,
     pub transport: TransportType,
 }
 
 impl Instance {
-    pub fn id(&self) -> i64 {
+    pub fn id(&self) -> u64 {
         self.instance_id
     }
     pub fn endpoint_id(&self) -> EndpointId {
@@ -525,12 +525,12 @@ impl Endpoint {
     }
 
     /// The fully path of an instance in etcd
-    pub fn etcd_path_with_lease_id(&self, lease_id: i64) -> String {
+    pub fn etcd_path_with_lease_id(&self, lease_id: u64) -> String {
         format!("{INSTANCE_ROOT_PATH}/{}", self.unique_path(lease_id))
     }
 
     /// Full path of this endpoint with forward slash separators, including lease id
-    pub fn unique_path(&self, lease_id: i64) -> String {
+    pub fn unique_path(&self, lease_id: u64) -> String {
         let ns = self.component.namespace().name();
         let cp = self.component.name();
         let ep = self.name();
@@ -552,7 +552,7 @@ impl Endpoint {
         }
     }
 
-    pub fn name_with_id(&self, lease_id: i64) -> String {
+    pub fn name_with_id(&self, lease_id: u64) -> String {
         if self.is_static {
             self.name.clone()
         } else {
@@ -565,7 +565,7 @@ impl Endpoint {
     }
 
     /// Subject to an instance of the [Endpoint] with a specific lease id
-    pub fn subject_to(&self, lease_id: i64) -> String {
+    pub fn subject_to(&self, lease_id: u64) -> String {
         format!(
             "{}.{}",
             self.component.service_name(),

@@ -128,6 +128,16 @@ spec:
 
 **For MoE models**, use `profile_sla_moe_job.yaml` with TEP/DEP configuration instead.
 
+### Auto-Configuration
+
+To automatically configure the profiling job based on the hardware and model information, supply the `--model` argument to the profiling script. The following arguments will be automatically set:
+- `--config`: will use the default config file (`components/backends/<backend>/deploy/disagg.yaml`) with model updated to the provided model name
+- `--min-num-gpus-per-engine`: will be set to the minimum number of GPUs per engine based on the model size and hardware information
+- `--max-num-gpus-per-engine`: will be set to the maximum number of GPUs per engine based on the model size and hardware information
+- `--num-gpus-per-node`: will be set to the number of GPUs per node based on the hardware information
+- `--is-moe-model`: will be set based on the HF config file
+- `--max-context-length`: will be set to the maximum context length supported by the model based on the HF config file
+
 ### Advanced Configuration
 
 - **Model caching**: For large models, create a multi-attach PVC to cache the model. See [recipes](../../recipes/README.md) for details.
