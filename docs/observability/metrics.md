@@ -94,6 +94,6 @@ prometheus-grafana
 
 ## Related Documentation
 
-- [Distributed Runtime Architecture](../architecture/distributed_runtime.md)
-- [Dynamo Architecture Overview](../architecture/architecture.md)
+- [Distributed Runtime Architecture](../design_docs/distributed_runtime.md)
+- [Dynamo Architecture Overview](../design_docs/architecture.md)
 - [Backend Guide](../development/backend-guide.md)
