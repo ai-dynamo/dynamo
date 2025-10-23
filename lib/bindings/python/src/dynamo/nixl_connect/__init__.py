@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import socket
 import uuid
@@ -1211,7 +1212,7 @@ class PassiveOperation(AbstractOperation):
 
             self._serialized_request = RdmaMetadata(
                 descriptors=descriptors,
-                nixl_metadata=nixl_metadata.hex(),
+                nixl_metadata=base64.b64encode(nixl_metadata).decode("utf-8"),
                 notification_key=self._notification_key,
                 operation_kind=int(self._operation_kind),
             )
@@ -1471,11 +1472,11 @@ class Remote:
         self._connector = connector
 
         # When `nixl_metadata` is a string, it is assumed to have come from a remote worker
-        # via a `RdmaMetadata` object and therefore can assumed be a hex-encoded, compressed
+        # via a `RdmaMetadata` object and therefore can assumed be a b64-encoded, compressed
         # representation of the NIXL metadata.
         if isinstance(nixl_metadata, str):
-            # Decode the hex-encoded string into bytes.
-            nixl_metadata = bytes.fromhex(nixl_metadata)
+            # Decode the b64-encoded string into bytes.
+            nixl_metadata = base64.b64decode(nixl_metadata)
             # Decompress the NIXL metadata.
             nixl_metadata = zlib.decompress(nixl_metadata)
 
