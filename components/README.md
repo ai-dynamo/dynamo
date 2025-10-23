@@ -31,7 +31,7 @@ Each engine provides launch scripts for different deployment patterns in their r
 
 ## Core Components
 
-### [Backends](src/dynamo/)
+### [Backends](backends/)
 
 The backends directory contains inference engine integrations and implementations, with a key focus on:
 

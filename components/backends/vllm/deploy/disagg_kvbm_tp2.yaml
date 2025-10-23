@@ -58,10 +58,6 @@ spec:
       envs:
         - name: DYN_KVBM_CPU_CACHE_GB
           value: "100"
-        - name: DYN_KVBM_BARRIER_ID_PREFIX
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.name
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag

@@ -18,18 +18,57 @@ kind: DynamoGraphDeploymentRequest
 metadata:
   name: example-llm-sla
 spec:
-  modelName: "meta/llama3-70b"
-  backend: trtllm # enum: [vllm, sglang, trtllm]; default is trtllm
-  sla: # SLA profiling targets (all fields optional with defaults)
-    itl: 10    # Inter-Token Latency target in milliseconds (default: 10)
-    ttft: 50   # Time To First Token target in milliseconds (default: 50)
-    isl: 3000  # Input Sequence Length (default: 3000)
-    osl: 500   # Output Sequence Length (default: 500)
-  gpu: # optional
-    type: h200_sxm
-    minNumGPUsPerEngine: 1  # default is 1
-    maxNumGPUsPerEngine: 8  # default is 8
-  online: false # true for online profiler, false for AIC profiler
+  # ModelName is a high-level identifier for the model being deployed
+  modelName: Qwen/Qwen3-0.6B
+
+  # ProfilingConfig maps directly to the profile_sla.py config format
+  # See benchmarks/profiler/utils/profiler_argparse.py for complete schema
+  profilingConfig:
+    config:
+      # Optional: Output directory for profiling results (defaults to /data in the Job)
+      # output_dir: "profiling_results"
+
+      # Engine configuration
+      engine:
+        backend: trtllm  # Inference backend: vllm, sglang, or trtllm
+        max_context_length: 16384  # Maximum context length supported by the model
+        is_moe_model: false  # Enable MoE model support (uses TEP/DEP instead of TP)
+
+      # Hardware configuration
+      hardware:
+        min_num_gpus_per_engine: 1  # Minimum GPUs to test
+        max_num_gpus_per_engine: 4  # Maximum GPUs to test (limited by model's num_heads/4)
+        num_gpus_per_node: 8  # GPUs per node (for MoE models)
+
+      # Sweep/profiling configuration
+      sweep:
+        skip_existing_results: true  # Skip configurations that already have results
+        prefill_interpolation_granularity: 16  # Samples for TTFT interpolation
+        decode_interpolation_granularity: 6  # Samples for ITL interpolation
+
+        # AI Configurator mode (fast simulation-based profiling, 20-30 seconds)
+        use_ai_configurator: false  # Set to false for online profiling (2-4 hours)
+        aic_system: h200_sxm  # Target GPU system for AI Configurator
+        aic_model_name: QWEN3_0.6B  # Model name for AI Configurator
+        aic_backend_version: "0.20.0"  # Backend version for AI Configurator
+
+      # SLA targets for profiling
+      sla:
+        isl: 3000  # Input sequence length
+        osl: 500   # Output sequence length
+        ttft: 50.0  # Time To First Token target (milliseconds)
+        itl: 10.0   # Inter-Token Latency target (milliseconds)
+
+      # Optional: Planner-specific arguments
+      # planner:
+      #   planner_min_endpoint: 2
+      #   # Add any other planner args here (use hyphens or underscores)
+
+    # Reference to ConfigMap containing the DGD base config (disagg.yaml)
+    # The path to this file will be automatically set as engine.config
+    configMapRef:
+      name: my-profiling-config
+      key: disagg.yaml  # defaults to "disagg.yaml"
 
   # Optional: Automatically create DynamoGraphDeployment after profiling
   autoApply: true  # default is false
@@ -42,9 +81,3 @@ spec:
   #     team: ml-platform
   #   annotations:
   #     description: "Auto-generated from DGDR"
-
-  # Currently required for both online and offline/AIC profiling, but will be removed in the future
-  profilingConfig:
-    configMapRef:
-      name: my-profiling-config
-      key: disagg.yaml  # default is "disagg.yaml"
