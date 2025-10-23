@@ -34,7 +34,7 @@ distributed tracing.
 | `DYN_LOGGING_CONFIG_PATH`          | Path to custom TOML logging configuration file            | `DYN_LOGGING_CONFIG_PATH=/path/to/config.toml`|
 | `OTEL_SERVICE_NAME`                | Service name for OpenTelemetry traces (default: `dynamo`) | `OTEL_SERVICE_NAME=dynamo-frontend` |
 | `OTEL_EXPORT_ENABLED`              | Enable OTLP trace exporting (set to `1` to enable) | `OTEL_EXPORT_ENABLED=1` |
-| `OTEL_EXPORT_ENDPOINT`             | OTLP exporter endpoint (default: http://localhost:4317) | `OTEL_EXPORT_ENDPOINT=http://tempo:4317` |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`             | OTLP exporter endpoint (default: http://localhost:4317) | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://tempo:4317` |
 
 
 ## Available Logging Levels
@@ -99,13 +99,13 @@ When `DYN_LOGGING_JSONL` is enabled, Dynamo uses OpenTelemetry for distributed t
 To enable OTLP trace exporting:
 
 1. Set `OTEL_EXPORT_ENABLED=1` to enable trace export
-2. Optionally configure the endpoint using `OTEL_EXPORT_ENDPOINT` (default: `http://localhost:4317`)
+2. Optionally configure the endpoint using `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (default: `http://localhost:4317`)
 3. Optionally set `OTEL_SERVICE_NAME` to identify the service (useful in Kubernetes, default: `dynamo`)
 
 **Export Settings:**
 - **Protocol**: gRPC (Tonic)
 - **Service Name**: Value of `OTEL_SERVICE_NAME` env var, or `dynamo` if not set
-- **Endpoint**: Value of `OTEL_EXPORT_ENDPOINT` env var, or `http://localhost:4317` if not set
+- **Endpoint**: Value of `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` env var, or `http://localhost:4317` if not set
 
 ### Example: JSONL Logging Only (No Export)
 
@@ -119,68 +119,9 @@ export DYN_LOGGING_JSONL=true
 ```bash
 export DYN_LOGGING_JSONL=true
 export OTEL_EXPORT_ENABLED=1
-export OTEL_EXPORT_ENDPOINT=http://tempo:4317
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://tempo:4317
 export OTEL_SERVICE_NAME=dynamo-frontend
 # OpenTelemetry is active, traces appear in logs AND are exported to Tempo
-```
-
-## Trace and Span information
-
-When `DYN_LOGGING_JSONL` is enabled with `DYN_LOG` set to greater than or equal to
-`info` level, trace information is added to all logged spans along with
-`SPAN_CREATED` and `SPAN_CLOSED` events.
-
-### Example Request
-
-```
-curl -d '{"model": "Qwen/Qwen3-0.6B", "max_completion_tokens": 2049, "messages":[{"role":"user", "content": "What is the capital of South Africa?" }]}' -H 'Content-Type: application/json' http://localhost:8080/v1/chat/completions
-```
-
-### Example Logs
-
-```
-# Span Created in HTTP Frontend with trace_id and span_id
-
-{"time":"2025-09-02T16:38:06.656503Z","level":"INFO","file":"/workspace/lib/runtime/src/logging.rs","line":248,"target":"dynamo_runtime::logging","message":"SPAN_CREATED","method":"POST","span_id":"6959a1b2d1ee41a5","span_name":"http-request","trace_id":"425ef761ca5b44c795b4c912f1d84b39","uri":"/v1/chat/completions","version":"HTTP/1.1"}
-
-# Span Created in Worker with trace_id and parent_id from frontend and new span_id
-
-{"time":"2025-09-02T16:38:06.666672Z","level":"INFO","file":"/workspace/lib/runtime/src/pipeline/network/ingress/push_endpoint.rs","line":108,"target":"dynamo_runtime::pipeline::network::ingress::push_endpoint","message":"SPAN_CREATED","component":"backend","endpoint":"generate","instance_id":"7587888160958627596","namespace":"dynamo","parent_id":"6959a1b2d1ee41a5","span_id":"b035f33bdd5c4b50","span_name":"handle_payload","trace_id":"425ef761ca5b44c795b4c912f1d84b39"}
-{"time":"2025-09-02T16:38:06.685333Z","level":"WARN","target":"log","message":"cudagraph dispatching keys are not initialized. No cudagraph will be used.","log.file":"/opt/vllm/vllm/v1/cudagraph_dispatcher.py","log.line":101,"log.target":"cudagraph_dispatcher.dispatch"}
-
-# Span Closed in Worker with duration, busy, and idle information
-
-{"time":"2025-09-02T16:38:08.787232Z","level":"INFO","file":"/workspace/lib/runtime/src/pipeline/network/ingress/push_endpoint.rs","line":108,"target":"dynamo_runtime::pipeline::network::ingress::push_endpoint","message":"SPAN_CLOSED","component":"backend","endpoint":"generate","instance_id":"7587888160958627596","namespace":"dynamo","parent_id":"6959a1b2d1ee41a5","span_id":"b035f33bdd5c4b50","span_name":"handle_payload","time.busy_us":1090,"time.duration_us":2121090,"time.idle_us":2120000,"trace_id":"425ef761ca5b44c795b4c912f1d84b39"}
-
-# Span Closed in HTTP Frontend with duration, busy and idle information
-
-{"time":"2025-09-02T16:38:08.788268Z","level":"INFO","file":"/workspace/lib/runtime/src/logging.rs","line":248,"target":"dynamo_runtime::logging","message":"SPAN_CLOSED","method":"POST","span_id":"6959a1b2d1ee41a5","span_name":"http-request","time.busy_us":13000,"time.duration_us":2133000,"time.idle_us":2120000,"trace_id":"425ef761ca5b44c795b4c912f1d84b39","uri":"/v1/chat/completions","version":"HTTP/1.1"}
-```
-
-### Example Request with User Supplied `x-request-id`
-
-```
-curl -d '{"model": "Qwen/Qwen3-0.6B", "max_completion_tokens": 2049, "messages":[{"role":"user", "content": "What is the capital of South Africa?" }]}' -H 'Content-Type: application/json' -H 'x-request-id: 8372eac7-5f43-4d76-beca-0a94cfb311d0' http://localhost:8080/v1/chat/completions
-```
-
-### Example Logs
-
-```
-# Span Created in HTTP Frontend with x-request-id, trace_id, and span_id
-
-{"time":"2025-09-02T17:01:46.306801Z","level":"INFO","file":"/workspace/lib/runtime/src/logging.rs","line":248,"target":"dynamo_runtime::logging","message":"SPAN_CREATED","method":"POST","span_id":"906902a4e74b4264","span_name":"http-request","trace_id":"3924188ea88d40febdfa173afd246a3a","uri":"/v1/chat/completions","version":"HTTP/1.1","x_request_id":"8372eac7-5f43-4d76-beca-0a94cfb311d0"}
-
-# Span Created in Worker with trace_id, parent_id and x_request_id from frontend and new span_id
-
-{"time":"2025-09-02T17:01:46.307484Z","level":"INFO","file":"/workspace/lib/runtime/src/pipeline/network/ingress/push_endpoint.rs","line":108,"target":"dynamo_runtime::pipeline::network::ingress::push_endpoint","message":"SPAN_CREATED","component":"backend","endpoint":"generate","instance_id":"7587888160958627596","namespace":"dynamo","parent_id":"906902a4e74b4264","span_id":"5a732a3721814f5e","span_name":"handle_payload","trace_id":"3924188ea88d40febdfa173afd246a3a","x_request_id":"8372eac7-5f43-4d76-beca-0a94cfb311d0"}
-
-# Span Closed in Worker with duration, busy, and idle information
-{"time":"2025-09-02T17:01:47.975228Z","level":"INFO","file":"/workspace/lib/runtime/src/pipeline/network/ingress/push_endpoint.rs","line":108,"target":"dynamo_runtime::pipeline::network::ingress::push_endpoint","message":"SPAN_CLOSED","component":"backend","endpoint":"generate","instance_id":"7587888160958627596","namespace":"dynamo","parent_id":"906902a4e74b4264","span_id":"5a732a3721814f5e","span_name":"handle_payload","time.busy_us":646,"time.duration_us":1670646,"time.idle_us":1670000,"trace_id":"3924188ea88d40febdfa173afd246a3a","x_request_id":"8372eac7-5f43-4d76-beca-0a94cfb311d0"}
-
-# Span Closed in HTTP Frontend with duration, busy and idle information
-
-{"time":"2025-09-02T17:01:47.975616Z","level":"INFO","file":"/workspace/lib/runtime/src/logging.rs","line":248,"target":"dynamo_runtime::logging","message":"SPAN_CLOSED","method":"POST","span_id":"906902a4e74b4264","span_name":"http-request","time.busy_us":2980,"time.duration_us":1672980,"time.idle_us":1670000,"trace_id":"3924188ea88d40febdfa173afd246a3a","uri":"/v1/chat/completions","version":"HTTP/1.1","x_request_id":"8372eac7-5f43-4d76-beca-0a94cfb311d0"}
-
 ```
 
 ## Related Documentation

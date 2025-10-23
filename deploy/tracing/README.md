@@ -27,7 +27,7 @@ Dynamo's tracing is configured via environment variables. For complete logging d
 |----------|-------------|---------------|
 | `DYN_LOGGING_JSONL` | Enable JSONL logging format (required for tracing) | `true` |
 | `OTEL_EXPORT_ENABLED` | Enable OTLP trace export | `1` |
-| `OTEL_EXPORT_ENDPOINT` | OTLP gRPC endpoint for Tempo | `http://localhost:4317` (local) or `http://tempo:4317` (docker) |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for Tempo | `http://localhost:4317` (local) or `http://tempo:4317` (docker) |
 | `OTEL_SERVICE_NAME` | Service name for identifying components | `dynamo-frontend`, `dynamo-worker-prefill`, `dynamo-worker-decode` |
 
 **Note:** When `OTEL_EXPORT_ENABLED=1`, logging initialization is deferred until the runtime is available (required by the OTEL exporter). This means some early logs will be dropped. This will be fixed in a future release.
@@ -42,7 +42,7 @@ export DYN_LOGGING_JSONL=true
 export OTEL_EXPORT_ENABLED=1
 
 # Set the Tempo endpoint (docker-compose network)
-export OTEL_EXPORT_ENDPOINT=http://tempo:4317
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://tempo:4317
 
 # Set service name to identify this component
 export OTEL_SERVICE_NAME=dynamo-frontend
@@ -79,7 +79,7 @@ Configure Dynamo components to export traces:
 # Enable JSONL logging and tracing
 export DYN_LOGGING_JSONL=true
 export OTEL_EXPORT_ENABLED=1
-export OTEL_EXPORT_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317
 
 # Set service names for each component
 export OTEL_SERVICE_NAME=dynamo-frontend
@@ -107,7 +107,7 @@ trap 'echo Cleaning up...; kill 0' EXIT
 # Enable tracing
 export DYN_LOGGING_JSONL=true
 export OTEL_EXPORT_ENABLED=1
-export OTEL_EXPORT_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317
 
 # Run frontend
 export OTEL_SERVICE_NAME=dynamo-frontend
@@ -193,7 +193,7 @@ spec:
       value: "true"
     - name: OTEL_EXPORT_ENABLED
       value: "1"
-    - name: OTEL_EXPORT_ENDPOINT
+    - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
       value: "http://tempo.observability.svc.cluster.local:4317"
 
   services:
