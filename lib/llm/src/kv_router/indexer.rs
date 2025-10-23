@@ -357,6 +357,7 @@ impl RadixTree {
                             dp_rank = ?worker.dp_rank,
                             id,
                             parent_hash = ?op.parent_hash,
+                            num_blocks = op.blocks.len(),
                             "Failed to find parent block; skipping store operation"
                         );
                         return Err(KvCacheEventError::ParentBlockNotFound);
@@ -415,6 +416,7 @@ impl RadixTree {
                                 worker_id = worker.worker_id.to_string(),
                                 dp_rank = ?worker.dp_rank,
                                 id,
+                                block_hash = ?block,
                                 "Failed to find block to remove; skipping remove operation"
                             );
                             return Err(KvCacheEventError::BlockNotFound);
