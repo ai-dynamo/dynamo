@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from tests.serve.common import params_with_model_mark, run_serve_deployment
+from tests.serve.common import DYNAMO_HOME, params_with_model_mark, run_serve_deployment
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
     chat_payload_default,
@@ -25,7 +25,9 @@ class TRTLLMConfig(EngineConfig):
     stragglers: list[str] = field(default_factory=lambda: ["TRTLLM:EngineCore"])
 
 
-trtllm_dir = os.environ.get("TRTLLM_DIR", "/workspace/components/backends/trtllm")
+trtllm_dir = os.environ.get("TRTLLM_DIR") or os.path.join(
+    DYNAMO_HOME, "components", "backends", "trtllm"
+)
 
 # trtllm test configurations
 trtllm_configs = {

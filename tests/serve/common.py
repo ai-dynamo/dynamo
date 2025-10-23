@@ -15,9 +15,8 @@ from tests.utils.engine_process import EngineConfig, EngineProcess
 
 DEFAULT_TIMEOUT = 10
 
-SERVE_TEST_DIR = os.path.join(
-    os.environ.get("DYNAMO_HOME", "/workspace"), "tests", "serve"
-)
+DYNAMO_HOME = os.environ.get("DYNAMO_HOME", "/workspace")
+SERVE_TEST_DIR = os.path.join(DYNAMO_HOME, "tests", "serve")
 
 
 def run_serve_deployment(

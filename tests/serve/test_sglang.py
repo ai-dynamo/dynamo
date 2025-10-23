@@ -7,11 +7,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from tests.serve.common import (
-    SERVE_TEST_DIR,
-    params_with_model_mark,
-    run_serve_deployment,
-)
+from tests.serve.common import DYNAMO_HOME, params_with_model_mark, run_serve_deployment
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
     chat_payload,
@@ -32,12 +28,14 @@ class SGLangConfig(EngineConfig):
     stragglers: list[str] = field(default_factory=lambda: ["SGLANG:EngineCore"])
 
 
-sglang_dir = os.environ.get("SGLANG_DIR", "/workspace/components/backends/sglang")
+sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
+    DYNAMO_HOME, "components", "backends", "sglang"
+)
 
 sglang_configs = {
     "aggregated": SGLangConfig(
         name="aggregated",
-        directory=SERVE_TEST_DIR,
+        directory=sglang_dir,
         script_name="sglang_agg.sh",
         marks=[pytest.mark.gpu_1],
         model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
@@ -85,7 +83,7 @@ sglang_configs = {
         # The backend (launch/template_verifier.*) checks for this marker
         # and returns "Successfully Applied Chat Template" if found.
         name="template_verification",
-        directory=SERVE_TEST_DIR,
+        directory=sglang_dir,
         script_name="template_verifier.sh",
         marks=[pytest.mark.gpu_1],
         model="Qwen/Qwen3-0.6B",
