@@ -4,6 +4,7 @@
 ARG CUDA_VERSION=12.9.1
 
 # Runtime image and build-time configuration (aligned with other backends)
+# TODO: OPS-<number>: Use the same runtime image as the other backends
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.9.1-cudnn-runtime-ubuntu24.04"
 
@@ -43,7 +44,7 @@ ARG FLASHMLA_COMMIT=1408756a88e52a25196b759eaf8db89d2b51b5a1
 ARG CMAKE_BUILD_PARALLEL_LEVEL=2
 ARG SGL_KERNEL_VERSION=0.3.15
 ARG SGLANG_COMMIT=0.5.3.post1
-ARG GRACE_BLACKWELL=0
+ARG GRACE_BLACKWELL=false
 ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_HOME=/usr/local/cuda \
     GDRCOPY_HOME=/usr/src/gdrdrv-2.4.4/ \
@@ -63,7 +64,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
  && add-apt-repository ppa:deadsnakes/ppa -y \
  && apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    # Python (using 3.10 as primary), python3.12-venv required for NVSHMEM build
+    # Python (using 3.10 as default system Python)
     python${PYTHON_VERSION}-dev \
     python${PYTHON_VERSION}-venv \
     python${PYTHON_VERSION}-distutils \
@@ -135,11 +136,9 @@ RUN git clone --branch v${SGLANG_COMMIT} --depth 1 https://github.com/sgl-projec
 
 WORKDIR /sgl-workspace
 
-# Set up virtual environment so subsequent Python installs land in the venv
-RUN mkdir -p /opt/dynamo/venv && \
-     python${PYTHON_VERSION} -m venv /opt/dynamo/venv
-ENV VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH="/opt/dynamo/venv/bin:${PATH}"
+# Set Python 3.10 as the default python3 interpreter
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
+    update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION}
 
 ARG SGL_KERNEL_VERSION
 RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel html5lib six \
@@ -163,7 +162,7 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel html5li
 # Download NVSHMEM source files
 # We use Tom's DeepEP fork for GB200 for now
 RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/source/nvshmem_src_cuda12-all-all-3.3.9.tar.gz && \
-    if [ "$GRACE_BLACKWELL" = "1" ]; then \
+    if [ "$GRACE_BLACKWELL" = true ]; then \
       git clone https://github.com/fzyzcjy/DeepEP.git \
       && cd DeepEP && git checkout 1b14ad661c7640137fcfe93cccb2694ede1220b0 && sed -i 's/#define NUM_CPU_TIMEOUT_SECS 100/#define NUM_CPU_TIMEOUT_SECS 1000/' csrc/kernels/configs.cuh && cd .. ; \
     else \
@@ -176,7 +175,7 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/sour
 
 # Build and install NVSHMEM library only (without python library)
 RUN cd /sgl-workspace/nvshmem && \
-    if [ "$GRACE_BLACKWELL" = "1" ]; then CUDA_ARCH="90;100;120"; else CUDA_ARCH="90"; fi && \
+    if [ "$GRACE_BLACKWELL" = true ]; then CUDA_ARCH="90;100;120"; else CUDA_ARCH="90"; fi && \
     NVSHMEM_SHMEM_SUPPORT=0 \
     NVSHMEM_UCX_SUPPORT=0 \
     NVSHMEM_USE_NCCL=0 \
@@ -286,8 +285,6 @@ FROM framework AS runtime
 
 WORKDIR /workspace
 ENV DYNAMO_HOME=/opt/dynamo
-ENV VIRTUAL_ENV=/opt/dynamo/venv
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 ARG ARCH
 ARG ARCH_ALT
@@ -339,8 +336,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 COPY ATTRIBUTION* LICENSE /workspace/
 COPY container/launch_message.txt /workspace/launch_message.txt
 RUN sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
-    echo "cat ~/.launch_screen" >> ~/.bashrc && \
-    echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
+    echo "cat ~/.launch_screen" >> ~/.bashrc
 
 # Copy tests, benchmarks, deploy and components for CI
 COPY tests /workspace/tests
@@ -416,7 +412,6 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     CARGO_TARGET_DIR=/workspace/target \
-    VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/usr/local/cargo/bin:$PATH
 
 COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
