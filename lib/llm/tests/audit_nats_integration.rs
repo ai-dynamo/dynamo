@@ -151,20 +151,19 @@ mod tests {
     #[tokio::test]
     #[ignore] // Manual testing only - requires NATS on localhost:4222
     async fn test_audit_nats_basic_flow() {
+        const TEST_SUBJECT: &str = "test.audit.basic";
         // Core test: audit records are published to NATS with correct structure
         async_with_vars(
             [
                 ("DYN_AUDIT_ENABLED", Some("1")),
                 ("DYN_AUDIT_SINKS", Some("nats")),
-                ("DYN_AUDIT_NATS_SUBJECT", Some("test.audit.basic")),
-                ("DYN_AUDIT_NATS_FLUSH_MS", Some("50")),
+                ("DYN_AUDIT_NATS_SUBJECT", Some(TEST_SUBJECT)),
             ],
             async {
                 let stream_name = format!("test_basic_{}", Uuid::new_v4());
-                let subject = "test.audit.basic";
 
                 let client = create_test_nats_client().await;
-                setup_test_stream(&client, &stream_name, subject).await;
+                setup_test_stream(&client, &stream_name, TEST_SUBJECT).await;
 
                 bus::init(100);
                 let drt = create_test_drt().await;
@@ -209,19 +208,19 @@ mod tests {
     #[ignore] // Manual testing only - requires NATS on localhost:4222
     async fn test_audit_nats_store_flag() {
         // Test that store flag controls whether records are audited
+        const TEST_SUBJECT: &str = "test.audit.store";
+
         async_with_vars(
             [
                 ("DYN_AUDIT_ENABLED", Some("1")),
                 ("DYN_AUDIT_SINKS", Some("nats")),
-                ("DYN_AUDIT_NATS_SUBJECT", Some("test.audit.store")),
-                ("DYN_AUDIT_NATS_FLUSH_MS", Some("50")),
+                ("DYN_AUDIT_NATS_SUBJECT", Some(TEST_SUBJECT)),
             ],
             async {
                 let stream_name = format!("test_store_{}", Uuid::new_v4());
-                let subject = "test.audit.store";
 
                 let client = create_test_nats_client().await;
-                setup_test_stream(&client, &stream_name, subject).await;
+                setup_test_stream(&client, &stream_name, TEST_SUBJECT).await;
 
                 bus::init(100);
                 let drt = create_test_drt().await;

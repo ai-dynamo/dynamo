@@ -1,12 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use async_nats::jetstream;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use super::{bus, handle::AuditRecord};
-mod sink_nats;
-use sink_nats::NatsSink;
 
 pub trait AuditSink: Send + Sync {
     fn name(&self) -> &'static str;
@@ -28,6 +27,43 @@ impl AuditSink for StderrSink {
     }
 }
 
+pub struct NatsSink {
+    js: jetstream::Context,
+    subject: String,
+}
+
+impl NatsSink {
+    pub fn new(nats_client: &dynamo_runtime::transports::nats::Client) -> Self {
+        let subject = std::env::var("DYN_AUDIT_NATS_SUBJECT")
+            .unwrap_or_else(|_| "dynamo.audit.v1".to_string());
+        Self {
+            js: nats_client.jetstream().clone(),
+            subject,
+        }
+    }
+}
+
+impl AuditSink for NatsSink {
+    fn name(&self) -> &'static str {
+        "nats"
+    }
+
+    fn emit(&self, rec: &AuditRecord) {
+        match serde_json::to_vec(rec) {
+            Ok(bytes) => {
+                let js = self.js.clone();
+                let subject = self.subject.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = js.publish(subject, bytes.into()).await {
+                        tracing::warn!("nats: publish failed: {e}");
+                    }
+                });
+            }
+            Err(e) => tracing::warn!("nats: serialize failed: {e}"),
+        }
+    }
+}
+
 fn parse_sinks_from_env(
     nats_client: Option<&dynamo_runtime::transports::nats::Client>,
 ) -> Vec<Arc<dyn AuditSink>> {
@@ -37,8 +73,12 @@ fn parse_sinks_from_env(
         match name.as_str() {
             "stderr" | "" => out.push(Arc::new(StderrSink)),
             "nats" => {
-                if let Some(sink) = NatsSink::new(nats_client) {
-                    out.push(Arc::new(sink));
+                if let Some(client) = nats_client {
+                    out.push(Arc::new(NatsSink::new(client)));
+                } else {
+                    tracing::warn!(
+                        "NATS sink requested but no DistributedRuntime NATS client available; skipping"
+                    );
                 }
             }
             // "pg"   => out.push(Arc::new(PostgresSink::from_env())),
