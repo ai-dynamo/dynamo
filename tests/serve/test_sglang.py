@@ -42,7 +42,11 @@ sglang_configs = {
         model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         env={},
         models_port=8000,
-        request_payloads=[chat_payload_default(), completion_payload_default()],
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            # TODO: Add metric_payload_default(min_num_requests=N, backend="sglang")
+        ],
     ),
     "disaggregated": SGLangConfig(
         name="disaggregated",

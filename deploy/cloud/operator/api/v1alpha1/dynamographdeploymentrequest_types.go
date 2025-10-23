@@ -24,67 +24,13 @@ a high-level, SLA-driven interface for deploying machine learning models on Dyna
 package v1alpha1
 
 import (
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
-// SLASpec defines Service Level Agreement targets for model profiling and deployment.
-// These targets guide the profiling process to find optimal deployment configurations
-// that meet the specified performance requirements.
-type SLASpec struct {
-	// ITL is the target Inter-Token Latency in milliseconds.
-	// This represents the maximum time allowed between consecutive tokens in the output.
-	// +kubebuilder:default=10
-	// +optional
-	ITL int `json:"itl,omitempty"`
-
-	// TTFT is the target Time To First Token in milliseconds.
-	// This represents the maximum time allowed from request submission to receiving the first token.
-	// +kubebuilder:default=50
-	// +optional
-	TTFT int `json:"ttft,omitempty"`
-
-	// ISL is the Input Sequence Length for profiling.
-	// Defines the length of input sequences to use during profiling tests.
-	// +kubebuilder:default=3000
-	// +kubebuilder:validation:Minimum=1
-	// +optional
-	ISL int `json:"isl,omitempty"`
-
-	// OSL is the Output Sequence Length for profiling.
-	// Defines the expected length of output sequences to generate during profiling tests.
-	// +kubebuilder:default=500
-	// +kubebuilder:validation:Minimum=1
-	// +optional
-	OSL int `json:"osl,omitempty"`
-}
-
-// GPUSpec defines optional GPU type and resource specifications for profiling and deployment.
-// These constraints help narrow down the search space during profiling to find configurations
-// that fit within specified hardware bounds.
-type GPUSpec struct {
-	// Type specifies the GPU type to target (e.g., "h200", "h100", "a100").
-	// If specified, profiling will focus on configurations optimized for this GPU type.
-	// +kubebuilder:validation:Optional
-	Type string `json:"type,omitempty"`
-
-	// MinNumGPUsPerEngine specifies the minimum number of GPUs per engine for profiling.
-	// The profiler will not consider configurations with fewer GPUs than this value.
-	// +kubebuilder:validation:Optional
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:default=1
-	MinNumGPUsPerEngine int `json:"minNumGPUsPerEngine,omitempty"`
-
-	// MaxNumGPUsPerEngine specifies the maximum number of GPUs per engine for profiling.
-	// The profiler will not consider configurations with more GPUs than this value.
-	// +kubebuilder:validation:Optional
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:default=8
-	MaxNumGPUsPerEngine int `json:"maxNumGPUsPerEngine,omitempty"`
-}
 
 // ConfigMapKeySelector selects a specific key from a ConfigMap.
 // Used to reference external configuration data stored in ConfigMaps.
@@ -99,11 +45,19 @@ type ConfigMapKeySelector struct {
 }
 
 // ProfilingConfigSpec defines configuration for the profiling process.
-// Allows users to provide custom profiling parameters via ConfigMap references.
+// This structure maps directly to the profile_sla.py config format.
+// See benchmarks/profiler/utils/profiler_argparse.py for the complete schema.
 type ProfilingConfigSpec struct {
-	// ConfigMapRef is a reference to a ConfigMap containing profiling configuration.
-	// The ConfigMap should contain a key (default: "disagg.yaml") with the configuration file.
-	// This configuration is used by both online and offline (AIC) profiling modes.
+	// Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.
+	// The profiler will validate the configuration and report any errors.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	Config *apiextensionsv1.JSON `json:"config,omitempty"`
+
+	// ConfigMapRef is an optional reference to a ConfigMap containing the DynamoGraphDeployment
+	// base config file (disagg.yaml). This is separate from the profiling config above.
+	// The path to this config will be set as engine.config in the profiling config.
 	// +kubebuilder:validation:Optional
 	ConfigMapRef *ConfigMapKeySelector `json:"configMapRef,omitempty"`
 }
@@ -135,32 +89,17 @@ type DeploymentOverridesSpec struct {
 // This CRD serves as the primary interface for users to request model deployments with
 // specific performance constraints and resource requirements, enabling SLA-driven deployments.
 type DynamoGraphDeploymentRequestSpec struct {
-	// ModelName specifies the model to deploy (e.g., "meta/llama3-70b").
-	// This should be a valid model identifier that the profiler can resolve.
+	// ModelName specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
+	// This is a high-level identifier for easy reference in kubectl output and logs.
 	// +kubebuilder:validation:Required
 	ModelName string `json:"modelName"`
 
-	// Backend specifies the inference backend framework to use.
-	// Supported values are: "vllm", "sglang", "trtllm".
-	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
-	// +kubebuilder:default=trtllm
-	Backend string `json:"backend,omitempty"`
-
-	// SLA defines the Service Level Agreement profiling targets.
-	// The profiler uses these targets to find an optimal deployment configuration.
+	// ProfilingConfig provides the complete configuration for the profiling job.
+	// This configuration is passed directly to the profiler.
+	// The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).
+	// The profiler will validate the configuration and report any errors.
 	// +kubebuilder:validation:Required
-	SLA SLASpec `json:"sla"`
-
-	// GPU defines optional GPU type and resource specifications.
-	// These constraints guide the profiler to find configurations within specified bounds.
-	// +kubebuilder:validation:Optional
-	GPU *GPUSpec `json:"gpu,omitempty"`
-
-	// Online indicates whether to use online profiler (true) or AI Configurator (false).
-	// Online profiling uses real deployments for accurate measurements (2-4 hours).
-	// Offline profiling uses AI Configurator for fast simulation-based profiling (20-30 seconds).
-	// +kubebuilder:default=false
-	Online bool `json:"online,omitempty"`
+	ProfilingConfig ProfilingConfigSpec `json:"profilingConfig"`
 
 	// AutoApply indicates whether to automatically create a DynamoGraphDeployment
 	// after profiling completes. If false, only the spec is generated and stored in status.
@@ -172,11 +111,6 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// Only applicable when AutoApply is true.
 	// +kubebuilder:validation:Optional
 	DeploymentOverrides *DeploymentOverridesSpec `json:"deploymentOverrides,omitempty"`
-
-	// ProfilingConfig provides custom configuration for the profiling job.
-	// Applicable to both online and offline (AIC) profiling modes.
-	// +kubebuilder:validation:Optional
-	ProfilingConfig *ProfilingConfigSpec `json:"profilingConfig,omitempty"`
 }
 
 // DeploymentStatus tracks the state of an auto-created DynamoGraphDeployment.
@@ -204,6 +138,11 @@ type DynamoGraphDeploymentRequestStatus struct {
 	// Possible values: "", "Pending", "Profiling", "Deploying", "Ready", "DeploymentDeleted", "Failed"
 	// Empty string ("") represents the initial state before initialization.
 	State string `json:"state,omitempty"`
+
+	// Backend is extracted from profilingConfig.config.engine.backend for display purposes.
+	// This field is populated by the controller and shown in kubectl output.
+	// +kubebuilder:validation:Optional
+	Backend string `json:"backend,omitempty"`
 
 	// ObservedGeneration reflects the generation of the most recently observed spec.
 	// Used to detect spec changes and enforce immutability after profiling starts.
@@ -253,7 +192,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=dgdr
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.modelName`
-// +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.spec.backend`
+// +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.status.backend`
 // +kubebuilder:printcolumn:name="State",type=string,JSONPath=`.status.state`
 // +kubebuilder:printcolumn:name="DGD-State",type=string,JSONPath=`.status.deployment.state`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
