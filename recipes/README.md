@@ -285,7 +285,7 @@ pkill -f "kubectl port-forward"
 
 ## Performance Benchmarking (Optional)
 
-Run performance benchmarks to evaluate model performance. Note that benchmarking is only available for models that include a `perf.yaml` file:
+Run performance benchmarks to evaluate model performance. Note that benchmarking is only available for models that include a `perf.yaml` file (optional):
 
 ### Step 1: Launch Benchmark Job
 
@@ -519,6 +519,6 @@ When adding new recipes, ensure they follow the standard structure:
 ├── <framework>/
 │   └── <deployment-mode>/
 │       ├── deploy.yaml
-│       └── perf.yaml
+│       └── perf.yaml (optional)
 └── README.md (optional)
 ```
