@@ -20,7 +20,7 @@ pub type EndpointStatsHandler =
     Box<dyn FnMut(EndpointStats) -> serde_json::Value + Send + Sync + 'static>;
 
 pub const PROJECT_NAME: &str = "Dynamo";
-const SERVICE_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const SERVICE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub async fn build_nats_service(
     nats_client: &crate::transports::nats::Client,

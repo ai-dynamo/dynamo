@@ -170,6 +170,11 @@ pub struct Component {
     // A static component's endpoints cannot be discovered via etcd, they are
     // fixed at startup time.
     is_static: bool,
+
+    /// Handle for this component's registration with service discovery
+    #[builder(default)]
+    #[educe(Debug(ignore))]
+    instance_handle: Option<Arc<parking_lot::Mutex<Box<dyn crate::discovery::InstanceHandle>>>>,
 }
 
 impl Hash for Component {
@@ -254,6 +259,11 @@ impl Component {
 
     pub fn labels(&self) -> &[(String, String)] {
         &self.labels
+    }
+
+    /// Get the instance handle for this component
+    pub fn instance_handle(&self) -> Result<Arc<parking_lot::Mutex<Box<dyn crate::discovery::InstanceHandle>>>> {
+        self.instance_handle.clone().ok_or_else(|| error!("Component not registered with service discovery"))
     }
 
     pub fn endpoint(&self, endpoint: impl Into<String>) -> Endpoint {
@@ -387,6 +397,14 @@ impl Component {
             anyhow::bail!("Service {service_name} already exists");
         }
 
+        // 1. Register with service discovery
+        let instance_handle = {
+            let discovery = self.drt.service_discovery();
+            let discovery_guard = discovery.lock();
+            discovery_guard.register_instance(&self.namespace.name(), &self.name).await?
+        };
+
+        // 2. Setup NATS service
         let Some(nats_client) = self.drt.nats_client() else {
             anyhow::bail!("Cannot create NATS service without NATS.");
         };
@@ -394,6 +412,17 @@ impl Component {
         let (nats_service, stats_reg) =
             service::build_nats_service(nats_client, self, description).await?;
 
+        // 3. Store transport details in metadata
+        instance_handle.set_metadata(serde_json::json!({
+            "transport": {
+                "type": "nats",
+                "service_name": service_name,
+                "version": service::SERVICE_VERSION,
+            },
+            "endpoints": {},  // Will be populated as endpoints are added
+        })).await?;
+
+        // 4. Update component registry
         let mut guard = self.drt.component_registry.inner.lock().await;
         if !guard.services.contains_key(&service_name) {
             // Normal case
@@ -408,10 +437,14 @@ impl Component {
             ));
         }
 
-        // Register metrics callback. CRITICAL: Never fail service creation for metrics issues.
+        // 5. Store instance handle on component
+        self.instance_handle = Some(Arc::new(parking_lot::Mutex::new(instance_handle)));
+
+        // 6. Register metrics callback. CRITICAL: Never fail service creation for metrics issues.
         if let Err(err) = self.start_scraping_nats_service_component_metrics() {
             tracing::debug!(service_name, error = %err, "Metrics registration failed");
         }
+
         Ok(())
     }
 }
