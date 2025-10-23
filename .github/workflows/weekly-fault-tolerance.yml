@@ -12,12 +12,6 @@ on:
 
   # Allow manual triggering for testing
   workflow_dispatch:
-    inputs:
-      test_scenarios:
-        description: 'Test scenarios to run (comma-separated or "all")'
-        required: false
-        default: 'all'
-        type: string
 
 concurrency:
   group: ${{ github.workflow }}-weekly-${{ github.ref_name || github.run_id }}
