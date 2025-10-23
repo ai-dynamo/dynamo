@@ -165,7 +165,7 @@ Test complete scaling behavior including Kubernetes deployment and load generati
 
 **Prerequisites:**
 
-- **[kube-prometheus-stack](../../docs/kubernetes/metrics.md) installed and running.** The SLA planner requires Prometheus to observe metrics and make scaling decisions.
+- **[kube-prometheus-stack](../../docs/kubernetes/observability/metrics.md) installed and running.** The SLA planner requires Prometheus to observe metrics and make scaling decisions.
 - Ensure the Dynamo operator was installed with the Prometheus endpoint configured (see [SLA Planner Quickstart Guide](../../docs/planner/sla_planner_quickstart.md#prerequisites) for details).
 
 **Prepare the test deployment manifest:**
