@@ -302,9 +302,9 @@ jobs:
       fail-fast: false
       matrix:
         test_scenario:
-          - vllm-disagg-tp-1-dp-2-decode_worker_pod
-          - trtllm-disagg-tp-1-dp-2-decode_worker_pod
-          - sglang-disagg-tp-1-dp-2-decode_worker_pod
+          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod
+          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod
+          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod
     name: deploy-test-fault-tolerance (${{ matrix.test_scenario }})
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
