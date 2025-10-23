@@ -10,6 +10,13 @@ on:
     # This runs at 5:30 PM UTC (17:30) every day
     - cron: '30 17 * * *'
 
+  # TEMPORARY: For testing on feature branch - REMOVE BEFORE MERGING TO MAIN
+  push:
+    branches:
+      - 'ibhosale-nightly-ci'  # Replace with your actual branch name
+    paths:
+      - '.github/workflows/nightly-fault-tolerance.yml'
+
   # Allow manual triggering for testing
   workflow_dispatch:
     inputs:
