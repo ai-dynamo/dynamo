@@ -52,7 +52,7 @@ impl WorkerLoadState {
 /// Worker monitor for tracking KV cache usage and busy states
 pub struct KvWorkerMonitor {
     client: Arc<Client>,
-    worker_load_states: Arc<RwLock<HashMap<i64, WorkerLoadState>>>,
+    worker_load_states: Arc<RwLock<HashMap<u64, WorkerLoadState>>>,
     busy_threshold: f64,
 }
 
@@ -67,7 +67,7 @@ impl KvWorkerMonitor {
     }
 
     /// Get the worker load states for external access
-    pub fn load_states(&self) -> Arc<RwLock<HashMap<i64, WorkerLoadState>>> {
+    pub fn load_states(&self) -> Arc<RwLock<HashMap<u64, WorkerLoadState>>> {
         self.worker_load_states.clone()
     }
 }
@@ -154,7 +154,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
                             // Recalculate all busy instances and update
                             let states = worker_load_states.read().unwrap();
-                            let busy_instances: Vec<i64> = states
+                            let busy_instances: Vec<u64> = states
                                 .iter()
                                 .filter_map(|(&id, state)| {
                                     state.is_busy(busy_threshold).then_some(id)

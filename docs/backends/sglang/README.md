@@ -34,9 +34,9 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | SGLang | Notes |
 |---------|--------|-------|
-| [**Disaggregated Serving**](../../architecture/disagg_serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
-| [**KV-Aware Routing**](../../architecture/kv_cache_routing.md) | ✅ |  |
+| [**Disaggregated Serving**](../../design_docs/disagg_serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../design_docs/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
+| [**KV-Aware Routing**](../../router/kv_cache_routing.md) | ✅ |  |
 | [**SLA-Based Planner**](../../planner/sla_planner.md) | ✅ |  |
 | [**Multimodal EPD Disaggregation**](multimodal_epd.md) | ✅ |  |
 | [**KVBM**](../../kvbm/kvbm_architecture.md) | ❌ | Planned |
@@ -55,7 +55,7 @@ Dynamo SGLang uses SGLang's native argument parser, so **most SGLang engine argu
 | Argument | Description | Default | SGLang Equivalent |
 |----------|-------------|---------|-------------------|
 | `--endpoint` | Dynamo endpoint in `dyn://namespace.component.endpoint` format | Auto-generated based on mode | N/A |
-| `--migration-limit` | Max times a request can migrate between workers for fault tolerance. See [Request Migration Architecture](../../../docs/architecture/request_migration.md). | `0` (disabled) | N/A |
+| `--migration-limit` | Max times a request can migrate between workers for fault tolerance. See [Request Migration Architecture](../../fault_tolerance/request_migration.md). | `0` (disabled) | N/A |
 | `--dyn-tool-call-parser` | Tool call parser for structured outputs (takes precedence over `--tool-call-parser`) | `None` | `--tool-call-parser` |
 | `--dyn-reasoning-parser` | Reasoning parser for CoT models (takes precedence over `--reasoning-parser`) | `None` | `--reasoning-parser` |
 | `--use-sglang-tokenizer` | Use SGLang's tokenizer instead of Dynamo's | `False` | N/A |
@@ -83,7 +83,7 @@ When a user cancels a request (e.g., by disconnecting from the frontend), the re
 > [!WARNING]
 > ⚠️ SGLang backend currently does not support cancellation during remote prefill phase in disaggregated mode.
 
-For more details, see the [Request Cancellation Architecture](../../architecture/request_cancellation.md) documentation.
+For more details, see the [Request Cancellation Architecture](../../fault_tolerance/request_cancellation.md) documentation.
 
 ## Installation
 

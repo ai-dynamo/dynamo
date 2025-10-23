@@ -310,7 +310,7 @@ pub fn make_handle_payload_span(
     component: &str,
     endpoint: &str,
     namespace: &str,
-    instance_id: i64,
+    instance_id: u64,
 ) -> Span {
     let (otel_context, trace_id, parent_span_id) = extract_otel_context_from_nats_headers(headers);
     let trace_parent = TraceParent::from_headers(headers);

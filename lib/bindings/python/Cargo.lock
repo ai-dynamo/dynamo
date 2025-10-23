@@ -1466,6 +1466,7 @@ dependencies = [
  "async_zmq",
  "axum",
  "axum-server",
+ "bincode",
  "bitflags 2.9.3",
  "blake3",
  "bs62",

@@ -28,6 +28,11 @@ limitations under the License.
 
 Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API group.
 
+This package defines the DynamoGraphDeploymentRequest (DGDR) custom resource, which provides
+a high-level, SLA-driven interface for deploying machine learning models on Dynamo.
+
+Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API group.
+
 ### Resource Types
 - [DynamoComponentDeployment](#dynamocomponentdeployment)
 - [DynamoGraphDeployment](#dynamographdeployment)
@@ -62,7 +67,8 @@ _Appears in:_
 
 
 
-ConfigMapKeySelector selects a key from a ConfigMap.
+ConfigMapKeySelector selects a specific key from a ConfigMap.
+Used to reference external configuration data stored in ConfigMaps.
 
 
 
@@ -71,15 +77,16 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | Name of the ConfigMap. |  | Required: {} <br /> |
-| `key` _string_ | Key in the ConfigMap to select. | disagg.yaml |  |
+| `name` _string_ | Name of the ConfigMap containing the desired data. |  | Required: {} <br /> |
+| `key` _string_ | Key in the ConfigMap to select. If not specified, defaults to "disagg.yaml". | disagg.yaml |  |
 
 
 #### DeploymentOverridesSpec
 
 
 
-DeploymentOverridesSpec defines metadata overrides for the auto-created DGD.
+DeploymentOverridesSpec allows users to customize metadata for auto-created DynamoGraphDeployments.
+When autoApply is enabled, these overrides are applied to the generated DGD resource.
 
 
 
@@ -88,17 +95,18 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | Name is the name for the created DynamoGraphDeployment.<br />If not specified, defaults to the DGDR name. |  | Optional: {} <br /> |
-| `namespace` _string_ | Namespace is the namespace for the created DynamoGraphDeployment.<br />If not specified, defaults to the DGDR namespace. |  | Optional: {} <br /> |
-| `labels` _object (keys:string, values:string)_ | Labels are additional labels to add to the DynamoGraphDeployment.<br />These are merged with auto-generated labels. |  | Optional: {} <br /> |
-| `annotations` _object (keys:string, values:string)_ | Annotations are additional annotations to add to the DynamoGraphDeployment. |  | Optional: {} <br /> |
+| `name` _string_ | Name is the desired name for the created DynamoGraphDeployment.<br />If not specified, defaults to the DGDR name. |  | Optional: {} <br /> |
+| `namespace` _string_ | Namespace is the desired namespace for the created DynamoGraphDeployment.<br />If not specified, defaults to the DGDR namespace. |  | Optional: {} <br /> |
+| `labels` _object (keys:string, values:string)_ | Labels are additional labels to add to the DynamoGraphDeployment metadata.<br />These are merged with auto-generated labels from the profiling process. |  | Optional: {} <br /> |
+| `annotations` _object (keys:string, values:string)_ | Annotations are additional annotations to add to the DynamoGraphDeployment metadata. |  | Optional: {} <br /> |
 
 
 #### DeploymentStatus
 
 
 
-DeploymentStatus tracks the auto-created DGD status.
+DeploymentStatus tracks the state of an auto-created DynamoGraphDeployment.
+This status is populated when autoApply is enabled and a DGD is created.
 
 
 
@@ -109,8 +117,8 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ | Name is the name of the created DynamoGraphDeployment. |  |  |
 | `namespace` _string_ | Namespace is the namespace of the created DynamoGraphDeployment. |  |  |
-| `state` _string_ | State is the current state of the DynamoGraphDeployment.<br />This is mirrored from the DGD's status.state field. |  |  |
-| `created` _boolean_ | Created indicates whether the DGD has been created.<br />Used to prevent recreation if DGD is deleted by user. |  |  |
+| `state` _string_ | State is the current state of the DynamoGraphDeployment.<br />This value is mirrored from the DGD's status.state field. |  |  |
+| `created` _boolean_ | Created indicates whether the DGD has been successfully created.<br />Used to prevent recreation if the DGD is manually deleted by users. |  |  |
 
 
 #### DynamoComponentDeployment
@@ -229,6 +237,19 @@ It serves as the primary interface for users to request model deployments with
 specific performance and resource constraints, enabling SLA-driven deployments.
 
 
+Lifecycle:
+ 1. Initial → Pending: Validates spec and prepares for profiling
+ 2. Pending → Profiling: Creates and runs profiling job (online or AIC)
+ 3. Profiling → Ready/Deploying: Generates DGD spec after profiling completes
+ 4. Deploying → Ready: When autoApply=true, monitors DGD until Ready
+ 5. Ready: Terminal state when DGD is operational or spec is available
+ 6. DeploymentDeleted: Terminal state when auto-created DGD is manually deleted
+
+
+The spec becomes immutable once profiling starts. Users must delete and recreate
+the DGDR to modify configuration after this point.
+
+
 
 
 
@@ -245,9 +266,9 @@ specific performance and resource constraints, enabling SLA-driven deployments.
 
 
 
-DynamoGraphDeploymentRequestSpec defines the desired state of DynamoGraphDeploymentRequest.
-This CRD serves as the primary interface for users to request model deployments
-with specific performance and resource constraints for SLA-driven deployments.
+DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
+This CRD serves as the primary interface for users to request model deployments with
+specific performance constraints and resource requirements, enabling SLA-driven deployments.
 
 
 
@@ -256,21 +277,18 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `modelName` _string_ | ModelName specifies the model to deploy (e.g., "meta/llama3-70b"). |  | Required: {} <br /> |
-| `backend` _string_ | Backend specifies the backend framework to use. | trtllm | Enum: [vllm sglang trtllm] <br /> |
-| `sla` _[SLASpec](#slaspec)_ | SLA defines the Service Level Agreement profiling targets. |  | Required: {} <br /> |
-| `gpu` _[GPUSpec](#gpuspec)_ | GPU defines optional GPU type specification. |  | Optional: {} <br /> |
-| `online` _boolean_ | Online indicates whether to use online profiler (true) or AI Configurator (false).<br />When true, uses real deployment for profiling (2-4 hours).<br />When false, uses AI Configurator for fast profiling (20-30 seconds). | false |  |
-| `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, only the spec is generated in status. | false |  |
-| `deploymentOverrides` _[DeploymentOverridesSpec](#deploymentoverridesspec)_ | DeploymentOverrides allows overriding metadata for the auto-created DGD.<br />Only used when AutoApply is true. |  | Optional: {} <br /> |
-| `profilingConfig` _[ProfilingConfigSpec](#profilingconfigspec)_ | ProfilingConfig provides configuration for the profiling job.<br />Can be used for both online and offline (AIC) profiling. |  | Optional: {} <br /> |
+| `modelName` _string_ | ModelName specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").<br />This is a high-level identifier for easy reference in kubectl output and logs. |  | Required: {} <br /> |
+| `profilingConfig` _[ProfilingConfigSpec](#profilingconfigspec)_ | ProfilingConfig provides the complete configuration for the profiling job.<br />This configuration is passed directly to the profiler.<br />The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).<br />The profiler will validate the configuration and report any errors. |  | Required: {} <br /> |
+| `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, only the spec is generated and stored in status.<br />Users can then manually create a DGD using the generated spec. | false |  |
+| `deploymentOverrides` _[DeploymentOverridesSpec](#deploymentoverridesspec)_ | DeploymentOverrides allows customizing metadata for the auto-created DGD.<br />Only applicable when AutoApply is true. |  | Optional: {} <br /> |
 
 
 #### DynamoGraphDeploymentRequestStatus
 
 
 
-DynamoGraphDeploymentRequestStatus defines the observed state of DynamoGraphDeploymentRequest.
+DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest.
+The controller updates this status as the DGDR progresses through its lifecycle.
 
 
 
@@ -279,12 +297,13 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `state` _string_ | State is a high-level textual status of the deployment request lifecycle.<br />Possible values: "Pending", "Profiling", "Deploying", "Ready", "DeploymentDeleted", "Failed" |  |  |
-| `observedGeneration` _integer_ | ObservedGeneration reflects the generation of the most recently observed spec.<br />Used to detect spec changes and enforce immutability. |  |  |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />The slice is merged by type on patch updates. |  |  |
-| `profilingResults` _string_ | ProfilingResults contains references to the profiling data and results. |  | Optional: {} <br /> |
-| `generatedDeployment` _[RawExtension](#rawextension)_ | GeneratedDeployment contains the full generated DynamoGraphDeployment (including metadata)<br />based on profiling results. This can be used to create a DynamoGraphDeployment resource.<br />Stored as RawExtension to preserve all fields including metadata. |  | EmbeddedResource: {} <br />Optional: {} <br /> |
-| `deployment` _[DeploymentStatus](#deploymentstatus)_ | Deployment tracks the auto-created DGD if AutoApply is true. |  | Optional: {} <br /> |
+| `state` _string_ | State is a high-level textual status of the deployment request lifecycle.<br />Possible values: "", "Pending", "Profiling", "Deploying", "Ready", "DeploymentDeleted", "Failed"<br />Empty string ("") represents the initial state before initialization. |  |  |
+| `backend` _string_ | Backend is extracted from profilingConfig.config.engine.backend for display purposes.<br />This field is populated by the controller and shown in kubectl output. |  | Optional: {} <br /> |
+| `observedGeneration` _integer_ | ObservedGeneration reflects the generation of the most recently observed spec.<br />Used to detect spec changes and enforce immutability after profiling starts. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />Standard condition types include: Validation, Profiling, SpecGenerated, DeploymentReady.<br />Conditions are merged by type on patch updates. |  |  |
+| `profilingResults` _string_ | ProfilingResults contains a reference to the ConfigMap holding profiling data.<br />Format: "configmap/<name>" |  | Optional: {} <br /> |
+| `generatedDeployment` _[RawExtension](#rawextension)_ | GeneratedDeployment contains the full generated DynamoGraphDeployment specification<br />including metadata, based on profiling results. Users can extract this to create<br />a DGD manually, or it's used automatically when autoApply is true.<br />Stored as RawExtension to preserve all fields including metadata. |  | EmbeddedResource: {} <br />Optional: {} <br /> |
+| `deployment` _[DeploymentStatus](#deploymentstatus)_ | Deployment tracks the auto-created DGD when AutoApply is true.<br />Contains name, namespace, state, and creation status of the managed DGD. |  | Optional: {} <br /> |
 
 
 #### DynamoGraphDeploymentSpec
@@ -321,24 +340,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `state` _string_ | State is a high-level textual status of the graph deployment lifecycle. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the graph deployment.<br />The slice is merged by type on patch updates. |  |  |
-
-
-#### GPUSpec
-
-
-
-GPUSpec defines optional GPU type specification.
-
-
-
-_Appears in:_
-- [DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `type` _string_ | Type specifies the GPU type (e.g., "h200", "h100", "a100"). |  | Optional: {} <br /> |
-| `minNumGPUsPerEngine` _integer_ | MinNumGPUsPerEngine specifies the minimum number of GPUs per engine for profiling. | 1 | Minimum: 1 <br />Optional: {} <br /> |
-| `maxNumGPUsPerEngine` _integer_ | MaxNumGPUsPerEngine specifies the maximum number of GPUs per engine for profiling. | 8 | Minimum: 1 <br />Optional: {} <br /> |
 
 
 #### IngressSpec
@@ -424,7 +425,9 @@ _Appears in:_
 
 
 
-ProfilingConfigSpec defines the profiling configuration.
+ProfilingConfigSpec defines configuration for the profiling process.
+This structure maps directly to the profile_sla.py config format.
+See benchmarks/profiler/utils/profiler_argparse.py for the complete schema.
 
 
 
@@ -433,26 +436,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `configMapRef` _[ConfigMapKeySelector](#configmapkeyselector)_ | ConfigMapRef is a reference to a ConfigMap containing the profiling configuration.<br />The ConfigMap should contain a key (default: "disagg.yaml") with the configuration file.<br />Can be used for both online and offline (AIC) profiling. |  | Optional: {} <br /> |
-
-
-#### SLASpec
-
-
-
-SLASpec defines the Service Level Agreement profiling targets.
-
-
-
-_Appears in:_
-- [DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `itl` _integer_ | ITL is the target Inter-Token Latency in milliseconds. |  | Required: {} <br /> |
-| `ttft` _integer_ | TTFT is the target Time To First Token in milliseconds. |  | Required: {} <br /> |
-| `isl` _integer_ | ISL is the Input Sequence Length for profiling. |  | Minimum: 1 <br />Required: {} <br /> |
-| `osl` _integer_ | OSL is the Output Sequence Length for profiling. |  | Minimum: 1 <br />Required: {} <br /> |
+| `config` _[JSON](#json)_ | Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.<br />The profiler will validate the configuration and report any errors. |  | Optional: {} <br />Type: object <br /> |
+| `configMapRef` _[ConfigMapKeySelector](#configmapkeyselector)_ | ConfigMapRef is an optional reference to a ConfigMap containing the DynamoGraphDeployment<br />base config file (disagg.yaml). This is separate from the profiling config above.<br />The path to this config will be set as engine.config in the profiling config. |  | Optional: {} <br /> |
 
 
 #### SharedMemorySpec
@@ -588,7 +573,16 @@ For larger models (typically >70B parameters) or slower storage systems, you may
 For multinode deployments, the operator modifies probes based on the backend framework and node role:
 
 #### VLLM Backend
+
+The operator automatically selects between two deployment modes based on parallelism configuration:
+
+**Ray-Based Mode** (when `world_size > GPUs_per_node`):
 - **Worker nodes**: All probes (liveness, readiness, startup) are removed
+- **Leader nodes**: All probes remain active
+
+**Data Parallel Mode** (when `world_size × data_parallel_size > GPUs_per_node`):
+- **Worker nodes**: All probes (liveness, readiness, startup) are removed
+- **Leader nodes**: All probes remain active
 
 #### SGLang Backend
 - **Worker nodes**: All probes (liveness, readiness, startup) are removed
@@ -686,7 +680,8 @@ Default container ports are configured based on component type:
 ## Backend-Specific Configurations
 
 ### VLLM
-- **Ray Head Port**: 6379 (for multinode deployments)
+- **Ray Head Port**: 6379 (for Ray-based multinode deployments)
+- **Data Parallel RPC Port**: 13445 (for data parallel multinode deployments)
 
 ### SGLang
 - **Distribution Init Port**: 29500 (for multinode deployments)
