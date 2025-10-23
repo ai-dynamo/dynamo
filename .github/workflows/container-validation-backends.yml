@@ -441,6 +441,7 @@ jobs:
           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
           --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
           --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret \
+          --set global.security.allowInsecureImages=true \
           --set nats.container.image.registry=${{ secrets.AZURE_ACR_HOSTNAME }}/dockerhub \
           --set nats.reloader.image.registry=${{ secrets.AZURE_ACR_HOSTNAME }}/dockerhub \
           --set etcd.image.registry=${{ secrets.AZURE_ACR_HOSTNAME }}/dockerhub \
