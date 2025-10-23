@@ -55,6 +55,18 @@ def create_temp_engine_args_file(args) -> Path:
     return temp_path
 
 
+def validate_worker_type_args(args):
+    """
+    Validate that is_prefill_worker and is_decode_worker are not both True.
+    Raises ValueError if validation fails.
+    """
+    if args.is_prefill_worker and args.is_decode_worker:
+        raise ValueError(
+            "Cannot specify both --is-prefill-worker and --is-decode-worker. "
+            "A worker must be either prefill, decode, or aggregated (neither flag set)."
+        )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Mocker engine for testing Dynamo LLM infrastructure with vLLM-style CLI.",
@@ -185,4 +197,6 @@ def parse_args():
         help="Mark this as a decode worker which does not publish KV events and skips prefill cost estimation (default: False)",
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    validate_worker_type_args(args)
+    return args

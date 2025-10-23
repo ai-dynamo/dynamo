@@ -61,6 +61,18 @@ pub struct OutputSignal {
     pub completed: bool,
 }
 
+/// Worker type for disaggregated serving configurations
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum WorkerType {
+    /// Standard aggregated worker handling both prefill and decode
+    #[default]
+    Aggregated,
+    /// Dedicated prefill worker in disaggregated mode
+    Prefill,
+    /// Dedicated decode worker in disaggregated mode
+    Decode,
+}
+
 /// Configuration arguments for MockVllmEngine
 #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
 #[builder(pattern = "owned", build_fn(public))]
@@ -98,13 +110,9 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub startup_time: Option<f64>,
 
-    /// Whether this is a prefill worker (for disaggregated serving)
-    #[builder(default = "false")]
-    pub is_prefill: bool,
-
-    /// Whether this is a decode worker (for disaggregated serving)
-    #[builder(default = "false")]
-    pub is_decode: bool,
+    /// Worker type for disaggregated serving (Aggregated, Prefill, or Decode)
+    #[builder(default = "WorkerType::Aggregated")]
+    pub worker_type: WorkerType,
 }
 
 impl Default for MockEngineArgs {
@@ -223,17 +231,27 @@ impl MockEngineArgs {
             builder = builder.startup_time(Some(num));
         }
 
-        if let Some(value) = extra_args.get("is_prefill")
-            && let Some(enabled) = value.as_bool()
-        {
-            builder = builder.is_prefill(enabled);
-        }
+        // Parse worker type from is_prefill and is_decode flags
+        let is_prefill = extra_args
+            .get("is_prefill")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let is_decode = extra_args
+            .get("is_decode")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
-        if let Some(value) = extra_args.get("is_decode")
-            && let Some(enabled) = value.as_bool()
-        {
-            builder = builder.is_decode(enabled);
-        }
+        // Determine worker type based on flags
+        let worker_type = match (is_prefill, is_decode) {
+            (false, false) => WorkerType::Aggregated,
+            (true, false) => WorkerType::Prefill,
+            (false, true) => WorkerType::Decode,
+            (true, true) => panic!(
+                "Invalid worker configuration: is_prefill and is_decode cannot both be true. \
+                 Worker must be either Aggregated (both false), Prefill (is_prefill=true), or Decode (is_decode=true)."
+            ),
+        };
+        builder = builder.worker_type(worker_type);
 
         // Build the MockEngineArgs with either defaults or overridden values
         builder
