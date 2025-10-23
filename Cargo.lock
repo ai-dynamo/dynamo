@@ -2164,11 +2164,6 @@ dependencies = [
  "async_zmq",
  "axum 0.8.4",
  "axum-server",
- "base64 0.22.1",
-<<<<<<< HEAD
- "bincode",
-=======
->>>>>>> a0f0e5a18 (feat: Media processing in the frontend - 1st pass)
  "bitflags 2.9.4",
  "blake3",
  "bs62",
@@ -9600,18 +9595,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "video-rs"
-version = "0.10.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "859aad7261bac267f90f9635ec9addba3b4bcb4bbb2edb03fec3e6b765657bee"
-dependencies = [
- "ffmpeg-next",
- "ndarray",
- "tracing",
- "url",
-]
 
 [[package]]
 name = "vob"

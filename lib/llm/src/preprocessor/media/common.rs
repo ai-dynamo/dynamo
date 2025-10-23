@@ -11,6 +11,28 @@ pub struct EncodedMediaData {
     pub(crate) b64_encoded: bool,
 }
 
+// Decoded media data (image RGB, video frames pixels, ...)
+pub struct DecodedMediaData {
+    data: SystemStorage,
+    shape: Vec<usize>,
+    dtype: String,
+}
+
+// Decoded media data NIXL descriptor (sent to the next step in the pipeline / NATS)
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RdmaMediaDataDescriptor {
+    // b64 agent metadata
+    nixl_metadata: String,
+    // tensor descriptor
+    nixl_descriptor: NixlStorage,
+    shape: Vec<usize>,
+    dtype: String,
+    // reference to the actual data, kept alive while the rdma descriptor is alive
+    #[serde(skip, default)]
+    #[allow(dead_code)]
+    source_storage: Option<Arc<SystemStorage>>,
+}
+
 impl EncodedMediaData {
     // Handles both web URLs (will download the bytes) and data URLs (will keep b64-encoded)
     // This function is kept in tokio runtime so we do not want any expensive operations
