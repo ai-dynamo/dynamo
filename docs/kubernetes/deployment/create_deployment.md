@@ -1,25 +1,79 @@
 # Creating Kubernetes Deployments
 
 The scripts in the `components/<backend>/launch` folder like [agg.sh](../../../components/backends/vllm/launch/agg.sh) demonstrate how you can serve your models locally.
-The corresponding YAML files like [agg.yaml](../../../components/backends/vllm/deploy/agg.yaml) show you how you could create a kubernetes deployment for your inference graph.
-
+The corresponding YAML files like [agg.yaml](../../../components/backends/vllm/deploy/agg.yaml) show you how you could create a Kubernetes deployment for your inference graph.
 
 This guide explains how to create your own deployment files.
 
 ## Step 1: Choose Your Architecture Pattern
 
+Before choosing a template, understand the different architecture patterns:
+
+### Aggregated Serving (agg.yaml)
+
+**Pattern**: Prefill and decode on the same GPU in a single process.
+
+**Suggested to use for**:
+- Small to medium models (under 70B parameters)
+- Development and testing
+- Low to moderate traffic
+- Simplicity is prioritized over maximum throughput
+
+**Tradeoffs**:
+- Simpler setup and debugging
+- Lower operational complexity
+- GPU utilization may not be optimal (prefill and decode compete for resources)
+- Lower throughput ceiling compared to disaggregated
+
+**Example**: [`agg.yaml`](../../../components/backends/vllm/deploy/agg.yaml)
+
+### Aggregated + Router (agg_router.yaml)
+
+**Pattern**: Load balancer routing across multiple aggregated worker instances.
+
+**Suggested to use for**:
+- Medium traffic requiring high availability
+- Need horizontal scaling
+- Want some load balancing without disaggregation complexity
+
+**Tradeoffs**:
+- Better scalability than plain aggregated
+- High availability through multiple replicas
+- Still has GPU underutilization issues of aggregated serving
+- More complex than plain aggregated but simpler than disaggregated
+
+**Example**: [`agg_router.yaml`](../../../components/backends/vllm/deploy/agg_router.yaml)
+
+### Disaggregated Serving (disagg_router.yaml)
+
+**Pattern**: Separate prefill and decode workers with specialized optimization.
+
+**Suggested to use for**:
+- Production-style deployments
+- High throughput requirements
+- Large models (70B+ parameters)
+- Maximum GPU utilization needed
+
+**Tradeoffs**:
+- Maximum performance and throughput
+- Better GPU utilization (prefill and decode specialized)
+- Independent scaling of prefill and decode
+- More complex setup and debugging
+- Requires understanding of prefill/decode separation
+
+**Example**: [`disagg_router.yaml`](../../../components/backends/vllm/deploy/disagg_router.yaml)
+
+### Quick Selection Guide
+
 Select the architecture pattern as your template that best fits your use case.
 
-For example, when using the `VLLM` inference backend:
+For example, when using the `vLLM` backend:
 
-- **Development / Testing**
-  Use [`agg.yaml`](/components/backends/vllm/deploy/agg.yaml) as the base configuration.
+- **Development / Testing**: Use [`agg.yaml`](../../../components/backends/vllm/deploy/agg.yaml) as the base configuration.
 
-- **Production with Load Balancing**
-  Use [`agg_router.yaml`](/components/backends/vllm/deploy/agg_router.yaml) to enable scalable, load-balanced inference.
+- **Production with Load Balancing**: Use [`agg_router.yaml`](../../../components/backends/vllm/deploy/agg_router.yaml) to enable scalable, load-balanced inference.
 
-- **High Performance / Disaggregated Deployment**
-  Use [`disagg_router.yaml`](/components/backends/vllm/deploy/disagg_router.yaml) for maximum throughput and modular scalability.
+- **High Performance / Disaggregated Deployment**: Use [`disagg_router.yaml`](../../../components/backends/vllm/deploy/disagg_router.yaml) for maximum throughput and modular scalability.
 
 
 ## Step 2: Customize the Template
@@ -90,7 +144,7 @@ Consult the corresponding sh file. Each of the python commands to launch a compo
 
 The front end is launched with "python3 -m dynamo.frontend [--http-port 8000] [--router-mode kv]"
 Each worker will launch `python -m dynamo.YOUR_INFERENCE_BACKEND --model YOUR_MODEL --your-flags `command.
-If you are a Dynamo contributor the [dynamo run guide](/docs/reference/cli.md) for details on how to run this command.
+If you are a Dynamo contributor the [dynamo run guide](../../reference/cli.md) for details on how to run this command.
 
 
 ## Step 3: Key Customization Points
