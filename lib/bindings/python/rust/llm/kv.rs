@@ -143,7 +143,6 @@ impl ZmqKvEventPublisher {
     fn new(component: Component, config: ZmqKvEventPublisherConfig) -> PyResult<Self> {
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
             component.inner,
-            config.worker_id,
             config.kv_block_size as u32,
             Some(KvEventSourceConfig::Zmq {
                 endpoint: config.zmq_endpoint,
@@ -239,10 +238,9 @@ pub(crate) struct KvEventPublisher {
 #[pymethods]
 impl KvEventPublisher {
     #[new]
-    #[pyo3(signature = (component, worker_id, kv_block_size, dp_rank=0))]
+    #[pyo3(signature = (component, kv_block_size, dp_rank=0))]
     fn new(
         component: Component,
-        worker_id: WorkerId,
         kv_block_size: usize,
         dp_rank: DpRank,
     ) -> PyResult<Self> {
@@ -252,7 +250,6 @@ impl KvEventPublisher {
 
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
             component.inner,
-            worker_id,
             kv_block_size as u32,
             None,
         )

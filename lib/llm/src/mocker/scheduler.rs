@@ -28,14 +28,14 @@
 //! ## NOTE
 //! The current prefill and decoding time simulations are not scientific at all and are WIP
 
-use crate::kv_router::protocols::{ForwardPassMetrics, KvCacheEventData, KvStats, WorkerStats};
+use crate::kv_router::protocols::{ForwardPassMetrics, KvStats, WorkerStats};
 use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::kv_manager::KvManager;
-use crate::mocker::protocols::{DirectRequest, MockEngineArgs, MoveBlockResponse};
-use crate::mocker::protocols::{MoveBlock, OutputSignal, PrefillCost, block_response_to_kv_event};
+use crate::mocker::protocols::{
+    DirectRequest, MockEngineArgs, MoveBlock, OutputSignal, PrefillCost,
+};
 use crate::mocker::running_mean::RunningMean;
 use crate::mocker::sequence::ActiveSequence;
-use crate::tokens::BlockHash;
 use crate::tokens::blocks::UniqueBlock;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -112,9 +112,8 @@ impl SchedulerState {
     /// Returns `Some((prefill_compute, creation_signal, is_full_prefill))` where:
     /// - `prefill_compute`: The compute time in milliseconds for this prefill operation
     /// - `creation_signal`: Optional MoveBlock signal for KV cache block creation
-    /// - `block_hashes`: Block hashes of the sequence beign prefilled
     /// - `is_full_prefill`: true if the entire sequence was prefilled, false if chunked
-    fn try_prefill(&mut self) -> Option<(f64, Option<MoveBlock>, Vec<BlockHash>, bool)> {
+    fn try_prefill(&mut self) -> Option<(f64, Option<MoveBlock>, bool)> {
         let uuid = self.prefill.pop_front()?;
 
         // Remove and extract prefill_compute from prefill_costs
@@ -169,7 +168,6 @@ impl SchedulerState {
         Some((
             prefill_compute,
             sequence.take_creation_signal(),
-            sequence.block_hashes(),
             is_full_prefill,
         ))
     }
@@ -250,23 +248,16 @@ impl Scheduler {
         args: MockEngineArgs,
         dp_rank: u32,
         output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
-        kv_events_tx: Option<mpsc::UnboundedSender<KvCacheEventData>>,
+        component: Option<dynamo_runtime::component::Component>,
         cancellation_token: Option<CancellationToken>,
     ) -> Self {
         let state = Arc::new(Mutex::new(SchedulerState::new(args.max_num_batched_tokens)));
 
-        // Create internal channel for KV events only if needed
-        let (block_resp_tx, mut block_resp_rx) = if kv_events_tx.is_some() {
-            let (tx, rx) = mpsc::unbounded_channel::<MoveBlockResponse>();
-            (Some(tx), Some(rx))
-        } else {
-            (None, None)
-        };
-
-        let kv_manager = Arc::new(Mutex::new(KvManager::new_with_sender(
+        let kv_manager = Arc::new(Mutex::new(KvManager::new_with_publisher(
             args.num_gpu_blocks,
             args.block_size,
-            block_resp_tx,
+            component,
+            dp_rank,
         )));
         let hit_rates = Arc::new(Mutex::new(RunningMean::new(1000)));
 
@@ -391,12 +382,8 @@ impl Scheduler {
                 let mut total_time = Duration::from_secs_f64(decoding_time / 1000.0);
 
                 // Process prefilling
-                while let Some((
-                    prefill_compute,
-                    maybe_creation_signal,
-                    block_hashes,
-                    is_full_prefill,
-                )) = state_guard.try_prefill()
+                while let Some((prefill_compute, maybe_creation_signal, is_full_prefill)) =
+                    state_guard.try_prefill()
                 {
                     // NOTE: Prefill cost/time is always incremented for new blocks, even if they
                     // could be cached by other requests in the same batch. This matches vLLM behavior.
@@ -405,22 +392,14 @@ impl Scheduler {
                         total_time += Duration::from_secs_f64(prefill_compute / 1000.0);
                     }
 
-                    if let Some(creation_signal) = maybe_creation_signal {
-                        if !process_signals(
+                    if let Some(creation_signal) = maybe_creation_signal
+                        && !process_signals(
                             &mut kv_manager_guard,
                             std::slice::from_ref(&creation_signal),
-                        ) {
-                            panic!("Block allocation for prefilling cannot fail.");
-                        }
-
-                        // Drain KV events and forward to relay after prefill signal processing
-                        if let (Some(relay_tx), Some(rx)) = (&kv_events_tx, &mut block_resp_rx) {
-                            while let Ok(event) = rx.try_recv() {
-                                let _ =
-                                    relay_tx.send(block_response_to_kv_event(event, &block_hashes));
-                            }
-                        }
-                    };
+                        )
+                    {
+                        panic!("Block allocation for prefilling cannot fail.");
+                    }
 
                     // Impossible to schedule more prefills if we encounter one incomplete (chunked) prefill
                     if !is_full_prefill {
@@ -460,14 +439,6 @@ impl Scheduler {
                             kv_manager_guard.process(&signal);
                         }
                         continue;
-                    }
-
-                    // Drain KV events and forward to relay after decode signal processing
-                    if let (Some(relay_tx), Some(rx)) = (&kv_events_tx, &mut block_resp_rx) {
-                        while let Ok(event) = rx.try_recv() {
-                            let _ = relay_tx
-                                .send(block_response_to_kv_event(event, &sequence.block_hashes()));
-                        }
                     }
 
                     // Check completion and send notification
@@ -654,7 +625,7 @@ fn process_signals(
         }
 
         // Check we have a Use signal with blocks
-        let MoveBlock::Use(blocks) = signal else {
+        let MoveBlock::Use(blocks, _hashes) = signal else {
             panic!(
                 "Failed signal is Invalid. Has to fail on generation signal, but failed on {signal:?}"
             );

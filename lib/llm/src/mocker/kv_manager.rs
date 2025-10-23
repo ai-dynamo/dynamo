@@ -33,13 +33,21 @@
 //! the more idiomatic built-in Arc reference counter. This can be considered a shadow / mirror
 //! implementation of the main block manager.
 
+use crate::kv_router::protocols::{
+    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
+    KvCacheStoredBlockData, LocalBlockHash,
+};
+use crate::kv_router::publisher::KvEventPublisher;
 use crate::mocker::evictor::LRUEvictor;
-use crate::mocker::protocols::{MoveBlock, MoveBlockResponse, PrefillCost};
+use crate::mocker::protocols::{MoveBlock, PrefillCost};
 use crate::mocker::sequence::ActiveSequence;
 use crate::tokens::blocks::UniqueBlock;
+use crate::tokens::{BlockHash, SequenceHash};
 use derive_getters::Getters;
+use dynamo_runtime::component::Component;
 use std::collections::{HashMap, HashSet};
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use uuid::Uuid;
 
 #[derive(Getters)]
 pub struct KvManager {
@@ -55,22 +63,36 @@ pub struct KvManager {
 
     all_blocks: HashSet<UniqueBlock>,
 
-    move_block_response_tx: Option<mpsc::UnboundedSender<MoveBlockResponse>>,
+    kv_event_publisher: Option<Arc<KvEventPublisher>>,
+
+    #[getter(copy)]
+    dp_rank: u32,
 }
 
 impl KvManager {
     pub fn new(max_capacity: usize, block_size: usize) -> Self {
-        Self::new_with_sender(max_capacity, block_size, None)
+        Self::new_with_publisher(max_capacity, block_size, None, 0)
     }
 
-    pub fn new_with_sender(
+    pub fn new_with_publisher(
         max_capacity: usize,
         block_size: usize,
-        move_block_response_tx: Option<mpsc::UnboundedSender<MoveBlockResponse>>,
+        component: Option<Component>,
+        dp_rank: u32,
     ) -> Self {
         let active_blocks = HashMap::new();
         let inactive_blocks = LRUEvictor::default();
         let all_blocks = HashSet::new();
+
+        let kv_event_publisher = component.map(|comp| {
+            tracing::info!(
+                "Initializing KV event publisher for DP rank {dp_rank} with block_size {block_size}"
+            );
+            Arc::new(
+                KvEventPublisher::new(comp, block_size as u32, None)
+                    .expect("Failed to create KV event publisher"),
+            )
+        });
 
         KvManager {
             max_capacity,
@@ -78,28 +100,69 @@ impl KvManager {
             active_blocks,
             inactive_blocks,
             all_blocks,
-            move_block_response_tx,
+            kv_event_publisher,
+            dp_rank,
         }
     }
 
-    /// Utility method to send block responses
-    fn send_block_response(&self, blocks: Vec<u64>, store: bool, parent_hash: Option<u64>) {
-        if let Some(ref tx) = self.move_block_response_tx
-            && !blocks.is_empty()
-        {
-            let response = if store {
-                MoveBlockResponse::Store(blocks, parent_hash)
-            } else {
-                MoveBlockResponse::Remove(blocks)
-            };
-            tx.send(response).unwrap();
+    /// Converts stored/removed blocks into KvCacheEventData and publishes if publisher is available
+    fn publish_kv_event(
+        &self,
+        full_blocks: Vec<SequenceHash>,
+        local_hashes: &[BlockHash],
+        parent_hash: Option<u64>,
+        is_store: bool,
+    ) {
+        if full_blocks.is_empty() {
+            return;
+        }
+
+        let Some(ref publisher) = self.kv_event_publisher else {
+            return;
+        };
+
+        let event_data = if is_store {
+            let num_blocks = full_blocks.len();
+            let local_hashes_slice = &local_hashes[local_hashes
+                .len()
+                .checked_sub(num_blocks)
+                .expect("local hashes fewer than stored blocks")..];
+
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: parent_hash.map(ExternalSequenceBlockHash),
+                blocks: full_blocks
+                    .into_iter()
+                    .zip(local_hashes_slice.iter())
+                    .map(|(global_hash, local_hash)| KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(global_hash),
+                        tokens_hash: LocalBlockHash(*local_hash),
+                    })
+                    .collect(),
+            })
+        } else {
+            KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: full_blocks
+                    .into_iter()
+                    .map(ExternalSequenceBlockHash)
+                    .collect(),
+            })
+        };
+
+        let event = KvCacheEvent {
+            event_id: Uuid::new_v4().as_u128() as u64,
+            data: event_data,
+            dp_rank: self.dp_rank,
+        };
+
+        if let Err(e) = publisher.publish(event) {
+            tracing::warn!("Failed to publish KV event: {e}");
         }
     }
 
     /// Process a MoveBlock instruction synchronously
     pub fn process(&mut self, event: &MoveBlock) -> bool {
         match event {
-            MoveBlock::Use(hashes) => {
+            MoveBlock::Use(hashes, local_hashes) => {
                 let mut blocks_stored = Vec::<u64>::new();
 
                 let mut parent_block: Option<&UniqueBlock> = None;
@@ -131,14 +194,14 @@ impl KvManager {
                         };
                         self.all_blocks.remove(&evicted);
                         if let UniqueBlock::FullBlock(evicted_full_block) = evicted {
-                            self.send_block_response(vec![evicted_full_block], false, None);
+                            self.publish_kv_event(vec![evicted_full_block], &[], None, false);
                         }
                     }
 
                     // Now insert the new block in active blocks with reference count 1
                     self.active_blocks.insert(hash.clone(), 1);
                     self.all_blocks.insert(hash.clone());
-                    if self.move_block_response_tx.is_some()
+                    if self.kv_event_publisher.is_some()
                         && let UniqueBlock::FullBlock(stored_full_block) = hash
                     {
                         blocks_stored.push(*stored_full_block);
@@ -150,7 +213,7 @@ impl KvManager {
                     Some(UniqueBlock::FullBlock(block)) => Some(*block),
                     Some(UniqueBlock::PartialBlock(_)) => panic!("parent block cannot be partial"),
                 };
-                self.send_block_response(blocks_stored, true, parent_hash);
+                self.publish_kv_event(blocks_stored, local_hashes, parent_hash, true);
             }
 
             MoveBlock::Destroy(hashes) => {
@@ -163,14 +226,14 @@ impl KvManager {
                     assert!(self.all_blocks.remove(hash));
 
                     // Track blocks for batch sending
-                    if self.move_block_response_tx.is_some()
+                    if self.kv_event_publisher.is_some()
                         && let UniqueBlock::FullBlock(destroyed_full_block) = hash
                     {
                         blocks_destroyed.push(*destroyed_full_block);
                     }
                 }
 
-                self.send_block_response(blocks_destroyed, false, None);
+                self.publish_kv_event(blocks_destroyed, &[], None, false);
             }
 
             MoveBlock::Deref(hashes) => {
@@ -193,7 +256,7 @@ impl KvManager {
                 }
             }
 
-            MoveBlock::Promote(uuid, hash, parent_hash) => {
+            MoveBlock::Promote(uuid, hash, parent_hash, local_hashes) => {
                 let uuid_block = UniqueBlock::PartialBlock(*uuid);
                 let hash_block = UniqueBlock::FullBlock(*hash);
 
@@ -210,7 +273,7 @@ impl KvManager {
                 // Update all_blocks
                 assert!(self.all_blocks.remove(&uuid_block));
                 self.all_blocks.insert(hash_block);
-                self.send_block_response(vec![*hash], true, *parent_hash);
+                self.publish_kv_event(vec![*hash], local_hashes, *parent_hash, true);
             }
         }
 
@@ -282,7 +345,6 @@ impl KvManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::mpsc;
 
     #[test]
     fn test_failure_on_max_capacity() {
@@ -291,8 +353,9 @@ mod tests {
 
         // Helper function to use multiple blocks that returns the response
         fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) -> bool {
-            let blocks = ids.into_iter().map(UniqueBlock::FullBlock).collect();
-            manager.process(&MoveBlock::Use(blocks))
+            let blocks: Vec<_> = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
+            let hashes: Vec<_> = ids.into_iter().collect();
+            manager.process(&MoveBlock::Use(blocks, hashes))
         }
 
         // First use 10 blocks (0 to 9) in a batch
@@ -312,16 +375,14 @@ mod tests {
 
     #[test]
     fn test_block_lifecycle_stringent() {
-        // Create a channel to listen to block responses
-        let (tx, mut rx) = mpsc::unbounded_channel::<MoveBlockResponse>();
-
-        // Create a KvManager with 10 blocks capacity and the response sender
-        let mut manager = KvManager::new_with_sender(10, 16, Some(tx));
+        // Create a KvManager with 10 blocks capacity (no KV event publisher for tests)
+        let mut manager = KvManager::new(10, 16);
 
         // Helper function to use multiple blocks
         fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) {
-            let blocks = ids.into_iter().map(UniqueBlock::FullBlock).collect();
-            manager.process(&MoveBlock::Use(blocks));
+            let blocks: Vec<_> = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
+            let hashes: Vec<_> = ids.into_iter().collect();
+            manager.process(&MoveBlock::Use(blocks, hashes));
         }
 
         // Helper function to destroy multiple blocks
@@ -334,56 +395,6 @@ mod tests {
         fn deref_blocks(manager: &mut KvManager, ids: Vec<u64>) {
             let blocks = ids.into_iter().map(UniqueBlock::FullBlock).collect();
             manager.process(&MoveBlock::Deref(blocks));
-        }
-
-        // Helper function to assert block responses
-        fn assert_block_response(
-            rx: &mut mpsc::UnboundedReceiver<MoveBlockResponse>,
-            expected_type: &str,
-            expected_blocks: Vec<u64>,
-            description: &str,
-        ) {
-            let response = rx
-                .try_recv()
-                .unwrap_or_else(|_| panic!("Expected {expected_type} response {description}"));
-
-            match (&response, expected_type) {
-                (MoveBlockResponse::Store(blocks, _parent_hash), "Store") => {
-                    assert_eq!(
-                        blocks.len(),
-                        expected_blocks.len(),
-                        "Expected {} blocks in Store response {}",
-                        expected_blocks.len(),
-                        description
-                    );
-                    assert_eq!(
-                        *blocks, expected_blocks,
-                        "Store blocks don't match expected {description}"
-                    );
-                }
-                (MoveBlockResponse::Remove(blocks), "Remove") => {
-                    assert_eq!(
-                        blocks.len(),
-                        expected_blocks.len(),
-                        "Expected {} blocks in Remove response {}",
-                        expected_blocks.len(),
-                        description
-                    );
-                    assert_eq!(
-                        *blocks, expected_blocks,
-                        "Remove blocks don't match expected {description}"
-                    );
-                }
-                _ => panic!("Expected {expected_type} response, got {response:?} {description}"),
-            }
-        }
-
-        // Helper function to assert no response is received
-        fn assert_no_response(
-            rx: &mut mpsc::UnboundedReceiver<MoveBlockResponse>,
-            description: &str,
-        ) {
-            assert!(rx.try_recv().is_err(), "Expected no response {description}",);
         }
 
         // Helper function to check if active blocks contain expected blocks with expected ref counts
@@ -433,11 +444,9 @@ mod tests {
 
         // First use blocks 0, 1, 2, 3, 4 in a batch
         use_blocks(&mut manager, (0..5).collect());
-        assert_block_response(&mut rx, "Store", vec![0, 1, 2, 3, 4], "after first use");
 
         // Then use blocks 0, 1, 5, 6 in a batch
         use_blocks(&mut manager, vec![0, 1, 5, 6]);
-        assert_block_response(&mut rx, "Store", vec![5, 6], "after second use");
 
         // Check that the blocks 0 and 1 are in active blocks, both with reference counts of 2
         assert_active_blocks(
@@ -447,11 +456,9 @@ mod tests {
 
         // Now destroy block 4
         destroy_blocks(&mut manager, vec![4]);
-        assert_block_response(&mut rx, "Remove", vec![4], "after destroy block 4");
 
         // And deref blocks 3, 2, 1, 0 in this order as a batch
         deref_blocks(&mut manager, vec![0, 1, 2, 3]);
-        assert_no_response(&mut rx, "after deref operation");
 
         // Check that the inactive_blocks is size 2 (via num_objects) and contains 3 and 2
         assert_inactive_blocks(&manager, 2, &[3, 2]);
@@ -459,7 +466,6 @@ mod tests {
 
         // Now destroy block 6
         destroy_blocks(&mut manager, vec![6]);
-        assert_block_response(&mut rx, "Remove", vec![6], "after block 6 eviction");
 
         // And deref blocks 5, 1, 0 as a batch
         deref_blocks(&mut manager, vec![0, 1, 5]);
@@ -470,7 +476,6 @@ mod tests {
 
         // Now use 0, 1, 2, 7, 8, 9 as a batch
         use_blocks(&mut manager, vec![0, 1, 2, 7, 8, 9]);
-        assert_block_response(&mut rx, "Store", vec![7, 8, 9], "after [7, 8, 9] use");
 
         // Check that the inactive_blocks is size 2, and contains 3 and 5
         assert_inactive_blocks(&manager, 2, &[3, 5]);
@@ -485,14 +490,10 @@ mod tests {
 
         // Now use blocks 10, 11, 12 as a batch
         use_blocks(&mut manager, vec![10, 11, 12]);
-        assert_block_response(&mut rx, "Remove", vec![3], "after block 5 eviction");
-        assert_block_response(&mut rx, "Store", vec![10, 11, 12], "after [10, 11, 12] use");
 
         // Check that the inactive_blocks is size 1 and contains only 5
         assert_inactive_blocks(&manager, 1, &[5]);
 
         use_blocks(&mut manager, vec![13]);
-        assert_block_response(&mut rx, "Remove", vec![5], "after block 5 eviction");
-        assert_block_response(&mut rx, "Store", vec![13], "after block 13 use");
     }
 }
