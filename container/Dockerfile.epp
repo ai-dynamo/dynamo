@@ -18,11 +18,11 @@ ENV CXX=g++
 
 # C/C++ toolchain for cgo, and libstdc++ for link-time
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    gcc g++ \
-    libc6-dev \
-    ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+  build-essential \
+  gcc g++ \
+  libc6-dev \
+  ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 
 ARG COMMIT_SHA=unknown
 ARG BUILD_REF
@@ -56,13 +56,18 @@ FROM ${BASE_IMAGE} AS runtime
 
 # Minimal runtime deps; include libstdc++ runtime for -lstdc++
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    libstdc++6 \
- && rm -rf /var/lib/apt/lists/* \
- && groupadd -r nonroot && useradd -r -g nonroot nonroot
+  ca-certificates \
+  libstdc++6 \
+  && rm -rf /var/lib/apt/lists/* \
+  && groupadd -r nonroot && useradd -r -g nonroot -m -d /home/nonroot nonroot \
+  && mkdir -p /home/nonroot/.cache/huggingface/hub \
+  && chown -R nonroot:nonroot /home/nonroot
 
 WORKDIR /
 COPY --from=builder /epp /epp
+
+# Set HOME so ModelExpress can find the cache directory
+ENV HOME=/home/nonroot
 
 USER nonroot:nonroot
 ENTRYPOINT ["/epp"]
