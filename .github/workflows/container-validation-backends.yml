@@ -5,10 +5,8 @@ name: Docker Build and Test
 
 on:
   push:
-    branches:
-      - main
-      - "pull-request/[0-9]+"
-      - release/*.*.*
+  pull_request:
+    types: [opened, synchronize, reopened]
 
 concurrency:
     group: ${{ github.workflow }}-build-test-${{ github.ref_name || github.run_id }}

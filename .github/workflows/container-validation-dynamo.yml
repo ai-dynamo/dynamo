@@ -5,10 +5,8 @@ name: NVIDIA Dynamo Github Validation
 
 on:
   push:
-    branches:
-    - main
-    - release/*.*.*
   pull_request:
+    types: [opened, synchronize, reopened]
 
 # Cancel any previous check runs for the same pull request to avoid redundant workflows.
 concurrency:
