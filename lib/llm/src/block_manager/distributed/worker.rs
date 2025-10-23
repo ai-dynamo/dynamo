@@ -575,10 +575,14 @@ impl KvbmWorker {
 
         let pool_config = PoolConfig {
             enable_pool: true,
+            enable_temp_device_buffer_pool: crate::block_manager::config::should_bypass_cpu_cache(),
             max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
             max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
             num_outer_components: device_layout.config().outer_dim,
             num_layers: device_layout.config().num_layers,
+            page_size: device_layout.config().page_size,
+            inner_dim: device_layout.config().inner_dim,
+            dtype_width_bytes: device_layout.config().dtype_width_bytes,
         };
 
         let transfer_context = Arc::new(TransferContext::new(
