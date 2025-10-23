@@ -5,10 +5,10 @@ name: Nightly Fault Tolerance Tests
 
 on:
   schedule:
-    # Run every night at 2:00 AM UTC (adjust as needed)
+    # Run every day at 5:30 PM UTC
     # Cron syntax: minute hour day-of-month month day-of-week
-    # This runs at 2 AM UTC every day
-    - cron: '0 2 * * *'
+    # This runs at 5:30 PM UTC (17:30) every day
+    - cron: '30 17 * * *'
 
   # Allow manual triggering for testing
   workflow_dispatch:
