@@ -24,6 +24,7 @@ pub mod component;
 pub mod compute;
 pub mod discovery;
 pub mod engine;
+pub mod service_discovery;
 pub mod health_check;
 pub mod system_status_server;
 pub use system_status_server::SystemStatusServerInfo;
