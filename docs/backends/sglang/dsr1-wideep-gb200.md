@@ -97,6 +97,7 @@ python3 -m dynamo.sglang \
   --disable-cuda-graph \
   --chunked-prefill-size 16384 \
   --max-total-tokens 32768 \
+  --mem-fraction-static 0.82 \
   --log-level debug \
   --disaggregation-transfer-backend nixl
 ```
