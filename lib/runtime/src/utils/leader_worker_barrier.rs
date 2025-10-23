@@ -85,7 +85,7 @@ async fn create_barrier_key<T: Serialize>(
     client: &Client,
     key: &str,
     data: T,
-    lease_id: Option<i64>,
+    lease_id: Option<u64>,
 ) -> Result<(), LeaderWorkerBarrierError> {
     let serialized_data =
         serde_json::to_vec(&data).map_err(LeaderWorkerBarrierError::SerdeError)?;
@@ -151,7 +151,7 @@ impl<LeaderData: Serialize + DeserializeOwned, WorkerData: Serialize + Deseriali
         data: &LeaderData,
     ) -> anyhow::Result<HashMap<String, WorkerData>, LeaderWorkerBarrierError> {
         let etcd_client = rt
-            .etcd_client()
+            .deprecated_etcd_client()
             .ok_or(LeaderWorkerBarrierError::EtcdClientNotFound)?;
 
         let lease_id = etcd_client.lease_id();
@@ -178,7 +178,7 @@ impl<LeaderData: Serialize + DeserializeOwned, WorkerData: Serialize + Deseriali
         &self,
         client: &Client,
         data: &LeaderData,
-        lease_id: i64,
+        lease_id: u64,
     ) -> Result<(), LeaderWorkerBarrierError> {
         let key = barrier_key(&self.barrier_id, BARRIER_DATA);
         create_barrier_key(client, &key, data, Some(lease_id)).await
@@ -197,7 +197,7 @@ impl<LeaderData: Serialize + DeserializeOwned, WorkerData: Serialize + Deseriali
         &self,
         client: &Client,
         worker_result: &Result<HashMap<String, WorkerData>, LeaderWorkerBarrierError>,
-        lease_id: i64,
+        lease_id: u64,
     ) -> Result<(), LeaderWorkerBarrierError> {
         if let Ok(worker_result) = worker_result {
             let key = barrier_key(&self.barrier_id, BARRIER_COMPLETE);
@@ -245,7 +245,7 @@ impl<LeaderData: Serialize + DeserializeOwned, WorkerData: Serialize + Deseriali
         data: &WorkerData,
     ) -> anyhow::Result<LeaderData, LeaderWorkerBarrierError> {
         let etcd_client = rt
-            .etcd_client()
+            .deprecated_etcd_client()
             .ok_or(LeaderWorkerBarrierError::EtcdClientNotFound)?;
 
         let lease_id = etcd_client.lease_id();
@@ -284,7 +284,7 @@ impl<LeaderData: Serialize + DeserializeOwned, WorkerData: Serialize + Deseriali
         &self,
         client: &Client,
         data: &WorkerData,
-        lease_id: i64,
+        lease_id: u64,
     ) -> Result<String, LeaderWorkerBarrierError> {
         let key = barrier_key(
             &self.barrier_id,

@@ -120,13 +120,14 @@ pub(crate) struct EntrypointArgs {
     namespace: Option<String>,
     custom_backend_metrics_endpoint: Option<String>,
     custom_backend_metrics_polling_interval: Option<f64>,
+    is_prefill: bool,
 }
 
 #[pymethods]
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, custom_backend_metrics_endpoint=None, custom_backend_metrics_polling_interval=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, custom_backend_metrics_endpoint=None, custom_backend_metrics_polling_interval=None, is_prefill=false))]
     pub fn new(
         engine_type: EngineType,
         model_path: Option<PathBuf>,
@@ -144,6 +145,7 @@ impl EntrypointArgs {
         namespace: Option<String>,
         custom_backend_metrics_endpoint: Option<String>,
         custom_backend_metrics_polling_interval: Option<f64>,
+        is_prefill: bool,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -170,6 +172,7 @@ impl EntrypointArgs {
             namespace,
             custom_backend_metrics_endpoint,
             custom_backend_metrics_polling_interval,
+            is_prefill,
         })
     }
 }
@@ -277,6 +280,7 @@ async fn select_engine(
                 engine,
                 model: Box::new(local_model),
                 is_static: false,
+                is_prefill: args.is_prefill,
             }
         }
     };

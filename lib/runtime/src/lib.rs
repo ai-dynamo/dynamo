@@ -52,7 +52,8 @@ pub use tokio_util::sync::CancellationToken;
 pub use worker::Worker;
 
 use crate::{
-    metrics::prometheus_names::distributed_runtime, storage::key_value_store::KeyValueStore,
+    metrics::prometheus_names::distributed_runtime,
+    storage::key_value_store::{KeyValueStore, KeyValueStoreManager},
 };
 
 use component::{Endpoint, InstanceSource};
@@ -188,7 +189,7 @@ pub struct DistributedRuntime {
     // we might consider a unifed transport manager here
     etcd_client: Option<transports::etcd::Client>,
     nats_client: Option<transports::nats::Client>,
-    store: Arc<dyn KeyValueStore>,
+    store: KeyValueStoreManager,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
 
