@@ -36,6 +36,6 @@ impl Decoder for ImageDecoder {
         };
         let shape = (height as usize, width as usize, n_channels as usize);
         let array = Array3::from_shape_vec(shape, data)?;
-        Ok(array.into())
+        Ok(array.try_into()?)
     }
 }

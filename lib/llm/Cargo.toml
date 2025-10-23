@@ -24,7 +24,7 @@ testing-etcd = []
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
-media-loading = ["dep:ndarray", "dep:video-rs", "dep:image", "dep:reqwest", "dep:base64", "dep:tokio-rayon"]
+media-loading = ["dep:ndarray", "dep:video-rs", "dep:image", "dep:reqwest", "dep:base64", "dep:tokio-rayon", "block-manager"]
 
 [[bench]]
 name = "tokenizer"

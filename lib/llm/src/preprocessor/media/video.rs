@@ -111,6 +111,6 @@ impl Decoder for VideoDecoder {
             3,
         );
         let array = Array4::from_shape_vec(shape, all_frames)?;
-        Ok(array.into())
+        Ok(array.try_into()?)
     }
 }

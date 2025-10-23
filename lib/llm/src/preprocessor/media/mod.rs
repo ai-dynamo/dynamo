@@ -5,6 +5,6 @@ mod common;
 mod image;
 mod video;
 
-pub use common::{DecodedMediaData, Decoder, EncodedMediaData, MediaDecoder, MediaLoader};
+pub use common::{Decoder, EncodedMediaData, MediaDecoder, MediaLoader, RdmaMediaDataDescriptor};
 pub use image::ImageDecoder;
 pub use video::VideoDecoder;
