@@ -50,9 +50,15 @@ RUN apt-get install -y sudo gnupg2 gnupg1 \
     && echo "$USERNAME ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
     && chmod 0440 /etc/sudoers.d/$USERNAME \
     && mkdir -p /home/$USERNAME \
-    && groupmod -g $USER_GID $USERNAME \
-    && usermod -u $USER_UID -g $USER_GID $USERNAME \
-    && chown -R $USERNAME:$USERNAME /home/$USERNAME \
+    && if getent group "$USER_GID" >/dev/null; then \
+         echo "Using existing group with GID $USER_GID"; \
+         usermod -g "$USER_GID" "$USERNAME"; \
+       else \
+         groupmod -g "$USER_GID" "$USERNAME"; \
+         usermod -g "$USER_GID" "$USERNAME"; \
+       fi \
+    && usermod -u "$USER_UID" "$USERNAME" \
+    && chown -R "$USER_UID":"$USER_GID" /home/$USERNAME \
     && chsh -s /bin/bash $USERNAME
 
 # Install awk separately with fault tolerance
