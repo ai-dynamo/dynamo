@@ -2,22 +2,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use async_nats::jetstream;
+use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use super::{bus, handle::AuditRecord};
 
+#[async_trait]
 pub trait AuditSink: Send + Sync {
     fn name(&self) -> &'static str;
-    fn emit(&self, rec: &AuditRecord);
+    async fn emit(&self, rec: &AuditRecord);
 }
 
 pub struct StderrSink;
+#[async_trait]
 impl AuditSink for StderrSink {
     fn name(&self) -> &'static str {
         "stderr"
     }
-    fn emit(&self, rec: &AuditRecord) {
+    async fn emit(&self, rec: &AuditRecord) {
         match serde_json::to_string(rec) {
             Ok(js) => {
                 tracing::info!(target="dynamo_llm::audit", log_type="audit", record=%js, "audit")
@@ -43,21 +46,18 @@ impl NatsSink {
     }
 }
 
+#[async_trait]
 impl AuditSink for NatsSink {
     fn name(&self) -> &'static str {
         "nats"
     }
 
-    fn emit(&self, rec: &AuditRecord) {
+    async fn emit(&self, rec: &AuditRecord) {
         match serde_json::to_vec(rec) {
             Ok(bytes) => {
-                let js = self.js.clone();
-                let subject = self.subject.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = js.publish(subject, bytes.into()).await {
-                        tracing::warn!("nats: publish failed: {e}");
-                    }
-                });
+                if let Err(e) = self.js.publish(self.subject.clone(), bytes.into()).await {
+                    tracing::warn!("nats: publish failed: {e}");
+                }
             }
             Err(e) => tracing::warn!("nats: serialize failed: {e}"),
         }
@@ -98,7 +98,7 @@ pub fn spawn_workers_from_env(drt: Option<&dynamo_runtime::DistributedRuntime>) 
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Ok(rec) => sink.emit(&rec),
+                    Ok(rec) => sink.emit(&rec).await,
                     Err(broadcast::error::RecvError::Lagged(n)) => tracing::warn!(
                         sink = name,
                         dropped = n,
