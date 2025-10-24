@@ -645,7 +645,7 @@ NORMAL MODE
         println!("Default template with no tools => None: {:?}", result2);
         assert!(
             result2.is_ok(),
-            "Jinja template with if defined conditional should handle None: {:?}",
+            "Jinja template with if tools is not none conditional should handle None: {:?}",
             result2
         );
         assert!(result2.unwrap().contains("NORMAL MODE"));
