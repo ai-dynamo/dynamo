@@ -656,7 +656,7 @@ NORMAL MODE
 
     #[test]
     fn test_llama_template_no_tools_no_tool_calling() {
-        // Llama 3.1 activates tool calling when tools is defined
+        // Llama model default templates do not actiavte tool calling when tools is None
         let template_str = r#"
 {%- if tools is defined %}
 TOOL MODE
