@@ -7,9 +7,17 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from tests.serve.common import params_with_model_mark, run_serve_deployment
+from tests.serve.common import (
+    WORKSPACE_DIR,
+    params_with_model_mark,
+    run_serve_deployment,
+)
 from tests.utils.engine_process import EngineConfig
-from tests.utils.payload_builder import chat_payload_default, completion_payload_default
+from tests.utils.payload_builder import (
+    chat_payload_default,
+    completion_payload_default,
+    metric_payload_default,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,21 +29,23 @@ class TRTLLMConfig(EngineConfig):
     stragglers: list[str] = field(default_factory=lambda: ["TRTLLM:EngineCore"])
 
 
-trtllm_dir = os.environ.get("TRTLLM_DIR", "/workspace/components/backends/trtllm")
+trtllm_dir = os.environ.get("TRTLLM_DIR") or os.path.join(
+    WORKSPACE_DIR, "components", "backends", "trtllm"
+)
 
 # trtllm test configurations
 trtllm_configs = {
     "aggregated": TRTLLMConfig(
         name="aggregated",
         directory=trtllm_dir,
-        script_name="agg.sh",
+        script_name="agg_metrics.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.trtllm_marker],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
-            # TODO: Add metric_payload_default(min_num_requests=N, backend="trtllm")
+            metric_payload_default(min_num_requests=6, backend="trtllm"),
         ],
     ),
     "disaggregated": TRTLLMConfig(
