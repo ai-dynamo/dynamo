@@ -67,6 +67,30 @@ impl Client {
 
     // Client with auto-discover instances using etcd
     pub(crate) async fn new_dynamic(endpoint: Endpoint) -> Result<Self> {
+        // Try to use ServiceDiscovery if available, otherwise fall back to ETCD
+        if endpoint.component.instance_handle().is_ok() {
+            Self::new_dynamic_v2(endpoint).await
+        } else {
+            Self::new_dynamic_etcd(endpoint).await
+        }
+    }
+
+    // V2: Client with auto-discover instances using ServiceDiscovery
+    pub(crate) async fn new_dynamic_v2(endpoint: Endpoint) -> Result<Self> {
+        let instance_source = Self::get_or_create_dynamic_instance_source_v2(&endpoint).await?;
+
+        let client = Client {
+            endpoint,
+            instance_source: instance_source.clone(),
+            instance_avail: Arc::new(ArcSwap::from(Arc::new(vec![]))),
+            instance_free: Arc::new(ArcSwap::from(Arc::new(vec![]))),
+        };
+        client.monitor_instance_source();
+        Ok(client)
+    }
+
+    // Original ETCD-based implementation
+    async fn new_dynamic_etcd(endpoint: Endpoint) -> Result<Self> {
         const INSTANCE_REFRESH_PERIOD: Duration = Duration::from_secs(1);
 
         // create live endpoint watcher
@@ -281,5 +305,158 @@ impl Client {
         let instance_source = Arc::new(InstanceSource::Dynamic(watch_rx));
         instance_sources.insert(endpoint.clone(), Arc::downgrade(&instance_source));
         Ok(instance_source)
+    }
+
+    /// V2: Create instance source using ServiceDiscovery interface
+    async fn get_or_create_dynamic_instance_source_v2(
+        endpoint: &Endpoint,
+    ) -> Result<Arc<InstanceSource>> {
+        let drt = endpoint.drt();
+        let instance_sources = drt.instance_sources();
+        let mut instance_sources = instance_sources.lock().await;
+
+        // Check if we already have a watcher for this endpoint
+        if let Some(instance_source) = instance_sources.get(endpoint) {
+            if let Some(instance_source) = instance_source.upgrade() {
+                return Ok(instance_source);
+            } else {
+                instance_sources.remove(endpoint);
+            }
+        }
+
+        let namespace = endpoint.component.namespace.name();
+        let component = endpoint.component.name();
+
+        // Get service discovery interface
+        let discovery = drt.service_discovery();
+        
+        // List current instances
+        let initial_instances = discovery.list_instances(&namespace, component).await?;
+
+        // Set up watch for instance changes
+        let mut instance_watch = discovery.watch(&namespace, component).await?;
+
+        let (watch_tx, watch_rx) = tokio::sync::watch::channel(vec![]);
+
+        // Convert discovery instances to runtime instances
+        let mut runtime_instances: Vec<Instance> = Vec::new();
+        for disc_instance in initial_instances {
+            if let Some(instance) = Self::convert_discovery_instance_to_runtime_instance(disc_instance, endpoint) {
+                runtime_instances.push(instance);
+            }
+        }
+
+        // Send initial instances
+        let _ = watch_tx.send(runtime_instances.clone());
+
+        let secondary = endpoint.component.drt.runtime.secondary().clone();
+        let endpoint_name = endpoint.name.clone();
+        let namespace_clone = namespace.clone();
+        let component_clone = component.to_string();
+
+        // Spawn background task to process instance events
+        secondary.spawn(async move {
+            tracing::debug!("Starting ServiceDiscovery watcher for {}/{}", namespace_clone, component_clone);
+            let mut map: HashMap<String, Instance> = runtime_instances
+                .into_iter()
+                .map(|inst| (inst.instance_id.to_string(), inst))
+                .collect();
+
+            loop {
+                let event = tokio::select! {
+                    _ = watch_tx.closed() => {
+                        tracing::debug!("All watchers have closed; shutting down ServiceDiscovery watcher for {}/{}", namespace_clone, component_clone);
+                        break;
+                    }
+                    event = instance_watch.recv() => {
+                        match event {
+                            Ok(event) => event,
+                            Err(e) => {
+                                tracing::debug!("Watch stream error: {}; shutting down ServiceDiscovery watcher for {}/{}", e, namespace_clone, component_clone);
+                                break;
+                            }
+                        }
+                    }
+                };
+
+                match event {
+                    crate::discovery::InstanceEvent::Added(disc_instance) => {
+                        // Assumption: 1 endpoint per component, so if ns/comp match, endpoint matches
+                        if let Some(runtime_instance) = Self::convert_discovery_instance_to_runtime_instance_static(
+                            disc_instance,
+                            &namespace_clone,
+                            &component_clone,
+                            &endpoint_name,
+                        ) {
+                            map.insert(runtime_instance.instance_id.to_string(), runtime_instance);
+                        }
+                    }
+                    crate::discovery::InstanceEvent::Removed(instance_id) => {
+                        map.remove(&instance_id);
+                    }
+                }
+
+                let instances: Vec<Instance> = map.values().cloned().collect();
+
+                if watch_tx.send(instances).is_err() {
+                    tracing::debug!("Unable to send watch updates; shutting down ServiceDiscovery watcher for {}/{}", namespace_clone, component_clone);
+                    break;
+                }
+            }
+
+            tracing::debug!("Completed ServiceDiscovery watcher for {}/{}", namespace_clone, component_clone);
+            let _ = watch_tx.send(vec![]);
+        });
+
+        let instance_source = Arc::new(InstanceSource::Dynamic(watch_rx));
+        instance_sources.insert(endpoint.clone(), Arc::downgrade(&instance_source));
+        Ok(instance_source)
+    }
+
+    /// Convert a discovery::Instance to a runtime Instance
+    fn convert_discovery_instance_to_runtime_instance(
+        disc_instance: crate::discovery::Instance,
+        endpoint: &Endpoint,
+    ) -> Option<Instance> {
+        let namespace = endpoint.component.namespace.name();
+        let component = endpoint.component.name();
+        let endpoint_name = &endpoint.name;
+        
+        Self::convert_discovery_instance_to_runtime_instance_static(
+            disc_instance,
+            &namespace,
+            component,
+            endpoint_name,
+        )
+    }
+
+    /// Static version that doesn't need endpoint reference
+    fn convert_discovery_instance_to_runtime_instance_static(
+        disc_instance: crate::discovery::Instance,
+        namespace: &str,
+        component: &str,
+        endpoint_name: &str,
+    ) -> Option<Instance> {
+        // Parse instance_id as u64
+        let instance_id = disc_instance.instance_id.parse::<u64>().ok()?;
+        
+        // Extract NATS subject from metadata
+        let transport = disc_instance.metadata
+            .get("transport")?
+            .get("service_name")?
+            .as_str()
+            .map(|service_name| {
+                // Construct subject: {service_name}.{endpoint_name}-{instance_id}
+                let subject = format!("{}.{}-{:x}", service_name, endpoint_name, instance_id);
+                TransportType::NatsTcp(subject)
+            })?;
+
+        Some(Instance {
+            namespace: namespace.to_string(),
+            component: component.to_string(),
+            endpoint: endpoint_name.to_string(),
+            instance_id,
+            transport,
+        })
     }
 }

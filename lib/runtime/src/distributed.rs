@@ -103,7 +103,7 @@ impl DistributedRuntime {
                 crate::MetricsRegistryEntry,
             >::new())),
             system_health,
-            service_discovery: Arc::new(parking_lot::Mutex::new(service_discovery)),
+            service_discovery: Arc::new(service_discovery),
         };
 
         if let Some(nats_client_for_metrics) = nats_client_for_metrics {
@@ -301,7 +301,7 @@ impl DistributedRuntime {
     }
 
     /// Get the service discovery interface
-    pub fn service_discovery(&self) -> Arc<parking_lot::Mutex<Box<dyn ServiceDiscovery>>> {
+    pub fn service_discovery(&self) -> Arc<Box<dyn ServiceDiscovery>> {
         self.service_discovery.clone()
     }
 

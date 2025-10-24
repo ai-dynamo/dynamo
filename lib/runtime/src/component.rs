@@ -400,8 +400,7 @@ impl Component {
         // 1. Register with service discovery
         let instance_handle = {
             let discovery = self.drt.service_discovery();
-            let discovery_guard = discovery.lock();
-            discovery_guard.register_instance(&self.namespace.name(), &self.name).await?
+            discovery.register_instance(&self.namespace.name(), &self.name).await?
         };
 
         // 2. Setup NATS service

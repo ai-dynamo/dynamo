@@ -214,5 +214,5 @@ pub struct DistributedRuntime {
     hierarchy_to_metricsregistry: Arc<std::sync::RwLock<HashMap<String, MetricsRegistryEntry>>>,
 
     // Service discovery interface
-    service_discovery: Arc<parking_lot::Mutex<Box<dyn discovery::ServiceDiscovery>>>,
+    service_discovery: Arc<Box<dyn discovery::ServiceDiscovery>>,
 }
