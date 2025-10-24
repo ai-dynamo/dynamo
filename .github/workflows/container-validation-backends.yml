@@ -30,7 +30,7 @@ jobs:
 
   backend-status-check:
     runs-on: ubuntu-latest
-    needs: [vllm, sglang, trtllm, operator, deploy-test-fault-tolerance]
+    needs: [vllm, sglang, trtllm, operator]
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -301,32 +301,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test_scenario:
-          - vllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod
-          - trtllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod
-          - sglang-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod
-    name: deploy-test-fault-tolerance (${{ matrix.test_scenario }})
+        framework:
+          - { name: vllm, test_scenario: vllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
+          - { name: trtllm, test_scenario: trtllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
+          - { name: sglang, test_scenario: sglang-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
+    name: deploy-test-fault-tolerance (${{ matrix.framework.name }})
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Install awscli
-        shell: bash
-        run: |
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "awscliv2.zip"
-          unzip awscliv2.zip
-          sudo ./aws/install
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Set namespace and install dependencies
         run: |
           # Set namespace using test scenario
-          export FRAMEWORK=$(echo ${{ matrix.test_scenario }} | cut -d'-' -f1)
+          export FRAMEWORK=${{ matrix.framework.name }}
           echo "NAMESPACE=gh-job-id-${{ github.run_id }}-ft-${FRAMEWORK}" >> $GITHUB_ENV
           set -x
           # Install dependencies
@@ -409,7 +397,7 @@ jobs:
           set -x
           export KUBECONFIG=$(pwd)/.kubeconfig
           export NAMESPACE=$NAMESPACE
-          export FRAMEWORK=$(echo ${{ matrix.test_scenario }} | cut -d'-' -f1)
+          export FRAMEWORK=${{ matrix.framework.name }}
           export IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
 
           # Set up Python virtual environment and install dependencies
@@ -424,12 +412,12 @@ jobs:
           # Add project source to PYTHONPATH for test imports
           export PYTHONPATH=$(pwd):$(pwd)/components/src:$PYTHONPATH
 
-          echo "Running fault tolerance test: $FRAMEWORK-${{ matrix.test_scenario }}"
+          echo "Running fault tolerance test: ${{ matrix.framework.test_scenario }}"
           echo "Using namespace: $NAMESPACE"
           echo "Using image: $IMAGE"
 
           # Run the pytest command
-          pytest tests/fault_tolerance/deploy/test_deployment.py::test_fault_scenario[${{ matrix.test_scenario }}] \
+          pytest tests/fault_tolerance/deploy/test_deployment.py::test_fault_scenario[${{ matrix.framework.test_scenario }}] \
             -s -v \
             --namespace ${NAMESPACE} \
             --image ${IMAGE} \
