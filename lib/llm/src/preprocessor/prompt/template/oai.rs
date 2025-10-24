@@ -601,6 +601,76 @@ mod tests {
         assert_eq!(content_array[1]["type"], "image_url");
     }
 
+    #[test]
+fn test_template_with_empty_tools() {
+        use super::tokcfg::ChatTemplate;
+        use super::{ContextMixins, HfTokenizerConfigJsonFormatter};
+
+        // minijinja limitation around short circuiting "and" expressions
+        // errors without a custom length filter
+        // this should not error as we override the length filter
+        let template_str = r#"
+{%- if tools is iterable and tools | length > 0 %}
+Tools available: {{ tools | length }}
+{%- else %}
+No tools
+{%- endif %}
+"#;
+
+        let chat_template: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": template_str
+        })).unwrap();
+
+        let formatter = HfTokenizerConfigJsonFormatter::new(
+            chat_template,
+            ContextMixins::new(&[])
+        ).unwrap();
+
+        // Test 1: Empty tools array
+        let ctx1 = context! {
+            tools => Value::from_serialize(Vec::<serde_json::Value>::new())
+        };
+        let result1 = formatter.env.get_template("default").unwrap().render(&ctx1);
+        assert!(result1.is_ok(), "Should handle empty array: {:?}", result1);
+        assert!(result1.unwrap().contains("No tools"));
+
+        // Test 2: Tools not in context at all
+        let ctx2 = context! {};
+        let result2 = formatter.env.get_template("default").unwrap().render(&ctx2);
+        println!("Result without tools in context: {:?}", result2);
+        assert!(
+            result2.is_ok() && result2.as_ref().unwrap().contains("No tools"),
+            "Should handle undefined tools: {:?}", result2
+        );
+}
+
+#[test]
+fn test_llama_template_no_tools_no_tool_calling() {
+        // Llama 3.1 activates tool calling when tools is defined
+        let template_str = r#"
+{%- if tools is defined %}
+TOOL MODE
+{%- else %}
+NORMAL MODE
+{%- endif %}
+"#;
+
+        let chat_template: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": template_str
+        })).unwrap();
+
+        let formatter = HfTokenizerConfigJsonFormatter::new(
+            chat_template,
+            ContextMixins::new(&[])
+        ).unwrap();
+
+        // Without tools in context, should be NORMAL MODE
+        let ctx = context! {};
+        let result = formatter.env.get_template("default").unwrap().render(&ctx);
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("NORMAL MODE"));
+}
+
     /// Tests mixed content type scenarios.
     #[test]
     fn test_may_be_fix_msg_content_multiple_content_types() {

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::tokcfg::{ChatTemplate, raise_exception, strftime_now, tojson};
 use super::{ContextMixins, HfTokenizerConfigJsonFormatter, JinjaEnvironment};
 use either::Either;
-use minijinja::Environment;
+use minijinja::{Environment, Value};
 use tracing;
 
 impl JinjaEnvironment {
@@ -33,6 +33,14 @@ impl HfTokenizerConfigJsonFormatter {
         let chat_template = config.chat_template.as_ref().ok_or(anyhow::anyhow!(
             "chat_template field is required in the tokenizer_config.json file"
         ))?;
+
+        env.add_filter("length", |value: Value| -> usize {
+            use minijinja::value::ValueKind;
+            match value.kind() {
+                ValueKind::Undefined | ValueKind::None => 0,
+                _ => value.len().unwrap_or(0),
+            }
+        });
 
         // add pycompat
         // todo: should we use this: minijinja_contrib::add_to_environment(&mut env);
