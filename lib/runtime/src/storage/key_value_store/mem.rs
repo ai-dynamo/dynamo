@@ -12,7 +12,7 @@ use rand::Rng as _;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::storage::key_value_store::Key;
+use crate::storage::key_value_store::{Key, KeyValue, WatchEvent};
 
 use super::{KeyValueBucket, KeyValueStore, StoreError, StoreOutcome};
 
@@ -162,10 +162,10 @@ impl KeyValueBucket for MemoryBucketRef {
     /// All current values in the bucket first, then block waiting for new
     /// values to be published.
     /// Caller takes the lock so only a single caller may use this at once.
+    /// TODO: This only emits WatchEvent::Put. Add support for WatchEvent::Delete.
     async fn watch(
         &self,
-    ) -> Result<Pin<Box<dyn futures::Stream<Item = bytes::Bytes> + Send + 'life0>>, StoreError>
-    {
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + 'life0>>, StoreError> {
         Ok(Box::pin(async_stream::stream! {
             // All the existing ones first
             let mut seen = HashSet::new();
@@ -174,9 +174,10 @@ impl KeyValueBucket for MemoryBucketRef {
                 tracing::error!(bucket_name = self.name, "watch: Missing bucket");
                 return;
             };
-            for (_rev, v) in bucket.data.values() {
+            for (key, (_rev, v)) in &bucket.data {
                 seen.insert(v.clone());
-                yield bytes::Bytes::from(v.clone());
+                let item = KeyValue::new(key.clone(), bytes::Bytes::from(v.clone().into_bytes()));
+                yield WatchEvent::Put(item);
             }
             drop(data_lock);
             // Now any new ones
@@ -187,11 +188,12 @@ impl KeyValueBucket for MemoryBucketRef {
                         // Channel is closed, no more values coming
                         break;
                     },
-                    Some((_k, v)) => {
+                    Some((key, v)) => {
                         if seen.contains(&v) {
                             continue;
                         }
-                        yield bytes::Bytes::from(v.clone());
+                        let item = KeyValue::new(key, bytes::Bytes::from(v));
+                        yield WatchEvent::Put(item);
                     }
                 }
             }
