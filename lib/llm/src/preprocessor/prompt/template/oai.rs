@@ -617,27 +617,45 @@ NORMAL MODE
                 {"safe_length": length_template},
                 {"no_tool": no_tool_template}
             ]
-        })).unwrap();
+        }))
+        .unwrap();
 
-        let formatter = HfTokenizerConfigJsonFormatter::new(
-            chat_template,
-            ContextMixins::new(&[])
-        ).unwrap();
+        let formatter =
+            HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap();
 
         let ctx = context! { tools => Option::<Value>::None };
 
-        let result1 = formatter.env.get_template("safe_length").unwrap().render(&ctx);
+        let result1 = formatter
+            .env
+            .get_template("safe_length")
+            .unwrap()
+            .render(&ctx);
         println!("Safe length template with no tools => None: {:?}", result1);
-        assert!(result1.is_ok(), "Jinja template with and conditional and length filter should handle None: {:?}", result1);
-        assert!(result1.unwrap().contains("No tools"), "Should show 'No tools'");
+        assert!(
+            result1.is_ok(),
+            "Jinja template with and conditional and length filter should handle None: {:?}",
+            result1
+        );
+        assert!(
+            result1.unwrap().contains("No tools"),
+            "Should show 'No tools'"
+        );
 
         let result2 = formatter.env.get_template("no_tool").unwrap().render(&ctx);
         println!("Default template with no tools => None: {:?}", result2);
-        assert!(result2.is_ok(), "Jinja template with if defined conditional should handle None: {:?}", result2);
+        assert!(
+            result2.is_ok(),
+            "Jinja template with if defined conditional should handle None: {:?}",
+            result2
+        );
+        assert!(
+            result2.unwrap().contains("TOOL MODE"),
+            "None in context is 'defined', so production uses template selection to avoid this"
+        );
     }
 
-#[test]
-fn test_llama_template_no_tools_no_tool_calling() {
+    #[test]
+    fn test_llama_template_no_tools_no_tool_calling() {
         // Llama 3.1 activates tool calling when tools is defined
         let template_str = r#"
 {%- if tools is defined %}
@@ -649,19 +667,18 @@ NORMAL MODE
 
         let chat_template: ChatTemplate = serde_json::from_value(serde_json::json!({
             "chat_template": template_str
-        })).unwrap();
+        }))
+        .unwrap();
 
-        let formatter = HfTokenizerConfigJsonFormatter::new(
-            chat_template,
-            ContextMixins::new(&[])
-        ).unwrap();
+        let formatter =
+            HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap();
 
         // Without tools in context, should be NORMAL MODE
         let ctx = context! {};
         let result = formatter.env.get_template("default").unwrap().render(&ctx);
         assert!(result.is_ok());
         assert!(result.unwrap().contains("NORMAL MODE"));
-}
+    }
 
     /// Tests mixed content type scenarios.
     #[test]
