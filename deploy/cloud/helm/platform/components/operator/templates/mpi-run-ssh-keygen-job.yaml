@@ -48,7 +48,7 @@ spec:
         fsGroup: 65534
       initContainers:
       - name: keygen
-        image: bitnamisecure/git:latest
+        image: {{ .Values.dynamo.mpiRun.sshKeygen.images.keygen }}
         volumeMounts:
         - name: shared
           mountPath: /shared
@@ -67,7 +67,7 @@ spec:
           echo "SSH keys generated and saved to shared volume"
       containers:
       - name: kubectl-create-secret
-        image: bitnamisecure/kubectl:latest
+        image: {{ .Values.dynamo.mpiRun.sshKeygen.images.kubectl }}
         volumeMounts:
         - name: shared
           mountPath: /shared

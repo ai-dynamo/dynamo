@@ -116,6 +116,9 @@ dynamo:
     secretName: "mpi-run-ssh-secret"
     sshKeygen:
       enabled: true
+      images:
+        keygen: bitnamisecure/git:latest
+        kubectl: bitnamisecure/kubectl:latest
 
   # DynamoGraphDeploymentRequest (DGDR) configuration
   dgdr:
