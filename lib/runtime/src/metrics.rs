@@ -650,10 +650,15 @@ pub type PrometheusExpositionFormatCallback =
 pub struct MetricsRegistry {
     /// The Prometheus registry for this hierarchy (with interior mutability for thread-safe access)
     pub prometheus_registry: std::sync::RwLock<prometheus::Registry>,
-    /// List of update callbacks invoked before metrics are scraped (with interior mutability)
-    pub prometheus_update_callbacks: std::sync::RwLock<Vec<PrometheusUpdateCallback>>,
-    /// List of callbacks that return Prometheus exposition text to be appended to metrics output (with interior mutability)
-    pub prometheus_expfmt_callbacks: std::sync::RwLock<Vec<PrometheusExpositionFormatCallback>>,
+
+    /// Update callbacks invoked before metrics are scraped.
+    /// Wrapped in Arc to preserve callbacks across clones (prevents callback loss when MetricsRegistry is cloned).
+    pub prometheus_update_callbacks: Arc<std::sync::RwLock<Vec<PrometheusUpdateCallback>>>,
+
+    /// Callbacks that return Prometheus exposition text appended to metrics output.
+    /// Wrapped in Arc to preserve callbacks across clones (e.g., vLLM callbacks registered at Endpoint remain accessible at DRT).
+    pub prometheus_expfmt_callbacks:
+        Arc<std::sync::RwLock<Vec<PrometheusExpositionFormatCallback>>>,
 }
 
 impl std::fmt::Debug for MetricsRegistry {
@@ -684,9 +689,10 @@ impl Clone for MetricsRegistry {
             prometheus_registry: std::sync::RwLock::new(
                 self.prometheus_registry.read().unwrap().clone(),
             ),
-            // Callbacks cannot be cloned, so we start with empty lists
-            prometheus_update_callbacks: std::sync::RwLock::new(Vec::new()),
-            prometheus_expfmt_callbacks: std::sync::RwLock::new(Vec::new()),
+            // Clone the Arc to share callbacks across all clones (prevents callback loss).
+            // Previously used Vec::new() here, which caused vllm: metrics to disappear.
+            prometheus_update_callbacks: Arc::clone(&self.prometheus_update_callbacks),
+            prometheus_expfmt_callbacks: Arc::clone(&self.prometheus_expfmt_callbacks),
         }
     }
 }
@@ -696,8 +702,8 @@ impl MetricsRegistry {
     pub fn new() -> Self {
         Self {
             prometheus_registry: std::sync::RwLock::new(prometheus::Registry::new()),
-            prometheus_update_callbacks: std::sync::RwLock::new(Vec::new()),
-            prometheus_expfmt_callbacks: std::sync::RwLock::new(Vec::new()),
+            prometheus_update_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
+            prometheus_expfmt_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
         }
     }
 
@@ -729,8 +735,8 @@ impl MetricsRegistry {
 
     /// Execute all exposition text callbacks and return their concatenated text
     pub fn execute_expfmt_callbacks(&self) -> String {
-        let mut result = String::new();
         let callbacks = self.prometheus_expfmt_callbacks.read().unwrap();
+        let mut result = String::new();
         for callback in callbacks.iter() {
             match callback() {
                 Ok(text) => {

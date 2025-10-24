@@ -724,9 +724,8 @@ impl RuntimeMetrics {
     /// The returned text will be appended to the /metrics endpoint output
     /// The callback should return a string in Prometheus text exposition format
     fn register_prometheus_expfmt_callback(&self, callback: PyObject, _py: Python) -> PyResult<()> {
-        // Get the metrics registry from the hierarchy and register the callback directly
-        let metrics_registry = self.hierarchy.get_metrics_registry();
-        metrics_registry.add_expfmt_callback(Arc::new(move || {
+        // Create the callback once (Arc allows sharing across registries)
+        let callback_arc = Arc::new(move || {
             // Execute the Python callback in the Python event loop
             Python::with_gil(|py| {
                 match callback.call0(py) {
@@ -749,7 +748,21 @@ impl RuntimeMetrics {
                     }
                 }
             })
-        }));
+        });
+
+        // Register the callback at this hierarchy level
+        self.hierarchy
+            .get_metrics_registry()
+            .add_expfmt_callback(callback_arc.clone());
+
+        // Also register at all parent hierarchy levels so the callback is accessible
+        // when prometheus_expfmt() is called on any parent (e.g., DRT)
+        let parents = self.hierarchy.parent_hierarchies();
+        for parent in parents.iter() {
+            parent
+                .get_metrics_registry()
+                .add_expfmt_callback(callback_arc.clone());
+        }
 
         Ok(())
     }
