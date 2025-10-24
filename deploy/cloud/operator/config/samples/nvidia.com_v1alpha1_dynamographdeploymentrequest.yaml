@@ -18,11 +18,15 @@ kind: DynamoGraphDeploymentRequest
 metadata:
   name: example-llm-sla
 spec:
-  # ModelName is a high-level identifier for the model being deployed
+  # ModelName is a high-level identifier for the model being deployed (required - injected into profilingConfig.config.deployment.model)
   modelName: Qwen/Qwen3-0.6B
+
+  # Backend to use for profiling (required - injected into profilingConfig.config.engine.backend)
+  backend: trtllm
 
   # ProfilingConfig maps directly to the profile_sla.py config format
   # See benchmarks/profiler/utils/profiler_argparse.py for complete schema
+  # Note: deployment.model and engine.backend are automatically set from modelName and backend above
   profilingConfig:
     config:
       # Optional: Output directory for profiling results (defaults to /data in the Job)
@@ -30,7 +34,6 @@ spec:
 
       # Engine configuration
       engine:
-        backend: trtllm  # Inference backend: vllm, sglang, or trtllm
         max_context_length: 16384  # Maximum context length supported by the model
         is_moe_model: false  # Enable MoE model support (uses TEP/DEP instead of TP)
 

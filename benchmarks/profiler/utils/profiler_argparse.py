@@ -295,10 +295,9 @@ def create_profiler_parser() -> argparse.Namespace:
         delattr(args, "profile_config")
 
     # Validate required arguments
-    if not args.config:
-        parser.error("--config is required (either via CLI or profile-config)")
+    # Either --model or --config (or both) must be provided
     if not args.model and not args.config:
-        parser.error("--model or --config is required")
+        parser.error("--model or --config is required (provide at least one)")
 
     auto_generate_search_space(args)
 

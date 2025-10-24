@@ -91,13 +91,21 @@ type DeploymentOverridesSpec struct {
 type DynamoGraphDeploymentRequestSpec struct {
 	// ModelName specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
 	// This is a high-level identifier for easy reference in kubectl output and logs.
+	// The controller automatically sets this value in profilingConfig.config.deployment.model.
 	// +kubebuilder:validation:Required
 	ModelName string `json:"modelName"`
+
+	// Backend specifies the inference backend to use.
+	// The controller automatically sets this value in profilingConfig.config.engine.backend.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
+	Backend string `json:"backend"`
 
 	// ProfilingConfig provides the complete configuration for the profiling job.
 	// This configuration is passed directly to the profiler.
 	// The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).
-	// The profiler will validate the configuration and report any errors.
+	// Note: deployment.model and engine.backend are automatically set from the high-level
+	// modelName and backend fields and should not be specified in this config.
 	// +kubebuilder:validation:Required
 	ProfilingConfig ProfilingConfigSpec `json:"profilingConfig"`
 
