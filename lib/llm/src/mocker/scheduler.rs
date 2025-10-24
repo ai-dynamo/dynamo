@@ -350,7 +350,7 @@ impl Scheduler {
                 // Simulates prefill + decode
                 // Base time needed for decoding using active percentage and quadratic formula
                 let active_perc = kv_manager.get_active_perc();
-                let decoding_time = -5.47 * active_perc.powi(2) + 43.88 * active_perc + 19.44;
+                let decoding_time = -25.74 * active_perc.powi(2) + 54.01 * active_perc + 5.74;
                 let mut total_time = Duration::from_secs_f64(decoding_time / 1000.0);
 
                 // Process prefilling
@@ -364,11 +364,10 @@ impl Scheduler {
                         total_time += Duration::from_secs_f64(prefill_compute / 1000.0);
                     }
 
-                    if let Some(creation_signal) = maybe_creation_signal {
-                        if !process_signals(&mut kv_manager, std::slice::from_ref(&creation_signal))
-                        {
-                            panic!("Block allocation for prefilling cannot fail.");
-                        }
+                    if let Some(creation_signal) = maybe_creation_signal
+                        && !process_signals(&mut kv_manager, std::slice::from_ref(&creation_signal))
+                    {
+                        panic!("Block allocation for prefilling cannot fail.");
                     }
 
                     // Impossible to schedule more prefills if we encounter one incomplete (chunked) prefill
