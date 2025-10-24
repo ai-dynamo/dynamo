@@ -15,23 +15,23 @@ Compared to aggregated mode, disaggregated mode has some known randomness.
 Example reference: https://github.com/vllm-project/vllm/issues/7779#issuecomment-2304967870
 """
 
-from copy import deepcopy
 import importlib.util
 import logging
 import os
 import signal
 import subprocess
 import time
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, TextIO, Dict, Any
-import yaml
+from typing import Any, Dict, Optional, TextIO
 
 import pytest
 import requests
+import yaml
 
-from common import DeterminismTester, ServerType
-from common import TestDeterminism as BaseTestDeterminism
+from .common import DeterminismTester, ServerType
+from .common import TestDeterminism as BaseTestDeterminism
 
 # Test markers to align with repository conventions
 # Todo: enable the rest when kvbm is built in the ci
@@ -167,14 +167,17 @@ class LLMServerManager:
             self.prefiller_cmd.extend(
                 ["--num-gpu-blocks-override", str(gpu_cache_blocks)]
             )
+
     def _set_up_trtllm_config(self, gpu_cache_blocks):
-        # Mostly the same parameters here as in the 
+        # Mostly the same parameters here as in the
         prefill_config_path = os.environ.get(
-            "KVBM_TRTLLM_LLMAPI_PREFILL_CONFIG_PATH", "/tmp/kvbm_llm_api_prefill_config.yaml"
+            "KVBM_TRTLLM_LLMAPI_PREFILL_CONFIG_PATH",
+            "/tmp/kvbm_llm_api_prefill_config.yaml",
         )
 
         decode_config_path = os.environ.get(
-            "KVBM_TRTLLM_LLMAPI_DECODE_CONFIG_PATH", "/tmp/kvbm_llm_api_decode_config.yaml"
+            "KVBM_TRTLLM_LLMAPI_DECODE_CONFIG_PATH",
+            "/tmp/kvbm_llm_api_decode_config.yaml",
         )
 
         llm_api_config: Dict[str, Any] = {}
@@ -183,7 +186,7 @@ class LLMServerManager:
             "free_gpu_memory_fraction": 0.10,
             "tokens_per_block": 16,
         }
-        
+
         # GPU blocks override
         if gpu_cache_blocks is not None:
             del llm_api_config["kv_cache_config"]["free_gpu_memory_fraction"]
@@ -206,7 +209,9 @@ class LLMServerManager:
             "max_tokens_in_buffer": 65536,
         }
 
-        model = os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B")
+        model = os.environ.get(
+            "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+        )
 
         cmd_root = [
             "python3",
@@ -217,7 +222,7 @@ class LLMServerManager:
             "--kv-block-size",
             "16",
             "--max-num-tokens",
-            "8000"
+            "8000",
         ]
 
         self.prefiller_cmd = cmd_root + [
@@ -226,7 +231,7 @@ class LLMServerManager:
             "--disaggregation-mode",
             "prefill",
             "--connector",
-            "kvbm"
+            "kvbm",
         ]
 
         self.decoder_cmd = cmd_root + [
@@ -431,7 +436,9 @@ class LLMServerManager:
                 timeout=10,
             )
             if response.status_code != 200:
-                print(f"Model endpoint test failed with status code: {response.status_code}")
+                print(
+                    f"Model endpoint test failed with status code: {response.status_code}"
+                )
             return response.status_code == 200
 
         except requests.exceptions.RequestException as e:
@@ -492,7 +499,9 @@ def llm_server(request, runtime_services):
     elif importlib.util.find_spec("tensorrt_llm") is not None:
         server_type = ServerType.trtllm
     else:
-        raise Exception("Neither the vllm nor the tensorrt_llm module is available in the current environment.")
+        raise Exception(
+            "Neither the vllm nor the tensorrt_llm module is available in the current environment."
+        )
 
     server_manager = LLMServerManager(
         port=port,
