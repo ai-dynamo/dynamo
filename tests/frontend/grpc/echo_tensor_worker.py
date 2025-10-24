@@ -7,7 +7,10 @@
 from base64 import b64encode
 
 import uvloop
-from model_config_pb2 import ModelConfig
+
+# Knowing the test will be run in environment that has tritonclient installed,
+# which contain the generated file equivalent to model_config.proto.
+from tritonclient.grpc.model_config_pb2 import ModelConfig
 
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
