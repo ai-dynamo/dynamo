@@ -251,9 +251,7 @@ fn convert_kserve_to_dynamo_params(
 ) -> Result<tensor::Parameters, Status> {
     kserve_params
         .iter()
-        .map(|(k, v)| {
-            kserve_param_to_dynamo(k, v).map(|param_value| (k.clone(), param_value))
-        })
+        .map(|(k, v)| kserve_param_to_dynamo(k, v).map(|param_value| (k.clone(), param_value)))
         .collect()
 }
 

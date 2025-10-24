@@ -30,11 +30,11 @@ class DynamoFrontendProcess(ManagedProcess):
         )
 
 
-class TensorParamsWorkerProcess(ManagedProcess):
+class EchoTensorWorkerProcess(ManagedProcess):
     def __init__(self, request):
         command = [
             "python3",
-            os.path.join(os.path.dirname(__file__), "tensor_params_worker.py"),
+            os.path.join(os.path.dirname(__file__), "echo_tensor_worker.py"),
         ]
 
         env = os.environ.copy()
@@ -65,7 +65,7 @@ class TensorParamsWorkerProcess(ManagedProcess):
 def start_services(request, runtime_services):
     """Start frontend and worker with fresh etcd/nats."""
     with DynamoFrontendProcess(request):
-        with TensorParamsWorkerProcess(request):
+        with EchoTensorWorkerProcess(request):
             yield
 
 
@@ -110,14 +110,13 @@ def test_request_parameters(start_services, request_params):
     inputs = [grpcclient.InferInput("INPUT", input_data.shape, "FP32")]
     inputs[0].set_data_from_numpy(input_data)
 
-    response = client.infer(
-        "tensor-params-model", inputs=inputs, parameters=request_params
-    )
+    response = client.infer("echo", inputs=inputs, parameters=request_params)
+
+    # Use tritonclient's as_numpy() which handles both raw_output_contents and contents
+    output_data = response.as_numpy("INPUT")
+    assert np.array_equal(input_data, output_data)
 
     response_msg = response.get_response()
-    output_tensor = response_msg.outputs[0]
-    output_data = np.array(list(output_tensor.contents.fp32_contents), dtype=np.float32)
-    assert np.array_equal(input_data, output_data)
 
     resp_params = extract_params(response_msg.parameters)
 
