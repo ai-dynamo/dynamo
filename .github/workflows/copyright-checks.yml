@@ -1,7 +1,9 @@
 name: Copyright Checks
 
 on:
-  pull_request
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened]
 
 jobs:
   copyright-checks:

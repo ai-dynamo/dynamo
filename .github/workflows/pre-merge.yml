@@ -18,7 +18,9 @@ name: pre_merge
 run-name: Pre Merge Validation of (${{ github.repository }}/${{ github.ref }}) by ${{ github.actor }}.
 
 on:
+  push:
   pull_request:
+    types: [opened, synchronize, reopened]
 
 jobs:
 
@@ -31,5 +33,3 @@ jobs:
     - uses: actions/setup-python@v5
     - uses: pre-commit/action@v3.0.0
       timeout-minutes: 3
-
-

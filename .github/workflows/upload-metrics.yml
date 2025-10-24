@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Upload Workflow Metrics
+
+# This workflow triggers after ANY other workflow completes
+on:
+  workflow_run:
+    workflows:
+      - "Docker Build and Test"
+      - "NVIDIA Dynamo Github Validation"
+      - "NVIDIA Test Lab Validation"
+      - "pre_merge"
+      - "Rust pre-merge checks"
+      - "Generate Documentation"
+      - "Docs link check"
+      - "CodeQL"
+      - "Copyright Checks"
+    types:
+      - completed
+
+# Prevent overlapping metrics uploads for the same workflow on the same branch
+concurrency:
+  group: metrics-upload-${{ github.event.workflow_run.workflow_id || github.run_id }}-${{ github.event.workflow_run.head_branch || github.ref_name }}
+  cancel-in-progress: false  # Queue them instead of cancelling
+
+jobs:
+  upload-workflow-metrics:
+    name: Upload Workflow Metrics
+    runs-on: gitlab
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Download build metrics
+        uses: actions/download-artifact@v4
+        with:
+          pattern: build-metrics-*
+          path: build-metrics/
+          merge-multiple: true
+        continue-on-error: true  # Don't fail if artifacts don't exist
+
+      - name: Upload Complete Workflow Metrics
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKFLOW_INDEX: ${{ secrets.WORKFLOW_INDEX }}
+          JOB_INDEX: ${{ secrets.JOB_INDEX }}
+          STEPS_INDEX: ${{ secrets.STEPS_INDEX }}
+          CONTAINER_INDEX: ${{ secrets.CONTAINER_INDEX }}
+          # For workflow_run trigger: use the triggering workflow's run ID
+          # For manual/push trigger: use current run ID (for testing only)
+          TARGET_RUN_ID: ${{ github.event.workflow_run.id || github.run_id }}
+        run: |
+          python3 .github/workflows/upload_complete_workflow_metrics.py
+
