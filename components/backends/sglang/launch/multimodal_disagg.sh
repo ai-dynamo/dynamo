@@ -59,11 +59,6 @@ if [[ -n "$SERVED_MODEL_NAME" ]]; then
     SERVED_MODEL_ARG="--served-model-name $SERVED_MODEL_NAME"
 fi
 
-# Get the directory where this script is located
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SGLANG_BACKEND_DIR="$SCRIPT_DIR/src"
-
-
 # run ingress
 python3 -m dynamo.frontend --http-port=8000 &
 DYNAMO_PID=$!

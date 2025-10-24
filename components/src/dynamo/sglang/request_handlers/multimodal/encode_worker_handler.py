@@ -49,13 +49,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
         super().__init__(component, engine=None, config=config)
         self.pd_worker_client = pd_worker_client
         self.model = config.server_args.model_path
-        # Use served_model_name for model identification, fallback to model_path if not available
-        self.model_name = (
-            config.server_args.served_model_name
-            if hasattr(config.server_args, "served_model_name")
-            and config.server_args.served_model_name
-            else config.server_args.model_path
-        )
+        self.served_model_name = config.server_args.served_model_name
 
         self.image_loader = ImageLoader(cache_size=CACHE_SIZE_MAXIMUM)
 
@@ -131,7 +125,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
 
             image_embeds = self.image_processor(images=image, return_tensors="pt")
             precomputed_embeddings = encode_image_embeddings(
-                model_name=self.model_name,
+                model_name=self.served_model_name,
                 image_embeds=image_embeds,
                 vision_encoder=self.vision_model,
                 projector=None,
