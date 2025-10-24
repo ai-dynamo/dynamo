@@ -73,6 +73,10 @@ runs:
       shell: bash
       run: |
 
+        # Sanitize test_type for filenames (always set this for artifact upload)
+        TEST_TYPE_SAFE=$(echo "${{ inputs.test_type }}" | tr ', ' '_')
+        echo "TEST_TYPE_SAFE=${TEST_TYPE_SAFE}" >> $GITHUB_ENV
+
         # Check for JUnit XML file and determine test status
         JUNIT_FILE="test-results/pytest_test_report.xml"
 
@@ -86,8 +90,6 @@ runs:
 
           # Create uniquely named metadata file with step context information
           # Use framework-testtype-arch to make it unique per test run
-          # Sanitize test_type to remove commas and spaces for safe filenames
-          TEST_TYPE_SAFE=$(echo "${{ inputs.test_type }}" | tr ', ' '_')
           METADATA_FILE="test-results/test_metadata_${{ inputs.framework }}_${TEST_TYPE_SAFE}_${{ inputs.platform_arch }}.json"
           JUNIT_UNIQUE_NAME="pytest_test_report_${{ inputs.framework }}_${TEST_TYPE_SAFE}_${{ inputs.platform_arch }}.xml"
 
@@ -118,6 +120,8 @@ runs:
       uses: actions/upload-artifact@v4
       if: always()  # Always upload test results, even if tests failed
       with:
-        name: test-results-${{ inputs.framework }}-${{ inputs.test_type }}-${{ env.PLATFORM_ARCH }}
-        path: test-results/
+        name: test-results-${{ inputs.framework }}-${{ env.TEST_TYPE_SAFE }}-${{ env.PLATFORM_ARCH }}
+        path: |
+          test-results/pytest_test_report_${{ inputs.framework }}_${{ env.TEST_TYPE_SAFE }}_${{ inputs.platform_arch }}.xml
+          test-results/test_metadata_${{ inputs.framework }}_${{ env.TEST_TYPE_SAFE }}_${{ inputs.platform_arch }}.json
         retention-days: 7

@@ -827,6 +827,22 @@ class WorkflowMetricsUploader:
 
         print(f"🧪 Looking for test results for job '{job_name}'")
 
+        # Determine framework from job name to filter metadata files
+        framework = None
+        job_name_lower = job_name.lower()
+        if "vllm" in job_name_lower:
+            framework = "vllm"
+        elif "sglang" in job_name_lower:
+            framework = "sglang"
+        elif "trtllm" in job_name_lower:
+            framework = "trtllm"
+
+        if not framework:
+            print(f"⚠️  Could not determine framework from job name: {job_name}")
+            return
+
+        print(f"📦 Job framework: {framework}")
+
         # Look for test results directory
         test_results_dir = "test-results"
         if not os.path.exists(test_results_dir):
@@ -835,13 +851,18 @@ class WorkflowMetricsUploader:
 
         # Look for metadata files to get accurate step and framework info
         # Updated pattern to match new unique naming: test_metadata_<framework>_<test_type>_<arch>.json
-        metadata_files = glob.glob(f"{test_results_dir}/test_metadata_*.json")
+        # Filter by framework to only process this job's tests
+        metadata_files = glob.glob(
+            f"{test_results_dir}/test_metadata_{framework}_*.json"
+        )
 
         if not metadata_files:
-            print(f"⚠️  No test metadata files found in {test_results_dir}")
+            print(
+                f"⚠️  No test metadata files found for framework '{framework}' in {test_results_dir}"
+            )
             return
 
-        print(f"📄 Found {len(metadata_files)} test metadata files")
+        print(f"📄 Found {len(metadata_files)} test metadata files for {framework}")
 
         total_tests_processed = 0
 
