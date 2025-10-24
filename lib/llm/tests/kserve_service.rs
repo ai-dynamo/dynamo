@@ -41,6 +41,8 @@ pub mod kserve_test {
     use tonic::{Request, Response, transport::Channel};
 
     use dynamo_async_openai::types::Prompt;
+    use prost::Message;
+    use base64::engine::{Engine, general_purpose};
 
     struct SplitEngine {}
 
@@ -1250,13 +1252,17 @@ pub mod kserve_test {
             ..Default::default()
         };
 
+        let mut buf = vec![];
+        expected_model_config.encode(&mut buf).unwrap();
+        let buf = general_purpose::STANDARD.encode(&buf);
+
         // Register a tensor model
         let mut card = ModelDeploymentCard::with_name_only(model_name);
         card.model_type = ModelType::TensorBased;
         card.model_input = ModelInput::Tensor;
         card.runtime_config = ModelRuntimeConfig {
             tensor_model_config: Some(tensor::TensorModelConfig {
-                triton_model_config: Some(serde_json::to_value(expected_model_config.clone()).unwrap()),
+                triton_model_config: Some(buf),
                 ..Default::default()
             }),
             ..Default::default()

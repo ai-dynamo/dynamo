@@ -126,8 +126,9 @@ pub struct TensorModelConfig {
     pub outputs: Vec<TensorMetadata>,
     // Optional Triton model config in serialized protobuf string,
     // if provided, it supercedes the basic model config defined above.
+    // The string is base64-encoded to ensure safe transport over text-based protocols.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub triton_model_config: Option<serde_json::Value>,
+    pub triton_model_config: Option<String>,
 }
 
 impl Default for TensorModelConfig {
