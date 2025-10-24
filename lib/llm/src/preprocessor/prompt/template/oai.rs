@@ -145,11 +145,7 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
 
     fn tools(&self) -> Option<Value> {
         if self.inner.tools.is_none() {
-            // Return empty array instead of None to handle minijinja limitation:
-            // minijinja doesn't short-circuit "and" expressions, so templates with
-            // "if tools is iterable and tools | length > 0" would fail if tools is None.
-            // The render() method will conditionally add this to context only when non-empty.
-            Some(Value::from_serialize(Vec::<serde_json::Value>::new()))
+            None
         } else {
             // Try to fix the tool schema if it is missing type and properties
             Some(may_be_fix_tool_schema(
@@ -268,25 +264,14 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
             add_generation_prompt
         );
 
-        let ctx = if has_tools {
-            context! {
-                messages => req.messages(),
-                tools => tools,
-                bos_token => self.config.bos_tok(),
-                eos_token => self.config.eos_tok(),
-                unk_token => self.config.unk_tok(),
-                add_generation_prompt => add_generation_prompt,
-                ..mixins
-            }
-        } else {
-            context! {
-                messages => req.messages(),
-                bos_token => self.config.bos_tok(),
-                eos_token => self.config.eos_tok(),
-                unk_token => self.config.unk_tok(),
-                add_generation_prompt => add_generation_prompt,
-                ..mixins
-            }
+        let ctx = context! {
+            messages => req.messages(),
+            tools => tools,
+            bos_token => self.config.bos_tok(),
+            eos_token => self.config.eos_tok(),
+            unk_token => self.config.unk_tok(),
+            add_generation_prompt => add_generation_prompt,
+            ..mixins
         };
 
         // Merge any additional args into the context last so they take precedence
@@ -602,14 +587,14 @@ mod tests {
     }
 
     #[test]
-fn test_template_with_empty_tools() {
+    fn test_none_tools_safe_for_all_templates() {
         use super::tokcfg::ChatTemplate;
         use super::{ContextMixins, HfTokenizerConfigJsonFormatter};
 
-        // minijinja limitation around short circuiting "and" expressions
-        // errors without a custom length filter
-        // this should not error as we override the length filter
-        let template_str = r#"
+        // Due to minijinja limitations the expressions in conditional statements may not be short-circuited
+        // This checks that our custom length filter works to avoid errors in this scenario
+        // length should return 0 if tools is None and 'if tools is iterable and tools | length > 0' should evaluate to false
+        let length_template = r#"
 {%- if tools is iterable and tools | length > 0 %}
 Tools available: {{ tools | length }}
 {%- else %}
@@ -617,8 +602,21 @@ No tools
 {%- endif %}
 "#;
 
+        // Because we return None for tools when there are no tools this scenario should also be evaluate to false
+        // This is similar to the default jinja template behavior seen with llama models
+        let no_tool_template = r#"
+{%- if tools %}
+TOOL MODE
+{%- else %}
+NORMAL MODE
+{%- endif %}
+"#;
+
         let chat_template: ChatTemplate = serde_json::from_value(serde_json::json!({
-            "chat_template": template_str
+            "chat_template": [
+                {"safe_length": length_template},
+                {"no_tool": no_tool_template}
+            ]
         })).unwrap();
 
         let formatter = HfTokenizerConfigJsonFormatter::new(
@@ -626,23 +624,17 @@ No tools
             ContextMixins::new(&[])
         ).unwrap();
 
-        // Test 1: Empty tools array
-        let ctx1 = context! {
-            tools => Value::from_serialize(Vec::<serde_json::Value>::new())
-        };
-        let result1 = formatter.env.get_template("default").unwrap().render(&ctx1);
-        assert!(result1.is_ok(), "Should handle empty array: {:?}", result1);
-        assert!(result1.unwrap().contains("No tools"));
+        let ctx = context! { tools => Option::<Value>::None };
 
-        // Test 2: Tools not in context at all
-        let ctx2 = context! {};
-        let result2 = formatter.env.get_template("default").unwrap().render(&ctx2);
-        println!("Result without tools in context: {:?}", result2);
-        assert!(
-            result2.is_ok() && result2.as_ref().unwrap().contains("No tools"),
-            "Should handle undefined tools: {:?}", result2
-        );
-}
+        let result1 = formatter.env.get_template("safe_length").unwrap().render(&ctx);
+        println!("Safe length template with no tools => None: {:?}", result1);
+        assert!(result1.is_ok(), "Jinja template with and conditional and length filter should handle None: {:?}", result1);
+        assert!(result1.unwrap().contains("No tools"), "Should show 'No tools'");
+
+        let result2 = formatter.env.get_template("no_tool").unwrap().render(&ctx);
+        println!("Default template with no tools => None: {:?}", result2);
+        assert!(result2.is_ok(), "Jinja template with if defined conditional should handle None: {:?}", result2);
+    }
 
 #[test]
 fn test_llama_template_no_tools_no_tool_calling() {
