@@ -77,6 +77,13 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
 
+      - name: Force fresh nvcr login
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker logout nvcr.io || true
+          echo "${{ secrets.NGC_CI_ACCESS_TOKEN }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+
       - name: Build Operator image (amd64)
         id: build-operator
         shell: bash
