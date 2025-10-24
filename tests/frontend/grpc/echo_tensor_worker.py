@@ -48,15 +48,12 @@ async def generate(request, context):
     """Echo tensors and parameters back to the client."""
     print(f"Echoing request: {request}")
 
-    # Start with any existing parameters from the request
     params = {}
     if "parameters" in request:
         params.update(request["parameters"])
 
-    # Add worker flag to verify parameters flow through the system
     params["processed"] = {"bool": True}
 
-    # Echo tensors and parameters
     yield {
         "model": request["model"],
         "tensors": request["tensors"],

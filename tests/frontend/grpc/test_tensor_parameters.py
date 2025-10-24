@@ -112,7 +112,6 @@ def test_request_parameters(start_services, request_params):
 
     response = client.infer("echo", inputs=inputs, parameters=request_params)
 
-    # Use tritonclient's as_numpy() which handles both raw_output_contents and contents
     output_data = response.as_numpy("INPUT")
     assert np.array_equal(input_data, output_data)
 
