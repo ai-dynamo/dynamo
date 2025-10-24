@@ -665,7 +665,7 @@ function determine_user_intention_trtllm() {
         intention_download="true";
         intention_count=$((intention_count+1));
         TRTLLM_INTENTION="download"
-        echo "INFO: Inferring download because TENSORRTLLM_PIP_WHEEL is set and TENSORRTLLM_INDEX_URL is not."
+        echo "INFO: Installing $TENSORRTLLM_PIP_WHEEL trtllm version from default pip index."
     fi
 
     # If nothing is set then we default to downloading the wheel
