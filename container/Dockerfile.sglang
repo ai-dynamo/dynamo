@@ -14,6 +14,11 @@ ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 ARG CARGO_BUILD_JOBS
 
+# sccache configuration - inherit from base build
+ARG USE_SCCACHE
+ARG SCCACHE_BUCKET=""
+ARG SCCACHE_REGION=""
+
 ARG DYNAMO_BASE_IMAGE="dynamo:latest-none"
 FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
 
@@ -37,147 +42,182 @@ FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
 
 FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS framework
 
+# Declare all ARGs
 ARG BUILD_TYPE=all
-ARG BRANCH_TYPE=remote
 ARG DEEPEP_COMMIT=9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee
 ARG CMAKE_BUILD_PARALLEL_LEVEL=2
 ARG FLASHMLA_COMMIT=1408756a88e52a25196b759eaf8db89d2b51b5a1
 ARG SGL_KERNEL_VERSION=0.3.15
 ARG SGLANG_COMMIT=0.5.3.post1
+ARG GDRCOPY_COMMIT=v2.4.4
 ARG GRACE_BLACKWELL=false
-ENV DEBIAN_FRONTEND=noninteractive \
-    CUDA_HOME=/usr/local/cuda \
-    GDRCOPY_HOME=/usr/src/gdrdrv-2.4.4/ \
-    NVSHMEM_DIR=/sgl-workspace/nvshmem/install
-
-
-# Add GKE default lib and bin locations.
-ENV PATH="${PATH}:/usr/local/nvidia/bin" \
-    LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
-
 ARG ARCH
 ARG ARCH_ALT
 ARG PYTHON_VERSION
-
-# Combined: Python setup, timezone, and all package installation in one layer
-RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
- && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
- && apt-get update \
- && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends software-properties-common \
- && add-apt-repository ppa:deadsnakes/ppa -y \
- && apt-get update \
- && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    # Python (using 3.10 as default system Python)
-    python${PYTHON_VERSION}-dev \
-    python${PYTHON_VERSION}-venv \
-    python${PYTHON_VERSION}-distutils \
-    python3-pip \
-    # System essentials
-    git \
-    tzdata \
-    wget \
-    curl ccache git-lfs tree \
-    build-essential cmake ninja-build \
-    dkms \
-    jq \
-    locales \
-    ca-certificates \
-    # Network and system utilities
-    netcat-openbsd kmod unzip openssh-server \
-    # SSL and libraries
-    libssl-dev \
-    pkg-config \
-    # MPI and NUMA
-    libopenmpi-dev libnuma1 libnuma-dev numactl \
-    # InfiniBand/RDMA
-    libibverbs-dev libibverbs1 libibumad3 \
-    librdmacm1 libnl-3-200 libnl-route-3-200 libnl-route-3-dev libnl-3-dev \
-    ibverbs-providers infiniband-diags perftest \
-    # Development libraries
-    libgoogle-glog-dev libgtest-dev libjsoncpp-dev libunwind-dev \
-    libboost-all-dev \
-    libgrpc-dev libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc \
-    pybind11-dev \
-    libhiredis-dev libcurl4-openssl-dev \
-    libczmq4 libczmq-dev \
-    libfabric-dev \
-    patchelf \
-    # NVIDIA (Canidate to remove)
-    nvidia-dkms-550 \
-    devscripts debhelper fakeroot check libsubunit0 libsubunit-dev \
- && rm -rf /var/lib/apt/lists/* \
- && apt-get clean
-
- # Set Python 3.10 as the default python3 interpreter and create python symlink
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
-update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} && \
-update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1 && \
-update-alternatives --set python /usr/bin/python${PYTHON_VERSION}
-
 ARG USE_SCCACHE
+ARG SCCACHE_BUCKET
+ARG SCCACHE_REGION
+ARG CARGO_BUILD_JOBS
+ARG CUDA_VERSION
+
+# Set all environment variables
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=America/Los_Angeles \
+    CUDA_HOME=/usr/local/cuda \
+    GDRCOPY_HOME=/usr/src/gdrdrv-2.4.4/ \
+    NVSHMEM_DIR=/sgl-workspace/nvshmem/install \
+    PATH="${PATH}:/usr/local/nvidia/bin" \
+    LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/nvidia/lib:/usr/local/nvidia/lib64" \
+    LANG=en_US.UTF-8 \
+    LANGUAGE=en_US:en \
+    LC_ALL=en_US.UTF-8
+
+# Combined: Python setup, locale, and all package installation 
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        # Python (using other python versions as needed)
+        python${PYTHON_VERSION}-dev \
+        python${PYTHON_VERSION}-venv \
+        python${PYTHON_VERSION}-distutils \
+        python3-pip \
+        # Build essentials
+        build-essential \
+        cmake \
+        ninja-build \
+        ccache \
+        patchelf \
+        git \
+        git-lfs \
+        # Core system utilities
+        tzdata \
+        locales \
+        ca-certificates \
+        dkms \
+        kmod \
+        # Command line tools
+        wget \
+        curl \
+        jq \
+        unzip \
+        # Network utilities
+        netcat-openbsd \
+        # SSL and pkg-config
+        libssl-dev \
+        pkg-config \
+        # MPI and NUMA
+        libopenmpi-dev \
+        libnuma1 \
+        libnuma-dev \
+        numactl \
+        # InfiniBand/RDMA
+        libibverbs-dev \
+        libibverbs1 \
+        libibumad3 \
+        librdmacm1 \
+        libnl-3-200 \
+        libnl-route-3-200 \
+        libnl-route-3-dev \
+        libnl-3-dev \
+        ibverbs-providers \
+        infiniband-diags \
+        perftest \
+        # Development libraries
+        libgoogle-glog-dev \
+        libgtest-dev \
+        libjsoncpp-dev \
+        libunwind-dev \
+        libboost-all-dev \
+        libgrpc-dev \
+        libgrpc++-dev \
+        libprotobuf-dev \
+        protobuf-compiler \
+        protobuf-compiler-grpc \
+        pybind11-dev \
+        libhiredis-dev \
+        libcurl4-openssl-dev \
+        libczmq4 \
+        libczmq-dev \
+        libfabric-dev \
+        # Package building tools
+        devscripts \
+        debhelper \
+        fakeroot \
+        check \
+        libsubunit0 \
+        libsubunit-dev \
+    # Set Python alternatives
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python /usr/bin/python${PYTHON_VERSION} \
+    # Set up locale
+    && locale-gen en_US.UTF-8 \
+    # Cleanup
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
 # Install sccache if requested
 COPY container/use-sccache.sh /tmp/use-sccache.sh
 RUN if [ "$USE_SCCACHE" = "true" ]; then \
- /tmp/use-sccache.sh install; \
+    /tmp/use-sccache.sh install; \
 fi
 
 # Set environment variables - they'll be empty strings if USE_SCCACHE=false
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
-SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-SCCACHE_S3_KEY_PREFIX=${USE_SCCACHE:+${ARCH}} \
-RUSTC_WRAPPER=${USE_SCCACHE:+sccache} \
-CMAKE_C_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
-CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
-CMAKE_CUDA_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache}
+    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
+    SCCACHE_S3_KEY_PREFIX=${USE_SCCACHE:+${ARCH}} \
+    RUSTC_WRAPPER=${USE_SCCACHE:+sccache} \
+    CMAKE_C_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
+    CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
+    CMAKE_CUDA_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache}
+
+WORKDIR /sgl-workspace
 
 # GDRCopy installation
-RUN mkdir -p /deps && cd /deps \
- && git clone https://github.com/NVIDIA/gdrcopy.git -b v2.4.4 \
- && cd gdrcopy/packages \
- && CUDA=/usr/local/cuda ./build-deb-packages.sh \
- && dpkg -i gdrdrv-dkms_*.deb libgdrapi_*.deb gdrcopy-tests_*.deb gdrcopy_*.deb \
- && cd /
+RUN git clone --depth 1 --branch ${GDRCOPY_COMMIT} https://github.com/NVIDIA/gdrcopy.git \
+    && cd gdrcopy/packages \
+    && export CUDA=${CUDA_HOME} \
+    && ./build-deb-packages.sh \
+    && dpkg -i gdrdrv-dkms_*.deb libgdrapi_*.deb gdrcopy-tests_*.deb gdrcopy_*.deb
 
 # Fix DeepEP IBGDA symlink
 RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so
 
-RUN git clone --branch v${SGLANG_COMMIT} --depth 1 https://github.com/sgl-project/sglang.git /sgl-workspace/sglang
-
-WORKDIR /sgl-workspace
-
-
-ARG SGL_KERNEL_VERSION
-RUN python3 -m pip install --break-system-packages --no-cache-dir --ignore-installed --upgrade pip setuptools wheel html5lib six \
- && cd sglang \
- && case "$CUDA_VERSION" in \
-      12.6.1) CUINDEX=126 ;; \
-      12.8.1) CUINDEX=128 ;; \
-      12.9.1) CUINDEX=129 ;; \
-      *) echo "Unsupported CUDA version: $CUDA_VERSION" && exit 1 ;; \
+# Install SGLang (requires CUDA 12.8.1 or 12.9.1)
+RUN python3 -m pip install --no-cache-dir --ignore-installed --upgrade pip setuptools wheel html5lib six \
+    && git clone --depth 1 --branch v${SGLANG_COMMIT} https://github.com/sgl-project/sglang.git \
+    && cd sglang \
+    && case "$CUDA_VERSION" in \
+        12.8.1) CUINDEX=128 ;; \
+        12.9.1) CUINDEX=129 ;; \
+        *) echo "Error: Unsupported CUDA version for sglang: $CUDA_VERSION (requires 12.8.1 or 12.9.1)" && exit 1 ;; \
     esac \
- && if [ "$CUDA_VERSION" = "12.6.1" ]; then \
-     python3 -m pip install --no-cache-dir https://github.com/sgl-project/whl/releases/download/v${SGL_KERNEL_VERSION}/sgl_kernel-${SGL_KERNEL_VERSION}+cu124-cp310-abi3-manylinux2014_$(uname -m).whl --force-reinstall --no-deps ; \
-   fi \
-&& if [ "$CUDA_VERSION" = "12.8.1" ] || [ "$CUDA_VERSION" = "12.9.1" ]; then \
-     python3 -m pip install --no-cache-dir sgl-kernel==${SGL_KERNEL_VERSION} ; \
-   fi \
- && python3 -m pip install --no-cache-dir -e "python[${BUILD_TYPE}]" --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX} \
- && python3 -m pip install --no-cache-dir nvidia-nccl-cu12==2.27.6 --force-reinstall --no-deps \
- && FLASHINFER_LOGGING_LEVEL=warning python3 -m flashinfer --download-cubin
+    && python3 -m pip install --no-cache-dir sgl-kernel==${SGL_KERNEL_VERSION} \
+    && python3 -m pip install --no-cache-dir -e "python[${BUILD_TYPE}]" --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX} \
+    && python3 -m pip install --no-cache-dir nvidia-nccl-cu12==2.27.6 --force-reinstall --no-deps \
+    && FLASHINFER_LOGGING_LEVEL=warning python3 -m flashinfer --download-cubin
 
-# Download NVSHMEM source files
-# We use Tom's DeepEP fork for GB200 for now
-RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/source/nvshmem_src_cuda12-all-all-3.3.9.tar.gz && \
-    if [ "$GRACE_BLACKWELL" = true ]; then \
-      git clone https://github.com/fzyzcjy/DeepEP.git \
-      && cd DeepEP && git checkout 1b14ad661c7640137fcfe93cccb2694ede1220b0 && sed -i 's/#define NUM_CPU_TIMEOUT_SECS 100/#define NUM_CPU_TIMEOUT_SECS 1000/' csrc/kernels/configs.cuh && cd .. ; \
-    else \
-      git clone https://github.com/deepseek-ai/DeepEP.git \
-      && cd DeepEP && git checkout ${DEEPEP_COMMIT} && sed -i 's/#define NUM_CPU_TIMEOUT_SECS 100/#define NUM_CPU_TIMEOUT_SECS 1000/' csrc/kernels/configs.cuh && cd .. ; \
-    fi \
-    && tar -xf nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
+# Download and extract NVSHMEM source, clone DeepEP (use Tom's fork for GB200)
+RUN --mount=type=cache,target=/var/cache/wget \
+    wget -nv -P /var/cache/wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/source/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
+    && tar -xf /var/cache/wget/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
     && mv nvshmem_src nvshmem \
-    && mv /sgl-workspace/nvshmem_src_cuda12-all-all-3.3.9.tar.gz /deps
+    && rm -f /var/cache/wget/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
+    && if [ "$GRACE_BLACKWELL" = true ]; then \
+        git clone --depth 1 https://github.com/fzyzcjy/DeepEP.git \
+        && cd DeepEP \
+        && git fetch --depth 1 origin 1b14ad661c7640137fcfe93cccb2694ede1220b0 \
+        && git checkout 1b14ad661c7640137fcfe93cccb2694ede1220b0; \
+    else \
+        git clone --depth 1 https://github.com/deepseek-ai/DeepEP.git \
+        && cd DeepEP \
+        && git fetch --depth 1 origin ${DEEPEP_COMMIT} \
+        && git checkout ${DEEPEP_COMMIT}; \
+    fi \
+    && sed -i 's/#define NUM_CPU_TIMEOUT_SECS 100/#define NUM_CPU_TIMEOUT_SECS 1000/' csrc/kernels/configs.cuh
 
 # Build and install NVSHMEM library only (without python library)
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
@@ -199,7 +239,6 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 
 # Build nvshmem4py wheels separately (Python 3.10, CUDA 12) to avoid building the python library twice for multiple python versions
 # Need to reconfigure with PYTHON_LIB=ON to add the nvshmem4py subdirectory
-ARG PYTHON_VERSION
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
@@ -217,71 +256,49 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cmake --build build --target build_nvshmem4py_wheel_cu12_${PYTHON_VERSION} -j${CMAKE_BUILD_PARALLEL_LEVEL} && \
     /tmp/use-sccache.sh show-stats "NVSHMEM4PY"
 
-
 # Install DeepEP
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
     cd /sgl-workspace/DeepEP && \
-    case "$CUDA_VERSION" in \
-      12.6.1) \
-        CHOSEN_TORCH_CUDA_ARCH_LIST='9.0' \
-        ;; \
-      12.8.1|12.9.1) \
-        CHOSEN_TORCH_CUDA_ARCH_LIST='9.0;10.0' \
-        ;; \
-      *) \
-        echo "Unsupported CUDA version: $CUDA_VERSION" && exit 1 \
-        ;; \
-    esac && \
-    NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST="${CHOSEN_TORCH_CUDA_ARCH_LIST}" pip install .
+    NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST="9.0;10.0" pip install .
 
-ARG ARCH
 # Install flashmla
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
     if [ "${ARCH}" = "amd64" ]; then \
-      git clone https://github.com/deepseek-ai/FlashMLA.git flash-mla && \
-      cd flash-mla && \
-      git checkout ${FLASHMLA_COMMIT} && \
-      git submodule update --init --recursive && \
-      if [ "$CUDA_VERSION" = "12.6.1" ]; then \
-        export FLASH_MLA_DISABLE_SM100=1; \
-      fi && \
-      pip install -v . ; \
+        git clone https://github.com/deepseek-ai/FlashMLA.git flash-mla \
+        && cd flash-mla \
+        && git checkout ${FLASHMLA_COMMIT} \
+        && git submodule update --init --recursive \
+        && export FLASH_MLA_DISABLE_SM100=1 \
+        && pip install -v . ;\
     fi
-
-
-# Essential Python build tools
-RUN python3 -m pip install --no-cache-dir \
-    mooncake-transfer-engine==0.3.6.post1 \
-    scikit-build-core
-
-
-# Set up locale
-RUN locale-gen en_US.UTF-8
-ENV LANG en_US.UTF-8
-ENV LANGUAGE en_US:en
-ENV LC_ALL en_US.UTF-8
 
 # Copy rust installation from dynamo_base to avoid duplication efforts
 COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
 COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
 
 ENV RUSTUP_HOME=/usr/local/rustup \
-CARGO_HOME=/usr/local/cargo \
-CARGO_TARGET_DIR=/workspace/target \
-PATH=/usr/local/cargo/bin:$PATH
+    CARGO_HOME=/usr/local/cargo \
+    CARGO_TARGET_DIR=/workspace/target \
+    PATH=/usr/local/cargo/bin:$PATH \
+    CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 
-ARG CARGO_BUILD_JOBS
-ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
+# Install essential Python build tools
+RUN python3 -m pip install --no-cache-dir \
+    mooncake-transfer-engine==0.3.6.post1 \
+    scikit-build-core \
+    setuptools-rust
+
 # Build and install sgl-router
-RUN python3 -m pip install --no-cache-dir setuptools-rust \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} \
     && cd /sgl-workspace/sglang/sgl-router \
     && cargo build --release \
-    && python3 -m pip install --no-cache-dir . \
-    && rm -rf /root/.cache
+    && python3 -m pip install --no-cache-dir .
 
 ##################################################
 ########## Runtime Image ########################
@@ -303,16 +320,15 @@ RUN python3 -m pip install --no-cache-dir setuptools-rust \
 FROM framework AS runtime
 
 WORKDIR /workspace
-ENV DYNAMO_HOME=/opt/dynamo
 
 ARG ARCH
 ARG ARCH_ALT
 ARG PYTHON_VERSION
+
+ENV DYNAMO_HOME=/opt/dynamo
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
-
-# Add default lib and bin locations.
 ENV LD_LIBRARY_PATH=\
 /opt/nvshmem/install/lib:\
 $NIXL_LIB_DIR:\
@@ -321,7 +337,6 @@ $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib/ucx:\
 /usr/local/nvidia/lib64:\
 $LD_LIBRARY_PATH
-
 
 # Copy NATS and ETCD from dynamo_base, and UCX/NIXL
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
@@ -383,7 +398,7 @@ FROM runtime AS dev
 
 ARG WORKSPACE_DIR=/sgl-workspace/dynamo
 
-# Install development tools and utilities (excluding packages already in runtime)
+# Install development tools and utilities
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends  \
     # System monitoring and debugging tools
@@ -420,29 +435,31 @@ RUN apt-get update -y && \
     zsh \
     silversearcher-ag \
     cloc \
-    locales && \
+    locales \
+    # NVIDIA tools dependencies
+    gnupg && \
+    echo "deb http://developer.download.nvidia.com/devtools/repos/ubuntu2004/amd64 /" | tee /etc/apt/sources.list.d/nvidia-devtools.list && \
+    apt-key adv --fetch-keys http://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub && \
+    apt-get update -y && \
+    apt-get install -y nsight-systems-cli && \
     rm -rf /var/lib/apt/lists/*
 
-# Set workspace directory variable
-ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
-    DYNAMO_HOME=${WORKSPACE_DIR} \
-    RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    CARGO_TARGET_DIR=/workspace/target \
-    PATH=/usr/local/cargo/bin:$PATH
-
-COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
-COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
-
-# Install maturin, for maturin develop
-RUN pip install maturin[patchelf]
+# Install clang-format and clangd
+RUN curl -LSso /usr/local/bin/clang-format https://github.com/muttleyxd/clang-tools-static-binaries/releases/download/master-32d3ac78/clang-format-16_linux-amd64 \
+    && chmod +x /usr/local/bin/clang-format \
+    && curl -L https://github.com/clangd/clangd/releases/download/18.1.3/clangd-linux-18.1.3.zip -o clangd.zip \
+    && unzip clangd.zip \
+    && cp -r clangd_18.1.3/bin/* /usr/local/bin/ \
+    && cp -r clangd_18.1.3/lib/* /usr/local/lib/ \
+    && rm -rf clangd_18.1.3 clangd.zip
 
 # Editable install of dynamo
 COPY pyproject.toml README.md hatch_build.py /workspace/
 RUN pip install --no-deps -e .
 
-# Install minimal Python packages
+# Install Python development packages
 RUN pip install --no-cache-dir \
+    maturin[patchelf] \
     pytest \
     black \
     isort \
@@ -453,24 +470,6 @@ RUN pip install --no-cache-dir \
     pandas \
     matplotlib \
     tabulate
-
-RUN apt update -y \
-    && apt install -y --no-install-recommends gnupg \
-    && echo "deb http://developer.download.nvidia.com/devtools/repos/ubuntu2004/amd64 /" | tee /etc/apt/sources.list.d/nvidia-devtools.list \
-    && apt-key adv --fetch-keys http://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub \
-    && apt update -y \
-    && apt install nsight-systems-cli -y
-
-# Install clang-format
-RUN curl -LSso /usr/local/bin/clang-format https://github.com/muttleyxd/clang-tools-static-binaries/releases/download/master-32d3ac78/clang-format-16_linux-amd64 \
-    && chmod +x /usr/local/bin/clang-format
-
-# Install clangd
-RUN curl -L https://github.com/clangd/clangd/releases/download/18.1.3/clangd-linux-18.1.3.zip -o clangd.zip \
-    && unzip clangd.zip \
-    && cp -r clangd_18.1.3/bin/* /usr/local/bin/ \
-    && cp -r clangd_18.1.3/lib/* /usr/local/lib/ \
-    && rm -rf clangd_18.1.3 clangd.zip
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
