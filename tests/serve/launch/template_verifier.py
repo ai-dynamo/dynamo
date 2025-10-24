@@ -1,16 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import sys
 from pathlib import Path
 
 import uvloop
 from transformers import AutoTokenizer
 
+from dynamo.common.utils.paths import WORKSPACE_DIR
 from dynamo.llm import ModelInput, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
-SERVE_TEST_DIR = "/workspace/tests/serve"  # do not import from tests.serve.common because on CI, PYTHONPATH is not set and it'll fail
+SERVE_TEST_DIR = os.path.join(WORKSPACE_DIR, "tests/serve")
 
 
 class TemplateVerificationHandler:

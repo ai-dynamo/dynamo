@@ -18,6 +18,8 @@ from kr8s.objects import Pod as kr8s_Pod
 from kr8s.objects import Service as kr8s_Service
 from kubernetes_asyncio import client, config
 
+from dynamo.common.utils.paths import get_workspace_dir
+
 
 class ServiceSpec:
     """Wrapper around a single service in the deployment spec."""
@@ -822,8 +824,11 @@ async def main():
         datefmt=DATE_FORMAT,  # ISO 8601 UTC format
     )
 
+    # Get workspace directory using centralized logic
+    workspace_dir = get_workspace_dir()
+
     deployment_spec = DeploymentSpec(
-        "/workspace/components/backends/vllm/deploy/agg.yaml"
+        os.path.join(workspace_dir, "components/backends/vllm/deploy/agg.yaml")
     )
 
     deployment_spec.disable_grove()
