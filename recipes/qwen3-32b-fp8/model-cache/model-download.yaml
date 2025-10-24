@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-download
+spec:
+  backoffLimit: 3
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: model-download
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: model-download
+          image: python:3.10-slim
+          command: ["sh", "-c"]
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          env:
+            - name: MODEL_NAME
+              value: Qwen/Qwen3-32B-FP8
+            - name: HF_HOME
+              value: /model-store
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "1"
+            - name: MODEL_REVISION
+              value: aa55da1ecc13d006e8b8e4f54579b1ea8c3db2df
+          args:
+            - |
+              set -eux
+              pip install --no-cache-dir huggingface_hub hf_transfer
+              hf download $MODEL_NAME --revision $MODEL_REVISION"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /model-store
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache

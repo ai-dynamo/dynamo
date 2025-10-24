@@ -7,10 +7,11 @@ use crate::storage::key_value_store::{
 };
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
-    ErrorContext, PrometheusUpdateCallback,
+    ErrorContext,
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
     discovery::DiscoveryClient,
-    metrics::MetricsRegistry,
+    metrics::PrometheusUpdateCallback,
+    metrics::{MetricsHierarchy, MetricsRegistry},
     service::ServiceClient,
     transports::{etcd, nats, tcp},
 };
@@ -25,13 +26,17 @@ use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-impl MetricsRegistry for DistributedRuntime {
+impl MetricsHierarchy for DistributedRuntime {
     fn basename(&self) -> String {
         "".to_string() // drt has no basename. Basename only begins with the Namespace.
     }
 
-    fn parent_hierarchy(&self) -> Vec<String> {
-        vec![] // drt is the root, so no parent hierarchy
+    fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy> {
+        vec![] // drt is the root, so no parent hierarchies
+    }
+
+    fn get_metrics_registry(&self) -> &MetricsRegistry {
+        &self.metrics_registry
     }
 }
 
@@ -89,10 +94,7 @@ impl DistributedRuntime {
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
-            hierarchy_to_metricsregistry: Arc::new(std::sync::RwLock::new(HashMap::<
-                String,
-                crate::MetricsRegistryEntry,
-            >::new())),
+            metrics_registry: crate::MetricsRegistry::new(),
             system_health,
         };
 
@@ -101,9 +103,7 @@ impl DistributedRuntime {
                 &distributed_runtime,
                 nats_client_for_metrics.client().clone(),
             )?;
-            let mut drt_hierarchies = distributed_runtime.parent_hierarchy();
-            drt_hierarchies.push(distributed_runtime.hierarchy());
-            // Register a callback to update NATS client metrics
+            // Register a callback to update NATS client metrics on the DRT's metrics registry
             let nats_client_callback = Arc::new({
                 let nats_client_clone = nats_client_metrics.clone();
                 move || {
@@ -112,7 +112,8 @@ impl DistributedRuntime {
                 }
             });
             distributed_runtime
-                .register_prometheus_update_callback(drt_hierarchies, nats_client_callback);
+                .metrics_registry
+                .add_update_callback(nats_client_callback);
         }
 
         // Initialize the uptime gauge in SystemHealth
@@ -300,78 +301,6 @@ impl DistributedRuntime {
 
     pub fn instance_sources(&self) -> Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>> {
         self.instance_sources.clone()
-    }
-
-    /// Add a Prometheus metric to a specific hierarchy's registry. Note that it is possible
-    /// to register the same metric name multiple times, as long as the labels are different.
-    pub fn add_prometheus_metric(
-        &self,
-        hierarchy: &str,
-        prometheus_metric: Box<dyn prometheus::core::Collector>,
-    ) -> anyhow::Result<()> {
-        let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
-        let entry = registries.entry(hierarchy.to_string()).or_default();
-
-        // Try to register the metric
-        entry
-            .prometheus_registry
-            .register(prometheus_metric)
-            .map_err(|e| e.into())
-    }
-
-    /// Add a Prometheus update callback to the given hierarchies
-    /// TODO: rename this to register_callback, once we move the the MetricsRegistry trait
-    ///       out of the runtime, and make it into a composed module.
-    pub fn register_prometheus_update_callback(
-        &self,
-        hierarchies: Vec<String>,
-        callback: PrometheusUpdateCallback,
-    ) {
-        let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
-        for hierarchy in &hierarchies {
-            registries
-                .entry(hierarchy.clone())
-                .or_default()
-                .add_prometheus_update_callback(callback.clone());
-        }
-    }
-
-    /// Execute all Prometheus update callbacks for a given hierarchy and return their results
-    pub fn execute_prometheus_update_callbacks(&self, hierarchy: &str) -> Vec<anyhow::Result<()>> {
-        // Clone callbacks while holding read lock (fast operation)
-        let callbacks = {
-            let registries = self.hierarchy_to_metricsregistry.read().unwrap();
-            registries
-                .get(hierarchy)
-                .map(|entry| entry.prometheus_update_callbacks.clone())
-        }; // Read lock released here
-
-        // Execute callbacks without holding the lock
-        match callbacks {
-            Some(callbacks) => callbacks.iter().map(|callback| callback()).collect(),
-            None => Vec::new(),
-        }
-    }
-
-    /// Add a Prometheus exposition text callback that returns Prometheus text for the given hierarchies
-    pub fn register_prometheus_expfmt_callback(
-        &self,
-        hierarchies: Vec<String>,
-        callback: crate::PrometheusExpositionFormatCallback,
-    ) {
-        let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
-        for hierarchy in &hierarchies {
-            registries
-                .entry(hierarchy.clone())
-                .or_default()
-                .add_prometheus_expfmt_callback(callback.clone());
-        }
-    }
-
-    /// Get all registered hierarchy keys. Private because it is only used for testing.
-    fn get_registered_hierarchies(&self) -> Vec<String> {
-        let registries = self.hierarchy_to_metricsregistry.read().unwrap();
-        registries.keys().cloned().collect()
     }
 }
 

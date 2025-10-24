@@ -1,18 +1,6 @@
 <!--
 SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
 -->
 
 # Dynamo MetricsRegistry
@@ -25,11 +13,11 @@ Dynamo provides built-in metrics capabilities through the `MetricsRegistry` trai
 
 Dynamo automatically exposes metrics with the `dynamo_` name prefixes. It also adds the following labels `dynamo_namespace`, `dynamo_component`, and `dynamo_endpoint` to indicate which component is providing the metric.
 
-**Frontend Metrics**: When using Dynamo HTTP Frontend (`--framework VLLM` or `--framework TRTLLM`), these metrics are automatically exposed with the `dynamo_frontend_*` prefix and include `model` labels containing the model name. These cover request handling, token processing, and latency measurements. See the [Available Metrics section](../../deploy/metrics/README.md#available-metrics) for the complete list of frontend metrics.
+**Frontend Metrics**: When using Dynamo HTTP Frontend (`--framework VLLM` or `--framework TRTLLM`), these metrics are automatically exposed with the `dynamo_frontend_*` prefix and include `model` labels containing the model name. These cover request handling, token processing, and latency measurements. See [prometheus-grafana.md](prometheus-grafana.md#available-metrics) for the complete list of frontend metrics.
 
-**Component Metrics**: The core Dynamo backend system automatically exposes metrics with the `dynamo_component_*` prefix for all components that use the `DistributedRuntime` framework. These include request counts, processing times, byte transfers, and system uptime metrics. See the [Available Metrics section](../../deploy/metrics/README.md#available-metrics) for the complete list of component metrics.
+**Component Metrics**: The core Dynamo backend system automatically exposes metrics with the `dynamo_component_*` prefix for all components that use the `DistributedRuntime` framework. These include request counts, processing times, byte transfers, and system uptime metrics. See [prometheus-grafana.md](prometheus-grafana.md#available-metrics) for the complete list of component metrics.
 
-**Specialized Component Metrics**: Components can also expose additional metrics specific to their functionality. For example, a `preprocessor` component exposes metrics with the `dynamo_preprocessor_*` prefix. See the [Available Metrics section](../../deploy/metrics/README.md#available-metrics) for details on specialized component metrics.
+**Specialized Component Metrics**: Components can also expose additional metrics specific to their functionality. For example, a `preprocessor` component exposes metrics with the `dynamo_preprocessor_*` prefix. See [prometheus-grafana.md](prometheus-grafana.md#available-metrics) for details on specialized component metrics.
 
 **Kubernetes Integration**: For comprehensive Kubernetes deployment and monitoring setup, see the [Kubernetes Metrics Guide](../kubernetes/observability/metrics.md). This includes Prometheus Operator setup, metrics collection configuration, and visualization in Grafana.
 
@@ -47,7 +35,7 @@ This hierarchical structure allows you to create metrics at the appropriate leve
 
 ## Getting Started
 
-For a complete setup guide including Docker Compose configuration, Prometheus setup, and Grafana dashboards, see the [Getting Started section](../../deploy/metrics/README.md#getting-started) in the deploy metrics documentation.
+For a complete setup guide including Docker Compose configuration, Prometheus setup, and Grafana dashboards, see the [Getting Started section](prometheus-grafana.md#getting-started) in the Prometheus and Grafana guide.
 
 The quick start includes:
 - Docker Compose setup for Prometheus and Grafana
@@ -57,7 +45,7 @@ The quick start includes:
 
 ## Implementation Examples
 
-See [Implementation Examples](../../deploy/metrics/README.md#implementation-examples) for detailed examples of creating metrics at different hierarchy levels and using dynamic labels.
+Examples of creating metrics at different hierarchy levels and using dynamic labels are included in this document below.
 
 ### Grafana Dashboards
 
@@ -90,12 +78,22 @@ graph TD
 
 The metrics system includes a pre-configured Grafana dashboard for visualizing service metrics:
 
-![Grafana Dynamo Dashboard](../../deploy/metrics/grafana-dynamo-composite.png)
+![Grafana Dynamo Dashboard](./grafana-dynamo-composite.png)
+
+## Detailed Setup Guide
+
+For complete setup instructions including Docker Compose, Prometheus configuration, and Grafana dashboards, see:
+
+```{toctree}
+:hidden:
+
+prometheus-grafana
+```
+
+- [Prometheus and Grafana Setup Guide](prometheus-grafana.md)
 
 ## Related Documentation
 
 - [Distributed Runtime Architecture](../design_docs/distributed_runtime.md)
 - [Dynamo Architecture Overview](../design_docs/architecture.md)
 - [Backend Guide](../development/backend-guide.md)
-- [Metrics Implementation Examples](../../deploy/metrics/README.md#implementation-examples)
-- [Complete Metrics Setup Guide](../../deploy/metrics/README.md)
