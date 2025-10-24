@@ -228,7 +228,7 @@ pub async fn start_kv_router_background(
                 }
                 Err(e) => {
                     tracing::info!(
-                        "Did not initialize radix state from NATS object store (likely no snapshots yet): {e:?}"
+                        "Failed to download snapshots. This is normal for freshly started Router replicas."
                     );
                 }
             }
