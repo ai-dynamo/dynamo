@@ -133,11 +133,6 @@ def send_completion_request(
             json=payload,
             timeout=timeout,
         )
-        logger.info(f"Received response with status code: {response.status_code}")
-        logger.info(f"response reason: {response.reason}")
-        logger.info(f"response content: {response.content}")
-        logger.info(f"response text: {response.text}")
-        logger.info(f"request body: {response.request.body}")
         return response
     except requests.exceptions.Timeout:
         logger.error(f"Request timed out after {timeout} seconds")
