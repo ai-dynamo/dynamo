@@ -34,6 +34,9 @@ impl HfTokenizerConfigJsonFormatter {
             "chat_template field is required in the tokenizer_config.json file"
         ))?;
 
+        // Safely handle chat templates that check the length of arguments like `tools` even
+        // when `tools=None` when rendered through minijinja. For example:
+        // https://github.com/vllm-project/vllm/blob/d95d0f4b985f28ea381e301490f9d479b34d8980/examples/tool_chat_template_hermes.jinja#L36
         env.add_filter("length", |value: Value| -> usize {
             use minijinja::value::ValueKind;
             match value.kind() {
