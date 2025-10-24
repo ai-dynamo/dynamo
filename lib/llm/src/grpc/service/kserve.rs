@@ -39,7 +39,6 @@ use inference::{
     ModelMetadataRequest, ModelMetadataResponse, ModelStreamInferResponse,
 };
 
-use base64::engine::{Engine, general_purpose};
 use prost::Message;
 
 /// [gluo TODO] 'metrics' are for HTTP service and there is HTTP endpoint
@@ -424,20 +423,13 @@ impl GrpcInferenceService for KserveService {
                     if let Some(triton_model_config) =
                         tensor_model_config.triton_model_config.as_ref()
                     {
-                        let bytes = general_purpose::STANDARD
-                            .decode(triton_model_config.clone())
+                        let model_config = ModelConfig::decode(triton_model_config.as_slice())
                             .map_err(|e| {
                                 Status::invalid_argument(format!(
-                                    "Failed to decode base64 model config: {}",
+                                    "Failed to deserialize model config: {}",
                                     e
                                 ))
                             })?;
-                        let model_config = ModelConfig::decode(&*bytes).map_err(|e| {
-                            Status::invalid_argument(format!(
-                                "Failed to deserialize model config: {}",
-                                e
-                            ))
-                        })?;
                         return Ok(Response::new(ModelMetadataResponse {
                             name: model_config.name,
                             versions: vec!["1".to_string()],
@@ -556,20 +548,13 @@ impl GrpcInferenceService for KserveService {
                     if let Some(triton_model_config) =
                         tensor_model_config.triton_model_config.as_ref()
                     {
-                        let bytes = general_purpose::STANDARD
-                            .decode(triton_model_config.clone())
+                        let model_config = ModelConfig::decode(triton_model_config.as_slice())
                             .map_err(|e| {
                                 Status::invalid_argument(format!(
-                                    "Failed to decode base64 model config: {}",
+                                    "Failed to deserialize model config: {}",
                                     e
                                 ))
                             })?;
-                        let model_config = ModelConfig::decode(&*bytes).map_err(|e| {
-                            Status::invalid_argument(format!(
-                                "Failed to deserialize model config: {}",
-                                e
-                            ))
-                        })?;
                         return Ok(Response::new(ModelConfigResponse {
                             config: Some(model_config),
                         }));

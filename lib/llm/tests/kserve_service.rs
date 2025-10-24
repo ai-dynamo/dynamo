@@ -40,7 +40,6 @@ pub mod kserve_test {
     use tokio::time::timeout;
     use tonic::{Request, Response, transport::Channel};
 
-    use base64::engine::{Engine, general_purpose};
     use dynamo_async_openai::types::Prompt;
     use prost::Message;
 
@@ -1254,7 +1253,6 @@ pub mod kserve_test {
 
         let mut buf = vec![];
         expected_model_config.encode(&mut buf).unwrap();
-        let buf = general_purpose::STANDARD.encode(&buf);
 
         // Register a tensor model
         let mut card = ModelDeploymentCard::with_name_only(model_name);
