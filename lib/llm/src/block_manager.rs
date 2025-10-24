@@ -20,6 +20,7 @@ pub mod numa_allocator;
 pub mod offload;
 pub mod pool;
 pub mod storage;
+pub mod v2;
 
 // dynamo rt integration
 pub mod controller;
