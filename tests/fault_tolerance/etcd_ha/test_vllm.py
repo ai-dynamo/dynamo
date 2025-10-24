@@ -88,7 +88,7 @@ def test_etcd_ha_failover_vllm_aggregated(request, predownload_models):
     """
     Test ETCD High Availability with leader failover.
 
-    This test:-
+    This test:
     1. Starts a 3-node ETCD cluster
     2. Starts NATS, frontend, and a vLLM worker
     3. Sends an inference request to verify the system works
