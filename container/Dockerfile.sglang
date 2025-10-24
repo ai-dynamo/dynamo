@@ -88,7 +88,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     libssl-dev \
     pkg-config \
     # MPI and NUMA
-    libopenmpi-dev libnuma1 libnuma-dev \
+    libopenmpi-dev libnuma1 libnuma-dev numactl \
     # InfiniBand/RDMA
     libibverbs-dev libibverbs1 libibumad3 \
     librdmacm1 libnl-3-200 libnl-route-3-200 libnl-route-3-dev libnl-3-dev \
