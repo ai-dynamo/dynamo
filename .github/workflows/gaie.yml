@@ -77,18 +77,18 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
 
-      - name: Ensure nvcr distroless base is available
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! docker image inspect nvcr.io/nvidia/distroless/go:v3.1.13 >/dev/null 2>&1; then
-            echo "nvcr distroless not present; logging in and pulling..."
-            docker logout nvcr.io || true
-            echo "${{ secrets.NGC_CI_ACCESS_TOKEN }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
-            docker pull nvcr.io/nvidia/distroless/go:v3.1.13
-          else
-            echo "nvcr distroless already present; skipping login."
-          fi
+      # - name: Ensure nvcr distroless base is available
+      #   shell: bash
+      #   run: |
+      #     set -euo pipefail
+      #     if ! docker image inspect nvcr.io/nvidia/distroless/go:v3.1.13 >/dev/null 2>&1; then
+      #       echo "nvcr distroless not present; logging in and pulling..."
+      #       docker logout nvcr.io || true
+      #       echo "${{ secrets.NGC_CI_ACCESS_TOKEN }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+      #       docker pull nvcr.io/nvidia/distroless/go:v3.1.13
+      #     else
+      #       echo "nvcr distroless already present; skipping login."
+      #     fi
 
       - name: Build Operator image (amd64)
         id: build-operator
