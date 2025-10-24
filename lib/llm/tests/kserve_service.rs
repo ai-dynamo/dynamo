@@ -42,6 +42,7 @@ pub mod kserve_test {
     use tonic::{Request, Response, transport::Channel};
 
     use dynamo_async_openai::types::Prompt;
+    use prost::Message;
 
     struct SplitEngine {}
 
@@ -361,6 +362,7 @@ pub mod kserve_test {
         ModelInfo = 8994,
         TensorModel = 8995,
         TensorModelTypes = 8996,
+        TritonModelConfig = 8997,
     }
 
     #[rstest]
@@ -1173,6 +1175,7 @@ pub mod kserve_test {
                     shape: vec![-1],
                     parameters: Default::default(),
                 }],
+                triton_model_config: None,
             }),
             ..Default::default()
         };
@@ -1203,6 +1206,98 @@ pub mod kserve_test {
             model_name,
             inputs,
             std::collections::HashMap::new(),
+        );
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_triton_model_config(
+        #[with(TestPort::TritonModelConfig as u16)] service_with_engines: (
+            KserveService,
+            Arc<SplitEngine>,
+            Arc<AlwaysFailEngine>,
+            Arc<LongRunningEngine>,
+        ),
+    ) {
+        // start server
+        let _running = RunningService::spawn(service_with_engines.0.clone());
+
+        let mut client = get_ready_client(TestPort::TritonModelConfig as u16, 5).await;
+
+        let model_name = "tensor";
+        let expected_model_config = inference::ModelConfig {
+            name: model_name.to_string(),
+            platform: "custom".to_string(),
+            backend: "custom".to_string(),
+            input: vec![
+                inference::ModelInput {
+                    name: "input".to_string(),
+                    data_type: DataType::TypeInt32 as i32,
+                    dims: vec![1],
+                    optional: false,
+                    ..Default::default()
+                },
+                inference::ModelInput {
+                    name: "optional_input".to_string(),
+                    data_type: DataType::TypeInt32 as i32,
+                    dims: vec![1],
+                    optional: true,
+                    ..Default::default()
+                },
+            ],
+            output: vec![inference::ModelOutput {
+                name: "output".to_string(),
+                data_type: DataType::TypeBool as i32,
+                dims: vec![-1],
+                ..Default::default()
+            }],
+            model_transaction_policy: Some(inference::ModelTransactionPolicy { decoupled: true }),
+            ..Default::default()
+        };
+
+        let mut buf = vec![];
+        expected_model_config.encode(&mut buf).unwrap();
+
+        // Register a tensor model
+        let mut card = ModelDeploymentCard::with_name_only(model_name);
+        card.model_type = ModelType::TensorBased;
+        card.model_input = ModelInput::Tensor;
+        card.runtime_config = ModelRuntimeConfig {
+            tensor_model_config: Some(tensor::TensorModelConfig {
+                triton_model_config: Some(buf),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let tensor = Arc::new(TensorEngine {});
+        service_with_engines
+            .0
+            .model_manager()
+            .add_tensor_model("tensor", card.mdcsum(), tensor.clone())
+            .unwrap();
+        let _ = service_with_engines
+            .0
+            .model_manager()
+            .save_model_card("key", card);
+
+        // success config
+        let request = tonic::Request::new(ModelConfigRequest {
+            name: model_name.into(),
+            version: "".into(),
+        });
+
+        let response = client
+            .model_config(request)
+            .await
+            .unwrap()
+            .into_inner()
+            .config;
+        let Some(config) = response else {
+            panic!("Expected Some(config), got None");
+        };
+        assert_eq!(
+            config, expected_model_config,
+            "Expected same model config to be returned",
         );
     }
 
@@ -1305,6 +1400,7 @@ pub mod kserve_test {
                     shape: vec![-1],
                     parameters: Default::default(),
                 }],
+                triton_model_config: None,
             }),
             ..Default::default()
         };

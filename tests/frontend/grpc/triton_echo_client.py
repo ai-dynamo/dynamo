@@ -43,3 +43,17 @@ def run_infer():
 
     assert np.array_equal(input0_data, output0_data)
     assert np.array_equal(input1_data, output1_data)
+
+
+def get_config():
+    server_url = "localhost:8000"
+    try:
+        triton_client = grpcclient.InferenceServerClient(url=server_url)
+    except Exception as e:
+        print("channel creation failed: " + str(e))
+        sys.exit()
+
+    model_name = "echo"
+    response = triton_client.get_model_config(model_name=model_name)
+    # Check one of the field that can only be set by providing Triton model config
+    assert response.config.model_transaction_policy.decoupled
