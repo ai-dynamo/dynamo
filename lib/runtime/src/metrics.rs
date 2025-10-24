@@ -996,14 +996,14 @@ mod test_metricsregistry_units {
             assert_eq!(results.len(), 3);
             assert_eq!(counter.load(Ordering::SeqCst), 222); // 111 + 111
 
-            // Test cloning - cloned entry should have no callbacks
+            // Test cloning - cloned entry shares callbacks (callbacks are Arc-wrapped)
             let cloned = registry.clone();
-            assert_eq!(cloned.execute_update_callbacks().len(), 0);
-            assert_eq!(counter.load(Ordering::SeqCst), 222); // No change
-
-            // Original still has callbacks
-            registry.execute_update_callbacks();
+            assert_eq!(cloned.execute_update_callbacks().len(), 3);
             assert_eq!(counter.load(Ordering::SeqCst), 333); // 222 + 111
+
+            // Original still has callbacks and shares the same Arc
+            registry.execute_update_callbacks();
+            assert_eq!(counter.load(Ordering::SeqCst), 444); // 333 + 111
         }
 
         // Test 2: Mixed success and error callbacks
