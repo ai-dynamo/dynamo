@@ -4,8 +4,12 @@
 use std::{collections::HashMap, pin::Pin, time::Duration};
 
 use crate::{
-    protocols::EndpointId, slug::Slug, storage::key_value_store::Key, transports::nats::Client,
+    protocols::EndpointId,
+    slug::Slug,
+    storage::key_value_store::{Key, KeyValue, WatchEvent},
+    transports::nats::Client,
 };
+use async_nats::jetstream::kv::Operation;
 use async_trait::async_trait;
 use futures::StreamExt;
 
@@ -141,8 +145,7 @@ impl KeyValueBucket for NATSBucket {
 
     async fn watch(
         &self,
-    ) -> Result<Pin<Box<dyn futures::Stream<Item = bytes::Bytes> + Send + 'life0>>, StoreError>
-    {
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + 'life0>>, StoreError> {
         let watch_stream = self
             .nats_store
             .watch_all()
@@ -156,7 +159,15 @@ impl KeyValueBucket for NATSBucket {
                     async_nats::error::Error<_>,
                 >| async move {
                     match maybe_entry {
-                        Ok(entry) => Some(entry.value),
+                        Ok(entry) => {
+                            let item = KeyValue::new(entry.key, entry.value);
+                            Some(match entry.operation {
+                                Operation::Put => WatchEvent::Put(item),
+                                Operation::Delete => WatchEvent::Delete(item),
+                                // TODO: What is Purge? Not urgent, NATS impl not used
+                                Operation::Purge => WatchEvent::Delete(item),
+                            })
+                        }
                         Err(e) => {
                             tracing::error!(error=%e, "watch fatal err");
                             None

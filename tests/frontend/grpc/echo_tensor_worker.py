@@ -45,8 +45,20 @@ async def echo_tensor_worker(runtime: DistributedRuntime):
 
 
 async def generate(request, context):
+    """Echo tensors and parameters back to the client."""
     print(f"Echoing request: {request}")
-    yield {"model": request["model"], "tensors": request["tensors"]}
+
+    params = {}
+    if "parameters" in request:
+        params.update(request["parameters"])
+
+    params["processed"] = {"bool": True}
+
+    yield {
+        "model": request["model"],
+        "tensors": request["tensors"],
+        "parameters": params,
+    }
 
 
 if __name__ == "__main__":
