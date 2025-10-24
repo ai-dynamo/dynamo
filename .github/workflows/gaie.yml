@@ -58,8 +58,8 @@ jobs:
           curl -LO "https://dl.k8s.io/release/${KUBECTL_VER}/bin/linux/amd64/kubectl"
           sudo install -m 0755 kubectl /usr/local/bin/kubectl
 
-      - name: Login to NGC (optional for base images)
-        if: ${{ false }}
+      - name: Login to NGC
+        if: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
         run: |
           echo "${{ secrets.NGC_CI_ACCESS_TOKEN }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
 
