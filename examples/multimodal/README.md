@@ -203,7 +203,7 @@ of the model per node.
 
 #### Workflow
 
-In this workflow, we have [VllmPDWorker](components/worker.py) which will encode the image, prefill and decode the prompt, just like the [LLM aggregated serving](/docs/backends/vllm/README.md) example.
+In this workflow, we have [VllmPDWorker](components/worker.py) which will encode the image, prefill and decode the prompt, just like the [LLM aggregated serving](../../docs/backends/vllm/README.md) example.
 
 This figure illustrates the workflow:
 ```mermaid
@@ -342,7 +342,7 @@ This example demonstrates deploying an aggregated multimodal model that can proc
 In this workflow, we have two workers, [VideoEncodeWorker](components/video_encode_worker.py) and [VllmPDWorker](components/worker.py).
 The VideoEncodeWorker is responsible for decoding the video into a series of frames. Unlike the image pipeline which generates embeddings,
 this pipeline passes the raw frames directly to the VllmPDWorker via a combination of NATS and RDMA.
-Its VllmPDWorker then prefills and decodes the prompt, just like the [LLM aggregated serving](/docs/backends/vllm/README.md) example.
+Its VllmPDWorker then prefills and decodes the prompt, just like the [LLM aggregated serving](../../docs/backends/vllm/README.md) example.
 By separating the video processing from the prefill and decode stages, we can have a more flexible deployment and scale the
 VideoEncodeWorker independently from the prefill and decode workers if needed.
 
@@ -501,4 +501,135 @@ You should see a response describing the video's content similar to
   "object": "chat.completion",
   "usage": null
 }
+```
+## Multimodal Aggregated Audio Serving
+
+This example demonstrates deploying an aggregated multimodal model that can process audio inputs.
+
+### Components
+
+- workers: For audio serving, we use the [AudioEncodeWorker](components/audio_encode_worker.py) for decoding audio into audio embeddings, and send the embeddings to [VllmPDWorker](components/worker.py) for prefilling and decoding.
+- processor: Tokenizes the prompt and passes it to the AudioEncodeWorker.
+- frontend: HTTP endpoint to handle incoming requests.
+
+### Workflow
+
+In this workflow, we have two workers, [AudioEncodeWorker](components/audio_encode_worker.py) and [VllmPDWorker](components/worker.py).
+The AudioEncodeWorker is responsible for decoding the audio into embeddings.
+Its VllmPDWorker then prefills and decodes the prompt, just like the [LLM aggregated serving](../../docs/backends/vllm/README.md) example.
+By separating the audio processing from the prefill and decode stages, we can have a more flexible deployment and scale the
+AudioEncodeWorker independently from the prefill and decode workers if needed.
+
+This figure illustrates the workflow:
+```mermaid
+flowchart LR
+  HTTP --> processor
+  processor --> HTTP
+  processor --audio_url--> audio_encode_worker
+  audio_encode_worker --> processor
+  audio_encode_worker --embeddings--> pd_worker
+  pd_worker --> audio_encode_worker
+```
+
+```bash
+pip install vllm["audio"] accelerate # multimodal audio models dependency
+cd $DYNAMO_HOME/examples/multimodal
+bash launch/audio_agg.sh
+```
+
+### Client
+
+In another terminal:
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+      "model": "Qwen/Qwen2-Audio-7B-Instruct",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "What is recited in the audio?"
+            },
+            {
+              "type": "audio_url",
+              "audio_url": {
+                "url": "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client/main/datasets/mini_en/wav/1221-135766-0002.wav"
+              }
+            }
+          ]
+        }
+      ],
+      "max_tokens": 6000,
+      "temperature": 0.8,
+      "stream": false
+    }' | jq
+```
+
+You should see a response describing the audio's content similar to
+```json
+{
+  "id": "e2d8d67c37634b309400974eaa058ce8",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": "The original content of this audio is:'yet these thoughts affected Hester Pynne less with hope than apprehension.'",
+        "refusal": null,
+        "tool_calls": null,
+        "role": "assistant",
+        "function_call": null,
+        "audio": null
+      },
+      "finish_reason": "stop",
+      "logprobs": null
+    }
+  ],
+  "created": 1756368148,
+  "model": "Qwen/Qwen2-Audio-7B-Instruct",
+  "service_tier": null,
+  "system_fingerprint": null,
+  "object": "chat.completion",
+  "usage": null
+}
+```
+
+## Multimodal Disaggregated Audio Serving
+
+This example demonstrates deploying a disaggregated multimodal model that can process audio inputs.
+
+### Components
+
+- workers: For disaggregated audio serving, we have three workers, [AudioEncodeWorker](components/audio_encode_worker.py) for decoding audio into embeddings,
+[VllmDecodeWorker](components/worker.py) for decoding, and [VllmPDWorker](components/worker.py) for prefilling.
+- processor: Tokenizes the prompt and passes it to the AudioEncodeWorker.
+- frontend: HTTP endpoint to handle incoming requests.
+
+### Workflow
+
+In this workflow, we have three workers, [AudioEncodeWorker](components/audio_encode_worker.py), [VllmDecodeWorker](components/worker.py), and [VllmPDWorker](components/worker.py).
+For the Qwen/Qwen2-Audio-7B-Instruct model, audio embeddings are only required during the prefill stage. As such, the AudioEncodeWorker is connected directly to the prefill worker.
+The AudioEncodeWorker is responsible for decoding the audio into embeddings and passing them to the prefill worker via RDMA.
+The prefill worker performs the prefilling step and forwards the KV cache to the decode worker for decoding.
+For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](../../docs/backends/vllm/README.md) example.
+
+This figure illustrates the workflow:
+```mermaid
+flowchart LR
+  HTTP --> processor
+  processor --> HTTP
+  processor --audio_url--> audio_encode_worker
+  audio_encode_worker --> processor
+  audio_encode_worker --embeddings--> prefill_worker
+  prefill_worker --> audio_encode_worker
+  prefill_worker --> decode_worker
+  decode_worker --> prefill_worker
+```
+
+```bash
+pip install vllm["audio"] accelerate # multimodal audio models dependency
+cd $DYNAMO_HOME/examples/multimodal
+bash launch/audio_disagg.sh
 ```
