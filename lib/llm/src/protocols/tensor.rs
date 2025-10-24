@@ -130,6 +130,17 @@ pub struct TensorModelConfig {
     pub triton_model_config: Option<serde_json::Value>,
 }
 
+impl Default for TensorModelConfig {
+    fn default() -> Self {
+        Self {
+            name: "".to_string(),
+            inputs: vec![],
+            outputs: vec![],
+            triton_model_config: None,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Tensor {
     pub metadata: TensorMetadata,
