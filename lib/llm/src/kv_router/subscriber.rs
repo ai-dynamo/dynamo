@@ -227,7 +227,7 @@ pub async fn start_kv_router_background(
                     tracing::info!("Successfully sent all initial events to indexer");
                 }
                 Err(_) => {
-                    tracing::info!(
+                    tracing::debug!(
                         "Failed to download snapshots. This is normal for freshly started Router replicas."
                     );
                 }
