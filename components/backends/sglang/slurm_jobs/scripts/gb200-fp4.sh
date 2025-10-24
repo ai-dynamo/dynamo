@@ -185,6 +185,7 @@ elif [ "$mode" = "decode" ]; then
         --node-rank "$RANK" \
         --tp-size "$TOTAL_GPUS" \
         --dp-size "$TOTAL_GPUS" \
+        --enable-single-batch-overlap \
         --enable-dp-attention \
         --stream-interval 50 \
         --mem-fraction-static 0.82 ${command_suffix}
