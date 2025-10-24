@@ -225,7 +225,7 @@ pub mod kserve_test {
                         id: request.id.clone(),
                         model: request.model.clone(),
                         tensors: request.tensors.clone(),
-                        parameters: None,
+                        parameters: Default::default(),
                     });
                 }
             };
@@ -1165,11 +1165,13 @@ pub mod kserve_test {
                     name: "input".to_string(),
                     data_type: tensor::DataType::Int32,
                     shape: vec![1],
+                    parameters: Default::default(),
                 }],
                 outputs: vec![tensor::TensorMetadata {
                     name: "output".to_string(),
                     data_type: tensor::DataType::Bool,
                     shape: vec![-1],
+                    parameters: Default::default(),
                 }],
             }),
             ..Default::default()
@@ -1295,13 +1297,13 @@ pub mod kserve_test {
                     name: "input".to_string(),
                     data_type: tensor::DataType::Bytes,
                     shape: vec![1],
-                    parameters: None,
+                    parameters: Default::default(),
                 }],
                 outputs: vec![tensor::TensorMetadata {
                     name: "output".to_string(),
                     data_type: tensor::DataType::Bool,
                     shape: vec![-1],
-                    parameters: None,
+                    parameters: Default::default(),
                 }],
             }),
             ..Default::default()

@@ -237,6 +237,42 @@ pub fn dynamo_param_to_kserve(param: &tensor::ParameterValue) -> inference::Infe
     }
 }
 
+/// Convert KServe parameter map to Dynamo Parameters
+///
+/// # Arguments
+/// * `kserve_params` - KServe parameter map from protobuf
+///
+/// # Returns
+/// * `Ok(Parameters)` - Successfully converted parameters (empty HashMap if input is empty)
+/// * `Err(Status)` - Parameter conversion error
+#[allow(clippy::result_large_err)]
+fn convert_kserve_to_dynamo_params(
+    kserve_params: &std::collections::HashMap<String, inference::InferParameter>,
+) -> Result<tensor::Parameters, Status> {
+    kserve_params
+        .iter()
+        .map(|(k, v)| {
+            kserve_param_to_dynamo(k, v).map(|param_value| (k.clone(), param_value))
+        })
+        .collect()
+}
+
+/// Convert Dynamo Parameters to KServe parameter map
+///
+/// # Arguments
+/// * `dynamo_params` - Dynamo parameters HashMap
+///
+/// # Returns
+/// * KServe parameter map (empty HashMap if input is empty)
+fn convert_dynamo_to_kserve_params(
+    dynamo_params: &tensor::Parameters,
+) -> std::collections::HashMap<String, inference::InferParameter> {
+    dynamo_params
+        .iter()
+        .map(|(k, v)| (k.clone(), dynamo_param_to_kserve(v)))
+        .collect()
+}
+
 impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
     type Error = Status;
 
@@ -252,16 +288,7 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
         }
 
         // Extract request-level parameters
-        let parameters = if request.parameters.is_empty() {
-            None
-        } else {
-            let mut converted_params = std::collections::HashMap::new();
-            for (k, v) in request.parameters.iter() {
-                let param_value = kserve_param_to_dynamo(k, v)?;
-                converted_params.insert(k.clone(), param_value);
-            }
-            Some(converted_params)
-        };
+        let parameters = convert_kserve_to_dynamo_params(&request.parameters)?;
 
         let mut tensor_request = NvCreateTensorRequest {
             id: if !request.id.is_empty() {
@@ -278,16 +305,7 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
         // iterate through inputs
         for (idx, input) in request.inputs.into_iter().enumerate() {
             // Extract per-tensor parameters
-            let tensor_parameters = if input.parameters.is_empty() {
-                None
-            } else {
-                let mut converted_params = std::collections::HashMap::new();
-                for (k, v) in input.parameters.iter() {
-                    let param_value = kserve_param_to_dynamo(k, v)?;
-                    converted_params.insert(k.clone(), param_value);
-                }
-                Some(converted_params)
-            };
+            let tensor_parameters = convert_kserve_to_dynamo_params(&input.parameters)?;
 
             let mut tensor = Tensor {
                 metadata: TensorMetadata {
@@ -540,16 +558,7 @@ impl TryFrom<ExtendedNvCreateTensorResponse> for inference::ModelInferResponse {
         let response = extended_response.response;
 
         // Convert response-level parameters
-        let parameters = response
-            .parameters
-            .as_ref()
-            .map(|params| {
-                params
-                    .iter()
-                    .map(|(k, v)| (k.clone(), dynamo_param_to_kserve(v)))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let parameters = convert_dynamo_to_kserve_params(&response.parameters);
 
         let mut infer_response = inference::ModelInferResponse {
             model_name: response.model,
@@ -561,17 +570,7 @@ impl TryFrom<ExtendedNvCreateTensorResponse> for inference::ModelInferResponse {
         };
         for tensor in &response.tensors {
             // Convert per-tensor parameters
-            let tensor_parameters = tensor
-                .metadata
-                .parameters
-                .as_ref()
-                .map(|params| {
-                    params
-                        .iter()
-                        .map(|(k, v)| (k.clone(), dynamo_param_to_kserve(v)))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let tensor_parameters = convert_dynamo_to_kserve_params(&tensor.metadata.parameters);
 
             infer_response
                 .outputs

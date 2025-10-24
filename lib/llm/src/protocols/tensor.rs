@@ -120,8 +120,8 @@ pub struct TensorMetadata {
     pub shape: Vec<i64>,
 
     /// Optional parameters for this tensor
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parameters: Option<Parameters>,
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    pub parameters: Parameters,
 }
 
 #[derive(Serialize, Deserialize, Validate, Debug, Clone, PartialEq)]
@@ -189,8 +189,8 @@ pub struct NvCreateTensorRequest {
     pub tensors: Vec<Tensor>,
 
     /// Optional request-level parameters
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parameters: Option<Parameters>,
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    pub parameters: Parameters,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
@@ -210,8 +210,8 @@ pub struct NvCreateTensorResponse {
     pub tensors: Vec<Tensor>,
 
     /// Optional response-level parameters
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parameters: Option<Parameters>,
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    pub parameters: Parameters,
 }
 
 /// Implements `NvExtProvider` for `NvCreateTensorRequest`,
