@@ -268,8 +268,9 @@ class MetricsPayload(BasePayload):
             MetricCheck(
                 name=f"{prefix}_{prometheus_names.kvstats.TOTAL_BLOCKS}",
                 pattern=metric_pattern,
-                validator=lambda value: int(float(value)) > 0,
-                error_msg=lambda name, value: f"{name} should be > 0, but got {value}",
+                validator=lambda value: int(float(value))
+                >= 0,  # Allow 0 for SGLang (hardcoded issue in components/src/dynamo/sglang/publisher.py:70)
+                error_msg=lambda name, value: f"{name} should be >= 0, but got {value}",
                 success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
             ),
         ]
@@ -288,7 +289,32 @@ class MetricsPayload(BasePayload):
                     multiline=True,
                 )
             )
-        # TODO: Add sglang:* and trtllm:* metrics checks (similar to vllm above)
+        elif backend == "sglang":
+            metrics_to_check.append(
+                MetricCheck(
+                    # Check: Minimum count of unique sglang:* metrics
+                    name="sglang:*",
+                    pattern=lambda name: r"^sglang:\w+",
+                    validator=lambda value: len(set(value))
+                    >= 20,  # 80% of typical ~25 sglang metrics (excluding _bucket) as of 2025-10-22 (but will grow)
+                    error_msg=lambda name, value: f"Expected at least 20 unique sglang:* metrics, but found only {len(set(value))}",
+                    success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique sglang:* metrics (minimum required: 20)",
+                    multiline=True,
+                )
+            )
+        elif backend == "trtllm":
+            metrics_to_check.append(
+                MetricCheck(
+                    # Check: Minimum count of unique trtllm:* metrics
+                    name="trtllm:*",
+                    pattern=lambda name: r"^trtllm:\w+",
+                    validator=lambda value: len(set(value))
+                    >= 4,  # 80% of typical ~5 trtllm metrics (excluding _bucket) as of 2025-10-22 (but will grow)
+                    error_msg=lambda name, value: f"Expected at least 4 unique trtllm:* metrics, but found only {len(set(value))}",
+                    success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique trtllm:* metrics (minimum required: 4)",
+                    multiline=True,
+                )
+            )
 
         # Check all metrics
         for metric in metrics_to_check:

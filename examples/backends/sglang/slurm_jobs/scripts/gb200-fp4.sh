@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# This comes from https://github.com/sgl-project/sglang/issues/10903 and uses the low-prec decode setup
+
 # Function to print usage
 print_usage() {
     echo "Usage: $0 <mode>"
@@ -66,16 +68,19 @@ fi
 if [ "$mode" = "prefill" ]; then
     set -x
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
-    export SGL_DG_CACHE_DIR="/configs/dgcache/3p1dcache"
 
-    command_suffix=""
-    if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix="--init-expert-location /configs/prefill_dsr1-0528_in1000out1000_num40000.json"; fi
+    # no expert locations collected for fp4 yet
+    if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix=" "; fi
 
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
-    MC_TE_METRIC=true \
+    SGLANG_NVFP4_CKPT_FP8_GEMM_IN_ATTN=1 \
+    SGLANG_PER_TOKEN_GROUP_QUANT_8BIT_V2=1 \
+    SGL_JIT_DEEPGEMM_PRECOMPILE=0 \
     SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \
     SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=100000 \
     SGLANG_DISAGGREGATION_WAITING_TIMEOUT=100000 \
+    SGLANG_HACK_SEQ_BOOTSTRAP_ROOM=1 \
+    MC_TE_METRIC=true \
     SGLANG_MOONCAKE_CUSTOM_MEM_POOL=True \
     MC_FORCE_MNNVL=1 \
     NCCL_MNNVL_ENABLE=1 \
@@ -87,8 +92,28 @@ if [ "$mode" = "prefill" ]; then
         --served-model-name deepseek-ai/DeepSeek-R1 \
         --model-path /model/ \
         --skip-tokenizer-init \
-        --trust-remote-code \
         --disaggregation-mode prefill \
+        --decode-log-interval 1000 \
+        --max-running-requests 5632 \
+        --context-length 2176 \
+        --disable-radix-cache \
+        --disable-shared-experts-fusion \
+        --watchdog-timeout 1000000 \
+        --disable-chunked-prefix-cache \
+        --attention-backend trtllm_mla \
+        --kv-cache-dtype fp8_e4m3 \
+        --enable-single-batch-overlap \
+        --chunked-prefill-size 65536 \
+        --eplb-algorithm deepseek \
+        --trust-remote-code \
+        --disable-cuda-graph \
+        --mem-fraction-static 0.84 \
+        --max-total-tokens 131072 \
+        --max-prefill-tokens 16384 \
+        --load-balance-method round_robin \
+        --quantization modelopt_fp4 \
+        --enable-ep-moe \
+        --moe-runner-backend flashinfer_cutlass \
         --dist-init-addr "$HOST_IP_MACHINE:$PORT" \
         --disaggregation-bootstrap-port 30001 \
         --nnodes "$TOTAL_NODES" \
@@ -97,50 +122,29 @@ if [ "$mode" = "prefill" ]; then
         --dp-size "$TOTAL_GPUS" \
         --enable-dp-attention \
         --host 0.0.0.0 \
-        --max-running-requests 30000 \
-        --context-length 2200 \
-        --disable-radix-cache \
-        --moe-a2a-backend deepep \
-        --load-balance-method round_robin \
-        --deepep-mode normal \
-        --ep-dispatch-algorithm dynamic \
-        --moe-dense-tp-size 1 \
-        --enable-dp-lm-head \
-        --disable-shared-experts-fusion \
-        --ep-num-redundant-experts 32 \
-        --eplb-algorithm deepseek \
-        --attention-backend cutlass_mla \
-        --watchdog-timeout 1000000 \
-        --disable-cuda-graph \
-        --chunked-prefill-size 131072 \
-        --max-total-tokens 524288 \
-        --deepep-config /configs/deepep_config.json \
         --stream-interval 50 \
-        --mem-fraction-static 0.75 ${command_suffix}
+        --log-level debug ${command_suffix}
 
 elif [ "$mode" = "decode" ]; then
     set -x
-    set -x
-    export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
-    export SGL_DG_CACHE_DIR="/configs/dgcache/3p1dcache"
-
     command_suffix=""
-    if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix="--init-expert-location /configs/decode_dsr1-0528_loadgen_in1024out1024_num2000_2p12d.json"; fi
+    if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix=" "; fi
 
-    DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
-    SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=768  \
+    export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
+
+    SGLANG_NVFP4_CKPT_FP8_GEMM_IN_ATTN=1 \
+    SGLANG_PER_TOKEN_GROUP_QUANT_8BIT_V2=1 \
+    SGL_JIT_DEEPGEMM_PRECOMPILE=0 \
     MC_TE_METRIC=true \
     SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \
     SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=100000 \
     SGLANG_DISAGGREGATION_WAITING_TIMEOUT=100000 \
-    SGLANG_DECODE_BOOTSTRAP_TIMEOUT=1000 \
     SGLANG_HACK_SEQ_BOOTSTRAP_ROOM=1 \
     SGLANG_MOONCAKE_CUSTOM_MEM_POOL=True \
-    MC_FORCE_MNNVL=1 \
-    NCCL_MNNVL_ENABLE=1 \
-    NCCL_CUMEM_ENABLE=1 \
-    SGLANG_USE_MESSAGE_QUEUE_BROADCASTER=0 \
-    SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
+    SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=1408 \
+    SGLANG_CUTEDSL_MOE_NVFP4_DISPATCH=1 \
+    SGLANG_FP4_GEMM_BACKEND=cutlass \
+    DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
     PYTHONUNBUFFERED=1 \
     python3 -m dynamo.sglang \
         --served-model-name deepseek-ai/DeepSeek-R1 \
@@ -148,33 +152,41 @@ elif [ "$mode" = "decode" ]; then
         --skip-tokenizer-init \
         --trust-remote-code \
         --disaggregation-mode decode \
+        --host 0.0.0.0 \
+        --decode-log-interval 1 \
+        --max-running-requests 67584 \
+        --context-length 2176 \
+        --disable-radix-cache \
+        --disable-shared-experts-fusion \
+        --watchdog-timeout 1000000 \
+        --disable-chunked-prefix-cache \
+        --attention-backend trtllm_mla \
+        --kv-cache-dtype fp8_e4m3 \
+        --enable-dp-attention \
+        --chunked-prefill-size 786432 \
+        --mem-fraction-static 0.83 \
+        --enable-ep-moe \
+        --moe-a2a-backend deepep \
+        --deepep-mode low_latency \
+        --ep-dispatch-algorithm static \
+        --cuda-graph-bs 1408 \
+        --num-reserved-decode-tokens 112 \
+        --ep-num-redundant-experts 32 \
+        --eplb-algorithm deepseek \
+        --moe-dense-tp-size 1 \
+        --enable-dp-lm-head \
+        --prefill-round-robin-balance \
+        --max-total-tokens 3122380 \
+        --quantization modelopt_fp4 \
+        --moe-runner-backend flashinfer_cutedsl \
         --dist-init-addr "$HOST_IP_MACHINE:$PORT" \
         --disaggregation-bootstrap-port 30001 \
         --nnodes "$TOTAL_NODES" \
         --node-rank "$RANK" \
         --tp-size "$TOTAL_GPUS" \
         --dp-size "$TOTAL_GPUS" \
+        --enable-single-batch-overlap \
         --enable-dp-attention \
-        --host 0.0.0.0 \
-        --decode-log-interval 1000 \
-        --max-running-requests 45000 \
-        --context-length 2200 \
-        --disable-radix-cache \
-        --moe-a2a-backend deepep \
-        --prefill-round-robin-balance \
-        --deepep-mode low_latency \
-        --moe-dense-tp-size 1 \
-        --enable-dp-lm-head \
-        --cuda-graph-bs 1 2 4 8 16 24 32 40 48 56 64 72 80 88 96 104 112 120 128 136 144 152 160 168 176 184 192 200 208 216 224 232 240 248 256 264 272 280 288 296 304 312 320 328 336 344 352 360 368 376 384 416 448 480 512 544 576 608 640 672 704 736 768 \
-        --cuda-graph-max-bs 768 \
-        --disable-shared-experts-fusion \
-        --ep-num-redundant-experts 32 \
-        --ep-dispatch-algorithm static \
-        --eplb-algorithm deepseek \
-        --attention-backend cutlass_mla \
-        --watchdog-timeout 1000000 \
-        --chunked-prefill-size 36864 \
         --stream-interval 50 \
-        --deepep-config /configs/deepep_config.json \
         --mem-fraction-static 0.82 ${command_suffix}
 fi
