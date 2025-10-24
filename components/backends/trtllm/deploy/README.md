@@ -53,7 +53,7 @@ Advanced disaggregated deployment with SLA-based automatic scaling.
 - `TRTLLMPrefillWorker`: Specialized prefill-only worker
 
 > [!NOTE]
-> This deployment requires pre-deployment profiling to be completed first. See [Pre-Deployment Profiling](../../../../docs/benchmarks/pre_deployment_profiling.md) for detailed instructions.
+> This deployment requires pre-deployment profiling to be completed first. See [Pre-Deployment Profiling](../../../../docs/benchmarks/sla_driven_profiling.md) for detailed instructions.
 
 ## CRD Structure
 
