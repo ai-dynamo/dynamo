@@ -133,7 +133,13 @@ async fn keep_alive(
 
                 _ = token.cancelled() => {
                     tracing::debug!(lease_id, "cancellation token triggered; revoking lease");
-                    let _ = lease_client.revoke(lease_id as i64).await;
+                    if let Err(e) = lease_client.revoke(lease_id as i64).await {
+                        tracing::warn!(
+                            lease_id,
+                            error = %e,
+                            "Failed to revoke lease during cancellation. Cleanup may be incomplete."
+                        );
+                    }
                     return Ok(());
                 }
 
