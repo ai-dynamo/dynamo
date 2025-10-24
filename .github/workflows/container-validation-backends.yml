@@ -174,14 +174,18 @@ jobs:
   sglang:
     needs: changed-files
     if: needs.changed-files.outputs.has_code_changes == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { arch: amd64, runner: gpu-l40-amd64 }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: sglang (${{ matrix.platform.arch }})
-    runs-on: ${{ matrix.platform.runner }}
+    # OPS-1140: Uncomment this for sglang arm switch to wideep
+    # strategy:
+    #   fail-fast: false
+    #   matrix:
+    #     platform:
+    #       - { arch: amd64, runner: gpu-l40-amd64 }
+    #       - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+    # name: sglang (${{ matrix.platform.arch }})
+    # runs-on: ${{ matrix.platform.runner }}
+    # OPS-1140: Remove these lines when matrix is enabled, replaced with the above lines
+    name: sglang (amd64)
+    runs-on: gpu-l40-amd64
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -223,7 +227,8 @@ jobs:
           pytest_marks: "unit and sglang and gpu_1"
           framework: "sglang"
           test_type: "unit"
-          platform_arch: ${{ matrix.platform.arch }}
+          platform_arch: amd64
+          # OPS-1140: Replace above with ${{ matrix.platform.arch }} when matrix is enabled
       - name: Run e2e tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
@@ -232,7 +237,8 @@ jobs:
           pytest_marks: "e2e and sglang and gpu_1"
           framework: "sglang"
           test_type: "e2e, gpu_1"
-          platform_arch: ${{ matrix.platform.arch }}
+          platform_arch: amd64
+          # OPS-1140: Replace above with ${{ matrix.platform.arch }} when matrix is enabled
 
   trtllm:
     needs: changed-files
