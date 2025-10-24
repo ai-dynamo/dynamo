@@ -256,6 +256,11 @@ RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+    && if ls /opt/dynamo/wheelhouse/kvbm*.whl >/dev/null 2>&1; then \
+         uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
+       else \
+         echo "No kvbm*.whl found, skipping"; \
+       fi \
     && cd /opt/dynamo/benchmarks \
     && UV_GIT_LFS=1 uv pip install --no-cache . \
     && cd - \

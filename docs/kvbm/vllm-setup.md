@@ -101,7 +101,7 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 Alternatively, can use `vllm serve` directly to use KVBM for aggregated serving:
 ```bash
-vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "dynamo.llm.vllm_integration.connector"}' Qwen/Qwen3-0.6B
+vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"}' Qwen/Qwen3-0.6B
 ```
 
 ## Enable and View KVBM Metrics
