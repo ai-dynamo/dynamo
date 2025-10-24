@@ -511,7 +511,7 @@ kubectl delete namespace $NAMESPACE
 ## Contributing
 
 When adding new recipes, ensure they follow the standard structure:
-```
+```text
 <model-name>/
 ├── model-cache/
 │   ├── model-cache.yaml
