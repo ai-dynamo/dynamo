@@ -145,11 +145,10 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
 
     fn tools(&self) -> Option<Value> {
         if self.inner.tools.is_none() {
-            // ISSUE: {%- if tools is iterable and tools | length > 0 %}
-            // For cases like above, minijinja will not error out in calculating the length of tools
-            // as it evaluates both the sides an don't do short circuiting.
-            // Safe to return an empty array here. This will work even if tools are not present as length = 0
-            Some(Value::from_serialize(Vec::<serde_json::Value>::new()))
+            // Should return None instead of empty array
+            // All templates should check for tools being defined but some do not check for length
+            // This results in tool calling behavior when it shouldn't
+            None
         } else {
             // Try to fix the tool schema if it is missing type and properties
             Some(may_be_fix_tool_schema(
