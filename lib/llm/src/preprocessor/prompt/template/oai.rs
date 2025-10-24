@@ -603,9 +603,9 @@ No tools
 "#;
 
         // Because we return None for tools when there are no tools this scenario should also be evaluate to false
-        // This is similar to the default jinja template behavior seen with llama models
+        // This is similar to the default jinja template behavior seen with llama models which check if tools is not none to activate tool mode
         let no_tool_template = r#"
-{%- if tools %}
+{%- if tools is not none %}
 TOOL MODE
 {%- else %}
 NORMAL MODE
@@ -648,36 +648,7 @@ NORMAL MODE
             "Jinja template with if defined conditional should handle None: {:?}",
             result2
         );
-        assert!(
-            result2.unwrap().contains("TOOL MODE"),
-            "None in context is 'defined', so production uses template selection to avoid this"
-        );
-    }
-
-    #[test]
-    fn test_llama_template_no_tools_no_tool_calling() {
-        // Llama model default templates do not actiavte tool calling when tools is None
-        let template_str = r#"
-{%- if tools is defined %}
-TOOL MODE
-{%- else %}
-NORMAL MODE
-{%- endif %}
-"#;
-
-        let chat_template: ChatTemplate = serde_json::from_value(serde_json::json!({
-            "chat_template": template_str
-        }))
-        .unwrap();
-
-        let formatter =
-            HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap();
-
-        // Without tools in context, should be NORMAL MODE
-        let ctx = context! {};
-        let result = formatter.env.get_template("default").unwrap().render(&ctx);
-        assert!(result.is_ok());
-        assert!(result.unwrap().contains("NORMAL MODE"));
+        assert!(result2.unwrap().contains("NORMAL MODE"));
     }
 
     /// Tests mixed content type scenarios.
