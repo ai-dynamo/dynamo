@@ -64,26 +64,115 @@ impl From<&Key> for String {
 
 #[async_trait]
 pub trait KeyValueStore: Send + Sync {
+    type Bucket: KeyValueBucket + Send + Sync + 'static;
+
     async fn get_or_create_bucket(
         &self,
         bucket_name: &str,
         // auto-delete items older than this
         ttl: Option<Duration>,
-    ) -> Result<Box<dyn KeyValueBucket>, StoreError>;
+    ) -> Result<Self::Bucket, StoreError>;
 
-    async fn get_bucket(
-        &self,
-        bucket_name: &str,
-    ) -> Result<Option<Box<dyn KeyValueBucket>>, StoreError>;
+    async fn get_bucket(&self, bucket_name: &str) -> Result<Option<Self::Bucket>, StoreError>;
 
     fn connection_id(&self) -> u64;
 }
 
-pub struct KeyValueStoreManager(Box<dyn KeyValueStore>);
+#[allow(clippy::large_enum_variant)]
+pub enum KeyValueStoreEnum {
+    Memory(MemoryStore),
+    Nats(NATSStore),
+    Etcd(EtcdStore),
+}
+
+impl KeyValueStoreEnum {
+    async fn get_or_create_bucket(
+        &self,
+        bucket_name: &str,
+        // auto-delete items older than this
+        ttl: Option<Duration>,
+    ) -> Result<Box<dyn KeyValueBucket>, StoreError> {
+        use KeyValueStoreEnum::*;
+        Ok(match self {
+            Memory(x) => Box::new(x.get_or_create_bucket(bucket_name, ttl).await?),
+            Nats(x) => Box::new(x.get_or_create_bucket(bucket_name, ttl).await?),
+            Etcd(x) => Box::new(x.get_or_create_bucket(bucket_name, ttl).await?),
+        })
+    }
+
+    async fn get_bucket(
+        &self,
+        bucket_name: &str,
+    ) -> Result<Option<Box<dyn KeyValueBucket>>, StoreError> {
+        use KeyValueStoreEnum::*;
+        let maybe_bucket: Option<Box<dyn KeyValueBucket>> = match self {
+            Memory(x) => x
+                .get_bucket(bucket_name)
+                .await?
+                .map(|b| Box::new(b) as Box<dyn KeyValueBucket>),
+            Nats(x) => x
+                .get_bucket(bucket_name)
+                .await?
+                .map(|b| Box::new(b) as Box<dyn KeyValueBucket>),
+            Etcd(x) => x
+                .get_bucket(bucket_name)
+                .await?
+                .map(|b| Box::new(b) as Box<dyn KeyValueBucket>),
+        };
+        Ok(maybe_bucket)
+    }
+
+    fn connection_id(&self) -> u64 {
+        use KeyValueStoreEnum::*;
+        match self {
+            Memory(x) => x.connection_id(),
+            Etcd(x) => x.connection_id(),
+            Nats(x) => x.connection_id(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct KeyValueStoreManager(Arc<KeyValueStoreEnum>);
+
+impl Default for KeyValueStoreManager {
+    fn default() -> Self {
+        KeyValueStoreManager::memory()
+    }
+}
 
 impl KeyValueStoreManager {
-    pub fn new(s: Box<dyn KeyValueStore>) -> KeyValueStoreManager {
-        KeyValueStoreManager(s)
+    /// In-memory KeyValueStoreManager for testing
+    pub fn memory() -> Self {
+        Self::new(KeyValueStoreEnum::Memory(MemoryStore::new()))
+    }
+
+    pub fn etcd(etcd_client: crate::transports::etcd::Client) -> Self {
+        Self::new(KeyValueStoreEnum::Etcd(EtcdStore::new(etcd_client)))
+    }
+
+    fn new(s: KeyValueStoreEnum) -> KeyValueStoreManager {
+        KeyValueStoreManager(Arc::new(s))
+    }
+
+    pub async fn get_or_create_bucket(
+        &self,
+        bucket_name: &str,
+        // auto-delete items older than this
+        ttl: Option<Duration>,
+    ) -> Result<Box<dyn KeyValueBucket>, StoreError> {
+        self.0.get_or_create_bucket(bucket_name, ttl).await
+    }
+
+    pub async fn get_bucket(
+        &self,
+        bucket_name: &str,
+    ) -> Result<Option<Box<dyn KeyValueBucket>>, StoreError> {
+        self.0.get_bucket(bucket_name).await
+    }
+
+    pub fn connection_id(&self) -> u64 {
+        self.0.connection_id()
     }
 
     pub async fn load<T: for<'a> Deserialize<'a>>(
@@ -95,17 +184,13 @@ impl KeyValueStoreManager {
             // No bucket means no cards
             return Ok(None);
         };
-        match bucket.get(key).await {
-            Ok(Some(card_bytes)) => {
+        Ok(match bucket.get(key).await? {
+            Some(card_bytes) => {
                 let card: T = serde_json::from_slice(card_bytes.as_ref())?;
-                Ok(Some(card))
+                Some(card)
             }
-            Ok(None) => Ok(None),
-            Err(err) => {
-                // TODO look at what errors NATS can give us and make more specific wrappers
-                Err(StoreError::NATSError(err.to_string()))
-            }
-        }
+            None => None,
+        })
     }
 
     /// Returns a receiver that will receive all the existing keys, and
@@ -115,6 +200,7 @@ impl KeyValueStoreManager {
         self: Arc<Self>,
         bucket_name: &str,
         bucket_ttl: Option<Duration>,
+        cancel_token: CancellationToken,
     ) -> (
         tokio::task::JoinHandle<Result<(), StoreError>>,
         tokio::sync::mpsc::UnboundedReceiver<T>,
@@ -136,7 +222,14 @@ impl KeyValueStoreManager {
             }
 
             // Now block waiting for new entries
-            while let Some(card_bytes) = stream.next().await {
+            loop {
+                let card_bytes = tokio::select! {
+                    _ = cancel_token.cancelled() => break,
+                    result = stream.next() => match result {
+                        Some(bytes) => bytes,
+                        None => break,
+                    }
+                };
                 let card: T = serde_json::from_slice(card_bytes.as_ref())?;
                 let _ = tx.send(card);
             }
@@ -170,7 +263,7 @@ impl KeyValueStoreManager {
 /// An online storage for key-value config values.
 /// Usually backed by `nats-server`.
 #[async_trait]
-pub trait KeyValueBucket: Send {
+pub trait KeyValueBucket: Send + Sync {
     /// A bucket is a collection of key/value pairs.
     /// Insert a value into a bucket, if it doesn't exist already
     async fn insert(
@@ -191,7 +284,7 @@ pub trait KeyValueBucket: Send {
     /// such time.
     async fn watch(
         &self,
-    ) -> Result<Pin<Box<dyn futures::Stream<Item = bytes::Bytes> + Send + 'life0>>, StoreError>;
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = bytes::Bytes> + Send + '_>>, StoreError>;
 
     async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StoreError>;
 }
@@ -230,7 +323,7 @@ pub enum StoreError {
     #[error("Internal etcd error: {0}")]
     EtcdError(String),
 
-    #[error("Key Value Error: {0} for bucket '{1}")]
+    #[error("Key Value Error: {0} for bucket '{1}'")]
     KeyValueError(String, String),
 
     #[error("Error decoding bytes: {0}")]

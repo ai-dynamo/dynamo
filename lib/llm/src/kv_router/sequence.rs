@@ -293,7 +293,7 @@ impl ActiveSequencesMultiWorker {
     pub fn new(
         component: Component,
         block_size: usize,
-        workers_with_configs: HashMap<i64, Option<ModelRuntimeConfig>>,
+        workers_with_configs: HashMap<u64, Option<ModelRuntimeConfig>>,
         replica_sync: bool,
         router_uuid: String,
     ) -> Self {
@@ -557,7 +557,7 @@ impl ActiveSequencesMultiWorker {
     /// Update the set of workers, adding and removing as needed
     pub fn update_workers(
         &self,
-        new_workers_with_configs: HashMap<i64, Option<ModelRuntimeConfig>>,
+        new_workers_with_configs: HashMap<u64, Option<ModelRuntimeConfig>>,
     ) {
         let current_workers: HashSet<WorkerWithDpRank> =
             self.senders.iter().map(|entry| *entry.key()).collect();

@@ -67,35 +67,34 @@ impl MemoryStore {
 
 #[async_trait]
 impl KeyValueStore for MemoryStore {
+    type Bucket = MemoryBucketRef;
+
     async fn get_or_create_bucket(
         &self,
         bucket_name: &str,
         // MemoryStore doesn't respect TTL yet
         _ttl: Option<Duration>,
-    ) -> Result<Box<dyn KeyValueBucket>, StoreError> {
+    ) -> Result<Self::Bucket, StoreError> {
         let mut locked_data = self.inner.data.lock().await;
         // Ensure the bucket exists
         locked_data
             .entry(bucket_name.to_string())
             .or_insert_with(MemoryBucket::new);
         // Return an object able to access it
-        Ok(Box::new(MemoryBucketRef {
+        Ok(MemoryBucketRef {
             name: bucket_name.to_string(),
             inner: self.inner.clone(),
-        }))
+        })
     }
 
     /// This operation cannot fail on MemoryStore. Always returns Ok.
-    async fn get_bucket(
-        &self,
-        bucket_name: &str,
-    ) -> Result<Option<Box<dyn KeyValueBucket>>, StoreError> {
+    async fn get_bucket(&self, bucket_name: &str) -> Result<Option<Self::Bucket>, StoreError> {
         let locked_data = self.inner.data.lock().await;
         match locked_data.get(bucket_name) {
-            Some(_) => Ok(Some(Box::new(MemoryBucketRef {
+            Some(_) => Ok(Some(MemoryBucketRef {
                 name: bucket_name.to_string(),
                 inner: self.inner.clone(),
-            }))),
+            })),
             None => Ok(None),
         }
     }

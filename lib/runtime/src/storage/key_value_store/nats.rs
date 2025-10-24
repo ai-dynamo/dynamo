@@ -23,25 +23,24 @@ pub struct NATSBucket {
 
 #[async_trait]
 impl KeyValueStore for NATSStore {
+    type Bucket = NATSBucket;
+
     async fn get_or_create_bucket(
         &self,
         bucket_name: &str,
         ttl: Option<Duration>,
-    ) -> Result<Box<dyn KeyValueBucket>, StoreError> {
+    ) -> Result<Self::Bucket, StoreError> {
         let name = Slug::slugify(bucket_name);
         let nats_store = self
             .get_or_create_key_value(&self.endpoint.namespace, &name, ttl)
             .await?;
-        Ok(Box::new(NATSBucket { nats_store }))
+        Ok(NATSBucket { nats_store })
     }
 
-    async fn get_bucket(
-        &self,
-        bucket_name: &str,
-    ) -> Result<Option<Box<dyn KeyValueBucket>>, StoreError> {
+    async fn get_bucket(&self, bucket_name: &str) -> Result<Option<Self::Bucket>, StoreError> {
         let name = Slug::slugify(bucket_name);
         match self.get_key_value(&self.endpoint.namespace, &name).await? {
-            Some(nats_store) => Ok(Some(Box::new(NATSBucket { nats_store }))),
+            Some(nats_store) => Ok(Some(NATSBucket { nats_store })),
             None => Ok(None),
         }
     }
