@@ -4,43 +4,35 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: sglang-agg-router
+  name: vllm-agg-router
 spec:
   services:
     Frontend:
-      dynamoNamespace: sglang-agg-router
+      dynamoNamespace: vllm-agg-router
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
       envs:
         - name: DYN_ROUTER_MODE
           value: kv
-    decode:
+    VllmDecodeWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: sglang-agg-router
+      dynamoNamespace: vllm-agg-router
       componentType: worker
-      replicas: 1
+      replicas: 2
       resources:
         limits:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
-          workingDir: /workspace/components/backends/sglang
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
           command:
           - python3
           - -m
-          - dynamo.sglang
+          - dynamo.vllm
           args:
-            - --model-path
+            - --model
             - Qwen/Qwen3-0.6B
-            - --served-model-name
-            - Qwen/Qwen3-0.6B
-            - --page-size
-            - "16"
-            - --tp
-            - "1"
-            - --trust-remote-code
-            - --skip-tokenizer-init

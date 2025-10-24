@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-agg-router
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: sglang-agg-router
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/sglang-runtime:my-tag
+      envs:
+        - name: DYN_ROUTER_MODE
+          value: kv
+    decode:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: sglang-agg-router
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/sglang-runtime:my-tag
+          workingDir: /workspace/examples/backends/sglang
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --page-size
+            - "16"
+            - --tp
+            - "1"
+            - --trust-remote-code
+            - --skip-tokenizer-init

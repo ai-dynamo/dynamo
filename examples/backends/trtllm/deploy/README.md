@@ -90,7 +90,7 @@ resources:
 extraPodSpec:
   mainContainer:
     image: my-registry/trtllm-runtime:my-tag
-    workingDir: /workspace/components/backends/trtllm
+    workingDir: /workspace/examples/backends/trtllm
     args:
       - "python3"
       - "-m"
@@ -168,7 +168,7 @@ Then, deploy the model using the deployment file.
 Export the NAMESPACE you used in your Dynamo Cloud Installation.
 
 ```bash
-cd dynamo/components/backends/trtllm/deploy
+cd dynamo/examples/backends/trtllm/deploy
 export DEPLOYMENT_FILE=agg.yaml
 kubectl apply -f $DEPLOYMENT_FILE -n $NAMESPACE
 ```

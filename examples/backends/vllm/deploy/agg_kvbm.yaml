@@ -4,46 +4,21 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-disagg-kvbm-2p2d
+  name: vllm-agg-kvbm
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-disagg-kvbm-2p2d
+      dynamoNamespace: vllm-agg-kvbm
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
     VllmDecodeWorker:
-      dynamoNamespace: vllm-disagg-kvbm-2p2d
       envFromSecret: hf-token-secret
+      dynamoNamespace: vllm-agg-kvbm
       componentType: worker
-      replicas: 2
-      resources:
-        limits:
-          gpu: "1"
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
-          command:
-          - python3
-          - -m
-          - dynamo.vllm
-          args:
-            - --model
-            - Qwen/Qwen3-8B
-            - --gpu-memory-utilization
-            - "0.3"
-            - --disable-log-requests
-            - --max-model-len
-            - "32000"
-            - --enforce-eager
-    VllmPrefillWorker:
-      dynamoNamespace: vllm-disagg-kvbm-2p2d
-      envFromSecret: hf-token-secret
-      componentType: worker
-      replicas: 2
+      replicas: 1
       resources:
         requests:
           gpu: "1"
@@ -57,7 +32,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
+          workingDir: /workspace/examples/backends/vllm
           command:
           - python3
           - -m
@@ -65,13 +40,11 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-8B
-            - --is-prefill-worker
             - --gpu-memory-utilization
-            - "0.3"
+            - "0.45"
             - --disable-log-requests
             - --max-model-len
             - "32000"
             - --enforce-eager
             - --connector
             - kvbm
-            - nixl

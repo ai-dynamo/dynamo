@@ -4,31 +4,38 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-v1-disagg-router
+  name: vllm-disagg
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-v1-disagg-router
+      dynamoNamespace: vllm-disagg
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-      envs:
-        - name: DYN_ROUTER_MODE
-          value: kv
-    VllmDecodeWorker:
-      dynamoNamespace: vllm-v1-disagg-router
+          image: my-registry/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          args:
+            - --http-port
+            - "8000"
+    decode:
+      dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
-      replicas: 2
+      replicas: 1
+      multinode:
+        nodeCount: 2
       resources:
         limits:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
+          image: my-registry/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
           command:
           - python3
           - -m
@@ -36,18 +43,22 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
-    VllmPrefillWorker:
-      dynamoNamespace: vllm-v1-disagg-router
+            - --tensor-parallel-size
+            - "2"
+    prefill:
+      dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
+      multinode:
+        nodeCount: 2
       resources:
         limits:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
+          image: my-registry/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
           command:
           - python3
           - -m
@@ -56,3 +67,5 @@ spec:
             - --model
             - Qwen/Qwen3-0.6B
             - --is-prefill-worker
+            - --tensor-parallel-size
+            - "2"

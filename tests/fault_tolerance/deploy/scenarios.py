@@ -177,8 +177,8 @@ def _create_deployments_for_backend(backend):
 
     # Define the yaml files for agg and disagg deployments
     yaml_files = {
-        "agg": f"components/backends/{backend}/deploy/agg.yaml",
-        "disagg": f"components/backends/{backend}/deploy/disagg.yaml",
+        "agg": f"examples/backends/{backend}/deploy/agg.yaml",
+        "disagg": f"examples/backends/{backend}/deploy/disagg.yaml",
     }
 
     # Define the different configurations to test

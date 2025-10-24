@@ -4,29 +4,39 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: sglang-disagg
+  name: sglang-disagg-multinode
 spec:
+  envs:
+  - name: HF_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: hf-token-secret
+        key: HF_TOKEN
+  - name: GLOO_SOCKET_IFNAME
+    value: "eth0"
+  backendFramework: sglang
   services:
     Frontend:
-      dynamoNamespace: sglang-disagg
+      dynamoNamespace: sglang-disagg-multinode
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
     decode:
+      multinode:
+        nodeCount: 2
       envFromSecret: hf-token-secret
-      dynamoNamespace: sglang-disagg
+      dynamoNamespace: sglang-disagg-multinode
       componentType: worker
-      subComponentType: decode
       replicas: 1
       resources:
         limits:
-          gpu: "1"
+          gpu: "4"
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
-          workingDir: /workspace/components/backends/sglang
+          workingDir: /workspace/examples/backends/sglang
           command:
           - python3
           - -m
@@ -36,10 +46,8 @@ spec:
             - Qwen/Qwen3-0.6B
             - --served-model-name
             - Qwen/Qwen3-0.6B
-            - --page-size
-            - "16"
-            - --tp
-            - "1"
+            - --tp-size
+            - "8"
             - --trust-remote-code
             - --skip-tokenizer-init
             - --disaggregation-mode
@@ -47,22 +55,25 @@ spec:
             - --disaggregation-transfer-backend
             - nixl
             - --disaggregation-bootstrap-port
-            - "12345"
+            - "30001"
             - --host
             - "0.0.0.0"
+            - --mem-fraction-static
+            - "0.82"
     prefill:
+      multinode:
+        nodeCount: 2
       envFromSecret: hf-token-secret
-      dynamoNamespace: sglang-disagg
+      dynamoNamespace: sglang-disagg-multinode
       componentType: worker
-      subComponentType: prefill
       replicas: 1
       resources:
         limits:
-          gpu: "1"
+          gpu: "4"
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
-          workingDir: /workspace/components/backends/sglang
+          workingDir: /workspace/examples/backends/sglang
           command:
           - python3
           - -m
@@ -72,10 +83,8 @@ spec:
             - Qwen/Qwen3-0.6B
             - --served-model-name
             - Qwen/Qwen3-0.6B
-            - --page-size
-            - "16"
-            - --tp
-            - "1"
+            - --tp-size
+            - "8"
             - --trust-remote-code
             - --skip-tokenizer-init
             - --disaggregation-mode
@@ -83,6 +92,8 @@ spec:
             - --disaggregation-transfer-backend
             - nixl
             - --disaggregation-bootstrap-port
-            - "12345"
+            - "30001"
+            - --mem-fraction-static
+            - "0.82"
             - --host
             - "0.0.0.0"

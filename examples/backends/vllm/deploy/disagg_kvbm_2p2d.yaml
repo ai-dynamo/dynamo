@@ -4,30 +4,28 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-disagg-kvbm-tp2
+  name: vllm-disagg-kvbm-2p2d
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-disagg-kvbm-tp2
+      dynamoNamespace: vllm-disagg-kvbm-2p2d
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
     VllmDecodeWorker:
-      dynamoNamespace: vllm-disagg-kvbm-tp2
+      dynamoNamespace: vllm-disagg-kvbm-2p2d
       envFromSecret: hf-token-secret
       componentType: worker
-      replicas: 1
+      replicas: 2
       resources:
-        requests:
-          gpu: "2"
         limits:
-          gpu: "2"
+          gpu: "1"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
+          workingDir: /workspace/examples/backends/vllm
           command:
           - python3
           - -m
@@ -36,24 +34,22 @@ spec:
             - --model
             - Qwen/Qwen3-8B
             - --gpu-memory-utilization
-            - "0.23"
+            - "0.3"
             - --disable-log-requests
             - --max-model-len
             - "32000"
             - --enforce-eager
-            - --tensor-parallel-size
-            - "2"
     VllmPrefillWorker:
-      dynamoNamespace: vllm-disagg-kvbm-tp2
+      dynamoNamespace: vllm-disagg-kvbm-2p2d
       envFromSecret: hf-token-secret
       componentType: worker
-      replicas: 1
+      replicas: 2
       resources:
         requests:
-          gpu: "2"
+          gpu: "1"
           memory: "200Gi"
         limits:
-          gpu: "2"
+          gpu: "1"
           memory: "250Gi"
       envs:
         - name: DYN_KVBM_CPU_CACHE_GB
@@ -61,7 +57,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
+          workingDir: /workspace/examples/backends/vllm
           command:
           - python3
           - -m
@@ -71,7 +67,7 @@ spec:
             - Qwen/Qwen3-8B
             - --is-prefill-worker
             - --gpu-memory-utilization
-            - "0.23"
+            - "0.3"
             - --disable-log-requests
             - --max-model-len
             - "32000"
@@ -79,5 +75,3 @@ spec:
             - --connector
             - kvbm
             - nixl
-            - --tensor-parallel-size
-            - "2"

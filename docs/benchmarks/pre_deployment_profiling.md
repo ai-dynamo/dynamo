@@ -42,7 +42,7 @@ This sequential approach ensures:
 - **Reliable cleanup** between different TP configuration tests
 - **Accurate SLA compliance verification** for each configuration
 
-After the profiling finishes, two plots will be generated in the `output-dir`. For example, here are the profiling results for `components/backends/vllm/deploy/disagg.yaml`:
+After the profiling finishes, two plots will be generated in the `output-dir`. For example, here are the profiling results for `examples/backends/vllm/deploy/disagg.yaml`:
 
 ![Prefill Performance](../../docs/images/h100_prefill_performance.png)
 ![Decode Performance](../../docs/images/h100_decode_performance.png)
@@ -131,7 +131,7 @@ spec:
 ### Auto-Configuration
 
 To automatically configure the profiling job based on the hardware and model information, supply the `--model` argument to the profiling script. The following arguments will be automatically set:
-- `--config`: will use the default config file (`components/backends/<backend>/deploy/disagg.yaml`) with model updated to the provided model name
+- `--config`: will use the default config file (`examples/backends/<backend>/deploy/disagg.yaml`) with model updated to the provided model name
 - `--min-num-gpus-per-engine`: will be set to the minimum number of GPUs per engine based on the model size and hardware information
 - `--max-num-gpus-per-engine`: will be set to the maximum number of GPUs per engine based on the model size and hardware information
 - `--num-gpus-per-node`: will be set to the number of GPUs per node based on the hardware information
@@ -291,7 +291,7 @@ Backends: trtllm (vllm and sglang support coming soon)
 Example command for TensorRT-LLM:
 ```bash
 python3 -m benchmarks.profiler.profile_sla \
-   --config ./components/backends/trtllm/deploy/disagg.yaml \
+   --config ./examples/backends/trtllm/deploy/disagg.yaml \
    --backend trtllm \
    --use-ai-configurator \
    --aic-system h200_sxm \

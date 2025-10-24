@@ -67,9 +67,9 @@ Each backend has deployment examples and configuration options:
 
 | Backend      | Aggregated | Aggregated + Router | Disaggregated | Disaggregated + Router | Disaggregated + Planner | Disaggregated Multi-node |
 |--------------|:----------:|:-------------------:|:-------------:|:----------------------:|:-----------------------:|:------------------------:|
-| **[SGLang](../../components/backends/sglang/deploy/README.md)**       | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **[TensorRT-LLM](../../components/backends/trtllm/deploy/README.md)** | ✅ | ✅ | ✅ | ✅ | 🚧 | ✅ |
-| **[vLLM](../../components/backends/vllm/deploy/README.md)**           | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[SGLang](../../examples/backends/sglang/deploy/README.md)**       | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[TensorRT-LLM](../../examples/backends/trtllm/deploy/README.md)** | ✅ | ✅ | ✅ | ✅ | 🚧 | ✅ |
+| **[vLLM](../../examples/backends/vllm/deploy/README.md)**           | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ## 3. Deploy Your First Model
 
@@ -84,7 +84,7 @@ kubectl create secret generic hf-token-secret \
   -n ${NAMESPACE};
 
 # Deploy any example (this uses vLLM with Qwen model using aggregated serving)
-kubectl apply -f components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
+kubectl apply -f examples/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
 
 # Check status
 kubectl get dynamoGraphDeployment -n ${NAMESPACE}

@@ -35,7 +35,7 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-DEFAULT_SGLANG_CONFIG_PATH = "components/backends/sglang/deploy/disagg.yaml"
+DEFAULT_SGLANG_CONFIG_PATH = "examples/backends/sglang/deploy/disagg.yaml"
 
 
 class SGLangConfigModifier:
