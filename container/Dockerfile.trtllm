@@ -207,6 +207,7 @@ RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
     rm -f /etc/apt/sources.list.d/cuda*.list && \
     rm -f /usr/share/keyrings/cuda-archive-keyring.gpg && \
     rm -f /etc/apt/trusted.gpg.d/cuda*.gpg
+
 RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         # Download and run install_tensorrt.sh from TensorRT-LLM GitHub before installing the wheel
         curl -fsSL --retry 5 --retry-delay 10 --max-time 1800 -o /tmp/install_tensorrt.sh "https://github.com/NVIDIA/TensorRT-LLM/raw/${GITHUB_TRTLLM_COMMIT}/docker/common/install_tensorrt.sh" && \
