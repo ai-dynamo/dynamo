@@ -30,6 +30,8 @@ CUDA_VERSION="12.8" # For DEEPGEMM
 EDITABLE=true
 VLLM_GIT_URL="https://github.com/vllm-project/vllm.git"
 FLASHINF_REF="v0.3.1"
+USE_LOCAL_VLLM=""
+USE_LOCAL_DEEPEP=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -40,6 +42,14 @@ while [[ $# -gt 0 ]]; do
         --no-editable)
             EDITABLE=false
             shift
+            ;;
+        --use-local-vllm)
+            USE_LOCAL_VLLM="$2"
+            shift 2
+            ;;
+        --use-local-deepep)
+            USE_LOCAL_DEEPEP="$2"
+            shift 2
             ;;
         --vllm-ref)
             VLLM_REF="$2"
@@ -82,10 +92,12 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [--editable|--no-editable] [--vllm-ref REF] [--max-jobs NUM] [--arch ARCH] [--deepgemm-ref REF] [--flashinf-ref REF] [--torch-backend BACKEND] [--torch-cuda-arch-list LIST] [--cuda-version VERSION]"
+            echo "Usage: $0 [--editable|--no-editable] [--use-local-vllm PATH] [--use-local-deepep PATH] [--vllm-ref REF] [--max-jobs NUM] [--arch ARCH] [--deepgemm-ref REF] [--flashinf-ref REF] [--torch-backend BACKEND] [--torch-cuda-arch-list LIST] [--cuda-version VERSION]"
             echo "Options:"
             echo "  --editable        Install vllm in editable mode (default)"
             echo "  --no-editable     Install vllm in non-editable mode"
+            echo "  --use-local-vllm PATH  Use local vLLM directory instead of cloning"
+            echo "  --use-local-deepep PATH  Use local DeepEP directory instead of vLLM's version"
             echo "  --vllm-ref REF    Git reference to checkout (default: ${VLLM_REF})"
             echo "  --max-jobs NUM    Maximum number of parallel jobs (default: ${MAX_JOBS})"
             echo "  --arch ARCH       Architecture (amd64|arm64, default: auto-detect)"
@@ -123,16 +135,25 @@ echo "  MAX_JOBS=$MAX_JOBS | TORCH_BACKEND=$TORCH_BACKEND | CUDA_VERSION=$CUDA_V
 echo "  TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST"
 echo "  DEEPGEMM_REF=$DEEPGEMM_REF | FLASHINF_REF=$FLASHINF_REF"
 echo "  INSTALLATION_DIR=$INSTALLATION_DIR | VLLM_GIT_URL=$VLLM_GIT_URL"
+echo "  USE_LOCAL_VLLM=$USE_LOCAL_VLLM | USE_LOCAL_DEEPEP=$USE_LOCAL_DEEPEP"
 
-echo "\n=== Cloning vLLM repository ==="
-# We need to clone to install dependencies
-cd $INSTALLATION_DIR
-git clone $VLLM_GIT_URL vllm
-cd vllm
-git checkout $VLLM_REF
-
-# TODO leave this here in case we need to do cherry-picks in future
-# GIT_COMMITTER_NAME="Container Build" GIT_COMMITTER_EMAIL="container@buildkitsandbox.local" git cherry-pick 740f064
+if [ -n "$USE_LOCAL_VLLM" ]; then
+    echo "\n=== Using local vLLM directory ==="
+    echo "Copying from: $USE_LOCAL_VLLM"
+    cd $INSTALLATION_DIR
+    cp -r "$USE_LOCAL_VLLM" vllm
+    cd vllm
+else
+    echo "\n=== Cloning vLLM repository ==="
+    # We need to clone to install dependencies
+    cd $INSTALLATION_DIR
+    git clone $VLLM_GIT_URL vllm
+    cd vllm
+    git checkout $VLLM_REF
+    
+    # TODO leave this here in case we need to do cherry-picks in future
+    # GIT_COMMITTER_NAME="Container Build" GIT_COMMITTER_EMAIL="container@buildkitsandbox.local" git cherry-pick 740f064
+fi
 
 echo "\n=== Installing vLLM & FlashInfer ==="
 
@@ -238,7 +259,38 @@ fi
 echo "✓ DeepGEMM installation completed"
 
 echo "\n=== Installing EP Kernels (PPLX and DeepEP) ==="
-cd ep_kernels/
-TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" bash install_python_libraries.sh
+if [ -n "$USE_LOCAL_DEEPEP" ]; then
+    echo "Using local DeepEP from: $USE_LOCAL_DEEPEP"
+    
+    # Create ep_kernels directory structure if needed
+    mkdir -p ep_kernels/ep_kernels_workspace
+    cd ep_kernels/
+    
+    # Copy local DeepEP to the workspace
+    cp -r "$USE_LOCAL_DEEPEP" ep_kernels_workspace/DeepEP
+    
+    # Install local DeepEP
+    cd ep_kernels_workspace/DeepEP
+    if [ -f "install.sh" ]; then
+        echo "Running local DeepEP install script..."
+        bash install.sh
+    elif [ -f "setup.py" ] || [ -f "pyproject.toml" ]; then
+        echo "Installing local DeepEP as Python package..."
+        uv pip install -e .
+    else
+        echo "Warning: No setup.py or pyproject.toml found in local DeepEP"
+    fi
+    
+    # Still need to install other EP components (like PPLX) if they exist
+    cd $INSTALLATION_DIR/vllm/tools/ep_kernels/
+    if [ -f "install_python_libraries.sh" ]; then
+        echo "Running vLLM's EP kernels installation for other components..."
+        # Try to install other components, but don't fail if DeepEP is already installed
+        TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" bash install_python_libraries.sh || true
+    fi
+else
+    cd ep_kernels/
+    TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" bash install_python_libraries.sh
+fi
 
 echo "\n✅ All installations completed successfully!"
