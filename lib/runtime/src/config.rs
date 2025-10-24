@@ -397,6 +397,19 @@ pub fn is_truthy(val: &str) -> bool {
     matches!(val.to_lowercase().as_str(), "1" | "true" | "on" | "yes")
 }
 
+pub fn parse_bool(val: &str) -> anyhow::Result<bool> {
+    if is_truthy(val) {
+        Ok(true)
+    } else if is_falsey(val) {
+        Ok(false)
+    } else {
+        anyhow::bail!(
+            "Invalid boolean value: '{}'. Expected one of: true/false, 1/0, on/off, yes/no",
+            val
+        )
+    }
+}
+
 /// Check if a string is falsey
 /// This will be used to evaluate environment variables or any other subjective
 /// configuration parameters that can be set by the user that should be evaluated

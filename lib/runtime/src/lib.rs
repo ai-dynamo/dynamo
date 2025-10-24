@@ -17,7 +17,7 @@ pub use anyhow::{
 
 use async_once_cell::OnceCell;
 
-mod config;
+pub mod config;
 pub use config::RuntimeConfig;
 
 pub mod component;
