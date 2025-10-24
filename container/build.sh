@@ -660,6 +660,7 @@ function determine_user_intention_trtllm() {
         intention_download="true";
         intention_count=$((intention_count+1));
         TRTLLM_INTENTION="download"
+        echo "INFO: Installing $TENSORRTLLM_PIP_WHEEL trtllm version from index: $TENSORRTLLM_INDEX_URL"
     elif [[ -n "$TENSORRTLLM_PIP_WHEEL" ]]; then
         intention_download="true";
         intention_count=$((intention_count+1));
