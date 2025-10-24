@@ -421,29 +421,55 @@ impl GrpcInferenceService for KserveService {
             if card.model_type.supports_tensor() {
                 if let Some(tensor_model_config) = card.runtime_config.tensor_model_config.as_ref()
                 {
-                    if let Some(triton_model_config) = tensor_model_config.triton_model_config.as_ref() {
-                        let bytes = general_purpose::STANDARD.decode(triton_model_config.clone()).map_err(|e| Status::invalid_argument(format!("Failed to decode base64 model config: {}", e)))?;
-                        let model_config = ModelConfig::decode(&*bytes).map_err(|e| Status::invalid_argument(format!("Failed to deserialize model config: {}", e)))?;
+                    if let Some(triton_model_config) =
+                        tensor_model_config.triton_model_config.as_ref()
+                    {
+                        let bytes = general_purpose::STANDARD
+                            .decode(triton_model_config.clone())
+                            .map_err(|e| {
+                                Status::invalid_argument(format!(
+                                    "Failed to decode base64 model config: {}",
+                                    e
+                                ))
+                            })?;
+                        let model_config = ModelConfig::decode(&*bytes).map_err(|e| {
+                            Status::invalid_argument(format!(
+                                "Failed to deserialize model config: {}",
+                                e
+                            ))
+                        })?;
                         return Ok(Response::new(ModelMetadataResponse {
                             name: model_config.name,
                             versions: vec!["1".to_string()],
                             platform: model_config.platform,
-                            inputs: model_config.input.iter().map(|input| inference::model_metadata_response::TensorMetadata {
-                                name: input.name.clone(),
-                                datatype: match inference::DataType::try_from(input.data_type) {
-                                    Ok(dt) => dt.as_str_name().to_string(),
-                                    Err(_) => "TYPE_INVALID".to_string(),
-                                },
-                                shape: input.dims.clone(),
-                            }).collect(),
-                            outputs: model_config.output.iter().map(|output| inference::model_metadata_response::TensorMetadata {
-                                name: output.name.clone(),
-                                datatype: match inference::DataType::try_from(output.data_type) {
-                                    Ok(dt) => dt.as_str_name().to_string(),
-                                    Err(_) => "TYPE_INVALID".to_string(),
-                                },
-                                shape: output.dims.clone(),
-                            }).collect(),
+                            inputs: model_config
+                                .input
+                                .iter()
+                                .map(|input| inference::model_metadata_response::TensorMetadata {
+                                    name: input.name.clone(),
+                                    datatype: match inference::DataType::try_from(input.data_type) {
+                                        Ok(dt) => dt.as_str_name().to_string(),
+                                        Err(_) => "TYPE_INVALID".to_string(),
+                                    },
+                                    shape: input.dims.clone(),
+                                })
+                                .collect(),
+                            outputs: model_config
+                                .output
+                                .iter()
+                                .map(
+                                    |output| inference::model_metadata_response::TensorMetadata {
+                                        name: output.name.clone(),
+                                        datatype: match inference::DataType::try_from(
+                                            output.data_type,
+                                        ) {
+                                            Ok(dt) => dt.as_str_name().to_string(),
+                                            Err(_) => "TYPE_INVALID".to_string(),
+                                        },
+                                        shape: output.dims.clone(),
+                                    },
+                                )
+                                .collect(),
                         }));
                     }
                     return Ok(Response::new(ModelMetadataResponse {
@@ -527,9 +553,23 @@ impl GrpcInferenceService for KserveService {
             if card.model_type.supports_tensor() {
                 if let Some(tensor_model_config) = card.runtime_config.tensor_model_config.as_ref()
                 {
-                    if let Some(triton_model_config) = tensor_model_config.triton_model_config.as_ref() {
-                        let bytes = general_purpose::STANDARD.decode(triton_model_config.clone()).map_err(|e| Status::invalid_argument(format!("Failed to decode base64 model config: {}", e)))?;
-                        let model_config = ModelConfig::decode(&*bytes).map_err(|e| Status::invalid_argument(format!("Failed to deserialize model config: {}", e)))?;
+                    if let Some(triton_model_config) =
+                        tensor_model_config.triton_model_config.as_ref()
+                    {
+                        let bytes = general_purpose::STANDARD
+                            .decode(triton_model_config.clone())
+                            .map_err(|e| {
+                                Status::invalid_argument(format!(
+                                    "Failed to decode base64 model config: {}",
+                                    e
+                                ))
+                            })?;
+                        let model_config = ModelConfig::decode(&*bytes).map_err(|e| {
+                            Status::invalid_argument(format!(
+                                "Failed to deserialize model config: {}",
+                                e
+                            ))
+                        })?;
                         return Ok(Response::new(ModelConfigResponse {
                             config: Some(model_config),
                         }));

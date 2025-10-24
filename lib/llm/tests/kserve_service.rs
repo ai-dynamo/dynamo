@@ -40,9 +40,9 @@ pub mod kserve_test {
     use tokio::time::timeout;
     use tonic::{Request, Response, transport::Channel};
 
+    use base64::engine::{Engine, general_purpose};
     use dynamo_async_openai::types::Prompt;
     use prost::Message;
-    use base64::engine::{Engine, general_purpose};
 
     struct SplitEngine {}
 
@@ -1226,7 +1226,8 @@ pub mod kserve_test {
             name: model_name.to_string(),
             platform: "custom".to_string(),
             backend: "custom".to_string(),
-            input: vec![inference::ModelInput {
+            input: vec![
+                inference::ModelInput {
                     name: "input".to_string(),
                     data_type: DataType::TypeInt32 as i32,
                     dims: vec![1],
@@ -1239,16 +1240,15 @@ pub mod kserve_test {
                     dims: vec![1],
                     optional: true,
                     ..Default::default()
-                }],
+                },
+            ],
             output: vec![inference::ModelOutput {
-                    name: "output".to_string(),
-                    data_type: DataType::TypeBool as i32,
-                    dims: vec![-1],
-                    ..Default::default()
-                }],
-            model_transaction_policy: Some(inference::ModelTransactionPolicy {
-                decoupled: true,
-            }),
+                name: "output".to_string(),
+                data_type: DataType::TypeBool as i32,
+                dims: vec![-1],
+                ..Default::default()
+            }],
+            model_transaction_policy: Some(inference::ModelTransactionPolicy { decoupled: true }),
             ..Default::default()
         };
 
