@@ -23,6 +23,8 @@ pub use nats::NATSStore;
 mod etcd;
 pub use etcd::EtcdStore;
 
+const WATCH_SEND_TIMEOUT: Duration = Duration::from_millis(100);
+
 /// A key that is safe to use directly in the KV store.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Key(String);
@@ -240,7 +242,7 @@ impl KeyValueStoreManager {
         tokio::sync::mpsc::Receiver<WatchEvent>,
     ) {
         let bucket_name = bucket_name.to_string();
-        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let (tx, rx) = tokio::sync::mpsc::channel(128);
         let watch_task = tokio::spawn(async move {
             // Start listening for changes but don't poll this yet
             let bucket = self
@@ -251,7 +253,15 @@ impl KeyValueStoreManager {
 
             // Send all the existing keys
             for (key, bytes) in bucket.entries().await? {
-                let _ = tx.send(WatchEvent::Put(KeyValue::new(key, bytes))).await;
+                if let Err(err) = tx
+                    .send_timeout(
+                        WatchEvent::Put(KeyValue::new(key, bytes)),
+                        WATCH_SEND_TIMEOUT,
+                    )
+                    .await
+                {
+                    tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding existing key to channel");
+                }
             }
 
             // Now block waiting for new entries
@@ -263,7 +273,9 @@ impl KeyValueStoreManager {
                         None => break,
                     }
                 };
-                let _ = tx.send(event).await;
+                if let Err(err) = tx.send_timeout(event, WATCH_SEND_TIMEOUT).await {
+                    tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding new key to channel");
+                }
             }
 
             Ok::<(), StoreError>(())

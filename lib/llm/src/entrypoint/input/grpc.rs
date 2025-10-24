@@ -29,7 +29,6 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
         EngineConfig::Dynamic(_) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
             let store = Arc::new(distributed_runtime.store().clone());
-            // This allows the /health endpoint to query etcd for active instances
             let grpc_service = grpc_service_builder.build()?;
             let router_config = engine_config.local_model().router_config();
             // Listen for models registering themselves, add them to gRPC service
@@ -43,7 +42,6 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 distributed_runtime,
                 grpc_service.state().manager_clone(),
                 store,
-                model_card::ROOT_PATH,
                 router_config.router_mode,
                 Some(router_config.kv_router_config),
                 router_config.busy_threshold,
@@ -164,14 +162,13 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
     Ok(())
 }
 
-/// Spawns a task that watches for new models in etcd at network_prefix,
+/// Spawns a task that watches for new models in store,
 /// and registers them with the ModelManager so that the HTTP service can use them.
 #[allow(clippy::too_many_arguments)]
 async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
     store: Arc<KeyValueStoreManager>,
-    network_prefix: &str,
     router_mode: RouterMode,
     kv_router_config: Option<KvRouterConfig>,
     busy_threshold: Option<f64>,
@@ -185,7 +182,7 @@ async fn run_watcher(
         kv_router_config,
         busy_threshold,
     );
-    tracing::info!("Watching for remote model at {network_prefix}");
+    tracing::debug!("Waiting for remote model");
     let (_, receiver) = store.watch(model_card::ROOT_PATH, None, cancellation_token);
 
     // [gluo NOTE] This is different from http::run_watcher where it alters the HTTP service
