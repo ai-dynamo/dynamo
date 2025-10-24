@@ -195,6 +195,7 @@ fn get_or_create_request_id(primary: Option<&str>) -> String {
     uuid.to_string()
 }
 
+/// Convert KServe InferParameter to Dynamo ParameterValue
 #[allow(clippy::result_large_err)]
 pub fn kserve_param_to_dynamo(
     key: &str,
