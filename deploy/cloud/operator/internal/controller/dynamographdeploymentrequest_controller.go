@@ -792,10 +792,18 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 
 		// Set deployment.namespace if not already set
-		if _, hasDeployment := config["deployment"]; !hasDeployment {
-			config["deployment"] = make(map[string]interface{})
+		deploymentVal, hasDeployment := config["deployment"]
+		var deploymentConfig map[string]interface{}
+		if !hasDeployment || deploymentVal == nil {
+			deploymentConfig = make(map[string]interface{})
+			config["deployment"] = deploymentConfig
+		} else {
+			var ok bool
+			deploymentConfig, ok = deploymentVal.(map[string]interface{})
+			if !ok {
+				return nil, false, fmt.Errorf("profilingConfig.config.deployment must be an object, got %T", deploymentVal)
+			}
 		}
-		deploymentConfig := config["deployment"].(map[string]interface{})
 		if _, hasNamespace := deploymentConfig["namespace"]; !hasNamespace {
 			deploymentConfig["namespace"] = dgdr.Namespace
 		}
@@ -809,10 +817,18 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 
 		// Set engine.backend from spec.backend
-		if _, hasEngine := config["engine"]; !hasEngine {
-			config["engine"] = make(map[string]interface{})
+		engineVal, hasEngine := config["engine"]
+		var engineConfig map[string]interface{}
+		if !hasEngine || engineVal == nil {
+			engineConfig = make(map[string]interface{})
+			config["engine"] = engineConfig
+		} else {
+			var ok bool
+			engineConfig, ok = engineVal.(map[string]interface{})
+			if !ok {
+				return nil, false, fmt.Errorf("profilingConfig.config.engine must be an object, got %T", engineVal)
+			}
 		}
-		engineConfig := config["engine"].(map[string]interface{})
 		engineConfig["backend"] = dgdr.Spec.Backend
 
 		// If ConfigMapRef is provided, set engine.config path
