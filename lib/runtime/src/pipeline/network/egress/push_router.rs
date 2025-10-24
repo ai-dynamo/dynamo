@@ -77,7 +77,7 @@ pub enum RouterMode {
     #[default]
     RoundRobin,
     Random,
-    Direct(i64),
+    Direct(u64),
     // Marker value, KV routing itself is in dynamo-llm
     KV,
 }
@@ -89,8 +89,11 @@ impl RouterMode {
 }
 
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
+    let Some(nats_client) = endpoint.drt().nats_client() else {
+        anyhow::bail!("Missing NATS. Please ensure it is running and accessible.");
+    };
     AddressedPushRouter::new(
-        endpoint.drt().nats_client.client().clone(),
+        nats_client.client().clone(),
         endpoint.drt().tcp_server().await?,
     )
 }
@@ -178,7 +181,7 @@ where
     pub async fn direct(
         &self,
         request: SingleIn<T>,
-        instance_id: i64,
+        instance_id: u64,
     ) -> anyhow::Result<ManyOut<U>> {
         let found = self.client.instance_ids_avail().contains(&instance_id);
 
@@ -203,7 +206,7 @@ where
 
     async fn generate_with_fault_detection(
         &self,
-        instance_id: i64,
+        instance_id: u64,
         request: SingleIn<T>,
     ) -> anyhow::Result<ManyOut<U>> {
         // Check if all workers are busy (only if busy threshold is set)

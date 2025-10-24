@@ -96,6 +96,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
+# Path constants
+DYNAMO_RUNTIME_SRC_PATH = "lib/bindings/python/src/dynamo"
+
 
 # ANSI color constants
 class Colors:
@@ -1745,6 +1748,11 @@ class DynamoRuntimeInfo(NodeInfo):
             if pth_file:
                 self.add_child(pth_file)
 
+        # Check for multiple _core*.so files
+        multiple_so_warning = self._check_multiple_core_so(workspace_dir)
+        if multiple_so_warning:
+            self.add_child(multiple_so_warning)
+
         # Discover runtime components from source
         components = self._discover_runtime_components(workspace_dir)
 
@@ -1806,6 +1814,49 @@ class DynamoRuntimeInfo(NodeInfo):
         if not self.children:
             self.status = NodeStatus.ERROR
 
+    def _check_multiple_core_so(self, workspace_dir: str) -> Optional[NodeInfo]:
+        """Check for multiple _core*.so files and return warning if found.
+
+        Multiple _core*.so files are problematic because:
+        - Python's import system picks up the first matching file it finds
+        - This can lead to loading the wrong/outdated binary module
+        - Different naming patterns (_core.abi3.so vs _core.cpython-312-x86_64-linux-gnu.so)
+          indicate different build configurations which shouldn't coexist
+        - Can cause confusing import errors when the wrong .so is loaded
+        - Typically occurs when switching between maturin build modes or Python versions
+
+        Returns:
+            NodeInfo with warning if multiple .so files found, None otherwise
+        """
+        if not workspace_dir:
+            return None
+
+        core_dir = os.path.join(workspace_dir, DYNAMO_RUNTIME_SRC_PATH)
+        if not os.path.exists(core_dir):
+            return None
+
+        try:
+            # Find all _core*.so files
+            so_files = glob.glob(os.path.join(core_dir, "_core*.so"))
+
+            if len(so_files) > 1:
+                # Multiple .so files found - create warning
+                so_file_names = [os.path.basename(f) for f in so_files]
+                warning_desc = (
+                    f"Found {len(so_files)} files: {', '.join(so_file_names)}. "
+                    f"Python may load the wrong version causing import errors. "
+                    f"You may need to remove old *.so files and/or rebuild via 'maturin develop'."
+                )
+                return NodeInfo(
+                    label="Multiple _core*.so files detected",
+                    desc=warning_desc,
+                    status=NodeStatus.WARNING,
+                )
+        except Exception:
+            pass
+
+        return None
+
     def _discover_runtime_components(self, workspace_dir: str) -> list:
         """Discover ai-dynamo-runtime components from filesystem.
 
@@ -1814,7 +1865,7 @@ class DynamoRuntimeInfo(NodeInfo):
             Example: ['dynamo._core', 'dynamo.nixl_connect', 'dynamo.llm', 'dynamo.runtime']
 
         Note: Always includes 'dynamo._core' (compiled Rust module), then scans
-              lib/bindings/python/src/dynamo/ for additional components.
+              DYNAMO_RUNTIME_SRC_PATH for additional components.
         """
         components = ["dynamo._core"]  # Always include compiled Rust module
 
@@ -1822,7 +1873,7 @@ class DynamoRuntimeInfo(NodeInfo):
             return components
 
         # Scan runtime components (llm, runtime, nixl_connect, etc.)
-        runtime_path = os.path.join(workspace_dir, "lib/bindings/python/src/dynamo")
+        runtime_path = os.path.join(workspace_dir, DYNAMO_RUNTIME_SRC_PATH)
         if not os.path.exists(runtime_path):
             return components
 

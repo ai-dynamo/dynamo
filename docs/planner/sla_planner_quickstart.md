@@ -15,7 +15,7 @@ The deployment process consists of two mandatory phases:
 2. **SLA Planner Deployment** (5-10 minutes) - Enables autoscaling
 
 > [!TIP]
-> **Fast Profiling with AI Configurator**: For TensorRT-LLM users, we provide AI Configurator (AIC) that can complete profiling in 20-30 seconds using performance simulation instead of real deployments. Support for vLLM and SGLang coming soon. See [AI Configurator section](/docs/benchmarks/pre_deployment_profiling.md#running-the-profiling-script-with-aiconfigurator) in the Profiling Guide.
+> **Fast Profiling with AI Configurator**: For TensorRT-LLM users, we provide AI Configurator (AIC) that can complete profiling in 20-30 seconds using performance simulation instead of real deployments. Support for vLLM and SGLang coming soon. See [AI Configurator section](/docs/benchmarks/pre_deployment_profiling.md#running-the-profiling-script-with-ai-configurator) in the Profiling Guide.
 
 ```mermaid
 flowchart TD
@@ -38,7 +38,7 @@ flowchart TD
 
 Before deploying the SLA planner, ensure:
 - **Dynamo platform installed** (see [Installation Guide](/docs/kubernetes/installation_guide.md))
-- **[kube-prometheus-stack](/docs/kubernetes/metrics.md) installed and running.** By default, the prometheus server is not deployed in the `monitoring` namespace. If it is deployed to a different namespace, set `dynamo-operator.dynamo.metrics.prometheusEndpoint="http://prometheus-kube-prometheus-prometheus.<namespace>.svc.cluster.local:9090"`.
+- **[kube-prometheus-stack](/docs/kubernetes/observability/metrics.md) installed and running.** By default, the prometheus server is not deployed in the `monitoring` namespace. If it is deployed to a different namespace, set `dynamo-operator.dynamo.metrics.prometheusEndpoint="http://prometheus-kube-prometheus-prometheus.<namespace>.svc.cluster.local:9090"`.
 - **Benchmarking resources setup** (see [Kubernetes utilities for Dynamo Benchmarking and Profiling](../../deploy/utils/README.md)) The script will create a `dynamo-pvc` with `ReadWriteMany` access, if your cluster's default storageClassName does not allow `ReadWriteMany`, you need to specify a different storageClassName in `deploy/utils/manifests/pvc.yaml` which does support `ReadWriteMany`.
 
 
@@ -206,7 +206,7 @@ kubectl logs -n $NAMESPACE deployment/vllm-disagg-planner-planner --tail=10
 ```
 New adjustment interval started!
 Observed num_req: X.XXX isl: X.XXX osl: X.XXX
-Observed ttft: X.XXXs itl: X.XXXs
+Observed ttft: X.XXms itl: X.XXms
 Number of prefill workers: 1, number of decode workers: 1
 ```
 

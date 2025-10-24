@@ -71,9 +71,6 @@ def run_aiperf(
         model_name,
         "--artifact-dir",
         str(output_dir),
-        "--",
-        "-vv",
-        "--max-threads=300",
     ]
     print(
         f"Running aiperf with isl {isl}, osl {osl}, concurrency {concurrency}",

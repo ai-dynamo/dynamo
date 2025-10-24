@@ -90,10 +90,13 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         "--ttft",
         type=float,
         default=SLAPlannerDefaults.ttft,
-        help="Time to first token",
+        help="Time to first token (float, in milliseconds)",
     )
     parser.add_argument(
-        "--itl", type=float, default=SLAPlannerDefaults.itl, help="Inter-token latency"
+        "--itl",
+        type=float,
+        default=SLAPlannerDefaults.itl,
+        help="Inter-token latency (float, in milliseconds)",
     )
     parser.add_argument(
         "--load-predictor",

@@ -464,6 +464,13 @@ class WorkerMetricsPublisher:
         """
         Similar to Component.create_service, but only service created through
         this method will interact with KV router of the same component.
+
+        Args:
+            component: The component to create the endpoint for
+            metrics_labels: [DEPRECATED] This parameter is no longer used and will be removed in a future version
+
+        .. deprecated::
+            The metrics_labels parameter is deprecated and has no effect.
         """
 
     def publish(
@@ -486,7 +493,24 @@ class ModelRuntimeConfig:
     """
     A model runtime configuration is a collection of runtime information
     """
-    ...
+
+    total_kv_blocks: int | None
+    max_num_seqs: int | None
+    max_num_batched_tokens: int | None
+    tool_call_parser: str | None
+    reasoning_parser: str | None
+    runtime_data: dict[str, Any]
+    tensor_model_config: Any | None
+
+    def __init__(self) -> None: ...
+
+    def set_engine_specific(self, key: str, value: Any) -> None:
+        """Set an engine-specific runtime configuration value"""
+        ...
+
+    def get_engine_specific(self, key: str) -> Any | None:
+        """Get an engine-specific runtime configuration value"""
+        ...
 
 class OAIChatPreprocessor:
     """
@@ -546,7 +570,8 @@ class RadixTree:
     """
     A RadixTree that tracks KV cache blocks and can find prefix matches for sequences.
 
-    NOTE: This class is not thread-safe and should only be used from a single thread in Python.
+    Thread-safe: operations route to a dedicated background thread and long calls
+    release the Python GIL.
     """
 
     def __init__(self, expiration_duration_secs: Optional[float] = None) -> None:
@@ -602,6 +627,15 @@ class RadixTree:
 
         Args:
             worker_id: ID of the worker whose blocks should be cleared
+        """
+        ...
+
+    def dump_tree_as_events(self) -> List[str]:
+        """
+        Dump the current RadixTree state as a list of JSON-serialized KV cache events.
+
+        Returns:
+            List of JSON-serialized KV cache events as strings
         """
         ...
 
@@ -745,31 +779,6 @@ class KvRecorder:
         """
         ...
 
-class AggregatedMetrics:
-    """
-    A collection of metrics of the endpoints
-    """
-
-    ...
-
-class KvMetricsAggregator:
-    """
-    A metrics aggregator will collect KV metrics of the endpoints.
-    """
-
-    ...
-
-    def __init__(self, component: Component) -> None:
-        """
-        Create a `KvMetricsAggregator` object
-        """
-
-    def get_metrics(self) -> AggregatedMetrics:
-        """
-        Return the aggregated metrics of the endpoints.
-        """
-        ...
-
 class KvEventPublisher:
     """
     A KV event publisher will publish KV events corresponding to the component.
@@ -878,7 +887,12 @@ class ModelInput:
     ...
 
 class ModelType:
-    """What type of request this model needs: Chat, Completions, Embedding or Tensor"""
+    """What type of request this model needs: Chat, Completions, Embedding, Tensor or Prefill"""
+    Chat: ModelType
+    Completions: ModelType
+    Embedding: ModelType
+    TensorBased: ModelType
+    Prefill: ModelType
     ...
 
 class RouterMode:
@@ -901,8 +915,9 @@ async def register_llm(
     model_name: Optional[str] = None,
     context_length: Optional[int] = None,
     kv_cache_block_size: Optional[int] = None,
-    migration_limit: int = 0,
     router_mode: Optional[RouterMode] = None,
+    migration_limit: int = 0,
+    runtime_config: Optional[ModelRuntimeConfig] = None,
     user_data: Optional[Dict[str, Any]] = None,
     custom_template_path: Optional[str] = None,
 ) -> None:

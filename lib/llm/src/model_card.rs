@@ -21,11 +21,7 @@ use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_type::{ModelInput, ModelType};
 use anyhow::{Context, Result};
 use derive_builder::Builder;
-use dynamo_runtime::DistributedRuntime;
-use dynamo_runtime::storage::key_value_store::{
-    EtcdStore, Key, KeyValueStore, KeyValueStoreManager,
-};
-use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned, transports::nats};
+use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
 
@@ -352,20 +348,6 @@ impl ModelDeploymentCard {
         }
     }
 
-    /// Delete this card from the key-value store and it's URLs from the object store
-    pub async fn delete_from_nats(&mut self, nats_client: nats::Client) -> Result<()> {
-        let nats_addr = nats_client.addr();
-        let bucket_name = self.slug();
-        tracing::trace!(
-            nats_addr,
-            %bucket_name,
-            "Delete model deployment card from NATS"
-        );
-        nats_client
-            .object_store_delete_bucket(bucket_name.as_ref())
-            .await
-    }
-
     /// Allow user to override the name we register this model under.
     /// Corresponds to vllm's `--served-model-name`.
     pub fn set_name(&mut self, name: &str) {
@@ -385,30 +367,6 @@ impl ModelDeploymentCard {
 
     pub fn requires_preprocessing(&self) -> bool {
         matches!(self.model_input, ModelInput::Tokens)
-    }
-
-    /// Load a ModelDeploymentCard from storage the DistributedRuntime is configured to use.
-    /// Card should be fully local and ready to use when the call returns.
-    pub async fn load_from_store(
-        mdc_key: &Key,
-        drt: &DistributedRuntime,
-    ) -> anyhow::Result<Option<Self>> {
-        let Some(etcd_client) = drt.etcd_client() else {
-            // Should be impossible because we only get here on an etcd event
-            anyhow::bail!("Missing etcd_client");
-        };
-        let store: Box<dyn KeyValueStore> = Box::new(EtcdStore::new(etcd_client));
-        let card_store = Arc::new(KeyValueStoreManager::new(store));
-        let Some(mut card) = card_store
-            .load::<ModelDeploymentCard>(ROOT_PATH, mdc_key)
-            .await?
-        else {
-            return Ok(None);
-        };
-
-        card.download_config().await?;
-
-        Ok(Some(card))
     }
 
     /// Download the files this card needs to work: config.json, tokenizer.json, etc.

@@ -20,7 +20,7 @@ The Dynamo KV Block Manager (KVBM) is a scalable runtime component designed to h
 
 It offers:
 
-* A **unified memory API** that spans GPU memory, pinned host memory, remote RDMA-accessible memory, local or distributed pool of SSDs and remote file/object/cloud storage systems.
+* A **unified memory API** that spans GPU memory(in future) , pinned host memory, remote RDMA-accessible memory, local or distributed pool of SSDs and remote file/object/cloud storage systems.
 * Support for evolving **block lifecycles** (allocate → register → match) with event-based state transitions that storage can subscribe to.
 * Integration with **NIXL**, a dynamic memory exchange layer used for remote registration, sharing, and access of memory blocks over RDMA/NVLink.
 
@@ -43,7 +43,7 @@ The Dynamo KV Block Manager serves as a reference implementation that emphasizes
      - ✅
      - vLLM
    * -
-     - ❌
+     - ✅
      - TensorRT-LLM
    * -
      - ❌
@@ -60,7 +60,11 @@ The Dynamo KV Block Manager serves as a reference implementation that emphasizes
 
    Overview <self>
    Motivation <kvbm_motivation.md>
-   KVBM Architecture <kvbm_architecture.md>
-   Understanding KVBM components <kvbm_components.md>
-   KVBM Further Reading <kvbm_reading>
+   Architecture <kvbm_architecture.md>
+   Components <kvbm_components.md>
+   Design Deep Dive <kvbm_design_deepdive.md>
+   Integrations <kvbm_integrations.md>
+   KVBM in vLLM <vllm-setup.md>
+   KVBM in TRTLLM <trtllm-setup.md>
    LMCache Integration <../backends/vllm/LMCache_Integration>
+   Further Reading <kvbm_reading.md>

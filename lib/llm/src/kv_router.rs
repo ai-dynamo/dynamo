@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod approx;
 pub mod indexer;
-pub mod metrics_aggregator;
+pub mod prefill_router;
 pub mod protocols;
 pub mod publisher;
 pub mod recorder;
@@ -30,6 +30,8 @@ pub mod scheduler;
 pub mod scoring;
 pub mod sequence;
 pub mod subscriber;
+
+pub use prefill_router::PrefillRouter;
 
 use crate::{
     kv_router::{
@@ -42,7 +44,6 @@ use crate::{
             LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult, WorkerWithDpRank,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
-        scoring::ProcessedEndpoints,
         subscriber::start_kv_router_background,
     },
     local_model::runtime_config::ModelRuntimeConfig,
@@ -249,7 +250,7 @@ impl KvRouter {
 
         let runtime_configs_watcher = watch_prefix_with_extraction(
             etcd_client,
-            model_card::ROOT_PATH,
+            &format!("{}/{}", model_card::ROOT_PATH, component.path()),
             key_extractors::lease_id,
             |card: ModelDeploymentCard| Some(card.runtime_config),
             cancellation_token.clone(),

@@ -34,34 +34,34 @@ python components/planner/src/dynamo/planner/utils/perf_interpolation.py \
   --profile_results_dir <path_to_profile_results> \
   --isl <ISL> \
   --osl <OSL> \
-  --ttft <TTFT(s)> \
-  --itl <ITL(s)>
+  --ttft <TTFT(ms)> \
+  --itl <ITL(ms)>
 ```
 
 The script will perform the interpolation based on ISL, OSL, and TTFT and ITL SLAs and advise the load that can saturate the engine.
 
-For example, to test the interpolator for `nvidia/Llama-3.1-8B-Instruct-FP8` on H200,
+For example, to test the interpolator for `nvidia/Llama-3.1-8B-Instruct-FP8` on H200 (target TTFT=200ms, ITL=10ms):
 
 ```bash
 python components/planner/src/dynamo/planner/utils/perf_interpolation.py \
   --profile_results_dir tests/planner/profiling_results/H200_TP1P_TP1D/ \
   --isl 3000 \
   --osl 300 \
-  --ttft 0.2 \
-  --itl 0.01
+  --ttft 200 \
+  --itl 10
 
 # output:
 ISL=3000, OSL=300
-TTFT=0.1s, ITL=0.01s
+TTFT=200ms, ITL=10ms
 Using profile results from tests/planner/profiling_results/H200_TP1P_TP1D/
 
 Interpolating prefill performance ...
-        Estimated TTFT=0.060s <= target TTFT=0.200s. Requests can queue 0.140s maximally while meeting TTFT SLA.
+        Estimated TTFT=60.00ms <= target TTFT=200.00ms. Requests can queue 140.00ms maximally while meeting TTFT SLA.
         Estimated throughput: 49481.09 tokens/s/gpu. Request rate at 16.49 requests/s will saturate one GPU.
 
 Interpolating decode performance ...
         Average context length: isl + osl/2 = 3150.
-        Estimated ITL=0.0097s <= target ITL=0.0100s at 16.16% active kv usage.
+        Estimated ITL=9.70ms <= target ITL=10.00ms at 16.16% active kv usage.
         Estimated throughput: 4555.68 token/s/gpu. Request rate at 15.19 requests/s will saturate one GPU.
 ```
 
@@ -111,8 +111,8 @@ For example, to dry run SLA planner for the previous FP8 8B on H200 using the ge
 
 ```bash
 python components/planner/test/planner_sla_dryrun.py \
-    --ttft 0.2 \
-    --itl 0.01 \
+    --ttft 200 \
+    --itl 10 \
     --adjustment-interval 60 \
     --profile-results-dir tests/planner/profiling_results/H200_TP1P_TP1D/ \
     --dataset rr-5-45_i3000o300.jsonl \
@@ -160,20 +160,64 @@ PYTHONPATH=../../components/src python -m pytest test_replica_calculation.py -v
 **Note**: The unit tests automatically mock external dependencies (prometheus_client, runtime modules) to ensure they can run in isolation without requiring the full Dynamo environment.
 
 #### Run Full End-to-End Test
-Test complete scaling behavior including Kubernetes deployment and load generation:
+
+Test complete scaling behavior including Kubernetes deployment and load generation.
+
+**Prerequisites:**
+
+- **[kube-prometheus-stack](../../docs/kubernetes/observability/metrics.md) installed and running.** The SLA planner requires Prometheus to observe metrics and make scaling decisions.
+- Ensure the Dynamo operator was installed with the Prometheus endpoint configured (see [SLA Planner Quickstart Guide](../../docs/planner/sla_planner_quickstart.md#prerequisites) for details).
+
+**Prepare the test deployment manifest:**
+
+The test requires modifying `components/backends/vllm/deploy/disagg_planner.yaml` with test-specific planner arguments:
+
+1. Copy the base deployment:
 
 ```bash
-./scaling/run_scaling_test.sh
+cp components/backends/vllm/deploy/disagg_planner.yaml tests/planner/scaling/disagg_planner.yaml
 ```
 
-With custom namespace:
+2. Edit `tests/planner/scaling/disagg_planner.yaml`. Ensure all services use the correct image. Modify the Planner service args:
+
+```yaml
+spec:
+  services:
+    Planner:
+      extraPodSpec:
+        mainContainer:
+          args:
+            - --environment=kubernetes
+            - --backend=vllm
+            - --adjustment-interval=60
+            - --profile-results-dir=/workspace/tests/planner/profiling_results/H200_TP1P_TP1D
+            - --ttft=100
+            - --itl=10
+            - --load-predictor=constant
+            - --no-correction
+```
+
+3. Update the model in VllmPrefillWorker and VllmDecodeWorker services:
+
+```yaml
+args:
+  - -m
+  - dynamo.vllm
+  - --model
+  - nvidia/Llama-3.1-8B-Instruct-FP8
+  - --migration-limit=3
+  - --max-model-len=8192
+```
+
+**Run the test:**
+
 ```bash
 ./scaling/run_scaling_test.sh --namespace <namespace>
 ```
 
 To save results to `tests/planner/e2e_scaling_results` instead of `/tmp`:
 ```bash
-./scaling/run_scaling_test.sh --save-results
+./scaling/run_scaling_test.sh --namespace <namespace> --save-results
 ```
 
 **E2E Test Deployment Management:**
@@ -224,9 +268,9 @@ aiperf profile \
   --endpoint-type chat \
   --url localhost:8000 \ # or the port-forwarded port
   --streaming \
-  --input-file payload:/workspace/rr-5-45_i3000o300.jsonl \ # path to the generated load dataset \
-  --fixed-schedule True \
-  --goodput time_to_first_token:200 inter_token_latency:10 \
+  --input-file /workspace/rr-5-45_i3000o300.jsonl \ # path to the generated load dataset \
+  --custom-dataset-type mooncake_trace \
+  --goodput "time_to_first_token:200 inter_token_latency:10" \
   -v
 ```
 

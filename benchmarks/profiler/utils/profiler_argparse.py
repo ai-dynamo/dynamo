@@ -8,6 +8,7 @@ from typing import Any, Dict
 import yaml
 
 from benchmarks.profiler.utils.planner_utils import add_planner_arguments_to_parser
+from benchmarks.profiler.utils.search_space_autogen import auto_generate_search_space
 
 
 def parse_config_string(config_str: str) -> Dict[str, Any]:
@@ -64,15 +65,16 @@ def create_profiler_parser() -> argparse.Namespace:
         deployment:
             namespace: String (kubernetes namespace, default: dynamo-sla-profiler)
             service_name: String (service name, default: "")
+            model: String (model to serve, can be HF model name or local model path)
         engine:
             backend: String (backend type, currently support [vllm, sglang, trtllm], default: vllm)
-            config: String (path to the DynamoGraphDeployment config file)
-            max_context_length: Int (maximum context length supported by the served model, default: 16384)
+            config: String (path to the DynamoGraphDeployment config file, default: "")
+            max_context_length: Int (maximum context length supported by the served model, default: 0)
             is_moe_model: Boolean (enable MoE (Mixture of Experts) model support, use TEP for prefill and DEP for decode, default: False)
         hardware:
-            min_num_gpus_per_engine: Int (minimum number of GPUs per engine, default: 1)
-            max_num_gpus_per_engine: Int (maximum number of GPUs per engine, default: 8)
-            num_gpus_per_node: Int (number of GPUs per node for MoE models - this will be the granularity when searching for the best TEP/DEP size, default: 8)
+            min_num_gpus_per_engine: Int (minimum number of GPUs per engine, default: 0)
+            max_num_gpus_per_engine: Int (maximum number of GPUs per engine, default: 0)
+            num_gpus_per_node: Int (number of GPUs per node for MoE models - this will be the granularity when searching for the best TEP/DEP size, default: 0)
         sweep:
             skip_existing_results: Boolean (skip TP sizes that already have results in the output directory, default: False)
             force_rerun: Boolean (force re-running all tests even if results already exist (overrides --skip-existing-results), default: False)
@@ -87,8 +89,8 @@ def create_profiler_parser() -> argparse.Namespace:
         sla:
             isl: Int (target input sequence length, default: 3000)
             osl: Int (target output sequence length, default: 500)
-            ttft: Int (target Time To First Token in ms, default: 50)
-            itl: Int (target Inter Token Latency in ms, default: 10)
+            ttft: Float (target Time To First Token in milliseconds, default: 50)
+            itl: Float (target Inter Token Latency in milliseconds, default: 10)
         planner: (planner-bypass arguments, use hyphens or underscores)
             i.e., planner-min-endpoint: 2  # or planner_min_endpoint: 2 (both work)
     """
@@ -112,6 +114,12 @@ def create_profiler_parser() -> argparse.Namespace:
         type=str,
         help="Configuration as Python dict literal, YAML, or JSON string. CLI args override config values. "
         "Example: \"{'engine': {'backend': 'vllm', 'config': '/path'}, 'sla': {'isl': 3000}}\"",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=config.get("deployment", {}).get("model", ""),
+        help="Model to serve, can be HF model name or local model path",
     )
 
     # CLI arguments with config-aware defaults (using nested .get() for cleaner code)
@@ -144,13 +152,13 @@ def create_profiler_parser() -> argparse.Namespace:
     parser.add_argument(
         "--min-num-gpus-per-engine",
         type=int,
-        default=config.get("hardware", {}).get("min_num_gpus_per_engine", 1),
+        default=config.get("hardware", {}).get("min_num_gpus_per_engine", 0),
         help="minimum number of GPUs per engine",
     )
     parser.add_argument(
         "--max-num-gpus-per-engine",
         type=int,
-        default=config.get("hardware", {}).get("max_num_gpus_per_engine", 8),
+        default=config.get("hardware", {}).get("max_num_gpus_per_engine", 0),
         help="maximum number of GPUs per engine",
     )
     parser.add_argument(
@@ -179,22 +187,22 @@ def create_profiler_parser() -> argparse.Namespace:
     )
     parser.add_argument(
         "--ttft",
-        type=int,
-        default=config.get("sla", {}).get("ttft", 50),
-        help="target Time To First Token in ms",
+        type=float,
+        default=config.get("sla", {}).get("ttft", 50.0),
+        help="target Time To First Token (float, in milliseconds)",
     )
     parser.add_argument(
         "--itl",
-        type=int,
-        default=config.get("sla", {}).get("itl", 10),
-        help="target Inter Token Latency in ms",
+        type=float,
+        default=config.get("sla", {}).get("itl", 10.0),
+        help="target Inter Token Latency (float, in milliseconds)",
     )
 
     # arguments used for interpolating TTFT and ITL under different ISL/OSL
     parser.add_argument(
         "--max-context-length",
         type=int,
-        default=config.get("engine", {}).get("max_context_length", 16384),
+        default=config.get("engine", {}).get("max_context_length", 0),
         help="maximum context length supported by the served model",
     )
     parser.add_argument(
@@ -231,7 +239,7 @@ def create_profiler_parser() -> argparse.Namespace:
     parser.add_argument(
         "--num-gpus-per-node",
         type=int,
-        default=config.get("hardware", {}).get("num_gpus_per_node", 8),
+        default=config.get("hardware", {}).get("num_gpus_per_node", 0),
         help="Number of GPUs per node for MoE models - this will be the granularity when searching for the best TEP/DEP size",
     )
 
@@ -289,5 +297,9 @@ def create_profiler_parser() -> argparse.Namespace:
     # Validate required arguments
     if not args.config:
         parser.error("--config is required (either via CLI or profile-config)")
+    if not args.model and not args.config:
+        parser.error("--model or --config is required")
+
+    auto_generate_search_space(args)
 
     return args

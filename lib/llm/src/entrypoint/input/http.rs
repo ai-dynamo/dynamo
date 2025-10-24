@@ -64,10 +64,10 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
     let http_service = match engine_config {
         EngineConfig::Dynamic(_) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
-            let etcd_client = distributed_runtime.etcd_client();
             // This allows the /health endpoint to query etcd for active instances
-            http_service_builder = http_service_builder.with_etcd_client(etcd_client.clone());
+            http_service_builder = http_service_builder.store(distributed_runtime.store().clone());
             let http_service = http_service_builder.build()?;
+            let etcd_client = distributed_runtime.etcd_client();
             match etcd_client {
                 Some(ref etcd_client) => {
                     let router_config = engine_config.local_model().router_config();
@@ -121,7 +121,6 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 Some(
                     manager
                         .kv_chooser_for(
-                            local_model.display_name(),
                             &component,
                             card.kv_cache_block_size,
                             Some(local_model.router_config().kv_router_config),
@@ -143,6 +142,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 None,
                 kv_chooser.clone(),
                 tokenizer_hf.clone(),
+                None, // No prefill chooser in http static mode
             )
             .await?;
             manager.add_chat_completions_model(
@@ -151,12 +151,19 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 chat_engine,
             )?;
 
-            let completions_engine =
-                entrypoint::build_routed_pipeline::<
-                    NvCreateCompletionRequest,
-                    NvCreateCompletionResponse,
-                >(card, &client, router_mode, None, kv_chooser, tokenizer_hf)
-                .await?;
+            let completions_engine = entrypoint::build_routed_pipeline::<
+                NvCreateCompletionRequest,
+                NvCreateCompletionResponse,
+            >(
+                card,
+                &client,
+                router_mode,
+                None,
+                kv_chooser,
+                tokenizer_hf,
+                None, // No prefill chooser in http static mode
+            )
+            .await?;
             manager.add_completions_model(
                 local_model.display_name(),
                 checksum,
@@ -234,17 +241,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             http_service.custom_backend_registry.as_ref(),
         ) {
             // Create DistributedRuntime for polling, matching the engine's mode
-            // Check if we have etcd_client to determine if we're in dynamic or static mode
-            let drt = if http_service.state().etcd_client().is_some() {
-                // Dynamic mode: use from_settings() which respects environment (includes etcd)
-                DistributedRuntime::from_settings(runtime.clone()).await?
-            } else {
-                // Static mode: no etcd
-                let dst_config =
-                    dynamo_runtime::distributed::DistributedConfig::from_settings(true);
-                DistributedRuntime::new(runtime.clone(), dst_config).await?
-            };
-
+            let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
             tracing::info!(
                 namespace_component_endpoint=%namespace_component_endpoint,
                 polling_interval_secs=polling_interval,

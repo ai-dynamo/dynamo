@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# TODO: update to dgdr spec for AIC
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -53,7 +54,7 @@ spec:
           - h200_sxm
           - --aic-model-name
           - QWEN3_32B
-          - --backend-version
+          - --aic-backend-version
           - 0.20.0
         volumeMounts:
           - name: output-volume

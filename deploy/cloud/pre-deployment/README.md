@@ -21,7 +21,7 @@ This directory contains a pre-deployment check script that verifies your Kuberne
 
 - For NCCL tests, please refer to the [NCCL tests](https://docs.nebius.com/kubernetes/gpu/nccl-test#run-tests) for more details.
 
-- For NIXL benchmark, please refer to the [NIXL benchmark pre-deployment checks](/deploy/cloud/pre-deployment/nixl/README.md) for more details.
+For the latest pre-deployment check instructions, see the [main branch version of this README](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/pre-deployment/README.md).
 
 ## Usage
 

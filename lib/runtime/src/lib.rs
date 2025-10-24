@@ -52,7 +52,8 @@ pub use tokio_util::sync::CancellationToken;
 pub use worker::Worker;
 
 use crate::{
-    metrics::prometheus_names::distributed_runtime, storage::key_value_store::KeyValueStore,
+    metrics::prometheus_names::distributed_runtime,
+    storage::key_value_store::{KeyValueStore, KeyValueStoreManager},
 };
 
 use component::{Endpoint, InstanceSource};
@@ -187,8 +188,8 @@ pub struct DistributedRuntime {
 
     // we might consider a unifed transport manager here
     etcd_client: Option<transports::etcd::Client>,
-    nats_client: transports::nats::Client,
-    store: Arc<dyn KeyValueStore>,
+    nats_client: Option<transports::nats::Client>,
+    store: KeyValueStoreManager,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
 
@@ -206,7 +207,7 @@ pub struct DistributedRuntime {
     instance_sources: Arc<tokio::sync::Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
 
     // Health Status
-    system_health: Arc<std::sync::Mutex<SystemHealth>>,
+    system_health: Arc<parking_lot::Mutex<SystemHealth>>,
 
     // This map associates metric prefixes with their corresponding Prometheus registries and callbacks.
     // Uses RwLock for better concurrency - multiple threads can read (execute callbacks) simultaneously.
