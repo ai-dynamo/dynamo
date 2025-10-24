@@ -493,7 +493,24 @@ class ModelRuntimeConfig:
     """
     A model runtime configuration is a collection of runtime information
     """
-    ...
+
+    total_kv_blocks: int | None
+    max_num_seqs: int | None
+    max_num_batched_tokens: int | None
+    tool_call_parser: str | None
+    reasoning_parser: str | None
+    runtime_data: dict[str, Any]
+    tensor_model_config: Any | None
+
+    def __init__(self) -> None: ...
+
+    def set_engine_specific(self, key: str, value: Any) -> None:
+        """Set an engine-specific runtime configuration value"""
+        ...
+
+    def get_engine_specific(self, key: str) -> Any | None:
+        """Get an engine-specific runtime configuration value"""
+        ...
 
 class OAIChatPreprocessor:
     """

@@ -1467,6 +1467,7 @@ dependencies = [
  "axum",
  "axum-server",
  "base64 0.22.1",
+ "bincode",
  "bitflags 2.9.3",
  "blake3",
  "bs62",

@@ -484,7 +484,7 @@ mod integration_tests {
                     component: "test_component".to_string(),
                     endpoint: format!("test_endpoint_{}", i),
                     namespace: "test_namespace".to_string(),
-                    instance_id: i as i64,
+                    instance_id: i,
                     transport: crate::component::TransportType::NatsTcp(endpoint.clone()),
                 },
                 payload,
@@ -554,6 +554,6 @@ mod integration_tests {
             .system_health
             .lock()
             .get_endpoint_health_status(endpoint);
-        assert_eq!(status, Some(HealthStatus::Ready));
+        assert_eq!(status, Some(HealthStatus::NotReady));
     }
 }

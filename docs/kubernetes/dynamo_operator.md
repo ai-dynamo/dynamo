@@ -23,11 +23,57 @@ Dynamo operator is a Kubernetes operator that simplifies the deployment, configu
 
 For the complete technical API reference for Dynamo Custom Resource Definitions, see:
 
-**📖 [Dynamo CRD API Reference](/docs/kubernetes/api_reference.md)**
+**📖 [Dynamo CRD API Reference](./api_reference.md)**
 
 ## Installation
 
-[See installation steps](/docs/kubernetes/installation_guide.md#overview)
+### Quick Install with Helm
+
+```bash
+# Set environment
+export NAMESPACE=dynamo-system
+export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
+
+# Install Platform (includes operator)
+helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz
+helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
+```
+
+For namespace-restricted installations (shared clusters):
+```bash
+helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz \
+  --namespace ${NAMESPACE} \
+  --create-namespace \
+  --set dynamo-operator.namespaceRestriction.enabled=true
+```
+
+### Building from Source
+
+```bash
+# Set environment
+export NAMESPACE=dynamo-system
+export DOCKER_SERVER=your-registry.com/  # your container registry
+export IMAGE_TAG=latest
+
+# Build operator image
+cd deploy/cloud/operator
+docker build -t $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG .
+docker push $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG
+cd -
+
+# Install CRDs
+cd deploy/cloud/helm
+helm install dynamo-crds ./crds/ --namespace default
+
+# Install platform with custom operator image
+helm install dynamo-platform ./platform/ \
+  --namespace ${NAMESPACE} \
+  --create-namespace \
+  --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
+  --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}"
+```
+
+For detailed installation options, see the [Installation Guide](./installation_guide.md)
 
 
 ## Development
