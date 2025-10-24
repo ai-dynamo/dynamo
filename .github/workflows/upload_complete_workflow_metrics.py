@@ -841,7 +841,23 @@ class WorkflowMetricsUploader:
             print(f"⚠️  Could not determine framework from job name: {job_name}")
             return
 
-        print(f"📦 Job framework: {framework}")
+        # Determine platform architecture from job name
+        # Job names typically look like: "vllm (amd64)" or "sglang (arm64)"
+        platform_arch = None
+        if "(amd64)" in job_name_lower or "amd64" in job_name_lower:
+            platform_arch = "amd64"
+        elif "(arm64)" in job_name_lower or "arm64" in job_name_lower:
+            platform_arch = "arm64"
+
+        if not platform_arch:
+            print(
+                f"⚠️  Could not determine platform architecture from job name: {job_name}"
+            )
+            # Default to amd64 if not specified
+            platform_arch = "amd64"
+            print(f"   Defaulting to platform_arch: {platform_arch}")
+
+        print(f"📦 Job framework: {framework}, platform_arch: {platform_arch}")
 
         # Look for test results directory
         test_results_dir = "test-results"
@@ -851,18 +867,20 @@ class WorkflowMetricsUploader:
 
         # Look for metadata files to get accurate step and framework info
         # Updated pattern to match new unique naming: test_metadata_<framework>_<test_type>_<arch>.json
-        # Filter by framework to only process this job's tests
+        # Filter by both framework AND architecture to only process this job's tests
         metadata_files = glob.glob(
-            f"{test_results_dir}/test_metadata_{framework}_*.json"
+            f"{test_results_dir}/test_metadata_{framework}_*_{platform_arch}.json"
         )
 
         if not metadata_files:
             print(
-                f"⚠️  No test metadata files found for framework '{framework}' in {test_results_dir}"
+                f"⚠️  No test metadata files found for framework '{framework}' with arch '{platform_arch}' in {test_results_dir}"
             )
             return
 
-        print(f"📄 Found {len(metadata_files)} test metadata files for {framework}")
+        print(
+            f"📄 Found {len(metadata_files)} test metadata files for {framework} ({platform_arch})"
+        )
 
         total_tests_processed = 0
 
