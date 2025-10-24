@@ -74,6 +74,49 @@ pub fn prompt_to_string(prompt: &dynamo_async_openai::types::Prompt) -> String {
     }
 }
 
+/// Get the batch size from a prompt (1 for single prompts, array length for batch prompts)
+pub fn get_prompt_batch_size(prompt: &dynamo_async_openai::types::Prompt) -> usize {
+    match prompt {
+        dynamo_async_openai::types::Prompt::String(_) => 1,
+        dynamo_async_openai::types::Prompt::IntegerArray(_) => 1,
+        dynamo_async_openai::types::Prompt::StringArray(arr) => arr.len(),
+        dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => arr.len(),
+    }
+}
+
+/// Extract a single prompt from a batch at the given index.
+/// For single prompts, returns a clone regardless of index.
+/// For batch prompts, returns the prompt at the specified index.
+pub fn extract_single_prompt(
+    prompt: &dynamo_async_openai::types::Prompt,
+    index: usize,
+) -> dynamo_async_openai::types::Prompt {
+    match prompt {
+        dynamo_async_openai::types::Prompt::String(s) => {
+            dynamo_async_openai::types::Prompt::String(s.clone())
+        }
+        dynamo_async_openai::types::Prompt::IntegerArray(arr) => {
+            dynamo_async_openai::types::Prompt::IntegerArray(arr.clone())
+        }
+        dynamo_async_openai::types::Prompt::StringArray(arr) => {
+            if index < arr.len() {
+                dynamo_async_openai::types::Prompt::String(arr[index].clone())
+            } else {
+                // Fallback to empty string if index out of bounds
+                dynamo_async_openai::types::Prompt::String(String::new())
+            }
+        }
+        dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => {
+            if index < arr.len() {
+                dynamo_async_openai::types::Prompt::IntegerArray(arr[index].clone())
+            } else {
+                // Fallback to empty array if index out of bounds
+                dynamo_async_openai::types::Prompt::IntegerArray(vec![])
+            }
+        }
+    }
+}
+
 impl NvExtProvider for NvCreateCompletionRequest {
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
