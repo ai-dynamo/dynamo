@@ -70,11 +70,23 @@ async def echo_tensor_worker(runtime: DistributedRuntime):
 
 
 async def generate(request, context):
+    """Echo tensors and parameters back to the client."""
     # [NOTE] gluo: currently there is no frontend side
     # validation between model config and actual request,
     # so any request will reach here and be echoed back.
     print(f"Echoing request: {request}")
-    yield {"model": request["model"], "tensors": request["tensors"]}
+
+    params = {}
+    if "parameters" in request:
+        params.update(request["parameters"])
+
+    params["processed"] = {"bool": True}
+
+    yield {
+        "model": request["model"],
+        "tensors": request["tensors"],
+        "parameters": params,
+    }
 
 
 if __name__ == "__main__":

@@ -12,33 +12,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-backend: pytorch
-
-# WideEP related settings
-moe_config:
-  backend: WIDEEP
-  load_balancer: /mnt/engine_configs/deepseek_r1/wide_ep/eplb.yaml
-
-# TP/EP/PP/DP
-tensor_parallel_size: 16
-moe_expert_parallel_size: 16
-pipeline_parallel_size: 1
-enable_attention_dp: true
-
-max_batch_size: 1
+tensor_parallel_size: 1
+moe_expert_parallel_size: 1
+enable_attention_dp: false
 max_num_tokens: 8192
-max_seq_len: 8192
+max_batch_size: 16
+trust_remote_code: true
+backend: pytorch
+enable_chunked_prefill: true
 
 kv_cache_config:
-  free_gpu_memory_fraction: 0.3
-  dtype: fp8 # NOTE: This dtype must match in both prefill/decode configs
+  free_gpu_memory_fraction: 0.85
 
 # NOTE: pytorch_backend_config section flattened since: https://github.com/NVIDIA/TensorRT-LLM/pull/4603
 # NOTE: overlap_scheduler enabled by default since this commit and changed
 # config field from 'enable_overlap_scheduler' to 'disable_overlap_scheduler':
 # https://github.com/NVIDIA/TensorRT-LLM/commit/b4e5df0ee0024eda3eeb83a6ba822245a30ab428
-disable_overlap_scheduler: true
-print_iter_log: true
 
-cache_transceiver_config:
-  backend: DEFAULT
+
+cuda_graph_config:
+  max_batch_size: 16
