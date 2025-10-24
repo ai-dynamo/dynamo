@@ -17,7 +17,7 @@ use crate::{
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
-use dynamo_runtime::transports::etcd;
+use dynamo_runtime::storage::key_value_store::KeyValueStoreManager;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use dynamo_runtime::{distributed::DistributedConfig, pipeline::RouterMode};
 
@@ -64,40 +64,34 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
     let http_service = match engine_config {
         EngineConfig::Dynamic(_) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
-            // This allows the /health endpoint to query etcd for active instances
+            // This allows the /health endpoint to query store for active instances
             http_service_builder = http_service_builder.store(distributed_runtime.store().clone());
             let http_service = http_service_builder.build()?;
-            let etcd_client = distributed_runtime.etcd_client();
-            match etcd_client {
-                Some(ref etcd_client) => {
-                    let router_config = engine_config.local_model().router_config();
-                    // Listen for models registering themselves in etcd, add them to HTTP service
-                    // Check if we should filter by namespace (based on the local model's namespace)
-                    // Get namespace from the model, fallback to endpoint_id namespace if not set
-                    let namespace = engine_config.local_model().namespace().unwrap_or("");
-                    let target_namespace = if is_global_namespace(namespace) {
-                        None
-                    } else {
-                        Some(namespace.to_string())
-                    };
-                    run_watcher(
-                        distributed_runtime,
-                        http_service.state().manager_clone(),
-                        etcd_client.clone(),
-                        model_card::ROOT_PATH,
-                        router_config.router_mode,
-                        Some(router_config.kv_router_config),
-                        router_config.busy_threshold,
-                        target_namespace,
-                        Arc::new(http_service.clone()),
-                        http_service.state().metrics_clone(),
-                    )
-                    .await?;
-                }
-                None => {
-                    // Static endpoints don't need discovery
-                }
-            }
+            let store = Arc::new(distributed_runtime.store().clone());
+
+            let router_config = engine_config.local_model().router_config();
+            // Listen for models registering themselves, add them to HTTP service
+            // Check if we should filter by namespace (based on the local model's namespace)
+            // Get namespace from the model, fallback to endpoint_id namespace if not set
+            let namespace = engine_config.local_model().namespace().unwrap_or("");
+            let target_namespace = if is_global_namespace(namespace) {
+                None
+            } else {
+                Some(namespace.to_string())
+            };
+            run_watcher(
+                distributed_runtime,
+                http_service.state().manager_clone(),
+                store,
+                model_card::ROOT_PATH,
+                router_config.router_mode,
+                Some(router_config.kv_router_config),
+                router_config.busy_threshold,
+                target_namespace,
+                Arc::new(http_service.clone()),
+                http_service.state().metrics_clone(),
+            )
+            .await?;
             http_service
         }
         EngineConfig::StaticRemote(local_model) => {
@@ -280,7 +274,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
 async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
-    etcd_client: etcd::Client,
+    store: Arc<KeyValueStoreManager>,
     network_prefix: &str,
     router_mode: RouterMode,
     kv_router_config: Option<KvRouterConfig>,
@@ -289,6 +283,7 @@ async fn run_watcher(
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
 ) -> anyhow::Result<()> {
+    let cancellation_token = runtime.primary_token();
     let mut watch_obj = ModelWatcher::new(
         runtime,
         model_manager,
@@ -297,12 +292,10 @@ async fn run_watcher(
         busy_threshold,
     );
     tracing::info!("Watching for remote model at {network_prefix}");
-    let models_watcher = etcd_client.kv_get_and_watch_prefix(network_prefix).await?;
-    let (_prefix, _watcher, receiver) = models_watcher.dissolve();
+    let (_, receiver) = store.watch(model_card::ROOT_PATH, None, cancellation_token);
 
     // Create a channel to receive model type updates
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
-
     watch_obj.set_notify_on_model_update(tx);
 
     // Spawn a task to watch for model type changes and update HTTP service endpoints and metrics

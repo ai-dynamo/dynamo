@@ -16,49 +16,40 @@ use crate::{
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
-use dynamo_runtime::transports::etcd;
-use dynamo_runtime::{DistributedRuntime, Runtime};
+use dynamo_runtime::{DistributedRuntime, Runtime, storage::key_value_store::KeyValueStoreManager};
 use dynamo_runtime::{distributed::DistributedConfig, pipeline::RouterMode};
 
 /// Build and run an KServe gRPC service
 pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Result<()> {
-    let mut grpc_service_builder = kserve::KserveService::builder()
+    let grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..
         .with_request_template(engine_config.local_model().request_template());
 
     let grpc_service = match engine_config {
         EngineConfig::Dynamic(_) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
-            let etcd_client = distributed_runtime.etcd_client();
+            let store = Arc::new(distributed_runtime.store().clone());
             // This allows the /health endpoint to query etcd for active instances
-            grpc_service_builder = grpc_service_builder.with_etcd_client(etcd_client.clone());
             let grpc_service = grpc_service_builder.build()?;
-            match etcd_client {
-                Some(ref etcd_client) => {
-                    let router_config = engine_config.local_model().router_config();
-                    // Listen for models registering themselves in etcd, add them to gRPC service
-                    let namespace = engine_config.local_model().namespace().unwrap_or("");
-                    let target_namespace = if is_global_namespace(namespace) {
-                        None
-                    } else {
-                        Some(namespace.to_string())
-                    };
-                    run_watcher(
-                        distributed_runtime,
-                        grpc_service.state().manager_clone(),
-                        etcd_client.clone(),
-                        model_card::ROOT_PATH,
-                        router_config.router_mode,
-                        Some(router_config.kv_router_config),
-                        router_config.busy_threshold,
-                        target_namespace,
-                    )
-                    .await?;
-                }
-                None => {
-                    // Static endpoints don't need discovery
-                }
-            }
+            let router_config = engine_config.local_model().router_config();
+            // Listen for models registering themselves, add them to gRPC service
+            let namespace = engine_config.local_model().namespace().unwrap_or("");
+            let target_namespace = if is_global_namespace(namespace) {
+                None
+            } else {
+                Some(namespace.to_string())
+            };
+            run_watcher(
+                distributed_runtime,
+                grpc_service.state().manager_clone(),
+                store,
+                model_card::ROOT_PATH,
+                router_config.router_mode,
+                Some(router_config.kv_router_config),
+                router_config.busy_threshold,
+                target_namespace,
+            )
+            .await?;
             grpc_service
         }
         EngineConfig::StaticRemote(local_model) => {
@@ -179,13 +170,14 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
 async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
-    etcd_client: etcd::Client,
+    store: Arc<KeyValueStoreManager>,
     network_prefix: &str,
     router_mode: RouterMode,
     kv_router_config: Option<KvRouterConfig>,
     busy_threshold: Option<f64>,
     target_namespace: Option<String>,
 ) -> anyhow::Result<()> {
+    let cancellation_token = runtime.primary_token();
     let watch_obj = ModelWatcher::new(
         runtime,
         model_manager,
@@ -194,8 +186,7 @@ async fn run_watcher(
         busy_threshold,
     );
     tracing::info!("Watching for remote model at {network_prefix}");
-    let models_watcher = etcd_client.kv_get_and_watch_prefix(network_prefix).await?;
-    let (_prefix, _watcher, receiver) = models_watcher.dissolve();
+    let (_, receiver) = store.watch(model_card::ROOT_PATH, None, cancellation_token);
 
     // [gluo NOTE] This is different from http::run_watcher where it alters the HTTP service
     // endpoint being exposed, gRPC doesn't have the same concept as the KServe service

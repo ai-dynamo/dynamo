@@ -72,6 +72,22 @@ impl KeyValue {
     pub fn new(key: String, value: bytes::Bytes) -> Self {
         KeyValue { key, value }
     }
+
+    pub fn key(&self) -> String {
+        self.key.clone()
+    }
+
+    pub fn key_str(&self) -> &str {
+        &self.key
+    }
+
+    pub fn value(&self) -> &[u8] {
+        &self.value
+    }
+
+    pub fn value_str(&self) -> anyhow::Result<&str> {
+        std::str::from_utf8(self.value()).map_err(From::from)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -221,10 +237,10 @@ impl KeyValueStoreManager {
         cancel_token: CancellationToken,
     ) -> (
         tokio::task::JoinHandle<Result<(), StoreError>>,
-        tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
+        tokio::sync::mpsc::Receiver<WatchEvent>,
     ) {
         let bucket_name = bucket_name.to_string();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
         let watch_task = tokio::spawn(async move {
             // Start listening for changes but don't poll this yet
             let bucket = self
@@ -235,7 +251,7 @@ impl KeyValueStoreManager {
 
             // Send all the existing keys
             for (key, bytes) in bucket.entries().await? {
-                let _ = tx.send(WatchEvent::Put(KeyValue::new(key, bytes)));
+                let _ = tx.send(WatchEvent::Put(KeyValue::new(key, bytes))).await;
             }
 
             // Now block waiting for new entries
@@ -247,7 +263,7 @@ impl KeyValueStoreManager {
                         None => break,
                     }
                 };
-                let _ = tx.send(event);
+                let _ = tx.send(event).await;
             }
 
             Ok::<(), StoreError>(())

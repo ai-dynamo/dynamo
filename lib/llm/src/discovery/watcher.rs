@@ -14,7 +14,7 @@ use dynamo_runtime::{
         network::egress::push_router::PushRouter,
     },
     protocols::{EndpointId, annotated::Annotated},
-    transports::etcd::WatchEvent,
+    storage::key_value_store::WatchEvent,
 };
 
 use crate::{
@@ -119,13 +119,7 @@ impl ModelWatcher {
                             continue;
                         }
                     };
-                    let key = match kv.key_str() {
-                        Ok(k) => k,
-                        Err(err) => {
-                            tracing::error!(%err, ?kv, "Invalid UTF-8 string in model card key, skipping");
-                            continue;
-                        }
-                    };
+                    let key = kv.key_str();
                     let endpoint_id = match etcd_key_extract(key) {
                         Ok((eid, _)) => eid,
                         Err(err) => {
@@ -190,10 +184,7 @@ impl ModelWatcher {
                     }
                 }
                 WatchEvent::Delete(kv) => {
-                    let Ok(deleted_key) = kv.key_str() else {
-                        tracing::warn!("Invalid UTF-8 in etcd delete notification key: {kv:?}");
-                        continue;
-                    };
+                    let deleted_key = kv.key_str();
                     match self
                         .handle_delete(deleted_key, target_namespace, global_namespace)
                         .await
