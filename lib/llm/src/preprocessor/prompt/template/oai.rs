@@ -145,10 +145,11 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
 
     fn tools(&self) -> Option<Value> {
         if self.inner.tools.is_none() {
-            // Should return None instead of empty array
-            // All templates should check for tools being defined but some do not check for length
-            // This results in tool calling behavior when it shouldn't
-            None
+            // Return empty array instead of None to handle minijinja limitation:
+            // minijinja doesn't short-circuit "and" expressions, so templates with
+            // "if tools is iterable and tools | length > 0" would fail if tools is None.
+            // The render() method will conditionally add this to context only when non-empty.
+            Some(Value::from_serialize(Vec::<serde_json::Value>::new()))
         } else {
             // Try to fix the tool schema if it is missing type and properties
             Some(may_be_fix_tool_schema(
@@ -267,14 +268,25 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
             add_generation_prompt
         );
 
-        let ctx = context! {
-            messages => req.messages(),
-            tools => tools,
-            bos_token => self.config.bos_tok(),
-            eos_token => self.config.eos_tok(),
-            unk_token => self.config.unk_tok(),
-            add_generation_prompt => add_generation_prompt,
-            ..mixins
+        let ctx = if has_tools {
+            context! {
+                messages => req.messages(),
+                tools => tools,
+                bos_token => self.config.bos_tok(),
+                eos_token => self.config.eos_tok(),
+                unk_token => self.config.unk_tok(),
+                add_generation_prompt => add_generation_prompt,
+                ..mixins
+            }
+        } else {
+            context! {
+                messages => req.messages(),
+                bos_token => self.config.bos_tok(),
+                eos_token => self.config.eos_tok(),
+                unk_token => self.config.unk_tok(),
+                add_generation_prompt => add_generation_prompt,
+                ..mixins
+            }
         };
 
         // Merge any additional args into the context last so they take precedence
