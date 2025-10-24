@@ -734,8 +734,7 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
     fi
 
     # Need to know the commit of TRTLLM so we can determine the
-    # TensorRT installation associated with TRTLLM. This cannot be
-    # inferred from the wheel.
+    # TensorRT installation associated with TRTLLM.
     if [[ -z "$TRTLLM_COMMIT" ]]; then
         # Attempt to default since the commit will work with a hash or a tag/branch
         if [[ ! -z "$TENSORRTLLM_PIP_WHEEL" ]]; then
