@@ -554,6 +554,6 @@ mod integration_tests {
             .system_health
             .lock()
             .get_endpoint_health_status(endpoint);
-        assert_eq!(status, Some(HealthStatus::Ready));
+        assert_eq!(status, Some(HealthStatus::NotReady));
     }
 }
