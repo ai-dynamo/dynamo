@@ -72,7 +72,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANGUAGE=en_US:en \
     LC_ALL=en_US.UTF-8
 
-# Combined: Python setup, locale, and all package installation 
+# Combined: Python setup, locale, and all package installation
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends software-properties-common \
     && add-apt-repository ppa:deadsnakes/ppa -y \
