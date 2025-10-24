@@ -807,7 +807,7 @@ unsafe fn operational_to_block(
 }
 
 #[pymodule]
-fn cuda_tensor_kernels(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+fn dynamo_kvbm_kernels(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(block_to_universal, m)?)?;
     m.add_function(wrap_pyfunction!(universal_to_block, m)?)?;
     m.add_function(wrap_pyfunction!(block_to_operational, m)?)?;

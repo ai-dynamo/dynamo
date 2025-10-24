@@ -26,7 +26,7 @@ blocks between three commonly used layouts:
 2. **Operational blocks** – flattened buffers shaped `[nl, no, inner]`,
    where `inner = nt * nh * hd`.
    - primarily used by TensorRT LLM
-   - used by Dynamo's KVBM for non-device storage when no adjustments to 
+   - used by Dynamo's KVBM for non-device storage when no adjustments to
      the layout is need to translate to/from different TP world sizes
 3. **Universal blocks** – contiguous buffers shaped `[nh, nl, no, nt, hd]`.
    - move the head dimension to the front
@@ -50,7 +50,7 @@ into existing pipelines without living in CUDA all day.
 | Operational block   | `[nl, no, inner]`          | contiguous buffer per block        | `inner = nt * nh * hd`        |
 | Universal block     | `[nh, nl, no, nt, hd]`     | contiguous buffer per block        | Ideal when all dims are fixed |
 
-> **Pointer prep**  
+> **Pointer prep**
 > For each logical block you provide:
 > - one universal pointer,
 > - `nl * no` pointers for either NHD or HND chunks, and
@@ -146,7 +146,7 @@ ctk.operational_to_block(operationals, blocks, backend="auto")
 ```
 
 All tensors must be CUDA accessible by the specificed device and match the expected
-shapes and be contiguous in those shapes. The bindings validate shapes/dtypes, stage 
+shapes and be contiguous in those shapes. The bindings validate shapes/dtypes, stage
 pointer tables on-device, and launch the appropriate CUDA kernel.
 
 ---

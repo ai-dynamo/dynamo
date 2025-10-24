@@ -10,10 +10,9 @@ act as both verification and documentation.
 
 from typing import List
 
+import dynamo_kvbm_kernels as ctk
 import pytest
 import torch
-
-import dynamo_kvbm_kernels as ctk
 
 
 def _tolerances(dtype: torch.dtype) -> tuple[float, float]:
@@ -90,8 +89,7 @@ def test_block_universal_roundtrip(layout: str, dtype: torch.dtype) -> None:
     nh, nl, no, nt, hd = 3, 2, 2, 4, 5
     nb = 3
     universals = [
-        torch.randn(nh, nl, no, nt, hd, device=device, dtype=dtype)
-        for _ in range(nb)
+        torch.randn(nh, nl, no, nt, hd, device=device, dtype=dtype) for _ in range(nb)
     ]
 
     # Prepare block stacks by permuting each universal tensor with PyTorch ops.
@@ -140,8 +138,7 @@ def test_operational_roundtrip(dtype: torch.dtype) -> None:
     nh, nl, no, nt, hd = 2, 3, 2, 4, 3
     nb = 2
     universals = [
-        torch.randn(nh, nl, no, nt, hd, device=device, dtype=dtype)
-        for _ in range(nb)
+        torch.randn(nh, nl, no, nt, hd, device=device, dtype=dtype) for _ in range(nb)
     ]
 
     reference_blocks = [_make_blocks(t, "NHD") for t in universals]
@@ -149,8 +146,7 @@ def test_operational_roundtrip(dtype: torch.dtype) -> None:
 
     inner = nt * nh * hd
     operationals = [
-        torch.empty(nl, no, inner, device=device, dtype=dtype)
-        for _ in range(nb)
+        torch.empty(nl, no, inner, device=device, dtype=dtype) for _ in range(nb)
     ]
 
     # Pack block stacks -> operational.
@@ -162,9 +158,7 @@ def test_operational_roundtrip(dtype: torch.dtype) -> None:
         expected_operational = torch.stack(
             [b.reshape(-1) for b in ref_blocks], dim=0
         ).view(nl, no, inner)
-        assert torch.allclose(
-            operational, expected_operational, atol=atol, rtol=rtol
-        )
+        assert torch.allclose(operational, expected_operational, atol=atol, rtol=rtol)
 
     # Zero and unpack back into block stacks.
     for block_set in blocks:
@@ -194,13 +188,11 @@ def test_operational_backends(backend):
     dtype = torch.float32
 
     universals = [
-        torch.randn(nh, nl, no, nt, hd, device=device, dtype=dtype)
-        for _ in range(nb)
+        torch.randn(nh, nl, no, nt, hd, device=device, dtype=dtype) for _ in range(nb)
     ]
     blocks = [_make_blocks(t, "NHD") for t in universals]
     operationals = [
-        torch.empty(nl, no, nt * nh * hd, device=device, dtype=dtype)
-        for _ in range(nb)
+        torch.empty(nl, no, nt * nh * hd, device=device, dtype=dtype) for _ in range(nb)
     ]
 
     _call_with_backend(ctk.block_to_operational, backend, blocks, operationals)

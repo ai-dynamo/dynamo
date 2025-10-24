@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Typed builder for constructing [`PhysicalLayout`](crate::v2::layout::PhysicalLayout)
+//! Typed builder for constructing [`PhysicalLayout`](crate::block_manager::v2::layout::PhysicalLayout)
 //! instances with strongly-typed configuration, layout selection, and memory provisioning.
 //!
 //! The builder enforces the three steps required to materialize a physical layout:

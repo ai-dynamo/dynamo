@@ -6,7 +6,7 @@ requires = ["maturin>=1.5,<2"]
 build-backend = "maturin"
 
 [project]
-name = "cuda-tensor-kernels"
+name = "kvbm_kernels"
 version = "0.1.0"
 description = "CUDA tensor permutation and packing kernels with Python bindings"
 requires-python = ">=3.8"
@@ -23,4 +23,4 @@ classifiers = [
 
 [tool.maturin]
 features = ["python-bindings"]
-module-name = "cuda_tensor_kernels"
+module-name = "dynamo_kvbm_kernels"

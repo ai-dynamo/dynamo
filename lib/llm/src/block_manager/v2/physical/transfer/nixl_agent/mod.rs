@@ -19,7 +19,7 @@ use std::collections::HashSet;
 ///
 /// This wrapper provides:
 /// - Runtime validation of backend availability
-/// - Clear error messages when operations need unavailable backends  
+/// - Clear error messages when operations need unavailable backends
 /// - Single source of truth for backend state in tests and production
 ///
 /// # Backend Tracking

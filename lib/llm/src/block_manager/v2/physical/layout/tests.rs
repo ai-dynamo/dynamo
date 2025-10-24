@@ -324,17 +324,19 @@ fn test_version_check_on_deserialization() {
         version: 999, // Future version
         layout_config: config.clone(),
         location: StorageKind::System,
-        nixl_metadata: crate::v2::physical::layout::physical::NixlMetadata::new(
+        nixl_metadata: crate::block_manager::v2::physical::layout::physical::NixlMetadata::new(
             "test".to_string(),
             nixl_sys::MemType::Dram,
             0,
         ),
         memory_descriptors: vec![],
-        layout_type_details: crate::v2::physical::layout::LayoutTypeDetails::FullyContiguous(
-            crate::v2::physical::layout::FullyContiguousDetails {
-                block_format: crate::v2::physical::layout::BlockFormat::Operational,
-            },
-        ),
+        layout_type_details:
+            crate::block_manager::v2::physical::layout::LayoutTypeDetails::FullyContiguous(
+                crate::block_manager::v2::physical::layout::FullyContiguousDetails {
+                    block_format:
+                        crate::block_manager::v2::physical::layout::BlockFormat::Operational,
+                },
+            ),
     };
 
     // Should fail with unsupported version
@@ -349,8 +351,10 @@ fn test_version_check_on_deserialization() {
 
     // Should succeed with supported version
     serialized.version = LayoutDescriptor::CURRENT_VERSION;
-    serialized.memory_descriptors =
-        vec![dynamo_memory::MemoryDescriptor::new(0x1000, required_size)];
+    serialized.memory_descriptors = vec![crate::block_manager::v2::memory::MemoryDescriptor::new(
+        0x1000,
+        required_size,
+    )];
     let result = PhysicalLayout::from_descriptor(serialized);
     if let Err(ref e) = result {
         eprintln!("Error during deserialization: {}", e);
