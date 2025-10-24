@@ -68,6 +68,9 @@ class Config:
     # dump config to file
     dump_config_to: Optional[str] = None
 
+    # max model length override
+    max_model_len: Optional[int] = None
+
 
 @register_encoder(Config)
 def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
@@ -173,6 +176,11 @@ def parse_args() -> Config:
     config.tool_call_parser = args.dyn_tool_call_parser
     config.reasoning_parser = args.dyn_reasoning_parser
     config.custom_jinja_template = args.custom_jinja_template
+    config.max_model_len = engine_args.max_model_len
+
+    # Log if max_model_len was explicitly set
+    if config.max_model_len is not None:
+        logger.info(f"Max model length set to: {config.max_model_len}")
 
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:
