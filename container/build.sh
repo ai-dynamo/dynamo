@@ -692,15 +692,6 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
     echo -e "Determining the user's TRTLLM installation intent..."
     determine_user_intention_trtllm   # From this point forward, can assume correct TRTLLM flags
 
-    # Need to know the commit of TRTLLM so we can determine the
-    # TensorRT installation associated with TRTLLM. This cannot be
-    # inferred from the wheel.
-    if [[ -z "$TRTLLM_COMMIT" ]]; then
-        echo -e "[ERROR] TRTLLM framework was set as a target but the TRTLLM_COMMIT variable was not set. This variable is needed to install the correct version of TensorRT associated with TensorRT-LLM"
-        exit 1
-    fi
-
-    BUILD_ARGS+=" --build-arg GITHUB_TRTLLM_COMMIT=${TRTLLM_COMMIT}"
     if [[ "$TRTLLM_INTENTION" == "download" ]]; then
         TENSORRTLLM_INDEX_URL=${TENSORRTLLM_INDEX_URL:-$DEFAULT_TENSORRTLLM_INDEX_URL}
         TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL:-$DEFAULT_TENSORRTLLM_PIP_WHEEL}
@@ -740,6 +731,25 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
         echo 'No intention was set. This error should have been detected in "determine_user_intention_trtllm()". Exiting...'
         exit 1
     fi
+
+    # Need to know the commit of TRTLLM so we can determine the
+    # TensorRT installation associated with TRTLLM. This cannot be
+    # inferred from the wheel.
+    if [[ -z "$TRTLLM_COMMIT" ]]; then
+        # Attempt to default since the commit will work with a hash or a tag/branch
+        if [[ ! -z "$TENSORRTLLM_PIP_WHEEL" ]]; then
+            TRTLLM_COMMIT=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -n 's/.*==\([0-9a-zA-Z\.\-]*\).*/\1/p')
+            echo "Attempting to default TRTLLM_COMMIT to \"$TRTLLM_COMMIT\" for installation of TensorRT."
+        else
+            echo -e "[ERROR] TRTLLM framework was set as a target but the TRTLLM_COMMIT variable was not set."
+            echo -e "  Could not find a suitible default by infering from TENSORRTLLM_PIP_WHEEL."
+            echo -e "  TRTLLM_COMMIT is needed to install the correct version of TensorRT associated with TensorRT-LLM."
+            exit 1
+        fi
+    fi
+    BUILD_ARGS+=" --build-arg GITHUB_TRTLLM_COMMIT=${TRTLLM_COMMIT}"
+
+
 fi
 
 if [ -n "${HF_TOKEN}" ]; then
