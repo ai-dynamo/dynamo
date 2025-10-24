@@ -216,7 +216,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
     // Build updated_labels: auto-labels first, then `labels` + stored labels
     let mut updated_labels: Vec<(String, String)> = Vec::new();
 
-    if USE_AUTO_LABELS {
+    if !USE_AUTO_LABELS {
         // Validate that user-provided labels don't conflict with auto-generated labels
         for (key, _) in labels {
             if *key == labels::NAMESPACE || *key == labels::COMPONENT || *key == labels::ENDPOINT {
