@@ -223,6 +223,19 @@ python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multipli
 > ```
 > However, by the time of release, the aiperf version included in the vLLM runtime container should be up to date enough to use as-is.
 
+## Benchmarking Results
+
+We benchmarked the Dynamo KV Router against a baseline round-robin routing strategy to evaluate the performance benefits of cache-aware routing. The experiments were conducted using deepseek-ai/DeepSeek-R1-Distill-Llama-8B on 8 L40S GPUs under aggregated serving, with the following configuration:
+
+- **ISL/OSL**: 14000/200
+- **Prefix Ratios**: 0.1, 0.3, 0.5, 0.7, 0.9
+- **Workload**: 200 requests organized into 20 prefix groups
+- **Concurrency**: 20 concurrent requests
+
+![Router Performance Comparison](results.png)
+
+The results demonstrate that the Dynamo KV Router consistently outperforms round-robin routing across all prefix ratio settings, with performance gains increasing as the prefix ratio grows. This highlights the importance of cache-aware routing for workloads with significant prefix sharing such as multi-turn conversations, document Q&A, and prompt engineering iterations.
+
 ## Troubleshooting
 
 1. **Workers fail to start**: Check CUDA_VISIBLE_DEVICES and GPU availability

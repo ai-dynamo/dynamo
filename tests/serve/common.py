@@ -4,6 +4,7 @@
 """Common base classes and utilities for engine tests (vLLM, TRT-LLM, etc.)"""
 
 import logging
+import os
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
@@ -13,7 +14,20 @@ from tests.utils.client import send_request
 from tests.utils.engine_process import EngineConfig, EngineProcess
 
 DEFAULT_TIMEOUT = 10
-SERVE_TEST_DIR = "/workspace/tests/serve"
+
+# Determine WORKSPACE_DIR with precedence: current path -> env WORKSPACE_DIR -> /workspace
+if os.path.exists(os.path.join(os.getcwd(), "Cargo.toml")):
+    WORKSPACE_DIR = os.getcwd()
+else:
+    _workspace_dir = os.environ.get("WORKSPACE_DIR")
+    if _workspace_dir:
+        WORKSPACE_DIR = _workspace_dir
+    elif os.path.exists("/workspace"):
+        WORKSPACE_DIR = "/workspace"
+    else:
+        WORKSPACE_DIR = os.getcwd()
+
+SERVE_TEST_DIR = os.path.join(WORKSPACE_DIR, "tests/serve")
 
 
 def run_serve_deployment(
