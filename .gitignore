@@ -38,6 +38,9 @@ CMakeCache.txt
 *pytest_report.md
 *pytest_report.xml
 
+# Pytest auto-generated test artifact directories
+test_*/
+
 **/__pycache__
 **/venv
 **/.venv

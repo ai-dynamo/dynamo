@@ -1,0 +1,175 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# Standalone DCGM DaemonSet for NVSentinel GPU Health Monitor
+# This deploys the full DCGM service (not just the exporter) to expose the DCGM API on port 5555
+#
+# Prerequisites:
+# - NVIDIA GPU Operator installed
+# - GPU nodes in the cluster
+#
+# Deploy:
+#   kubectl apply -f dcgm-daemonset.yaml
+#
+# Verify:
+#   kubectl get pods -n gpu-operator -l app=nvidia-dcgm
+#   kubectl logs -n gpu-operator -l app=nvidia-dcgm
+#
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-dcgm
+  namespace: gpu-operator
+  labels:
+    app: nvidia-dcgm
+    app.kubernetes.io/name: nvidia-dcgm
+    app.kubernetes.io/component: dcgm
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-dcgm
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: nvidia-dcgm
+    spec:
+      # Use host networking for DCGM to access GPUs directly
+      # This is optional but recommended for better GPU access
+      hostNetwork: false
+      hostPID: true
+
+      # Select only GPU nodes
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+
+      # Tolerate GPU node taints
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      - key: dedicated
+        operator: Exists
+
+      # Init container to validate GPU toolkit
+      initContainers:
+      - name: toolkit-validation
+        image: nvcr.io/nvidia/cloud-native/gpu-operator-validator:v25.3.2
+        command: ['sh', '-c']
+        args:
+        - |
+          echo "Validating NVIDIA GPU toolkit..."
+          nvidia-smi
+          echo "Toolkit validation complete"
+        securityContext:
+          privileged: true
+        env:
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: "all"
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: "compute,utility"
+
+      containers:
+      - name: nvidia-dcgm
+        image: nvcr.io/nvidia/cloud-native/dcgm:4.3.1-1-ubuntu22.04
+
+        # Start nv-hostengine (DCGM daemon) in foreground mode
+        # This exposes the DCGM API on port 5555
+        command: ["/usr/bin/nv-hostengine"]
+        args:
+        - "-n"  # Run in foreground
+        - "-b"  # Bind to specific IP address
+        - "0.0.0.0"  # Listen on all interfaces
+        - "--service-account"
+        - "dcgm"
+
+        ports:
+        - name: dcgm
+          containerPort: 5555
+          protocol: TCP
+
+        # Liveness probe to check DCGM health
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - "dcgmi discovery -l | grep 'GPU'"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+
+        # Readiness probe
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - "dcgmi discovery -l | grep 'GPU'"
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 5
+
+        securityContext:
+          privileged: true
+          capabilities:
+            add:
+            - SYS_ADMIN
+
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+
+        env:
+        # Make all GPUs visible to DCGM
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: "all"
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: "compute,utility"
+
+        volumeMounts:
+        # Mount GPU device files
+        - name: device-files
+          mountPath: /dev
+          readOnly: false
+
+      volumes:
+      - name: device-files
+        hostPath:
+          path: /dev
+          type: Directory
+
+      restartPolicy: Always
+      serviceAccountName: default
+
+---
+# Service to expose DCGM API on port 5555
+# This is what NVSentinel GPU Health Monitor connects to
+apiVersion: v1
+kind: Service
+metadata:
+  name: nvidia-dcgm
+  namespace: gpu-operator
+  labels:
+    app: nvidia-dcgm
+    app.kubernetes.io/name: nvidia-dcgm
+spec:
+  type: ClusterIP
+  # Use headless service to allow direct pod connections
+  # Each GPU node runs its own DCGM instance
+  clusterIP: None
+  ports:
+  - name: dcgm
+    port: 5555
+    targetPort: 5555
+    protocol: TCP
+  selector:
+    app: nvidia-dcgm
+
