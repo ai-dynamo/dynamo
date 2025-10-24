@@ -67,10 +67,17 @@ fi
 # Construct command based on mode
 if [ "$mode" = "prefill" ]; then
     set -x
-    export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
-
     # no expert locations collected for fp4 yet
+    command_suffix=""
     if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix=" "; fi
+
+    # we have to install pre-release cutedsl for a integer overflow fix
+    python3 -m pip install --no-cache-dir --upgrade --pre nvidia-cutlass-dsl
+
+    # set your own cache variables here
+    export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
+    export SGLANG_DG_CACHE_DIR="/configs/deepgemm-kernels-10212025-ddcba74b"
+    export FLASHINFER_WORKSPACE_BASE="/configs/flashinfer-cache"
 
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
     SGLANG_NVFP4_CKPT_FP8_GEMM_IN_ATTN=1 \
@@ -112,12 +119,12 @@ if [ "$mode" = "prefill" ]; then
         --max-prefill-tokens 16384 \
         --load-balance-method round_robin \
         --quantization modelopt_fp4 \
-        --enable-ep-moe \
         --moe-runner-backend flashinfer_cutlass \
         --dist-init-addr "$HOST_IP_MACHINE:$PORT" \
         --disaggregation-bootstrap-port 30001 \
         --nnodes "$TOTAL_NODES" \
         --node-rank "$RANK" \
+        --ep-size "$TOTAL_GPUS" \
         --tp-size "$TOTAL_GPUS" \
         --dp-size "$TOTAL_GPUS" \
         --enable-dp-attention \
@@ -125,12 +132,25 @@ if [ "$mode" = "prefill" ]; then
         --stream-interval 50 \
         --log-level debug ${command_suffix}
 
+# For now we must keep SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK and cuda-graph-bs at 384 until
+# nvidia-cutlass-dsl fixes https://github.com/flashinfer-ai/flashinfer/issues/1830#issuecomment-3380074018
+# and the version bump is included in sglang
+# Use 12 nodes for fp4 since flashinfer_cutedsl requires experts per gpu < 8
+# We have 288 (256 + 32 redundant) => 288/48 = 6
+
 elif [ "$mode" = "decode" ]; then
     set -x
+    # no expert locations collected for fp4 yet
     command_suffix=""
     if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix=" "; fi
 
+    # set your own cache variables here
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
+    export SGLANG_DG_CACHE_DIR="/configs/deepgemm-kernels-10212025-ddcba74b"
+    export FLASHINFER_WORKSPACE_BASE="/configs/flashinfer-cache"
+
+    # we have to install pre-release cutedsl for a integer overflow fix
+    python3 -m pip install --no-cache-dir --upgrade --pre nvidia-cutlass-dsl
 
     SGLANG_NVFP4_CKPT_FP8_GEMM_IN_ATTN=1 \
     SGLANG_PER_TOKEN_GROUP_QUANT_8BIT_V2=1 \
@@ -141,7 +161,7 @@ elif [ "$mode" = "decode" ]; then
     SGLANG_DISAGGREGATION_WAITING_TIMEOUT=100000 \
     SGLANG_HACK_SEQ_BOOTSTRAP_ROOM=1 \
     SGLANG_MOONCAKE_CUSTOM_MEM_POOL=True \
-    SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=1408 \
+    SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=384 \
     SGLANG_CUTEDSL_MOE_NVFP4_DISPATCH=1 \
     SGLANG_FP4_GEMM_BACKEND=cutlass \
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
@@ -165,11 +185,10 @@ elif [ "$mode" = "decode" ]; then
         --enable-dp-attention \
         --chunked-prefill-size 786432 \
         --mem-fraction-static 0.83 \
-        --enable-ep-moe \
         --moe-a2a-backend deepep \
         --deepep-mode low_latency \
         --ep-dispatch-algorithm static \
-        --cuda-graph-bs 1408 \
+        --cuda-graph-bs 384 \
         --num-reserved-decode-tokens 112 \
         --ep-num-redundant-experts 32 \
         --eplb-algorithm deepseek \
@@ -184,6 +203,7 @@ elif [ "$mode" = "decode" ]; then
         --nnodes "$TOTAL_NODES" \
         --node-rank "$RANK" \
         --tp-size "$TOTAL_GPUS" \
+        --ep-size "$TOTAL_GPUS" \
         --dp-size "$TOTAL_GPUS" \
         --enable-single-batch-overlap \
         --enable-dp-attention \
