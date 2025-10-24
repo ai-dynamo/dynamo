@@ -7,8 +7,8 @@
 //! environment variables with the pattern: `DYN_KVBM_NIXL_BACKEND_<backend>_<key>=<value>`
 
 use anyhow::{Result, bail};
-use std::collections::HashSet;
 use dynamo_runtime::config::parse_bool;
+use std::collections::HashSet;
 
 /// Configuration for NIXL backends.
 ///

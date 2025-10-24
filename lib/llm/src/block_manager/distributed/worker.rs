@@ -185,10 +185,13 @@ struct WorkerMetadataHandler {
 #[async_trait]
 impl Handler for WorkerMetadataHandler {
     async fn handle(&self, mut message: MessageHandle) -> anyhow::Result<()> {
-        let payload = bincode::serde::encode_to_vec(&WorkerMetadata {
-            num_device_blocks: self.num_device_blocks,
-            bytes_per_block: self.bytes_per_block,
-        }, bincode::config::standard())?;
+        let payload = bincode::serde::encode_to_vec(
+            &WorkerMetadata {
+                num_device_blocks: self.num_device_blocks,
+                bytes_per_block: self.bytes_per_block,
+            },
+            bincode::config::standard(),
+        )?;
         message
             .reply(ZMQ_WORKER_METADATA_MESSAGE, &[payload])
             .await?;
@@ -226,7 +229,10 @@ impl Handler for LeaderMetadataHandler {
             );
             return Ok(());
         }
-        let leader_meta: LeaderMetadata = match bincode::serde::decode_from_slice(&message.data[0], bincode::config::standard()) {
+        let leader_meta: LeaderMetadata = match bincode::serde::decode_from_slice(
+            &message.data[0],
+            bincode::config::standard(),
+        ) {
             Ok((m, _)) => m,
             Err(e) => {
                 tracing::error!("leader_metadata: bad payload: {e:#}");

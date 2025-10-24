@@ -15,13 +15,13 @@ pub(crate) use local::LocalLayout;
 pub(crate) use metadata::LocalLayoutDescriptor;
 pub(crate) use remote::RemoteLayout;
 
+use crate::block_manager::v2::memory::StorageKind;
 use crate::block_manager::v2::physical::layout::PhysicalLayout;
 use crate::block_manager::v2::physical::transfer::TransferContext;
 use crate::block_manager::v2::physical::transfer::context::TransferCompleteNotification;
 use crate::block_manager::v2::physical::transfer::nixl_agent::NixlAgent;
 use crate::block_manager::v2::physical::transfer::options::TransferOptions;
 use anyhow::{Result, anyhow, bail};
-use crate::block_manager::v2::memory::StorageKind;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, RwLock};
@@ -60,7 +60,8 @@ impl TransportManager {
     ///     .nixl_agent_name("custom-agent")
     ///     .build()?;
     /// ```
-    pub fn builder() -> crate::block_manager::v2::physical::transfer::context::TransferConfigBuilder {
+    pub fn builder() -> crate::block_manager::v2::physical::transfer::context::TransferConfigBuilder
+    {
         TransferContext::builder()
     }
 

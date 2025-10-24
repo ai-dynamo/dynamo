@@ -103,13 +103,7 @@ impl DiskStorage {
         };
 
         // We need to use fallocate to actually allocate the storage and create the blocks on disk.
-        fallocate(
-            raw_fd,
-            FallocateFlags::empty(),
-            0,
-            len as i64,
-        )
-        .map_err(|e| {
+        fallocate(raw_fd, FallocateFlags::empty(), 0, len as i64).map_err(|e| {
             StorageError::AllocationFailed(format!("Failed to allocate temp file: {}", e))
         })?;
 

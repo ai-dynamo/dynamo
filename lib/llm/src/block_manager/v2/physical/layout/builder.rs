@@ -19,11 +19,11 @@ use super::{
     physical::NixlMetadata,
 };
 
-use anyhow::{Result, anyhow, bail};
 use crate::block_manager::v2::memory::{
     DiskStorage, NixlCompatible, NixlDescriptor, OffsetMemoryRegion, OwnedMemoryRegion,
     RegisteredView, StorageKind, SystemStorage, register_with_nixl,
 };
+use anyhow::{Result, anyhow, bail};
 #[allow(unused_imports)]
 use nixl_sys::Agent as RawNixlAgent;
 use nixl_sys::MemType;

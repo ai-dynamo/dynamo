@@ -8,10 +8,10 @@
 
 use super::PhysicalLayout;
 
+use crate::block_manager::v2::memory::StorageKind;
 use aligned_vec::{AVec, avec};
 use anyhow::{Result, anyhow};
 use cudarc::runtime::sys::{cudaMemcpy, cudaMemcpyKind};
-use crate::block_manager::v2::memory::StorageKind;
 
 use std::{
     fs::File,

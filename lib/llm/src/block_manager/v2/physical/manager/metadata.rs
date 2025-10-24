@@ -132,11 +132,11 @@ impl std::fmt::Debug for SerializedLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_manager::v2::memory::{MemoryDescriptor, StorageKind};
     use crate::block_manager::v2::physical::layout::{
         BlockFormat, FullyContiguousDetails, LayoutConfig, LayoutDescriptor, LayoutTypeDetails,
         NixlMetadata,
     };
-    use crate::block_manager::v2::memory::{MemoryDescriptor, StorageKind};
 
     fn make_test_serialized_layout() -> LayoutDescriptor {
         let config = LayoutConfig::builder()

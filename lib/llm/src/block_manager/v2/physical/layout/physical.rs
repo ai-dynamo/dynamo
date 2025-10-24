@@ -9,8 +9,8 @@ use super::{
     serialize::{LayoutDescriptor, LayoutTypeDetails},
 };
 
-use anyhow::{Result, anyhow};
 use crate::block_manager::v2::memory::{MemoryRegion, StorageKind};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::sync::Arc;

@@ -7,10 +7,12 @@
 //! ensuring that layouts can be transmitted to remote nodes and reconstructed
 //! with all necessary metadata intact.
 
+use crate::block_manager::v2::memory::{
+    MemoryRegion, NixlDescriptor, OwnedMemoryRegion, StorageKind,
+};
 use crate::block_manager::v2::physical::layout::physical::PhysicalLayout;
 use crate::block_manager::v2::physical::layout::{BlockDimension, LayoutConfig, LayoutDescriptor};
 use crate::block_manager::v2::physical::transfer::nixl_agent::NixlAgent;
-use crate::block_manager::v2::memory::{MemoryRegion, NixlDescriptor, OwnedMemoryRegion, StorageKind};
 use std::any::Any;
 use std::sync::Arc;
 

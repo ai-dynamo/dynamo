@@ -9,8 +9,10 @@
 //! - Different transfer strategies (Memcpy, CUDA H2D/D2H)
 
 use super::*;
-use crate::block_manager::v2::physical::transfer::{BounceBufferSpec, TransferCapabilities, TransferOptions};
 use crate::block_manager::v2::physical::transfer::executor::execute_transfer;
+use crate::block_manager::v2::physical::transfer::{
+    BounceBufferSpec, TransferCapabilities, TransferOptions,
+};
 use anyhow::Result;
 use rstest::rstest;
 

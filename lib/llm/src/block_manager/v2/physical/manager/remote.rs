@@ -59,13 +59,15 @@ impl RemoteLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_manager::v2::physical::layout::{LayoutConfig, LayoutDescriptor, PhysicalLayout};
+    use crate::block_manager::v2::physical::layout::{
+        LayoutConfig, LayoutDescriptor, PhysicalLayout,
+    };
 
     fn make_serialized_layout() -> LayoutDescriptor {
+        use crate::block_manager::v2::memory::{MemoryDescriptor, StorageKind};
         use crate::block_manager::v2::physical::layout::{
             BlockFormat, FullyContiguousDetails, LayoutTypeDetails, NixlMetadata,
         };
-        use crate::block_manager::v2::memory::{MemoryDescriptor, StorageKind};
 
         let config = LayoutConfig::builder()
             .num_blocks(2)

@@ -10,7 +10,9 @@ mod nixl;
 use super::strategy::select_strategy;
 use super::validation::validate_block_transfer;
 use super::{PhysicalLayout, TransferContext, TransferOptions, TransferPlan, TransferStrategy};
-use crate::block_manager::v2::physical::transfer::{StorageKind, context::TransferCompleteNotification};
+use crate::block_manager::v2::physical::transfer::{
+    StorageKind, context::TransferCompleteNotification,
+};
 use anyhow::Result;
 use std::ops::Range;
 use std::sync::Arc;

@@ -7,10 +7,10 @@ use super::TransferContext;
 use super::{PhysicalLayout, TransferStrategy};
 use crate::block_manager::v2::physical::transfer::context::TransferCompleteNotification;
 use anyhow::{Result, anyhow};
+use cudarc::driver::result as cuda_result;
 use dynamo_kvbm_kernels::tensor_kernels::{
     OperationalCopyBackend, OperationalCopyDirection, TensorDataType,
 };
-use cudarc::driver::result as cuda_result;
 use std::ops::Range;
 
 // #[cfg(test)]

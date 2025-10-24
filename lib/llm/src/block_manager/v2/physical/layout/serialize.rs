@@ -8,8 +8,8 @@
 
 use super::physical::NixlMetadata;
 use super::{BlockDimension, LayoutConfig};
-use anyhow::Result;
 use crate::block_manager::v2::memory::{MemoryDescriptor, StorageKind};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 /// Format of blocks in a fully contiguous layout.
