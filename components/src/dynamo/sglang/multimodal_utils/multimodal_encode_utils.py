@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -43,11 +42,22 @@ def normalize_model_name(model_name: str) -> str:
     # Handle HuggingFace cache paths
     if "models--" in model_name:
         # Extract from cache path format: models--ORG--MODEL-NAME
-        cache_match = re.search(r"models--([^--]+)--([^/]+)", model_name)
-        if cache_match:
-            org = cache_match.group(1)
-            model = cache_match.group(2)
-            return f"{org}/{model}"
+        # Split on "models--" then on "--" to handle dashes in org/model names
+        parts_after_models = model_name.split("models--", 1)
+        if len(parts_after_models) > 1:
+            # Split the remaining part on "--" and take the last two segments
+            segments = parts_after_models[1].split("--")
+            if len(segments) >= 2:
+                # Take all segments except the last as org (rejoined with dashes)
+                # and the last segment (before any slash) as model name
+                org_segments = segments[:-1]
+                model_segment = segments[-1].split("/")[
+                    0
+                ]  # Remove any path after model name
+
+                org = "--".join(org_segments)  # Rejoin org parts with dashes
+                model = model_segment
+                return f"{org}/{model}"
 
     # Handle local directory paths - extract the last directory name
     path = Path(model_name)
