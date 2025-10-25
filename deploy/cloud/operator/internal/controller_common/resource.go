@@ -423,7 +423,13 @@ func GetResourcesConfig(resources *common.Resources) (*corev1.ResourceRequiremen
 			if currentResources.Limits == nil {
 				currentResources.Limits = make(corev1.ResourceList)
 			}
-			currentResources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)] = q
+			if resources.Limits.GPUType == "xe" {
+				currentResources.Limits[corev1.ResourceName(consts.KubeResourceGPUXeIntel)] = q
+			} else if resources.Limits.GPUType == "i915" {
+				currentResources.Limits[corev1.ResourceName(consts.KubeResourceGPUi915Intel)] = q
+			} else {
+				currentResources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)] = q
+			}
 		}
 		for k, v := range resources.Limits.Custom {
 			q, err := resource.ParseQuantity(v)
