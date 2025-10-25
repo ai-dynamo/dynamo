@@ -1,5 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-config
+data:
+  config.yaml: |
+    enable_attention_dp: true
+    cuda_graph_config:
+        max_batch_size: 800
+        enable_padding: true
+    kv_cache_config:
+      enable_block_reuse: false
+    stream_interval: 20
+    moe_config:
+        backend: CUTLASS
+---
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -7,7 +23,7 @@ metadata:
 spec:
   backendFramework: trtllm
   pvcs:
-    - name: model-cache-oss-gpt120b
+    - name: model-cache
       create: false
   services:
     Frontend:
@@ -31,17 +47,13 @@ spec:
           - /bin/sh
           - -c
           image: my-registry/trtllm-runtime:my-tag
-      pvc:
-        create: false
-        mountPoint: /model-store
-        name: model-cache
       replicas: 1
     TrtllmWorker:
       componentType: main
       dynamoNamespace: gpt-oss-agg
       envFromSecret: hf-token-secret
       volumeMounts:
-        - name: model-cache-oss-gpt120b
+        - name: model-cache
           mountPoint: /root/.cache/huggingface
       sharedMemory:
         size: 80Gi
@@ -90,10 +102,6 @@ spec:
         - configMap:
             name: llm-config
           name: llm-config
-      pvc:
-        create: false
-        mountPoint: /model-store
-        name: model-cache
       replicas: 1
       resources:
         limits:
