@@ -1,123 +1,103 @@
 # Fault Tolerance Tests
 
-This directory contains end-to-end tests for Dynamo's fault tolerance capabilities.
+## Migration Tests
 
-## Tests
+The migration directory contains tests for worker fault tolerance with migration support.
 
-### `test_request_migration.py`
+### Test Matrix
 
-Tests worker fault tolerance with migration support using the `test_request_migration_vllm` function. This test:
+| Test | Shutdown Method | Migration Enabled | Expected Result | Verification |
+|------|----------------|-------------------|-----------------|--------------|
+| `test_request_migration_vllm_worker_failure` | SIGKILL (immediate) | Yes (default) | Request succeeds | "Stream disconnected... recreating stream..." in logs |
+| `test_request_migration_vllm_graceful_shutdown` | SIGTERM (10s timeout) | Yes (default) | Request succeeds | "Stream disconnected... recreating stream..." in logs |
+| `test_no_request_migration_vllm_worker_failure` | SIGKILL (immediate) | No (migration_limit=0) | Request fails (500) | "Migration limit exhausted" in logs |
+| `test_no_request_migration_vllm_graceful_shutdown` | SIGTERM (10s timeout) | No (migration_limit=0) | Request fails (500) | "Migration limit exhausted" in logs |
 
-0. Downloads the DeepSeek-R1-Distill-Llama-8B model from HuggingFace if not already cached
-1. Starts a Dynamo frontend using `python -m dynamo.frontend` with round-robin routing
-2. Starts 2 workers sequentially using `python3 -m dynamo.vllm` with specific configuration:
-   - Model: `deepseek-ai/DeepSeek-R1-Distill-Llama-8B`
-   - `--enforce-eager`, `--gpu-memory-utilization 0.45`
-   - `--max-model-len 8192`, `--migration-limit 3`
-3. Waits for both workers to be fully ready (health check returns "ready" status)
-4. Sends a test request ("Who are you?", 100 tokens) to determine which worker handles requests
-5. Determines primary/backup worker roles based on round-robin routing and log analysis
-6. Sends a long completion request ("Tell me a long long long story about yourself?", 8000 tokens) in a separate thread
-7. Waits 0.5 seconds, then kills the primary worker using SIGKILL process group termination
-8. Verifies the request completes successfully despite the worker failure (with 240s timeout)
-9. Checks that the frontend logs contain "Stream disconnected... recreating stream..." indicating migration occurred
+### Common Test Flow
 
-### `test_request_cancellation.py`
+All migration tests follow this pattern:
 
-Tests request cancellation functionality across multiple API endpoints and deployment configurations. Contains three test functions:
+1. Start a Dynamo frontend with round-robin routing
+2. Start 2 vLLM workers sequentially
+3. Send a long completion request (max_tokens=8192) in a separate daemon thread
+4. Use parallel polling to determine which worker received the request (checks for "New Request ID:" in logs)
+5. Terminate the worker processing the request (method varies by test)
+6. Validate the request outcome (success or failure based on migration setting)
+7. Verify migration behavior in frontend logs
 
-#### `test_request_cancellation_vllm`
-Tests basic request cancellation with a single worker:
-
-0. Downloads the DeepSeek-R1-Distill-Llama-8B model from HuggingFace if not already cached
-1. Starts a Dynamo frontend using `python -m dynamo.frontend` with debug logging enabled
-2. Starts a single worker using `python3 -m dynamo.vllm` with specific configuration:
-   - Model: `deepseek-ai/DeepSeek-R1-Distill-Llama-8B`
-   - `--enforce-eager`, `--gpu-memory-utilization 0.45`, `--max-model-len 8192`, `--migration-limit 3`
-   - Debug logging enabled on port 8081
-3. Tests request cancellation across three scenarios:
-   - **Completion API**: `/v1/completions` endpoint cancellation
-   - **Chat Completion API (non-streaming)**: `/v1/chat/completions` endpoint cancellation
-   - **Chat Completion API (streaming)**: `/v1/chat/completions` with streaming cancellation
-4. For each scenario:
-   - Sends a long request with 1-second timeout to trigger cancellation
-   - Validates that cancellation messages appear in both frontend and worker logs
-   - Uses incremental log offset tracking to avoid false positives from previous tests
-5. Checks for specific cancellation patterns:
-   - Frontend log: "issued control message Kill to sender"
-   - Worker log: "Aborted Request ID: <request_id>" matching the "New Request ID: <request_id>"
-
-#### `test_request_cancellation_vllm_decode`
-Tests request cancellation during disaggregated decode phase:
-
-0. Downloads the DeepSeek-R1-Distill-Llama-8B model from HuggingFace if not already cached
-1. Starts a Dynamo frontend using `python -m dynamo.frontend` with debug logging enabled
-2. Starts a prefill worker using `python3 -m dynamo.vllm --is-prefill-worker` on port 8082
-3. Starts a decode worker using `python3 -m dynamo.vllm` on port 8081
-4. Tests completion request cancellation in the disaggregated setup
-5. Validates cancellation messages appear in prefill worker, decode worker, and frontend logs
-6. Checks for specific patterns:
-   - Frontend log: "issued control message Kill to sender"
-   - Decode worker log: "Aborted Request ID: <request_id>"
-   - Prefill worker log: "New Prefill Request ID: <request_id>"
-
-#### `test_request_cancellation_vllm_prefill`
-Tests request cancellation during disaggregated prefill phase:
-
-- (Skipped until request cancellation can cancel before receiving the first response)
-
-## Prerequisites
-
-- vLLM backend installed
-- NATS and etcd services running (provided by `runtime_services` fixture)
-- Access to DeepSeek-R1-Distill-Llama-8B model (automatically downloaded from HuggingFace)
-- Sufficient GPU memory
-
-## Running the Tests
-
-To run the fault tolerance tests:
-
+**Run examples:**
 ```bash
-# Run all fault tolerance tests
-pytest -m "e2e and vllm" /workspace/tests/fault_tolerance
+# With migration enabled
+pytest tests/fault_tolerance/migration/test_vllm.py::test_request_migration_vllm_worker_failure -v -s
+pytest tests/fault_tolerance/migration/test_vllm.py::test_request_migration_vllm_graceful_shutdown -v -s
 
-# Run specific test functions with debug logging
-pytest /workspace/tests/fault_tolerance/test_request_migration.py::test_request_migration_vllm -v -s
-pytest /workspace/tests/fault_tolerance/test_request_cancellation.py::test_request_cancellation_vllm -v -s
-pytest /workspace/tests/fault_tolerance/test_request_cancellation.py::test_request_cancellation_vllm_decode -v -s
+# With migration disabled
+pytest tests/fault_tolerance/migration/test_vllm.py::test_no_request_migration_vllm_worker_failure -v -s
+pytest tests/fault_tolerance/migration/test_vllm.py::test_no_request_migration_vllm_graceful_shutdown -v -s
 ```
 
-## Test Markers
+## Cancellation Tests
 
-- `@pytest.mark.e2e`: End-to-end test
-- `@pytest.mark.vllm`: Requires vLLM backend
-- `@pytest.mark.gpu_1`: Requires single GPU access
-- `@pytest.mark.slow`: Known to be slow (due to model loading and inference)
+The cancellation directory contains tests for request cancellation functionality across multiple
+API endpoints, backends, and deployment configurations.
 
-## Environment Variables
+### Test Overview by Backend
 
-- `DYN_LOG`: Set to `debug` or `trace` for verbose logging (automatically set to `debug` by worker processes)
-- `CUDA_VISIBLE_DEVICES`: Control which GPUs are used for testing
+#### vLLM Cancellation Tests
 
-## Expected Test Duration
+| Test | Mode | Cancellation Phase | Request Type | Setup |
+|------|------|-------------------|--------------|-------|
+| `test_request_cancellation_vllm_aggregated` | Aggregated | During generation | 3 scenarios: completion, chat, streaming chat | 1 worker |
+| `test_request_cancellation_vllm_decode_cancel` | Disaggregated | Remote decode | Streaming chat (5 responses read) | Prefill + Decode workers |
+| `test_request_cancellation_vllm_remote_prefill_cancel` | Disaggregated | Remote prefill | Completion (long prompt) | Prefill + Decode workers |
 
-The tests typically take 2-3 minutes to complete each, including:
-- Model download/loading time (if not cached) - can take 1-2 minutes for first run
-- Worker startup and registration
-- Request processing and response validation
-- Worker failure simulation and migration (for migration test) / Request cancellation validation (for cancellation tests)
-- Cleanup
+**Run examples:**
+```bash
+pytest tests/fault_tolerance/cancellation/test_vllm.py::test_request_cancellation_vllm_aggregated -v -s
+pytest tests/fault_tolerance/cancellation/test_vllm.py::test_request_cancellation_vllm_decode_cancel -v -s
+pytest tests/fault_tolerance/cancellation/test_vllm.py::test_request_cancellation_vllm_remote_prefill_cancel -v -s
+```
 
-## Troubleshooting
+#### TRT-LLM Cancellation Tests
 
-If tests fail:
+| Test | Mode | Strategy | Cancellation Phase | Request Type | Setup |
+|------|------|----------|-------------------|--------------|-------|
+| `test_request_cancellation_trtllm_aggregated` | Aggregated | N/A | During generation | 3 scenarios: completion, chat, streaming chat | 1 worker (prefill_and_decode) |
+| `test_request_cancellation_trtllm_decode_first_decode_cancel` | Disaggregated | Decode-first | Remote decode | Streaming chat (5 responses read) | Prefill + Decode workers |
+| `test_request_cancellation_trtllm_decode_first_remote_prefill_cancel` | Disaggregated | Decode-first | Remote prefill | Completion (long prompt) | Prefill + Decode workers |
+| `test_request_cancellation_trtllm_prefill_first_prefill_cancel` | Disaggregated | Prefill-first | Local prefill | Completion (long prompt) | Decode + Prefill workers |
+| `test_request_cancellation_trtllm_prefill_first_remote_decode_cancel` | Disaggregated | Prefill-first | Remote decode | Streaming chat (5 responses read) | Decode + Prefill workers |
 
-1. Check that NATS and etcd services are running
-2. Verify vLLM backend is properly installed
-3. Ensure sufficient GPU memory is available
-4. Check internet connectivity for model download from HuggingFace
-5. Review test logs for specific error messages
-6. Verify that the DeepSeek-R1-Distill-Llama-8B model can be accessed
-7. For cancellation tests: Check that timeout-based cancellation is working properly and cancellation patterns appear in logs
-8. For migration tests: Verify worker process termination and stream recreation behavior
-9. For disaggregated cancellation tests: Ensure both prefill and decode workers are properly started and cancellation works across the disaggregated setup
+**Run examples:**
+```bash
+pytest tests/fault_tolerance/cancellation/test_trtllm.py::test_request_cancellation_trtllm_aggregated -v -s
+pytest tests/fault_tolerance/cancellation/test_trtllm.py::test_request_cancellation_trtllm_decode_first_decode_cancel -v -s
+# ... (other tests follow same pattern)
+```
+
+#### SGLang Cancellation Tests
+
+| Test | Mode | Cancellation Phase | Request Type | Setup | Notes |
+|------|------|-------------------|--------------|-------|-------|
+| `test_request_cancellation_sglang_aggregated` | Aggregated | During generation | 3 scenarios: completion, chat, streaming chat (1 response read) | 1 worker | ⚠️ Flaky: SGLang prefill cancellation issues |
+| `test_request_cancellation_sglang_decode_cancel` | Disaggregated | Remote decode | Streaming chat (1 response read) | Decode + Prefill workers | Requires 2 GPUs |
+
+**Run examples:**
+```bash
+pytest tests/fault_tolerance/cancellation/test_sglang.py::test_request_cancellation_sglang_aggregated -v -s
+pytest tests/fault_tolerance/cancellation/test_sglang.py::test_request_cancellation_sglang_decode_cancel -v -s
+```
+
+### Common Cancellation Test Pattern
+
+1. Start frontend and workers (configuration varies by test)
+2. Send request (type varies by test scenario)
+3. Poll for request ID in worker logs
+4. For streaming: read N responses before cancellation
+5. Cancel the request via API
+6. Verify cancellation messages in worker and frontend logs
+
+**Verification patterns:**
+- Aggregated mode: "Aborted Request ID" in worker logs
+- Remote prefill: "Aborted Request ID" in prefill, "Aborted Remote Request ID" in decode
+- Remote decode: "Aborted Request ID" in decode, "Aborted Remote Request ID" in prefill
