@@ -13,7 +13,16 @@ in a hierarchical tree format. This script checks for:
 - LLM frameworks (vllm, sglang, tensorrt_llm)
 - Dynamo runtime and framework components
 - File system (permissions and disk space, detailed with --thorough-check)
+- HuggingFace model cache (detailed with --thorough-check)
 - Installation status and component availability
+
+IMPORTANT: This script is STANDALONE and uses only Python stdlib (no Dynamo components).
+
+Why: Must work before Dynamo is built/installed (CI, fresh containers, build failures).
+This tool is for pre-deployment validation; dynamo.common.config_dump is for runtime.
+
+Hard-coded paths: Uses defaults (e.g., ~/.cache/huggingface/hub) for predictable
+behavior even when environment variables are misconfigured. See class docs for details.
 
 The output uses status indicators:
 - ✅ Component found and working
@@ -35,6 +44,9 @@ System info (hostname=jensen-linux, IP=10.111.122.133)
 ├─ OS Ubuntu 24.04.1 LTS (Noble Numbat) (Linux 6.11.0-28-generic x86_64), Memory=26.7/125.5 GiB, Cores=32
 ├─ User info: user=ubuntu, uid=1000, gid=1000
 ├─ ✅ NVIDIA GPU NVIDIA RTX 6000 Ada Generation, driver 570.133.07, CUDA 12.8, Power=26.14/300.00 W, Memory=289/49140 MiB
+├─ 🤖Framework
+│  ├─ ✅ vLLM: 0.10.1.1, module=/opt/vllm/vllm/__init__.py, exec=/opt/dynamo/venv/bin/vllm
+│  └─ ✅ Sglang: 0.3.0, module=/opt/sglang/sglang/__init__.py
 ├─ File System
 │  ├─ ✅ Dynamo workspace ($HOME/dynamo) writable
 │  ├─ ✅ Dynamo .git directory writable
@@ -42,6 +54,7 @@ System info (hostname=jensen-linux, IP=10.111.122.133)
 │  ├─ ✅ Cargo home ($HOME/.cargo) writable
 │  ├─ ✅ Cargo target ($HOME/dynamo/.build/target) writable
 │  └─ ✅ Python site-packages ($HOME/dynamo/venv/lib/python3.12/site-packages) writable
+├─ ✅ Hugging Face Cache 3 models in ~/.cache/huggingface/hub
 ├─ ✅ Cargo $HOME/.cargo/bin/cargo, cargo 1.89.0 (c24e10642 2025-06-23)
 │  ├─ Cargo home directory CARGO_HOME=$HOME/.cargo
 │  └─ Cargo target directory CARGO_TARGET_DIR=$HOME/dynamo/.build/target
@@ -52,9 +65,6 @@ System info (hostname=jensen-linux, IP=10.111.122.133)
 ├─ ✅ Python 3.12.3, /opt/dynamo/venv/bin/python
 │  ├─ ✅ PyTorch 2.7.1+cu128, ✅torch.cuda.is_available
 │  └─ PYTHONPATH not set
-├─ 🤖Framework
-│  ├─ ✅ vLLM: 0.10.1.1, module=/opt/vllm/vllm/__init__.py, exec=/opt/dynamo/venv/bin/vllm
-│  └─ ✅ Sglang: 0.3.0, module=/opt/sglang/sglang/__init__.py
 └─ Dynamo $HOME/dynamo, SHA: a03d29066, Date: 2025-08-30 16:22:29 PDT
    ├─ ✅ Runtime components ai-dynamo-runtime 0.4.1
    │  │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime-0.4.1.dist-info: created=2025-08-30 19:14:29 PDT
@@ -79,8 +89,8 @@ Usage:
     python deploy/sanity_check.py [--thorough-check] [--terse]
 
 Options:
-    --thorough-check  Enable thorough checking (file permissions, directory sizes, etc.)
-    --terse           Enable terse output mode
+    --thorough-check  Enable thorough checking (file permissions, directory sizes, HuggingFace model details)
+    --terse           Enable terse output mode (show only essential info and errors)
 """
 
 import datetime
@@ -323,6 +333,9 @@ class SystemInfo(NodeInfo):
         if not self.terse:
             # Add file permissions check
             self.add_child(FilePermissionsInfo(thorough_check=self.thorough_check))
+
+            # Add HuggingFace cache check
+            self.add_child(HuggingFaceInfo(thorough_check=self.thorough_check))
 
             # Add Cargo (always show, even if not found)
             self.add_child(CargoInfo(thorough_check=self.thorough_check))
@@ -1225,6 +1238,187 @@ class FilePermissionsInfo(NodeInfo):
 
         except Exception:
             return "", None
+
+
+class HuggingFaceInfo(NodeInfo):
+    """Hugging Face models cache information (follows standalone requirement)
+
+    HARD-CODED PATH: ~/.cache/huggingface/hub
+
+    ENV VARIABLES (checked by HuggingFace transformers library, not this tool):
+    - HF_HOME: Base directory for Hugging Face cache
+    - HUGGINGFACE_HUB_CACHE: Direct path to hub cache
+    - HF_TOKEN: Authentication token (checked and displayed if set)
+
+    This class directly uses ~/.cache/huggingface/hub instead of reading environment
+    variables because this tool must work reliably in all environments, including when
+    environment variables are misconfigured or not set. For dynamic configuration that
+    respects all HF environment variables, use dynamo.common.config_dump at runtime.
+    """
+
+    def __init__(self, thorough_check: bool = False):
+        # HARD-CODED PATH: ~/.cache/huggingface/hub (not reading HF_HOME or HUGGINGFACE_HUB_CACHE)
+        hf_cache_path = os.path.expanduser("~/.cache/huggingface/hub")
+
+        if os.path.exists(hf_cache_path):
+            models = self._get_cached_models(
+                hf_cache_path, compute_sizes=thorough_check
+            )
+            if models:
+                self._init_with_models(hf_cache_path, models, thorough_check)
+            else:
+                self._init_no_models_found(hf_cache_path)
+        else:
+            self._init_cache_not_available()
+
+        # Add HF_TOKEN info if set (common to all cases)
+        self._add_hf_token_info()
+
+    def _init_with_models(
+        self, hf_cache_path: str, models: List[tuple], thorough_check: bool
+    ):
+        """Initialize when models are found in cache."""
+        model_count = len(models)
+        display_path = self._replace_home_with_var(hf_cache_path)
+        super().__init__(
+            label="Hugging Face Cache",
+            desc=f"{model_count} models in {display_path}",
+            status=NodeStatus.OK,
+        )
+
+        # Only show detailed model list in thorough mode
+        if thorough_check:
+            self._add_model_details(models)
+
+    def _init_no_models_found(self, hf_cache_path: str):
+        """Initialize when cache exists but no models found."""
+        display_path = self._replace_home_with_var(hf_cache_path)
+        super().__init__(
+            label="Hugging Face Cache",
+            desc=f"directory exists but no models found in {display_path}",
+            status=NodeStatus.WARNING,
+        )
+
+    def _init_cache_not_available(self):
+        """Initialize when cache directory doesn't exist."""
+        super().__init__(
+            label="Hugging Face Cache",
+            desc="~/.cache/huggingface/hub not available",
+            status=NodeStatus.WARNING,
+        )
+
+    def _add_model_details(self, models: List[tuple]):
+        """Add detailed model information as child nodes."""
+        # Add all models as children (no limit)
+        for i, model_info in enumerate(models):
+            model_name, download_date, size_str = model_info
+            model_node = NodeInfo(
+                label=f"Model {i+1}",
+                desc=f"{model_name}, downloaded={download_date}, size={size_str}",
+                status=NodeStatus.INFO,
+            )
+            self.add_child(model_node)
+
+    def _add_hf_token_info(self):
+        """Add HF_TOKEN information if the environment variable is set."""
+        if os.environ.get("HF_TOKEN"):
+            token_node = NodeInfo(
+                label="HF_TOKEN",
+                desc="<set>",
+                status=NodeStatus.INFO,
+            )
+            self.add_child(token_node)
+
+    def _get_cached_models(self, cache_path: str, compute_sizes: bool) -> List[tuple]:
+        """Get list of cached Hugging Face models with metadata.
+
+        Args:
+            cache_path: Path to HuggingFace cache directory
+            compute_sizes: Whether to compute directory sizes (slow operation)
+
+        Returns:
+            List of tuples: (model_name, download_date, size_str)
+        """
+        models = []
+        try:
+            if os.path.exists(cache_path):
+                for item in os.listdir(cache_path):
+                    item_path = os.path.join(cache_path, item)
+                    # Only count model repos; ignore datasets--, spaces--, blobs, etc.
+                    if not (os.path.isdir(item_path) and item.startswith("models--")):
+                        continue
+                    # Convert "models--org--repo-name" to "org/repo-name"
+                    parts = item.split("--")
+                    if len(parts) >= 3:
+                        org = parts[1]
+                        model_name = "--".join(parts[2:])  # Preserve dashes
+                        display_name = f"{org}/{model_name}"
+                    else:
+                        display_name = item  # Fallback to raw dir name
+
+                    # Get download date (directory creation/modification time)
+                    try:
+                        stat_info = os.stat(item_path)
+                        # Use the earlier of creation time or modification time
+                        download_time = min(stat_info.st_ctime, stat_info.st_mtime)
+                        download_date = self._format_timestamp_pdt(download_time)
+                    except Exception:
+                        download_date = "unknown"
+
+                    # Get directory size (only when requested)
+                    size_str = "-"
+                    if compute_sizes:
+                        try:
+                            size_bytes = self._get_directory_size_bytes(item_path)
+                            size_str = self._format_size(size_bytes)
+                        except Exception:
+                            size_str = "unknown"
+
+                    models.append((display_name, download_date, size_str))
+        except Exception:
+            pass
+
+        # Sort by model name
+        return sorted(models, key=lambda x: x[0])
+
+    def _get_directory_size_bytes(self, directory: str) -> int:
+        """Get the total size of a directory in bytes."""
+        total_size = 0
+        try:
+            for dirpath, dirnames, filenames in os.walk(directory):
+                for filename in filenames:
+                    filepath = os.path.join(dirpath, filename)
+                    try:
+                        if not os.path.islink(filepath):  # Skip symbolic links
+                            total_size += os.path.getsize(filepath)
+                    except (OSError, FileNotFoundError):
+                        pass  # Skip files that can't be accessed
+        except Exception:
+            pass
+        return total_size
+
+    def _format_size(self, size_bytes: int) -> str:
+        """Format size in bytes to human readable format."""
+        if size_bytes == 0:
+            return "0 B"
+
+        units = ["B", "KB", "MB", "GB", "TB"]
+        size = float(size_bytes)
+        unit_index = 0
+
+        while size >= 1024.0 and unit_index < len(units) - 1:
+            size /= 1024.0
+            unit_index += 1
+
+        # Format with appropriate precision
+        if unit_index == 0:  # Bytes
+            return f"{int(size)} {units[unit_index]}"
+        elif size >= 100:
+            return f"{size:.0f} {units[unit_index]}"
+        elif size >= 10:
+            return f"{size:.1f} {units[unit_index]}"
+        else:
+            return f"{size:.2f} {units[unit_index]}"
 
 
 class CargoInfo(NodeInfo):
