@@ -18,32 +18,30 @@ use crate::error::OpenAIError;
 
 use super::{ChatCompletionStreamOptions, Choice, CompletionUsage, Prompt, Stop};
 
-/// Custom deserializer for strict boolean validation of the echo parameter.
-///
-/// Accepts JSON booleans (true/false), explicit null, and omitted fields.
-/// Rejects integers (1, 0) and strings ("true", "false", "null") with clear error messages.
+/// Custom deserializer for the echo parameter that only accepts booleans.
+/// Rejects integers and strings with clear error messages.
 fn deserialize_echo_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
+    // Outer visitor: handles Option semantics (Some/None/null)
     struct StrictBoolVisitor;
 
     impl<'de> serde::de::Visitor<'de> for StrictBoolVisitor {
         type Value = Option<bool>;
 
+        // Required by Visitor trait
         fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
             formatter.write_str("echo parameter to be a boolean (true or false) or null")
         }
 
-        // Accept JSON boolean values
-        fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
         where
-            E: serde::de::Error,
+            D: serde::Deserializer<'de>,
         {
-            Ok(Some(value))
+            deserializer.deserialize_any(BoolOnlyVisitor)
         }
 
-        // Accept omitted field
         fn visit_none<E>(self) -> Result<Self::Value, E>
         where
             E: serde::de::Error,
@@ -51,15 +49,31 @@ where
             Ok(None)
         }
 
-        // Accept explicit JSON null
         fn visit_unit<E>(self) -> Result<Self::Value, E>
         where
             E: serde::de::Error,
         {
             Ok(None)
         }
+    }
 
-        // Explicitly reject signed integers
+    // Inner visitor: validates type is boolean, rejects integers and strings
+    struct BoolOnlyVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for BoolOnlyVisitor {
+        type Value = Option<bool>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("echo parameter to be a boolean (true or false) or null")
+        }
+
+        fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(value))
+        }
+
         fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
         where
             E: serde::de::Error,
@@ -70,7 +84,6 @@ where
             ))
         }
 
-        // Explicitly reject unsigned integers
         fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
         where
             E: serde::de::Error,
@@ -93,7 +106,7 @@ where
         }
     }
 
-    deserializer.deserialize_any(StrictBoolVisitor)
+    deserializer.deserialize_option(StrictBoolVisitor)
 }
 
 #[derive(Clone, Serialize, Deserialize, Default, Debug, Builder, PartialEq)]
@@ -158,7 +171,7 @@ pub struct CreateCompletionRequest {
 
     /// Echo back the prompt in addition to the completion
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(deserialize_with = "deserialize_echo_bool")]
+    #[serde(default, deserialize_with = "deserialize_echo_bool")]
     pub echo: Option<bool>,
 
     ///  Up to 4 sequences where the API will stop generating further tokens. The returned text will not contain the stop sequence.
