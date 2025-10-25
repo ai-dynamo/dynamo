@@ -15,13 +15,28 @@ from vllm.distributed.kv_events import ZmqEventPublisher
 logger = logging.getLogger(__name__)
 
 
+def is_truthy(val: str) -> bool:
+    """
+    Check if a string represents a truthy value.
+    Truthy values: "1", "true", "on", "yes" (case-insensitive)
+
+    Args:
+        val: The string value to check
+
+    Returns:
+        True if the value is truthy, False otherwise
+    """
+    return val.lower() in ("1", "true", "on", "yes")
+
+
 def should_enable_consolidator(vllm_config) -> bool:
     """
     Determine if the KV Event Consolidator should be enabled based on vLLM config.
 
-    The consolidator can be controlled via the DYN_ENABLE_KV_CONSOLIDATOR environment variable:
-    - Set to "false", "0", "no", or "off" to disable
-    - If not set, auto-detects based on KVBM connector and prefix caching settings
+    The consolidator can be controlled via the DYN_KV_EVENTS_ENABLE_CONSOLIDATOR environment variable:
+    - Set to truthy values ("1", "true", "on", "yes") to enable (default)
+    - Set to any other value to disable
+    - If not set, defaults to enabled and auto-detects based on KVBM connector and prefix caching settings
 
     Args:
         vllm_config: The vLLM VllmConfig object
@@ -30,10 +45,10 @@ def should_enable_consolidator(vllm_config) -> bool:
         True if consolidator should be enabled, False otherwise
     """
     # Check environment variable override
-    env_override = os.getenv("DYN_ENABLE_KV_CONSOLIDATOR", "true").lower()
-    if env_override in ("false", "0", "no", "off"):
+    env_override = os.getenv("DYN_KV_EVENTS_ENABLE_CONSOLIDATOR", "true")
+    if not is_truthy(env_override):
         logger.info(
-            "KV Event Consolidator disabled via DYN_ENABLE_KV_CONSOLIDATOR environment variable"
+            "KV Event Consolidator disabled via DYN_KV_EVENTS_ENABLE_CONSOLIDATOR environment variable"
         )
         return False
 
