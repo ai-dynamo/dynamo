@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 MISSING_PROFILING_DATA_ERROR_MESSAGE = (
     "SLA-Planner requires pre-deployment profiling results to run.\n"
-    "Please follow /docs/benchmarks/pre_deployment_profiling.md to run the profiling first,\n"
+    "Please follow /docs/benchmarks/sla_driven_profiling.md to run the profiling first,\n"
     "and make sure the profiling results are present in --profile-results-dir."
 )
 

@@ -1,7 +1,7 @@
 # SLA-based Planner
 
 > [!TIP]
-> **New to SLA Planner?** For a complete workflow including profiling and deployment, see the [SLA Planner Quick Start Guide](/docs/planner/sla_planner_quickstart.md).
+> **New to SLA Planner?** For a complete workflow including profiling and deployment, see the [SLA Profiling + Planner Quick Start Guide](/docs/planner/sla_planner_quickstart.md).
 
 This document covers information regarding the SLA-based planner in `examples/common/utils/planner_core.py`.
 
@@ -47,11 +47,11 @@ The SLA planner consists of several key components:
 3. **Correction Factors**: Adjust predictions based on observed vs. expected performance
 4. **Scaling Logic**: Calculate optimal number of prefill/decode replicas to meet SLA targets
 
-## Pre-Deployment Profiling
+## SLA-Driven Pre-Deployment Profiling
 
 **Prerequisite**: SLA-based planner requires pre-deployment profiling to be completed before deployment. The profiling process analyzes your model's performance characteristics to determine optimal tensor parallelism configurations and scaling parameters that the planner will use during operation.
 
-See [Pre-Deployment Profiling](../benchmarks/pre_deployment_profiling.md) for detailed instructions on running the profiling process.
+See [Pre-Deployment Profiling](../benchmarks/sla_driven_profiling.md) for detailed instructions on running the profiling process.
 
 ## Load Prediction
 

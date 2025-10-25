@@ -78,5 +78,5 @@ Key features include:
 
    Overview <self>
    SLA Planner Quick Start <sla_planner_quickstart>
-   Pre-Deployment Profiling <../benchmarks/pre_deployment_profiling.md>
+   SLA-Driven Profiling <../benchmarks/sla_driven_profiling.md>
    SLA-based Planner <sla_planner.md>
