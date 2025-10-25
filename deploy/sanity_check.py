@@ -1261,7 +1261,9 @@ class HuggingFaceInfo(NodeInfo):
         hf_cache_path = os.path.expanduser("~/.cache/huggingface/hub")
 
         if os.path.exists(hf_cache_path):
-            models = self._get_cached_models(hf_cache_path)
+            models = self._get_cached_models(
+                hf_cache_path, compute_sizes=thorough_check
+            )
             if models:
                 self._init_with_models(hf_cache_path, models, thorough_check)
             else:
@@ -1327,8 +1329,12 @@ class HuggingFaceInfo(NodeInfo):
             )
             self.add_child(token_node)
 
-    def _get_cached_models(self, cache_path: str) -> List[tuple]:
+    def _get_cached_models(self, cache_path: str, compute_sizes: bool) -> List[tuple]:
         """Get list of cached Hugging Face models with metadata.
+
+        Args:
+            cache_path: Path to HuggingFace cache directory
+            compute_sizes: Whether to compute directory sizes (slow operation)
 
         Returns:
             List of tuples: (model_name, download_date, size_str)
@@ -1338,41 +1344,37 @@ class HuggingFaceInfo(NodeInfo):
             if os.path.exists(cache_path):
                 for item in os.listdir(cache_path):
                     item_path = os.path.join(cache_path, item)
-                    if os.path.isdir(item_path):
-                        # Get model name
-                        if item.startswith("models--"):
-                            # Convert "models--org--model-name" to "org/model-name"
-                            parts = item.split("--")
-                            if len(parts) >= 3:
-                                org = parts[1]
-                                model_name = "--".join(
-                                    parts[2:]
-                                )  # Handle model names with dashes
-                                display_name = f"{org}/{model_name}"
-                            else:
-                                display_name = item  # Fallback to raw name
-                        elif not item.startswith("."):  # Skip hidden files/dirs
-                            display_name = item
-                        else:
-                            continue  # Skip hidden directories
+                    # Only count model repos; ignore datasets--, spaces--, blobs, etc.
+                    if not (os.path.isdir(item_path) and item.startswith("models--")):
+                        continue
+                    # Convert "models--org--repo-name" to "org/repo-name"
+                    parts = item.split("--")
+                    if len(parts) >= 3:
+                        org = parts[1]
+                        model_name = "--".join(parts[2:])  # Preserve dashes
+                        display_name = f"{org}/{model_name}"
+                    else:
+                        display_name = item  # Fallback to raw dir name
 
-                        # Get download date (directory creation/modification time)
-                        try:
-                            stat_info = os.stat(item_path)
-                            # Use the earlier of creation time or modification time
-                            download_time = min(stat_info.st_ctime, stat_info.st_mtime)
-                            download_date = self._format_timestamp_pdt(download_time)
-                        except Exception:
-                            download_date = "unknown"
+                    # Get download date (directory creation/modification time)
+                    try:
+                        stat_info = os.stat(item_path)
+                        # Use the earlier of creation time or modification time
+                        download_time = min(stat_info.st_ctime, stat_info.st_mtime)
+                        download_date = self._format_timestamp_pdt(download_time)
+                    except Exception:
+                        download_date = "unknown"
 
-                        # Get directory size
+                    # Get directory size (only when requested)
+                    size_str = "-"
+                    if compute_sizes:
                         try:
                             size_bytes = self._get_directory_size_bytes(item_path)
                             size_str = self._format_size(size_bytes)
                         except Exception:
                             size_str = "unknown"
 
-                        models.append((display_name, download_date, size_str))
+                    models.append((display_name, download_date, size_str))
         except Exception:
             pass
 
