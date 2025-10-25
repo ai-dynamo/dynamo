@@ -36,6 +36,7 @@ either = { workspace = true }
 etcd-client = { workspace = true }
 futures = { workspace = true }
 humantime = { workspace = true }
+parking_lot = { workspace = true }
 prometheus = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }

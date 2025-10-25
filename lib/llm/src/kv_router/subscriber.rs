@@ -63,7 +63,7 @@ impl SnapshotResources {
         // Clean up stale workers before snapshot
         // Get current worker IDs from instances_rx
         let current_instances = self.instances_rx.borrow().clone();
-        let current_worker_ids: std::collections::HashSet<i64> = current_instances
+        let current_worker_ids: std::collections::HashSet<u64> = current_instances
             .iter()
             .map(|instance| instance.instance_id)
             .collect();
@@ -306,14 +306,13 @@ pub async fn start_kv_router_background(
 
                     let key = String::from_utf8_lossy(kv.key());
 
-                    // Extract the hex worker ID after the colon (e.g., "generate:694d99badb9f7c07" -> "694d99badb9f7c07")
-                    let Some(worker_id_str) = key.split(':').next_back() else {
+                    let Some(worker_id_str) = key.split(&['/', ':'][..]).next_back() else {
                         tracing::warn!("Could not extract worker ID from instance key: {key}");
                         continue;
                     };
 
                     // Parse as hexadecimal (base 16)
-                    let Ok(worker_id) = i64::from_str_radix(worker_id_str, 16) else {
+                    let Ok(worker_id) = u64::from_str_radix(worker_id_str, 16) else {
                         tracing::warn!("Could not parse worker ID from instance key: {key}");
                         continue;
                     };

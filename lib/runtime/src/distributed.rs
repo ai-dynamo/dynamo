@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub use crate::component::Component;
-use crate::storage::key_value_store::{EtcdStore, KeyValueStore, MemoryStore};
+use crate::storage::key_value_store::{
+    EtcdStore, KeyValueStore, KeyValueStoreEnum, KeyValueStoreManager, MemoryStore,
+};
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
     ErrorContext, PrometheusUpdateCallback,
@@ -46,12 +48,10 @@ impl DistributedRuntime {
         let runtime_clone = runtime.clone();
 
         let (etcd_client, store) = if is_static {
-            let store: Arc<dyn KeyValueStore> = Arc::new(MemoryStore::new());
-            (None, store)
+            (None, KeyValueStoreManager::memory())
         } else {
             let etcd_client = etcd::Client::new(etcd_config.clone(), runtime_clone).await?;
-            let store: Arc<dyn KeyValueStore> = Arc::new(EtcdStore::new(etcd_client.clone()));
-
+            let store = KeyValueStoreManager::etcd(etcd_client.clone());
             (Some(etcd_client), store)
         };
 
@@ -70,7 +70,7 @@ impl DistributedRuntime {
         let use_endpoint_health_status = config.use_endpoint_health_status.clone();
         let health_endpoint_path = config.system_health_path.clone();
         let live_endpoint_path = config.system_live_path.clone();
-        let system_health = Arc::new(std::sync::Mutex::new(SystemHealth::new(
+        let system_health = Arc::new(parking_lot::Mutex::new(SystemHealth::new(
             starting_health_status,
             use_endpoint_health_status,
             health_endpoint_path,
@@ -119,7 +119,6 @@ impl DistributedRuntime {
         distributed_runtime
             .system_health
             .lock()
-            .unwrap()
             .initialize_uptime_gauge(&distributed_runtime)?;
 
         // Handle system status server initialization
@@ -279,10 +278,16 @@ impl DistributedRuntime {
         self.etcd_client.clone()
     }
 
+    // Deprecated but our CI blocks us using the feature currently.
+    //#[deprecated(note = "Use KeyValueStoreManager via store(); this will be removed")]
+    pub fn deprecated_etcd_client(&self) -> Option<etcd::Client> {
+        self.etcd_client.clone()
+    }
+
     /// An interface to store things. Will eventually replace `etcd_client`.
     /// Currently does key-value, but will grow to include whatever we need to store.
-    pub fn store(&self) -> Arc<dyn KeyValueStore> {
-        self.store.clone()
+    pub fn store(&self) -> &KeyValueStoreManager {
+        &self.store
     }
 
     pub fn child_token(&self) -> CancellationToken {
@@ -430,7 +435,7 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
             // Check that uptime is 50+ ms
-            let uptime = drt.system_health.lock().unwrap().uptime();
+            let uptime = drt.system_health.lock().uptime();
             assert!(
                 uptime >= std::time::Duration::from_millis(50),
                 "Expected uptime to be at least 50ms, but got {:?}",
@@ -456,7 +461,7 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
             // Check that uptime is 50+ ms
-            let uptime = drt.system_health.lock().unwrap().uptime();
+            let uptime = drt.system_health.lock().uptime();
             assert!(
                 uptime >= std::time::Duration::from_millis(50),
                 "Expected uptime to be at least 50ms, but got {:?}",
