@@ -136,7 +136,7 @@ follow these steps below to launch an **aggregated** deployment across 4 nodes:
 
 ```bash
 # Default set in srun_aggregated.sh, but can customize here.
-# export ENGINE_CONFIG="/mnt/recipes/deepseek-r1/trtllm/wide_ep/wide_ep_agg.yaml"
+# export ENGINE_CONFIG="/mnt/recipes/deepseek-r1/trtllm/agg/wide_ep/wide_ep_agg.yaml"
 
 # Customize NUM_NODES to match the desired parallelism in ENGINE_CONFIG
 # The product of NUM_NODES*NUM_GPUS_PER_NODE should match the number of
@@ -165,8 +165,8 @@ deployment across 8 nodes:
 
 ```bash
 # Defaults set in srun_disaggregated.sh, but can customize here.
-# export PREFILL_ENGINE_CONFIG="/mnt/recipes/deepseek-r1/trtllm/wide_ep/wide_ep_prefill.yaml"
-# export DECODE_ENGINE_CONFIG="/mnt/recipes/deepseek-r1/trtllm/wide_ep/wide_ep_decode.yaml"
+# export PREFILL_ENGINE_CONFIG="/mnt/recipes/deepseek-r1/trtllm/disagg/wide_ep/wide_ep_prefill.yaml"
+# export DECODE_ENGINE_CONFIG="/mnt/recipes/deepseek-r1/trtllm/disagg/wide_ep/wide_ep_decode.yaml"
 
 # Customize NUM_PREFILL_NODES to match the desired parallelism in PREFILL_ENGINE_CONFIG
 # Customize NUM_DECODE_NODES to match the desired parallelism in DECODE_ENGINE_CONFIG
