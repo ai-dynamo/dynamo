@@ -354,9 +354,10 @@ impl RadixTree {
                     None => {
                         tracing::warn!(
                             worker_id = worker.worker_id.to_string(),
-                            dp_rank = ?worker.dp_rank,
+                            dp_rank = worker.dp_rank,
                             id,
                             parent_hash = ?op.parent_hash,
+                            num_blocks = op.blocks.len(),
                             "Failed to find parent block; skipping store operation"
                         );
                         return Err(KvCacheEventError::ParentBlockNotFound);
@@ -412,8 +413,10 @@ impl RadixTree {
                         Some(entry) => entry.clone(),
                         None => {
                             tracing::warn!(
-                                worker_id = worker_id.to_string(),
+                                worker_id = worker.worker_id.to_string(),
+                                dp_rank = worker.dp_rank,
                                 id,
+                                block_hash = ?block,
                                 "Failed to find block to remove; skipping remove operation"
                             );
                             return Err(KvCacheEventError::BlockNotFound);

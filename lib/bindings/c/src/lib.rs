@@ -60,7 +60,6 @@ pub enum DynamoLlmResult {
 pub unsafe extern "C" fn dynamo_llm_init(
     namespace_c_str: *const c_char,
     component_c_str: *const c_char,
-    worker_id: i64,
     kv_block_size: u32,
 ) -> DynamoLlmResult {
     initialize_tracing();
@@ -102,7 +101,7 @@ pub unsafe extern "C" fn dynamo_llm_init(
 
     match result {
         Ok(_) => match KV_PUB.get_or_try_init(move || {
-            dynamo_create_kv_publisher(namespace, component, worker_id, kv_block_size)
+            dynamo_create_kv_publisher(namespace, component, kv_block_size)
         }) {
             Ok(_) => DynamoLlmResult::OK,
             Err(e) => {
@@ -144,7 +143,6 @@ pub extern "C" fn dynamo_llm_load_publisher_create() -> DynamoLlmResult {
 fn dynamo_create_kv_publisher(
     namespace: String,
     component: String,
-    worker_id: i64,
     kv_block_size: u32,
 ) -> Result<KvEventPublisher, anyhow::Error> {
     tracing::info!("Creating KV Publisher for model: {}", component);
@@ -154,7 +152,7 @@ fn dynamo_create_kv_publisher(
     {
         Ok(drt) => {
             let backend = drt.namespace(namespace)?.component(component)?;
-            KvEventPublisher::new(backend, worker_id as u64, kv_block_size, None)
+            KvEventPublisher::new(backend, kv_block_size, None)
         }
         Err(e) => Err(e),
     }

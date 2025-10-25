@@ -81,7 +81,8 @@ impl ActiveSequence {
         let tokens = Tokens::from(tokens).into_sequence(block_size as u32, Some(1337));
         let unique_blocks =
             create_unique_blocks_from_sequence(&tokens, None, block_size, enable_prefix_caching);
-        let creation_signal = Some(MoveBlock::Use(unique_blocks.clone()));
+        let block_hashes = tokens.blocks().iter().map(|b| b.block_hash()).collect();
+        let creation_signal = Some(MoveBlock::Use(unique_blocks.clone(), block_hashes));
 
         Self {
             unique_blocks,
@@ -170,12 +171,13 @@ impl ActiveSequence {
                 uuid,
                 last_block_hash,
                 self.get_parent_hash(),
+                self.block_hashes(),
             ));
         }
 
         let new_partial_block = UniqueBlock::default();
         self.unique_blocks.push(new_partial_block.clone());
-        signals.push(MoveBlock::Use(vec![new_partial_block]));
+        signals.push(MoveBlock::Use(vec![new_partial_block], self.block_hashes()));
         Some(signals)
     }
 
@@ -247,7 +249,10 @@ impl ActiveSequence {
         );
         self.already_generated_tokens = self.generated_tokens.max(self.already_generated_tokens);
         self.generated_tokens = 0;
-        self.creation_signal = Some(MoveBlock::Use(self.unique_blocks.clone()));
+        self.creation_signal = Some(MoveBlock::Use(
+            self.unique_blocks.clone(),
+            self.block_hashes(),
+        ));
 
         free_signal
     }
@@ -280,7 +285,7 @@ mod tests {
         // Check that we got a Use signal
         assert!(signal1.is_some());
         match &signal1 {
-            Some(MoveBlock::Use(blocks)) => {
+            Some(MoveBlock::Use(blocks, _hashes)) => {
                 assert_eq!(blocks.len(), 1);
             }
             _ => panic!("Expected Use signal"),
@@ -301,7 +306,7 @@ mod tests {
 
         // First signal should be Promote for the previous block
         match &signal_16[0] {
-            MoveBlock::Promote(_, _, parent_hash) => {
+            MoveBlock::Promote(_, _, parent_hash, _hashes) => {
                 assert_eq!(*parent_hash, None);
             }
             _ => panic!("Expected Promote signal as second signal"),
@@ -309,7 +314,7 @@ mod tests {
 
         // Second signal should be Use for new partial block
         match &signal_16[1] {
-            MoveBlock::Use(blocks) => {
+            MoveBlock::Use(blocks, _hashes) => {
                 assert_eq!(blocks.len(), 1);
                 assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
             }
@@ -396,7 +401,7 @@ mod tests {
 
         // Check that signal[0] is promote
         match &signal[0] {
-            MoveBlock::Promote(_, _, parent_hash) => {
+            MoveBlock::Promote(_, _, parent_hash, _hashes) => {
                 // Check that the parent_hash matches unique_blocks[1], which should be a full block
                 if let UniqueBlock::FullBlock(expected_hash) = seq1.unique_blocks()[1] {
                     assert_eq!(
@@ -430,7 +435,7 @@ mod tests {
         // Initial signal - should have received a Use signal for the partial block
         assert!(signal.is_some());
         match signal {
-            Some(MoveBlock::Use(blocks)) => {
+            Some(MoveBlock::Use(blocks, _hashes)) => {
                 assert_eq!(blocks.len(), 1);
                 assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
             }
@@ -448,7 +453,7 @@ mod tests {
 
         // First signal should be Promote
         match &signals_second[0] {
-            MoveBlock::Promote(_, _, parent_hash) => {
+            MoveBlock::Promote(_, _, parent_hash, _hashes) => {
                 assert_eq!(*parent_hash, None);
             }
             _ => panic!("Expected Promote signal as first signal after second token"),
@@ -456,7 +461,7 @@ mod tests {
 
         // Second signal should be Use for new partial block
         match &signals_second[1] {
-            MoveBlock::Use(blocks) => {
+            MoveBlock::Use(blocks, _hashes) => {
                 assert_eq!(blocks.len(), 1);
                 assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
             }

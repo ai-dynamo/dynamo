@@ -28,16 +28,16 @@
 //! ## NOTE
 //! The current prefill and decoding time simulations are not scientific at all and are WIP
 
-use crate::kv_router::protocols::{ForwardPassMetrics, KvCacheEventData, KvStats, WorkerStats};
+use crate::kv_router::protocols::{ForwardPassMetrics, KvStats, WorkerStats};
 use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::kv_manager::KvManager;
-use crate::mocker::protocols::{DirectRequest, MockEngineArgs, MoveBlockResponse};
-use crate::mocker::protocols::{MoveBlock, OutputSignal, PrefillCost, block_response_to_kv_event};
+use crate::mocker::protocols::{
+    DirectRequest, MockEngineArgs, MoveBlock, OutputSignal, PrefillCost, WorkerType,
+};
+use crate::mocker::running_mean::RunningMean;
 use crate::mocker::sequence::ActiveSequence;
-use crate::tokens::BlockHash;
 use crate::tokens::blocks::UniqueBlock;
-use std::collections::HashMap;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -111,9 +111,8 @@ impl SchedulerState {
     /// Returns `Some((prefill_compute, creation_signal, is_full_prefill))` where:
     /// - `prefill_compute`: The compute time in milliseconds for this prefill operation
     /// - `creation_signal`: Optional MoveBlock signal for KV cache block creation
-    /// - `block_hashes`: Block hashes of the sequence beign prefilled
     /// - `is_full_prefill`: true if the entire sequence was prefilled, false if chunked
-    fn try_prefill(&mut self) -> Option<(f64, Option<MoveBlock>, Vec<BlockHash>, bool)> {
+    fn try_prefill(&mut self) -> Option<(f64, Option<MoveBlock>, bool)> {
         let uuid = self.prefill.pop_front()?;
 
         // Remove and extract prefill_compute from prefill_costs
@@ -168,7 +167,6 @@ impl SchedulerState {
         Some((
             prefill_compute,
             sequence.take_creation_signal(),
-            sequence.block_hashes(),
             is_full_prefill,
         ))
     }
@@ -247,17 +245,9 @@ impl Scheduler {
         args: MockEngineArgs,
         dp_rank: u32,
         output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
-        kv_events_tx: Option<mpsc::UnboundedSender<KvCacheEventData>>,
+        _component: Option<dynamo_runtime::component::Component>,
         cancellation_token: Option<CancellationToken>,
     ) -> Self {
-        // Create internal channel for KV events only if needed
-        let (block_resp_tx, mut block_resp_rx) = if kv_events_tx.is_some() {
-            let (tx, rx) = mpsc::unbounded_channel::<MoveBlockResponse>();
-            (Some(tx), Some(rx))
-        } else {
-            (None, None)
-        };
-
         // Assert speedup_ratio is greater than 0
         assert!(
             args.speedup_ratio > 0.0,
@@ -278,9 +268,8 @@ impl Scheduler {
         tokio::spawn(async move {
             // Create state and kv_manager as local variables owned by this task
             let mut state = SchedulerState::new(args.max_num_batched_tokens);
-            let mut kv_manager =
-                KvManager::new_with_sender(args.num_gpu_blocks, args.block_size, block_resp_tx);
-            let mut hit_rates = VecDeque::with_capacity(1000);
+            let mut kv_manager = KvManager::new(args.num_gpu_blocks, args.block_size);
+            let mut hit_rates = RunningMean::new(1000);
             let mut should_schedule = true;
 
             loop {
@@ -345,10 +334,7 @@ impl Scheduler {
 
                             // Compute and store hit rate
                             let hit_rate = if !active_sequence.is_empty() { 1.0 - (new_tokens as f32 / active_sequence.len() as f32) } else { 0.0 };
-                            hit_rates.push_back(hit_rate);
-                            if hit_rates.len() > 1000 {
-                                hit_rates.pop_front();
-                            }
+                            hit_rates.push(hit_rate);
 
                             state.move_to_prefill(uuid, active_sequence, prefill_cost);
                             should_schedule = false;
@@ -364,35 +350,25 @@ impl Scheduler {
                 // Simulates prefill + decode
                 // Base time needed for decoding using active percentage and quadratic formula
                 let active_perc = kv_manager.get_active_perc();
-                let decoding_time = -5.47 * active_perc.powi(2) + 43.88 * active_perc + 19.44;
+                let decoding_time = -25.74 * active_perc.powi(2) + 54.01 * active_perc + 5.74;
                 let mut total_time = Duration::from_secs_f64(decoding_time / 1000.0);
 
                 // Process prefilling
-                while let Some((
-                    prefill_compute,
-                    maybe_creation_signal,
-                    block_hashes,
-                    is_full_prefill,
-                )) = state.try_prefill()
+                while let Some((prefill_compute, maybe_creation_signal, is_full_prefill)) =
+                    state.try_prefill()
                 {
                     // NOTE: Prefill cost/time is always incremented for new blocks, even if they
                     // could be cached by other requests in the same batch. This matches vLLM behavior.
-                    total_time += Duration::from_secs_f64(prefill_compute / 1000.0);
+                    // For decode workers, skip adding prefill compute time
+                    if args.worker_type != WorkerType::Decode {
+                        total_time += Duration::from_secs_f64(prefill_compute / 1000.0);
+                    }
 
-                    if let Some(creation_signal) = maybe_creation_signal {
-                        if !process_signals(&mut kv_manager, std::slice::from_ref(&creation_signal))
-                        {
-                            panic!("Block allocation for prefilling cannot fail.");
-                        }
-
-                        // Drain KV events and forward to relay after prefill signal processing
-                        if let (Some(relay_tx), Some(rx)) = (&kv_events_tx, &mut block_resp_rx) {
-                            while let Ok(event) = rx.try_recv() {
-                                let _ =
-                                    relay_tx.send(block_response_to_kv_event(event, &block_hashes));
-                            }
-                        }
-                    };
+                    if let Some(creation_signal) = maybe_creation_signal
+                        && !process_signals(&mut kv_manager, std::slice::from_ref(&creation_signal))
+                    {
+                        panic!("Block allocation for prefilling cannot fail.");
+                    }
 
                     // Impossible to schedule more prefills if we encounter one incomplete (chunked) prefill
                     if !is_full_prefill {
@@ -421,14 +397,6 @@ impl Scheduler {
                             kv_manager.process(&signal);
                         }
                         continue;
-                    }
-
-                    // Drain KV events and forward to relay after decode signal processing
-                    if let (Some(relay_tx), Some(rx)) = (&kv_events_tx, &mut block_resp_rx) {
-                        while let Ok(event) = rx.try_recv() {
-                            let _ = relay_tx
-                                .send(block_response_to_kv_event(event, &sequence.block_hashes()));
-                        }
                     }
 
                     // Check completion and send notification
@@ -499,7 +467,7 @@ impl Scheduler {
 fn get_fwd_pass_metrics(
     state: &SchedulerState,
     kv_manager: &KvManager,
-    hit_rates: &VecDeque<f32>,
+    hit_rates: &RunningMean<f32>,
     dp_rank: u32,
 ) -> ForwardPassMetrics {
     // Get state metrics
@@ -507,7 +475,7 @@ fn get_fwd_pass_metrics(
     let num_requests_waiting = state.waiting.len() as u64;
 
     // Get KV manager metrics
-    let active_blocks_count = kv_manager.active_blocks().len() as u64;
+    let active_blocks_count = kv_manager.num_active_blocks() as u64;
     let total_capacity = kv_manager.max_capacity() as u64;
     let gpu_cache_usage_perc = if total_capacity > 0 {
         active_blocks_count as f32 / total_capacity as f32
@@ -515,13 +483,8 @@ fn get_fwd_pass_metrics(
         0.0
     };
 
-    // Get hit rate metrics
-    let gpu_prefix_cache_hit_rate = if hit_rates.is_empty() {
-        0.0
-    } else {
-        let sum: f32 = hit_rates.iter().sum();
-        sum / hit_rates.len() as f32
-    };
+    // Get hit rate metrics - O(1) access
+    let gpu_prefix_cache_hit_rate = hit_rates.mean();
 
     let worker_stats = WorkerStats {
         data_parallel_rank: Some(dp_rank),
@@ -582,7 +545,7 @@ fn process_signals(kv_manager: &mut KvManager, signals: &[MoveBlock]) -> bool {
         }
 
         // Check we have a Use signal with blocks
-        let MoveBlock::Use(blocks) = signal else {
+        let MoveBlock::Use(blocks, _hashes) = signal else {
             panic!(
                 "Failed signal is Invalid. Has to fail on generation signal, but failed on {signal:?}"
             );
