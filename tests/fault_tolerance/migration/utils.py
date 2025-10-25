@@ -47,7 +47,7 @@ def start_completion_request() -> tuple:
     Returns:
         tuple: (request_thread, response_list)
     """
-    response_list = []
+    response_list = []  # Thread safe is not required as only one thread writes to it
 
     def send_request():
         prompt = "Tell me a long long long story about yourself?"
