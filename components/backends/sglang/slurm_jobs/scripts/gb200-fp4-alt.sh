@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# This comes from https://github.com/sgl-project/sglang/issues/10903 and uses the low-prec decode setup
+# This comes from https://github.com/sgl-project/sglang/issues/10903 and uses the low-prec prefill setup - seems like prefill is offloaded
 
 # Function to print usage
 print_usage() {
@@ -67,17 +67,15 @@ fi
 # Construct command based on mode
 if [ "$mode" = "prefill" ]; then
     set -x
-    # no expert locations collected for fp4 yet
-    command_suffix=""
-    if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix=" "; fi
-
-    # we have to install pre-release cutedsl for a integer overflow fix
-    python3 -m pip install --no-cache-dir --upgrade --pre nvidia-cutlass-dsl
-
-    # set your own cache variables here
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
     export SGLANG_DG_CACHE_DIR="/configs/deepgemm-kernels-10212025-ddcba74b"
     export FLASHINFER_WORKSPACE_BASE="/configs/flashinfer-cache"
+
+    # temp we need to install newest cutedsl
+    python3 -m pip install --no-cache-dir --upgrade --pre nvidia-cutlass-dsl
+
+    # no expert locations collected for fp4 yet
+    if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix=" "; fi
 
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
     SGLANG_NVFP4_CKPT_FP8_GEMM_IN_ATTN=1 \
@@ -96,13 +94,14 @@ if [ "$mode" = "prefill" ]; then
     SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
     PYTHONUNBUFFERED=1 \
     python3 -m dynamo.sglang \
+        --disaggregation-transfer-backend nixl \
         --served-model-name deepseek-ai/DeepSeek-R1 \
         --model-path /model/ \
         --skip-tokenizer-init \
         --disaggregation-mode prefill \
         --decode-log-interval 1000 \
-        --max-running-requests 5632 \
-        --context-length 2176 \
+        --max-running-requests 768 \
+        --context-length 4224 \
         --disable-radix-cache \
         --disable-shared-experts-fusion \
         --watchdog-timeout 1000000 \
@@ -113,6 +112,10 @@ if [ "$mode" = "prefill" ]; then
         --chunked-prefill-size 65536 \
         --eplb-algorithm deepseek \
         --trust-remote-code \
+	--offload-mode cpu  \
+	--offload-group-size 2  \
+	--offload-num-in-group 1 \
+	--offload-prefetch-step 1 \
         --disable-cuda-graph \
         --mem-fraction-static 0.84 \
         --max-total-tokens 131072 \
@@ -124,32 +127,24 @@ if [ "$mode" = "prefill" ]; then
         --disaggregation-bootstrap-port 30001 \
         --nnodes "$TOTAL_NODES" \
         --node-rank "$RANK" \
-        --ep-size "$TOTAL_GPUS" \
-        --tp-size "$TOTAL_GPUS" \
-        --dp-size "$TOTAL_GPUS" \
+	--ep-size "$((TOTAL_GPUS - 2))" \
+	--tp-size "$((TOTAL_GPUS - 2))" \
+	--dp-size "$((TOTAL_GPUS - 2))" \
         --enable-dp-attention \
         --host 0.0.0.0 \
-        --stream-interval 50 \
+        --stream-interval 2 \
         --log-level debug ${command_suffix}
-
-# For now we must keep SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK and cuda-graph-bs at 384 until
-# nvidia-cutlass-dsl fixes https://github.com/flashinfer-ai/flashinfer/issues/1830#issuecomment-3380074018
-# and the version bump is included in sglang
-# Use 12 nodes for fp4 since flashinfer_cutedsl requires experts per gpu < 8
-# We have 288 (256 + 32 redundant) => 288/48 = 6
 
 elif [ "$mode" = "decode" ]; then
     set -x
-    # no expert locations collected for fp4 yet
     command_suffix=""
     if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix=" "; fi
 
-    # set your own cache variables here
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
     export SGLANG_DG_CACHE_DIR="/configs/deepgemm-kernels-10212025-ddcba74b"
     export FLASHINFER_WORKSPACE_BASE="/configs/flashinfer-cache"
 
-    # we have to install pre-release cutedsl for a integer overflow fix
+    # temp we need to install newest cutedsl
     python3 -m pip install --no-cache-dir --upgrade --pre nvidia-cutlass-dsl
 
     SGLANG_NVFP4_CKPT_FP8_GEMM_IN_ATTN=1 \
@@ -161,12 +156,13 @@ elif [ "$mode" = "decode" ]; then
     SGLANG_DISAGGREGATION_WAITING_TIMEOUT=100000 \
     SGLANG_HACK_SEQ_BOOTSTRAP_ROOM=1 \
     SGLANG_MOONCAKE_CUSTOM_MEM_POOL=True \
-    SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=384 \
     SGLANG_CUTEDSL_MOE_NVFP4_DISPATCH=1 \
     SGLANG_FP4_GEMM_BACKEND=cutlass \
+    SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=384 \
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
     PYTHONUNBUFFERED=1 \
     python3 -m dynamo.sglang \
+        --disaggregation-transfer-backend nixl \
         --served-model-name deepseek-ai/DeepSeek-R1 \
         --model-path /model/ \
         --skip-tokenizer-init \
@@ -174,8 +170,8 @@ elif [ "$mode" = "decode" ]; then
         --disaggregation-mode decode \
         --host 0.0.0.0 \
         --decode-log-interval 1 \
-        --max-running-requests 67584 \
-        --context-length 2176 \
+        --max-running-requests 18432 \
+        --context-length 4224 \
         --disable-radix-cache \
         --disable-shared-experts-fusion \
         --watchdog-timeout 1000000 \
@@ -183,19 +179,19 @@ elif [ "$mode" = "decode" ]; then
         --attention-backend trtllm_mla \
         --kv-cache-dtype fp8_e4m3 \
         --enable-dp-attention \
-        --chunked-prefill-size 786432 \
+        --chunked-prefill-size 1572864 \
         --mem-fraction-static 0.83 \
         --moe-a2a-backend deepep \
         --deepep-mode low_latency \
         --ep-dispatch-algorithm static \
         --cuda-graph-bs 384 \
-        --num-reserved-decode-tokens 112 \
+        --num-reserved-decode-tokens 128 \
         --ep-num-redundant-experts 32 \
         --eplb-algorithm deepseek \
         --moe-dense-tp-size 1 \
         --enable-dp-lm-head \
         --prefill-round-robin-balance \
-        --max-total-tokens 3122380 \
+        --max-total-tokens 1703116 \
         --quantization modelopt_fp4 \
         --moe-runner-backend flashinfer_cutedsl \
         --dist-init-addr "$HOST_IP_MACHINE:$PORT" \
@@ -207,6 +203,6 @@ elif [ "$mode" = "decode" ]; then
         --dp-size "$TOTAL_GPUS" \
         --enable-single-batch-overlap \
         --enable-dp-attention \
-        --stream-interval 50 \
-        --mem-fraction-static 0.82 ${command_suffix}
+        --stream-interval 2 \
+        --mem-fraction-static 0.83 ${command_suffix}
 fi
