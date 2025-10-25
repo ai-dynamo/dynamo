@@ -18,7 +18,7 @@ MOUNTS="${MOUNTS:-${DEFAULT_MOUNT}}"
 NUM_NODES=${NUM_NODES:-4}
 NUM_GPUS_PER_NODE=${NUM_GPUS_PER_NODE:-4}
 
-export ENGINE_CONFIG="${ENGINE_CONFIG:-/mnt/recipes/deepseek-r1/trtllm/wide_ep/wide_ep_agg.yaml}"
+export ENGINE_CONFIG="${ENGINE_CONFIG:-/mnt/recipes/deepseek-r1/trtllm/agg/wide_ep/wide_ep_agg.yaml}"
 
 # Automate settings of certain variables for convenience, but you are free
 # to manually set these for more control as well.
