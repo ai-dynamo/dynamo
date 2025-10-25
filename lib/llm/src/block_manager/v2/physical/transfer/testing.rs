@@ -236,7 +236,7 @@ impl RoundTripTest {
     }
 }
 
-#[cfg(test)]
+#[cfg(test, features = "testing-cuda")]
 mod tests {
     use super::*;
     use crate::block_manager::v2::layout::{
@@ -253,7 +253,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Requires CUDA/NIXL setup"]
     async fn test_round_trip_host_to_host() {
         // Create three layouts: source, intermediate, destination
         let (src_layout, _src_mem) = create_test_layout(4);
@@ -287,7 +286,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Requires CUDA/NIXL setup"]
     async fn test_round_trip_different_block_ids() {
         // Create layouts with enough blocks
         let (src_layout, _src_mem) = create_test_layout(8);

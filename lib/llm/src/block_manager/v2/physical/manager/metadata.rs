@@ -129,7 +129,7 @@ impl std::fmt::Debug for SerializedLayout {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-nixl"))]
 mod tests {
     use super::*;
     use crate::block_manager::v2::memory::{MemoryDescriptor, StorageKind};

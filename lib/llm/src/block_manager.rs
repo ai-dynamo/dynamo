@@ -327,18 +327,6 @@ mod tests {
             .unwrap()
     }
 
-    pub async fn create_reference_block_manager_with_counts(
-        device: usize,
-        host: usize,
-        disk: usize,
-    ) -> ReferenceBlockManager {
-        ReferenceBlockManager::new(create_reference_block_manager_config_with_counts(
-            device, host, disk,
-        ))
-        .await
-        .unwrap()
-    }
-
     #[tokio::test]
     async fn test_reference_block_manager_inherited_async_runtime() {
         dynamo_runtime::logging::init();

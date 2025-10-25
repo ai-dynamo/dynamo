@@ -65,6 +65,7 @@ fn test_memory_descriptor() {
     assert_eq!(desc.size, 4096);
 }
 
+#[cfg(feature = "testing-cuda")]
 mod cuda_tests {
     use super::*;
 

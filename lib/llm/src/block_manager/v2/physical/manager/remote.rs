@@ -56,7 +56,7 @@ impl RemoteLayout {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-nixl"))]
 mod tests {
     use super::*;
     use crate::block_manager::v2::physical::layout::{
