@@ -132,7 +132,7 @@ def test_request_migration_vllm_worker_failure(
 
                 # Step 4: Use polling to determine which worker received the request
                 worker, worker_name = determine_request_receiving_worker(
-                    worker1, worker2
+                    worker1, worker2, receiving_pattern="Decode Request ID: "
                 )
 
                 # Step 5: Kill the worker that has the request
@@ -181,7 +181,7 @@ def test_request_migration_vllm_graceful_shutdown(
 
                 # Step 4: Use polling to determine which worker received the request
                 worker, worker_name = determine_request_receiving_worker(
-                    worker1, worker2
+                    worker1, worker2, receiving_pattern="Decode Request ID: "
                 )
 
                 # Step 5: Gracefully shutdown the worker that has the request
@@ -231,7 +231,7 @@ def test_no_request_migration_vllm_worker_failure(
 
                 # Step 4: Use polling to determine which worker received the request
                 worker, worker_name = determine_request_receiving_worker(
-                    worker1, worker2
+                    worker1, worker2, receiving_pattern="Decode Request ID: "
                 )
 
                 # Step 5: Kill the worker that has the request
@@ -295,7 +295,7 @@ def test_no_request_migration_vllm_graceful_shutdown(
 
                 # Step 4: Use polling to determine which worker received the request
                 worker, worker_name = determine_request_receiving_worker(
-                    worker1, worker2
+                    worker1, worker2, receiving_pattern="Decode Request ID: "
                 )
 
                 # Step 5: Gracefully shutdown the worker that has the request

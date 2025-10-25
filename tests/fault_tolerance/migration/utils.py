@@ -85,7 +85,7 @@ def start_completion_request() -> tuple:
 
 
 def determine_request_receiving_worker(
-    worker1: ManagedProcess, worker2: ManagedProcess
+    worker1: ManagedProcess, worker2: ManagedProcess, receiving_pattern: str
 ) -> tuple:
     """
     Determine which worker received the request using parallel polling.
@@ -93,6 +93,7 @@ def determine_request_receiving_worker(
     Args:
         worker1: First worker process
         worker2: Second worker process
+        receiving_pattern: Log pattern indicating request receipt
 
     Returns:
         Tuple of (worker_with_request, name_of_worker_with_request)
@@ -112,7 +113,7 @@ def determine_request_receiving_worker(
             try:
                 with open(worker.log_path, "r") as f:
                     log_content = f.read()
-                    if "New Request ID: " in log_content:
+                    if receiving_pattern in log_content:
                         result_list.append(True)
                         return
             except Exception as e:
