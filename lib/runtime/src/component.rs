@@ -609,7 +609,7 @@ impl Endpoint {
         if self.is_static {
             client::Client::new_static(self.clone()).await
         } else {
-            client::Client::new_dynamic(self.clone()).await
+            client::Client::new_dynamic_v2(self.clone()).await
         }
     }
 
