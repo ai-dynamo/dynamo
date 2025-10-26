@@ -58,12 +58,14 @@ profilingConfig:
 
 **What It Does:**
 1. **GPU Discovery**: Detects available GPUs and their specifications
-2. **TP Sweep**: Tests different tensor parallelism configurations (TP1, TP2, TP4, TP8, etc.)
-3. **Performance Measurement**:
-   - **Prefill**: Measures TTFT across different input lengths
-   - **Decode**: Measures ITL under various KV cache loads
-4. **Recommendation**: Selects optimal TP for prefill and decode that meets SLAs
-5. **Interpolation**: Generates performance models for SLA planner
+2. **Identify Sweep Ranges**: Automatically determine minimum and maximum number of GPUs per engine. Minimum is determined by the model size and GPU VRAM. Maximum is set to one node for dense model and 4 nodes for MoE models.
+3. **Parallelization Mapping Sweep**: Use the input ISL and OSL, test the performance of the engines with different parallelization mappings.  
+   - Dense models: Test different TP sizes for both prefill and decode. 
+   - MoE models: Test different TEP sizes for prefill and DEP sizes for decode.
+4. **Recommendation**: Selects optimal parallelization mapping for prefill and decode that achieves the highest per GPU throughput while adhering the SLA on TTFT and ITL.
+5. **In-Depth Profiling on Recommended P/D Engine**:  Generates performance models for SLA planner. 
+   - **Prefill**: Measures TTFT across different input lengths   
+   - **Decode**: Measures ITL under various KV cache loads and decode context lengths.
 
 ### Offline Profiling (AI Configurator)
 
