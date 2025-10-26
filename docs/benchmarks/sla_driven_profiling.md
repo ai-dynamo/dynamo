@@ -114,7 +114,7 @@ To check from the command line: `aiconfigurator cli --help`
 
 Profiling tests different parallelization configurations **sequentially**, not in parallel:
 
-- **One TP at a time**: TP1, then TP2, then TP4, etc.
+- **One parallelization mapping at a time**: Finish all tests for one engine before starting the next engine.
 - **Full GPU access**: Each configuration gets exclusive access to all GPUs
 - **Resource isolation**: No interference between tests
 - **Accurate measurements**: Consistent conditions for fair comparison
