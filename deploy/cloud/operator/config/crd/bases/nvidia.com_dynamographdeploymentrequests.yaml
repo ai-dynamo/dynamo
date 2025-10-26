@@ -131,11 +131,17 @@ spec:
                         If not specified, defaults to the DGDR namespace.
                       type: string
                   type: object
-                modelName:
+                model:
                   description: |-
-                    ModelName specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
+                    Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
                     This is a high-level identifier for easy reference in kubectl output and logs.
                     The controller automatically sets this value in profilingConfig.config.deployment.model.
+                  type: string
+                profilerImage:
+                  description: |-
+                    ProfilerImage specifies the container image to use for profiling jobs.
+                    This image contains the profiler code and dependencies needed for SLA-based profiling.
+                    Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
                   type: string
                 profilingConfig:
                   description: |-
@@ -170,7 +176,8 @@ spec:
                   type: object
               required:
                 - backend
-                - modelName
+                - model
+                - profilerImage
                 - profilingConfig
               type: object
             status:

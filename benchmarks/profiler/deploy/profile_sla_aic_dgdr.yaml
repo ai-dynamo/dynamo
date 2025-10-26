@@ -7,8 +7,9 @@ kind: DynamoGraphDeploymentRequest
 metadata:
   name: sla-aic
 spec:
-  modelName: Qwen/Qwen3-32B
+  model: Qwen/Qwen3-32B
   backend: trtllm
+  profilerImage: "nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-540.1"
 
   # ProfilingConfig maps directly to the profile_sla.py config format
   profilingConfig:

@@ -89,17 +89,23 @@ type DeploymentOverridesSpec struct {
 // This CRD serves as the primary interface for users to request model deployments with
 // specific performance constraints and resource requirements, enabling SLA-driven deployments.
 type DynamoGraphDeploymentRequestSpec struct {
-	// ModelName specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
+	// Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
 	// This is a high-level identifier for easy reference in kubectl output and logs.
 	// The controller automatically sets this value in profilingConfig.config.deployment.model.
 	// +kubebuilder:validation:Required
-	ModelName string `json:"modelName"`
+	Model string `json:"model"`
 
 	// Backend specifies the inference backend to use.
 	// The controller automatically sets this value in profilingConfig.config.engine.backend.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
 	Backend string `json:"backend"`
+
+	// ProfilerImage specifies the container image to use for profiling jobs.
+	// This image contains the profiler code and dependencies needed for SLA-based profiling.
+	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+	// +kubebuilder:validation:Required
+	ProfilerImage string `json:"profilerImage"`
 
 	// ProfilingConfig provides the complete configuration for the profiling job.
 	// This configuration is passed directly to the profiler.

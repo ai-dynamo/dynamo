@@ -8,8 +8,9 @@ kind: DynamoGraphDeploymentRequest
 metadata:
   name: sla-moe
 spec:
-  modelName: deepseek-ai/DeepSeek-R1
+  model: deepseek-ai/DeepSeek-R1
   backend: sglang
+  profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
 
   # ProfilingConfig maps directly to the profile_sla.py config format
   profilingConfig:

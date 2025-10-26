@@ -72,9 +72,8 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 	BeforeEach(func() {
 		recorder = record.NewFakeRecorder(100)
 		reconciler = &DynamoGraphDeploymentRequestReconciler{
-			Client:        k8sClient,
-			Recorder:      recorder,
-			ProfilerImage: "test-profiler:latest",
+			Client:   k8sClient,
+			Recorder: recorder,
 			Config: commonController.Config{
 				RestrictedNamespace: "",
 				RBAC: commonController.RBACConfig{
@@ -97,8 +96,9 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   "vllm",
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
@@ -155,8 +155,9 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   "vllm",
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"sla": map[string]interface{}{
@@ -224,8 +225,9 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   "vllm",
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
@@ -322,8 +324,9 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   "trtllm",
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "trtllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
@@ -396,8 +399,9 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   "vllm",
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
@@ -509,8 +513,9 @@ spec:
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   "vllm",
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
@@ -638,8 +643,9 @@ spec:
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   "vllm",
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
@@ -720,8 +726,9 @@ spec:
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   "vllm",
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
@@ -866,8 +873,9 @@ var _ = Describe("DGDR Validation", func() {
 			ctx := context.Background()
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   "vllm",
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
@@ -892,8 +900,9 @@ var _ = Describe("DGDR Validation", func() {
 			ctx := context.Background()
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   "vllm",
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"sla": map[string]interface{}{
@@ -917,9 +926,8 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 
 	BeforeEach(func() {
 		reconciler = &DynamoGraphDeploymentRequestReconciler{
-			Client:        k8sClient,
-			Recorder:      record.NewFakeRecorder(100),
-			ProfilerImage: "test-profiler:latest",
+			Client:   k8sClient,
+			Recorder: record.NewFakeRecorder(100),
 			Config: commonController.Config{
 				RestrictedNamespace: "",
 			},
@@ -949,8 +957,9 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   "trtllm",
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "trtllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
@@ -1024,8 +1033,9 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   "trtllm",
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "trtllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
@@ -1090,9 +1100,8 @@ var _ = Describe("DGDR Error Handling", func() {
 	BeforeEach(func() {
 		recorder = record.NewFakeRecorder(100)
 		reconciler = &DynamoGraphDeploymentRequestReconciler{
-			Client:        k8sClient,
-			Recorder:      recorder,
-			ProfilerImage: "test-profiler:latest",
+			Client:   k8sClient,
+			Recorder: recorder,
 			Config: commonController.Config{
 				RestrictedNamespace: "",
 			},
@@ -1112,8 +1121,9 @@ var _ = Describe("DGDR Error Handling", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ModelName: "test-model",
-					Backend:   "vllm",
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{

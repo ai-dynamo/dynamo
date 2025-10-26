@@ -144,10 +144,10 @@ const (
 	MessageConfigMapKeyNotFound      = "key %s not found in ConfigMap %s"
 
 	// Validation messages
-	ValidationErrorModelNameRequired = "modelName is required"
-	ValidationErrorITLPositive       = "sla.itl must be positive"
-	ValidationErrorTTFTPositive      = "sla.ttft must be positive"
-	ValidationErrorInvalidBackend    = "invalid backend: %s (must be vllm, sglang, or trtllm)"
+	ValidationErrorModelRequired  = "model is required"
+	ValidationErrorITLPositive    = "sla.itl must be positive"
+	ValidationErrorTTFTPositive   = "sla.ttft must be positive"
+	ValidationErrorInvalidBackend = "invalid backend: %s (must be vllm, sglang, or trtllm)"
 
 	// Valid backend values
 	BackendVLLM   = "vllm"
@@ -198,8 +198,6 @@ type DynamoGraphDeploymentRequestReconciler struct {
 	Recorder record.EventRecorder
 	Config   commonController.Config
 
-	// ProfilerImage is the container image to use for profiling jobs (both online and offline/AIC)
-	ProfilerImage string
 	// RBACMgr handles RBAC setup for profiling jobs
 	RBACManager RBACManager
 }
@@ -754,10 +752,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 		}
 	}
 	if deployment, ok := config["deployment"].(map[string]interface{}); ok {
-		if model, ok := deployment["model"].(string); ok && model != "" && model != dgdr.Spec.ModelName {
+		if model, ok := deployment["model"].(string); ok && model != "" && model != dgdr.Spec.Model {
 			logger := log.FromContext(ctx)
-			logger.Info("Warning: profilingConfig.config.deployment.model will be overwritten by spec.modelName",
-				"configModel", model, "specModelName", dgdr.Spec.ModelName)
+			logger.Info("Warning: profilingConfig.config.deployment.model will be overwritten by spec.model",
+				"configModel", model, "specModel", dgdr.Spec.Model)
 		}
 	}
 
@@ -808,8 +806,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			deploymentConfig["namespace"] = dgdr.Namespace
 		}
 
-		// Set deployment.model from spec.modelName
-		deploymentConfig["model"] = dgdr.Spec.ModelName
+		// Set deployment.model from spec.model
+		deploymentConfig["model"] = dgdr.Spec.Model
 
 		// Set output_dir if not already set
 		if _, hasOutputDir := config["output_dir"]; !hasOutputDir {
@@ -887,11 +885,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			"--profile-config", string(configYAML),
 		}
 
-		// Determine profiler image
-		imageName := r.ProfilerImage
-		if imageName == "" {
-			return nil, false, fmt.Errorf("profiler image not configured: configure dynamo-operator.dynamo.dgdr.profilerImage in Helm values")
-		}
+		// Use profiler image from DGDR spec
+		imageName := dgdr.Spec.ProfilerImage
 		logger.Info("Using profiler image", "image", imageName)
 
 		profilerContainer := corev1.Container{
