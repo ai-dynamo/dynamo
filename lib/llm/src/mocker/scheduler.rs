@@ -308,10 +308,7 @@ impl Scheduler {
                 try_schedule(&mut state, &kv_manager, &mut hit_rates, &args);
 
                 // 3. Simulate prefill + decode
-                // Base time needed for decoding using active percentage and quadratic formula
-                let active_perc = kv_manager.get_active_perc();
-                let decoding_time = -25.74 * active_perc.powi(2) + 54.01 * active_perc + 5.74;
-                let mut total_time = Duration::from_secs_f64(decoding_time / 1000.0);
+                let mut total_time = Duration::ZERO;
 
                 // Process prefilling
                 while let Some((prefill_compute, maybe_creation_signal, is_full_prefill)) =
@@ -335,6 +332,10 @@ impl Scheduler {
                         break;
                     }
                 }
+
+                let active_perc = kv_manager.get_active_perc();
+                let decoding_time = -25.74 * active_perc.powi(2) + 54.01 * active_perc + 5.74;
+                total_time += Duration::from_secs_f64(decoding_time / 1000.0);
 
                 state.reset_active_tokens();
 
