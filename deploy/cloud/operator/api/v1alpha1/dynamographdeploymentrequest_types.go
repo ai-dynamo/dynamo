@@ -107,6 +107,13 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +kubebuilder:validation:Required
 	ProfilerImage string `json:"profilerImage"`
 
+	// DgdImage specifies the container image to use for DynamoGraphDeployment components.
+	// This image is used for both temporary DGDs created during online profiling and the final DGD.
+	// If omitted, the image from the base config file (e.g., disagg.yaml) is used.
+	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+	// +kubebuilder:validation:Optional
+	DgdImage string `json:"dgdImage,omitempty"`
+
 	// ProfilingConfig provides the complete configuration for the profiling job.
 	// This configuration is passed directly to the profiler.
 	// The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).

@@ -121,6 +121,12 @@ def create_profiler_parser() -> argparse.Namespace:
         default=config.get("deployment", {}).get("model", ""),
         help="Model to serve, can be HF model name or local model path",
     )
+    parser.add_argument(
+        "--dgd-image",
+        type=str,
+        default=config.get("deployment", {}).get("dgd_image", ""),
+        help="Container image to use for DGD components (frontend, planner, workers). Overrides images in config file.",
+    )
 
     # CLI arguments with config-aware defaults (using nested .get() for cleaner code)
     parser.add_argument(

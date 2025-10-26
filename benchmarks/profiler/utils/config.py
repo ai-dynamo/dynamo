@@ -418,6 +418,10 @@ class ConfigModifierProtocol(Protocol):
     def update_model(cls, config: dict, model_name: str) -> dict:
         ...
 
+    @classmethod
+    def update_image(cls, config: dict, image: str) -> dict:
+        ...
+
 
 def generate_dgd_config_with_planner(
     config_path: str,
@@ -448,6 +452,15 @@ def generate_dgd_config_with_planner(
     # Load config from file
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
+
+    # Update model name in config from profiling args
+    # This ensures the final DGD uses the model specified in the DGDR, not the default in the config file
+    config = config_modifier.update_model(config, args.model)
+
+    # Update container image if provided
+    # This overrides the default image in the config file for all DGD components
+    if args.dgd_image:
+        config = config_modifier.update_image(config, args.dgd_image)
 
     if not is_moe_model:
         # dense model, use TP for both prefill and decode

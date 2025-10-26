@@ -131,6 +131,13 @@ spec:
                         If not specified, defaults to the DGDR namespace.
                       type: string
                   type: object
+                dgdImage:
+                  description: |-
+                    DgdImage specifies the container image to use for DynamoGraphDeployment components.
+                    This image is used for both temporary DGDs created during online profiling and the final DGD.
+                    If omitted, the image from the base config file (e.g., disagg.yaml) is used.
+                    Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+                  type: string
                 model:
                   description: |-
                     Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").

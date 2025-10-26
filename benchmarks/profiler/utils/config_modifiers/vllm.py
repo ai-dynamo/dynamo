@@ -70,6 +70,22 @@ class VllmV1ConfigModifier:
         return cfg.model_dump()
 
     @classmethod
+    def update_image(cls, config, image: str) -> dict:
+        """Update container image for all DGD services (frontend, planner, workers)."""
+        cfg = Config.model_validate(config)
+
+        # Update image for all services
+        for service_name, service_config in cfg.spec.services.items():
+            if (
+                service_config.extraPodSpec
+                and service_config.extraPodSpec.mainContainer
+            ):
+                service_config.extraPodSpec.mainContainer.image = image
+                logger.debug(f"Updated image for {service_name} to {image}")
+
+        return cfg.model_dump()
+
+    @classmethod
     def convert_config(
         cls,
         config: dict,

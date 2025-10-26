@@ -809,6 +809,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		// Set deployment.model from spec.model
 		deploymentConfig["model"] = dgdr.Spec.Model
 
+		// Set deployment.dgd_image from spec.dgdImage if provided
+		if dgdr.Spec.DgdImage != "" {
+			deploymentConfig["dgd_image"] = dgdr.Spec.DgdImage
+		}
+
 		// Set output_dir if not already set
 		if _, hasOutputDir := config["output_dir"]; !hasOutputDir {
 			config["output_dir"] = ProfilingOutputPath

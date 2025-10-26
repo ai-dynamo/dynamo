@@ -11,6 +11,7 @@ spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
   profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
+  dgdImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
 
   # ProfilingConfig maps directly to the profile_sla.py config format
   profilingConfig:
