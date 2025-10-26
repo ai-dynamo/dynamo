@@ -275,84 +275,39 @@ impl Scheduler {
                 dp_rank,
             );
             let mut hit_rates = RunningMean::new(1000);
-            let mut should_schedule = true;
 
             loop {
-                {
-                    // Enqueue new request, blocks until at least one is received, so no redundant work is done
-                    if state.is_empty() {
-                        let Some(request) = request_rx.recv().await else {
-                            tracing::warn!("request sender is dropped");
+                // 1. Receive requests
+                if state.is_empty() {
+                    // Fully idle - block until new request arrives
+                    tokio::select! {
+                        biased;
+                        Some(request) = request_rx.recv() => {
+                            state.receive(request);
+                        }
+                        _ = cancel_token_clone.cancelled() => {
                             break;
-                        };
-                        state.receive(request);
-                    }
-                }
-
-                tokio::select! {
-                    biased;
-
-                    // Enqueue new request
-                    Some(request) = request_rx.recv() => {
-                        state.receive(request);
-                    }
-
-                    // Try Scheduling Requests - runs on normal interval or after simulation
-                    _ = tokio::task::yield_now() => {
-                        // Skip if we just ran scheduling after simulation to prevent consecutive runs
-                        if !should_schedule {
-                            continue;
                         }
-
-                        // Process DirectRequests, converting them to ActiveSequence and scheduling them until we can't
-                        // schedule anymore.
-                        let mut current_blocks = kv_manager.num_active_blocks();
-                        let mut current_tokens = state.active_tokens + state.waiting_tokens;
-                        let mut current_seqs = state.num_active_requests();
-
-                        while let Some((uuid, request)) = state.next() {
-                            let active_sequence = get_active_sequence(request, args.block_size, args.enable_prefix_caching);
-
-                            // Update predictive budgets
-                            let prefill_cost = kv_manager.get_prefill_cost(&active_sequence);
-                            let total_tokens = active_sequence.len();
-                            // this is conservative, assumes no cache hit so never over-schedules
-                            let new_blocks = (total_tokens as u32).div_ceil(args.block_size as u32) as usize;
-                            let new_tokens = prefill_cost.new_tokens;
-
-                            current_blocks += new_blocks;
-                            current_tokens += new_tokens;
-                            current_seqs += 1;
-
-                            // Check various budgets to see if possible to schedule
-                            let under_block_budget = current_blocks as f64 <= (1. - args.watermark) * kv_manager.max_capacity() as f64;
-                            // If chunked prefill is enabled, we can be under token budget when scheduling
-                            let comparison_tokens = if args.enable_chunked_prefill {current_tokens - new_tokens} else {current_tokens};
-                            let under_token_budget = args.max_num_batched_tokens.is_none_or(|limit| comparison_tokens <= limit);
-                            let under_seq_budget = args.max_num_seqs.is_none_or(|limit| current_seqs <= limit);
-
-                            // Cannot schedule, put first in line instead
-                            if !(under_block_budget && under_token_budget && under_seq_budget) {
-                                state.first_in_line(uuid, Request::Active(active_sequence));
-                                break;
-                            }
-
-                            // Compute and store hit rate
-                            let hit_rate = if !active_sequence.is_empty() { 1.0 - (new_tokens as f32 / active_sequence.len() as f32) } else { 0.0 };
-                            hit_rates.push(hit_rate);
-
-                            state.move_to_prefill(uuid, active_sequence, prefill_cost);
-                            should_schedule = false;
-                        }
+                    }
+                } else {
+                    // Has active/waiting work - collect any pending requests without blocking
+                    while let Ok(request) = request_rx.try_recv() {
+                        state.receive(request);
                     }
 
                     // Check for cancellation
-                    _ = cancel_token_clone.cancelled() => {
+                    if cancel_token_clone.is_cancelled() {
                         break;
                     }
                 }
 
-                // Simulates prefill + decode
+                // Start timing for this forward pass (schedule + simulate)
+                let iteration_start = std::time::Instant::now();
+
+                // 2. Schedule waiting requests (once per iteration)
+                try_schedule(&mut state, &kv_manager, &mut hit_rates, &args);
+
+                // 3. Simulate prefill + decode
                 // Base time needed for decoding using active percentage and quadratic formula
                 let active_perc = kv_manager.get_active_perc();
                 let decoding_time = -25.74 * active_perc.powi(2) + 54.01 * active_perc + 5.74;
@@ -385,9 +340,6 @@ impl Scheduler {
 
                 // Process decoding
                 let uuids: Vec<Uuid> = state.decode.keys().cloned().collect();
-                if !uuids.is_empty() {
-                    should_schedule = true
-                };
                 for uuid in uuids {
                     let Some(sequence) = state.run(uuid) else {
                         continue;
@@ -438,11 +390,13 @@ impl Scheduler {
                     let _ = metrics_tx.send(metrics);
                 }
 
-                // Sleep once for the adjusted duration
-                let adjusted_time =
+                // 4. Sleep to maintain target iteration timing
+                let target_duration =
                     Duration::from_secs_f64(total_time.as_secs_f64() / args.speedup_ratio);
-                if adjusted_time.as_millis() > 0 {
-                    tokio::time::sleep(adjusted_time).await;
+                let elapsed = iteration_start.elapsed();
+
+                if elapsed < target_duration {
+                    tokio::time::sleep(target_duration - elapsed).await;
                 }
             }
         });
@@ -514,26 +468,75 @@ fn get_fwd_pass_metrics(
     }
 }
 
-/// Convert a Request to an ActiveSequence
-fn get_active_sequence(
-    request: Request,
-    block_size: usize,
-    enable_prefix_caching: bool,
-) -> ActiveSequence {
-    if let Request::Active(active_seq) = request {
-        return active_seq;
+/// Attempts to schedule waiting requests from the state queue.
+/// Returns the number of requests successfully scheduled.
+fn try_schedule(
+    state: &mut SchedulerState,
+    kv_manager: &KvManager,
+    hit_rates: &mut RunningMean<f32>,
+    args: &MockEngineArgs,
+) -> usize {
+    let mut scheduled_count = 0;
+    let mut current_blocks = kv_manager.num_active_blocks();
+    let mut current_tokens = state.active_tokens + state.waiting_tokens;
+    let mut current_seqs = state.num_active_requests();
+
+    while let Some((uuid, request)) = state.next() {
+        // Convert Request to ActiveSequence
+        let active_sequence = match request {
+            Request::Active(active_seq) => active_seq,
+            Request::Direct(direct_request) => ActiveSequence::new(
+                direct_request.tokens,
+                direct_request.max_output_tokens,
+                Some(args.block_size),
+                args.enable_prefix_caching,
+            ),
+        };
+
+        // Update predictive budgets
+        let prefill_cost = kv_manager.get_prefill_cost(&active_sequence);
+        let total_tokens = active_sequence.len();
+        // this is conservative, assumes no cache hit so never over-schedules
+        let new_blocks = (total_tokens as u32).div_ceil(args.block_size as u32) as usize;
+        let new_tokens = prefill_cost.new_tokens;
+
+        current_blocks += new_blocks;
+        current_tokens += new_tokens;
+        current_seqs += 1;
+
+        // Check various budgets to see if possible to schedule
+        let under_block_budget =
+            current_blocks as f64 <= (1. - args.watermark) * kv_manager.max_capacity() as f64;
+        // If chunked prefill is enabled, we can be under token budget when scheduling
+        let comparison_tokens = if args.enable_chunked_prefill {
+            current_tokens - new_tokens
+        } else {
+            current_tokens
+        };
+        let under_token_budget = args
+            .max_num_batched_tokens
+            .is_none_or(|limit| comparison_tokens <= limit);
+        let under_seq_budget = args.max_num_seqs.is_none_or(|limit| current_seqs <= limit);
+
+        // Cannot schedule, put first in line instead
+        if !(under_block_budget && under_token_budget && under_seq_budget) {
+            state.first_in_line(uuid, Request::Active(active_sequence));
+            break;
+        }
+
+        // Compute and store hit rate
+        let hit_rate = if !active_sequence.is_empty() {
+            1.0 - (new_tokens as f32 / active_sequence.len() as f32)
+        } else {
+            0.0
+        };
+        hit_rates.push(hit_rate);
+
+        state.move_to_prefill(uuid, active_sequence, prefill_cost);
+        scheduled_count += 1;
     }
 
-    let Request::Direct(direct_request) = request else {
-        unreachable!("Request must be either Direct or Active");
-    };
-
-    ActiveSequence::new(
-        direct_request.tokens,
-        direct_request.max_output_tokens,
-        Some(block_size),
-        enable_prefix_caching,
-    )
+    scheduled_count
 }
 
 /// Processes MoveBlock signals with the KvManager.
