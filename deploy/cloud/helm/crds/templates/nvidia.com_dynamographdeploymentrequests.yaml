@@ -33,7 +33,7 @@ spec:
   scope: Namespaced
   versions:
     - additionalPrinterColumns:
-        - jsonPath: .spec.modelName
+        - jsonPath: .spec.model
           name: Model
           type: string
         - jsonPath: .status.backend
