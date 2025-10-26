@@ -245,7 +245,7 @@ impl Scheduler {
         args: MockEngineArgs,
         dp_rank: u32,
         output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
-        _component: Option<dynamo_runtime::component::Component>,
+        component: Option<dynamo_runtime::component::Component>,
         cancellation_token: Option<CancellationToken>,
     ) -> Self {
         // Assert speedup_ratio is greater than 0
@@ -268,7 +268,12 @@ impl Scheduler {
         tokio::spawn(async move {
             // Create state and kv_manager as local variables owned by this task
             let mut state = SchedulerState::new(args.max_num_batched_tokens);
-            let mut kv_manager = KvManager::new(args.num_gpu_blocks, args.block_size);
+            let mut kv_manager = KvManager::new_with_publisher(
+                args.num_gpu_blocks,
+                args.block_size,
+                component,
+                dp_rank,
+            );
             let mut hit_rates = RunningMean::new(1000);
             let mut should_schedule = true;
 
