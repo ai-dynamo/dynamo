@@ -32,6 +32,8 @@ use axum::response::sse::Event;
 use dynamo_runtime::engine::AsyncEngineContext;
 use futures::{Stream, StreamExt};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tracing::{debug, info, warn};
 
 use crate::http::service::metrics::{InflightGuard, Metrics};
 
@@ -129,14 +131,78 @@ async fn connection_monitor(
     stream_rx: tokio::sync::oneshot::Receiver<ConnectionStatus>,
     metrics: Option<Arc<Metrics>>,
 ) {
+    // Per-request cancellation state - ensures cancel path runs only once per request
+    let mut cancel_handled = false;
+    
+    async fn handle_client_cancellation(
+        cancel_handled: &mut bool,
+        engine_context: &Arc<dyn AsyncEngineContext>,
+        metrics: &Option<Arc<Metrics>>,
+        cancel_reason: &str,
+    ) {
+        // Guard idempotency so cancel handler runs once per request
+        if *cancel_handled {
+            debug!("Cancellation already handled for request {}", engine_context.id());
+            return;
+        }
+        *cancel_handled = true;
+
+        tracing::trace!("{} closed unexpectedly; issuing cancellation", cancel_reason);
+        if let Some(metrics) = metrics {
+            metrics.inc_client_disconnect();
+        }
+
+        // Check if this is SGLang backend that requires two-phase cancellation
+        if is_sglang_backend(engine_context) {
+            info!("sglang_cancel_sent: Starting SGLang two-phase cancellation for request {}", engine_context.id());
+            
+            // Phase 1: Best-effort send_cancel() to SGLang adapter
+            // The stop_generating() call notifies SGLang to begin cleanup
+            engine_context.stop_generating();
+            
+            // Phase 2: Wait for terminal or timeout with tokio::select! and pinned sleep
+            let grace_duration = cancel_grace_duration();
+            let deadline = tokio::time::sleep(grace_duration);
+            tokio::pin!(deadline);
+            
+            let start_time = Instant::now();
+            
+            tokio::select! {
+                // Wait for context to report stopped (terminal condition from SGLang)
+                _ = engine_context.stopped() => {
+                    let handshake_ms = start_time.elapsed().as_millis() as u64;
+                    info!("sglang_cancel_ack: SGLang graceful termination completed in {}ms for request {}", 
+                         handshake_ms, engine_context.id());
+                    
+                    // TODO: Record metrics when repo's metrics system is available
+                    // metrics.record_histogram("cancel.sglang.handshake_ms", handshake_ms);
+                    // metrics.inc_counter("cancel.sglang.sent");
+                    
+                    // Context already stopped gracefully, no need to kill
+                }
+                // Timeout after grace period
+                _ = &mut deadline => {
+                    let timeout_ms = grace_duration.as_millis() as u64;
+                    warn!("cancel_grace_timeout: SGLang cancellation timed out after {}ms for request {}", 
+                         timeout_ms, engine_context.id());
+                    
+                    // TODO: Record metrics when repo's metrics system is available  
+                    // metrics.inc_counter("cancel.sglang.timeout");
+                    
+                    // Force kill after timeout
+                    engine_context.kill();
+                }
+            }
+        } else {
+            // Keep existing immediate drop path for non-SGLang backends (vLLM, TensorRT-LLM, etc.)
+            debug!("Using immediate cancellation for non-SGLang backend");
+            engine_context.kill();
+        }
+    }
+
     match connection_rx.await {
         Err(_) | Ok(ConnectionStatus::ClosedUnexpectedly) => {
-            // the client has disconnected, no need to gracefully cancel, just kill the context
-            tracing::trace!("Connection closed unexpectedly; issuing cancellation");
-            if let Some(metrics) = &metrics {
-                metrics.inc_client_disconnect();
-            }
-            engine_context.kill();
+            handle_client_cancellation(&mut cancel_handled, &engine_context, &metrics, "Connection").await;
         }
         Ok(ConnectionStatus::ClosedGracefully) => {
             tracing::trace!("Connection closed gracefully");
@@ -146,11 +212,7 @@ async fn connection_monitor(
 
     match stream_rx.await {
         Err(_) | Ok(ConnectionStatus::ClosedUnexpectedly) => {
-            tracing::trace!("Stream closed unexpectedly; issuing cancellation");
-            if let Some(metrics) = &metrics {
-                metrics.inc_client_disconnect();
-            }
-            engine_context.kill();
+            handle_client_cancellation(&mut cancel_handled, &engine_context, &metrics, "Stream").await;
         }
         Ok(ConnectionStatus::ClosedGracefully) => {
             tracing::trace!("Stream closed gracefully");
@@ -202,4 +264,29 @@ pub fn monitor_for_disconnects(
             }
         }
     }
+}
+
+/// Configuration helper for SGLang cancellation grace period.
+/// 
+/// This function provides a configurable grace period for SGLang backend cancellation
+/// to prevent race conditions between Rust runtime and SGLang cleanup processes.
+/// 
+/// The grace period can be configured via the `CANCEL_GRACE_MS` environment variable.
+/// Default is 300ms as recommended by project leaders.
+fn cancel_grace_ms() -> u64 {
+    std::env::var("CANCEL_GRACE_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300)
+}
+
+/// Returns the cancel grace period as a Duration for use with tokio::time operations
+fn cancel_grace_duration() -> Duration {
+    Duration::from_millis(cancel_grace_ms())
+}
+
+/// Detect if this is an SGLang backend by examining the engine context.
+/// Uses standardized ID prefix pattern following the existing engine type system.
+fn is_sglang_backend(engine_context: &Arc<dyn AsyncEngineContext>) -> bool {
+    engine_context.id().starts_with("sglang:")
 }
