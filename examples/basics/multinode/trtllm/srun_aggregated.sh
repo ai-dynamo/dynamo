@@ -10,7 +10,7 @@ IMAGE="${IMAGE:-""}"
 # but you may freely customize the mounts based on your cluster. A common practice
 # is to mount paths to NFS storage for common scripts, model weights, etc.
 # NOTE: This can be a comma separated list of multiple mounts as well.
-DEFAULT_MOUNT="${PWD}/../:/mnt"
+DEFAULT_MOUNT="${PWD}/../../../../:/mnt"
 MOUNTS="${MOUNTS:-${DEFAULT_MOUNT}}"
 
 # Example values, assuming 4 nodes with 4 GPUs on each node, such as 4xGB200 nodes.
@@ -18,7 +18,7 @@ MOUNTS="${MOUNTS:-${DEFAULT_MOUNT}}"
 NUM_NODES=${NUM_NODES:-4}
 NUM_GPUS_PER_NODE=${NUM_GPUS_PER_NODE:-4}
 
-export ENGINE_CONFIG="${ENGINE_CONFIG:-/mnt/engine_configs/deepseek_r1/wide_ep/wide_ep_agg.yaml}"
+export ENGINE_CONFIG="${ENGINE_CONFIG:-/mnt/recipes/deepseek-r1/trtllm/wide_ep/wide_ep_agg.yaml}"
 
 # Automate settings of certain variables for convenience, but you are free
 # to manually set these for more control as well.
@@ -51,7 +51,7 @@ srun \
   --nodelist "${HEAD_NODE}" \
   --nodes 1 \
   --jobid "${SLURM_JOB_ID}" \
-  /mnt/multinode/start_frontend_services.sh &
+  /mnt/examples/basics/multinode/trtllm/start_frontend_services.sh &
 
 # NOTE: Output streamed to stdout for ease of understanding the example, but
 # in practice you would probably set `srun --output ... --error ...` to pipe
@@ -71,4 +71,4 @@ srun \
   --nodes "${NUM_NODES}" \
   --ntasks-per-node "${NUM_GPUS_PER_NODE}" \
   --jobid "${SLURM_JOB_ID}" \
-  /mnt/multinode/start_trtllm_worker.sh &
+  /mnt/examples/basics/multinode/trtllm/start_trtllm_worker.sh &

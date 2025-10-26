@@ -10,18 +10,18 @@ IMAGE="${IMAGE:-""}"
 # but you may freely customize the mounts based on your cluster. A common practice
 # is to mount paths to NFS storage for common scripts, model weights, etc.
 # NOTE: This can be a comma separated list of multiple mounts as well.
-DEFAULT_MOUNT="${PWD}/../:/mnt"
+DEFAULT_MOUNT="${PWD}/../../../../:/mnt"
 MOUNTS="${MOUNTS:-${DEFAULT_MOUNT}}"
 
 NUM_GPUS_PER_NODE=${NUM_GPUS_PER_NODE:-4}
 
 NUM_PREFILL_NODES=${NUM_PREFILL_NODES:-4}
 NUM_PREFILL_WORKERS=${NUM_PREFILL_WORKERS:-1}
-PREFILL_ENGINE_CONFIG="${PREFILL_ENGINE_CONFIG:-/mnt/engine_configs/deepseek_r1/wide_ep/wide_ep_prefill.yaml}"
+PREFILL_ENGINE_CONFIG="${PREFILL_ENGINE_CONFIG:-/mnt/recipes/deepseek-r1/trtllm/wide_ep/wide_ep_prefill.yaml}"
 
 NUM_DECODE_NODES=${NUM_DECODE_NODES:-4}
 NUM_DECODE_WORKERS=${NUM_DECODE_WORKERS:-1}
-DECODE_ENGINE_CONFIG="${DECODE_ENGINE_CONFIG:-/mnt/engine_configs/deepseek_r1/wide_ep/wide_ep_decode.yaml}"
+DECODE_ENGINE_CONFIG="${DECODE_ENGINE_CONFIG:-/mnt/recipes/deepseek-r1/trtllm/wide_ep/wide_ep_decode.yaml}"
 
 DISAGGREGATION_STRATEGY=${DISAGGREGATION_STRATEGY:-"decode_first"}
 
@@ -56,7 +56,7 @@ srun \
   --nodelist "${HEAD_NODE}" \
   --nodes 1 \
   --jobid "${SLURM_JOB_ID}" \
-  /mnt/multinode/start_frontend_services.sh &
+  /mnt/examples/basics/multinode/trtllm/start_frontend_services.sh &
 
 # NOTE: Output streamed to stdout for ease of understanding the example, but
 # in practice you would probably set `srun --output ... --error ...` to pipe
@@ -78,7 +78,7 @@ for ((i=1; i<=${NUM_PREFILL_WORKERS}; i++)); do
     --nodes "${NUM_PREFILL_NODES}" \
     --ntasks-per-node "${NUM_GPUS_PER_NODE}" \
     --jobid "${SLURM_JOB_ID}" \
-    /mnt/multinode/start_trtllm_worker.sh &
+    /mnt/examples/basics/multinode/trtllm/start_trtllm_worker.sh &
 done
 
 for ((i=1; i<=${NUM_DECODE_WORKERS}; i++)); do
@@ -98,5 +98,5 @@ for ((i=1; i<=${NUM_DECODE_WORKERS}; i++)); do
     --nodes "${NUM_DECODE_NODES}" \
     --ntasks-per-node "${NUM_GPUS_PER_NODE}" \
     --jobid "${SLURM_JOB_ID}" \
-    /mnt/multinode/start_trtllm_worker.sh &
+    /mnt/examples/basics/multinode/trtllm/start_trtllm_worker.sh &
 done

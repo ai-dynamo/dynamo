@@ -7,7 +7,11 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from tests.serve.common import params_with_model_mark, run_serve_deployment
+from tests.serve.common import (
+    WORKSPACE_DIR,
+    params_with_model_mark,
+    run_serve_deployment,
+)
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
     chat_payload,
@@ -26,7 +30,9 @@ class VLLMConfig(EngineConfig):
     stragglers: list[str] = field(default_factory=lambda: ["VLLM:EngineCore"])
 
 
-vllm_dir = os.environ.get("VLLM_DIR", "/workspace/components/backends/vllm")
+vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
+    WORKSPACE_DIR, "components", "backends", "vllm"
+)
 
 # vLLM test configurations
 vllm_configs = {
@@ -100,7 +106,7 @@ vllm_configs = {
     ),
     "multimodal_agg_llava": VLLMConfig(
         name="multimodal_agg_llava",
-        directory="/workspace/examples/multimodal",
+        directory=os.path.join(WORKSPACE_DIR, "examples", "multimodal"),
         script_name="agg.sh",
         marks=[pytest.mark.gpu_2],
         model="llava-hf/llava-1.5-7b-hf",
@@ -124,7 +130,7 @@ vllm_configs = {
     ),
     "multimodal_agg_qwen": VLLMConfig(
         name="multimodal_agg_qwen",
-        directory="/workspace/examples/multimodal",
+        directory=os.path.join(WORKSPACE_DIR, "examples", "multimodal"),
         script_name="agg.sh",
         marks=[pytest.mark.gpu_2],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
@@ -149,7 +155,7 @@ vllm_configs = {
     ),
     "multimodal_video_agg": VLLMConfig(
         name="multimodal_video_agg",
-        directory="/workspace/examples/multimodal",
+        directory=os.path.join(WORKSPACE_DIR, "examples", "multimodal"),
         script_name="video_agg.sh",
         marks=[pytest.mark.gpu_2],
         model="llava-hf/LLaVA-NeXT-Video-7B-hf",

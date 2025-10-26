@@ -3,7 +3,7 @@
 This directory contains configuration for visualizing metrics from the metrics aggregation service using Prometheus and Grafana.
 
 > [!NOTE]
-> For detailed information about Dynamo's metrics system, including hierarchical metrics, automatic labeling, and usage examples, see the [Metrics Guide](../../docs/observability/metrics.md).
+> For detailed information about Dynamo's metrics system, including hierarchical metrics, automatic labeling, and usage examples, see the [Metrics Guide](./metrics.md).
 
 ## Overview
 
@@ -165,14 +165,14 @@ $ python -m dynamo.vllm --model Qwen/Qwen3-0.6B  \
 
 ### Required Files
 
-The following configuration files should be present in this directory:
-- [docker-compose.yml](../docker-compose.yml): Defines the Prometheus and Grafana services
-- [prometheus.yml](./prometheus.yml): Contains Prometheus scraping configuration
-- [grafana-datasources.yml](./grafana-datasources.yml): Contains Grafana datasource configuration
-- [grafana_dashboards/grafana-dashboard-providers.yml](./grafana_dashboards/grafana-dashboard-providers.yml): Contains Grafana dashboard provider configuration
-- [grafana_dashboards/grafana-dynamo-dashboard.json](./grafana_dashboards/grafana-dynamo-dashboard.json): A general Dynamo Dashboard for both SW and HW metrics.
-- [grafana_dashboards/grafana-dcgm-metrics.json](./grafana_dashboards/grafana-dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
-- [grafana_dashboards/grafana-kvbm-dashboard.json](./grafana_dashboards/grafana-kvbm-dashboard.json): Contains Grafana dashboard configuration for KVBM metrics
+The following configuration files are located in the `deploy/metrics/` directory:
+- [docker-compose.yml](../../deploy/docker-compose.yml): Defines the Prometheus and Grafana services
+- [prometheus.yml](../../deploy/metrics/prometheus.yml): Contains Prometheus scraping configuration
+- [grafana-datasources.yml](../../deploy/metrics/grafana-datasources.yml): Contains Grafana datasource configuration
+- [grafana_dashboards/grafana-dashboard-providers.yml](../../deploy/metrics/grafana_dashboards/grafana-dashboard-providers.yml): Contains Grafana dashboard provider configuration
+- [grafana_dashboards/grafana-dynamo-dashboard.json](../../deploy/metrics/grafana_dashboards/grafana-dynamo-dashboard.json): A general Dynamo Dashboard for both SW and HW metrics.
+- [grafana_dashboards/grafana-dcgm-metrics.json](../../deploy/metrics/grafana_dashboards/grafana-dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
+- [grafana_dashboards/grafana-kvbm-dashboard.json](../../deploy/metrics/grafana_dashboards/grafana-kvbm-dashboard.json): Contains Grafana dashboard configuration for KVBM metrics
 
 ### Metric Name Constants
 
@@ -241,7 +241,7 @@ This centralized approach ensures all Dynamo components use consistent, valid Pr
 
 #### Prometheus
 
-The Prometheus configuration is specified in [prometheus.yml](./prometheus.yml). This file is set up to collect metrics from the metrics aggregation service endpoint.
+The Prometheus configuration is specified in [prometheus.yml](../../deploy/metrics/prometheus.yml). This file is set up to collect metrics from the metrics aggregation service endpoint.
 
 Please be aware that you might need to modify the target settings to align with your specific host configuration and network environment.
 
@@ -288,13 +288,13 @@ let component = namespace.component("my_component")?;
 let endpoint = component.endpoint("my_endpoint")?;
 
 // Create endpoint-level counters (this is a Prometheus Counter type)
-let requests_total = endpoint.create_counter(
+let requests_total = endpoint.metrics().create_counter(
     "requests_total",
     "Total requests across all namespaces",
     &[]
 )?;
 
-let active_connections = endpoint.create_gauge(
+let active_connections = endpoint.metrics().create_gauge(
     "active_connections",
     "Number of active client connections",
     &[]
@@ -307,17 +307,17 @@ let active_connections = endpoint.create_gauge(
 let namespace = runtime.namespace("my_model")?;
 
 // Namespace-scoped metrics
-let model_requests = namespace.create_counter(
+let model_requests = namespace.metrics().create_counter(
     "model_requests",
     "Requests for this specific model",
     &[]
 )?;
 
-let model_latency = namespace.create_histogram(
+let model_latency = namespace.metrics().create_histogram(
     "model_latency_seconds",
     "Model inference latency",
     &[],
-    &[0.001, 0.01, 0.1, 1.0, 10.0]
+    Some(vec![0.001, 0.01, 0.1, 1.0, 10.0])
 )?;
 ```
 
@@ -327,13 +327,13 @@ let model_latency = namespace.create_histogram(
 let component = namespace.component("backend")?;
 
 // Component-specific metrics
-let backend_requests = component.create_counter(
+let backend_requests = component.metrics().create_counter(
     "backend_requests",
     "Requests handled by this backend component",
     &[]
 )?;
 
-let gpu_memory_usage = component.create_gauge(
+let gpu_memory_usage = component.metrics().create_gauge(
     "gpu_memory_bytes",
     "GPU memory usage in bytes",
     &[]
@@ -346,17 +346,17 @@ let gpu_memory_usage = component.create_gauge(
 let endpoint = component.endpoint("generate")?;
 
 // Endpoint-specific metrics
-let generate_requests = endpoint.create_counter(
+let generate_requests = endpoint.metrics().create_counter(
     "generate_requests",
     "Generate endpoint requests",
     &[]
 )?;
 
-let generate_latency = endpoint.create_histogram(
+let generate_latency = endpoint.metrics().create_histogram(
     "generate_latency_seconds",
     "Generate endpoint latency",
     &[],
-    &[0.001, 0.01, 0.1, 1.0, 10.0]
+    Some(vec![0.001, 0.01, 0.1, 1.0, 10.0])
 )?;
 ```
 
@@ -366,10 +366,11 @@ Use vector metrics when you need to track metrics with different label values:
 
 ```rust
 // Counter with labels
-let requests_by_model = endpoint.create_counter_vec(
+let requests_by_model = endpoint.metrics().create_countervec(
     "requests_by_model",
     "Requests by model type",
-    &["model_type", "model_size"]
+    &["model_type", "model_size"],
+    &[]  // no constant labels
 )?;
 
 // Increment with specific labels
@@ -377,10 +378,11 @@ requests_by_model.with_label_values(&["llama", "7b"]).inc();
 requests_by_model.with_label_values(&["gpt", "13b"]).inc();
 
 // Gauge with labels
-let memory_by_gpu = component.create_gauge_vec(
+let memory_by_gpu = component.metrics().create_gaugevec(
     "gpu_memory_bytes",
     "GPU memory usage by device",
-    &["gpu_id", "memory_type"]
+    &["gpu_id", "memory_type"],
+    &[]  // no constant labels
 )?;
 
 memory_by_gpu.with_label_values(&["0", "allocated"]).set(8192.0);
@@ -392,11 +394,11 @@ memory_by_gpu.with_label_values(&["0", "cached"]).set(4096.0);
 Histograms are useful for measuring distributions of values like latency:
 
 ```rust
-let latency_histogram = endpoint.create_histogram(
+let latency_histogram = endpoint.metrics().create_histogram(
     "request_latency_seconds",
     "Request latency distribution",
     &[],
-    &[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0]
+    Some(vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0])
 )?;
 
 // Record latency values
@@ -429,7 +431,7 @@ counter.inc();
 #### After (Dynamo MetricsRegistry)
 
 ```rust
-let counter = endpoint.create_counter(
+let counter = endpoint.metrics().create_counter(
     "my_counter",
     "My custom counter",
     &[]
@@ -438,10 +440,10 @@ let counter = endpoint.create_counter(
 counter.inc();
 ```
 
-**Note:** The metric is automatically registered when created via the endpoint's `create_counter` factory method.
+**Note:** The metric is automatically registered when created via the endpoint's `metrics().create_counter()` factory method.
 
 **Benefits of Dynamo's approach:**
-- **Automatic registration**: Metrics created via endpoint's `create_*` factory methods are automatically registered with the system
+- **Automatic registration**: Metrics created via endpoint's `metrics().create_*()` factory methods are automatically registered with the system
 - Automatic labeling with namespace, component, and endpoint information
 - Consistent metric naming with `dynamo_` prefix
 - Built-in HTTP metrics endpoint when enabled with `DYN_SYSTEM_ENABLED=true`
@@ -454,11 +456,11 @@ counter.inc();
 ```rust
 // Define custom buckets for your use case
 let custom_buckets = vec![0.001, 0.01, 0.1, 1.0, 10.0];
-let latency = endpoint.create_histogram(
+let latency = endpoint.metrics().create_histogram(
     "api_latency_seconds",
     "API latency in seconds",
     &[],
-    &custom_buckets
+    Some(custom_buckets)
 )?;
 ```
 
@@ -466,7 +468,7 @@ let latency = endpoint.create_histogram(
 
 ```rust
 // Aggregate metrics across multiple endpoints
-let requests_total = namespace.create_counter(
+let requests_total = namespace.metrics().create_counter(
     "requests_total",
     "Total requests across all endpoints",
     &[]

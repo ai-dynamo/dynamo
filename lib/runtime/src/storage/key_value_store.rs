@@ -62,6 +62,24 @@ impl From<&Key> for String {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeyValue {
+    key: String,
+    value: bytes::Bytes,
+}
+
+impl KeyValue {
+    pub fn new(key: String, value: bytes::Bytes) -> Self {
+        KeyValue { key, value }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum WatchEvent {
+    Put(KeyValue),
+    Delete(KeyValue),
+}
+
 #[async_trait]
 pub trait KeyValueStore: Send + Sync {
     type Bucket: KeyValueBucket + Send + Sync + 'static;
@@ -196,14 +214,14 @@ impl KeyValueStoreManager {
     /// Returns a receiver that will receive all the existing keys, and
     /// then block and receive new keys as they are created.
     /// Starts a task that runs forever, watches the store.
-    pub fn watch<T: for<'a> Deserialize<'a> + Send + 'static>(
+    pub fn watch(
         self: Arc<Self>,
         bucket_name: &str,
         bucket_ttl: Option<Duration>,
         cancel_token: CancellationToken,
     ) -> (
         tokio::task::JoinHandle<Result<(), StoreError>>,
-        tokio::sync::mpsc::UnboundedReceiver<T>,
+        tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
     ) {
         let bucket_name = bucket_name.to_string();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -216,22 +234,20 @@ impl KeyValueStoreManager {
             let mut stream = bucket.watch().await?;
 
             // Send all the existing keys
-            for (_, card_bytes) in bucket.entries().await? {
-                let card: T = serde_json::from_slice(card_bytes.as_ref())?;
-                let _ = tx.send(card);
+            for (key, bytes) in bucket.entries().await? {
+                let _ = tx.send(WatchEvent::Put(KeyValue::new(key, bytes)));
             }
 
             // Now block waiting for new entries
             loop {
-                let card_bytes = tokio::select! {
+                let event = tokio::select! {
                     _ = cancel_token.cancelled() => break,
                     result = stream.next() => match result {
-                        Some(bytes) => bytes,
+                        Some(event) => event,
                         None => break,
                     }
                 };
-                let card: T = serde_json::from_slice(card_bytes.as_ref())?;
-                let _ = tx.send(card);
+                let _ = tx.send(event);
             }
 
             Ok::<(), StoreError>(())
@@ -284,7 +300,7 @@ pub trait KeyValueBucket: Send + Sync {
     /// such time.
     async fn watch(
         &self,
-    ) -> Result<Pin<Box<dyn futures::Stream<Item = bytes::Bytes> + Send + '_>>, StoreError>;
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + '_>>, StoreError>;
 
     async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StoreError>;
 }
@@ -353,14 +369,14 @@ mod tests {
     /// clients can listen to.
     #[allow(dead_code)]
     pub struct TappableStream {
-        tx: tokio::sync::broadcast::Sender<bytes::Bytes>,
+        tx: tokio::sync::broadcast::Sender<WatchEvent>,
     }
 
     #[allow(dead_code)]
     impl TappableStream {
         async fn new<T>(stream: T, max_size: usize) -> Self
         where
-            T: futures::Stream<Item = bytes::Bytes> + Send + 'static,
+            T: futures::Stream<Item = WatchEvent> + Send + 'static,
         {
             let (tx, _) = tokio::sync::broadcast::channel(max_size);
             let tx2 = tx.clone();
@@ -373,7 +389,7 @@ mod tests {
             TappableStream { tx }
         }
 
-        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<bytes::Bytes> {
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<WatchEvent> {
             self.tx.subscribe()
         }
     }
@@ -393,6 +409,15 @@ mod tests {
         let res = bucket.insert(&"test1".into(), "value1", 0).await?;
         assert_eq!(res, StoreOutcome::Created(0));
 
+        let mut expected = Vec::with_capacity(3);
+        for i in 1..=3 {
+            let item = WatchEvent::Put(KeyValue::new(
+                format!("test{i}"),
+                bytes::Bytes::from(format!("value{i}").into_bytes()),
+            ));
+            expected.push(item);
+        }
+
         let (got_first_tx, got_first_rx) = tokio::sync::oneshot::channel();
         let ingress = tokio::spawn(async move {
             let b2 = s2.get_or_create_bucket(BUCKET_NAME, None).await?;
@@ -400,15 +425,16 @@ mod tests {
 
             // Put in before starting the watch-all
             let v = stream.next().await.unwrap();
-            assert_eq!(v, "value1".as_bytes());
+            assert_eq!(v, expected[0]);
 
             got_first_tx.send(()).unwrap();
 
             // Put in after
             let v = stream.next().await.unwrap();
-            assert_eq!(v, "value2".as_bytes());
+            assert_eq!(v, expected[1]);
+
             let v = stream.next().await.unwrap();
-            assert_eq!(v, "value3".as_bytes());
+            assert_eq!(v, expected[2]);
 
             Ok::<_, StoreError>(())
         });
@@ -455,13 +481,18 @@ mod tests {
         let mut rx1 = tap.subscribe();
         let mut rx2 = tap.subscribe();
 
+        let item = WatchEvent::Put(KeyValue::new(
+            "test1".to_string(),
+            bytes::Bytes::from(b"GK".as_slice()),
+        ));
+        let item_clone = item.clone();
         let handle1 = tokio::spawn(async move {
             let b = rx1.recv().await.unwrap();
-            assert_eq!(b, bytes::Bytes::from(vec![b'G', b'K']));
+            assert_eq!(b, item_clone);
         });
         let handle2 = tokio::spawn(async move {
             let b = rx2.recv().await.unwrap();
-            assert_eq!(b, bytes::Bytes::from(vec![b'G', b'K']));
+            assert_eq!(b, item);
         });
 
         bucket.insert(&"test1".into(), "GK", 1).await?;

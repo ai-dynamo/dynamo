@@ -19,6 +19,7 @@ from tests.utils.payload_builder import (
     completion_payload_default,
     embedding_payload,
     embedding_payload_default,
+    metric_payload_default,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,17 +36,19 @@ sglang_dir = os.environ.get("SGLANG_DIR", "/workspace/components/backends/sglang
 
 sglang_configs = {
     "aggregated": SGLangConfig(
+        # Uses backend agg.sh (with metrics enabled) for testing standard
+        # aggregated deployment with metrics collection
         name="aggregated",
-        directory=SERVE_TEST_DIR,
-        script_name="sglang_agg.sh",
+        directory=sglang_dir,
+        script_name="agg.sh",
         marks=[pytest.mark.gpu_1],
-        model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+        model="Qwen/Qwen3-0.6B",
         env={},
         models_port=8000,
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
-            # TODO: Add metric_payload_default(min_num_requests=N, backend="sglang")
+            metric_payload_default(min_num_requests=6, backend="sglang"),
         ],
     ),
     "disaggregated": SGLangConfig(
@@ -83,8 +86,10 @@ sglang_configs = {
         # marker 'CUSTOM_TEMPLATE_ACTIVE|' is applied to user messages.
         # The backend (launch/template_verifier.*) checks for this marker
         # and returns "Successfully Applied Chat Template" if found.
+        # Uses SERVE_TEST_DIR (not sglang_dir) because template_verifier.sh/.py
+        # are test-specific mock scripts in tests/serve/launch/
         name="template_verification",
-        directory=SERVE_TEST_DIR,
+        directory=SERVE_TEST_DIR,  # special directory for test-specific scripts
         script_name="template_verifier.sh",
         marks=[pytest.mark.gpu_1],
         model="Qwen/Qwen3-0.6B",
