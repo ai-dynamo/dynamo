@@ -17,17 +17,37 @@ pub async fn create_lease(
     let clone = token.clone();
 
     tokio::spawn(async move {
-        match keep_alive(lease_client, id, ttl, child).await {
-            Ok(_) => tracing::trace!("keep alive task exited successfully"),
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "Unable to maintain lease. Check etcd server status"
-                );
-                token.cancel();
+        let mut retry_count = 0;
+        const MAX_RETRIES: u32 = 10;
+        const RETRY_DELAY: Duration = Duration_from_millisecs(500);
+        loop {
+                match keep_alive(lease_client, id, ttl, child).await {
+                    Ok(_) => {
+                        tracing::trace!("keep alive task exited successfully");
+                        retry_count = 0;
+                    },
+                    Err(e) => {
+                        retry_count += 1;
+
+                        tracing::error!(
+                            error = %e,
+                            "Attempting to maintain lease. Check etcd server status, attempt {}/{}",
+                            retry_count, MAX_RETRIES
+                        );
+                        if retry_count >= MAX_RETRIES {
+                            tracing::error!(
+                                error = %e,
+                                "Unable to maintain lease. Check etcd server status"
+                            );
+                            token.cancel();
+                            break;
+                        }
+                        tokio::time::sleep(RETRY_DELAY).await;
+                    }
+                }
             }
         }
-    });
+    );
 
     Ok(Lease {
         id,
