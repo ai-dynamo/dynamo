@@ -71,7 +71,8 @@ impl Client {
         if endpoint.component.instance_handle().is_ok() {
             Self::new_dynamic_v2(endpoint).await
         } else {
-            Self::new_dynamic_etcd(endpoint).await
+            // Self::new_dynamic_etcd(endpoint).await
+            panic!("Error retrieving instance handle from service discovery");
         }
     }
 
@@ -437,19 +438,23 @@ impl Client {
         component: &str,
         endpoint_name: &str,
     ) -> Option<Instance> {
-        // Parse instance_id as u64
-        let instance_id = disc_instance.instance_id.parse::<u64>().ok()?;
+        let id_str = &disc_instance.instance_id;
         
-        // Extract NATS subject from metadata
-        let transport = disc_instance.metadata
-            .get("transport")?
-            .get("service_name")?
-            .as_str()
-            .map(|service_name| {
-                // Construct subject: {service_name}.{endpoint_name}-{instance_id}
-                let subject = format!("{}.{}-{:x}", service_name, endpoint_name, instance_id);
-                TransportType::NatsTcp(subject)
-            })?;
+        // Parse instance_id as u64, or hash if not numeric (e.g., UUID)
+        let instance_id = id_str.parse::<u64>().unwrap_or_else(|_| {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            id_str.hash(&mut hasher);
+            hasher.finish()
+        });
+        
+        // Hardcode transport for now - construct NATS subject
+        // Must match server side: service_name is slugified, then formatted with endpoint
+        use crate::transports::nats::Slug;
+        let service_name_raw = format!("{}_{}", namespace, component);
+        let service_name = Slug::slugify(&service_name_raw).to_string();
+        let subject = format!("{}.{}-{:x}", service_name, endpoint_name, instance_id);
+        let transport = TransportType::NatsTcp(subject);
 
         Some(Instance {
             namespace: namespace.to_string(),

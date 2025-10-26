@@ -411,15 +411,15 @@ impl Component {
         let (nats_service, stats_reg) =
             service::build_nats_service(nats_client, self, description).await?;
 
-        // 3. Store transport details in metadata
-        instance_handle.set_metadata(serde_json::json!({
-            "transport": {
-                "type": "nats",
-                "service_name": service_name,
-                "version": service::SERVICE_VERSION,
-            },
-            "endpoints": {},  // Will be populated as endpoints are added
-        })).await?;
+        // // 3. Store transport details in metadata
+        // instance_handle.set_metadata(serde_json::json!({
+        //     "transport": {
+        //         "type": "nats",
+        //         "service_name": service_name,
+        //         "version": service::SERVICE_VERSION,
+        //     },
+        //     "endpoints": {},  // Will be populated as endpoints are added
+        // })).await?;
 
         // 4. Update component registry
         let mut guard = self.drt.component_registry.inner.lock().await;
@@ -609,7 +609,7 @@ impl Endpoint {
         if self.is_static {
             client::Client::new_static(self.clone()).await
         } else {
-            client::Client::new_dynamic_v2(self.clone()).await
+            client::Client::new_dynamic(self.clone()).await
         }
     }
 

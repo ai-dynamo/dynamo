@@ -82,7 +82,7 @@ impl EndpointConfigBuilder {
                 hasher.finish()
             })
         } else {
-            lease_id  // Fallback to lease_id if no instance handle
+            panic!("Error getting instance_id from service discovery");
         };
 
         tracing::debug!(
