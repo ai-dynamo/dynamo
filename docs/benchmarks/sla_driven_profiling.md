@@ -251,7 +251,7 @@ Control GPU search space and constraints:
 profilingConfig:
   config:
     hardware:
-      min_num_gpus_per_engine: 2     # Minimum GPUs to test (skip TP1)
+      min_num_gpus_per_engine: 2     # if not provided, will automatically determine based on model and VRAM size
       max_num_gpus_per_engine: 8     # Maximum GPUs to test
       num_gpus_per_node: 8            # GPUs per node (for multi-node MoE)
       gpu_type: h200_sxm              # GPU type hint
