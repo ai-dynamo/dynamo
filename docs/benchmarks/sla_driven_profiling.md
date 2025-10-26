@@ -19,33 +19,62 @@ This document covers:
 - Direct script usage for advanced scenarios
 - Comprehensive troubleshooting
 
+## Support Matrix
+
+| Backend | Dense Models (P:TP, D:TP) | MoE Models (P:TEP, D:DEP) |
+|---------|-------------|------------|
+| vLLM | ✅ | 🚧 |
+| SGLang | ✅ | ✅ |
+| TensorRT-LLM | ✅ | 🚧 |
+
+> [!NOTE]
+> - We only support multi-node engines for MoE models.
+> - For MoE models, we currently only support deepseek-style MLA+MoE models. For other MoE models like GQA+MoE, please use the dense mode (sweep over TP sizes) instead.
+> - Exact model x parallelization mapping support is dependent on the backend. The profiler does not guarantee that the recommended P/D engine configuration is supported and bug-free by the backend.
+
 ## Using DGDR for Profiling (Recommended)
 
 The recommended way to profile models is through DGDRs. Sample configurations are provided in `deploy/`:
 
 **Available Samples:**
-- **`profile_sla_dgdr.yaml`**: Standard online profiling
-- **`profile_sla_aic_dgdr.yaml`**: Fast offline profiling with AI Configurator
+- **`profile_sla_dgdr.yaml`**: Standard profiling with AIPerf on real engines
+- **`profile_sla_aic_dgdr.yaml`**: Fast profiling with AI Configurator simulation
 - **`profile_sla_moe_dgdr.yaml`**: MoE model profiling
 
 The Dynamo Operator automatically:
 1. Discovers GPU resources
-2. Runs profiling (online or offline)
-3. Generates optimal DGD configuration
-4. Deploys to your cluster
+2. Runs profiling (AIPerf on real engines or AI Configurator simulation)
+3. Generates optimal DGD configuration with SLA planner
+4. Deploys the DGD to your cluster
 
-See the [Quick Start Guide](/docs/planner/sla_planner_quickstart.md) for detailed instructions.
+See the [Quick Start Guide](/docs/planner/sla_planner_quickstart.md) for prerequisites and detailed instructions.
 
-## Profiling Methods
+## Profiling Method
 
-### Online Profiling (Default)
+1. **GPU Discovery**: Detects available GPUs and their specifications
+2. **Identify Sweep Ranges**: Automatically determine minimum and maximum number of GPUs per engine. Minimum is determined by the model size and GPU VRAM. Maximum is set to one node for dense model and 4 nodes for MoE models.
+3. **Parallelization Mapping Sweep**: Use the input ISL and OSL, test the performance of the engines with different parallelization mappings. For dense models, we test different TP sizes for both prefill and decode. For MoE models, we test different TEP sizes for prefill and DEP sizes for decode.
+   - **Prefill**: For prefill, since there is no in-flight batching (assume isl is long enough to saturate the GPU), we directly measure the TTFT for a request with given isl without kv-reusing. For example, the below plot shows the prefill parallelization mapping sweep results for H100 for deepseek-ai/DeepSeek-R1-Distill-Llama-8B.
+   ![Prefill Performance](/docs/images/h100_prefill_performance.png)
+   - **Decode**: Since the ITL (or iteration time) is relevant with how many requests are in-flight, we measure the ITL under different number of in-flight requests. The range of the number of in-flight requests is from 1 to the maximum number of requests that the kv cache of the engine can hold. To measure the ITL without being affected by piggy-backed prefill requests, the script will enable kv-reuse and warm up the engine by issuing the same prompts before measuring the ITL. Since the kv cache is sufficient for all the requests, it can hold the kv cache of the pre-computed prompts and skip the prefill phase when measuring the ITL. However, for MoE models, this is not guaranteed because the kv cache in different attention DP ranks is different. We are working on framework-side change to fix this issue. For example, the below plot shows the decode parallelization mapping sweep results for H100 for deepseek-ai/DeepSeek-R1-Distill-Llama-8B.
+   ![Decode Performance](/docs/images/h100_decode_performance.png)
+4. **Recommendation**: Selects optimal parallelization mapping for prefill and decode that achieves the highest per GPU throughput while adhering the SLA on TTFT and ITL. Specifically, the profiler will choose the point (or a point on the curve for decode) that is left to the vertical red dashed line that represents the SLAs while has the highest y coordinate (throughput per GPU).
+5. **In-Depth Profiling on the Recommended P/D Engine**: After finding the best TP size for prefill and decode, the script will then interpolate the TTFT with ISL and ITL with active KV cache and decode context length. This is to provide a more accurate estimation of the performance when ISL and OSL changes and will be used in the sla-planner.
+![ITL Interpolation](/docs/images/pd_interpolation.png)
+   - **Prefill**: Measures TTFT and throughput per GPU across different input lengths with batch size=1.
+   - **Decode**: Measures ITL and throughput per GPU under various KV cache loads and decode context lengths. The active kv usage determines the complexity of the memory-bounded attention kernel while the active kv usage divided the average context length determines the complexity of the computation bound MLP kernel. For example, the below figure shows the ITL of DS-Distilled Llama 8b model on H100 TP4. The ITL grows near-linearly with active kv usage under a fixed context length. And the slope increases as the context length decreases.
+
+
+To run the parallelization mapping sweep and the in-depth profiling on the recommended P/D engine, the profiler need to know the engine's forward pass time with different loads. There are two ways to achieve this: run AIPerf on real engines or use AI Configurator to run simulations.
+
+### AIPerf on Real Engines
 
 Profiles your model by creating real test deployments in Kubernetes and measuring their performance.
 
 **Characteristics:**
 - **Duration**: 2-4 hours
 - **Accuracy**: Highest (real measurements)
-- **GPU Requirements**: Full access to test different TP configurations
+- **GPU Requirements**: Full access to test different parallelization mappings
 - **Backends**: vLLM, SGLang, TensorRT-LLM
 
 **DGDR Configuration:**
@@ -56,18 +85,7 @@ profilingConfig:
       use_ai_configurator: false  # Default
 ```
 
-**What It Does:**
-1. **GPU Discovery**: Detects available GPUs and their specifications
-2. **Identify Sweep Ranges**: Automatically determine minimum and maximum number of GPUs per engine. Minimum is determined by the model size and GPU VRAM. Maximum is set to one node for dense model and 4 nodes for MoE models.
-3. **Parallelization Mapping Sweep**: Use the input ISL and OSL, test the performance of the engines with different parallelization mappings.  
-   - Dense models: Test different TP sizes for both prefill and decode. 
-   - MoE models: Test different TEP sizes for prefill and DEP sizes for decode.
-4. **Recommendation**: Selects optimal parallelization mapping for prefill and decode that achieves the highest per GPU throughput while adhering the SLA on TTFT and ITL.
-5. **In-Depth Profiling on Recommended P/D Engine**:  Generates performance models for SLA planner. 
-   - **Prefill**: Measures TTFT across different input lengths   
-   - **Decode**: Measures ITL under various KV cache loads and decode context lengths.
-
-### Offline Profiling (AI Configurator)
+### AI Configurator Simulation
 
 Uses performance simulation to rapidly estimate optimal configurations without running real deployments.
 
@@ -100,84 +118,40 @@ To check from the command line: `aiconfigurator cli --help`
 - **Systems**: H100 SXM, H200 SXM, B200 SXM, GB200 SXM, A100 SXM
 - **Models**: Wide range including GPT, Llama, Mixtral, DeepSeek, Qwen, and more
 
-## Support Matrix
-
-| Backend | Dense Models | MoE Models |
-|---------|-------------|------------|
-| vLLM | ✅ | 🚧 |
-| SGLang | ✅ | ✅ |
-| TensorRT-LLM | ✅ | 🚧 |
-
-## Profiling Process Details
-
-### GPU Resource Usage
-
-Profiling tests different parallelization configurations **sequentially**, not in parallel:
-
-- **One parallelization mapping at a time**: Finish all tests for one engine before starting the next engine.
-- **Full GPU access**: Each configuration gets exclusive access to all GPUs
-- **Resource isolation**: No interference between tests
-- **Accurate measurements**: Consistent conditions for fair comparison
-
-### Prefill Profiling
-
-For prefill engines, the profiler:
-1. Tests each TP configuration with batch size = 1
-2. Measures TTFT across different input sequence lengths (ISL)
-3. Records throughput per GPU at each ISL
-4. Selects the TP that meets TTFT SLA with best throughput/GPU
-
-**For Dense Models**: Profiles different TP sizes
-**For MoE Models**: Profiles different TEP sizes (DEP generally not optimal for prefill)
-
-### Decode Profiling
-
-For decode engines, the profiler:
-1. Tests each TP configuration under varying KV cache loads
-2. Measures ITL at different active KV usage levels and context lengths
-3. Records throughput per GPU at each load condition
-4. Selects the TP that meets ITL SLA with best throughput/GPU
-
-**For Dense Models**: Profiles different TP sizes
-**For MoE Models**: Profiles different DEP sizes (TEP decode for low latency coming soon)
-
 ### Output Format
 
 After profiling, the DGDR status contains:
 
 1. **Recommended Configuration**: Optimal TP for prefill and decode
-2. **Planner Bounds**: Queue size and KV cache utilization thresholds
-3. **Performance Data**: Interpolation models for SLA planner
-4. **Generated DGD**: Complete deployment manifest
+2. **Performance Data**: Interpolation models for SLA planner
+3. **Generated DGD**: Complete deployment manifest
 
 **Example Recommendations:**
 ```
 Suggested prefill TP:4 (TTFT 48.37 ms, throughput 15505.23 tokens/s/GPU)
-Suggested planner upper/lower bound for prefill queue size: 0.24/0.10
 Suggested decode TP:4 (ITL 4.83 ms, throughput 51.22 tokens/s/GPU)
-Suggested planner upper/lower bound for decode kv cache utilization: 0.20/0.10
 ```
 
-### Performance Plots (Online Profiling)
+#### Output Performance Plots
 
-Online profiling generates visualization plots:
+The profiler will generate the following plots to better visualize the performance data:
 
-**Main Performance Plots:**
-- `prefill_performance.png`: TTFT vs TP size
-- `decode_performance.png`: ITL vs TP size and in-flight requests
+**Parallelization Mapping Sweep Plots:**
+- `prefill_performance.png`: TTFT vs Parallelization Mapping size
+- `decode_performance.png`: ITL vs Parallelization Mapping size and in-flight requests
 
-**Interpolation Plots:**
-- `prefill_ttft_interpolation.png`: TTFT vs ISL with quadratic fit
-- `prefill_throughput_interpolation.png`: Throughput vs ISL
-- `decode_tp{N}.png`: 3D surface of ITL vs KV usage and context length
+Note these two plots are based on the input ISL and OSL.
 
-**Example:**
-![Prefill Performance](/docs/images/h100_prefill_performance.png)
-![Decode Performance](/docs/images/h100_decode_performance.png)
+**In-Depth Profiling for the Recommended P/D Engine Plots:**
+- `selected_prefill_interpolation/prefill_ttft_interpolation.png`: TTFT vs ISL for the recommended prefill engine
+- `selected_prefill_interpolation/prefill_throughput_interpolation.png`: Throughput vs ISL for the recommended prefill engine
+- `selected_decode_interpolation/decode_itl_interplation.png`: ITL vs KV usage and context length for the recommended decode engine
+- `selected_decode_interpolation/decode_throughput_interpolation.png`: Throughput vs KV usage and context length for the recommended decode engine
 
-### Interpolation Data Format
 
-The profiler generates `.npz` files with performance characteristics:
+### Output Interpolation Data
+
+The profiler generates `.npz` files to store the performance data for the recommended P/D engine:
 
 **Prefill Interpolation** (`selected_prefill_interpolation/raw_data.npz`):
 - `prefill_isl`: 1D array of input sequence lengths tested
@@ -190,8 +164,6 @@ The profiler generates `.npz` files with performance characteristics:
 - `y_context_length`: 1D array of average context lengths tested
 - `z_itl`: 1D array of ITLs (ms) at each (KV usage, context length) point
 - `z_thpt_per_gpu`: 1D array of throughput (tokens/s/GPU) at each point
-
-![ITL Interpolation](/docs/images/itl_interpolation.png)
 
 ## DGDR Configuration Reference
 
@@ -207,7 +179,7 @@ kind: DynamoGraphDeploymentRequest
 metadata:
   name: my-deployment
 spec:
-  modelName: "Qwen/Qwen3-0.6B"    # High-level: model to deploy
+  model: "Qwen/Qwen3-0.6B"         # High-level: model to deploy
   backend: vllm                    # High-level: inference backend
 
   profilingConfig:
@@ -251,8 +223,8 @@ Control GPU search space and constraints:
 profilingConfig:
   config:
     hardware:
-      min_num_gpus_per_engine: 2     # if not provided, will automatically determine based on model and VRAM size
-      max_num_gpus_per_engine: 8     # Maximum GPUs to test
+      min_num_gpus_per_engine: 2      # if not provided, will automatically determine based on model and VRAM size
+      max_num_gpus_per_engine: 8      # Maximum GPUs to test
       num_gpus_per_node: 8            # GPUs per node (for multi-node MoE)
       gpu_type: h200_sxm              # GPU type hint
 ```
@@ -275,21 +247,18 @@ profilingConfig:
   config:
     sweep:
       use_ai_configurator: false              # Use offline profiling (default: false)
-      skip_existing_results: false            # Skip TP sizes with existing results
-      force_rerun: false                      # Force re-profiling even if results exist
       prefill_interpolation_granularity: 16   # Samples for prefill TTFT curve
       decode_interpolation_granularity: 6     # Samples for decode ITL curve
 ```
 
 **Use cases:**
 - **use_ai_configurator**: Set to `true` for 20-30 second profiling (TensorRT-LLM only)
-- **skip_existing_results**: Resume interrupted profiling runs
-- **force_rerun**: Override cached results for validation
-- **interpolation_granularity**: How many samples to benchmark (lower = faster but may be less accurate)
+- **prefill_interpolation_granularity**: How many samples to benchmark for prefill TTFT curve (lower = faster but may be less accurate)
+- **decode_interpolation_granularity**: How many samples to benchmark for decode ITL curve (lower = faster but may be less accurate). Since ITL interpolation is a 3d plot and takes longer to run, we default to a smaller number of samples. Increasing this value might quadratically increase the profiling time.
 
 ### AI Configurator Configuration (Required if `use_ai_configurator: true`)
 
-Configure offline profiling mode:
+Configure AI Configurator profiling mode:
 
 ```yaml
 profilingConfig:
@@ -337,14 +306,14 @@ The controller automatically sets these from high-level fields:
 ```yaml
 # You specify:
 spec:
-  modelName: "Qwen/Qwen3-0.6B"
+  model: "Qwen/Qwen3-0.6B"
   backend: vllm
 
 # Controller auto-injects into config:
 profilingConfig:
   config:
     deployment:
-      model: "Qwen/Qwen3-0.6B"      # From spec.modelName
+      model: "Qwen/Qwen3-0.6B"       # From spec.model
     engine:
       backend: vllm                  # From spec.backend
       config: /path/to/configmap     # From spec.profilingConfig.configMapRef (if provided)
@@ -352,7 +321,7 @@ profilingConfig:
 
 **You should not manually set** `deployment.model` or `engine.backend` in `profilingConfig.config` - they are automatically injected from the high-level fields.
 
-### Complete Example: Online Profiling
+### Complete Example: AIPerf on Real Engines
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -360,7 +329,7 @@ kind: DynamoGraphDeploymentRequest
 metadata:
   name: vllm-dense-online
 spec:
-  modelName: "Qwen/Qwen3-0.6B"
+  model: "Qwen/Qwen3-0.6B"
   backend: vllm
 
   profilingConfig:
@@ -382,7 +351,7 @@ spec:
   autoApply: true
 ```
 
-### Complete Example: Offline Profiling (AI Configurator)
+### Complete Example: AI Configurator Simulation
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -390,7 +359,7 @@ kind: DynamoGraphDeploymentRequest
 metadata:
   name: trtllm-aic-offline
 spec:
-  modelName: "Qwen/Qwen3-32B"
+  model: "Qwen/Qwen3-32B"
   backend: trtllm
 
   profilingConfig:
@@ -420,7 +389,7 @@ kind: DynamoGraphDeploymentRequest
 metadata:
   name: sglang-moe
 spec:
-  modelName: "mistralai/Mixtral-8x7B-v0.1"
+  model: "deepseek-ai/DeepSeek-R1"
   backend: sglang
 
   profilingConfig:
@@ -432,7 +401,7 @@ spec:
         itl: 25.0
 
       hardware:
-        num_gpus_per_node: 8     # Required for MoE
+        num_gpus_per_node: 8
         max_num_gpus_per_engine: 32
 
       engine:
@@ -523,6 +492,14 @@ kubectl create secret docker-registry nvcr-imagepullsecret \
 2. Reduce `--max-context-length`
 3. Skip larger TP configurations
 4. Use fewer GPUs per test
+
+### Unsupported Parallelization Mapping in Backend
+
+**Symptoms**: Starttime/runtime error in the backend. For example, prime number of attention heads restrain TP size to be 1 (i.e., falcon-7b with 71 attention heads). Or some backend does not support different TP sizes for prefill and decode.
+
+**Solutions:**
+1. Contact the backend to add support for the use cases and bump backend version in dynamo.
+2. Restrain the max and min number of GPUs per engine to the supported range.
 
 ## Next Steps
 
