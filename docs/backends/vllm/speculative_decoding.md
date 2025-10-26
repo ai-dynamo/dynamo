@@ -81,15 +81,15 @@ Once the weights finish downloading and serving begins, you’ll be ready to sen
 To verify your setup, try sending a simple prompt to your model:
 
 ```bash
-curl http://localhost:8000/v1/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-    "messages": [
-      {"role": "user", "content": "Write a poem about why Sakura trees are beautiful."}
-    ],
-    "max_tokens": 250
-  }'
+curl http://localhost:8000/v1/chat/completions \
+   -H "Content-Type: application/json" \
+   -d '{
+     "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+     "messages": [
+       {"role": "user", "content": "Write a poem about why Sakura trees are beautiful."}
+     ],
+     "max_tokens": 250
+   }'
 ```
 
 ### Example Output
