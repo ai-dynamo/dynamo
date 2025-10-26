@@ -67,13 +67,10 @@ impl Client {
 
     // Client with auto-discover instances using etcd
     pub(crate) async fn new_dynamic(endpoint: Endpoint) -> Result<Self> {
-        // Try to use ServiceDiscovery if available, otherwise fall back to ETCD
-        if endpoint.component.instance_handle().is_ok() {
-            Self::new_dynamic_v2(endpoint).await
-        } else {
-            // Self::new_dynamic_etcd(endpoint).await
-            panic!("Error retrieving instance handle from service discovery");
-        }
+        // Always use ServiceDiscovery for now (we have it on DRT)
+        // In the future, we can add a flag to determine which backend to use
+        eprintln!("[DEBUG] new_dynamic called, using ServiceDiscovery v2");
+        Self::new_dynamic_v2(endpoint).await
     }
 
     // V2: Client with auto-discover instances using ServiceDiscovery

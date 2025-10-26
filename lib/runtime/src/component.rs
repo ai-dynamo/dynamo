@@ -172,9 +172,10 @@ pub struct Component {
     is_static: bool,
 
     /// Handle for this component's registration with service discovery
-    #[builder(default)]
+    /// Wrapped in Arc<OnceCell> so it can be set once and shared across all clones
+    #[builder(default = "Arc::new(async_once_cell::OnceCell::new())")]
     #[educe(Debug(ignore))]
-    instance_handle: Option<Arc<Box<dyn crate::discovery::InstanceHandle>>>,
+    instance_handle: Arc<async_once_cell::OnceCell<Box<dyn crate::discovery::InstanceHandle>>>,
 }
 
 impl Hash for Component {
@@ -262,11 +263,33 @@ impl Component {
     }
 
     /// Get the instance handle for this component
-    pub fn instance_handle(&self) -> Result<Arc<Box<dyn crate::discovery::InstanceHandle>>> {
-        self.instance_handle.clone().ok_or_else(|| error!("Component not registered with service discovery"))
+    pub fn instance_handle(&self) -> Result<&Box<dyn crate::discovery::InstanceHandle>> {
+        eprintln!("[DEBUG] instance_handle() called for component {}/{}", 
+                 self.namespace.name(), self.name);
+        
+        let handle = self.instance_handle.get();
+        if handle.is_none() {
+            eprintln!("[DEBUG] ERROR: instance_handle is None for {}/{}", 
+                     self.namespace.name(), self.name);
+        } else {
+            eprintln!("[DEBUG] instance_handle found for {}/{}", 
+                     self.namespace.name(), self.name);
+        }
+        
+        handle.ok_or_else(|| error!("Component not registered with service discovery"))
+    }
+    
+    /// Set the instance handle for this component - uses OnceCell for thread-safe init
+    pub(crate) async fn set_instance_handle_async(&self, handle: Box<dyn crate::discovery::InstanceHandle>) {
+        eprintln!("[DEBUG] set_instance_handle_async called for component {}/{}", 
+                 self.namespace.name(), self.name);
+        self.instance_handle.get_or_init(async { handle }).await;
+        eprintln!("[DEBUG] instance_handle stored in OnceCell");
     }
 
     pub fn endpoint(&self, endpoint: impl Into<String>) -> Endpoint {
+        eprintln!("[DEBUG] endpoint() called, cloning component. instance_handle.get().is_some(): {}", 
+                 self.instance_handle.get().is_some());
         Endpoint {
             component: self.clone(),
             name: endpoint.into(),
@@ -381,7 +404,9 @@ impl Component {
         unimplemented!("collect_stats")
     }
 
-    pub async fn add_stats_service(&mut self) -> anyhow::Result<()> {
+    pub async fn add_stats_service(&self) -> anyhow::Result<()> {
+        eprintln!("[DEBUG] add_stats_service called for {}/{}", 
+                 self.namespace.name(), self.name);
         let service_name = self.service_name();
 
         // Pre-check to save cost of creating the service, but don't hold the lock
@@ -436,8 +461,9 @@ impl Component {
             ));
         }
 
-        // 5. Store instance handle on component
-        self.instance_handle = Some(Arc::new(instance_handle));
+        // 5. Store instance handle on component (OnceCell shared across clones via Arc)
+        eprintln!("[DEBUG] Storing instance_handle in component via OnceCell");
+        self.set_instance_handle_async(instance_handle).await;
 
         // 6. Register metrics callback. CRITICAL: Never fail service creation for metrics issues.
         if let Err(err) = self.start_scraping_nats_service_component_metrics() {

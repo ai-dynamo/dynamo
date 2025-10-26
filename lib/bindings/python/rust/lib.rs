@@ -683,7 +683,7 @@ impl Component {
 
     /// NATS specific stats/metrics call
     fn create_service<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let mut inner = self.inner.clone();
+        let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             inner.add_stats_service().await.map_err(to_pyerr)?;
             Ok(())
