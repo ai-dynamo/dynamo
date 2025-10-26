@@ -5,7 +5,7 @@ pub use crate::component::Component;
 use crate::storage::key_value_store::{
     EtcdStore, KeyValueStore, KeyValueStoreEnum, KeyValueStoreManager, MemoryStore,
 };
-use crate::discovery::{ServiceDiscovery, mock::MockServiceDiscovery};
+use crate::discovery::{ServiceDiscovery, mock::MockServiceDiscovery, filesystem::FilesystemServiceDiscovery};
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
     ErrorContext, PrometheusUpdateCallback,
@@ -84,8 +84,8 @@ impl DistributedRuntime {
         let service_discovery: Box<dyn ServiceDiscovery + Send + Sync> = if use_mock_discovery {
             Box::new(MockServiceDiscovery::new())
         } else {
-            // For now, just use mock. Later we'll add ETCD implementation
-            Box::new(MockServiceDiscovery::new())
+            // Use filesystem-based discovery for testing
+            Box::new(FilesystemServiceDiscovery::new())
         };
 
         let distributed_runtime = Self {

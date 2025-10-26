@@ -9,6 +9,7 @@ mod legacy;
 pub use legacy::{DiscoveryClient, Lease};
 
 pub mod mock;
+pub mod filesystem;
 
 #[derive(Error, Debug)]
 pub enum DiscoveryError {
