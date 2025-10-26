@@ -1157,15 +1157,80 @@ func (r *DynamoGraphDeploymentRequestReconciler) cleanupProfilingResources(ctx c
 
 	// Cleanup behavior when DGDR is deleted:
 	// - Profiling Job: Automatically deleted via ownerReference (set by SyncResource)
-	// - Output ConfigMap: NOT deleted (no ownerReference) - contains valuable profiling data
-	// - Auto-created DGD: NOT deleted (no ownerReference) - may be serving traffic
+	// - Test DGDs (online profiling): Deleted using label selector
 	//
-	// We use labels (LabelDGDRName) to track relationships without cascade delete.
-	// Users can manually clean up ConfigMaps and DGDs if needed using label selectors:
-	//   kubectl delete configmap -l dgdr.nvidia.com/name=<dgdr-name>
-	//   kubectl delete dynamographdeployment -l dgdr.nvidia.com/name=<dgdr-name>
+	// NOT deleted (preserved for reuse or operator lifecycle):
+	// - ServiceAccount & RoleBinding: Kept for future DGDRs (since users may create more)
+	// - ClusterRole & ClusterRoleBinding: Managed by Helm (deleted when operator uninstalled)
+	// - Output ConfigMap: Contains valuable profiling data
+	// - Final DGD (if AutoApply=true): May be serving traffic
 
 	logger.Info("Profiling job will be automatically deleted via ownerReference")
+
+	// Delete test DGDs created during online profiling
+	// These are labeled with dgdr.nvidia.com/name=<dgdr-name>
+	if err := r.cleanupTestDGDs(ctx, dgdr); err != nil {
+		logger.Error(err, "Failed to cleanup test DGDs")
+		// Don't fail finalization - continue with other cleanup
+	}
+
+	return nil
+}
+
+// cleanupTestDGDs deletes test DGDs created during online profiling
+// These DGDs are labeled with dgdr.nvidia.com/name=<dgdr-name>
+func (r *DynamoGraphDeploymentRequestReconciler) cleanupTestDGDs(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
+	logger := log.FromContext(ctx)
+
+	// List all DGDs with the DGDR label in the DGDR's namespace
+	dgdList := &nvidiacomv1alpha1.DynamoGraphDeploymentList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(dgdr.Namespace),
+		client.MatchingLabels{LabelDGDRName: dgdr.Name},
+	}
+
+	if err := r.List(ctx, dgdList, listOpts...); err != nil {
+		return fmt.Errorf("failed to list DGDs for cleanup: %w", err)
+	}
+
+	// Skip if AutoApply is enabled and there's a managed DGD - we'll check if it's the final one
+	var finalDGDName string
+	if dgdr.Spec.AutoApply && dgdr.Status.Deployment != nil && dgdr.Status.Deployment.Name != "" {
+		finalDGDName = dgdr.Status.Deployment.Name
+		logger.Info("DGDR has AutoApply enabled with managed DGD",
+			"finalDGD", finalDGDName,
+			"totalDGDs", len(dgdList.Items))
+	}
+
+	// Delete test DGDs (but NOT the final DGD if AutoApply is enabled)
+	deletedCount := 0
+	for _, dgd := range dgdList.Items {
+		// Skip the final DGD created by AutoApply
+		if dgd.Name == finalDGDName {
+			logger.Info("Skipping deletion of final DGD (may be serving traffic)",
+				"dgd", dgd.Name)
+			continue
+		}
+
+		// Delete test DGD
+		logger.Info("Deleting test DGD created during profiling",
+			"dgd", dgd.Name,
+			"namespace", dgd.Namespace)
+
+		if err := r.Delete(ctx, &dgd); err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "Failed to delete test DGD", "dgd", dgd.Name)
+			// Continue deleting other DGDs even if one fails
+		} else {
+			deletedCount++
+		}
+	}
+
+	if deletedCount > 0 {
+		logger.Info("Cleaned up test DGDs", "count", deletedCount)
+	} else {
+		logger.Info("No test DGDs to clean up")
+	}
+
 	return nil
 }
 
