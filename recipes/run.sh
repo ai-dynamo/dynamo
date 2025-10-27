@@ -20,7 +20,6 @@ IFS=$'\n\t'
 RECIPES_DIR="$( cd "$( dirname "$0" )" && pwd )"
 # Default values
 NAMESPACE="${NAMESPACE:-dynamo}"
-DOWNLOAD_MODEL=true
 DEPLOY_TYPE=""
 GAIE="${GAIE:-false}"
 DEPLOYMENT=""
