@@ -4,9 +4,8 @@
 use crate::{ErrorContext, Result, error};
 use etcd_client::ConnectOptions;
 use parking_lot::RwLock;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::time::sleep;
+use std::{sync::Arc, time::Duration};
+use tokio::{sync::Mutex, time::sleep};
 
 /// Manages ETCD client connections with reconnection support
 pub struct Connector {
@@ -16,10 +15,9 @@ pub struct Connector {
     /// Configuration for connecting to ETCD
     etcd_urls: Vec<String>,
     connect_options: Option<ConnectOptions>,
-    /// Initial backoff duration for reconnection attempts
-    pub initial_backoff: Duration,
-    /// Maximum backoff duration for reconnection attempts
-    pub max_backoff: Duration,
+    /// Tracks the current backoff duration and last successful connect time
+    /// The Mutex ensures only one reconnect operation runs at a time
+    backoff_state: Mutex<BackoffState>,
 }
 
 impl Connector {
@@ -35,8 +33,7 @@ impl Connector {
             client: RwLock::new(client),
             etcd_urls,
             connect_options,
-            initial_backoff: Duration::from_millis(500),
-            max_backoff: Duration::from_secs(5),
+            backoff_state: Mutex::new(BackoffState::default()),
         }))
     }
 
@@ -62,10 +59,19 @@ impl Connector {
 
     /// Reconnect to ETCD cluster with retry logic
     /// Respects the deadline and returns error if exceeded
+    ///
+    /// Backoff behavior:
+    /// - Starts at 0 (immediate reconnect) if this is the first reconnect or enough time has passed
+    ///   since the last reconnect
+    /// - Increments exponentially for continuous failures
+    /// - Resets to 0 only when: this is a new call AND current_time > last_connect_time + residual_backoff
+    ///
+    /// The mutex ensures only one reconnect operation runs at a time globally
     pub async fn reconnect(&self, deadline: std::time::Instant) -> Result<()> {
-        tracing::warn!("Reconnecting to ETCD cluster at: {:?}", self.etcd_urls);
+        let mut backoff_state = self.backoff_state.lock().await;
 
-        let mut backoff = self.initial_backoff;
+        tracing::warn!("Reconnecting to ETCD cluster at: {:?}", self.etcd_urls);
+        backoff_state.attempt_reset();
 
         loop {
             let now = std::time::Instant::now();
@@ -75,8 +81,8 @@ impl Connector {
                 ));
             }
             let remaining = deadline.saturating_duration_since(now);
-            backoff = std::cmp::min(std::cmp::min(backoff, remaining / 2), self.max_backoff);
-            sleep(backoff).await;
+
+            backoff_state.apply_backoff(remaining).await;
 
             match Self::connect(&self.etcd_urls, &self.connect_options).await {
                 Ok(new_client) => {
@@ -92,7 +98,6 @@ impl Connector {
                         remaining,
                         e
                     );
-                    backoff *= 2;
                 }
             }
         }
@@ -106,5 +111,59 @@ impl Connector {
     /// Get the connection options
     pub fn connect_options(&self) -> &Option<ConnectOptions> {
         &self.connect_options
+    }
+}
+
+#[derive(Debug)]
+struct BackoffState {
+    /// Initial backoff duration for reconnection attempts
+    pub initial_backoff: Duration,
+    /// Maximum backoff duration for reconnection attempts
+    pub max_backoff: Duration,
+    /// Current backoff duration (starts at 0 for immediate reconnect)
+    current_backoff: Duration,
+    /// Last time a connection establishment was attempted
+    last_connect_attempt: std::time::Instant,
+}
+
+impl Default for BackoffState {
+    fn default() -> Self {
+        Self {
+            initial_backoff: Duration::from_millis(500),
+            max_backoff: Duration::from_secs(5),
+            current_backoff: Duration::ZERO,
+            last_connect_attempt: std::time::Instant::now(),
+        }
+    }
+}
+
+impl BackoffState {
+    /// Reset backoff to 0 if enough time has passed since the last connection
+    pub fn attempt_reset(&mut self) {
+        if std::time::Instant::now() > self.last_connect_attempt + self.current_backoff {
+            tracing::debug!("Resetting backoff to 0 (first reconnect or enough time has passed)");
+            self.current_backoff = Duration::ZERO;
+        }
+    }
+
+    /// Apply backoff and update backoff state for possible next connection attempt
+    pub async fn apply_backoff(&mut self, remaining: Duration) {
+        if self.current_backoff > Duration::ZERO {
+            let backoff = std::cmp::min(
+                std::cmp::min(self.current_backoff, remaining / 2),
+                self.max_backoff,
+            );
+            self.current_backoff = backoff * 2;
+
+            tracing::debug!(
+                "Applying backoff of {:?} (remaining time: {:?})",
+                backoff,
+                remaining
+            );
+            sleep(backoff).await;
+        } else {
+            self.current_backoff = self.initial_backoff;
+        }
+        self.last_connect_attempt = std::time::Instant::now();
     }
 }
