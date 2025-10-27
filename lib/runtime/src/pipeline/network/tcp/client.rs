@@ -84,6 +84,7 @@ impl TcpClient {
         }
 
         let stream = TcpClient::connect(&info.address).await?;
+        let peer_addr = stream.peer_addr().ok();
         let (read_half, write_half) = tokio::io::split(stream);
 
         let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
@@ -100,7 +101,7 @@ impl TcpClient {
 
         // transport specific handshake message
         let handshake = CallHomeHandshake {
-            subject: info.subject,
+            subject: info.subject.clone(),
             stream_type: StreamType::Response,
         };
 
@@ -127,6 +128,7 @@ impl TcpClient {
 
         let writer_task = tokio::spawn(handle_writer(framed_writer, bytes_rx, alive_rx, context));
 
+        let subject = info.subject.clone();
         tokio::spawn(async move {
             // await both tasks
             let (reader, writer) = tokio::join!(reader_task, writer_task);
@@ -167,14 +169,27 @@ impl TcpClient {
                     Ok(())
                 }
                 (Err(reader_err), Ok(_)) => {
-                    anyhow::bail!("reader task failed to join: {reader_err:?}");
+                    tracing::error!(
+                        "reader task failed to join (peer: {peer_addr:?}, subject: {subject}): {reader_err:?}"
+                    );
+                    anyhow::bail!(
+                        "reader task failed to join (peer: {peer_addr:?}, subject: {subject}): {reader_err:?}"
+                    );
                 }
                 (Ok(_), Err(writer_err)) => {
-                    anyhow::bail!("writer task failed to join: {writer_err:?}");
+                    tracing::error!(
+                        "writer task failed to join (peer: {peer_addr:?}, subject: {subject}): {writer_err:?}"
+                    );
+                    anyhow::bail!(
+                        "writer task failed to join (peer: {peer_addr:?}, subject: {subject}): {writer_err:?}"
+                    );
                 }
                 (Err(reader_err), Err(writer_err)) => {
+                    tracing::error!(
+                        "both reader and writer tasks failed to join (peer: {peer_addr:?}, subject: {subject}) - reader: {reader_err:?}, writer: {writer_err:?}"
+                    );
                     anyhow::bail!(
-                        "both reader and writer tasks failed to join - reader: {reader_err:?}, writer: {writer_err:?}"
+                        "both reader and writer tasks failed to join (peer: {peer_addr:?}, subject: {subject}) - reader: {reader_err:?}, writer: {writer_err:?}"
                     );
                 }
             }
