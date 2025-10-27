@@ -90,7 +90,7 @@ async def worker(runtime: DistributedRuntime):
     elif config.multimodal_encode_worker:
         await init_multimodal_encode_worker(runtime, config)
         logger.debug("init_multimodal_encode_worker completed")
-    elif config.multimodal_worker:
+    elif config.multimodal_worker and config.is_prefill_worker:
         await init_multimodal_worker(runtime, config)
         logger.debug("init_multimodal_worker completed")
     elif config.is_prefill_worker:
@@ -484,23 +484,16 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
 
     engine_client, vllm_config, default_sampling_params = setup_vllm_engine(config)
 
-    decode_worker_client = None
-
-    # For multimodal workers, we always use MultimodalPDWorkerHandler
-    # It handles both aggregated mode (prefill+decode) and prefill-only in disaggregated mode
-    # Note: MultimodalDecodeWorkerHandler is currently not used - we may add it later for disagg decode
-
-    if config.is_prefill_worker:
-        # Prefill worker in disaggregated mode - needs decode worker client
-        decode_worker_client = (
-            await runtime.namespace(config.namespace)
-            .component("backend")  # decode workers use backend component
-            .endpoint("generate")
-            .client()
-        )
+    # TODO: Support Disaggregated mode separately
+    client = (
+        await runtime.namespace(config.namespace)
+        .component("backend")
+        .endpoint("generate")
+        .client()
+    )
 
     handler = MultimodalPDWorkerHandler(
-        runtime, component, engine_client, config, decode_worker_client
+        runtime, component, engine_client, config, client
     )
 
     await handler.async_init(runtime)
