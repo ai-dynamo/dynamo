@@ -49,6 +49,8 @@ class TestProfileSLADryRun:
                 self.config = "components/backends/vllm/deploy/disagg.yaml"
                 self.output_dir = "/tmp/test_profiling_results"
                 self.namespace = "test-namespace"
+                self.model = ""
+                self.dgd_image = ""
                 self.min_num_gpus_per_engine = 1
                 self.max_num_gpus_per_engine = 8
                 self.skip_existing_results = False
@@ -83,6 +85,8 @@ class TestProfileSLADryRun:
                 self.config = "components/backends/sglang/deploy/disagg.yaml"
                 self.output_dir = "/tmp/test_profiling_results"
                 self.namespace = "test-namespace"
+                self.model = ""
+                self.dgd_image = ""
                 self.min_num_gpus_per_engine = 1
                 self.max_num_gpus_per_engine = 8
                 self.skip_existing_results = False
@@ -131,6 +135,8 @@ class TestProfileSLADryRun:
                 self.config = "components/backends/trtllm/deploy/disagg.yaml"
                 self.output_dir = "/tmp/test_profiling_results"
                 self.namespace = "test-namespace"
+                self.model = ""
+                self.dgd_image = ""
                 self.min_num_gpus_per_engine = 1
                 self.max_num_gpus_per_engine = 8
                 self.skip_existing_results = False
@@ -172,6 +178,8 @@ class TestProfileSLADryRun:
                 self.config = "recipes/deepseek-r1/sglang/disagg-16gpu/deploy.yaml"
                 self.output_dir = "/tmp/test_profiling_results"
                 self.namespace = "test-namespace"
+                self.model = ""
+                self.dgd_image = ""
                 self.min_num_gpus_per_engine = 8
                 self.max_num_gpus_per_engine = 32
                 self.skip_existing_results = False
@@ -233,6 +241,7 @@ class TestProfileSLADryRun:
                 self.output_dir = "/tmp/test_profiling_results"
                 self.namespace = "test-namespace"
                 self.model = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"  # Specify model for autogen
+                self.dgd_image = ""
                 self.min_num_gpus_per_engine = 0  # Will be auto-generated
                 self.max_num_gpus_per_engine = 0  # Will be auto-generated
                 self.skip_existing_results = False
@@ -294,6 +303,7 @@ class TestProfileSLADryRun:
                 self.output_dir = "/tmp/test_profiling_results"
                 self.namespace = "test-namespace"
                 self.model = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"  # Specify model for autogen
+                self.dgd_image = ""
                 self.min_num_gpus_per_engine = 0  # Will be auto-generated
                 self.max_num_gpus_per_engine = 0  # Will be auto-generated
                 self.skip_existing_results = False
@@ -355,6 +365,7 @@ class TestProfileSLADryRun:
                 self.output_dir = "/tmp/test_profiling_results"
                 self.namespace = "test-namespace"
                 self.model = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"  # Specify model for autogen
+                self.dgd_image = ""
                 self.min_num_gpus_per_engine = 0  # Will be auto-generated
                 self.max_num_gpus_per_engine = 0  # Will be auto-generated
                 self.skip_existing_results = False
