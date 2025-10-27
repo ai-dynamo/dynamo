@@ -74,15 +74,12 @@ impl Connector {
         backoff_state.attempt_reset();
 
         loop {
-            let now = std::time::Instant::now();
-            if now >= deadline {
+            backoff_state.apply_backoff(deadline).await;
+            if std::time::Instant::now() >= deadline {
                 return Err(error!(
                     "Unable to reconnect to ETCD cluster: deadline exceeded"
                 ));
             }
-            let remaining = deadline.saturating_duration_since(now);
-
-            backoff_state.apply_backoff(remaining).await;
 
             match Self::connect(&self.etcd_urls, &self.connect_options).await {
                 Ok(new_client) => {
@@ -95,7 +92,7 @@ impl Connector {
                 Err(e) => {
                     tracing::warn!(
                         "Reconnection failed (remaining time: {:?}): {}",
-                        remaining,
+                        deadline.saturating_duration_since(std::time::Instant::now()),
                         e
                     );
                 }
@@ -118,6 +115,8 @@ impl Connector {
 struct BackoffState {
     /// Initial backoff duration for reconnection attempts
     pub initial_backoff: Duration,
+    /// Minimum backoff duration for reconnection attempts
+    pub min_backoff: Duration,
     /// Maximum backoff duration for reconnection attempts
     pub max_backoff: Duration,
     /// Current backoff duration (starts at 0 for immediate reconnect)
@@ -130,6 +129,7 @@ impl Default for BackoffState {
     fn default() -> Self {
         Self {
             initial_backoff: Duration::from_millis(500),
+            min_backoff: Duration::from_millis(50),
             max_backoff: Duration::from_secs(5),
             current_backoff: Duration::ZERO,
             last_connect_attempt: std::time::Instant::now(),
@@ -147,12 +147,12 @@ impl BackoffState {
     }
 
     /// Apply backoff and update backoff state for possible next connection attempt
-    pub async fn apply_backoff(&mut self, remaining: Duration) {
+    pub async fn apply_backoff(&mut self, deadline: std::time::Instant) {
         if self.current_backoff > Duration::ZERO {
-            let backoff = std::cmp::min(
-                std::cmp::min(self.current_backoff, remaining / 2),
-                self.max_backoff,
-            );
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let backoff = std::cmp::min(self.current_backoff, remaining / 2);
+            let backoff = std::cmp::min(backoff, self.max_backoff);
+            let backoff = std::cmp::max(backoff, self.min_backoff);
             self.current_backoff = backoff * 2;
 
             tracing::debug!(
