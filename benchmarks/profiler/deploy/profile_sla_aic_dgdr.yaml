@@ -9,8 +9,8 @@ metadata:
 spec:
   model: Qwen/Qwen3-32B
   backend: trtllm
-  profilerImage: "nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-540.4"
-  dgdImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.1"
+  profilerImage: "nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-540.5"
+  dgdImage: "nvcr.io/nvidian/dynamo-dev/trtllm-runtime:dep-540.5"
 
   # ProfilingConfig maps directly to the profile_sla.py config format
   profilingConfig:

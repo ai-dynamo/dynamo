@@ -755,6 +755,28 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
 	logger := log.FromContext(ctx)
 
+	// Delete any existing output ConfigMap to ensure fresh profiling results
+	// This prevents using stale data from previous profiling runs
+	outputConfigMapName := getOutputConfigMapName(dgdr)
+	existingCM := &corev1.ConfigMap{}
+	err := r.Get(ctx, types.NamespacedName{
+		Name:      outputConfigMapName,
+		Namespace: dgdr.Namespace,
+	}, existingCM)
+	if err == nil {
+		// ConfigMap exists, delete it
+		logger.Info("Deleting existing output ConfigMap to ensure fresh profiling results", "configMap", outputConfigMapName)
+		if err := r.Delete(ctx, existingCM); err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "Failed to delete existing output ConfigMap", "configMap", outputConfigMapName)
+			return fmt.Errorf("failed to delete existing output ConfigMap: %w", err)
+		}
+		logger.Info("Successfully deleted old output ConfigMap", "configMap", outputConfigMapName)
+	} else if !apierrors.IsNotFound(err) {
+		// Unexpected error checking for ConfigMap
+		logger.Error(err, "Failed to check for existing output ConfigMap", "configMap", outputConfigMapName)
+		return fmt.Errorf("failed to check for existing output ConfigMap: %w", err)
+	}
+
 	// Ensure profiling job RBAC exists
 	if err := r.RBACManager.EnsureServiceAccountWithRBAC(
 		ctx,
