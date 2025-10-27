@@ -125,6 +125,9 @@ The dashboard is embedded in the ConfigMap. Since it is labeled with `grafana_da
 - Request duration
 - Input/Output sequence lengths
 - GPU utilization via DCGM
+- Node CPU utilization and system load
+- Container CPU usage per pod
+- Memory usage per pod
 
 ## Viewing the Metrics
 
