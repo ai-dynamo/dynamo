@@ -55,9 +55,8 @@ fn main() -> anyhow::Result<()> {
 
     // One per process. Wraps a Runtime with holds one or two tokio runtimes.
     let worker = dynamo_runtime::Worker::from_config(rt_config)?;
-    return Ok(());
 
-    // worker.execute(wrapper)
+    worker.execute(wrapper)
 }
 
 async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
