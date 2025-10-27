@@ -10,6 +10,7 @@ pub use legacy::{DiscoveryClient, Lease};
 
 pub mod mock;
 pub mod filesystem;
+pub mod kubernetes;
 
 #[derive(Error, Debug)]
 pub enum DiscoveryError {

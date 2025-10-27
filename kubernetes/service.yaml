@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-test-service
+  labels:
+    app: nginx-test
+    # Labels for Dynamo service discovery
+    dynamo.namespace: test
+    dynamo.component: worker
+spec:
+  type: ClusterIP
+  selector:
+    app: nginx-test
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+    name: http
+

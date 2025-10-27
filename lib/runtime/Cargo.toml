@@ -56,6 +56,8 @@ uuid = { workspace = true }
 url = { workspace = true }
 validator = { workspace = true }
 xxhash-rust = { workspace = true }
+kube = { version = "0.97", features = ["runtime", "derive"] }
+k8s-openapi = { version = "0.23", features = ["v1_30"] }
 
 arc-swap = { version = "1" }
 async-once-cell = { version = "0.5.4" }
