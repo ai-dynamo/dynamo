@@ -818,12 +818,30 @@ impl
 
         // Preserve original inbound streaming flag before any internal overrides
         let request_id = context.id().to_string();
+        let original_stream_flag = request.inner.stream.unwrap_or(false);
 
         // Build audit handle (None if DYN_AUDIT_ENABLED=0)
         let mut audit_handle = crate::audit::handle::create_handle(&request, &request_id);
 
         if let Some(ref mut h) = audit_handle {
             h.set_request(std::sync::Arc::new(request.clone()));
+        }
+
+        // For non-streaming requests (stream=false), enable usage by default
+        // This ensures compliance with OpenAI API spec where non-streaming responses
+        // always include usage statistics
+        if !original_stream_flag {
+            // If stream_options doesn't exist, create it
+            if request.inner.stream_options.is_none() {
+                request.inner.stream_options = Some(
+                    dynamo_async_openai::types::ChatCompletionStreamOptions {
+                        include_usage: true,
+                    }
+                );
+            } else if let Some(ref mut opts) = request.inner.stream_options {
+                // If stream_options exists, ensure include_usage is true for non-streaming
+                opts.include_usage = true;
+            }
         }
 
         // Set stream=true for internal processing (after audit capture)
@@ -951,6 +969,26 @@ impl
     ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         // unpack the request
         let (mut request, context) = request.into_parts();
+
+        // Preserve original streaming flag
+        let original_stream_flag = request.inner.stream.unwrap_or(false);
+
+        // For non-streaming requests (stream=false), enable usage by default
+        // This ensures compliance with OpenAI API spec where non-streaming responses
+        // always include usage statistics
+        if !original_stream_flag {
+            // If stream_options doesn't exist, create it
+            if request.inner.stream_options.is_none() {
+                request.inner.stream_options = Some(
+                    dynamo_async_openai::types::ChatCompletionStreamOptions {
+                        include_usage: true,
+                    }
+                );
+            } else if let Some(ref mut opts) = request.inner.stream_options {
+                // If stream_options exists, ensure include_usage is true for non-streaming
+                opts.include_usage = true;
+            }
+        }
 
         request.inner.stream = Some(true);
 
