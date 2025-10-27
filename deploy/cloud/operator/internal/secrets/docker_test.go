@@ -21,7 +21,7 @@ func TestDockerSecretIndexer_RefreshIndex(t *testing.T) {
 			},
 			Type: corev1.SecretTypeDockerConfigJson,
 			Data: map[string][]byte{
-				".dockerconfigjson": []byte(`{"auths":{"docker.io":{}, "my-registry.com:5005/registry1":{}}}`),
+				".dockerconfigjson": []byte(`{"auths":{"docker.io":{}, "nvcr.io/nvidia/ai-dynamo.com:5005/registry1":{}}}`),
 			},
 		},
 		{
@@ -31,7 +31,7 @@ func TestDockerSecretIndexer_RefreshIndex(t *testing.T) {
 			},
 			Type: corev1.SecretTypeDockerConfigJson,
 			Data: map[string][]byte{
-				".dockerconfigjson": []byte(`{"auths":{"my-registry.com:5005/registry2":{}}}`),
+				".dockerconfigjson": []byte(`{"auths":{"nvcr.io/nvidia/ai-dynamo.com:5005/registry2":{}}}`),
 			},
 		},
 		{
@@ -41,7 +41,7 @@ func TestDockerSecretIndexer_RefreshIndex(t *testing.T) {
 			},
 			Type: corev1.SecretTypeDockerConfigJson,
 			Data: map[string][]byte{
-				".dockerconfigjson": []byte(`{"auths":{"my-registry.com:5005/registry2":{}}}`),
+				".dockerconfigjson": []byte(`{"auths":{"nvcr.io/nvidia/ai-dynamo.com:5005/registry2":{}}}`),
 			},
 		},
 	}
@@ -68,7 +68,7 @@ func TestDockerSecretIndexer_RefreshIndex(t *testing.T) {
 		t.Errorf("DockerSecretIndexer.GetSecrets() = %v, want %v", secrets[0], "secret1")
 	}
 
-	secrets, err = i.GetSecrets("default", "my-registry.com:5005")
+	secrets, err = i.GetSecrets("default", "nvcr.io/nvidia/ai-dynamo.com:5005")
 	if err != nil {
 		t.Errorf("DockerSecretIndexer.GetSecrets() error = %v, wantErr %v", err, nil)
 	}
@@ -82,7 +82,7 @@ func TestDockerSecretIndexer_RefreshIndex(t *testing.T) {
 		t.Errorf("DockerSecretIndexer.GetSecrets() = %v, want %v", secrets[1], "secret2")
 	}
 
-	secrets, err = i.GetSecrets("another-namespace", "my-registry.com:5005")
+	secrets, err = i.GetSecrets("another-namespace", "nvcr.io/nvidia/ai-dynamo.com:5005")
 	if err != nil {
 		t.Errorf("DockerSecretIndexer.GetSecrets() error = %v, wantErr %v", err, nil)
 	}
