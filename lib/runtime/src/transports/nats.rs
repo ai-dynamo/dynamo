@@ -560,19 +560,9 @@ impl NatsQueue {
 
             // Create persistent subscriber only if consumer_name is set
             if let Some(ref consumer_name) = self.consumer_name {
-                // Set ack_wait to 5 minutes to give plenty of time for message processing
-                // before NATS redelivers. This prevents spurious redeliveries when messages
-                // are being processed but haven't been ack'd yet.
-                let ack_wait = std::env::var("DYN_NATS_ACK_WAIT")
-                    .ok()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(time::Duration::from_secs)
-                    .unwrap_or_else(|| time::Duration::from_secs(300)); // 5 minutes default
-
                 let consumer_config = jetstream::consumer::pull::Config {
                     durable_name: Some(consumer_name.clone()),
                     inactive_threshold: std::time::Duration::from_secs(3600), // 1 hour
-                    ack_wait,
                     ..Default::default()
                 };
 
