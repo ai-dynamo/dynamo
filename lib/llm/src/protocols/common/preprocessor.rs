@@ -50,7 +50,7 @@ pub struct PreprocessedRequest {
 
     /// Targeted backend instance ID for the request
     #[builder(default)]
-    pub backend_instance_id: Option<i64>,
+    pub backend_instance_id: Option<u64>,
 
     /// Router configuration overrides for this specific request
     #[builder(default)]
@@ -60,6 +60,11 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disaggregated_params: Option<serde_json::Value>,
+
+    /// Data parallel rank for the request (used with data parallelism)
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dp_rank: Option<u32>,
 
     /// Additional arguments for extensibility
     #[builder(default)]

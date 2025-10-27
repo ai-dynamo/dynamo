@@ -120,13 +120,14 @@ pub(crate) struct EntrypointArgs {
     namespace: Option<String>,
     custom_backend_metrics_endpoint: Option<String>,
     custom_backend_metrics_polling_interval: Option<f64>,
+    is_prefill: bool,
 }
 
 #[pymethods]
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, custom_backend_metrics_endpoint=None, custom_backend_metrics_polling_interval=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, custom_backend_metrics_endpoint=None, custom_backend_metrics_polling_interval=None, is_prefill=false))]
     pub fn new(
         engine_type: EngineType,
         model_path: Option<PathBuf>,
@@ -144,6 +145,7 @@ impl EntrypointArgs {
         namespace: Option<String>,
         custom_backend_metrics_endpoint: Option<String>,
         custom_backend_metrics_polling_interval: Option<f64>,
+        is_prefill: bool,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -170,6 +172,7 @@ impl EntrypointArgs {
             namespace,
             custom_backend_metrics_endpoint,
             custom_backend_metrics_polling_interval,
+            is_prefill,
         })
     }
 }
@@ -180,6 +183,8 @@ pub(crate) struct EngineConfig {
     inner: RsEngineConfig,
 }
 
+/// Create the backend engine wrapper to run the model.
+/// Download the model if necessary.
 #[pyfunction]
 #[pyo3(signature = (distributed_runtime, args))]
 pub fn make_engine<'p>(
@@ -189,8 +194,11 @@ pub fn make_engine<'p>(
 ) -> PyResult<Bound<'p, PyAny>> {
     let mut builder = LocalModelBuilder::default();
     builder
-        .model_path(args.model_path.clone())
-        .model_name(args.model_name.clone())
+        .model_name(
+            args.model_name
+                .clone()
+                .or_else(|| args.model_path.clone().map(|p| p.display().to_string())),
+        )
         .endpoint_id(args.endpoint_id.clone())
         .context_length(args.context_length)
         .request_template(args.template_file.clone())
@@ -206,6 +214,19 @@ pub fn make_engine<'p>(
         .custom_backend_metrics_endpoint(args.custom_backend_metrics_endpoint.clone())
         .custom_backend_metrics_polling_interval(args.custom_backend_metrics_polling_interval);
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        if let Some(model_path) = args.model_path.clone() {
+            let local_path = if model_path.exists() {
+                model_path
+            } else {
+                // Mocker only needs tokenizer, not weights
+                let ignore_weights = matches!(args.engine_type, EngineType::Mocker);
+                LocalModel::fetch(&model_path.display().to_string(), ignore_weights)
+                    .await
+                    .map_err(to_pyerr)?
+            };
+            builder.model_path(local_path);
+        }
+
         let local_model = builder.build().await.map_err(to_pyerr)?;
         let inner = select_engine(distributed_runtime, args, local_model)
             .await
@@ -259,6 +280,7 @@ async fn select_engine(
                 engine,
                 model: Box::new(local_model),
                 is_static: false,
+                is_prefill: args.is_prefill,
             }
         }
     };

@@ -17,7 +17,7 @@
 //!
 //! Note: `NATS_AUTH_USERNAME` and `NATS_AUTH_PASSWORD` must be used together.
 use crate::traits::events::EventPublisher;
-use crate::{Result, metrics::MetricsRegistry};
+use crate::{Result, metrics::MetricsHierarchy};
 
 use async_nats::connection::State;
 use async_nats::{Subscriber, client, jetstream};
@@ -910,32 +910,33 @@ pub struct DRTNatsClientPrometheusMetrics {
 impl DRTNatsClientPrometheusMetrics {
     /// Create a new instance of NATS client metrics using a DistributedRuntime's Prometheus constructors
     pub fn new(drt: &crate::DistributedRuntime, nats_client: client::Client) -> Result<Self> {
-        let in_bytes = drt.create_intgauge(
+        let metrics = drt.metrics();
+        let in_bytes = metrics.create_intgauge(
             nats_metrics::IN_TOTAL_BYTES,
             "Total number of bytes received by NATS client",
             &[],
         )?;
-        let out_bytes = drt.create_intgauge(
+        let out_bytes = metrics.create_intgauge(
             nats_metrics::OUT_OVERHEAD_BYTES,
             "Total number of bytes sent by NATS client",
             &[],
         )?;
-        let in_messages = drt.create_intgauge(
+        let in_messages = metrics.create_intgauge(
             nats_metrics::IN_MESSAGES,
             "Total number of messages received by NATS client",
             &[],
         )?;
-        let out_messages = drt.create_intgauge(
+        let out_messages = metrics.create_intgauge(
             nats_metrics::OUT_MESSAGES,
             "Total number of messages sent by NATS client",
             &[],
         )?;
-        let connects = drt.create_intgauge(
+        let connects = metrics.create_intgauge(
             nats_metrics::CURRENT_CONNECTIONS,
             "Current number of active connections for NATS client",
             &[],
         )?;
-        let connection_state = drt.create_intgauge(
+        let connection_state = metrics.create_intgauge(
             nats_metrics::CONNECTION_STATE,
             "Current connection state of NATS client (0=disconnected, 1=connected, 2=reconnecting)",
             &[],

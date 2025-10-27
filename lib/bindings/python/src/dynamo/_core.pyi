@@ -464,6 +464,13 @@ class WorkerMetricsPublisher:
         """
         Similar to Component.create_service, but only service created through
         this method will interact with KV router of the same component.
+
+        Args:
+            component: The component to create the endpoint for
+            metrics_labels: [DEPRECATED] This parameter is no longer used and will be removed in a future version
+
+        .. deprecated::
+            The metrics_labels parameter is deprecated and has no effect.
         """
 
     def publish(
@@ -486,7 +493,24 @@ class ModelRuntimeConfig:
     """
     A model runtime configuration is a collection of runtime information
     """
-    ...
+
+    total_kv_blocks: int | None
+    max_num_seqs: int | None
+    max_num_batched_tokens: int | None
+    tool_call_parser: str | None
+    reasoning_parser: str | None
+    runtime_data: dict[str, Any]
+    tensor_model_config: Any | None
+
+    def __init__(self) -> None: ...
+
+    def set_engine_specific(self, key: str, value: Any) -> None:
+        """Set an engine-specific runtime configuration value"""
+        ...
+
+    def get_engine_specific(self, key: str) -> Any | None:
+        """Get an engine-specific runtime configuration value"""
+        ...
 
 class OAIChatPreprocessor:
     """
@@ -546,7 +570,8 @@ class RadixTree:
     """
     A RadixTree that tracks KV cache blocks and can find prefix matches for sequences.
 
-    NOTE: This class is not thread-safe and should only be used from a single thread in Python.
+    Thread-safe: operations route to a dedicated background thread and long calls
+    release the Python GIL.
     """
 
     def __init__(self, expiration_duration_secs: Optional[float] = None) -> None:
@@ -602,6 +627,15 @@ class RadixTree:
 
         Args:
             worker_id: ID of the worker whose blocks should be cleared
+        """
+        ...
+
+    def dump_tree_as_events(self) -> List[str]:
+        """
+        Dump the current RadixTree state as a list of JSON-serialized KV cache events.
+
+        Returns:
+            List of JSON-serialized KV cache events as strings
         """
         ...
 
@@ -745,31 +779,6 @@ class KvRecorder:
         """
         ...
 
-class AggregatedMetrics:
-    """
-    A collection of metrics of the endpoints
-    """
-
-    ...
-
-class KvMetricsAggregator:
-    """
-    A metrics aggregator will collect KV metrics of the endpoints.
-    """
-
-    ...
-
-    def __init__(self, component: Component) -> None:
-        """
-        Create a `KvMetricsAggregator` object
-        """
-
-    def get_metrics(self) -> AggregatedMetrics:
-        """
-        Return the aggregated metrics of the endpoints.
-        """
-        ...
-
 class KvEventPublisher:
     """
     A KV event publisher will publish KV events corresponding to the component.
@@ -778,16 +787,21 @@ class KvEventPublisher:
     ...
 
     def __init__(
-        self, component: Component, worker_id: int, kv_block_size: int
+        self, component: Component, worker_id: int, kv_block_size: int, dp_rank: int = 0
     ) -> None:
         """
         Create a `KvEventPublisher` object
+
+        Args:
+            component: The component to publish events for
+            worker_id: The worker ID
+            kv_block_size: The KV block size (must be > 0)
+            dp_rank: The data parallel rank (defaults to 0)
         """
 
     def publish_stored(
         self,
-        event_id,
-        int,
+        event_id: int,
         token_ids: List[int],
         num_block_tokens: List[int],
         block_hashes: List[int],
@@ -796,12 +810,24 @@ class KvEventPublisher:
     ) -> None:
         """
         Publish a KV stored event.
+
+        Args:
+            event_id: The event ID
+            token_ids: List of token IDs
+            num_block_tokens: Number of tokens per block
+            block_hashes: List of block hashes (signed 64-bit integers)
+            lora_id: The LoRA ID
+            parent_hash: Optional parent hash (signed 64-bit integer)
         """
         ...
 
-    def publish_removed(self, event_id, int, block_hashes: List[int]) -> None:
+    def publish_removed(self, event_id: int, block_hashes: List[int]) -> None:
         """
         Publish a KV removed event.
+
+        Args:
+            event_id: The event ID
+            block_hashes: List of block hashes to remove (signed 64-bit integers)
         """
         ...
 
@@ -847,6 +873,17 @@ class HttpService:
 
     ...
 
+class PythonAsyncEngine:
+    """
+    Bridge a Python async generator onto Dynamo's AsyncEngine interface.
+    """
+
+    def __init__(self, generator: Any, event_loop: Any) -> None:
+        """Wrap a Python generator and event loop for use with Dynamo services."""
+        ...
+
+
+
 class HttpAsyncEngine:
     """
     An async engine for a distributed Dynamo http service. This is an extension of the
@@ -856,12 +893,144 @@ class HttpAsyncEngine:
 
     ...
 
+class KserveGrpcService:
+    """
+    A gRPC service implementing the KServe protocol for dynamo applications.
+    Provides model management for completions, chat completions, and tensor-based models.
+    """
+
+    def __init__(self, port: Optional[int] = None, host: Optional[str] = None) -> None:
+        """
+        Create a new KServe gRPC service.
+
+        Args:
+            port: Optional port number to bind the service to
+            host: Optional host address to bind the service to
+        """
+        ...
+
+    def add_completions_model(
+        self,
+        model: str,
+        checksum: str,
+        engine: PythonAsyncEngine,
+    ) -> None:
+        """
+        Register a completions model with the service.
+
+        Args:
+            model: The model name
+            checksum: The model checksum
+            engine: The async engine to handle requests
+        """
+        ...
+
+    def add_chat_completions_model(
+        self,
+        model: str,
+        checksum: str,
+        engine: PythonAsyncEngine,
+    ) -> None:
+        """
+        Register a chat completions model with the service.
+
+        Args:
+            model: The model name
+            checksum: The model checksum
+            engine: The async engine to handle requests
+        """
+        ...
+
+    def add_tensor_model(
+        self,
+        model: str,
+        checksum: str,
+        engine: PythonAsyncEngine,
+    ) -> None:
+        """
+        Register a tensor-based model with the service.
+
+        Args:
+            model: The model name
+            checksum: The model checksum
+            engine: The async engine to handle requests
+        """
+        ...
+
+    def remove_completions_model(self, model: str) -> None:
+        """
+        Remove a completions model from the service.
+
+        Args:
+            model: The model name to remove
+        """
+        ...
+
+    def remove_chat_completions_model(self, model: str) -> None:
+        """
+        Remove a chat completions model from the service.
+
+        Args:
+            model: The model name to remove
+        """
+        ...
+
+    def remove_tensor_model(self, model: str) -> None:
+        """
+        Remove a tensor model from the service.
+
+        Args:
+            model: The model name to remove
+        """
+        ...
+
+    def list_chat_completions_models(self) -> List[str]:
+        """
+        List all registered chat completions models.
+
+        Returns:
+            List of model names
+        """
+        ...
+
+    def list_completions_models(self) -> List[str]:
+        """
+        List all registered completions models.
+
+        Returns:
+            List of model names
+        """
+        ...
+
+    def list_tensor_models(self) -> List[str]:
+        """
+        List all registered tensor models.
+
+        Returns:
+            List of model names
+        """
+        ...
+
+    async def run(self, token: CancellationToken) -> None:
+        """
+        Run the KServe gRPC service.
+
+        Args:
+            token: Cancellation token to stop the service
+        """
+        ...
+
 class ModelInput:
     """What type of request this model needs: Text, Tokens or Tensor"""
     ...
 
 class ModelType:
-    """What type of request this model needs: Chat, Completions, Embedding or Tensor"""
+    """What type of request this model needs: Chat, Completions, Embedding, Tensor or Prefill"""
+    Chat: ModelType
+    Completions: ModelType
+    Embedding: ModelType
+    TensorBased: ModelType
+    Prefill: ModelType
     ...
 
 class RouterMode:
@@ -884,12 +1053,20 @@ async def register_llm(
     model_name: Optional[str] = None,
     context_length: Optional[int] = None,
     kv_cache_block_size: Optional[int] = None,
-    migration_limit: int = 0,
     router_mode: Optional[RouterMode] = None,
+    migration_limit: int = 0,
+    runtime_config: Optional[ModelRuntimeConfig] = None,
     user_data: Optional[Dict[str, Any]] = None,
     custom_template_path: Optional[str] = None,
 ) -> None:
     """Attach the model at path to the given endpoint, and advertise it as model_type"""
+    ...
+
+async def fetch_llm(remote_name: str) -> str:
+    """
+    Download a model from Hugging Face, returning it's local path.
+    Example: `model_path = await fetch_llm("Qwen/Qwen3-0.6B")`
+    """
     ...
 
 class EngineConfig:
@@ -1192,6 +1369,7 @@ class KvPushRouter:
         output_options: Optional[JsonLike] = None,
         router_config_override: Optional[JsonLike] = None,
         worker_id: Optional[int] = None,
+        dp_rank: Optional[int] = None,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate text using the KV-aware router.
@@ -1206,6 +1384,10 @@ class KvPushRouter:
             worker_id: Optional worker ID to route to directly. If set, the request
                       will be sent to this specific worker and router states will be
                       updated accordingly.
+            dp_rank: Optional data parallel rank to route to. If set along with worker_id,
+                    the request will be routed to the specific (worker_id, dp_rank) pair.
+                    If only dp_rank is set, the router will select the best worker but
+                    force routing to the specified dp_rank.
 
         Returns:
             An async iterator yielding generation responses
@@ -1213,7 +1395,33 @@ class KvPushRouter:
         Note:
             - If worker_id is set, the request bypasses KV matching and routes directly
               to the specified worker while still updating router states.
+            - dp_rank allows targeting a specific data parallel replica when workers have
+              multiple replicas (data_parallel_size > 1).
             - This is different from query_instance_id which doesn't route the request.
+        """
+        ...
+
+    async def best_worker(
+        self,
+        token_ids: List[int],
+        router_config_override: Optional[JsonLike] = None,
+        request_id: Optional[str] = None,
+    ) -> Tuple[int, int, int]:
+        """
+        Find the best matching worker for the given tokens.
+
+        Args:
+            token_ids: List of token IDs to find matches for
+            router_config_override: Optional router configuration override
+            request_id: Optional request ID. If provided, router states will be updated
+                       to track this request (active blocks, lifecycle events). If not
+                       provided, this is a query-only operation that doesn't affect state.
+
+        Returns:
+            A tuple of (worker_id, dp_rank, overlap_blocks) where:
+                - worker_id: The ID of the best matching worker
+                - dp_rank: The data parallel rank of the selected worker
+                - overlap_blocks: The number of overlapping blocks found
         """
         ...
 
@@ -1224,6 +1432,8 @@ class KvPushRouter:
         request_id: Optional[str] = None,
     ) -> Tuple[int, int]:
         """
+        [DEPRECATED] Use best_worker() instead which returns (worker_id, dp_rank, overlap_blocks).
+
         Find the best matching worker for the given tokens.
 
         Args:
@@ -1237,6 +1447,9 @@ class KvPushRouter:
             A tuple of (worker_id, overlap_blocks) where:
                 - worker_id: The ID of the best matching worker
                 - overlap_blocks: The number of overlapping blocks found
+
+        .. deprecated::
+            Use :meth:`best_worker` instead which also returns dp_rank.
         """
         ...
 
@@ -1253,8 +1466,13 @@ class KvPushRouter:
         Returns:
             A list of dictionaries, each containing:
                 - worker_id: The worker ID
+                - dp_rank: The data parallel rank
                 - potential_prefill_tokens: Number of tokens that would need prefill
                 - potential_decode_blocks: Number of blocks currently in decode phase
+
+        Note:
+            Each (worker_id, dp_rank) pair is returned as a separate entry.
+            If you need aggregated loads per worker_id, sum the values manually.
         """
         ...
 
@@ -1280,7 +1498,7 @@ class KvPushRouter:
         Note:
             This is typically called automatically by the router when using the
             `generate()` method. Only call this manually if you're using
-            `best_worker_id()` with `request_id` for custom routing.
+            `best_worker()` with `request_id` for custom routing.
         """
         ...
 
@@ -1297,7 +1515,7 @@ class KvPushRouter:
         Note:
             This is typically called automatically by the router when using the
             `generate()` method. Only call this manually if you're using
-            `best_worker_id()` with `request_id` for custom routing.
+            `best_worker()` with `request_id` for custom routing.
         """
         ...
 
@@ -1358,7 +1576,9 @@ __all__ = [
     "Client",
     "Component",
     "Context",
+    "KserveGrpcService",
     "ModelDeploymentCard",
     "OAIChatPreprocessor",
+    "PythonAsyncEngine",
     "prometheus_names",
 ]

@@ -52,12 +52,12 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | TensorRT-LLM | Notes |
 |---------|--------------|-------|
-| [**Disaggregated Serving**](../../../docs/architecture/disagg_serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | Not supported yet |
-| [**KV-Aware Routing**](../../../docs/architecture/kv_cache_routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | ✅ |  |
-| [**Load Based Planner**](../../../docs/architecture/load_planner.md) | 🚧 | Planned |
-| [**KVBM**](../../../docs/architecture/kvbm_architecture.md) | 🚧 | Planned |
+| [**Disaggregated Serving**](../../../docs/design_docs/disagg_serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../../docs/design_docs/disagg_serving.md#conditional-disaggregation) | 🚧 | Not supported yet |
+| [**KV-Aware Routing**](../../../docs/router/kv_cache_routing.md) | ✅ |  |
+| [**SLA-Based Planner**](../../../docs/planner/sla_planner.md) | ✅ |  |
+| [**Load Based Planner**](../../../docs/planner/load_planner.md) | 🚧 | Planned |
+| [**KVBM**](../../../docs/kvbm/kvbm_architecture.md) | ✅ | |
 
 ### Large Scale P/D and WideEP Features
 
@@ -162,7 +162,7 @@ cd $DYNAMO_HOME/components/backends/trtllm
 ```bash
 cd $DYNAMO_HOME/components/backends/trtllm
 
-export AGG_ENGINE_ARGS=./engine_configs/deepseek_r1/mtp/mtp_agg.yaml
+export AGG_ENGINE_ARGS=./recipes/deepseek-r1/trtllm/mtp/mtp_agg.yaml
 export SERVED_MODEL_NAME="nvidia/DeepSeek-R1-FP4"
 # nvidia/DeepSeek-R1-FP4 is a large model
 export MODEL_PATH="nvidia/DeepSeek-R1-FP4"
@@ -196,7 +196,7 @@ NOTE: To send a request to a multi-node deployment, target the node which is run
 
 ### Benchmarking
 
-To benchmark your deployment with GenAI-Perf, see this utility script, configuring the
+To benchmark your deployment with AIPerf, see this utility script, configuring the
 `model` name and `host` based on your deployment: [perf.sh](../../../benchmarks/llm/perf.sh)
 
 
@@ -220,13 +220,27 @@ Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disag
 
 ## Request Migration
 
-You can enable [request migration](../../../docs/architecture/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
+You can enable [request migration](../../../docs/fault_tolerance/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
 
 ```bash
 python3 -m dynamo.trtllm ... --migration-limit=3
 ```
 
-This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../../../docs/architecture/request_migration.md) documentation for details on how this works.
+This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../../../docs/fault_tolerance/request_migration.md) documentation for details on how this works.
+
+## Request Cancellation
+
+When a user cancels a request (e.g., by disconnecting from the frontend), the request is automatically cancelled across all workers, freeing compute resources for other requests.
+
+### Cancellation Support Matrix
+
+| | Prefill | Decode |
+|-|---------|--------|
+| **Aggregated** | ✅ | ✅ |
+| **Disaggregated (Decode-First)** | ✅ | ✅ |
+| **Disaggregated (Prefill-First)** | ✅ | ✅ |
+
+For more details, see the [Request Cancellation Architecture](../../fault_tolerance/request_cancellation.md) documentation.
 
 ## Client
 
@@ -236,7 +250,7 @@ NOTE: To send a request to a multi-node deployment, target the node which is run
 
 ## Benchmarking
 
-To benchmark your deployment with GenAI-Perf, see this utility script, configuring the
+To benchmark your deployment with AIPerf, see this utility script, configuring the
 `model` name and `host` based on your deployment: [perf.sh](../../../benchmarks/llm/perf.sh)
 
 ## Multimodal support
@@ -308,4 +322,4 @@ For detailed instructions on running comprehensive performance sweeps across bot
 
 Dynamo with TensorRT-LLM currently supports integration with the Dynamo KV Block Manager. This integration can significantly reduce time-to-first-token (TTFT) latency, particularly in usage patterns such as multi-turn conversations and repeated long-context requests.
 
-Here is the instruction: [Running KVBM in TensorRT-LLM](./../../../docs/guides/run_kvbm_in_trtllm.md) .
+Here is the instruction: [Running KVBM in TensorRT-LLM](./../../../docs/kvbm/trtllm-setup.md) .

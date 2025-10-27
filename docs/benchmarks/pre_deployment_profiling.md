@@ -1,7 +1,7 @@
 # Pre-Deployment Profiling
 
 > [!TIP]
-> **New to SLA Planner?** For a complete workflow including profiling and deployment, see the [SLA Planner Quick Start Guide](/docs/kubernetes/sla_planner_quickstart.md).
+> **New to SLA Planner?** For a complete workflow including profiling and deployment, see the [SLA Planner Quick Start Guide](/docs/planner/sla_planner_quickstart.md).
 
 ## Profiling Script
 
@@ -99,7 +99,7 @@ SLA planner can work with any interpolation data that follows the above format. 
 ## Detailed Kubernetes Profiling Instructions
 
 > [!TIP]
-> For a complete step-by-step workflow, see the [SLA Planner Quick Start Guide](/docs/kubernetes/sla_planner_quickstart.md).
+> For a complete step-by-step workflow, see the [SLA Planner Quick Start Guide](/docs/planner/sla_planner_quickstart.md).
 
 This section provides detailed technical information for advanced users who need to customize the profiling process.
 
@@ -119,14 +119,24 @@ spec:
             - --osl
             - "150" # average OSL is 150 tokens
             - --ttft
-            - "200" # target TTFT is 200ms
+            - "200" # target TTFT is 200ms (float, in milliseconds)
             - --itl
-            - "20" # target ITL is 20ms
+            - "20" # target ITL is 20ms (float, in milliseconds)
             - --backend
             - <vllm/sglang>
 ```
 
 **For MoE models**, use `profile_sla_moe_job.yaml` with TEP/DEP configuration instead.
+
+### Auto-Configuration
+
+To automatically configure the profiling job based on the hardware and model information, supply the `--model` argument to the profiling script. The following arguments will be automatically set:
+- `--config`: will use the default config file (`components/backends/<backend>/deploy/disagg.yaml`) with model updated to the provided model name
+- `--min-num-gpus-per-engine`: will be set to the minimum number of GPUs per engine based on the model size and hardware information
+- `--max-num-gpus-per-engine`: will be set to the maximum number of GPUs per engine based on the model size and hardware information
+- `--num-gpus-per-node`: will be set to the number of GPUs per node based on the hardware information
+- `--is-moe-model`: will be set based on the HF config file
+- `--max-context-length`: will be set to the maximum context length supported by the model based on the HF config file
 
 ### Advanced Configuration
 
@@ -217,7 +227,7 @@ If you see `ErrImagePull` or `ImagePullBackOff` errors with 401 unauthorized mes
 
 2. Verify the service account was created with the image pull secret:
   ```bash
-  kubectl get serviceaccount dynamo-sa -n $NAMESPACE -o yaml
+  kubectl get serviceaccount dgdr-profiling-job -n $NAMESPACE -o yaml
    ```
 
 3. The service account should show `imagePullSecrets` containing `nvcr-imagepullsecret`.
@@ -290,8 +300,8 @@ python3 -m benchmarks.profiler.profile_sla \
    --aic-backend-version 0.20.0 \
    --isl 3000 \
    --osl 150 \
-   --ttft 0.2 \
-   --itl 0.02
+   --ttft 200 \ # target TTFT in milliseconds (float)
+   --itl 20 # target ITL in milliseconds (float)
 ```
 
 The output will be written to `./profiling_results/` and can be used directly with SLA planner deployment.

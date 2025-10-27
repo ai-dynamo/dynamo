@@ -90,14 +90,14 @@ The deployment uses configuration files and command-line arguments to control be
 
 #### Configuration Files
 
-**Prefill Configuration (`engine_configs/gpt_oss/prefill.yaml`)**:
+**Prefill Configuration (`recipes/gpt-oss-120b/trtllm/disagg/prefill.yaml`)**:
 - `enable_attention_dp: false` - Attention data parallelism disabled for prefill
 - `enable_chunked_prefill: true` - Enables efficient chunked prefill processing
 - `moe_config.backend: CUTLASS` - Uses optimized CUTLASS kernels for MoE layers
 - `cache_transceiver_config.backend: ucx` - Uses UCX for efficient KV cache transfer
 - `cuda_graph_config.max_batch_size: 32` - Maximum batch size for CUDA graphs
 
-**Decode Configuration (`engine_configs/gpt_oss/decode.yaml`)**:
+**Decode Configuration (`recipes/gpt-oss-120b/trtllm/disagg/decode.yaml`)**:
 - `enable_attention_dp: true` - Attention data parallelism enabled for decode
 - `disable_overlap_scheduler: false` - Enables overlapping for decode efficiency
 - `moe_config.backend: CUTLASS` - Uses optimized CUTLASS kernels for MoE layers
@@ -147,7 +147,7 @@ python3 -m dynamo.frontend --router-mode round-robin --http-port 8000 &
 CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
   --model-path /model \
   --served-model-name openai/gpt-oss-120b \
-  --extra-engine-args engine_configs/gpt_oss/prefill.yaml \
+  --extra-engine-args recipes/gpt-oss-120b/trtllm/disagg/prefill.yaml \
   --dyn-reasoning-parser gpt_oss \
   --dyn-tool-call-parser harmony \
   --disaggregation-mode prefill \
@@ -164,7 +164,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
 CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --model-path /model \
   --served-model-name openai/gpt-oss-120b \
-  --extra-engine-args engine_configs/gpt_oss/decode.yaml \
+  --extra-engine-args recipes/gpt-oss-120b/trtllm/disagg/decode.yaml \
   --dyn-reasoning-parser gpt_oss \
   --dyn-tool-call-parser harmony \
   --disaggregation-mode decode \
@@ -402,9 +402,9 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 ```
 ## Benchmarking
 
-### Performance Testing with GenAI-Perf
+### Performance Testing with AIPerf
 
-The Dynamo container includes [GenAI-Perf](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/perf_analyzer/genai-perf/README.html), NVIDIA's tool for benchmarking generative AI models. This tool helps measure throughput, latency, and other performance metrics for your deployment.
+The Dynamo container includes [AIPerf](https://github.com/ai-dynamo/aiperf/tree/main?tab=readme-ov-file#aiperf), NVIDIA's tool for benchmarking generative AI models. This tool helps measure throughput, latency, and other performance metrics for your deployment.
 
 **Run the following benchmark from inside the container** (after completing the deployment steps above):
 
@@ -413,7 +413,7 @@ The Dynamo container includes [GenAI-Perf](https://docs.nvidia.com/deeplearning/
 mkdir -p /tmp/benchmark-results
 
 # Run the benchmark - this command tests the deployment with high-concurrency synthetic workload
-genai-perf profile \
+aiperf profile \
     --model openai/gpt-oss-120b \
     --tokenizer /model \
     --endpoint-type chat \
@@ -434,9 +434,7 @@ genai-perf profile \
     --num-dataset-entries 8000 \
     --random-seed 100 \
     --artifact-dir /tmp/benchmark-results \
-    -- \
     -v \
-    --max-threads 500 \
     -H 'Authorization: Bearer NOT USED' \
     -H 'Accept: text/event-stream'
 ```
@@ -457,13 +455,13 @@ Key parameters you can adjust:
 - `--output-tokens-mean`: Average output length (tests decode throughput)
 - `--request-count`: Total number of requests for the benchmark
 
-### Installing GenAI-Perf Outside the Container
+### Installing AIPerf Outside the Container
 
 If you prefer to run benchmarks from outside the container:
 
 ```bash
-# Install GenAI-Perf
-pip install genai-perf
+# Install AIPerf
+pip install aiperf
 
 # Then run the same benchmark command, adjusting the tokenizer path if needed
 ```
@@ -520,4 +518,4 @@ flowchart TD
 - **Production Deployment**: For multi-node deployments, see the [Multi-node Guide](../../../examples/basics/multinode/README.md)
 - **Advanced Configuration**: Explore TensorRT-LLM engine building options for further optimization
 - **Monitoring**: Set up Prometheus and Grafana for production monitoring
-- **Performance Benchmarking**: Use GenAI-Perf to measure and optimize your deployment performance
+- **Performance Benchmarking**: Use AIPerf to measure and optimize your deployment performance
