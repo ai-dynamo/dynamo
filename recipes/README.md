@@ -2,6 +2,15 @@
 
 This repository contains production-ready recipes for deploying large language models using the Dynamo platform. Each recipe includes deployment configurations, performance benchmarking, and model caching setup.
 
+## Contents
+- [Available Models](#available-models)
+- [Quick Start](#quick-start)
+- [Prerequisites](#prerequisites)
+- Deployment Methods
+   - [Option 1: Automated Deployment](#option-1-automated-deployment)
+   - [Option 2: Manual Deployment](#option-2-manual-deployment)
+
+
 ## Available Models
 
 | Model Family    | Framework | Deployment Mode      | GPU Requirements | Status | Benchmark |
@@ -16,6 +25,21 @@ This repository contains production-ready recipes for deploying large language m
 **Legend:**
 - ✅ Functional
 - 🚧 Under development
+
+
+**Recipe Directory Structure:**
+Recipes are organized into a directory structure that follows the pattern:
+```text
+<model-name>/
+├── model-cache/
+│   ├── model-cache.yaml         # PVC for model cache
+│   └── model-download.yaml      # Job for model download
+├── <framework>/
+│   └── <deployment-mode>/
+│       ├── deploy.yaml          # DynamoGraphDeployment CRD and optional configmap for custom configuration
+│       └── perf.yaml (optional) # Performance benchmark
+└── README.md (optional)         # Model documentation
+```
 
 ## Quick Start
 
