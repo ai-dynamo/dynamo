@@ -53,12 +53,12 @@ else
 fi
 
 # run ingress
-python -m dynamo.frontend --http-port=8001 &
+python -m dynamo.frontend --http-port=8000 &
 
 # To make Qwen2.5-VL fit in A100 40GB, set the following extra arguments
 EXTRA_ARGS=""
 if [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
-    EXTRA_ARGS="--gpu-memory-utilization 0.40 --max-model-len 2048"
+    EXTRA_ARGS="--gpu-memory-utilization 0.85 --max-model-len 2048"
 fi
 
 # run processor

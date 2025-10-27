@@ -90,7 +90,7 @@ async def worker(runtime: DistributedRuntime):
     elif config.multimodal_encode_worker:
         await init_multimodal_encode_worker(runtime, config)
         logger.debug("init_multimodal_encode_worker completed")
-    elif config.multimodal_worker and config.is_prefill_worker:
+    elif config.multimodal_worker:
         await init_multimodal_worker(runtime, config)
         logger.debug("init_multimodal_worker completed")
     elif config.is_prefill_worker:
