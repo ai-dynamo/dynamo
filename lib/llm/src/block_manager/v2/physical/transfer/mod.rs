@@ -49,7 +49,7 @@ pub mod preferences;
 pub mod strategy;
 pub mod validation;
 
-#[cfg(all(test, feature = "testing-cuda", feature = "testing-nixl"))]
+#[cfg(test)]
 mod tests;
 
 // Re-export StorageKind

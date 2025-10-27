@@ -37,7 +37,7 @@ impl CompletionChecker for CudaEventChecker {
 mod tests {
     use crate::block_manager::v2::physical::manager::TransportManager;
     use crate::block_manager::v2::physical::transfer::nixl_agent::NixlAgent;
-    use crate::block_manager::v2::physical::transfer::tests::CudaSleep;
+    use crate::block_manager::v2::physical::transfer::tests::cuda::CudaSleep;
     use std::time::{Duration, Instant};
 
     #[tokio::test]

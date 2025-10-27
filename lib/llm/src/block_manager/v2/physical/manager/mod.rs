@@ -211,26 +211,26 @@ impl TransportManager {
     }
 
     /// Get the H2D stream (for testing only).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "testing-cuda"))]
     pub(crate) fn h2d_stream(&self) -> &std::sync::Arc<cudarc::driver::CudaStream> {
         self.context.h2d_stream()
     }
 
     /// Get the D2H stream (for testing only).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "testing-cuda"))]
     #[allow(dead_code)]
     pub(crate) fn d2h_stream(&self) -> &std::sync::Arc<cudarc::driver::CudaStream> {
         self.context.d2h_stream()
     }
 
     /// Get the CUDA context (for testing only).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "testing-cuda"))]
     pub(crate) fn cuda_context(&self) -> &std::sync::Arc<cudarc::driver::CudaContext> {
         self.context.cuda_context()
     }
 
     /// Register a CUDA event for completion (for testing only).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "testing-cuda"))]
     pub(crate) fn register_cuda_event(
         &self,
         event: cudarc::driver::CudaEvent,
