@@ -272,6 +272,7 @@ COPY examples /workspace/examples
 COPY benchmarks /workspace/benchmarks
 COPY deploy /workspace/deploy
 COPY components/ /workspace/components/
+COPY recipes/ /workspace/recipes/
 
 # Copy attribution files
 COPY ATTRIBUTION* LICENSE /workspace/

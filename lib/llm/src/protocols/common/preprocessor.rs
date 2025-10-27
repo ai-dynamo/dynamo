@@ -50,7 +50,7 @@ pub struct PreprocessedRequest {
 
     /// Targeted backend instance ID for the request
     #[builder(default)]
-    pub backend_instance_id: Option<i64>,
+    pub backend_instance_id: Option<u64>,
 
     /// Router configuration overrides for this specific request
     #[builder(default)]

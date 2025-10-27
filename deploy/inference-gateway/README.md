@@ -16,7 +16,7 @@ Currently, these setups are only supported with the kGateway based Inference Gat
 
 - [Prerequisites](#prerequisites)
 - [Installation Steps](#installation-steps)
-- [Usage](#usage)
+- [Usage](#6-usage)
 
 ## Prerequisites
 
@@ -160,7 +160,7 @@ You can configure the plugin by setting environment vars in your [values-dynamo-
   - Set `DYNAMO_OVERLAP_SCORE_WEIGHT` to weigh how heavily the score uses token overlap (predicted KV cache hits) versus other factors (load, historical hit rate). Higher weight biases toward reusing workers with similar cached prefixes.
   - Set `DYNAMO_ROUTER_TEMPERATURE` to soften or sharpen the selection curve when combining scores. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
   - Set `DYNAMO_USE_KV_EVENTS=false` if you want to disable KV event tracking while using kv-routing
-  - See the [KV cache routing design](../../docs/architecture/kv_cache_routing.md) for details.
+  - See the [KV cache routing design](../../docs/router/kv_cache_routing.md) for details.
 
 
 

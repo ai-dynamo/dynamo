@@ -23,6 +23,7 @@ import yaml
 from pydantic import BaseModel
 
 from benchmarks.profiler.utils.planner_utils import build_planner_args_from_namespace
+from dynamo.common.utils.paths import get_workspace_dir
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SubComponentType
 
 logger = logging.getLogger(__name__)
@@ -107,7 +108,7 @@ class DgdPlannerServiceConfig(BaseModel):
     extraPodSpec: PodSpec = PodSpec(
         mainContainer=Container(
             image="my-registry/dynamo-runtime:my-tag",  # placeholder
-            workingDir="/workspace/components/src/dynamo/planner",
+            workingDir=f"{get_workspace_dir()}/components/src/dynamo/planner",
             command=["python3", "-m", "planner_sla"],
             args=[],
         )
@@ -408,6 +409,14 @@ class ConfigModifierProtocol(Protocol):
     def get_kv_cache_size_from_dynamo_log(
         cls, dynamo_log_fn: str, attention_dp_size: int = 1
     ) -> int:
+        ...
+
+    @classmethod
+    def load_default_config(cls) -> dict:
+        ...
+
+    @classmethod
+    def update_model(cls, config: dict, model_name: str) -> dict:
         ...
 
 

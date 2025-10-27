@@ -457,11 +457,7 @@ impl Decoder {
                 }
             }
 
-            if self.jail.len() > self.jail_max_bytes {
-                // truncate the jail
-                let drain_len = self.jail.len() - self.jail_max_bytes;
-                self.jail.drain(0..drain_len);
-            }
+            Self::maybe_drain_to_max_bytes(&mut self.jail, self.jail_max_bytes);
         }
 
         Ok(StepResult::ok(token))
@@ -529,5 +525,29 @@ impl Decoder {
         } else {
             None
         }
+    }
+
+    fn maybe_drain_to_max_bytes(s: &mut String, max_bytes: usize) {
+        if s.len() > max_bytes {
+            let mut drain_len = s.len() - max_bytes;
+            while !s.is_char_boundary(drain_len) {
+                drain_len -= 1;
+            }
+            s.drain(0..drain_len);
+        }
+    }
+}
+
+mod tests {
+
+    #[test]
+    fn test_char_boundary_drain() {
+        use super::Decoder;
+        let mut s = String::from("helloñworld"); // 12 bytes total ñ is 2 bytes
+        let max_bytes = 6; // 12 - 6 = 6 which is inside ñ
+        assert!(!s.is_char_boundary(s.len() - max_bytes)); // initially we are not on a char boundary
+        Decoder::maybe_drain_to_max_bytes(&mut s, max_bytes);
+        assert!(s.is_char_boundary(0)); // front of jail string on valid char boundary
+        assert_eq!(s, "ñworld");
     }
 }
