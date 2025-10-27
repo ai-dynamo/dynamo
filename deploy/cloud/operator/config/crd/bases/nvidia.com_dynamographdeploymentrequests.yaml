@@ -130,13 +130,18 @@ spec:
                         Namespace is the desired namespace for the created DynamoGraphDeployment.
                         If not specified, defaults to the DGDR namespace.
                       type: string
+                    workersImage:
+                      description: |-
+                        WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.
+                        This image is used for both temporary DGDs created during online profiling and the final DGD.
+                        If omitted, the image from the base config file (e.g., disagg.yaml) is used.
+                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+                      type: string
                   type: object
                 dgdImage:
                   description: |-
                     DgdImage specifies the container image to use for DynamoGraphDeployment components.
-                    This image is used for both temporary DGDs created during online profiling and the final DGD.
-                    If omitted, the image from the base config file (e.g., disagg.yaml) is used.
-                    Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+                    DEPRECATED: Use deploymentOverrides.workersImage instead.
                   type: string
                 model:
                   description: |-
@@ -147,8 +152,7 @@ spec:
                 profilerImage:
                   description: |-
                     ProfilerImage specifies the container image to use for profiling jobs.
-                    This image contains the profiler code and dependencies needed for SLA-based profiling.
-                    Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+                    DEPRECATED: Use profilingConfig.profilerImage instead.
                   type: string
                 profilingConfig:
                   description: |-
@@ -180,11 +184,18 @@ spec:
                       required:
                         - name
                       type: object
+                    profilerImage:
+                      description: |-
+                        ProfilerImage specifies the container image to use for profiling jobs.
+                        This image contains the profiler code and dependencies needed for SLA-based profiling.
+                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+                      type: string
+                  required:
+                    - profilerImage
                   type: object
               required:
                 - backend
                 - model
-                - profilerImage
                 - profilingConfig
               type: object
             status:
