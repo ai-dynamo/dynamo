@@ -24,6 +24,9 @@ rules:
 - apiGroups: ["networking.k8s.io"]
   resources: ["networkpolicies"]
   verbs: ["get", "list", "create", "delete"]
+- apiGroups: ["chaos-mesh.org"]
+  resources: ["networkchaos", "podchaos", "stresschaos", "iochaos"]
+  verbs: ["get", "list", "create", "delete", "watch"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -83,7 +86,8 @@ spec:
                 - Standard_ND96amsr_A100_v4
       containers:
       - name: api
-        image: nvcr.io/nvidian/dynamo-dev/fault-injection-api:latest
+        # Replace with your Azure Container Registry (ACR)
+        image: dynamoci.azurecr.io/fault-injection-api:latest
         imagePullPolicy: Always
         ports:
         - name: http

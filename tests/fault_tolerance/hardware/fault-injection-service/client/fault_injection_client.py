@@ -52,7 +52,8 @@ class NetworkPartition(str, Enum):
 class NetworkMode(str, Enum):
     """Network fault modes"""
 
-    NETWORKPOLICY = "networkpolicy"  # Use Kubernetes NetworkPolicy (only supported mode)
+    NETWORKPOLICY = "networkpolicy"  # Use Kubernetes NetworkPolicy (complete blocking)
+    CHAOS_MESH = "chaos_mesh"  # Use ChaosMesh for advanced faults (packet loss, delay, etc.)
 
 
 class FaultSeverity(str, Enum):
@@ -315,26 +316,34 @@ class FaultInjectionClient:
         Returns:
             DCGM status information
         """
-        try:
-            ds = self.apps_v1.read_namespaced_daemon_set(name="nvidia-dcgm", namespace=namespace)
+        # Try different DCGM DaemonSet names (varies by installation method)
+        dcgm_names = ["nvidia-dcgm-exporter", "nvidia-dcgm", "dcgm-exporter"]
+        
+        for dcgm_name in dcgm_names:
+            try:
+                ds = self.apps_v1.read_namespaced_daemon_set(name=dcgm_name, namespace=namespace)
 
-            return {
-                "deployed": True,
-                "namespace": namespace,
-                "desired_pods": ds.status.desired_number_scheduled,
-                "ready_pods": ds.status.number_ready,
-                "available_pods": ds.status.number_available,
-                "unavailable_pods": ds.status.number_unavailable,
-                "ready": ds.status.number_ready == ds.status.desired_number_scheduled,
-            }
-        except ApiException as e:
-            if e.status == 404:
                 return {
-                    "deployed": False,
+                    "deployed": True,
                     "namespace": namespace,
-                    "message": "DCGM DaemonSet not found",
+                    "daemonset_name": dcgm_name,
+                    "desired_pods": ds.status.desired_number_scheduled,
+                    "ready_pods": ds.status.number_ready,
+                    "available_pods": ds.status.number_available,
+                    "unavailable_pods": ds.status.number_unavailable,
+                    "ready": ds.status.number_ready == ds.status.desired_number_scheduled,
                 }
-            raise
+            except ApiException as e:
+                if e.status == 404:
+                    continue  # Try next name
+                raise
+        
+        # None of the DCGM names found
+        return {
+            "deployed": False,
+            "namespace": namespace,
+            "message": f"DCGM DaemonSet not found (tried: {', '.join(dcgm_names)})",
+        }
 
     @contextmanager
     def dcgm_infrastructure(
@@ -467,15 +476,34 @@ class FaultInjectionClient:
         **parameters,
     ) -> FaultInfo:
         """
-        Inject network partition.
+        Inject network partition or network fault.
 
         Args:
             partition_type: Type of network partition
             source: Source namespace or pod selector
             target: Target namespace or pod selector
-            mode: Network fault mode
+            mode: Network fault mode (NETWORKPOLICY or CHAOS_MESH)
             duration: Duration in seconds
             **parameters: Mode-specific parameters
+            
+        NetworkPolicy Mode Parameters:
+            - namespace: Kubernetes namespace
+            - target_pod_prefix: Pod name prefix to target
+            - block_nats: Block NATS traffic (default: True)
+            - block_specific_pods: List of pod label selectors to block
+            - block_all_egress: Block all egress traffic
+            
+        ChaosMesh Mode Parameters:
+            - namespace: Kubernetes namespace
+            - target_pod_prefix: Pod name prefix to target
+            - packet_loss_percent: Percentage of packets to drop (0-100)
+            - delay_ms: Delay to add in milliseconds
+            - delay_jitter_ms: Jitter for delay in milliseconds
+            - bandwidth_limit: Bandwidth limit (e.g., "1mbps")
+            - corrupt_percent: Percentage of packets to corrupt (0-100)
+            - duplicate_percent: Percentage of packets to duplicate (0-100)
+            - target_nats: Target NATS traffic (default: True)
+            - target_specific_pods: List of pod label selectors to target
 
         Returns:
             FaultInfo with partition details

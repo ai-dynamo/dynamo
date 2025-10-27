@@ -4,16 +4,41 @@ Test network fault tolerance without Kubernetes expertise. Inject network partit
 
 ## What You Can Do
 
-- **Network Partitions**: Simulate worker↔NATS, worker↔frontend, or custom pod isolation
+### NetworkPolicy Mode (Built-in)
+- **Complete network isolation** - block all traffic between pods
+- **No installation required** - uses Kubernetes NetworkPolicy
+- Best for testing: binary failures, complete partitions, failover scenarios
+
+### ChaosMesh Mode (Advanced)
+- **Partial packet loss** - simulate 50% packet drop
+- **Network delay** - add latency + jitter
+- **Bandwidth limiting** - simulate slow networks
+- **Requires ChaosMesh installed** - see installation below
+- Best for testing: degraded networks, congestion, high-latency scenarios
+
+### General Features
 - **Automatic Recovery**: Set fault duration or manually recover
-- **Easy Testing**: Run tests locally or in-cluster (no port-forwarding needed)
+- **Easy Testing**: Run tests in-cluster (no port-forwarding needed)
 - **Clean Output**: Colored test results and helper utilities included
 
 ## Prerequisites
 
+### Required
 - Fault Injection API deployed (see [README.md](README.md))
 - **Recommended**: Use `run_test_incluster.py` script (no setup needed)
-- **Alternative**: Port-forward API for local testing: `kubectl port-forward -n fault-injection-system svc/fault-injection-api 8080:8080`
+
+### Optional (for ChaosMesh tests)
+- Install ChaosMesh for packet loss/delay tests:
+```bash
+kubectl create ns chaos-mesh
+helm repo add chaos-mesh https://charts.chaos-mesh.org
+helm install chaos-mesh chaos-mesh/chaos-mesh -n chaos-mesh \
+  --set chaosDaemon.runtime=containerd \
+  --set chaosDaemon.socketPath=/run/containerd/containerd.sock
+```
+
+### Alternative
+- Port-forward API for local testing: `kubectl port-forward -n fault-injection-system svc/fault-injection-api 8080:8080`
 
 ## Quick Start
 
@@ -33,7 +58,17 @@ python scripts/run_test_incluster.py examples/test_partition_worker_to_frontend.
 
 # Run Frontend→NATS partition test (critical failure scenario)
 python scripts/run_test_incluster.py examples/test_partition_frontend_to_nats.py
+
+# Run ChaosMesh tests (requires ChaosMesh installed)
+python scripts/run_test_incluster.py examples/test_nats_packet_loss_50_percent.py
 ```
+
+> **Note:** Update `FRONTEND_URL` in `scripts/run_test_incluster.py` (line 99) to match your deployment:
+> - `vllm-agg-frontend` for aggregated deployments
+> - `vllm-disagg-frontend` for disaggregated deployments
+> - Verify with: `kubectl get svc -n dynamo-oviya` or your namespace
+
+**Note:** ChaosMesh tests require ChaosMesh installed (see [Prerequisites](#prerequisites)).
 
 **See the [Create Your Own Test](#create-your-own-test) section below for writing custom tests.**
 
@@ -62,111 +97,80 @@ print(f"Got: {text}")
 
 ## Common Use Cases
 
-### 1. Direct Pod-to-Pod Blocking (Label-Based)
+### NetworkPolicy Mode Examples
 
-Block specific pod communication using Kubernetes label selectors. **Most precise method.**
-
+**1. Block NATS traffic:**
 ```python
-# Block worker from reaching frontend pods specifically
 fault = client.inject_network_partition(
     partition_type=NetworkPartition.CUSTOM,
-    source="dynamo-oviya",
-    target="dynamo-oviya",
     mode=NetworkMode.NETWORKPOLICY,
-    duration=60,
-    namespace="dynamo-oviya",
-    target_pod_prefix="vllm-agg-0-vllmdecodeworker",  # Pod that gets isolated
-    block_specific_pods=[
-        {"app.kubernetes.io/name": "vllm-agg-0-frontend"},  # Block by label
-    ],
-    block_nats=False  # Keep NATS working
-)
-```
-
-**How it works:**
-- NetworkPolicy applied TO: `vllm-agg-0-vllmdecodeworker-9c25m` (matched by prefix)
-- Blocks traffic TO: Any pod with label `app.kubernetes.io/name=vllm-agg-0-frontend`
-- Allows: NATS, DNS, and all other pods
-
-**Find pod labels:**
-```bash
-kubectl get pod <pod-name> -n <namespace> --show-labels
-```
-
-**Common label patterns:**
-- `{"app.kubernetes.io/name": "my-service"}`
-- `{"app.kubernetes.io/component": "frontend"}`
-- `{"nvidia.com/dynamo-component-type": "frontend"}`
-
-**Block multiple services:**
-```python
-block_specific_pods=[
-    {"app.kubernetes.io/name": "frontend"},
-    {"app.kubernetes.io/name": "api-gateway"},
-    {"component": "storage"},
-]
-```
-
-### 2. Worker→NATS Partition
-
-Test system resilience when a worker loses NATS connectivity. Other workers should handle requests.
-
-```python
-fault = client.inject_network_partition(
-    partition_type=NetworkPartition.FRONTEND_WORKER,
-    source="dynamo-oviya",
-    target="dynamo-oviya",
-    mode=NetworkMode.NETWORKPOLICY,
-    duration=60,
     namespace="dynamo-oviya",
     target_pod_prefix="vllm-agg-0-vllmdecodeworker",
-    block_nats=True
+    block_nats=True,
+    duration=60
 )
 ```
 
-
-### 3. Frontend→NATS Partition
-
-Critical test: frontend loses NATS connectivity. Tests recovery from catastrophic failure.
-
+**2. Block specific pod (by label):**
 ```python
 fault = client.inject_network_partition(
-    partition_type=NetworkPartition.FRONTEND_WORKER,
-    source="dynamo-oviya",
-    target="dynamo-oviya",
+    partition_type=NetworkPartition.CUSTOM,
     mode=NetworkMode.NETWORKPOLICY,
-    duration=60,
     namespace="dynamo-oviya",
-    target_pod_prefix="vllm-agg-0-frontend",
-    block_nats=True
+    target_pod_prefix="vllm-agg-0-vllmdecodeworker",
+    block_specific_pods=[{"app.kubernetes.io/name": "vllm-agg-0-frontend"}],
+    block_nats=False,  # Keep NATS working
+    duration=60
+)
+```
+
+*Find pod labels: `kubectl get pod <pod-name> -n <namespace> --show-labels`*
+
+### ChaosMesh Mode Examples
+
+**Requires ChaosMesh installed** (already on AKS dynamo-dev, see [Prerequisites](#prerequisites) for other clusters)
+
+**1. Packet loss (50%):**
+```python
+fault = client.inject_network_partition(
+    partition_type=NetworkPartition.CUSTOM,
+    mode=NetworkMode.CHAOS_MESH,
+    namespace="dynamo-oviya",
+    target_pod_prefix="vllm-agg-0-vllmdecodeworker",
+    packet_loss_percent=50,
+    target_nats=True,
+    duration=60
+)
+```
+
+**2. Network delay:**
+```python
+fault = client.inject_network_partition(
+    partition_type=NetworkPartition.CUSTOM,
+    mode=NetworkMode.CHAOS_MESH,
+    namespace="dynamo-oviya",
+    target_pod_prefix="vllm-agg-0-vllmdecodeworker",
+    delay_ms=100,
+    delay_jitter_ms=50,
+    target_nats=True,
+    duration=60
 )
 ```
 
 ## Pytest Integration
 
 ```python
-import pytest
-from fault_injection_client import FaultInjectionClient, NetworkMode, NetworkPartition
-
 @pytest.mark.fault_tolerance
 def test_worker_nats_partition():
-    """Test system behavior when worker loses NATS connection"""
     client = FaultInjectionClient(api_url="http://localhost:8080")
-    
-    # Inject fault
     fault = client.inject_network_partition(
-        partition_type=NetworkPartition.FRONTEND_WORKER,
-        source="dynamo-oviya",
-        target="dynamo-oviya",
         mode=NetworkMode.NETWORKPOLICY,
         namespace="dynamo-oviya",
         target_pod_prefix="vllm-agg-0-vllmdecodeworker",
         block_nats=True,
         duration=60
     )
-    
     try:
-        # Test application behavior during fault
         response = send_test_request()
         assert response.status_code in [200, 503]
     finally:
@@ -182,23 +186,55 @@ fault = client.inject_network_partition(
     partition_type=NetworkPartition.FRONTEND_WORKER,  # Type of partition
     source="namespace",                                # Source namespace
     target="namespace",                                # Target namespace
-    mode=NetworkMode.NETWORKPOLICY,                   # Always NetworkPolicy
+    mode=NetworkMode.NETWORKPOLICY,                   # NETWORKPOLICY or CHAOS_MESH
     duration=60,                                       # Auto-recover in 60s (optional)
     namespace="namespace",                             # Where to create policy
     target_pod_prefix="pod-prefix",                   # Pods to target
+    
+    # NetworkPolicy mode parameters:
     block_nats=True,                                   # Block NATS access (default: True)
     block_specific_pods=[],                            # Block specific pods by label (optional)
+    
+    # ChaosMesh mode parameters:
+    packet_loss_percent=0,                             # Packet loss percentage (0-100)
+    delay_ms=0,                                        # Delay in milliseconds
+    delay_jitter_ms=0,                                 # Jitter for delay (ms)
+    bandwidth_limit="",                                # Bandwidth limit (e.g., "1mbps")
+    corrupt_percent=0,                                 # Packet corruption (0-100)
+    duplicate_percent=0,                               # Packet duplication (0-100)
+    target_nats=True,                                  # Target NATS traffic
+    target_specific_pods=[],                           # Target specific pods
 )
 ```
 
 **Key Parameters:**
 - `partition_type`: Use `NetworkPartition.FRONTEND_WORKER` or `NetworkPartition.CUSTOM`
 - `target_pod_prefix`: Match your pod names (e.g., `"vllm-agg-0-vllmdecodeworker"`)
-- `block_nats`: Set to `True` to block NATS, `False` to keep NATS working
-- `block_specific_pods`: List of label selectors to block specific pods (e.g., `[{"app.kubernetes.io/name": "frontend"}]`)
+- `mode`: Choose `NetworkMode.NETWORKPOLICY` (complete blocking) or `NetworkMode.CHAOS_MESH` (advanced faults)
 - `duration`: Auto-recover after N seconds (omit for manual recovery)
 
-**Blocking Strategies:**
+**NetworkPolicy Mode Parameters:**
+- `block_nats`: Set to `True` to block NATS, `False` to keep NATS working
+- `block_specific_pods`: List of label selectors to block specific pods (e.g., `[{"app.kubernetes.io/name": "frontend"}]`)
+
+**ChaosMesh Mode Parameters (Requires ChaosMesh Installed):**
+- `packet_loss_percent`: Percentage of packets to drop (0-100)
+- `delay_ms`: Add delay in milliseconds
+- `delay_jitter_ms`: Add jitter to delay (± ms)
+- `bandwidth_limit`: Limit bandwidth (e.g., "1mbps", "100kbps")
+- `corrupt_percent`: Corrupt packet data (0-100)
+- `duplicate_percent`: Duplicate packets (0-100)
+- `target_nats`: Target NATS traffic (default: True)
+- `target_specific_pods`: Target specific pods by label selector
+
+**Mode Comparison:**
+
+| Mode | Use Case | Advantages | Requirements |
+|------|----------|-----------|--------------|
+| `NETWORKPOLICY` | Complete network isolation | Built-in Kubernetes, no extra deps | Complete blocking only |
+| `CHAOS_MESH` | Degraded network conditions | Partial loss, delay, bandwidth limits | ChaosMesh must be installed |
+
+**Blocking Strategies (NetworkPolicy Mode):**
 
 | Strategy | Use Case | Example |
 |----------|----------|---------|
@@ -210,102 +246,54 @@ fault = client.inject_network_partition(
 ### recover_fault()
 
 ```python
-client.recover_fault(fault_id)
-```
-
-Removes the NetworkPolicy and restores communication.
-
-### Test Helpers
-
-```python
-get_config_from_env()                    # Returns: {api_url, frontend_url, app_namespace}
-check_frontend_reachable(frontend_url)  # Returns: bool
-send_completion_request(prompt, tokens) # Returns: Response
-validate_completion_response(response)  # Returns: str (completion text)
+client.recover_fault(fault_id)  # Removes NetworkPolicy/ChaosMesh resource
 ```
 
 ## Best Practices
 
 1. **Always recover faults** - Use try/finally to ensure cleanup
 2. **Verify baseline first** - Check system is healthy before injecting faults
-3. **Wait after injection** - Give NetworkPolicy time to take effect (~5s)
+3. **Wait after injection** - Give NetworkPolicy/ChaosMesh time to take effect (~5s)
 4. **Test recovery** - Verify system returns to normal after fault clears
-
-## Troubleshooting
-
-**Fault not working?**
-- Check pod names match `target_pod_prefix`: `kubectl get pods -n <namespace>`
-- Verify NetworkPolicy created: `kubectl get networkpolicies -n <namespace>`
-- Check API logs: `kubectl logs -n fault-injection-system -l app=fault-injection-api`
-
-**Can't recover?**
-- Manually delete: `kubectl delete networkpolicy <policy-name> -n <namespace>`
-- List all faults: `client.list_faults()`
 
 ## Create Your Own Test
 
-**1. Write your test in `examples/`:**
-
 ```python
 # examples/my_custom_test.py
-from fault_injection_client import FaultInjectionClient, NetworkMode, NetworkPartition
-from test_helpers import get_config_from_env, Colors
+from fault_injection_client import FaultInjectionClient, NetworkMode
+from test_helpers import get_config_from_env, send_completion_request
 
 config = get_config_from_env()
 client = FaultInjectionClient(api_url=config['api_url'])
 
-# Option 1: Block NATS
-    fault = client.inject_network_partition(
-    partition_type=NetworkPartition.FRONTEND_WORKER,
-    source=config['app_namespace'],
-    target=config['app_namespace'],
+fault = client.inject_network_partition(
     mode=NetworkMode.NETWORKPOLICY,
     namespace=config['app_namespace'],
     target_pod_prefix="vllm-agg-0-vllmdecodeworker",
     block_nats=True,
-        duration=60
-    )
-    
-# Option 2: Block specific pod by label
-# fault = client.inject_network_partition(
-#     partition_type=NetworkPartition.CUSTOM,
-#     source=config['app_namespace'],
-#     target=config['app_namespace'],
-#     mode=NetworkMode.NETWORKPOLICY,
-#     namespace=config['app_namespace'],
-#     target_pod_prefix="vllm-agg-0-vllmdecodeworker",
-#     block_specific_pods=[{"app.kubernetes.io/name": "vllm-agg-0-frontend"}],
-#     block_nats=False,
-#     duration=60
-# )
+    duration=60
+)
 
-print(f"{Colors.GREEN}[OK]{Colors.RESET} Fault injected: {fault.fault_id}")
-    
-    # Your test logic here...
-    
-    # Recover
+try:
+    # Your test logic
+    response = send_completion_request("Test prompt", 10)
+finally:
     client.recover_fault(fault.fault_id)
-print(f"{Colors.GREEN}[OK]{Colors.RESET} Test passed!")
 ```
 
-**2. Run in-cluster (recommended):**
+**Run:** `python3 scripts/run_test_incluster.py examples/my_custom_test.py`
 
-```bash
-python scripts/run_test_incluster.py examples/my_custom_test.py
-```
+## Troubleshooting
 
-**3. Or run locally (requires port-forwarding):**
-
-```bash
-# Terminal 1: kubectl port-forward -n fault-injection-system svc/fault-injection-api 8080:8080
-# Terminal 2: kubectl port-forward -n dynamo-oviya svc/vllm-agg-frontend 8000:8000
-# Terminal 3: python examples/my_custom_test.py
-```
-
-## Need Help?
-
+**Fault not working:**
+- Check pod names: `kubectl get pods -n <namespace>`
+- Verify policy created: `kubectl get networkpolicies -n <namespace>`
 - Check API logs: `kubectl logs -n fault-injection-system -l app=fault-injection-api`
-- Verify pods are running: `kubectl get pods -n fault-injection-system`
-- Review active NetworkPolicies: `kubectl get networkpolicies -n <namespace>`
-- See example tests in: `examples/`
 
+**ChaosMesh not working:**
+- Verify installed: `kubectl get pods -n chaos-mesh`
+- Check permissions: `kubectl get clusterrole fault-injection-api -o yaml | grep chaos-mesh`
+
+**Manual cleanup:**
+- NetworkPolicy: `kubectl delete networkpolicy <name> -n <namespace>`
+- ChaosMesh: `kubectl delete networkchaos <name> -n <namespace>`

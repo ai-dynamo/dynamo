@@ -58,7 +58,8 @@ class NetworkPartitionType(str, Enum):
 class NetworkMode(str, Enum):
     """Network fault modes"""
 
-    NETWORKPOLICY = "networkpolicy"  # Use Kubernetes NetworkPolicy (only supported mode)
+    NETWORKPOLICY = "networkpolicy"  # Use Kubernetes NetworkPolicy (complete blocking)
+    CHAOS_MESH = "chaos_mesh"  # Use ChaosMesh for advanced faults (packet loss, delay, etc.)
 
 
 class FaultSeverity(str, Enum):
@@ -362,6 +363,45 @@ class GPUFaultInjectorClient:
             logger.error(f"Failed to inject GPU fault: {e}")
             return False, str(e)
 
+    async def inject_xid_error(
+        self,
+        node_name: str,
+        xid_type: int,
+        gpu_id: int,
+        duration: Optional[int],
+        fault_id: str,
+    ) -> tuple[bool, str]:
+        """Inject specific XID error via agent on target node"""
+
+        # Find agent pod on target node (use kernel agent label)
+        pods = self.k8s.core_v1.list_namespaced_pod(
+            namespace=self.namespace,
+            label_selector="app=gpu-fault-injector-kernel",
+            field_selector=f"spec.nodeName={node_name}",
+        )
+
+        if not pods.items:
+            return False, f"No GPU fault injector found on node {node_name}"
+
+        pod_ip = pods.items[0].status.pod_ip
+        agent_url = f"http://{pod_ip}:{self.agent_port}"
+
+        payload = {
+            "fault_id": fault_id,
+            "xid_type": xid_type,
+            "gpu_id": gpu_id,
+            "duration": duration,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(f"{agent_url}/inject-xid", json=payload)
+                response.raise_for_status()
+                return True, response.json().get("message", f"XID {xid_type} injected on GPU {gpu_id}")
+        except Exception as e:
+            logger.error(f"Failed to inject XID {xid_type}: {e}")
+            return False, str(e)
+
     async def recover_fault(self, node_name: str, fault_id: str) -> tuple[bool, str]:
         """Recover from GPU fault"""
 
@@ -388,12 +428,19 @@ class GPUFaultInjectorClient:
 
 
 class NetworkFaultInjectorClient:
-    """Client for managing network faults via NetworkPolicy (no agents required)"""
+    """Client for managing network faults via NetworkPolicy and ChaosMesh (no agents required)"""
 
     def __init__(self, k8s: KubernetesHelper, namespace: str = "fault-injection-system"):
         self.k8s = k8s
         self.namespace = namespace
         self.active_policies: dict[str, dict] = {}  # Track NetworkPolicies for cleanup
+        self.active_chaos: dict[str, dict] = {}  # Track ChaosMesh resources for cleanup
+        
+        # Initialize Custom Object API for ChaosMesh
+        try:
+            self.custom_api = client.CustomObjectsApi()
+        except Exception as e:
+            logger.warning(f"Failed to initialize Custom Objects API: {e}")
 
     async def inject_partition(
         self,
@@ -404,17 +451,21 @@ class NetworkFaultInjectorClient:
         parameters: dict[str, Any],
         duration: Optional[int],
     ) -> tuple[bool, str]:
-        """Inject network partition using NetworkPolicy"""
+        """Inject network partition using NetworkPolicy or ChaosMesh"""
 
-        # Only NetworkPolicy mode is supported
-        if mode != NetworkMode.NETWORKPOLICY:
+        if mode == NetworkMode.NETWORKPOLICY:
+            # Create NetworkPolicy directly (no agent needed)
+            return await self._create_networkpolicy(partition_type, source, target, parameters)
+        elif mode == NetworkMode.CHAOS_MESH:
+            # Create ChaosMesh NetworkChaos resource
+            return await self._create_chaos_mesh_network_fault(
+                partition_type, source, target, parameters, duration
+            )
+        else:
             return (
                 False,
-                f"Unsupported mode: {mode.value}. Only 'networkpolicy' mode is supported for network faults.",
+                f"Unsupported mode: {mode.value}. Supported modes: 'networkpolicy', 'chaos_mesh'",
             )
-
-        # Create NetworkPolicy directly (no agent needed)
-        return await self._create_networkpolicy(partition_type, source, target, parameters)
 
     async def _create_networkpolicy(
         self,
@@ -601,14 +652,227 @@ class NetworkFaultInjectorClient:
             logger.error(f"Failed to create NetworkPolicy: {e}")
             return False, str(e)
 
-    async def recover_partition(self, fault_id: str) -> tuple[bool, str]:
-        """Recover from network partition by deleting NetworkPolicy"""
+    async def _create_chaos_mesh_network_fault(
+        self,
+        partition_type: NetworkPartitionType,
+        source: str,
+        target: str,
+        parameters: dict[str, Any],
+        duration: Optional[int],
+    ) -> tuple[bool, str]:
+        """Create ChaosMesh NetworkChaos resource for packet loss, delay, etc."""
 
-        # Delete the NetworkPolicy we created
+        namespace = parameters.get("namespace", source)
+        target_pod_prefix = parameters.get("target_pod_prefix", "")
+        fault_id = parameters.get("fault_id", f"chaos-{uuid.uuid4().hex[:8]}")
+
+        # ChaosMesh parameters
+        packet_loss_percent = parameters.get("packet_loss_percent", 0)
+        delay_ms = parameters.get("delay_ms", 0)
+        delay_jitter_ms = parameters.get("delay_jitter_ms", 0)
+        bandwidth_limit = parameters.get("bandwidth_limit", "")
+        corrupt_percent = parameters.get("corrupt_percent", 0)
+        duplicate_percent = parameters.get("duplicate_percent", 0)
+
+        # Target configuration
+        target_nats = parameters.get("target_nats", True)  # Block NATS by default
+        target_specific_pods = parameters.get("target_specific_pods", [])  # Target specific pod labels
+        target_ports = parameters.get("target_ports", [])  # Target specific ports
+
+        if not target_pod_prefix:
+            return False, "target_pod_prefix parameter is required"
+
+        # Get the actual pod
+        target_pod_name = self.k8s.get_pod_by_prefix(namespace, target_pod_prefix)
+        if not target_pod_name:
+            return (
+                False,
+                f"Could not find pod with prefix '{target_pod_prefix}' in namespace '{namespace}'",
+            )
+
+        target_labels = self.k8s.get_pod_labels(namespace, target_pod_name)
+        if not target_labels:
+            return False, f"Could not get labels for pod '{target_pod_name}'"
+
+        logger.info(f"Found target pod: {target_pod_name} with labels: {target_labels}")
+
+        try:
+            # Build the NetworkChaos spec
+            safe_partition_type = partition_type.value.replace("_", "-")
+            chaos_name = f"network-chaos-{safe_partition_type}-{uuid.uuid4().hex[:8]}"
+
+            # Build selector for the source pod (the pod that will have faults injected)
+            selector = {
+                "namespaces": [namespace],
+                "labelSelectors": target_labels,
+            }
+
+            # Build target selector (where the packets are going TO)
+            target_spec = None
+            if target_nats or target_specific_pods:
+                target_selector = {"mode": "all"}  # Default to all matching pods
+
+                # Build label selector for target
+                target_match_labels = {}
+                target_match_expressions = []
+
+                if target_nats:
+                    # Target NATS services
+                    # We'll use externalTargets for NATS service IPs or target pods with NATS labels
+                    target_match_expressions.append({
+                        "key": "app.kubernetes.io/name",
+                        "operator": "In",
+                        "values": ["nats", "dynamo-platform-nats"],
+                    })
+
+                # Add specific pod targets
+                for pod_selector in target_specific_pods:
+                    for key, value in pod_selector.items():
+                        if not isinstance(value, list):
+                            value = [value]
+                        target_match_expressions.append({
+                            "key": key,
+                            "operator": "In",
+                            "values": value,
+                        })
+
+                if target_match_labels or target_match_expressions:
+                    target_selector["labelSelectors"] = {}
+                    if target_match_labels:
+                        target_selector["labelSelectors"]["matchLabels"] = target_match_labels
+                    if target_match_expressions:
+                        target_selector["labelSelectors"]["matchExpressions"] = target_match_expressions
+                    target_selector["namespaces"] = [namespace]
+
+                target_spec = target_selector
+
+            # Build action spec (packet loss, delay, etc.)
+            action = "loss"  # Default action
+            action_spec = {}
+
+            if packet_loss_percent > 0:
+                action = "loss"
+                action_spec = {
+                    "loss": {
+                        "loss": str(packet_loss_percent),
+                        "correlation": "0",  # Independent loss for each packet
+                    }
+                }
+            elif delay_ms > 0:
+                action = "delay"
+                delay_spec = {
+                    "latency": f"{delay_ms}ms",
+                }
+                if delay_jitter_ms > 0:
+                    delay_spec["jitter"] = f"{delay_jitter_ms}ms"
+                    delay_spec["correlation"] = "0"
+                action_spec = {"delay": delay_spec}
+            elif bandwidth_limit:
+                action = "bandwidth"
+                action_spec = {
+                    "bandwidth": {
+                        "rate": bandwidth_limit,
+                        "limit": 20480,
+                        "buffer": 10000,
+                    }
+                }
+            elif corrupt_percent > 0:
+                action = "corrupt"
+                action_spec = {
+                    "corrupt": {
+                        "corrupt": str(corrupt_percent),
+                        "correlation": "0",
+                    }
+                }
+            elif duplicate_percent > 0:
+                action = "duplicate"
+                action_spec = {
+                    "duplicate": {
+                        "duplicate": str(duplicate_percent),
+                        "correlation": "0",
+                    }
+                }
+
+            # Build the full NetworkChaos resource
+            chaos_resource = {
+                "apiVersion": "chaos-mesh.org/v1alpha1",
+                "kind": "NetworkChaos",
+                "metadata": {
+                    "name": chaos_name,
+                    "namespace": namespace,
+                    "labels": {
+                        "managed-by": "fault-injection-api",
+                        "fault-type": "network-chaos",
+                    },
+                },
+                "spec": {
+                    "action": action,
+                    "mode": "all",  # Apply to all matching pods
+                    "selector": selector,
+                    "direction": "to",  # Default: affect traffic going TO target
+                    **action_spec,
+                },
+            }
+
+            # Add target if specified
+            if target_spec:
+                chaos_resource["spec"]["target"] = target_spec
+
+            # Add duration if specified
+            if duration:
+                chaos_resource["spec"]["duration"] = f"{duration}s"
+
+            # Add port targeting if specified
+            if target_ports:
+                chaos_resource["spec"]["externalTargets"] = []
+                # Note: For port-specific targeting, you may need to adjust based on your requirements
+
+            # Create the NetworkChaos resource
+            self.custom_api.create_namespaced_custom_object(
+                group="chaos-mesh.org",
+                version="v1alpha1",
+                namespace=namespace,
+                plural="networkchaos",
+                body=chaos_resource,
+            )
+
+            # Store for cleanup
+            self.active_chaos[fault_id] = {
+                "chaos_name": chaos_name,
+                "namespace": namespace,
+                "action": action,
+            }
+
+            logger.info(f"Created NetworkChaos: {chaos_name} in namespace {namespace}")
+            
+            message = f"NetworkChaos {chaos_name} created in {namespace}"
+            if packet_loss_percent > 0:
+                message += f" (packet loss: {packet_loss_percent}%)"
+            elif delay_ms > 0:
+                message += f" (delay: {delay_ms}ms"
+                if delay_jitter_ms > 0:
+                    message += f" ± {delay_jitter_ms}ms"
+                message += ")"
+            
+            return True, message
+
+        except Exception as e:
+            logger.error(f"Failed to create NetworkChaos: {e}")
+            import traceback
+            traceback.print_exc()
+            return False, f"Failed to create NetworkChaos: {str(e)}"
+
+    async def recover_partition(self, fault_id: str) -> tuple[bool, str]:
+        """Recover from network partition by deleting NetworkPolicy or ChaosMesh resource"""
+
+        # Check if it's a NetworkPolicy
         if fault_id in self.active_policies:
             return await self._delete_networkpolicy(fault_id)
+        # Check if it's a ChaosMesh resource
+        elif fault_id in self.active_chaos:
+            return await self._delete_chaos_mesh(fault_id)
         else:
-            return False, f"NetworkPolicy not found for fault_id: {fault_id}"
+            return False, f"Fault resource not found for fault_id: {fault_id}"
 
     async def _delete_networkpolicy(self, fault_id: str) -> tuple[bool, str]:
         """Delete NetworkPolicy directly (no agent needed)"""
@@ -633,6 +897,35 @@ class NetworkFaultInjectorClient:
 
         except Exception as e:
             logger.error(f"Failed to delete NetworkPolicy: {e}")
+            return False, str(e)
+
+    async def _delete_chaos_mesh(self, fault_id: str) -> tuple[bool, str]:
+        """Delete ChaosMesh NetworkChaos resource"""
+
+        if fault_id not in self.active_chaos:
+            return False, f"NetworkChaos resource not found for fault_id: {fault_id}"
+
+        chaos_info = self.active_chaos[fault_id]
+        chaos_name = chaos_info["chaos_name"]
+        namespace = chaos_info["namespace"]
+
+        try:
+            self.custom_api.delete_namespaced_custom_object(
+                group="chaos-mesh.org",
+                version="v1alpha1",
+                namespace=namespace,
+                plural="networkchaos",
+                name=chaos_name,
+            )
+
+            # Remove from tracking
+            del self.active_chaos[fault_id]
+
+            logger.info(f"Deleted NetworkChaos: {chaos_name} from namespace {namespace}")
+            return True, f"NetworkChaos {chaos_name} deleted from {namespace}"
+
+        except Exception as e:
+            logger.error(f"Failed to delete NetworkChaos: {e}")
             return False, str(e)
 
 
@@ -1017,6 +1310,157 @@ async def collect_metrics(
         network_metrics=metrics.get("network_metrics"),
         inference_metrics=metrics.get("inference_metrics"),
         node_health=metrics.get("node_health"),
+    )
+
+
+@app.get("/api/v1/faults/gpu/xid-types")
+async def list_xid_types():
+    """List all available XID error types"""
+    return {
+        "xid_types": [
+            {
+                "code": 43,
+                "name": "Kernel Assert",
+                "severity": "high",
+                "description": "GPU kernel assertion failure",
+            },
+            {
+                "code": 48,
+                "name": "Double Bit ECC Error",
+                "severity": "critical",
+                "description": "Uncorrectable memory error",
+            },
+            {
+                "code": 74,
+                "name": "NVLink Error",
+                "severity": "high",
+                "description": "NVLink communication failure",
+            },
+            {
+                "code": 79,
+                "name": "GPU Fell Off Bus",
+                "severity": "critical",
+                "description": "Complete GPU hardware failure",
+            },
+            {
+                "code": 94,
+                "name": "Contained ECC Error",
+                "severity": "medium",
+                "description": "Correctable memory error",
+            },
+            {
+                "code": 95,
+                "name": "Uncontained Error",
+                "severity": "critical",
+                "description": "Severe uncontained memory corruption",
+            },
+            {
+                "code": 119,
+                "name": "GSP Error",
+                "severity": "high",
+                "description": "GPU firmware/GSP failure",
+            },
+            {
+                "code": 120,
+                "name": "GSP Resource Manager Error",
+                "severity": "high",
+                "description": "GPU resource exhaustion",
+            }
+        ]
+    }
+
+
+class XIDFaultRequest(BaseModel):
+    """Request to inject specific XID error"""
+    node_name: str = Field(..., description="Target GPU node name")
+    xid_type: int = Field(..., description="XID error code")
+    gpu_id: int = Field(0, description="GPU device ID")
+    duration: Optional[int] = Field(None, description="Duration in seconds (None = permanent)")
+
+
+@app.post("/api/v1/faults/gpu/inject/xid-43")
+async def inject_xid_43(request: XIDFaultRequest):
+    """Inject XID 43: Kernel Assert"""
+    return await _inject_xid_error(request, 43, "Kernel Assert")
+
+
+@app.post("/api/v1/faults/gpu/inject/xid-48")
+async def inject_xid_48(request: XIDFaultRequest):
+    """Inject XID 48: Double Bit ECC Error"""
+    return await _inject_xid_error(request, 48, "Double Bit ECC Error")
+
+
+@app.post("/api/v1/faults/gpu/inject/xid-74")
+async def inject_xid_74(request: XIDFaultRequest):
+    """Inject XID 74: NVLink Error"""
+    return await _inject_xid_error(request, 74, "NVLink Error")
+
+
+@app.post("/api/v1/faults/gpu/inject/xid-79")
+async def inject_xid_79(request: XIDFaultRequest):
+    """Inject XID 79: GPU Fell Off Bus"""
+    return await _inject_xid_error(request, 79, "GPU Fell Off Bus")
+
+
+@app.post("/api/v1/faults/gpu/inject/xid-94")
+async def inject_xid_94(request: XIDFaultRequest):
+    """Inject XID 94: Contained ECC Error"""
+    return await _inject_xid_error(request, 94, "Contained ECC Error")
+
+
+@app.post("/api/v1/faults/gpu/inject/xid-95")
+async def inject_xid_95(request: XIDFaultRequest):
+    """Inject XID 95: Uncontained Error"""
+    return await _inject_xid_error(request, 95, "Uncontained Error")
+
+
+@app.post("/api/v1/faults/gpu/inject/xid-119")
+async def inject_xid_119(request: XIDFaultRequest):
+    """Inject XID 119: GSP Error"""
+    return await _inject_xid_error(request, 119, "GSP Error")
+
+
+@app.post("/api/v1/faults/gpu/inject/xid-120")
+async def inject_xid_120(request: XIDFaultRequest):
+    """Inject XID 120: GSP Resource Manager Error"""
+    return await _inject_xid_error(request, 120, "GSP RM Error")
+
+
+async def _inject_xid_error(request: XIDFaultRequest, xid_code: int, xid_name: str):
+    """Helper function to inject XID errors"""
+    fault_id = await app.state.fault_tracker.create_fault(
+        fault_type=f"gpu_xid_{xid_code}",
+        target=f"{request.node_name}/gpu{request.gpu_id}",
+        details={
+            "xid_code": xid_code,
+            "xid_name": xid_name,
+            "gpu_id": request.gpu_id,
+            "duration": request.duration,
+        },
+    )
+
+    # Inject via GPU agent
+    success, message = await app.state.gpu_client.inject_xid_error(
+        node_name=request.node_name,
+        xid_type=xid_code,
+        gpu_id=request.gpu_id,
+        duration=request.duration,
+        fault_id=fault_id,
+    )
+
+    if not success:
+        await app.state.fault_tracker.update_status(fault_id, FaultStatus.FAILED)
+        raise HTTPException(status_code=500, detail=f"Failed to inject XID {xid_code}: {message}")
+
+    await app.state.fault_tracker.update_status(fault_id, FaultStatus.INJECTED)
+
+    return FaultResponse(
+        fault_id=fault_id,
+        status=FaultStatus.INJECTED,
+        fault_type=f"gpu_xid_{xid_code}",
+        target=f"{request.node_name}/gpu{request.gpu_id}",
+        injected_at=datetime.now(timezone.utc).isoformat(),
+        message=message,
     )
 
 
