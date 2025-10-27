@@ -693,6 +693,11 @@ func isOnlineProfiling(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) boo
 
 // validateSpec validates the DGDR spec
 func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
+	// Validate profiler image is specified (either in new or deprecated location)
+	if dgdr.Spec.ProfilingConfig.ProfilerImage == "" && dgdr.Spec.ProfilerImage == "" {
+		return errors.New("profilerImage is required: specify either spec.profilingConfig.profilerImage or spec.profilerImage (deprecated)")
+	}
+
 	// Basic validation - check that profilingConfig.config is provided
 	if dgdr.Spec.ProfilingConfig.Config == nil || len(dgdr.Spec.ProfilingConfig.Config.Raw) == 0 {
 		return errors.New("profilingConfig.config is required and must not be empty")
@@ -777,15 +782,17 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		return fmt.Errorf("failed to check for existing output ConfigMap: %w", err)
 	}
 
-	// Ensure profiling job RBAC exists
-	if err := r.RBACManager.EnsureServiceAccountWithRBAC(
-		ctx,
-		dgdr.Namespace,
-		ServiceAccountProfilingJob,
-		r.Config.RBAC.DGDRProfilingClusterRoleName,
-	); err != nil {
-		logger.Error(err, "Failed to ensure profiling job RBAC")
-		return fmt.Errorf("failed to ensure profiling job RBAC: %w", err)
+	// Ensure profiling job RBAC exists (only for cluster-wide installation)
+	if r.Config.RestrictedNamespace == "" {
+		if err := r.RBACManager.EnsureServiceAccountWithRBAC(
+			ctx,
+			dgdr.Namespace,
+			ServiceAccountProfilingJob,
+			r.Config.RBAC.DGDRProfilingClusterRoleName,
+		); err != nil {
+			logger.Error(err, "Failed to ensure profiling job RBAC")
+			return fmt.Errorf("failed to ensure profiling job RBAC: %w", err)
+		}
 	}
 
 	// Use SyncResource to create/update the job
@@ -819,9 +826,16 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		// Set deployment.model from spec.model
 		deploymentConfig["model"] = dgdr.Spec.Model
 
-		// Set deployment.dgd_image from spec.dgdImage if provided
-		if dgdr.Spec.DgdImage != "" {
-			deploymentConfig["dgd_image"] = dgdr.Spec.DgdImage
+		// Set deployment.dgd_image from deploymentOverrides.workersImage or fall back to deprecated field
+		dgdImage := ""
+		if dgdr.Spec.DeploymentOverrides != nil && dgdr.Spec.DeploymentOverrides.WorkersImage != "" {
+			dgdImage = dgdr.Spec.DeploymentOverrides.WorkersImage
+		} else if dgdr.Spec.DgdImage != "" {
+			// Fall back to deprecated field for backward compatibility
+			dgdImage = dgdr.Spec.DgdImage
+		}
+		if dgdImage != "" {
+			deploymentConfig["dgd_image"] = dgdImage
 		}
 
 		// Set output_dir if not already set
@@ -913,8 +927,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			"--profile-config", string(configYAML),
 		}
 
-		// Use profiler image from DGDR spec
-		imageName := dgdr.Spec.ProfilerImage
+		// Use profiler image from DGDR spec, with preference for new location
+		imageName := dgdr.Spec.ProfilingConfig.ProfilerImage
+		if imageName == "" {
+			// Fall back to deprecated field for backward compatibility
+			imageName = dgdr.Spec.ProfilerImage
+		}
 		logger.Info("Using profiler image", "image", imageName)
 
 		profilerContainer := corev1.Container{

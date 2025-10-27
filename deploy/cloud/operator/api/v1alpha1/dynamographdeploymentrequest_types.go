@@ -60,6 +60,13 @@ type ProfilingConfigSpec struct {
 	// The path to this config will be set as engine.config in the profiling config.
 	// +kubebuilder:validation:Optional
 	ConfigMapRef *ConfigMapKeySelector `json:"configMapRef,omitempty"`
+
+	// ProfilerImage specifies the container image to use for profiling jobs.
+	// This image contains the profiler code and dependencies needed for SLA-based profiling.
+	// If not specified, falls back to spec.profilerImage for backward compatibility.
+	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+	// +kubebuilder:validation:Optional
+	ProfilerImage string `json:"profilerImage,omitempty"`
 }
 
 // DeploymentOverridesSpec allows users to customize metadata for auto-created DynamoGraphDeployments.
@@ -83,6 +90,14 @@ type DeploymentOverridesSpec struct {
 	// Annotations are additional annotations to add to the DynamoGraphDeployment metadata.
 	// +kubebuilder:validation:Optional
 	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.
+	// This image is used for both temporary DGDs created during online profiling and the final DGD.
+	// If not specified, falls back to spec.dgdImage for backward compatibility.
+	// If neither is specified, the image from the base config file (e.g., disagg.yaml) is used.
+	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+	// +kubebuilder:validation:Optional
+	WorkersImage string `json:"workersImage,omitempty"`
 }
 
 // DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
@@ -102,12 +117,14 @@ type DynamoGraphDeploymentRequestSpec struct {
 	Backend string `json:"backend"`
 
 	// ProfilerImage specifies the container image to use for profiling jobs.
+	// DEPRECATED: Use profilingConfig.profilerImage instead. This field is kept for backward compatibility.
 	// This image contains the profiler code and dependencies needed for SLA-based profiling.
 	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
-	// +kubebuilder:validation:Required
-	ProfilerImage string `json:"profilerImage"`
+	// +kubebuilder:validation:Optional
+	ProfilerImage string `json:"profilerImage,omitempty"`
 
 	// DgdImage specifies the container image to use for DynamoGraphDeployment components.
+	// DEPRECATED: Use deploymentOverrides.workersImage instead. This field is kept for backward compatibility.
 	// This image is used for both temporary DGDs created during online profiling and the final DGD.
 	// If omitted, the image from the base config file (e.g., disagg.yaml) is used.
 	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
