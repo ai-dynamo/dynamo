@@ -1,37 +1,23 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# syntax=docker/dockerfile:1.10.0
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Note: This Dockerfile will be deprecated in favor of Dockerfile.sglang-wideep soon. Please build the container with that Dockerfile instead.
+ARG CUDA_VERSION=12.9.1
 
-ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-# TODO OPS-612: NCCL will hang with 25.03, so use 25.01 for now
-# Please check https://github.com/ai-dynamo/dynamo/pull/1065
-# for details and reproducer to manually test if the image
-# can be updated to later versions.
-ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+# Runtime image and build-time configuration (aligned with other backends)
+# TODO: OPS-<number>: Use the same runtime image as the other backends
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
-ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
+ARG RUNTIME_IMAGE_TAG="12.9.1-cudnn-runtime-ubuntu24.04"
 
-# Make sure to update the dependency version in pyproject.toml when updating this
-ARG SGLANG_VERSION="0.5.3.post2"
-
-
-# Define general architecture ARGs for supporting both x86 and aarch64 builds.
-#   ARCH: Used for package suffixes (e.g., amd64, arm64)
-#   ARCH_ALT: Used for Rust targets, manylinux suffix (e.g., x86_64, aarch64)
-#
-# Default values are for x86/amd64:
-#   --build-arg ARCH=amd64 --build-arg ARCH_ALT=x86_64
-#
-# For arm64/aarch64, build with:
-#   --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64
-#
-# NOTE: There isn't an easy way to define one of these values based on the other value
-# without adding if statements everywhere, so just define both as ARGs for now.
+ARG PYTHON_VERSION=3.10
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
-# Python configuration
-ARG PYTHON_VERSION=3.12
+ARG CARGO_BUILD_JOBS
+
+# sccache configuration - inherit from base build
+ARG USE_SCCACHE
+ARG SCCACHE_BUCKET=""
+ARG SCCACHE_REGION=""
 
 ARG DYNAMO_BASE_IMAGE="dynamo:latest-none"
 FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
@@ -40,10 +26,11 @@ FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
 ########## Framework Development Image ################
 ########################################################
 #
-# PURPOSE: Framework development and SGLang compilation
+# PURPOSE: Framework development and SGLang/DeepEP/NVSHMEM compilation
 #
 # This stage builds and compiles framework dependencies including:
 # - SGLang inference engine with CUDA support
+# - DeepEP and NVSHMEM
 # - All necessary build tools and compilation dependencies
 # - Framework-level Python packages and extensions
 #
@@ -53,60 +40,267 @@ FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
 # - Create custom builds with specific optimization flags
 #
 
-# Use dynamo base image (see /container/Dockerfile for more details)
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS framework
 
+# Declare all ARGs
+ARG BUILD_TYPE=all
+ARG DEEPEP_COMMIT=9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee
+ARG DEEPEP_GB_COMMIT=1b14ad661c7640137fcfe93cccb2694ede1220b0
+ARG CMAKE_BUILD_PARALLEL_LEVEL=2
+ARG FLASHMLA_COMMIT=1408756a88e52a25196b759eaf8db89d2b51b5a1
+ARG SGL_KERNEL_VERSION=0.3.15
+ARG SGLANG_COMMIT=0.5.3.post2
+ARG GDRCOPY_COMMIT=v2.4.4
+ARG NVSHMEM_VERSION=3.3.9
+ARG GRACE_BLACKWELL=false
+ARG ARCH
+ARG ARCH_ALT
 ARG PYTHON_VERSION
+ARG USE_SCCACHE
+ARG SCCACHE_BUCKET
+ARG SCCACHE_REGION
+ARG CARGO_BUILD_JOBS
+ARG CUDA_VERSION
 
-RUN apt-get update -y \
+# Set all environment variables
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=America/Los_Angeles \
+    CUDA_HOME=/usr/local/cuda \
+    GDRCOPY_HOME=/usr/src/gdrdrv-2.4.4/ \
+    NVSHMEM_DIR=/sgl-workspace/nvshmem/install \
+    PATH="${PATH}:/usr/local/nvidia/bin" \
+    LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/nvidia/lib:/usr/local/nvidia/lib64" \
+    LANG=en_US.UTF-8 \
+    LANGUAGE=en_US:en \
+    LC_ALL=en_US.UTF-8
+
+# Combined: Python setup, locale, and all package installation
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        # Python runtime - CRITICAL for virtual environment to work
+        # Python (using other python versions as needed)
         python${PYTHON_VERSION}-dev \
+        python${PYTHON_VERSION}-venv \
+        python${PYTHON_VERSION}-distutils \
+        python3-pip \
+        # Build essentials
         build-essential \
+        cmake \
+        ninja-build \
+        ccache \
+        patchelf \
         git \
         git-lfs \
-        # SGLang build dependencies
-        cmake \
-        ibverbs-providers \
-        ibverbs-utils \
-        libibumad-dev \
-        libibverbs-dev \
+        # Core system utilities
+        tzdata \
+        locales \
+        ca-certificates \
+        dkms \
+        kmod \
+        # Command line tools
+        wget \
+        curl \
+        jq \
+        unzip \
+        # Network utilities
+        netcat-openbsd \
+        # SSL and pkg-config
+        libssl-dev \
+        pkg-config \
+        # MPI and NUMA
+        libopenmpi-dev \
+        libnuma1 \
         libnuma-dev \
-        librdmacm-dev \
-        rdma-core \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+        numactl \
+        # InfiniBand/RDMA
+        libibverbs-dev \
+        libibverbs1 \
+        libibumad3 \
+        librdmacm1 \
+        libnl-3-200 \
+        libnl-route-3-200 \
+        libnl-route-3-dev \
+        libnl-3-dev \
+        ibverbs-providers \
+        infiniband-diags \
+        perftest \
+        # Development libraries
+        libgoogle-glog-dev \
+        libgtest-dev \
+        libjsoncpp-dev \
+        libunwind-dev \
+        libboost-all-dev \
+        libgrpc-dev \
+        libgrpc++-dev \
+        libprotobuf-dev \
+        protobuf-compiler \
+        protobuf-compiler-grpc \
+        pybind11-dev \
+        libhiredis-dev \
+        libcurl4-openssl-dev \
+        libczmq4 \
+        libczmq-dev \
+        libfabric-dev \
+        # Package building tools
+        devscripts \
+        debhelper \
+        fakeroot \
+        check \
+        libsubunit0 \
+        libsubunit-dev \
+    # Set Python alternatives
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python /usr/bin/python${PYTHON_VERSION} \
+    # Set up locale
+    && locale-gen en_US.UTF-8 \
+    # Cleanup
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
-### VIRTUAL ENVIRONMENT SETUP ###
+# Install sccache if requested
+COPY container/use-sccache.sh /tmp/use-sccache.sh
+RUN if [ "$USE_SCCACHE" = "true" ]; then \
+    /tmp/use-sccache.sh install; \
+fi
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-ARG PYTHON_VERSION
-# Create virtual environment
-RUN mkdir -p /opt/dynamo/venv && \
-    uv venv /opt/dynamo/venv --python $PYTHON_VERSION
+# Set environment variables - they'll be empty strings if USE_SCCACHE=false
+ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
+    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
+    SCCACHE_S3_KEY_PREFIX=${USE_SCCACHE:+${ARCH}} \
+    RUSTC_WRAPPER=${USE_SCCACHE:+sccache} \
+    CMAKE_C_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
+    CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
+    CMAKE_CUDA_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache}
 
-# Activate virtual environment
-ENV VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH="/opt/dynamo/venv/bin:${PATH}"
+WORKDIR /sgl-workspace
 
-ARG ARCH
-# Redeclare ARCH and ARCH_ALT so they're available in this stage
-ARG ARCH_ALT
+# GDRCopy installation
+RUN git clone --depth 1 --branch ${GDRCOPY_COMMIT} https://github.com/NVIDIA/gdrcopy.git \
+    && cd gdrcopy/packages \
+    && export CUDA=${CUDA_HOME} \
+    && ./build-deb-packages.sh \
+    && dpkg -i gdrdrv-dkms_*.deb libgdrapi_*.deb gdrcopy-tests_*.deb gdrcopy_*.deb
 
+# Fix DeepEP IBGDA symlink
+RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so
 
-WORKDIR /workspace
-# Install SGLang and related dependencies
-ARG SGLANG_VERSION
-RUN --mount=type=cache,target=/root/.cache/uv \
-    cd /opt && \
-    git clone https://github.com/sgl-project/sglang.git && \
-    cd sglang && \
-    git checkout v${SGLANG_VERSION} && \
-    # Install in editable mode for development
-    uv pip install --prerelease=allow -e "python[all]"
+# Install SGLang (requires CUDA 12.8.1 or 12.9.1)
+RUN python3 -m pip install --no-cache-dir --ignore-installed pip==25.3 setuptools==80.9.0 wheel==0.45.1 html5lib==1.1 six==1.17.0 \
+    && git clone --depth 1 --branch v${SGLANG_COMMIT} https://github.com/sgl-project/sglang.git \
+    && cd sglang \
+    && case "$CUDA_VERSION" in \
+        12.8.1) CUINDEX=128 ;; \
+        12.9.1) CUINDEX=129 ;; \
+        *) echo "Error: Unsupported CUDA version for sglang: $CUDA_VERSION (requires 12.8.1 or 12.9.1)" && exit 1 ;; \
+    esac \
+    && python3 -m pip install --no-cache-dir sgl-kernel==${SGL_KERNEL_VERSION} \
+    && python3 -m pip install --no-cache-dir -e "python[${BUILD_TYPE}]" --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX} \
+    && python3 -m pip install --no-cache-dir nvidia-nccl-cu12==2.27.6 --force-reinstall --no-deps \
+    && FLASHINFER_LOGGING_LEVEL=warning python3 -m flashinfer --download-cubin
 
-# Set env var that allows for forceful shutdown of inflight requests in SGL's TokenizerManager
-ENV SGL_FORCE_SHUTDOWN=1
+# Download and extract NVSHMEM source, clone DeepEP (use Tom's fork for GB200)
+RUN --mount=type=cache,target=/var/cache/curl \
+    curl --retry 3 --retry-delay 2 -fsSL -o /var/cache/curl/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz https://developer.download.nvidia.com/compute/redist/nvshmem/${NVSHMEM_VERSION}/source/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz \
+    && tar -xf /var/cache/curl/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz \
+    && mv nvshmem_src nvshmem \
+    && rm -f /var/cache/curl/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz \
+    && if [ "$GRACE_BLACKWELL" = true ]; then \
+        git clone --depth 1 https://github.com/fzyzcjy/DeepEP.git \
+        && cd DeepEP \
+        && git fetch --depth 1 origin ${DEEPEP_GB_COMMIT} \
+        && git checkout ${DEEPEP_GB_COMMIT}; \
+    else \
+        git clone --depth 1 https://github.com/deepseek-ai/DeepEP.git \
+        && cd DeepEP \
+        && git fetch --depth 1 origin ${DEEPEP_COMMIT} \
+        && git checkout ${DEEPEP_COMMIT}; \
+    fi \
+    && sed -i 's/#define NUM_CPU_TIMEOUT_SECS 100/#define NUM_CPU_TIMEOUT_SECS 1000/' csrc/kernels/configs.cuh
+
+# Build and install NVSHMEM library only (without python library)
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    cd /sgl-workspace/nvshmem && \
+    if [ "$GRACE_BLACKWELL" = true ]; then CUDA_ARCH="90;100;120"; else CUDA_ARCH="90"; fi && \
+    NVSHMEM_SHMEM_SUPPORT=0 \
+    NVSHMEM_UCX_SUPPORT=0 \
+    NVSHMEM_USE_NCCL=0 \
+    NVSHMEM_MPI_SUPPORT=0 \
+    NVSHMEM_IBGDA_SUPPORT=1 \
+    NVSHMEM_PMIX_SUPPORT=0 \
+    NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
+    NVSHMEM_USE_GDRCOPY=1 \
+    cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=${NVSHMEM_DIR} -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} -DNVSHMEM_BUILD_PYTHON_LIB=OFF && \
+    cmake --build build --target install -j${CMAKE_BUILD_PARALLEL_LEVEL} && \
+    /tmp/use-sccache.sh show-stats "NVSHMEM"
+
+# Build nvshmem4py wheels separately (Python 3.10, CUDA 12) to avoid building the python library twice for multiple python versions
+# Need to reconfigure with PYTHON_LIB=ON to add the nvshmem4py subdirectory
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    cd /sgl-workspace/nvshmem && \
+    if [ "$GRACE_BLACKWELL" = true ]; then CUDA_ARCH="90;100;120"; else CUDA_ARCH="90"; fi && \
+    NVSHMEM_SHMEM_SUPPORT=0 \
+    NVSHMEM_UCX_SUPPORT=0 \
+    NVSHMEM_USE_NCCL=0 \
+    NVSHMEM_MPI_SUPPORT=0 \
+    NVSHMEM_IBGDA_SUPPORT=1 \
+    NVSHMEM_PMIX_SUPPORT=0 \
+    NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
+    NVSHMEM_USE_GDRCOPY=1 \
+    cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=${NVSHMEM_DIR} -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} -DNVSHMEM_BUILD_PYTHON_LIB=ON && \
+    cmake --build build --target build_nvshmem4py_wheel_cu12_${PYTHON_VERSION} -j${CMAKE_BUILD_PARALLEL_LEVEL} && \
+    /tmp/use-sccache.sh show-stats "NVSHMEM4PY"
+
+# Install DeepEP
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    cd /sgl-workspace/DeepEP && \
+    NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST="9.0;10.0" pip install --no-build-isolation .
+
+# Install flashmla
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    if [ "${ARCH}" = "amd64" ]; then \
+        git clone https://github.com/deepseek-ai/FlashMLA.git flash-mla \
+        && cd flash-mla \
+        && git checkout ${FLASHMLA_COMMIT} \
+        && git submodule update --init --recursive \
+        && export FLASH_MLA_DISABLE_SM100=1 \
+        && pip install --no-build-isolation -v . ;\
+    fi
+
+# Copy rust installation from dynamo_base to avoid duplication efforts
+COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
+COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    CARGO_TARGET_DIR=/workspace/target \
+    PATH=/usr/local/cargo/bin:$PATH \
+    CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
+
+# Install essential Python build tools
+RUN python3 -m pip install --no-cache-dir \
+    mooncake-transfer-engine==0.3.6.post1 \
+    scikit-build-core==0.11.6 \
+    setuptools-rust==1.12.0
+
+# Build and install sgl-router
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} \
+    && cd /sgl-workspace/sglang/sgl-router \
+    && cargo build --release \
+    && python3 -m pip install --no-cache-dir .
 
 ##################################################
 ########## Runtime Image ########################
@@ -114,125 +308,78 @@ ENV SGL_FORCE_SHUTDOWN=1
 #
 # PURPOSE: Production runtime environment
 #
-# This stage creates a lightweight production-ready image containing:
-# - Pre-compiled SGLang and framework dependencies
+# This stage creates a production-ready image containing:
+# - Pre-compiled SGLang, DeepEP, and NVSHMEM components
 # - Dynamo runtime libraries and Python packages
 # - Essential runtime dependencies and configurations
 # - Optimized for inference workloads and deployment
 #
 # Use this stage when you need:
-# - Production deployment of Dynamo with SGLang
+# - Production deployment of Dynamo with SGLang + DeepEP
 # - Minimal runtime footprint without build tools
 # - Ready-to-run inference server environment
-# - Base for custom application containers
 #
-
-FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+FROM framework AS runtime
 
 WORKDIR /workspace
-ENV DYNAMO_HOME=/opt/dynamo
-ENV VIRTUAL_ENV=/opt/dynamo/venv
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
+ARG ARCH
 ARG ARCH_ALT
 ARG PYTHON_VERSION
+
+ENV DYNAMO_HOME=/opt/dynamo
+ENV NVSHMEM_DIR=/sgl-workspace/nvshmem/install
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
-ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
-
-# Install Python, build-essential and python3-dev as apt dependencies
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        # Python runtime - CRITICAL for virtual environment to work
-        python${PYTHON_VERSION}-dev \
-        build-essential \
-        # jq and curl for polling various endpoints and health checks
-        jq \
-        git \
-        git-lfs \
-        curl \
-        # Libraries required by UCX to find RDMA devices
-        libibverbs1 rdma-core ibverbs-utils libibumad3 \
-        libnuma1 librdmacm1 ibverbs-providers \
-        # JIT Kernel Compilation, flashinfer
-        ninja-build \
-        g++ \
-        # prometheus dependencies
-        ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
-
-# Copy CUDA development tools (nvcc, headers, dependencies, etc.) from framework devel image
-COPY --from=framework /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
-COPY --from=framework /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
-COPY --from=framework /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
-COPY --from=framework /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
-COPY --from=framework /usr/local/cuda/include/ /usr/local/cuda/include/
-COPY --from=framework /usr/local/cuda/nvvm /usr/local/cuda/nvvm
-COPY --from=framework /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
-
-### COPY NATS & ETCD ###
-# Copy nats and etcd from dynamo_base image
-COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
-COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
-# Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
-ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
-
-# Copy UCX from framework image as plugin for NIXL
-# Copy NIXL source from framework image
-# Copy dynamo wheels for gitlab artifacts
-COPY --from=dynamo_base /usr/local/ucx /usr/local/ucx
-COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
-
-# Copies sglang repo (editable install)
-COPY --from=framework /opt/sglang /opt/sglang
-
+ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=${NIXL_LIB_DIR}/plugins
 ENV LD_LIBRARY_PATH=\
-$NIXL_LIB_DIR:\
-$NIXL_PLUGIN_DIR:\
+${NVSHMEM_DIR}/lib:\
+${NIXL_LIB_DIR}:\
+${NIXL_PLUGIN_DIR}:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
-$LD_LIBRARY_PATH
+/usr/local/nvidia/lib64:\
+${LD_LIBRARY_PATH}
 
-### VIRTUAL ENVIRONMENT SETUP ###
+# Copy NATS and ETCD from dynamo_base, and UCX/NIXL
+COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+COPY --from=dynamo_base /usr/local/ucx /usr/local/ucx
+COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
+ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 
-# Copy uv and entire virtual environment from framework container
-COPY --from=framework /bin/uv /bin/uvx /bin/
-COPY --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
-
-# Install dynamo, NIXL, and dynamo-specific dependencies
+# Install Dynamo wheels from dynamo_base wheelhouse
 COPY benchmarks/ /opt/dynamo/benchmarks/
 COPY --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
-RUN uv pip install \
+RUN pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
     && cd /opt/dynamo/benchmarks \
-    && UV_GIT_LFS=1 uv pip install --no-cache . \
+    && pip install --no-cache . \
     && cd - \
     && rm -rf /opt/dynamo/benchmarks
 
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    UV_GIT_LFS=1 uv pip install \
+    pip install \
         --no-cache \
         --requirement /tmp/requirements.txt \
         --requirement /tmp/requirements.test.txt
 
-# Copy launch banner
-RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
-    sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
+## Copy attribution files and launch banner
+COPY ATTRIBUTION* LICENSE /workspace/
+COPY container/launch_message.txt /workspace/launch_message.txt
+RUN sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
 # Copy tests, benchmarks, deploy and components for CI
 COPY tests /workspace/tests
-COPY benchmarks /workspace/benchmarks
 COPY examples /workspace/examples
+COPY benchmarks /workspace/benchmarks
 COPY deploy /workspace/deploy
 COPY components/ /workspace/components/
-
-# Copy attribution files
-COPY ATTRIBUTION* LICENSE /workspace/
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
@@ -252,56 +399,80 @@ CMD []
 
 FROM runtime AS dev
 
-# Don't want ubuntu to be editable, just change uid and gid.
-ARG WORKSPACE_DIR=/workspace
+ARG WORKSPACE_DIR=/sgl-workspace/dynamo
 
-# Install utilities as root
+# Install development tools and utilities
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends  \
-    # Install utilities
+    # System monitoring and debugging tools
     nvtop \
-    wget \
-    tmux \
-    vim \
-    git \
-    openssh-client \
-    iproute2 \
-    rsync \
-    zip \
-    unzip \
     htop \
-    # Build Dependencies
+    gdb \
+    # Network and system utilities
+    wget \
+    iproute2 \
+    net-tools \
+    openssh-client \
+    rsync \
+    lsof \
+    # File and archive utilities
+    zip \
+    tree \
+    # Development and build tools
+    vim \
+    tmux \
+    git \
+    git-lfs \
     autoconf \
     automake \
     cmake \
     libtool \
     meson \
-    net-tools \
-    pybind11-dev \
-    # Rust build dependencies
+    bear \
+    ccache \
+    less \
+    # Language and development support
     clang \
     libclang-dev \
-    protobuf-compiler && \
+    # Shell and productivity tools
+    zsh \
+    silversearcher-ag \
+    cloc \
+    locales \
+    # NVIDIA tools dependencies
+    gnupg && \
+    echo "deb https://developer.download.nvidia.com/devtools/repos/ubuntu2004/amd64 /" | tee /etc/apt/sources.list.d/nvidia-devtools.list && \
+    apt-key adv --fetch-keys https://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub && \
+    apt-get update -y && \
+    apt-get install -y nsight-systems-cli && \
     rm -rf /var/lib/apt/lists/*
 
-# Set workspace directory variable
-ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
-    DYNAMO_HOME=${WORKSPACE_DIR} \
-    RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    CARGO_TARGET_DIR=/workspace/target \
-    VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH=/usr/local/cargo/bin:$PATH
-
-COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
-COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
-
-# Install maturin, for maturin develop
-RUN uv pip install maturin[patchelf]
+# Install clang-format and clangd
+RUN curl --retry 3 --retry-delay 2 -LSso /usr/local/bin/clang-format https://github.com/muttleyxd/clang-tools-static-binaries/releases/download/master-32d3ac78/clang-format-16_linux-amd64 \
+    && chmod +x /usr/local/bin/clang-format \
+    && curl --retry 3 --retry-delay 2 -L https://github.com/clangd/clangd/releases/download/18.1.3/clangd-linux-18.1.3.zip -o clangd.zip \
+    && unzip clangd.zip \
+    && cp -r clangd_18.1.3/bin/* /usr/local/bin/ \
+    && cp -r clangd_18.1.3/lib/* /usr/local/lib/ \
+    && rm -rf clangd_18.1.3 clangd.zip
 
 # Editable install of dynamo
 COPY pyproject.toml README.md hatch_build.py /workspace/
-RUN uv pip install --no-deps -e .
+RUN pip install --no-deps -e .
+
+# Install Python development packages
+RUN pip install --no-cache-dir \
+    maturin[patchelf] \
+    pytest \
+    black \
+    isort \
+    icdiff \
+    scikit_build_core \
+    uv \
+    pre-commit \
+    pandas \
+    matplotlib \
+    tabulate
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

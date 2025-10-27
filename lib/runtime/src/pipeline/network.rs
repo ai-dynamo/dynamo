@@ -31,7 +31,7 @@ use ingress::push_handler::WorkHandlerMetrics;
 pub const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
 
 // Add Prometheus metrics types
-use crate::metrics::MetricsRegistry;
+use crate::metrics::MetricsHierarchy;
 use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
 
 pub trait Codable: PipelineIO + Serialize + for<'de> Deserialize<'de> {}

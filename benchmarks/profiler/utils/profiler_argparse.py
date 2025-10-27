@@ -121,6 +121,12 @@ def create_profiler_parser() -> argparse.Namespace:
         default=config.get("deployment", {}).get("model", ""),
         help="Model to serve, can be HF model name or local model path",
     )
+    parser.add_argument(
+        "--dgd-image",
+        type=str,
+        default=config.get("deployment", {}).get("dgd_image", ""),
+        help="Container image to use for DGD components (frontend, planner, workers). Overrides images in config file.",
+    )
 
     # CLI arguments with config-aware defaults (using nested .get() for cleaner code)
     parser.add_argument(
@@ -295,10 +301,9 @@ def create_profiler_parser() -> argparse.Namespace:
         delattr(args, "profile_config")
 
     # Validate required arguments
-    if not args.config:
-        parser.error("--config is required (either via CLI or profile-config)")
+    # Either --model or --config (or both) must be provided
     if not args.model and not args.config:
-        parser.error("--model or --config is required")
+        parser.error("--model or --config is required (provide at least one)")
 
     auto_generate_search_space(args)
 

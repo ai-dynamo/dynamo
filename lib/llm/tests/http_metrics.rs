@@ -343,20 +343,18 @@ mod integration_tests {
             None,
             None,
         );
-
         // Start watching etcd for model registrations
-        if let Some(etcd_client) = distributed_runtime.etcd_client() {
-            let models_watcher = etcd_client
-                .kv_get_and_watch_prefix(model_card::ROOT_PATH)
-                .await
-                .unwrap();
-            let (_prefix, _watcher, receiver) = models_watcher.dissolve();
+        let store = Arc::new(distributed_runtime.store().clone());
+        let (_, receiver) = store.watch(
+            model_card::ROOT_PATH,
+            None,
+            distributed_runtime.primary_token(),
+        );
 
-            // Spawn watcher task to discover models from etcd
-            let _watcher_task = tokio::spawn(async move {
-                model_watcher.watch(receiver, None).await;
-            });
-        }
+        // Spawn watcher task to discover models from etcd
+        let _watcher_task = tokio::spawn(async move {
+            model_watcher.watch(receiver, None).await;
+        });
 
         // Set up the engine following the StaticFull pattern from http.rs
         let EngineConfig::StaticFull { engine, model, .. } = engine_config else {

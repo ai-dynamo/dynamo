@@ -184,7 +184,15 @@ python prefix_ratio_benchmark.py --output-dir results/experiment1
 
 ### Step 4 (Alternative): Run Benchmarks with Real Trace Data
 
-Instead of synthetic benchmarks with controlled prefix ratios, you can benchmark using real trace data in [mooncake-style format](https://github.com/kvcache-ai/Mooncake/blob/d21da178bae8db9651cf18a76824c084145fc725/mooncake_trace.jsonl). This approach uses actual request patterns from production traces, potentially modified with synthesis parameters.
+Instead of synthetic benchmarks with controlled prefix ratios, you can benchmark using real trace data. This approach uses actual request patterns from production traces, potentially modified with synthesis parameters.
+
+First, download the mooncake trace dataset:
+
+```bash
+wget https://raw.githubusercontent.com/kvcache-ai/Mooncake/d21da178bae8db9651cf18a76824c084145fc725/mooncake_trace.jsonl
+```
+
+Then run the benchmark:
 
 ```bash
 python real_data_benchmark.py --input-dataset mooncake_trace.jsonl

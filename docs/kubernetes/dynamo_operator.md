@@ -39,7 +39,8 @@ helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
 ```
 
-For namespace-restricted installations (shared clusters):
+For namespace-restricted installations (shared clusters), you'll need to install the Dynamo platform in each namespace you want to deploy to.
+Namespace restriction is enabled by setting the `dynamo-operator.namespaceRestriction.enabled` flag to `true`.
 ```bash
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz \
   --namespace ${NAMESPACE} \

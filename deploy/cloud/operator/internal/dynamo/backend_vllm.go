@@ -106,7 +106,7 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 		leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
 		container.Args = []string{fmt.Sprintf("ray start --address=%s:%s --block", leaderHostname, VLLMPort)}
 	}
-	container.Command = []string{"sh", "-c"} // ensure cmd is a shell
+	container.Command = []string{"/bin/sh", "-c"} // ensure cmd is a shell
 }
 
 func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) {

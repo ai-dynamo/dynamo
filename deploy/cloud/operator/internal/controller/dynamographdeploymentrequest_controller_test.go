@@ -72,9 +72,8 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 	BeforeEach(func() {
 		recorder = record.NewFakeRecorder(100)
 		reconciler = &DynamoGraphDeploymentRequestReconciler{
-			Client:        k8sClient,
-			Recorder:      recorder,
-			ProfilerImage: "test-profiler:latest",
+			Client:   k8sClient,
+			Recorder: recorder,
 			Config: commonController.Config{
 				RestrictedNamespace: "",
 				RBAC: commonController.RBACConfig{
@@ -97,11 +96,13 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend": "vllm",
-								"config":  "/tmp/test-config.yaml",
+								"config": "/tmp/test-config.yaml",
 							},
 							"sla": map[string]interface{}{
 								"ttft": 100.0,
@@ -143,9 +144,9 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(updated.Status.ObservedGeneration).Should(Equal(updated.Generation))
 		})
 
-		It("Should fail validation with missing config", func() {
+		It("Should pass validation with minimal config", func() {
 			ctx := context.Background()
-			dgdrName := "test-dgdr-invalid"
+			dgdrName := "test-dgdr-minimal"
 			namespace := "default"
 
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
@@ -154,8 +155,16 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
-						Config: createTestConfig(map[string]interface{}{}),
+						Config: createTestConfig(map[string]interface{}{
+							"sla": map[string]interface{}{
+								"ttft": 100.0,
+								"itl":  1500.0,
+							},
+						}),
 					},
 				},
 			}
@@ -163,7 +172,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
 			defer k8sClient.Delete(ctx, dgdr)
 
-			// Reconcile
+			// Reconcile - should succeed with minimal config
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{
 					Name:      dgdrName,
@@ -172,12 +181,12 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Check status transitions to Failed
+			// Check status transitions to Pending (not Failed)
 			Eventually(func() string {
 				var updated nvidiacomv1alpha1.DynamoGraphDeploymentRequest
 				k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)
 				return updated.Status.State
-			}, timeout, interval).Should(Equal(StateFailed))
+			}, timeout, interval).Should(Equal(StatePending))
 		})
 	})
 
@@ -216,10 +225,12 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend":        "vllm",
 								"profiler_image": "test-profiler:latest",
 							},
 							"sla": map[string]interface{}{
@@ -313,10 +324,12 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "trtllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend":        "trtllm",
 								"config":         "/tmp/test-config.yaml",
 								"profiler_image": "test-profiler:latest",
 							},
@@ -386,11 +399,13 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend": "vllm",
-								"config":  "/tmp/test-config.yaml",
+								"config": "/tmp/test-config.yaml",
 							},
 							"sla": map[string]interface{}{
 								"ttft": 100.0,
@@ -498,11 +513,13 @@ spec:
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend": "vllm",
-								"config":  "/tmp/test-config.yaml",
+								"config": "/tmp/test-config.yaml",
 							},
 							"sla": map[string]interface{}{
 								"ttft": 100.0,
@@ -626,11 +643,13 @@ spec:
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend": "vllm",
-								"config":  "/tmp/test-config.yaml",
+								"config": "/tmp/test-config.yaml",
 							},
 							"sla": map[string]interface{}{
 								"ttft": 100.0,
@@ -707,11 +726,13 @@ spec:
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend": "vllm",
-								"config":  "/tmp/test-config.yaml",
+								"config": "/tmp/test-config.yaml",
 							},
 							"sla": map[string]interface{}{
 								"ttft": 100.0,
@@ -852,11 +873,13 @@ var _ = Describe("DGDR Validation", func() {
 			ctx := context.Background()
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend": "vllm",
-								"config":  "/tmp/test-config.yaml",
+								"config": "/tmp/test-config.yaml",
 							},
 							"sla": map[string]interface{}{
 								"ttft": 100.0,
@@ -873,25 +896,13 @@ var _ = Describe("DGDR Validation", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("Should fail validation when config is empty", func() {
+		It("Should pass validation with minimal config", func() {
 			ctx := context.Background()
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
-						Config: createTestConfig(map[string]interface{}{}),
-					},
-				},
-			}
-
-			err := reconciler.validateSpec(ctx, dgdr)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).Should(ContainSubstring("config"))
-		})
-
-		It("Should fail validation when engine section is missing", func() {
-			ctx := context.Background()
-			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"sla": map[string]interface{}{
@@ -903,32 +914,9 @@ var _ = Describe("DGDR Validation", func() {
 				},
 			}
 
+			// Validation should pass - profiler will auto-generate missing config
 			err := reconciler.validateSpec(ctx, dgdr)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).Should(ContainSubstring("engine"))
-		})
-
-		It("Should fail validation when engine.config and configMapRef are both missing", func() {
-			ctx := context.Background()
-			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
-						Config: createTestConfig(map[string]interface{}{
-							"engine": map[string]interface{}{
-								"backend": "vllm",
-							},
-							"sla": map[string]interface{}{
-								"ttft": 100.0,
-								"itl":  1500.0,
-							},
-						}),
-					},
-				},
-			}
-
-			err := reconciler.validateSpec(ctx, dgdr)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).Should(ContainSubstring("engine.config"))
+			Expect(err).NotTo(HaveOccurred())
 		})
 	})
 })
@@ -938,9 +926,8 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 
 	BeforeEach(func() {
 		reconciler = &DynamoGraphDeploymentRequestReconciler{
-			Client:        k8sClient,
-			Recorder:      record.NewFakeRecorder(100),
-			ProfilerImage: "test-profiler:latest",
+			Client:   k8sClient,
+			Recorder: record.NewFakeRecorder(100),
 			Config: commonController.Config{
 				RestrictedNamespace: "",
 			},
@@ -970,10 +957,12 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "trtllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend":        "trtllm",
 								"config":         "/tmp/test-config.yaml",
 								"profiler_image": "test-profiler:latest",
 							},
@@ -1044,10 +1033,12 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "trtllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend":        "trtllm",
 								"config":         "/tmp/test-config.yaml",
 								"profiler_image": "test-profiler:latest",
 							},
@@ -1109,9 +1100,8 @@ var _ = Describe("DGDR Error Handling", func() {
 	BeforeEach(func() {
 		recorder = record.NewFakeRecorder(100)
 		reconciler = &DynamoGraphDeploymentRequestReconciler{
-			Client:        k8sClient,
-			Recorder:      recorder,
-			ProfilerImage: "test-profiler:latest",
+			Client:   k8sClient,
+			Recorder: recorder,
 			Config: commonController.Config{
 				RestrictedNamespace: "",
 			},
@@ -1131,11 +1121,13 @@ var _ = Describe("DGDR Error Handling", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:         "test-model",
+					ProfilerImage: "test-profiler:latest",
+					Backend:       "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend": "vllm",
-								"config":  "/tmp/test-config.yaml",
+								"config": "/tmp/test-config.yaml",
 							},
 							"sla": map[string]interface{}{
 								"ttft": 100.0,

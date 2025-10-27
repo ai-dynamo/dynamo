@@ -873,6 +873,17 @@ class HttpService:
 
     ...
 
+class PythonAsyncEngine:
+    """
+    Bridge a Python async generator onto Dynamo's AsyncEngine interface.
+    """
+
+    def __init__(self, generator: Any, event_loop: Any) -> None:
+        """Wrap a Python generator and event loop for use with Dynamo services."""
+        ...
+
+
+
 class HttpAsyncEngine:
     """
     An async engine for a distributed Dynamo http service. This is an extension of the
@@ -881,6 +892,133 @@ class HttpAsyncEngine:
     """
 
     ...
+
+class KserveGrpcService:
+    """
+    A gRPC service implementing the KServe protocol for dynamo applications.
+    Provides model management for completions, chat completions, and tensor-based models.
+    """
+
+    def __init__(self, port: Optional[int] = None, host: Optional[str] = None) -> None:
+        """
+        Create a new KServe gRPC service.
+
+        Args:
+            port: Optional port number to bind the service to
+            host: Optional host address to bind the service to
+        """
+        ...
+
+    def add_completions_model(
+        self,
+        model: str,
+        checksum: str,
+        engine: PythonAsyncEngine,
+    ) -> None:
+        """
+        Register a completions model with the service.
+
+        Args:
+            model: The model name
+            checksum: The model checksum
+            engine: The async engine to handle requests
+        """
+        ...
+
+    def add_chat_completions_model(
+        self,
+        model: str,
+        checksum: str,
+        engine: PythonAsyncEngine,
+    ) -> None:
+        """
+        Register a chat completions model with the service.
+
+        Args:
+            model: The model name
+            checksum: The model checksum
+            engine: The async engine to handle requests
+        """
+        ...
+
+    def add_tensor_model(
+        self,
+        model: str,
+        checksum: str,
+        engine: PythonAsyncEngine,
+    ) -> None:
+        """
+        Register a tensor-based model with the service.
+
+        Args:
+            model: The model name
+            checksum: The model checksum
+            engine: The async engine to handle requests
+        """
+        ...
+
+    def remove_completions_model(self, model: str) -> None:
+        """
+        Remove a completions model from the service.
+
+        Args:
+            model: The model name to remove
+        """
+        ...
+
+    def remove_chat_completions_model(self, model: str) -> None:
+        """
+        Remove a chat completions model from the service.
+
+        Args:
+            model: The model name to remove
+        """
+        ...
+
+    def remove_tensor_model(self, model: str) -> None:
+        """
+        Remove a tensor model from the service.
+
+        Args:
+            model: The model name to remove
+        """
+        ...
+
+    def list_chat_completions_models(self) -> List[str]:
+        """
+        List all registered chat completions models.
+
+        Returns:
+            List of model names
+        """
+        ...
+
+    def list_completions_models(self) -> List[str]:
+        """
+        List all registered completions models.
+
+        Returns:
+            List of model names
+        """
+        ...
+
+    def list_tensor_models(self) -> List[str]:
+        """
+        List all registered tensor models.
+
+        Returns:
+            List of model names
+        """
+        ...
+
+    async def run(self, token: CancellationToken) -> None:
+        """
+        Run the KServe gRPC service.
+
+        Args:
+            token: Cancellation token to stop the service
+        """
+        ...
 
 class ModelInput:
     """What type of request this model needs: Text, Tokens or Tensor"""
@@ -1438,7 +1576,9 @@ __all__ = [
     "Client",
     "Component",
     "Context",
+    "KserveGrpcService",
     "ModelDeploymentCard",
     "OAIChatPreprocessor",
+    "PythonAsyncEngine",
     "prometheus_names",
 ]
