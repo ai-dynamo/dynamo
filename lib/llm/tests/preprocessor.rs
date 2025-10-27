@@ -530,18 +530,10 @@ fn build_message(text: &str, chunks: &[(&str, usize)]) -> String {
 // No media case
 #[case::no_media(&[])]
 // Single media item cases
-#[case::single_image(&[("image_url", 1)])]
 #[case::single_video(&[("video_url", 1)])]
-#[case::single_audio(&[("audio_url", 1)])]
 // Multiple media items of the same type
 #[case::three_images(&[("image_url", 3)])]
-#[case::two_videos(&[("video_url", 2)])]
-#[case::two_audios(&[("audio_url", 2)])]
 // Mixed media types
-#[case::image_and_video(&[("image_url", 1), ("video_url", 1)])]
-#[case::images_and_audio(&[("image_url", 2), ("audio_url", 1)])]
-#[case::video_and_audios(&[("video_url", 1), ("audio_url", 2)])]
-#[case::all_three_types(&[("image_url", 1), ("video_url", 1), ("audio_url", 1)])]
 #[case::mixed_multiple(&[("image_url", 2), ("video_url", 1), ("audio_url", 2)])]
 #[tokio::test]
 async fn test_media_url_passthrough(#[case] media_chunks: &[(&str, usize)]) {

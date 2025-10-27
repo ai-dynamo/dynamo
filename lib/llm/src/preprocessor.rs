@@ -162,7 +162,7 @@ impl OpenAIPreprocessor {
     /// Annotations evaluated by this method include:
     /// - `formatted_prompt`
     /// - `token_ids`
-    pub async fn preprocess_request<
+    pub fn preprocess_request<
         R: OAIChatLikeRequest
             + AnnotationsProvider
             + SamplingOptionsProvider
@@ -181,7 +181,6 @@ impl OpenAIPreprocessor {
             .gather_tokens(request, &mut builder, formatted_prompt)
             .with_context(|| "Failed to gather tokens")?;
         self.gather_multi_modal_data(request, &mut builder)
-            .await
             .with_context(|| "Failed to gather multimodal data")?;
 
         Ok((builder.build()?, annotations))
@@ -268,7 +267,7 @@ impl OpenAIPreprocessor {
         }
     }
 
-    pub async fn gather_multi_modal_data<R: OAIChatLikeRequest>(
+    pub fn gather_multi_modal_data<R: OAIChatLikeRequest>(
         &self,
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
@@ -834,7 +833,7 @@ impl
         let response_generator = request.response_generator(context.id().to_string());
 
         // convert the chat completion request to a common completion request
-        let (common_request, annotations) = self.preprocess_request(&request).await?;
+        let (common_request, annotations) = self.preprocess_request(&request)?;
 
         let mut response_generator = Box::new(response_generator);
 
@@ -961,7 +960,7 @@ impl
         // convert the chat completion request to a common completion request
         let mut builder = self.builder(&request)?;
         let annotations = self.gather_tokens(&request, &mut builder, None)?;
-        self.gather_multi_modal_data(&request, &mut builder).await?;
+        self.gather_multi_modal_data(&request, &mut builder)?;
 
         let common_request = builder.build()?;
 
