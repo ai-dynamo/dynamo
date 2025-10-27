@@ -98,6 +98,7 @@ RUN apt-get update \
         dkms \
         kmod \
         # Command line tools
+        wget \
         curl \
         jq \
         unzip \
