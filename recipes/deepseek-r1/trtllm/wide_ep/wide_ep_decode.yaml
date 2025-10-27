@@ -17,7 +17,7 @@ backend: pytorch
 # WideEP related settings
 moe_config:
   backend: WIDEEP
-  load_balancer: /mnt/engine_configs/deepseek_r1/wide_ep/eplb.yaml
+  load_balancer: /mnt/recipes/deepseek-r1/trtllm/wide_ep/eplb.yaml
 
 # TP/EP/PP/DP
 tensor_parallel_size: 16

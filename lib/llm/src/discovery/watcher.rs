@@ -14,7 +14,7 @@ use dynamo_runtime::{
         network::egress::push_router::PushRouter,
     },
     protocols::{EndpointId, annotated::Annotated},
-    transports::etcd::WatchEvent,
+    storage::key_value_store::WatchEvent,
 };
 
 use crate::{
@@ -105,6 +105,28 @@ impl ModelWatcher {
         while let Some(event) = events_rx.recv().await {
             match event {
                 WatchEvent::Put(kv) => {
+                    let key = kv.key_str();
+                    let endpoint_id = match key_extract(key) {
+                        Ok((eid, _)) => eid,
+                        Err(err) => {
+                            tracing::error!(%key, %err, "Failed extracting EndpointId from key. Ignoring instance.");
+                            continue;
+                        }
+                    };
+
+                    // Filter by namespace if target_namespace is specified
+                    if !global_namespace
+                        && let Some(target_ns) = target_namespace
+                        && endpoint_id.namespace != target_ns
+                    {
+                        tracing::debug!(
+                            model_namespace = endpoint_id.namespace,
+                            target_namespace = target_ns,
+                            "Skipping model from different namespace"
+                        );
+                        continue;
+                    }
+
                     let mut card = match serde_json::from_slice::<ModelDeploymentCard>(kv.value()) {
                         Ok(card) => card,
                         Err(err) => {
@@ -119,34 +141,6 @@ impl ModelWatcher {
                             continue;
                         }
                     };
-                    let key = match kv.key_str() {
-                        Ok(k) => k,
-                        Err(err) => {
-                            tracing::error!(%err, ?kv, "Invalid UTF-8 string in model card key, skipping");
-                            continue;
-                        }
-                    };
-                    let endpoint_id = match etcd_key_extract(key) {
-                        Ok((eid, _)) => eid,
-                        Err(err) => {
-                            tracing::error!(%key, model_name = card.name(), %err, "Failed extracting EndpointId from key. Ignoring instance.");
-                            continue;
-                        }
-                    };
-
-                    // Filter by namespace if target_namespace is specified
-                    if !global_namespace
-                        && let Some(target_ns) = target_namespace
-                        && endpoint_id.namespace != target_ns
-                    {
-                        tracing::debug!(
-                            model_namespace = endpoint_id.namespace,
-                            target_namespace = target_ns,
-                            model_name = card.name(),
-                            "Skipping model from different namespace"
-                        );
-                        continue;
-                    }
 
                     // If we already have a worker for this model, and the ModelDeploymentCard
                     // cards don't match, alert, and don't add the new instance
@@ -190,10 +184,7 @@ impl ModelWatcher {
                     }
                 }
                 WatchEvent::Delete(kv) => {
-                    let Ok(deleted_key) = kv.key_str() else {
-                        tracing::warn!("Invalid UTF-8 in etcd delete notification key: {kv:?}");
-                        continue;
-                    };
+                    let deleted_key = kv.key_str();
                     match self
                         .handle_delete(deleted_key, target_namespace, global_namespace)
                         .await
@@ -304,7 +295,7 @@ impl ModelWatcher {
         Ok(Some(model_name))
     }
 
-    // Handles a PUT event from etcd, this usually means adding a new model to the list of served
+    // Handles a PUT event from store, this usually means adding a new model to the list of served
     // models.
     async fn handle_put(
         &self,
@@ -569,8 +560,6 @@ impl ModelWatcher {
     /// All the registered ModelDeploymentCard with the EndpointId they are attached to, one per instance
     async fn all_cards(&self) -> anyhow::Result<Vec<(EndpointId, ModelDeploymentCard)>> {
         let store = self.drt.store();
-
-        //let kvs = etcd_client.kv_get_prefix(model_card::ROOT_PATH).await?;
         let Some(card_bucket) = store.get_bucket(model_card::ROOT_PATH).await? else {
             // no cards
             return Ok(vec![]);
@@ -582,11 +571,11 @@ impl ModelWatcher {
             let r = match serde_json::from_slice::<ModelDeploymentCard>(&card_bytes) {
                 Ok(card) => {
                     let maybe_endpoint_id =
-                        etcd_key_extract(&key).map(|(endpoint_id, _instance_id)| endpoint_id);
+                        key_extract(&key).map(|(endpoint_id, _instance_id)| endpoint_id);
                     let endpoint_id = match maybe_endpoint_id {
                         Ok(eid) => eid,
                         Err(err) => {
-                            tracing::error!(%err, "Skipping invalid etcd key, not string or not EndpointId");
+                            tracing::error!(%err, "Skipping invalid key, not string or not EndpointId");
                             continue;
                         }
                     };
@@ -623,9 +612,9 @@ impl ModelWatcher {
     }
 }
 
-/// The ModelDeploymentCard is published in etcd with a key like "v1/mdc/dynamo/backend/generate/694d9981145a61ad".
+/// The ModelDeploymentCard is published in store with a key like "v1/mdc/dynamo/backend/generate/694d9981145a61ad".
 /// Extract the EndpointId and instance_id from that.
-fn etcd_key_extract(s: &str) -> anyhow::Result<(EndpointId, String)> {
+fn key_extract(s: &str) -> anyhow::Result<(EndpointId, String)> {
     if !s.starts_with(model_card::ROOT_PATH) {
         anyhow::bail!("Invalid format: expected model card ROOT_PATH segment in {s}");
     }
@@ -649,12 +638,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_etcd_key_extract() {
+    fn test_key_extract() {
         let input = format!(
             "{}/dynamo/backend/generate/694d9981145a61ad",
             model_card::ROOT_PATH
         );
-        let (endpoint_id, _) = etcd_key_extract(&input).unwrap();
+        let (endpoint_id, _) = key_extract(&input).unwrap();
         assert_eq!(endpoint_id.namespace, "dynamo");
         assert_eq!(endpoint_id.component, "backend");
         assert_eq!(endpoint_id.name, "generate");
