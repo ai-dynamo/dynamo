@@ -325,6 +325,8 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
+  profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+  dgdImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
 
   profilingConfig:
     config:
@@ -355,6 +357,8 @@ metadata:
 spec:
   model: "Qwen/Qwen3-32B"
   backend: trtllm
+  profilerImage: "nvcr.io/nvidia/ai-dynamo/trtllm-runtime:0.6.1"
+  dgdImage: "nvcr.io/nvidia/ai-dynamo/trtllm-runtime:0.6.1"
 
   profilingConfig:
     config:
@@ -385,6 +389,8 @@ metadata:
 spec:
   model: "deepseek-ai/DeepSeek-R1"
   backend: sglang
+  profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
+  dgdImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
 
   profilingConfig:
     config:

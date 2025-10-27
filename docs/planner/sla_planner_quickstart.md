@@ -35,10 +35,11 @@ flowchart TD
 
 A **DynamoGraphDeploymentRequest (DGDR)** is a Kubernetes Custom Resource that serves as the primary interface for users to request model deployments with specific performance and resource constraints. Think of it as a "deployment order" where you specify:
 
-- **What** model you want to deploy (`modelName`)
+- **What** model you want to deploy (`model`)
 - **How** it should perform (SLA targets: `ttft`, `itl`)
 - **Where** it should run (optional GPU preferences)
 - **Which** backend to use (`backend`: vllm, sglang, or trtllm)
+- **Which** images to use (`profilerImage`, `dgdImage`)
 
 The Dynamo Operator watches for DGDRs and automatically:
 1. Discovers available GPU resources in your cluster
@@ -56,56 +57,30 @@ The Dynamo Operator watches for DGDRs and automatically:
 
 Before creating a DGDR, ensure:
 - **Dynamo platform installed** with the operator running (see [Installation Guide](/docs/kubernetes/installation_guide.md))
-- **Operator profiler image configured** (see below)
 - **[kube-prometheus-stack](/docs/kubernetes/observability/metrics.md) installed and running** (required for SLA planner)
 - **Profiling PVC created** (see [Benchmarking Resource Setup](/deploy/utils/README.md#benchmarking-resource-setup#BenchmarkingResourceSetup))
 - **Image pull secrets configured** if using private registries (typically `nvcr-imagepullsecret` for NVIDIA images)
 - **Sufficient GPU resources** available in your cluster for profiling
+- **Runtime images available** that contain both profiler and runtime components
 
-### Configure Profiler Image
+### Container Images
 
-The Dynamo Operator requires a profiler image to run DGDR profiling jobs. This must be configured before creating any DGDRs. Any runtime Dynamo image will include the profiler.
+Each DGDR requires you to specify container images for the profiling and deployment process:
 
-**For development:** Build and push a runtime image from the ai-dynamo repository, then configure it:
+**profilerImage** (Required):  
+Specifies the container image used for the profiling job itself. This image must contain the profiler code and dependencies needed for SLA-based profiling.
+
+**dgdImage** (Optional):  
+Specifies the container image used for DynamoGraphDeployment components (frontend, workers, planner). This image is used for:
+- Temporary DGDs created during online profiling (for performance measurements)
+- The final DGD deployed after profiling completes
+
+If `dgdImage` is omitted, the image from the base config file (e.g., `disagg.yaml`) is used. You may use our public images (0.6.1 and later) or build and push your own.
 
 ```yaml
-# values.yaml
-dynamo-operator:
-  dynamo:
-    dgdr:
-      profilerImage: "your-registry/backend-runtime:your-tag"
-```
-
-**For production:** Public image will be available in release 0.6.1:
-
-```yaml
-# values.yaml (release 0.6.1+)
-dynamo-operator:
-  dynamo:
-    dgdr:
-      profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1" # sglang, trtllm runtime images will also include profiler
-```
-
-**To update an existing installation:**
-
-```bash
-# Using Helm upgrade with --set
-helm upgrade dynamo-platform deploy/cloud/helm/platform \
-  --namespace $NAMESPACE \
-  --set dynamo-operator.dynamo.dgdr.profilerImage="your-registry/backend-runtime:your-tag" \
-  --reuse-values
-
-# Or update your values.yaml and upgrade
-helm upgrade dynamo-platform deploy/cloud/helm/platform \
-  --namespace $NAMESPACE \
-  --values my-values.yaml
-```
-
-**Verify the configuration:**
-
-```bash
-# Check operator deployment for profiler image setting
-kubectl get deployment -n $NAMESPACE -l app.kubernetes.io/name=dynamo-operator -o yaml | grep profilerImage
+spec:
+  profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+  dgdImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"  # Optional
 ```
 
 ## Quick Start: Deploy with DGDR
@@ -128,8 +103,10 @@ metadata:
   name: my-model-deployment  # Change the name
   namespace: default         # Change the namespace
 spec:
-  modelName: "Qwen/Qwen3-0.6B"  # Update to your model
-  backend: vllm                 # Backend: vllm, sglang, or trtllm
+  model: "Qwen/Qwen3-0.6B"     # Update to your model
+  backend: vllm                # Backend: vllm, sglang, or trtllm
+  profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"  # Required
+  dgdImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"       # Optional
 
   profilingConfig:
     config:
@@ -205,9 +182,18 @@ curl http://localhost:8000/v1/models
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `spec.modelName` | string | Model identifier (e.g., "meta-llama/Llama-3-70b") |
+| `spec.model` | string | Model identifier (e.g., "meta-llama/Llama-3-70b") |
 | `spec.backend` | enum | Inference backend: `vllm`, `sglang`, or `trtllm` |
+| `spec.profilerImage` | string | Container image for profiling job |
 | `spec.profilingConfig.config.sla` | object | SLA targets (isl, osl, ttft, itl) |
+
+### Optional Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `spec.dgdImage` | string | Container image for DGD components (frontend, workers, planner). If omitted, uses image from base config file. |
+| `spec.autoApply` | boolean | Automatically deploy DGD after profiling (default: false) |
+| `spec.deploymentOverrides` | object | Customize metadata (name, namespace, labels, annotations) for auto-created DGD |
 
 ### SLA Configuration
 
@@ -283,8 +269,10 @@ kind: DynamoGraphDeploymentRequest
 metadata:
   name: deepseek-r1
 spec:
-  modelName: deepseek-ai/DeepSeek-R1
+  model: deepseek-ai/DeepSeek-R1
   backend: sglang
+  profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
+  dgdImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
 
   profilingConfig:
     configMapRef:
@@ -306,11 +294,11 @@ spec:
   autoApply: true
 ```
 
-> **What's happening**: The profiler uses the DGD config from the ConfigMap as a **base template**, then optimizes it based on your SLA targets. The controller automatically injects `modelName` into `deployment.model` and `backend` into `engine.backend` in the final configuration.
+> **What's happening**: The profiler uses the DGD config from the ConfigMap as a **base template**, then optimizes it based on your SLA targets. The controller automatically injects `spec.model` into `deployment.model` and `spec.backend` into `engine.backend` in the final configuration.
 
 #### Inline Configuration (Simple Use Cases)
 
-For simple use cases without a custom DGD config, provide profiler configuration directly. The profiler will auto-generate a basic DGD configuration from your `modelName` and `backend`:
+For simple use cases without a custom DGD config, provide profiler configuration directly. The profiler will auto-generate a basic DGD configuration from your `model` and `backend`:
 
 ```yaml
 profilingConfig:
