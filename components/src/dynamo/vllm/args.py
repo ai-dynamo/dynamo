@@ -68,7 +68,7 @@ class Config:
     multimodal_processor: bool = False
     multimodal_encode_worker: bool = False
     multimodal_worker: bool = False
-
+    mm_prompt_template: str = "USER: <image>\n<prompt> ASSISTANT:"
     # dump config to file
     dump_config_to: Optional[str] = None
 
@@ -151,6 +151,19 @@ def parse_args() -> Config:
         action="store_true",
         help="Run as multimodal worker component for LLM inference with multimodal data",
     )
+    parser.add_argument(
+        "--mm-prompt-template",
+        type=str,
+        default="USER: <image>\n<prompt> ASSISTANT:",
+        help=(
+            "Different multi-modal models expect the prompt to contain different special media prompts. "
+            "The processor will use this argument to construct the final prompt. "
+            "User prompt will replace '<prompt>' in the provided template. "
+            "For example, if the user prompt is 'please describe the image' and the prompt template is "
+            "'USER: <image> <prompt> ASSISTANT:', the resulting prompt is "
+            "'USER: <image> please describe the image ASSISTANT:'."
+        ),
+    )
     add_config_dump_args(parser)
 
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -205,6 +218,7 @@ def parse_args() -> Config:
     config.multimodal_processor = args.multimodal_processor
     config.multimodal_encode_worker = args.multimodal_encode_worker
     config.multimodal_worker = args.multimodal_worker
+    config.mm_prompt_template = args.mm_prompt_template
 
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:

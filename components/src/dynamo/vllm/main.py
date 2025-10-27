@@ -394,14 +394,12 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
     )
 
     # Get prompt template from args (must be passed via environment or command line)
-    prompt_template = os.environ.get(
-        "MULTIMODAL_PROMPT_TEMPLATE", "USER: <image>\n<prompt> ASSISTANT:"
-    )
+    mm_prompt_template = config.mm_prompt_template
 
     handler = ProcessorHandler(
         config.engine_args,
         encode_worker_client,
-        prompt_template,
+        mm_prompt_template,
     )
 
     logger.info("Waiting for Encoder Worker Instances ...")
