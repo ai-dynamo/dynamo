@@ -241,7 +241,7 @@ for concurrency in "${concurrency_array[@]}"; do
 
   # NOTE: For Dynamo HTTP OpenAI frontend, use `nvext` for fields like
   # `ignore_eos` since they are not in the official OpenAI spec.
-  genai-perf profile \
+  aiperf profile \
     --model ${model} \
     --tokenizer ${model} \
     --endpoint-type chat \
@@ -255,14 +255,15 @@ for concurrency in "${concurrency_array[@]}"; do
     --extra-inputs max_tokens:${osl} \
     --extra-inputs min_tokens:${osl} \
     --extra-inputs ignore_eos:true \
+    --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
     --concurrency ${concurrency} \
     --request-count $(($concurrency*10)) \
-    --num-dataset-entries $(($concurrency*10)) \
-    --random-seed ${concurrency} \
+    --warmup-request-count $(($concurrency*2)) \
+    --num-dataset-entries $(($concurrency*12)) \
+    --random-seed 100 \
     --artifact-dir ${artifact_dir} \
-    -- \
+    --ui simple \
     -v \
-    --max-threads ${concurrency} \
     -H 'Authorization: Bearer NOT USED' \
     -H 'Accept: text/event-stream'
 
