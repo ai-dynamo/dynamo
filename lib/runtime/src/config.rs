@@ -421,6 +421,15 @@ pub fn env_is_falsey(env: &str) -> bool {
     }
 }
 
+/// Check if service discovery is enabled via USE_SERVICE_DISCOVERY environment variable
+/// Returns true if USE_SERVICE_DISCOVERY is set to a truthy value, false otherwise
+pub fn is_service_discovery_enabled() -> bool {
+    std::env::var("USE_SERVICE_DISCOVERY")
+        .ok()
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(false)
+}
+
 /// Check whether JSONL logging enabled
 /// Set the `DYN_LOGGING_JSONL` environment variable a [`is_truthy`] value
 pub fn jsonl_logging_enabled() -> bool {

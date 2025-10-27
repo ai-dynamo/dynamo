@@ -685,7 +685,13 @@ impl Component {
     fn create_service<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            // Create the NATS service
             inner.add_stats_service().await.map_err(to_pyerr)?;
+            
+            // Feature flag: register with service discovery if enabled
+            if rs::config::is_service_discovery_enabled() {
+                inner.register_instance().await.map_err(to_pyerr)?;
+            }
             Ok(())
         })
     }

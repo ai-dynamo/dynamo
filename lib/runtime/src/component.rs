@@ -262,34 +262,13 @@ impl Component {
         &self.labels
     }
 
-    /// Get the instance handle for this component
+    /// Get the ServiceDiscovery instance handle for this component
     pub fn instance_handle(&self) -> Result<&Box<dyn crate::discovery::InstanceHandle>> {
-        eprintln!("[DEBUG] instance_handle() called for component {}/{}", 
-                 self.namespace.name(), self.name);
-        
         let handle = self.instance_handle.get();
-        if handle.is_none() {
-            eprintln!("[DEBUG] ERROR: instance_handle is None for {}/{}", 
-                     self.namespace.name(), self.name);
-        } else {
-            eprintln!("[DEBUG] instance_handle found for {}/{}", 
-                     self.namespace.name(), self.name);
-        }
-        
         handle.ok_or_else(|| error!("Component not registered with service discovery"))
-    }
-    
-    /// Set the instance handle for this component - uses OnceCell for thread-safe init
-    pub(crate) async fn set_instance_handle_async(&self, handle: Box<dyn crate::discovery::InstanceHandle>) {
-        eprintln!("[DEBUG] set_instance_handle_async called for component {}/{}", 
-                 self.namespace.name(), self.name);
-        self.instance_handle.get_or_init(async { handle }).await;
-        eprintln!("[DEBUG] instance_handle stored in OnceCell");
     }
 
     pub fn endpoint(&self, endpoint: impl Into<String>) -> Endpoint {
-        eprintln!("[DEBUG] endpoint() called, cloning component. instance_handle.get().is_some(): {}", 
-                 self.instance_handle.get().is_some());
         Endpoint {
             component: self.clone(),
             name: endpoint.into(),
@@ -405,8 +384,6 @@ impl Component {
     }
 
     pub async fn add_stats_service(&self) -> anyhow::Result<()> {
-        eprintln!("[DEBUG] add_stats_service called for {}/{}", 
-                 self.namespace.name(), self.name);
         let service_name = self.service_name();
 
         // Pre-check to save cost of creating the service, but don't hold the lock
@@ -422,13 +399,7 @@ impl Component {
             anyhow::bail!("Service {service_name} already exists");
         }
 
-        // 1. Register with service discovery
-        let instance_handle = {
-            let discovery = self.drt.service_discovery();
-            discovery.register_instance(&self.namespace.name(), &self.name).await?
-        };
-
-        // 2. Setup NATS service
+        // Setup NATS service
         let Some(nats_client) = self.drt.nats_client() else {
             anyhow::bail!("Cannot create NATS service without NATS.");
         };
@@ -436,17 +407,7 @@ impl Component {
         let (nats_service, stats_reg) =
             service::build_nats_service(nats_client, self, description).await?;
 
-        // // 3. Store transport details in metadata
-        // instance_handle.set_metadata(serde_json::json!({
-        //     "transport": {
-        //         "type": "nats",
-        //         "service_name": service_name,
-        //         "version": service::SERVICE_VERSION,
-        //     },
-        //     "endpoints": {},  // Will be populated as endpoints are added
-        // })).await?;
-
-        // 4. Update component registry
+        // Update component registry
         let mut guard = self.drt.component_registry.inner.lock().await;
         if !guard.services.contains_key(&service_name) {
             // Normal case
@@ -461,14 +422,24 @@ impl Component {
             ));
         }
 
-        // 5. Store instance handle on component (OnceCell shared across clones via Arc)
-        eprintln!("[DEBUG] Storing instance_handle in component via OnceCell");
-        self.set_instance_handle_async(instance_handle).await;
-
-        // 6. Register metrics callback. CRITICAL: Never fail service creation for metrics issues.
+        // Register metrics callback. CRITICAL: Never fail service creation for metrics issues.
         if let Err(err) = self.start_scraping_nats_service_component_metrics() {
             tracing::debug!(service_name, error = %err, "Metrics registration failed");
         }
+
+        Ok(())
+    }
+
+    /// Register this component instance with service discovery
+    pub async fn register_instance(&self) -> anyhow::Result<()> {
+        // Register with service discovery
+        let instance_handle = {
+            let discovery = self.drt.service_discovery();
+            discovery.register_instance(&self.namespace.name(), &self.name).await?
+        };
+
+        // Store instance handle on component (OnceCell ensures thread-safe init, shared across clones via Arc)
+        self.instance_handle.get_or_init(async { instance_handle }).await;
 
         Ok(())
     }
