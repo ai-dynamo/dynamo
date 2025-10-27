@@ -69,6 +69,16 @@ impl Instance {
     }
 }
 
+/// Convert a string instance_id to u64, either by parsing or hashing
+pub fn instance_id_to_u64(id: &str) -> u64 {
+    id.parse::<u64>().unwrap_or_else(|_| {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        id.hash(&mut hasher);
+        hasher.finish()
+    })
+}
+
 /// Main service discovery interface
 #[async_trait]
 pub trait ServiceDiscovery: Send + Sync + 'static {
