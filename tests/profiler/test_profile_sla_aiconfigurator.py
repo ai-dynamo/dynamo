@@ -27,6 +27,8 @@ class TestProfileSlaAiconfigurator:
     def trtllm_args(self):
         class Args:
             def __init__(self):
+                self.model = ""
+                self.dgd_image = ""
                 self.backend = "trtllm"
                 self.config = "components/backends/trtllm/deploy/disagg.yaml"
                 self.output_dir = "/tmp/test_profiling_results"

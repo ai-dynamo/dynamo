@@ -329,7 +329,6 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
-
         --vllm-max-jobs)
             # Set MAX_JOBS for vLLM compilation (only used by Dockerfile.vllm)
             if [ "$2" ]; then
@@ -716,7 +715,10 @@ fi
 if [ -n "${MAX_JOBS}" ]; then
     BUILD_ARGS+=" --build-arg MAX_JOBS=${MAX_JOBS} "
 fi
-
+if [[ $FRAMEWORK == "SGLANG" ]]; then
+    echo "Forcing Python version to 3.10 for sglang image build"
+    BUILD_ARGS+=" --build-arg PYTHON_VERSION=3.10"
+fi
 # Add sccache build arguments
 if [ "$USE_SCCACHE" = true ]; then
     BUILD_ARGS+=" --build-arg USE_SCCACHE=true"
@@ -725,7 +727,10 @@ if [ "$USE_SCCACHE" = true ]; then
     BUILD_ARGS+=" --secret id=aws-key-id,env=AWS_ACCESS_KEY_ID"
     BUILD_ARGS+=" --secret id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY"
 fi
-
+if [[ "$PLATFORM" == *"linux/arm64"* && "${FRAMEWORK}" == "SGLANG" ]]; then
+    # Add arguments required for sglang blackwell build
+    BUILD_ARGS+=" --build-arg GRACE_BLACKWELL=true --build-arg BUILD_TYPE=blackwell_aarch64"
+fi
 LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
 if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
     LATEST_TAG="${LATEST_TAG}-${TARGET}"
