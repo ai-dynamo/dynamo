@@ -67,10 +67,10 @@ Before creating a DGDR, ensure:
 
 Each DGDR requires you to specify container images for the profiling and deployment process:
 
-**profilerImage** (Required):  
+**profilerImage** (Required):
 Specifies the container image used for the profiling job itself. This image must contain the profiler code and dependencies needed for SLA-based profiling.
 
-**dgdImage** (Optional):  
+**dgdImage** (Optional):
 Specifies the container image used for DynamoGraphDeployment components (frontend, workers, planner). This image is used for:
 - Temporary DGDs created during online profiling (for performance measurements)
 - The final DGD deployed after profiling completes
