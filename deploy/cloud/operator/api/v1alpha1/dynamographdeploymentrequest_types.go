@@ -114,18 +114,6 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
 	Backend string `json:"backend"`
 
-	// ProfilerImage specifies the container image to use for profiling jobs.
-	// DEPRECATED: Use profilingConfig.profilerImage instead.
-	// +kubebuilder:validation:Optional
-	// +deprecated
-	ProfilerImage string `json:"profilerImage,omitempty"`
-
-	// DgdImage specifies the container image to use for DynamoGraphDeployment components.
-	// DEPRECATED: Use deploymentOverrides.workersImage instead.
-	// +kubebuilder:validation:Optional
-	// +deprecated
-	DgdImage string `json:"dgdImage,omitempty"`
-
 	// ProfilingConfig provides the complete configuration for the profiling job.
 	// This configuration is passed directly to the profiler.
 	// The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).

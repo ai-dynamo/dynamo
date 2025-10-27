@@ -138,21 +138,11 @@ spec:
                         Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
                       type: string
                   type: object
-                dgdImage:
-                  description: |-
-                    DgdImage specifies the container image to use for DynamoGraphDeployment components.
-                    DEPRECATED: Use deploymentOverrides.workersImage instead.
-                  type: string
                 model:
                   description: |-
                     Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
                     This is a high-level identifier for easy reference in kubectl output and logs.
                     The controller automatically sets this value in profilingConfig.config.deployment.model.
-                  type: string
-                profilerImage:
-                  description: |-
-                    ProfilerImage specifies the container image to use for profiling jobs.
-                    DEPRECATED: Use profilingConfig.profilerImage instead.
                   type: string
                 profilingConfig:
                   description: |-
