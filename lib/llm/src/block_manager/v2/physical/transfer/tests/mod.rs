@@ -3,7 +3,6 @@
 
 //! Comprehensive transfer tests for verifying data integrity across storage types and layout configurations.
 
-mod cuda_kernel_tests;
 mod local_transfers;
 
 use super::{

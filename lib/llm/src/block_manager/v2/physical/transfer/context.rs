@@ -5,10 +5,10 @@
 
 use std::sync::Arc;
 
+use crate::block_manager::v2::kernels::OperationalCopyBackend;
 use anyhow::Result;
 use cudarc::driver::{CudaContext, CudaEvent, CudaStream};
 use derive_builder::Builder;
-use dynamo_kvbm_kernels::tensor_kernels::OperationalCopyBackend;
 use nixl_sys::XferRequest;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
