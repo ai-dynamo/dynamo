@@ -8,6 +8,7 @@ import signal
 from typing import Optional
 
 import uvloop
+from prometheus_client import REGISTRY
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -127,6 +128,11 @@ def setup_kv_event_publisher(
         List of ZmqKvEventPublisher instances (one per dp_rank) if prefix caching is enabled, None otherwise.
     """
     if not config.engine_args.enable_prefix_caching:
+        return None
+
+    # Skip KV event publishing for decode workers
+    if config.is_decode_worker:
+        logger.info("Skipping KV event publisher setup for decode worker")
         return None
 
     # Get data_parallel_size to create publishers for all dp_ranks
@@ -418,9 +424,9 @@ async def init(runtime: DistributedRuntime, config: Config):
         handler.kv_publishers = kv_publishers
 
     if config.engine_args.disable_log_stats is False:
-        from prometheus_client import REGISTRY
-
-        register_engine_metrics_callback(generate_endpoint, REGISTRY, "vllm:", "vLLM")
+        register_engine_metrics_callback(
+            endpoint=generate_endpoint, registry=REGISTRY, metric_prefix_filter="vllm:"
+        )
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
         await register_vllm_model(

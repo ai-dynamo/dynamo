@@ -12,6 +12,13 @@ FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG}
 
 WORKDIR /sgl-workspace
 
+# Install jq for JSON processing
+RUN apt-get update -y \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        jq \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install dynamo
 # Providing --build-arg BRANCH_TYPE=local will editable install the local dynamo repo
 # Providing --build-arg BRANCH_TYPE=remote will editable install the remote dynamo repo

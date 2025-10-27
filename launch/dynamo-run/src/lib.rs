@@ -145,6 +145,7 @@ async fn engine_for(
                 engine,
                 model: Box::new(local_model),
                 is_static: flags.static_worker,
+                is_prefill: false,
             })
         }
     }

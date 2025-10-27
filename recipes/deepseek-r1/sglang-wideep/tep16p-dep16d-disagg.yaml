@@ -45,29 +45,38 @@ spec:
               path: /health
               port: 9090
             periodSeconds: 10
-            timeoutSeconds: 1800
-            failureThreshold: 60
+            timeoutSeconds: 10
+            failureThreshold: 600
           image: my-registry/sglang-wideep-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           command:
-            - /bin/sh
-            - -c
+            - python3
+            - -m
+            - dynamo.sglang
           args:
-            - >-
-              exec python3 -m dynamo.sglang
-              --model-path deepseek-ai/DeepSeek-R1
-              --served-model-name deepseek-ai/DeepSeek-R1
-              --tp 16
-              --dp 16
-              --enable-dp-attention
-              --ep-size 16
-              --trust-remote-code
-              --skip-tokenizer-init
-              --disaggregation-mode decode
-              --disaggregation-transfer-backend nixl
-              --disaggregation-bootstrap-port 30001
-              --mem-fraction-static 0.8
-              --host 0.0.0.0
+            - --model-path
+            - deepseek-ai/DeepSeek-R1
+            - --served-model-name
+            - deepseek-ai/DeepSeek-R1
+            - --tp
+            - "16"
+            - --dp
+            - "16"
+            - --enable-dp-attention
+            - --ep-size
+            - "16"
+            - --trust-remote-code
+            - --skip-tokenizer-init
+            - --disaggregation-mode
+            - decode
+            - --disaggregation-transfer-backend
+            - nixl
+            - --disaggregation-bootstrap-port
+            - "30001"
+            - --mem-fraction-static
+            - "0.75"
+            - --host
+            - 0.0.0.0
     prefill:
       dynamoNamespace: sgl-dsr1-16gpu
       componentType: worker
@@ -89,24 +98,32 @@ spec:
               path: /health
               port: 9090
             periodSeconds: 10
-            timeoutSeconds: 1800
-            failureThreshold: 60
+            timeoutSeconds: 10
+            failureThreshold: 600
           image: my-registry/sglang-wideep-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           command:
-            - /bin/sh
-            - -c
+            - python3
+            - -m
+            - dynamo.sglang
           args:
-            - >-
-              exec python3 -m dynamo.sglang
-              --model-path deepseek-ai/DeepSeek-R1
-              --served-model-name deepseek-ai/DeepSeek-R1
-              --tp 16
-              --ep-size 16
-              --trust-remote-code
-              --skip-tokenizer-init
-              --disaggregation-mode prefill
-              --disaggregation-transfer-backend nixl
-              --disaggregation-bootstrap-port 30001
-              --mem-fraction-static 0.8
-              --host 0.0.0.0
+            - --model-path
+            - deepseek-ai/DeepSeek-R1
+            - --served-model-name
+            - deepseek-ai/DeepSeek-R1
+            - --tp
+            - "16"
+            - --ep-size
+            - "16"
+            - --trust-remote-code
+            - --skip-tokenizer-init
+            - --disaggregation-mode
+            - prefill
+            - --disaggregation-transfer-backend
+            - nixl
+            - --disaggregation-bootstrap-port
+            - "30001"
+            - --mem-fraction-static
+            - "0.75"
+            - --host
+            - 0.0.0.0
