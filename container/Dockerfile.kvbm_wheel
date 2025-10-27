@@ -26,8 +26,9 @@
 #    the pip wheel independently, without having to build the entire Dynamo.
 
 ARG ARCH_ALT="x86_64"
+ARG BASE_IMAGE=quay.io/pypa/manylinux_2_28_${ARCH_ALT}
 
-FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT}
+FROM ${BASE_IMAGE} as base
 
 ARG CARGO_BUILD_JOBS
 ARG ARCH_ALT
