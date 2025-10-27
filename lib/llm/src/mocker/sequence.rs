@@ -6,12 +6,10 @@ use crate::tokens::blocks::UniqueBlock;
 use crate::tokens::{TokenBlockSequence, Tokens};
 use derive_getters::Getters;
 use rand::random;
-use uuid;
 
 /// Create unique blocks from a TokenBlockSequence
 fn create_unique_blocks_from_sequence(
     tokens: &TokenBlockSequence,
-    uuid: Option<uuid::Uuid>,
     block_size: usize,
     enable_prefix_caching: bool,
 ) -> Vec<UniqueBlock> {
@@ -29,10 +27,7 @@ fn create_unique_blocks_from_sequence(
 
     // Only push the partial block if tokens count isn't a multiple of block_size
     if !tokens.total_tokens().is_multiple_of(block_size) {
-        unique_blocks.push(match uuid {
-            Some(uuid) => UniqueBlock::PartialBlock(uuid),
-            None => UniqueBlock::default(),
-        });
+        unique_blocks.push(UniqueBlock::default());
     }
     unique_blocks
 }
@@ -80,7 +75,7 @@ impl ActiveSequence {
 
         let tokens = Tokens::from(tokens).into_sequence(block_size as u32, Some(1337));
         let unique_blocks =
-            create_unique_blocks_from_sequence(&tokens, None, block_size, enable_prefix_caching);
+            create_unique_blocks_from_sequence(&tokens, block_size, enable_prefix_caching);
         let block_hashes = tokens.blocks().iter().map(|b| b.block_hash()).collect();
         let creation_signal = Some(MoveBlock::Use(unique_blocks.clone(), block_hashes));
 
@@ -133,17 +128,6 @@ impl ActiveSequence {
         (sequence, signal)
     }
 
-    /// Get the parent hash from the second-to-last block if it exists and is a FullBlock
-    fn get_parent_hash(&self) -> Option<u64> {
-        if self.unique_blocks.len() < 2 {
-            return None;
-        }
-        match &self.unique_blocks[self.unique_blocks.len() - 2] {
-            UniqueBlock::FullBlock(hash) => Some(*hash),
-            _ => panic!("Cannot have a partial block as parent"),
-        }
-    }
-
     /// Push a token to the sequence
     pub fn push(&mut self, token: u32) -> Option<Vec<MoveBlock>> {
         self.tokens.append(token).expect("Token push failed.");
@@ -166,12 +150,19 @@ impl ActiveSequence {
             };
             let last_block_hash = self.tokens.last_complete_block().unwrap().block_hash();
             self.unique_blocks.pop();
+
+            // After pop, the last element is the parent block
+            let second_to_last_hash = self.unique_blocks.last().map(|block| match block {
+                UniqueBlock::FullBlock(hash) => *hash,
+                UniqueBlock::PartialBlock(_) => panic!("Cannot have a partial block as parent"),
+            });
+
             self.unique_blocks
                 .push(UniqueBlock::FullBlock(last_seq_hash));
             signals.push(MoveBlock::Promote(
                 uuid,
                 last_seq_hash,
-                self.get_parent_hash(),
+                second_to_last_hash,
                 last_block_hash,
             ));
         }
@@ -244,7 +235,6 @@ impl ActiveSequence {
         self.tokens.truncate(self.num_input_tokens).unwrap();
         self.unique_blocks = create_unique_blocks_from_sequence(
             &self.tokens,
-            None,
             self.block_size,
             self.enable_prefix_caching,
         );

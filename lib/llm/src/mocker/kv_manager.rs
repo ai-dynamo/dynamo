@@ -47,7 +47,6 @@ use derive_getters::Getters;
 use dynamo_runtime::component::Component;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use uuid::Uuid;
 
 #[derive(Getters)]
 pub struct KvManager {
@@ -67,6 +66,8 @@ pub struct KvManager {
 
     #[getter(copy)]
     dp_rank: u32,
+
+    next_event_id: u64,
 }
 
 impl KvManager {
@@ -102,12 +103,13 @@ impl KvManager {
             all_blocks,
             kv_event_publisher,
             dp_rank,
+            next_event_id: 0,
         }
     }
 
     /// Converts stored/removed blocks into KvCacheEventData and publishes if publisher is available
     fn publish_kv_event(
-        &self,
+        &mut self,
         full_blocks: Vec<SequenceHash>,
         local_hashes: &[BlockHash],
         parent_hash: Option<u64>,
@@ -148,8 +150,12 @@ impl KvManager {
             })
         };
 
+        // Use incremental event ID starting from 0
+        let event_id = self.next_event_id;
+        self.next_event_id += 1;
+
         let event = KvCacheEvent {
-            event_id: Uuid::new_v4().as_u128() as u64,
+            event_id,
             data: event_data,
             dp_rank: self.dp_rank,
         };
