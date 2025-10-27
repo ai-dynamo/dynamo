@@ -187,7 +187,8 @@ RUN git clone --depth 1 --branch ${GDRCOPY_COMMIT} https://github.com/NVIDIA/gdr
 RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so
 
 # Install SGLang (requires CUDA 12.8.1 or 12.9.1)
-RUN python3 -m pip install --no-cache-dir --ignore-installed --upgrade pip setuptools wheel html5lib six \
+RUN python3 -m pip install --no-cache-dir --ignore-installed pip==25.2 \
+    && python3 -m pip install --no-cache-dir --ignore-installed --upgrade setuptools wheel html5lib six \
     && git clone --depth 1 --branch v${SGLANG_COMMIT} https://github.com/sgl-project/sglang.git \
     && cd sglang \
     && case "$CUDA_VERSION" in \
