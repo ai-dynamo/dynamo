@@ -1,0 +1,263 @@
+# syntax=docker/dockerfile:1.10.0
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# DGX-SPARK specific Dockerfile for vLLM
+# Uses NVIDIA's pre-built vLLM container that supports Blackwell GPUs (compute_121)
+# See: https://docs.nvidia.com/deeplearning/frameworks/vllm-release-notes/rel-25-09.html
+
+ARG BASE_IMAGE="nvcr.io/nvidia/vllm"
+ARG BASE_IMAGE_TAG="25.09-py3"
+
+ARG DYNAMO_BASE_IMAGE="dynamo:latest-none"
+FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
+
+########################################################
+########## Runtime Image (based on NVIDIA vLLM) #######
+########################################################
+#
+# PURPOSE: Production runtime environment for DGX-SPARK
+#
+# This stage uses NVIDIA's pre-built vLLM container that already includes:
+# - vLLM with DGX Spark functional support (Blackwell compute_121)
+# - CUDA 13.0 support
+# - NVFP4 format support
+# - All necessary GPU acceleration libraries
+#
+# We add Dynamo's customizations on top:
+# - Dynamo runtime libraries
+# - NIXL for KV cache transfer
+# - Custom backend integrations
+#
+
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS runtime
+
+WORKDIR /workspace
+ENV DYNAMO_HOME=/opt/dynamo
+ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+# Add system Python site-packages to PYTHONPATH so we can use NVIDIA's vLLM
+ENV PYTHONPATH="/usr/local/lib/python3.12/dist-packages:${PYTHONPATH}"
+
+# NVIDIA vLLM container already has Python 3.12 and vLLM installed
+# We just need to set up Dynamo's virtual environment and dependencies
+ARG ARCH_ALT=aarch64
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+
+# Install additional dependencies for Dynamo
+# Note: NVIDIA vLLM container already has Python and CUDA tools
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        # Python runtime - CRITICAL for virtual environment to work
+        python3.12-dev \
+        build-essential \
+        # jq and curl for polling various endpoints and health checks
+        jq \
+        git \
+        git-lfs \
+        curl \
+        # Libraries required by UCX to find RDMA devices
+        libibverbs1 rdma-core ibverbs-utils libibumad3 \
+        libnuma1 librdmacm1 ibverbs-providers \
+        # JIT Kernel Compilation, flashinfer
+        ninja-build \
+        g++ \
+        # prometheus dependencies
+        ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# NVIDIA vLLM container has CUDA already, but ensure CUDA tools are in PATH
+ENV PATH=/usr/local/cuda/bin:$PATH
+
+# DeepGemm runs nvcc for JIT kernel compilation, however the CUDA include path
+# is not properly set for compilation. Set CPATH to help nvcc find the headers.
+ENV CPATH=/usr/local/cuda/include
+
+### COPY NATS & ETCD ###
+# Copy nats and etcd from dev image
+COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+# Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
+ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:/usr/local/cuda/bin:$PATH
+
+### COPY UV EARLY (needed for building NIXL Python wheel) ###
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uvx /bin/uvx
+
+# Build UCX and NIXL directly in this stage for CUDA 13.0 support
+# This ensures we get fresh NIXL 0.7.0 with CUDA 13 support, not cached CUDA 12 version
+
+# Build UCX from source
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        autoconf automake libtool pkg-config \
+        libibverbs-dev librdmacm-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && cd /usr/local/src \
+    && git clone https://github.com/openucx/ucx.git \
+    && cd ucx && git checkout v1.19.0 \
+    && ./autogen.sh \
+    && ./configure \
+        --prefix=/usr/local/ucx \
+        --enable-shared \
+        --disable-static \
+        --disable-doxygen-doc \
+        --enable-optimizations \
+        --enable-cma \
+        --enable-devel-headers \
+        --with-cuda=/usr/local/cuda \
+        --with-verbs \
+        --with-dm \
+        --enable-mt \
+    && make -j$(nproc) \
+    && make -j$(nproc) install-strip \
+    && echo "/usr/local/ucx/lib" > /etc/ld.so.conf.d/ucx.conf \
+    && echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf \
+    && ldconfig \
+    && cd /usr/local/src \
+    && rm -rf ucx
+
+# Build NIXL 0.7.0 from source with CUDA 13.0 support
+# Build both C++ library and Python wheel
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        meson ninja-build python3-pip \
+    && rm -rf /var/lib/apt/lists/* \
+    && git clone --depth 1 --branch 0.7.0 "https://github.com/ai-dynamo/nixl.git" /opt/nixl \
+    && cd /opt/nixl \
+    && meson setup build/ --buildtype=release --prefix=$NIXL_PREFIX -Ddisable_gds_backend=true \
+    && ninja -C build/ -j$(nproc) \
+    && ninja -C build/ install \
+    && echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf \
+    && echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf \
+    && ldconfig \
+    && mkdir -p /opt/dynamo/wheelhouse/nixl \
+    && /bin/uv build . --out-dir /opt/dynamo/wheelhouse/nixl --config-settings=setup-args="-Ddisable_gds_backend=true" \
+    && cd - \
+    && rm -rf /opt/nixl
+
+ENV PATH=/usr/local/ucx/bin:$PATH
+
+# Set library paths for NIXL and UCX
+ENV LD_LIBRARY_PATH=\
+/usr/local/cuda/lib64:\
+$NIXL_LIB_DIR:\
+$NIXL_PLUGIN_DIR:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+$LD_LIBRARY_PATH
+
+### VIRTUAL ENVIRONMENT SETUP ###
+# Note: uv was already copied earlier (needed for building NIXL Python wheel)
+
+# Create Dynamo's virtual environment
+RUN uv venv /opt/dynamo/venv --python 3.12
+
+# Install Dynamo dependencies
+# Note: vLLM is available via PYTHONPATH pointing to system Python
+# Note: We copy dynamo wheels from base, but NIXL wheel was built fresh above with CUDA 13 support
+COPY benchmarks/ /opt/dynamo/benchmarks/
+RUN mkdir -p /opt/dynamo/wheelhouse
+COPY --from=dynamo_base /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl /opt/dynamo/wheelhouse/
+COPY --from=dynamo_base /opt/dynamo/wheelhouse/ai_dynamo*.whl /opt/dynamo/wheelhouse/
+RUN uv pip install \
+    /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+    /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+    /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+    && cd /opt/dynamo/benchmarks \
+    && UV_GIT_LFS=1 uv pip install --no-cache . \
+    && cd - \
+    && rm -rf /opt/dynamo/benchmarks
+
+# Install common and test dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    UV_GIT_LFS=1 uv pip install \
+        --no-cache \
+        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.test.txt
+
+# Copy benchmarks, examples, and tests for CI
+COPY . /workspace/
+
+# Copy attribution files
+COPY ATTRIBUTION* LICENSE /workspace/
+
+# Copy launch banner
+RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
+    sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
+    echo "cat ~/.launch_screen" >> ~/.bashrc && \
+    echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
+
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []
+
+###########################################################
+########## Development (run.sh, runs as root user) ########
+###########################################################
+#
+# PURPOSE: Local development environment for use with run.sh (not Dev Container plug-in)
+#
+# This stage runs as root and provides:
+# - Development tools and utilities for local debugging
+# - Support for vscode/cursor development outside the Dev Container plug-in
+#
+# Use this stage if you need a full-featured development environment with extra tools,
+# but do not use it with the Dev Container plug-in.
+
+FROM runtime AS dev
+
+# Don't want ubuntu to be editable, just change uid and gid.
+ARG WORKSPACE_DIR=/workspace
+
+# Install utilities as root
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends  \
+    # Install utilities
+    nvtop \
+    wget \
+    tmux \
+    vim \
+    git \
+    openssh-client \
+    iproute2 \
+    rsync \
+    zip \
+    unzip \
+    htop \
+    # Build Dependencies
+    autoconf \
+    automake \
+    cmake \
+    libtool \
+    meson \
+    net-tools \
+    pybind11-dev \
+    # Rust build dependencies
+    clang \
+    libclang-dev \
+    protobuf-compiler && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set workspace directory variable
+ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
+    DYNAMO_HOME=${WORKSPACE_DIR} \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    CARGO_TARGET_DIR=/workspace/target \
+    VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH=/usr/local/cargo/bin:$PATH
+
+COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
+COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
+
+# Install maturin, for maturin develop
+# Editable install of dynamo
+RUN uv pip install maturin[patchelf] && \
+    uv pip install --no-deps -e .
+
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []
+

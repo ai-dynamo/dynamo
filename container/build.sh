@@ -24,6 +24,7 @@ set -e
 TAG=
 RUN_PREFIX=
 PLATFORM=linux/amd64
+USE_DGX_SPARK=false
 
 # Get short commit hash
 commit_id=$(git rev-parse --short HEAD)
@@ -116,6 +117,7 @@ SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 NIXL_REF=0.6.0
+NIXL_REF_DGX=0.7.0  # CUDA 13.0 support for DGX-SPARK
 NIXL_UCX_REF=v1.19.0
 NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
 
@@ -339,6 +341,13 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
+        --dgx-spark)
+            if [ -n "$2" ] && [[ "$2" != --* ]]; then
+                echo "ERROR: --dgx-spark does not take any argument"
+                exit 1
+            fi
+            USE_DGX_SPARK=true
+            ;;
          -?*)
             error 'ERROR: Unknown option: ' "$1"
             ;;
@@ -482,6 +491,7 @@ show_help() {
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
     echo "  [--vllm-max-jobs number of parallel jobs for compilation (only used by vLLM framework)]"
+    echo "  [--dgx-spark Use DGX-SPARK specific Dockerfile for vLLM (Blackwell GPU support, auto-detected for ARM64)]"
     echo ""
     echo "  Note: When using --use-sccache, AWS credentials must be set:"
     echo "        export AWS_ACCESS_KEY_ID=your_access_key"
@@ -500,6 +510,14 @@ error() {
 
 get_options "$@"
 
+# If --dgx-spark is specified, always force linux/arm64 (DGX-SPARK is ARM64 only)
+if [[ "$USE_DGX_SPARK" == "true" ]]; then
+    if [[ "$PLATFORM" != *"linux/arm64"* ]]; then
+        echo "Note: --dgx-spark requires linux/arm64 platform, overriding to linux/arm64"
+    fi
+    PLATFORM="--platform linux/arm64"
+fi
+
 # Automatically set ARCH and ARCH_ALT if PLATFORM is linux/arm64
 ARCH="amd64"
 if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
@@ -507,9 +525,23 @@ if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
     BUILD_ARGS+=" --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64 "
 fi
 
+# Automatically use NIXL 0.7.0 (CUDA 13.0 support) for DGX-SPARK builds
+# Only when explicitly building for DGX-SPARK with --dgx-spark flag
+if [[ "$USE_DGX_SPARK" == "true" ]]; then
+    echo "Note: Using NIXL ${NIXL_REF_DGX} for CUDA 13.0 compatibility (DGX-SPARK)"
+    NIXL_REF=$NIXL_REF_DGX
+fi
+
 # Update DOCKERFILE if framework is VLLM
 if [[ $FRAMEWORK == "VLLM" ]]; then
-    DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
+    # Use DGX-SPARK Dockerfile when:
+    # 1. Explicitly requested with --dgx-spark flag, OR
+    # 2. Building for ARM64 platform (DGX-SPARK requires Blackwell GPU support)
+    if [[ "$USE_DGX_SPARK" == "true" ]] || [[ "$PLATFORM" == *"linux/arm64"* ]]; then
+        DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm.dgx-spark
+    else
+        DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
+    fi
 elif [[ $FRAMEWORK == "TRTLLM" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.trtllm
 elif [[ $FRAMEWORK == "NONE" ]]; then
@@ -592,7 +624,12 @@ fi
 
 # BUILD DEV IMAGE
 
-BUILD_ARGS+=" --build-arg BASE_IMAGE=$BASE_IMAGE --build-arg BASE_IMAGE_TAG=$BASE_IMAGE_TAG"
+# Only pass BASE_IMAGE and BASE_IMAGE_TAG for non-DGX-SPARK builds
+# DGX-SPARK uses hardcoded base images in Dockerfile.vllm.dgx-spark
+# Skip these build args when building for DGX-SPARK
+if [[ ! (("$USE_DGX_SPARK" == "true") || ("$PLATFORM" == *"linux/arm64"* && $FRAMEWORK == "VLLM")) ]]; then
+    BUILD_ARGS+=" --build-arg BASE_IMAGE=$BASE_IMAGE --build-arg BASE_IMAGE_TAG=$BASE_IMAGE_TAG"
+fi
 
 if [ -n "${GITHUB_TOKEN}" ]; then
     BUILD_ARGS+=" --build-arg GITHUB_TOKEN=${GITHUB_TOKEN} "
