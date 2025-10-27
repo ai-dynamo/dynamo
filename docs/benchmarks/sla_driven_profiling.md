@@ -290,12 +290,6 @@ profilingConfig:
       planner_load_predictor: linear             # Load prediction method
 ```
 
-**Common planner arguments:**
-- **planner_min_endpoint**: Minimum number of prefill/decode endpoints
-- **planner_max_endpoint**: Maximum number of prefill/decode endpoints
-- **planner_adjustment_interval**: How often planner adjusts replicas
-- **planner_load_predictor**: Load prediction algorithm
-
 > [!NOTE]
 > Planner arguments use `planner_` prefix. See planner documentation for full list.
 
