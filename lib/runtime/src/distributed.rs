@@ -5,7 +5,7 @@ pub use crate::component::Component;
 use crate::storage::key_value_store::{
     EtcdStore, KeyValueStore, KeyValueStoreEnum, KeyValueStoreManager, MemoryStore,
 };
-use crate::discovery::{ServiceDiscovery, mock::MockServiceDiscovery, filesystem::FilesystemServiceDiscovery};
+use crate::discovery::{ServiceDiscovery, mock::MockServiceDiscovery, filesystem::FilesystemServiceDiscovery, kubernetes::KubernetesServiceDiscovery};
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
     ErrorContext, PrometheusUpdateCallback,
@@ -84,8 +84,19 @@ impl DistributedRuntime {
         let service_discovery: Box<dyn ServiceDiscovery + Send + Sync> = if use_mock_discovery {
             Box::new(MockServiceDiscovery::new())
         } else {
-            // Use filesystem-based discovery for testing
-            Box::new(FilesystemServiceDiscovery::new())
+            // Check if Kubernetes discovery is enabled via environment variable
+            let use_k8s = std::env::var("USE_K8S_DISCOVERY")
+                .ok()
+                .and_then(|v| v.parse::<bool>().ok())
+                .unwrap_or(false);
+            
+            if use_k8s {
+                println!("[DistributedRuntime] Using Kubernetes EndpointSlice-based service discovery");
+                Box::new(KubernetesServiceDiscovery::new().await?)
+            } else {
+                // Use filesystem-based discovery for testing
+                Box::new(FilesystemServiceDiscovery::new())
+            }
         };
 
         let distributed_runtime = Self {

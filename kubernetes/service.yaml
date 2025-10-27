@@ -6,7 +6,7 @@ metadata:
     app: nginx-test
     # Labels for Dynamo service discovery
     dynamo.namespace: test
-    dynamo.component: worker
+    dynamo.component: backend
 spec:
   type: ClusterIP
   selector:

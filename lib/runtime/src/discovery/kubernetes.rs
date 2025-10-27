@@ -88,8 +88,14 @@ impl KubernetesServiceDiscovery {
         let label_selector = Self::build_label_selector(namespace, component);
         let event_tx = self.get_or_create_sender(Self::watch_key(namespace, component));
         let watch_namespace = watch_namespace.to_string();
+        let namespace_copy = namespace.to_string();
+        let component_copy = component.to_string();
         
         tokio::spawn(async move {
+            println!(
+                "[K8s Discovery] Starting EndpointSlice watch: namespace={}, component={}, k8s_namespace={}, labels={}",
+                namespace_copy, component_copy, watch_namespace, label_selector
+            );
             let api: Api<EndpointSlice> = Api::namespaced(client, &watch_namespace);
             let watch_config = watcher::Config::default()
                 .labels(&label_selector);
@@ -145,6 +151,10 @@ impl KubernetesServiceDiscovery {
                         // Find newly ready instances (Added events)
                         for pod_name in current_ready.keys() {
                             if !known_ready.contains_key(pod_name) {
+                                println!(
+                                    "[K8s Discovery] ✅ Instance ADDED: pod_name={}, slice={}",
+                                    pod_name, slice_name
+                                );
                                 let instance = Instance::new(pod_name.clone(), Value::Null);
                                 let _ = event_tx.send(InstanceEvent::Added(instance));
                             }
@@ -153,6 +163,10 @@ impl KubernetesServiceDiscovery {
                         // Find no-longer-ready instances (Removed events)
                         for pod_name in known_ready.keys() {
                             if !current_ready.contains_key(pod_name) {
+                                println!(
+                                    "[K8s Discovery] ❌ Instance REMOVED: pod_name={}",
+                                    pod_name
+                                );
                                 let _ = event_tx.send(InstanceEvent::Removed(pod_name.clone()));
                             }
                         }
@@ -160,7 +174,7 @@ impl KubernetesServiceDiscovery {
                         known_ready = current_ready;
                     }
                     Err(e) => {
-                        tracing::warn!("Error watching EndpointSlices: {}", e);
+                        eprintln!("[K8s Discovery] ⚠️  Error watching EndpointSlices: {}", e);
                         // Continue watching despite errors
                     }
                 }
@@ -208,11 +222,16 @@ impl InstanceHandle for KubernetesInstanceHandle {
 impl ServiceDiscovery for KubernetesServiceDiscovery {
     async fn register_instance(
         &self,
-        _namespace: &str,
-        _component: &str,
+        namespace: &str,
+        component: &str,
     ) -> Result<Box<dyn InstanceHandle>> {
         // Read pod name from environment
         let instance_id = KubernetesInstanceHandle::read_pod_name()?;
+        
+        println!(
+            "[K8s Discovery] 📝 Registered instance: namespace={}, component={}, pod_name={}",
+            namespace, component, instance_id
+        );
         
         Ok(Box::new(KubernetesInstanceHandle {
             instance_id,
@@ -237,7 +256,17 @@ impl ServiceDiscovery for KubernetesServiceDiscovery {
         let slices = api.list(&lp).await
             .map_err(|e| DiscoveryError::MetadataError(format!("Failed to list EndpointSlices: {}", e)))?;
         
-        Ok(Self::extract_instances(&slices.items))
+        let instances = Self::extract_instances(&slices.items);
+        
+        println!(
+            "[K8s Discovery] 📋 Listed {} instances: namespace={}, component={}, pods={:?}",
+            instances.len(),
+            namespace,
+            component,
+            instances.iter().map(|i| &i.instance_id).collect::<Vec<_>>()
+        );
+        
+        Ok(instances)
     }
 
     async fn watch(
@@ -260,6 +289,11 @@ impl ServiceDiscovery for KubernetesServiceDiscovery {
             // Get the current namespace from env var, or use "default"
             let watch_namespace = std::env::var("POD_NAMESPACE")
                 .unwrap_or_else(|_| "default".to_string());
+            
+            println!(
+                "[K8s Discovery] 👀 Starting new EndpointSlice watcher: namespace={}, component={}",
+                namespace, component
+            );
             
             self.start_watch(namespace, component, &watch_namespace);
         }

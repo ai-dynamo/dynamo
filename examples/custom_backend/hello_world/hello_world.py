@@ -23,7 +23,7 @@ async def content_generator(request: str):
 
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime):
-    namespace_name = "hello_world"
+    namespace_name = "test"
     component_name = "backend"
     endpoint_name = "generate"
 
