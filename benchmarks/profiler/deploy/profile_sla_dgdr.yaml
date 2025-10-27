@@ -10,8 +10,8 @@ metadata:
 spec:
   model: Qwen/Qwen3-0.6B
   backend: vllm
-  profilerImage: "nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-540.3"
-  dgdImage: "nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-540.3"
+  profilerImage: "nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-540.4"
+  dgdImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.1"
 
   # ProfilingConfig maps directly to the profile_sla.py config format
   profilingConfig:
