@@ -23,6 +23,10 @@ while [[ $# -gt 0 ]]; do
             MODEL_NAME=$2
             shift 2
             ;;
+        --served-model-name)
+            SERVED_MODEL_NAME=$2
+            shift 2
+            ;;
         --chat-template)
             PROVIDED_CHAT_TEMPLATE=$2
             shift 2
@@ -31,6 +35,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --model <model_name> Specify the model to use (default: $MODEL_NAME)"
+            echo "  --served-model-name <served_model_name> Specify the served model name to use (default: empty)"
             echo "  --chat-template <template> Specify the SGLang chat template to use (default: $CHAT_TEMPLATE)"
             echo "  -h, --help           Show this help message"
             exit 0
@@ -48,20 +53,21 @@ if [[ -n "$PROVIDED_CHAT_TEMPLATE" ]]; then
     CHAT_TEMPLATE="$PROVIDED_CHAT_TEMPLATE"
 fi
 
-# Get the directory where this script is located
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SGLANG_BACKEND_DIR="$SCRIPT_DIR/src"
-
+# Prepare served-model-name argument if provided
+SERVED_MODEL_ARG=""
+if [[ -n "$SERVED_MODEL_NAME" ]]; then
+    SERVED_MODEL_ARG="--served-model-name $SERVED_MODEL_NAME"
+fi
 
 # run ingress
 python3 -m dynamo.frontend --http-port=8000 &
 DYNAMO_PID=$!
 
 # run SGLang multimodal processor
-python3 -m dynamo.sglang --multimodal-processor --model-path "$MODEL_NAME" --chat-template "$CHAT_TEMPLATE" &
+python3 -m dynamo.sglang --multimodal-processor --model-path "$MODEL_NAME" $SERVED_MODEL_ARG --chat-template "$CHAT_TEMPLATE" &
 
 # run SGLang multimodal encode worker
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.sglang --multimodal-encode-worker --model-path "$MODEL_NAME" --chat-template "$CHAT_TEMPLATE" &
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.sglang --multimodal-encode-worker --model-path "$MODEL_NAME" $SERVED_MODEL_ARG --chat-template "$CHAT_TEMPLATE" &
 
 # run SGLang multimodal inference worker
 # TODO: Remove disable-radix-cache once the issue is fixed.
@@ -69,6 +75,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.sglang --multimodal-encode-worker --mod
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --multimodal-worker \
   --model-path "$MODEL_NAME" \
+  $SERVED_MODEL_ARG \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \

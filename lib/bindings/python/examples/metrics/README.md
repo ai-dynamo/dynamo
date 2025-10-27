@@ -92,7 +92,7 @@ When you need to add or modify metrics in Method 1 (ForwardPassMetrics Pub/Sub v
        // ... existing gauges ...
 
        // Manually create and register new Prometheus gauge
-       let new_metric_gauge = component.create_gauge(
+       let new_metric_gauge = component.metrics().create_gauge(
            "new_metric_name",
            "Description of new metric",
            &[],  // labels
@@ -345,7 +345,7 @@ graph TD
     end
 
     PY -->|endpoint.metrics.create_intgauge| PM
-    PM -->|endpoint.create_intgauge| EP
+    PM -->|endpoint.metrics.create_intgauge| EP
     EP -->|create & register| PROM
     PM -->|wrap & return| MT
     MT -->|return to Python| PY
