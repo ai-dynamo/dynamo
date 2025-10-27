@@ -439,11 +439,15 @@ impl Component {
         // Register with service discovery
         let instance_handle = {
             let discovery = self.drt.service_discovery()?;
-            discovery.register_instance(&self.namespace.name(), &self.name).await?
+            discovery
+                .register_instance(&self.namespace.name(), &self.name)
+                .await?
         };
 
         // Store instance handle on component (OnceCell ensures thread-safe init, shared across clones via Arc)
-        self.instance_handle.get_or_init(async { instance_handle }).await;
+        self.instance_handle
+            .get_or_init(async { instance_handle })
+            .await;
 
         Ok(())
     }

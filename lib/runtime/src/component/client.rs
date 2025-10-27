@@ -205,8 +205,11 @@ impl Client {
                 // TODO: this resets both tracked available and free instances
                 client.instance_avail.store(Arc::new(instance_ids.clone()));
                 client.instance_free.store(Arc::new(instance_ids.clone()));
-                
-                tracing::debug!("Instance source updated with {} instances", instance_ids.len());
+
+                tracing::debug!(
+                    "Instance source updated with {} instances",
+                    instance_ids.len()
+                );
 
                 if let Err(err) = rx.changed().await {
                     tracing::error!("The Sender is dropped: {}", err);
@@ -409,7 +412,7 @@ impl Client {
         endpoint_name: &str,
     ) -> Option<Instance> {
         let instance_id = crate::discovery::instance_id_to_u64(&disc_instance.instance_id);
-        
+
         // Construct NATS subject (must match server side)
         use crate::transports::nats::Slug;
         let service_name_raw = format!("{}_{}", namespace, component);

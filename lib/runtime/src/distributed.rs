@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub use crate::component::Component;
+use crate::discovery::{ServiceDiscovery, kubernetes::KubernetesServiceDiscovery};
 use crate::storage::key_value_store::{
     EtcdStore, KeyValueStore, KeyValueStoreEnum, KeyValueStoreManager, MemoryStore,
 };
-use crate::discovery::{ServiceDiscovery, kubernetes::KubernetesServiceDiscovery};
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
     ErrorContext,
@@ -219,7 +219,8 @@ impl DistributedRuntime {
         // Currently only Kubernetes discovery is supported
         // In the future, this can be extended to support other backends
         tracing::info!("Initializing Kubernetes-based service discovery");
-        let discovery: Box<dyn ServiceDiscovery> = Box::new(KubernetesServiceDiscovery::new().await?);
+        let discovery: Box<dyn ServiceDiscovery> =
+            Box::new(KubernetesServiceDiscovery::new().await?);
         Ok(Some(Arc::new(discovery)))
     }
 
@@ -314,8 +315,9 @@ impl DistributedRuntime {
     /// Get the service discovery interface.
     /// Returns an error if service discovery is not initialized (USE_SERVICE_DISCOVERY not enabled).
     pub fn service_discovery(&self) -> Result<Arc<Box<dyn ServiceDiscovery>>> {
-        self.service_discovery.clone()
-            .ok_or_else(|| error!("Service discovery not initialized. Set USE_SERVICE_DISCOVERY=true to enable."))
+        self.service_discovery.clone().ok_or_else(|| {
+            error!("Service discovery not initialized. Set USE_SERVICE_DISCOVERY=true to enable.")
+        })
     }
 
     pub fn child_token(&self) -> CancellationToken {

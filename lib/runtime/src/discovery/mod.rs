@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
-use tokio::sync::broadcast;
 use thiserror::Error;
+use tokio::sync::broadcast;
 
 // Re-export legacy types
 mod legacy;
@@ -89,11 +89,7 @@ pub trait ServiceDiscovery: Send + Sync + 'static {
     ) -> Result<Box<dyn InstanceHandle>>;
 
     /// List all instances for a namespace/component
-    async fn list_instances(
-        &self,
-        namespace: &str,
-        component: &str,
-    ) -> Result<Vec<Instance>>;
+    async fn list_instances(&self, namespace: &str, component: &str) -> Result<Vec<Instance>>;
 
     /// Watch for instance changes
     async fn watch(

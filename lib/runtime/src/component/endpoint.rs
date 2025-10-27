@@ -79,7 +79,9 @@ impl EndpointConfigBuilder {
             if let Ok(instance_handle) = endpoint.component.instance_handle() {
                 crate::discovery::instance_id_to_u64(instance_handle.instance_id())
             } else {
-                panic!("Service discovery enabled but component not registered. Call component.register_instance() first.");
+                panic!(
+                    "Service discovery enabled but component not registered. Call component.register_instance() first."
+                );
             }
         } else {
             lease_id
@@ -140,7 +142,7 @@ impl EndpointConfigBuilder {
         let endpoint_name = endpoint.name.clone();
         let system_health = endpoint.drt().system_health.clone();
         let subject = endpoint.subject_to(instance_id);
-        
+
         // Legacy path only: ETCD registration variables
         let etcd_path = endpoint.etcd_path_with_lease_id(lease_id);
         let etcd_client = endpoint.component.drt.etcd_client.clone();
@@ -151,7 +153,7 @@ impl EndpointConfigBuilder {
                 component: component_name.clone(),
                 endpoint: endpoint_name.clone(),
                 namespace: namespace_name.clone(),
-                instance_id: instance_id,
+                instance_id,
                 transport: TransportType::NatsTcp(subject.clone()),
             };
             tracing::debug!(endpoint_name = %endpoint_name, "Registering endpoint health check target");
@@ -245,12 +247,22 @@ impl EndpointConfigBuilder {
         if use_service_discovery {
             // New path: mark instance ready via ServiceDiscovery interface
             if let Ok(instance_handle) = endpoint.component.instance_handle() {
-                if let Err(e) = instance_handle.set_ready(crate::discovery::InstanceStatus::Ready).await {
+                if let Err(e) = instance_handle
+                    .set_ready(crate::discovery::InstanceStatus::Ready)
+                    .await
+                {
                     tracing::error!(component_name, endpoint_name, error = %e, "Unable to mark instance ready");
                     cancel_token.cancel();
-                    return Err(error!("Unable to mark instance as ready. Check discovery service status"));
+                    return Err(error!(
+                        "Unable to mark instance as ready. Check discovery service status"
+                    ));
                 }
-                tracing::info!(component_name, endpoint_name, instance_id, "Instance marked ready");
+                tracing::info!(
+                    component_name,
+                    endpoint_name,
+                    instance_id,
+                    "Instance marked ready"
+                );
             }
         } else {
             // Legacy path: direct ETCD registration with lease
@@ -265,13 +277,23 @@ impl EndpointConfigBuilder {
             let info = serde_json::to_vec_pretty(&info)?;
 
             if let Some(etcd_client) = &etcd_client
-                && let Err(e) = etcd_client.kv_create(&etcd_path, info, Some(lease_id)).await
+                && let Err(e) = etcd_client
+                    .kv_create(&etcd_path, info, Some(lease_id))
+                    .await
             {
                 tracing::error!(component_name, endpoint_name, error = %e, "Unable to register in ETCD");
                 cancel_token.cancel();
-                return Err(error!("Unable to register service for discovery. Check ETCD connectivity"));
+                return Err(error!(
+                    "Unable to register service for discovery. Check ETCD connectivity"
+                ));
             }
-            tracing::info!(component_name, endpoint_name, lease_id, etcd_path, "Instance registered in ETCD");
+            tracing::info!(
+                component_name,
+                endpoint_name,
+                lease_id,
+                etcd_path,
+                "Instance registered in ETCD"
+            );
         }
         task.await??;
 
