@@ -34,7 +34,7 @@ use std::fmt;
 use crate::{
     config::HealthStatus,
     discovery::Lease,
-    metrics::{MetricsRegistry, prometheus_names},
+    metrics::{MetricsHierarchy, MetricsRegistry, prometheus_names},
     service::ServiceSet,
     transports::etcd::{ETCD_ROOT_PATH, EtcdPath},
 };
@@ -170,6 +170,10 @@ pub struct Component {
     // A static component's endpoints cannot be discovered via etcd, they are
     // fixed at startup time.
     is_static: bool,
+
+    /// This hierarchy's own metrics registry
+    #[builder(default = "crate::MetricsRegistry::new()")]
+    metrics_registry: crate::MetricsRegistry,
 }
 
 impl Hash for Component {
@@ -208,17 +212,25 @@ impl RuntimeProvider for Component {
     }
 }
 
-impl MetricsRegistry for Component {
+impl MetricsHierarchy for Component {
     fn basename(&self) -> String {
         self.name.clone()
     }
 
-    fn parent_hierarchy(&self) -> Vec<String> {
-        [
-            self.namespace.parent_hierarchy(),
-            vec![self.namespace.basename()],
-        ]
-        .concat()
+    fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy> {
+        let mut parents = vec![];
+
+        // Get all ancestors of namespace (DRT, parent namespaces, etc.)
+        parents.extend(self.namespace.parent_hierarchies());
+
+        // Add namespace itself
+        parents.push(&self.namespace as &dyn MetricsHierarchy);
+
+        parents
+    }
+
+    fn get_metrics_registry(&self) -> &MetricsRegistry {
+        &self.metrics_registry
     }
 }
 
@@ -262,6 +274,7 @@ impl Component {
             name: endpoint.into(),
             is_static: self.is_static,
             labels: Vec::new(),
+            metrics_registry: crate::MetricsRegistry::new(),
         }
     }
 
@@ -312,15 +325,6 @@ impl Component {
         let component_metrics = ComponentNatsServerPrometheusMetrics::new(self)?;
 
         let component_clone = self.clone();
-        let mut hierarchies = self.parent_hierarchy();
-        hierarchies.push(self.hierarchy());
-        debug_assert!(
-            hierarchies
-                .last()
-                .map(|x| x.as_str())
-                .unwrap_or_default()
-                .eq_ignore_ascii_case(&self.service_name())
-        ); // it happens that in component, hierarchy and service name are the same
 
         // Start a background task that scrapes stats every 5 seconds
         let m = component_metrics.clone();
@@ -434,6 +438,9 @@ pub struct Endpoint {
 
     /// Additional labels for metrics
     labels: Vec<(String, String)>,
+
+    /// This hierarchy's own metrics registry
+    metrics_registry: crate::MetricsRegistry,
 }
 
 impl Hash for Endpoint {
@@ -466,17 +473,25 @@ impl RuntimeProvider for Endpoint {
     }
 }
 
-impl MetricsRegistry for Endpoint {
+impl MetricsHierarchy for Endpoint {
     fn basename(&self) -> String {
         self.name.clone()
     }
 
-    fn parent_hierarchy(&self) -> Vec<String> {
-        [
-            self.component.parent_hierarchy(),
-            vec![self.component.basename()],
-        ]
-        .concat()
+    fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy> {
+        let mut parents = vec![];
+
+        // Get all ancestors of component (DRT, Namespace, etc.)
+        parents.extend(self.component.parent_hierarchies());
+
+        // Add component itself
+        parents.push(&self.component as &dyn MetricsHierarchy);
+
+        parents
+    }
+
+    fn get_metrics_registry(&self) -> &MetricsRegistry {
+        &self.metrics_registry
     }
 }
 
@@ -603,6 +618,10 @@ pub struct Namespace {
     /// Additional labels for metrics
     #[builder(default = "Vec::new()")]
     labels: Vec<(String, String)>,
+
+    /// This hierarchy's own metrics registry
+    #[builder(default = "crate::MetricsRegistry::new()")]
+    metrics_registry: crate::MetricsRegistry,
 }
 
 impl DistributedRuntimeProvider for Namespace {
