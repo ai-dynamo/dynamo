@@ -8,15 +8,20 @@ ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
 ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+ARG RELEASE_BUILD
 ARG ENABLE_KVBM=false
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 ARG CUDA_VERSION="12.8"
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG VLLM_REF="v0.11.0"
+ARG VLLM_REF="v0.10.2"
+# Set to "true" to use local vLLM directory instead of cloning from git
+ARG USE_LOCAL_VLLM="false"
+# Set to "true" to use local DeepEP directory instead of using vLLM's version
+ARG USE_LOCAL_DEEPEP="false"
 # FlashInfer only respected when building vLLM from source, ie when VLLM_REF does not start with 'v' or for arm64 builds
-ARG FLASHINF_REF="v0.3.1"
+ARG FLASHINF_REF="v0.3.0"
 ARG TORCH_BACKEND="cu128"
 
 # If left blank, then we will fallback to vLLM defaults
@@ -116,6 +121,18 @@ ARG MAX_JOBS=16
 ENV MAX_JOBS=$MAX_JOBS
 ENV CUDA_HOME=/usr/local/cuda
 
+# Copy local vLLM and DeepEP if using local versions
+# Note: These paths are relative to the build context
+# The build script should ensure vllm/ and DeepEP/ directories are available in the build context
+ARG USE_LOCAL_VLLM
+ARG USE_LOCAL_DEEPEP
+# Copy directly to where they would be cloned/installed (same path for both local and GitHub)
+# The wildcard * makes these optional (won't fail if directory doesn't exist)
+RUN if [ "$USE_LOCAL_VLLM" = "true" ]; then mkdir -p /opt; fi
+COPY --chown=root:root vll[m] /opt/
+RUN if [ "$USE_LOCAL_DEEPEP" = "true" ]; then mkdir -p /opt; fi  
+COPY --chown=root:root DeepE[P] /opt/
+
 # Install sccache if requested
 COPY container/use-sccache.sh /tmp/use-sccache.sh
 # Install sccache if requested
@@ -143,7 +160,18 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
         cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
         chmod +x /tmp/install_vllm.sh && \
-        /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} --torch-backend $TORCH_BACKEND --cuda-version $CUDA_VERSION && \
+        if [ "$USE_LOCAL_VLLM" = "true" ] && [ "$USE_LOCAL_DEEPEP" = "true" ]; then \
+            echo "Using local vLLM from /opt/vllm and local DeepEP from /opt/DeepEP" && \
+            /tmp/install_vllm.sh --editable --use-local-vllm /opt/vllm --use-local-deepep /opt/DeepEP --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} --torch-backend $TORCH_BACKEND --cuda-version $CUDA_VERSION; \
+        elif [ "$USE_LOCAL_VLLM" = "true" ]; then \
+            echo "Using local vLLM from /opt/vllm" && \
+            /tmp/install_vllm.sh --editable --use-local-vllm /opt/vllm --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} --torch-backend $TORCH_BACKEND --cuda-version $CUDA_VERSION; \
+        elif [ "$USE_LOCAL_DEEPEP" = "true" ]; then \
+            echo "Using local DeepEP from /opt/DeepEP" && \
+            /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --use-local-deepep /opt/DeepEP --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} --torch-backend $TORCH_BACKEND --cuda-version $CUDA_VERSION; \
+        else \
+            /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} --torch-backend $TORCH_BACKEND --cuda-version $CUDA_VERSION; \
+        fi && \
         /tmp/use-sccache.sh show-stats "vLLM";
 
 ENV LD_LIBRARY_PATH=\
@@ -241,7 +269,7 @@ $LD_LIBRARY_PATH
 
 # DeepGemm runs nvcc for JIT kernel compilation, however the CUDA include path
 # is not properly set for complilation. Set CPATH to help nvcc find the headers.
-ENV CPATH=/usr/local/cuda/include
+ENV CPATH=/usr/local/cuda/include:$CPATH
 
 ### VIRTUAL ENVIRONMENT SETUP ###
 

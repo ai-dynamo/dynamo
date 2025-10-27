@@ -30,6 +30,8 @@ CUDA_VERSION="12.8" # For DEEPGEMM
 EDITABLE=true
 VLLM_GIT_URL="https://github.com/vllm-project/vllm.git"
 FLASHINF_REF="v0.3.1"
+USE_LOCAL_VLLM=""
+USE_LOCAL_DEEPEP=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -40,6 +42,14 @@ while [[ $# -gt 0 ]]; do
         --no-editable)
             EDITABLE=false
             shift
+            ;;
+        --use-local-vllm)
+            USE_LOCAL_VLLM="$2"
+            shift 2
+            ;;
+        --use-local-deepep)
+            USE_LOCAL_DEEPEP="$2"
+            shift 2
             ;;
         --vllm-ref)
             VLLM_REF="$2"
@@ -82,10 +92,12 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [--editable|--no-editable] [--vllm-ref REF] [--max-jobs NUM] [--arch ARCH] [--deepgemm-ref REF] [--flashinf-ref REF] [--torch-backend BACKEND] [--torch-cuda-arch-list LIST] [--cuda-version VERSION]"
+            echo "Usage: $0 [--editable|--no-editable] [--use-local-vllm PATH] [--use-local-deepep PATH] [--vllm-ref REF] [--max-jobs NUM] [--arch ARCH] [--deepgemm-ref REF] [--flashinf-ref REF] [--torch-backend BACKEND] [--torch-cuda-arch-list LIST] [--cuda-version VERSION]"
             echo "Options:"
             echo "  --editable        Install vllm in editable mode (default)"
             echo "  --no-editable     Install vllm in non-editable mode"
+            echo "  --use-local-vllm PATH  Use local vLLM directory instead of cloning"
+            echo "  --use-local-deepep PATH  Use local DeepEP directory instead of vLLM's version"
             echo "  --vllm-ref REF    Git reference to checkout (default: ${VLLM_REF})"
             echo "  --max-jobs NUM    Maximum number of parallel jobs (default: ${MAX_JOBS})"
             echo "  --arch ARCH       Architecture (amd64|arm64, default: auto-detect)"
@@ -123,16 +135,32 @@ echo "  MAX_JOBS=$MAX_JOBS | TORCH_BACKEND=$TORCH_BACKEND | CUDA_VERSION=$CUDA_V
 echo "  TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST"
 echo "  DEEPGEMM_REF=$DEEPGEMM_REF | FLASHINF_REF=$FLASHINF_REF"
 echo "  INSTALLATION_DIR=$INSTALLATION_DIR | VLLM_GIT_URL=$VLLM_GIT_URL"
+echo "  USE_LOCAL_VLLM=$USE_LOCAL_VLLM | USE_LOCAL_DEEPEP=$USE_LOCAL_DEEPEP"
 
-echo "\n=== Cloning vLLM repository ==="
-# We need to clone to install dependencies
-cd $INSTALLATION_DIR
-git clone $VLLM_GIT_URL vllm
-cd vllm
-git checkout $VLLM_REF
-
-# TODO leave this here in case we need to do cherry-picks in future
-# GIT_COMMITTER_NAME="Container Build" GIT_COMMITTER_EMAIL="container@buildkitsandbox.local" git cherry-pick 740f064
+if [ -n "$USE_LOCAL_VLLM" ]; then
+    echo "\n=== Using local vLLM directory ==="
+    echo "Local vLLM at: $USE_LOCAL_VLLM"
+    
+    # For Docker builds, vLLM should already be at /opt/vllm
+    # For other uses, we might need to handle it differently
+    if [ ! -d "$USE_LOCAL_VLLM" ]; then
+        echo "Error: Local vLLM directory not found at $USE_LOCAL_VLLM"
+        exit 1
+    fi
+    
+    # Just use the local vLLM where it is
+    cd "$USE_LOCAL_VLLM"
+else
+    echo "\n=== Cloning vLLM repository ==="
+    # We need to clone to install dependencies
+    cd $INSTALLATION_DIR
+    git clone $VLLM_GIT_URL vllm
+    cd vllm
+    git checkout $VLLM_REF
+    
+    # TODO leave this here in case we need to do cherry-picks in future
+    # GIT_COMMITTER_NAME="Container Build" GIT_COMMITTER_EMAIL="container@buildkitsandbox.local" git cherry-pick 740f064
+fi
 
 echo "\n=== Installing vLLM & FlashInfer ==="
 
@@ -239,6 +267,16 @@ echo "✓ DeepGEMM installation completed"
 
 echo "\n=== Installing EP Kernels (PPLX and DeepEP) ==="
 cd ep_kernels/
-TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" bash install_python_libraries.sh
+
+# Check if the local script exists (when using local vLLM, you might have this script)
+if [ -n "$USE_LOCAL_DEEPEP" ] && [ -f "install_python_libraries_local_clean.sh" ]; then
+    echo "Using local DeepEP with install_python_libraries_local_clean.sh"
+    echo "Local DeepEP source: $USE_LOCAL_DEEPEP"
+    # The local script expects DeepEP at /workspace/DeepEP
+    cp -r "$USE_LOCAL_DEEPEP" /workspace/DeepEP
+    TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" bash install_python_libraries_local_clean.sh
+else
+    TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" bash install_python_libraries.sh
+fi
 
 echo "\n✅ All installations completed successfully!"
