@@ -9,7 +9,7 @@ from sglang.srt.parser.conversation import chat_templates
 from transformers import AutoImageProcessor, AutoModel, AutoTokenizer
 
 import dynamo.nixl_connect as connect
-from dynamo._core import Client, Component
+from dynamo._core import Client, Component, Context
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.multimodal_utils import ImageLoader, encode_image_embeddings
@@ -49,6 +49,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
         super().__init__(component, engine=None, config=config)
         self.pd_worker_client = pd_worker_client
         self.model = config.server_args.model_path
+        self.served_model_name = config.server_args.served_model_name
 
         self.image_loader = ImageLoader(cache_size=CACHE_SIZE_MAXIMUM)
 
@@ -90,7 +91,16 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
     def cleanup(self):
         pass
 
-    async def generate(self, request: SglangMultimodalRequest) -> AsyncIterator[str]:
+    async def generate(
+        self, request: SglangMultimodalRequest, context: Context
+    ) -> AsyncIterator[str]:
+        """
+        Generate precomputed embeddings for multimodal input.
+
+        Args:
+            request: Multimodal request with image/video data.
+            context: Context object for cancellation handling.
+        """
         if not isinstance(request, SglangMultimodalRequest):
             if isinstance(request, str):
                 request = SglangMultimodalRequest.model_validate_json(request)
@@ -115,7 +125,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
 
             image_embeds = self.image_processor(images=image, return_tensors="pt")
             precomputed_embeddings = encode_image_embeddings(
-                model_name=self.model,
+                model_name=self.served_model_name,
                 image_embeds=image_embeds,
                 vision_encoder=self.vision_model,
                 projector=None,

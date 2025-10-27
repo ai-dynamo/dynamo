@@ -202,12 +202,11 @@ if [ $index -gt 0 ]; then
     echo "--------------------------------"
 fi
 
-echo "Running genai-perf with:"
+echo "Running aiperf with:"
 echo "Model: $model"
 echo "ISL: $isl"
 echo "OSL: $osl"
 echo "Concurrency levels: ${concurrency_array[@]}"
-
 
 
 # The configuration is dumped to a JSON file which hold details of the OAI service

@@ -3,9 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Environment variables with defaults
+export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
 export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-0.6B"}
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"Qwen/Qwen3-0.6B"}
-export AGG_ENGINE_ARGS=${AGG_ENGINE_ARGS:-"engine_configs/agg.yaml"}
+export AGG_ENGINE_ARGS=${AGG_ENGINE_ARGS:-"$DYNAMO_HOME/recipes/qwen3/trtllm/agg.yaml"}
 export MODALITY=${MODALITY:-"text"}
 # If you want to use multimodal, set MODALITY to "multimodal"
 #export MODALITY=${MODALITY:-"multimodal"}
@@ -19,8 +20,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# run clear_namespace
-python3 utils/clear_namespace.py --namespace dynamo
 
 # run frontend
 python3 -m dynamo.frontend --http-port 8000 &

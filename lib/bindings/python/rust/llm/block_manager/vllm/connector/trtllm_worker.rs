@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use super::*;
-use crate::llm::block_manager::distributed::get_barrier_id_prefix;
+use crate::llm::block_manager::distributed::{get_leader_zmq_ack_url, get_leader_zmq_pub_url};
 use crate::llm::block_manager::vllm::connector::worker::event_sync_blocking;
 use crate::{
     DistributedRuntime as PyDistributedRuntime, llm::block_manager::distributed::VllmTensor,
@@ -20,10 +20,8 @@ use crate::{
 use anyhow;
 use dynamo_llm::block_manager::distributed::{KvbmWorker, KvbmWorkerConfig};
 use dynamo_llm::block_manager::layout::LayoutType;
-use dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics;
 use dynamo_llm::block_manager::storage::torch::TorchTensor;
 use dynamo_runtime::DistributedRuntime;
-use dynamo_runtime::metrics::prometheus_names::kvbm_connector;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
 pub trait Worker: Send + Sync {
@@ -71,8 +69,6 @@ pub struct KvConnectorWorker {
 
     /// cuda events created by the python side
     layer_events: Vec<u64>,
-
-    kvbm_metrics: KvbmMetrics,
 }
 
 impl KvConnectorWorker {
@@ -98,11 +94,6 @@ impl KvConnectorWorker {
             trtllm_rank
         );
 
-        let kvbm_metrics = KvbmMetrics::new(
-            &drt.namespace(kvbm_connector::KVBM_CONNECTOR_WORKER)
-                .unwrap(),
-        );
-
         Ok(Self {
             drt,
             kvbm_worker: OnceLock::new(),
@@ -116,7 +107,6 @@ impl KvConnectorWorker {
             iteration: 0,
             layers_complete: 0,
             layer_events: Vec::new(),
-            kvbm_metrics,
         })
     }
 }
@@ -148,7 +138,8 @@ impl Worker for KvConnectorWorker {
             .device_layout_type(LayoutType::FullyContiguous)
             .host_layout_type(LayoutType::FullyContiguous)
             .disk_layout_type(LayoutType::FullyContiguous)
-            .barrier_id_prefix(get_barrier_id_prefix())
+            .leader_pub_url(get_leader_zmq_pub_url())
+            .leader_ack_url(get_leader_zmq_ack_url())
             .scheduler_client(Some(self.transfer_client.clone()))
             .build()?;
 
@@ -236,7 +227,6 @@ impl Worker for KvConnectorWorker {
                 self.connector.enqueue_request(operation);
             }
         }
-        self.kvbm_metrics.save_kv_layer_requests.inc();
         Ok(())
     }
 

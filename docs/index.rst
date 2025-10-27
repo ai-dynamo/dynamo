@@ -42,39 +42,44 @@ Quickstart
 
    Quickstart <self>
    Installation <_sections/installation>
-   Support Matrix <support_matrix.md>
-   Architecture <_sections/architecture>
+   Support Matrix <reference/support-matrix.md>
    Examples <_sections/examples>
 
 .. toctree::
    :hidden:
    :caption: Kubernetes Deployment
 
-   Quickstart (K8s) <../kubernetes/README.md>
-   Detailed Installation Guide <../kubernetes/installation_guide.md>
-   Dynamo Operator <../kubernetes/dynamo_operator.md>
-   Metrics <../kubernetes/metrics.md>
-   Logging <../kubernetes/logging.md>
-   Multinode <../kubernetes/multinode-deployment.md>
-   Minikube Setup <../kubernetes/minikube.md>
+   Deployment Guide <_sections/k8s_deployment>
+   Observability (K8s) <_sections/k8s_observability>
+   Multinode <_sections/k8s_multinode>
+
+.. toctree::
+   :hidden:
+   :caption: User Guides
+
+   Tool Calling <agents/tool-calling.md>
+   Multimodality Support <multimodal/multimodal_intro.md>
+   Finding Best Initial Configs <performance/aiconfigurator.md>
+   Benchmarking <benchmarks/benchmarking.md>
+   Tuning Disaggregated Performance <performance/tuning.md>
+   Writing Python Workers in Dynamo <development/backend-guide.md>
+   Observability (Local) <_sections/observability>
+   Glossary <reference/glossary.md>
 
 .. toctree::
    :hidden:
    :caption: Components
 
    Backends <_sections/backends>
-   Router <components/router/README>
-   Planner <architecture/planner_intro>
-   KVBM <architecture/kvbm_intro>
+   Router <router/README>
+   Planner <planner/planner_intro>
+   KVBM <kvbm/kvbm_intro>
 
 .. toctree::
    :hidden:
-   :caption: Developer Guide
+   :caption: Design Docs
 
-   Benchmarking Guide <benchmarks/benchmarking.md>
-   SLA Planner (Autoscaling) Quickstart <kubernetes/sla_planner_quickstart>
-   Logging <guides/logging.md>
-   Health Checks <guides/health_check.md>
-   Tuning Disaggregated Serving Performance <guides/disagg_perf_tuning.md>
-   Writing Python Workers in Dynamo <guides/backend.md>
-   Glossary <dynamo_glossary.md>
+   Overall Architecture <design_docs/architecture.md>
+   Architecture Flow <design_docs/dynamo_flow.md>
+   Disaggregated Serving <design_docs/disagg_serving.md>
+   Distributed Runtime <design_docs/distributed_runtime.md>

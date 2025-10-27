@@ -173,13 +173,23 @@ def validate_openai_response(response: requests.Response) -> None:
 
 
 def check_worker_received_request(worker_process: DynamoWorkerProcess) -> bool:
-    """Check if the worker logs contain 'New Request ID:' message indicating it received a request"""
+    """Check if the worker logs contain request ID message indicating it received a request.
+
+    Supports multiple backend patterns:
+    - vLLM: "Decode Request ID:" or "Prefill Request ID:"
+    - SGLang/TensorRT-LLM: "New Request ID:"
+    """
     log_path = worker_process._log_path
     if log_path and os.path.exists(log_path):
         try:
             with open(log_path, "r") as f:
                 log_content = f.read()
-                return "New Request ID: " in log_content
+                # Check for any of the supported patterns
+                return (
+                    "New Request ID: " in log_content
+                    or "Decode Request ID: " in log_content
+                    or "Prefill Request ID: " in log_content
+                )
         except Exception as e:
             logger.warning(f"Could not read worker log file {log_path}: {e}")
     return False
@@ -290,7 +300,9 @@ def verify_migration_occurred(frontend_process: DynamoFrontendProcess) -> None:
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-def test_request_migration_vllm(request, runtime_services, predownload_models):
+def test_request_migration_vllm(
+    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+):
     """
     End-to-end test for worker fault tolerance with migration support.
 

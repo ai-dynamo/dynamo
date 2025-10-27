@@ -2,12 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub use crate::component::Component;
+use crate::storage::key_value_store::{
+    EtcdStore, KeyValueStore, KeyValueStoreEnum, KeyValueStoreManager, MemoryStore,
+};
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
-    ErrorContext, RuntimeCallback,
+    ErrorContext,
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
     discovery::DiscoveryClient,
-    metrics::MetricsRegistry,
+    metrics::PrometheusUpdateCallback,
+    metrics::{MetricsHierarchy, MetricsRegistry},
     service::ServiceClient,
     transports::{etcd, nats, tcp},
 };
@@ -22,13 +26,17 @@ use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-impl MetricsRegistry for DistributedRuntime {
+impl MetricsHierarchy for DistributedRuntime {
     fn basename(&self) -> String {
         "".to_string() // drt has no basename. Basename only begins with the Namespace.
     }
 
-    fn parent_hierarchy(&self) -> Vec<String> {
-        vec![] // drt is the root, so no parent hierarchy
+    fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy> {
+        vec![] // drt is the root, so no parent hierarchies
+    }
+
+    fn get_metrics_registry(&self) -> &MetricsRegistry {
+        &self.metrics_registry
     }
 }
 
@@ -44,13 +52,15 @@ impl DistributedRuntime {
 
         let runtime_clone = runtime.clone();
 
-        let etcd_client = if is_static {
-            None
+        let (etcd_client, store) = if is_static {
+            (None, KeyValueStoreManager::memory())
         } else {
-            Some(etcd::Client::new(etcd_config.clone(), runtime_clone).await?)
+            let etcd_client = etcd::Client::new(etcd_config.clone(), runtime_clone).await?;
+            let store = KeyValueStoreManager::etcd(etcd_client.clone());
+            (Some(etcd_client), store)
         };
 
-        let nats_client = nats_config.clone().connect().await?;
+        let nats_client = Some(nats_config.clone().connect().await?);
 
         // Start system status server for health and metrics if enabled in configuration
         let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
@@ -65,7 +75,7 @@ impl DistributedRuntime {
         let use_endpoint_health_status = config.use_endpoint_health_status.clone();
         let health_endpoint_path = config.system_health_path.clone();
         let live_endpoint_path = config.system_live_path.clone();
-        let system_health = Arc::new(std::sync::Mutex::new(SystemHealth::new(
+        let system_health = Arc::new(parking_lot::Mutex::new(SystemHealth::new(
             starting_health_status,
             use_endpoint_health_status,
             health_endpoint_path,
@@ -77,40 +87,39 @@ impl DistributedRuntime {
         let distributed_runtime = Self {
             runtime,
             etcd_client,
+            store,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
-            hierarchy_to_metricsregistry: Arc::new(std::sync::RwLock::new(HashMap::<
-                String,
-                crate::MetricsRegistryEntry,
-            >::new())),
+            metrics_registry: crate::MetricsRegistry::new(),
             system_health,
         };
 
-        let nats_client_metrics = DRTNatsClientPrometheusMetrics::new(
-            &distributed_runtime,
-            nats_client_for_metrics.client().clone(),
-        )?;
-        let mut drt_hierarchies = distributed_runtime.parent_hierarchy();
-        drt_hierarchies.push(distributed_runtime.hierarchy());
-        // Register a callback to update NATS client metrics
-        let nats_client_callback = Arc::new({
-            let nats_client_clone = nats_client_metrics.clone();
-            move || {
-                nats_client_clone.set_from_client_stats();
-                Ok(())
-            }
-        });
-        distributed_runtime.register_metrics_callback(drt_hierarchies, nats_client_callback);
+        if let Some(nats_client_for_metrics) = nats_client_for_metrics {
+            let nats_client_metrics = DRTNatsClientPrometheusMetrics::new(
+                &distributed_runtime,
+                nats_client_for_metrics.client().clone(),
+            )?;
+            // Register a callback to update NATS client metrics on the DRT's metrics registry
+            let nats_client_callback = Arc::new({
+                let nats_client_clone = nats_client_metrics.clone();
+                move || {
+                    nats_client_clone.set_from_client_stats();
+                    Ok(())
+                }
+            });
+            distributed_runtime
+                .metrics_registry
+                .add_update_callback(nats_client_callback);
+        }
 
         // Initialize the uptime gauge in SystemHealth
         distributed_runtime
             .system_health
             .lock()
-            .unwrap()
             .initialize_uptime_gauge(&distributed_runtime)?;
 
         // Handle system status server initialization
@@ -238,8 +247,8 @@ impl DistributedRuntime {
         )
     }
 
-    pub(crate) fn service_client(&self) -> ServiceClient {
-        ServiceClient::new(self.nats_client.clone())
+    pub(crate) fn service_client(&self) -> Option<ServiceClient> {
+        self.nats_client().map(|nc| ServiceClient::new(nc.clone()))
     }
 
     pub async fn tcp_server(&self) -> Result<Arc<tcp::server::TcpStreamServer>> {
@@ -254,8 +263,8 @@ impl DistributedRuntime {
             .clone())
     }
 
-    pub fn nats_client(&self) -> nats::Client {
-        self.nats_client.clone()
+    pub fn nats_client(&self) -> Option<&nats::Client> {
+        self.nats_client.as_ref()
     }
 
     /// Get system status server information if available
@@ -270,6 +279,18 @@ impl DistributedRuntime {
         self.etcd_client.clone()
     }
 
+    // Deprecated but our CI blocks us using the feature currently.
+    //#[deprecated(note = "Use KeyValueStoreManager via store(); this will be removed")]
+    pub fn deprecated_etcd_client(&self) -> Option<etcd::Client> {
+        self.etcd_client.clone()
+    }
+
+    /// An interface to store things. Will eventually replace `etcd_client`.
+    /// Currently does key-value, but will grow to include whatever we need to store.
+    pub fn store(&self) -> &KeyValueStoreManager {
+        &self.store
+    }
+
     pub fn child_token(&self) -> CancellationToken {
         self.runtime.child_token()
     }
@@ -280,72 +301,6 @@ impl DistributedRuntime {
 
     pub fn instance_sources(&self) -> Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>> {
         self.instance_sources.clone()
-    }
-
-    /// Add a Prometheus metric to a specific hierarchy's registry. Note that it is possible
-    /// to register the same metric name multiple times, as long as the labels are different.
-    pub fn add_prometheus_metric(
-        &self,
-        hierarchy: &str,
-        prometheus_metric: Box<dyn prometheus::core::Collector>,
-    ) -> anyhow::Result<()> {
-        let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
-        let entry = registries.entry(hierarchy.to_string()).or_default();
-
-        // Try to register the metric
-        entry
-            .prometheus_registry
-            .register(prometheus_metric)
-            .map_err(|e| e.into())
-    }
-
-    /// Add a callback function to metrics registries for the given hierarchies
-    // TODO: Rename to register_metrics_update_callback for consistency with Python API.
-    //       Do this after we move the MetricsRegistry trait to composition pattern.
-    pub fn register_metrics_callback(&self, hierarchies: Vec<String>, callback: RuntimeCallback) {
-        let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
-        for hierarchy in &hierarchies {
-            registries
-                .entry(hierarchy.clone())
-                .or_default()
-                .add_callback(callback.clone());
-        }
-    }
-
-    /// Execute all callbacks for a given hierarchy key and return their results
-    pub fn execute_metrics_callbacks(&self, hierarchy: &str) -> Vec<anyhow::Result<()>> {
-        // Clone callbacks while holding read lock (fast operation)
-        let callbacks = {
-            let registries = self.hierarchy_to_metricsregistry.read().unwrap();
-            registries
-                .get(hierarchy)
-                .map(|entry| entry.runtime_callbacks.clone())
-        }; // Read lock released here
-
-        // Execute callbacks without holding the lock
-        match callbacks {
-            Some(callbacks) => callbacks.iter().map(|callback| callback()).collect(),
-            None => Vec::new(),
-        }
-    }
-
-    /// Clear everything in etcd under a key.
-    /// todo: Remove as soon as we auto-delete the MDC.
-    pub async fn temp_clear_namespace(&self, name: &str) -> anyhow::Result<()> {
-        let Some(etcd_client) = self.etcd_client() else {
-            return Ok(()); // no etcd, nothing to clear
-        };
-        let kvs = etcd_client.kv_get_prefix(name).await?;
-        for kv in kvs {
-            etcd_client.kv_delete(kv.key(), None).await?;
-        }
-        Ok(())
-    }
-
-    /// Get all registered hierarchy keys. Private because it is only used for testing.
-    fn get_registered_hierarchies(&self) -> Vec<String> {
-        let registries = self.hierarchy_to_metricsregistry.read().unwrap();
-        registries.keys().cloned().collect()
     }
 }
 
@@ -409,7 +364,7 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
             // Check that uptime is 50+ ms
-            let uptime = drt.system_health.lock().unwrap().uptime();
+            let uptime = drt.system_health.lock().uptime();
             assert!(
                 uptime >= std::time::Duration::from_millis(50),
                 "Expected uptime to be at least 50ms, but got {:?}",
@@ -435,7 +390,7 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
             // Check that uptime is 50+ ms
-            let uptime = drt.system_health.lock().unwrap().uptime();
+            let uptime = drt.system_health.lock().uptime();
             assert!(
                 uptime >= std::time::Duration::from_millis(50),
                 "Expected uptime to be at least 50ms, but got {:?}",

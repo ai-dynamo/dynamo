@@ -3,7 +3,9 @@
 
 use pythonize::{depythonize, pythonize};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
+use std::sync::mpsc;
 use tokio_stream::StreamExt;
 
 use super::*;
@@ -49,39 +51,35 @@ impl WorkerMetricsPublisher {
     }
 
     #[pyo3(signature = (component, metrics_labels = None))]
+    #[allow(unused_variables)]
     fn create_endpoint<'p>(
         &self,
         py: Python<'p>,
         component: Component,
-        metrics_labels: Option<Vec<(String, String)>>,
+        metrics_labels: Option<Vec<(String, String)>>, // TODO: fully remove this
     ) -> PyResult<Bound<'p, PyAny>> {
+        // Emit deprecation warning if metrics_labels is provided
+        if metrics_labels.is_some() {
+            let warnings = py.import("warnings")?;
+            warnings.call_method1(
+                "warn",
+                (
+                    "The 'metrics_labels' parameter is deprecated and no longer used. It will be removed in a future version.",
+                    py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
+                ),
+            )?;
+        }
+
         let rs_publisher = self.inner.clone();
         let rs_component = component.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // Convert Python labels to Option<&[(&str, &str)]> expected by Rust API
-            let metrics_labels_ref: Option<Vec<(&str, &str)>> =
-                if let Some(metrics_labels) = metrics_labels.as_ref() {
-                    if metrics_labels.is_empty() {
-                        None
-                    } else {
-                        Some(
-                            metrics_labels
-                                .iter()
-                                .map(|(k, v)| (k.as_str(), v.as_str()))
-                                .collect(),
-                        )
-                    }
-                } else {
-                    None
-                };
-
             // Register Prometheus metrics first
             rs_publisher
                 .register_prometheus_metrics(&rs_component)
                 .map_err(to_pyerr)?;
 
             rs_publisher
-                .create_endpoint(rs_component, metrics_labels_ref.as_deref())
+                .create_endpoint(rs_component)
                 .await
                 .map_err(to_pyerr)?;
             Ok(())
@@ -101,7 +99,7 @@ impl WorkerMetricsPublisher {
 #[derive(Clone)]
 pub struct ZmqKvEventPublisherConfig {
     #[pyo3(get, set)]
-    pub worker_id: i64,
+    pub worker_id: WorkerId,
     #[pyo3(get, set)]
     pub kv_block_size: usize,
     #[pyo3(get, set)]
@@ -120,7 +118,7 @@ impl ZmqKvEventPublisherConfig {
         zmq_topic = "".to_string()
     ))]
     pub fn new(
-        worker_id: i64,
+        worker_id: WorkerId,
         kv_block_size: usize,
         zmq_endpoint: String,
         zmq_topic: String,
@@ -234,13 +232,20 @@ impl Drop for ZmqKvEventListener {
 pub(crate) struct KvEventPublisher {
     inner: Arc<llm_rs::kv_router::publisher::KvEventPublisher>,
     kv_block_size: usize,
+    dp_rank: DpRank,
     warning_count: Arc<AtomicU32>,
 }
 
 #[pymethods]
 impl KvEventPublisher {
     #[new]
-    fn new(component: Component, worker_id: i64, kv_block_size: usize) -> PyResult<Self> {
+    #[pyo3(signature = (component, worker_id, kv_block_size, dp_rank=0))]
+    fn new(
+        component: Component,
+        worker_id: WorkerId,
+        kv_block_size: usize,
+        dp_rank: DpRank,
+    ) -> PyResult<Self> {
         if kv_block_size == 0 {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
@@ -256,6 +261,7 @@ impl KvEventPublisher {
         Ok(Self {
             inner: inner.into(),
             kv_block_size,
+            dp_rank,
             warning_count: Arc::new(AtomicU32::new(0)),
         })
     }
@@ -286,6 +292,7 @@ impl KvEventPublisher {
                     &self.warning_count,
                 ),
             }),
+            dp_rank: self.dp_rank,
         };
 
         self.inner.publish(event).map_err(to_pyerr)
@@ -299,6 +306,7 @@ impl KvEventPublisher {
         let event = KvCacheEvent {
             event_id,
             data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
+            dp_rank: self.dp_rank,
         };
 
         self.inner.publish(event).map_err(to_pyerr)
@@ -314,8 +322,13 @@ pub(crate) struct OverlapScores {
 #[pymethods]
 impl OverlapScores {
     #[getter]
-    fn scores(&self) -> HashMap<llm_rs::kv_router::indexer::WorkerId, u32> {
-        self.inner.scores.clone()
+    fn scores(&self) -> HashMap<(u64, u32), u32> {
+        // Return scores with full WorkerWithDpRank granularity as (worker_id, dp_rank) tuples
+        self.inner
+            .scores
+            .iter()
+            .map(|(worker, score)| ((worker.worker_id, worker.dp_rank), *score))
+            .collect()
     }
 
     #[getter]
@@ -324,10 +337,36 @@ impl OverlapScores {
     }
 }
 
-// NOTE: the user needs to guarantee that this stays single threaded in Python land
-#[pyclass(unsendable)]
+#[derive(Debug)]
+enum RadixTreeRequest {
+    FindMatches {
+        local_block_hashes: Vec<llm_rs::kv_router::protocols::LocalBlockHash>,
+        early_exit: bool,
+        response_tx: mpsc::SyncSender<llm_rs::kv_router::indexer::OverlapScores>,
+    },
+    ApplyEvent {
+        worker_id: WorkerId,
+        kv_cache_event_bytes: Vec<u8>,
+        response_tx: mpsc::SyncSender<PyResult<()>>,
+    },
+    RemoveWorker {
+        worker_id: WorkerId,
+        response_tx: mpsc::SyncSender<()>,
+    },
+    ClearAllBlocks {
+        worker_id: WorkerId,
+        response_tx: mpsc::SyncSender<()>,
+    },
+    DumpTreeAsEvents {
+        response_tx: mpsc::SyncSender<Vec<llm_rs::kv_router::indexer::RouterEvent>>,
+    },
+    Shutdown,
+}
+
+// NOTE: RadixTree is now thread-safe with pure sync patterns
+#[pyclass]
 pub(crate) struct RadixTree {
-    inner: llm_rs::kv_router::indexer::RadixTree,
+    request_tx: mpsc::Sender<RadixTreeRequest>,
 }
 
 #[pymethods]
@@ -336,55 +375,249 @@ impl RadixTree {
     #[pyo3(signature = (expiration_duration_secs=None))]
     fn new(expiration_duration_secs: Option<f64>) -> PyResult<Self> {
         let expiration_duration = expiration_duration_secs.map(std::time::Duration::from_secs_f64);
-        let inner = llm_rs::kv_router::indexer::RadixTree::new_with_frequency(expiration_duration);
-        Ok(Self { inner })
+
+        let (request_tx, request_rx) = mpsc::channel::<RadixTreeRequest>();
+
+        // Spawn dedicated thread with simplified sync processing
+        std::thread::spawn(move || {
+            let mut radix_tree =
+                llm_rs::kv_router::indexer::RadixTree::new_with_frequency(expiration_duration);
+
+            loop {
+                match request_rx.recv() {
+                    Ok(RadixTreeRequest::Shutdown) => {
+                        tracing::debug!("RadixTree thread received shutdown request");
+                        break;
+                    }
+                    Ok(request) => {
+                        Self::handle_request(&mut radix_tree, request);
+                    }
+                    Err(mpsc::RecvError) => {
+                        tracing::debug!("RadixTree request channel disconnected");
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(Self { request_tx })
     }
 
     #[pyo3(signature = (sequence, early_exit=false))]
     fn find_matches(
         &self,
-        _py: Python,
+        py: Python,
         sequence: Vec<u64>,
         early_exit: bool,
     ) -> PyResult<OverlapScores> {
-        let local_block_hashes: Vec<llm_rs::kv_router::protocols::LocalBlockHash> = sequence
-            .into_iter()
-            .map(llm_rs::kv_router::protocols::LocalBlockHash)
-            .collect();
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
 
-        let rs_overlap_scores = self.inner.find_matches(local_block_hashes, early_exit);
-        Ok(OverlapScores {
-            inner: rs_overlap_scores,
-        })
+        let local_block_hashes = py.allow_threads(|| {
+            sequence
+                .into_iter()
+                .map(llm_rs::kv_router::protocols::LocalBlockHash)
+                .collect()
+        });
+
+        let request = RadixTreeRequest::FindMatches {
+            local_block_hashes,
+            early_exit,
+            response_tx,
+        };
+
+        self.request_tx.send(request).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "RadixTree background task has shut down",
+            )
+        })?;
+
+        // Release GIL while waiting for response
+        let result = py.allow_threads(move || {
+            response_rx.recv().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
+            })
+        })?;
+
+        Ok(OverlapScores { inner: result })
     }
 
     fn apply_event(
-        &mut self,
-        _py: Python,
-        worker_id: i64,
+        &self,
+        py: Python,
+        worker_id: WorkerId,
         kv_cache_event_bytes: &[u8],
     ) -> PyResult<()> {
-        let kv_cache_event: llm_rs::kv_router::protocols::KvCacheEvent =
-            serde_json::from_slice(kv_cache_event_bytes).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Failed to deserialize KvCacheEvent: {}",
-                    e
-                ))
-            })?;
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
 
-        let router_event = llm_rs::kv_router::indexer::RouterEvent::new(worker_id, kv_cache_event);
-        let _ = self.inner.apply_event(router_event);
-        Ok(())
+        let request = RadixTreeRequest::ApplyEvent {
+            worker_id,
+            kv_cache_event_bytes: kv_cache_event_bytes.to_vec(),
+            response_tx,
+        };
+
+        self.request_tx.send(request).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "RadixTree background task has shut down",
+            )
+        })?;
+
+        // Release GIL while waiting for response
+        let result = py.allow_threads(move || response_rx.recv());
+
+        result.map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
+        })?
     }
 
-    fn remove_worker(&mut self, _py: Python, worker_id: i64) -> PyResult<()> {
-        self.inner.remove_worker(worker_id);
-        Ok(())
+    fn remove_worker(&self, py: Python, worker_id: WorkerId) -> PyResult<()> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+
+        let request = RadixTreeRequest::RemoveWorker {
+            worker_id,
+            response_tx,
+        };
+
+        self.request_tx.send(request).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "RadixTree background task has shut down",
+            )
+        })?;
+
+        // Release GIL while waiting for response
+        py.allow_threads(move || {
+            response_rx.recv().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
+            })
+        })
     }
 
-    fn clear_all_blocks(&mut self, _py: Python, worker_id: i64) -> PyResult<()> {
-        self.inner.clear_all_blocks(worker_id);
-        Ok(())
+    fn clear_all_blocks(&self, py: Python, worker_id: WorkerId) -> PyResult<()> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+
+        let request = RadixTreeRequest::ClearAllBlocks {
+            worker_id,
+            response_tx,
+        };
+
+        self.request_tx.send(request).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "RadixTree background task has shut down",
+            )
+        })?;
+
+        // Release GIL while waiting for response
+        py.allow_threads(move || {
+            response_rx.recv().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
+            })
+        })
+    }
+
+    fn dump_tree_as_events(&self, py: Python) -> PyResult<Vec<String>> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+
+        let request = RadixTreeRequest::DumpTreeAsEvents { response_tx };
+
+        self.request_tx.send(request).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to send dump tree request")
+        })?;
+
+        // Release GIL while waiting for response from dedicated thread
+        let events = py.allow_threads(move || {
+            response_rx.recv().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "Failed to receive dump tree response",
+                )
+            })
+        })?;
+
+        // Serialize RouterEvent structs to JSON strings with GIL released
+        py.allow_threads(move || {
+            events
+                .into_iter()
+                .map(|event| {
+                    serde_json::to_string(&event).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Failed to serialize event to JSON: {}",
+                            e
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<String>, PyErr>>()
+        })
+    }
+}
+
+impl RadixTree {
+    fn handle_request(
+        radix_tree: &mut llm_rs::kv_router::indexer::RadixTree,
+        request: RadixTreeRequest,
+    ) {
+        match request {
+            RadixTreeRequest::FindMatches {
+                local_block_hashes,
+                early_exit,
+                response_tx,
+            } => {
+                let result = radix_tree.find_matches(local_block_hashes, early_exit);
+                let _ = response_tx.send(result);
+            }
+            RadixTreeRequest::ApplyEvent {
+                worker_id,
+                kv_cache_event_bytes,
+                response_tx,
+            } => {
+                let result = match serde_json::from_slice::<
+                    llm_rs::kv_router::protocols::KvCacheEvent,
+                >(&kv_cache_event_bytes)
+                {
+                    Ok(kv_cache_event) => {
+                        let router_event =
+                            llm_rs::kv_router::indexer::RouterEvent::new(worker_id, kv_cache_event);
+                        match radix_tree.apply_event(router_event) {
+                            Ok(_) => Ok(()),
+                            Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                format!("Failed to apply event: {}", e),
+                            )),
+                        }
+                    }
+                    Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Failed to deserialize KvCacheEvent: {}",
+                        e
+                    ))),
+                };
+                let _ = response_tx.send(result);
+            }
+            RadixTreeRequest::RemoveWorker {
+                worker_id,
+                response_tx,
+            } => {
+                radix_tree.remove_worker(worker_id);
+                let _ = response_tx.send(());
+            }
+            RadixTreeRequest::ClearAllBlocks {
+                worker_id,
+                response_tx,
+            } => {
+                radix_tree.clear_all_blocks(worker_id);
+                let _ = response_tx.send(());
+            }
+            RadixTreeRequest::DumpTreeAsEvents { response_tx } => {
+                let events = radix_tree.dump_tree_as_events();
+                let _ = response_tx.send(events);
+            }
+            RadixTreeRequest::Shutdown => {
+                // This is handled in the main loop
+            }
+        }
+    }
+}
+
+// Cleanup when RadixTree is dropped
+impl Drop for RadixTree {
+    fn drop(&mut self) {
+        // Only need graceful shutdown via RadixTreeRequest::Shutdown
+        let _ = self.request_tx.send(RadixTreeRequest::Shutdown);
     }
 }
 
@@ -416,12 +649,13 @@ impl KvIndexer {
                 .into();
 
             // Use the shared start_kv_router_background function for event consumption
-            // Pass None for snapshot_tx to skip snapshot handling in Python bindings
+            // Pass None for snapshot_tx and get_workers_tx to skip snapshot handling in Python bindings
             llm_rs::kv_router::subscriber::start_kv_router_background(
                 component.inner.clone(),
                 consumer_uuid.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                 inner.event_sender(),
                 inner.remove_worker_sender(),
+                None,
                 None,
                 cancellation_token,
                 None,
@@ -516,109 +750,22 @@ impl ApproxKvIndexer {
         })
     }
 
+    #[pyo3(signature = (tokens, worker_id, dp_rank=0))]
     fn process_routing_decision_for_request<'p>(
         &self,
         py: Python<'p>,
         tokens: Vec<u32>,
-        worker_id: i64,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
     ) -> PyResult<Bound<'p, PyAny>> {
         let indexer = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let worker = llm_rs::kv_router::protocols::WorkerWithDpRank::new(worker_id, dp_rank);
             indexer
-                .process_routing_decision_for_request(tokens.as_slice(), worker_id)
+                .process_routing_decision_for_request(tokens.as_slice(), worker)
                 .await
                 .map_err(to_pyerr)?;
             Ok(())
-        })
-    }
-}
-
-#[pyclass]
-#[derive(Clone)]
-pub(crate) struct EndpointKvMetrics {
-    #[pyo3(get, set)]
-    pub worker_id: i64,
-    #[pyo3(get, set)]
-    pub request_active_slots: u64,
-    #[pyo3(get, set)]
-    pub request_total_slots: u64,
-    #[pyo3(get, set)]
-    pub kv_active_blocks: u64,
-    #[pyo3(get, set)]
-    pub kv_total_blocks: u64,
-    #[pyo3(get, set)]
-    pub num_requests_waiting: u64,
-    #[pyo3(get, set)]
-    pub gpu_cache_usage_perc: f32,
-    #[pyo3(get, set)]
-    pub gpu_prefix_cache_hit_rate: f32,
-}
-
-#[pyclass]
-#[derive(Clone)]
-pub(crate) struct AggregatedMetrics {
-    #[pyo3(get, set)]
-    pub endpoints: Vec<EndpointKvMetrics>,
-    #[pyo3(get, set)]
-    pub load_avg: f64,
-    #[pyo3(get, set)]
-    pub load_std: f64,
-}
-
-#[pyclass]
-pub(crate) struct KvMetricsAggregator {
-    inner: Arc<llm_rs::kv_router::metrics_aggregator::KvMetricsAggregator>,
-}
-
-#[pymethods]
-impl KvMetricsAggregator {
-    #[new]
-    fn new(component: Component) -> PyResult<Self> {
-        let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        runtime.block_on(async {
-            let inner = llm_rs::kv_router::metrics_aggregator::KvMetricsAggregator::new(
-                component.inner.clone(),
-                component.inner.drt().runtime().child_token(),
-            )
-            .await;
-            Ok(Self {
-                inner: inner.into(),
-            })
-        })
-    }
-
-    fn get_metrics<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        // TODO: update EndpointKvMetrics to match the new ForwardPassMetrics struct
-        let endpoints = self.inner.get_endpoints();
-        let load_avg = endpoints.load_avg;
-        let load_std = endpoints.load_std;
-
-        let endpoint_kv_metrics = endpoints
-            .endpoints
-            .into_iter()
-            .map(|(worker_id, endpoint)| {
-                let metrics = endpoint.data;
-                let LoadMetrics::EngineLoadMetrics(fwd_pass_metrics) = metrics else {
-                    panic!("Endpoints do not contain forward pass metrics.");
-                };
-                EndpointKvMetrics {
-                    worker_id,
-                    request_active_slots: fwd_pass_metrics.worker_stats.request_active_slots,
-                    request_total_slots: fwd_pass_metrics.worker_stats.request_total_slots,
-                    kv_active_blocks: fwd_pass_metrics.kv_stats.kv_active_blocks,
-                    kv_total_blocks: fwd_pass_metrics.kv_stats.kv_total_blocks,
-                    num_requests_waiting: fwd_pass_metrics.worker_stats.num_requests_waiting,
-                    gpu_cache_usage_perc: fwd_pass_metrics.kv_stats.gpu_cache_usage_perc,
-                    gpu_prefix_cache_hit_rate: fwd_pass_metrics.kv_stats.gpu_prefix_cache_hit_rate,
-                }
-            })
-            .collect();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            Ok(AggregatedMetrics {
-                endpoints: endpoint_kv_metrics,
-                load_avg,
-                load_std,
-            })
         })
     }
 }
@@ -783,7 +930,7 @@ impl WorkerStats {
         request_active_slots: u64,
         request_total_slots: u64,
         num_requests_waiting: u64,
-        data_parallel_rank: Option<u32>,
+        data_parallel_rank: Option<DpRank>,
     ) -> Self {
         Self(RsWorkerStats {
             data_parallel_rank,
@@ -854,12 +1001,7 @@ async fn create_kv_router_from_endpoint(
     // Create ModelManager and use it to create KvRouter (ensures etcd registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
     let kv_router = model_manager
-        .kv_chooser_for(
-            "dummy_name", // does not matter, never cached
-            component,
-            block_size as u32,
-            kv_router_config,
-        )
+        .kv_chooser_for(component, block_size as u32, kv_router_config)
         .await
         .map_err(to_pyerr)?;
 
@@ -960,7 +1102,7 @@ impl KvPushRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, extra_args=None))]
+    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, dp_rank=None, extra_args=None))]
     fn generate<'p>(
         &self,
         py: Python<'p>,
@@ -970,7 +1112,8 @@ impl KvPushRouter {
         sampling_options: Option<PyObject>,
         output_options: Option<PyObject>,
         router_config_override: Option<PyObject>,
-        worker_id: Option<i64>,
+        worker_id: Option<WorkerId>,
+        dp_rank: Option<DpRank>,
         extra_args: Option<PyObject>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the options with defaults
@@ -1026,6 +1169,7 @@ impl KvPushRouter {
             .sampling_options(sampling_options)
             .output_options(output_options)
             .router_config_override(router_config_override)
+            .dp_rank(dp_rank)
             .extra_args(extra_args);
 
         // Set backend_instance_id if worker_id is provided
@@ -1052,12 +1196,13 @@ impl KvPushRouter {
         Self::process_request_to_stream(py, self.inner.clone(), request)
     }
 
-    #[pyo3(signature = (token_ids, router_config_override=None))]
-    fn best_worker_id<'p>(
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None))]
+    fn best_worker<'p>(
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
         router_config_override: Option<PyObject>,
+        request_id: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_config_override = if let Some(obj) = router_config_override {
             Python::with_gil(|py| {
@@ -1069,16 +1214,96 @@ impl KvPushRouter {
             None
         };
 
-        let inner = self.inner.clone();
+        let chooser = self.inner.chooser.clone();
+        let update_states = request_id.is_some();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let (worker_id, overlap_blocks) = inner
-                .find_best_match(&token_ids, router_config_override.as_ref())
+            let (best_worker, overlap_blocks) = chooser
+                .find_best_match(
+                    request_id.as_deref(),
+                    &token_ids,
+                    router_config_override.as_ref(),
+                    update_states,
+                )
                 .await
                 .map_err(to_pyerr)?;
 
-            // Return a tuple of (worker_id, overlap_blocks)
-            Ok((worker_id, overlap_blocks))
+            Ok((best_worker.worker_id, best_worker.dp_rank, overlap_blocks))
+        })
+    }
+
+    /// Deprecated: Use `best_worker()` instead which returns (worker_id, dp_rank, overlap_blocks)
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None))]
+    fn best_worker_id<'p>(
+        &self,
+        py: Python<'p>,
+        token_ids: Vec<u32>,
+        router_config_override: Option<PyObject>,
+        request_id: Option<String>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        // Issue deprecation warning
+        let warnings = py.import("warnings")?;
+        warnings.call_method1(
+            "warn",
+            (
+                "best_worker_id() is deprecated. Use best_worker() instead which returns (worker_id, dp_rank, overlap_blocks)",
+                py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
+            ),
+        )?;
+
+        let router_config_override = if let Some(obj) = router_config_override {
+            Python::with_gil(|py| {
+                let override_config: llm_rs::kv_router::RouterConfigOverride =
+                    depythonize(obj.bind(py)).map_err(to_pyerr)?;
+                Ok::<_, PyErr>(Some(override_config))
+            })?
+        } else {
+            None
+        };
+
+        let chooser = self.inner.chooser.clone();
+        let update_states = request_id.is_some();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let (best_worker, overlap_blocks) = chooser
+                .find_best_match(
+                    request_id.as_deref(),
+                    &token_ids,
+                    router_config_override.as_ref(),
+                    update_states,
+                )
+                .await
+                .map_err(to_pyerr)?;
+
+            // Return only worker_id and overlap_blocks for backward compatibility
+            Ok((best_worker.worker_id, overlap_blocks))
+        })
+    }
+
+    /// Mark prefill as completed for a request
+    fn mark_prefill_complete<'p>(
+        &self,
+        py: Python<'p>,
+        request_id: String,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let chooser = self.inner.chooser.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            chooser
+                .mark_prefill_completed(&request_id)
+                .await
+                .map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+
+    /// Free a request by its ID, signaling the router to release resources
+    fn free<'p>(&self, py: Python<'p>, request_id: String) -> PyResult<Bound<'p, PyAny>> {
+        let chooser = self.inner.chooser.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            chooser.free(&request_id).await.map_err(to_pyerr)?;
+            Ok(())
         })
     }
 
@@ -1087,14 +1312,15 @@ impl KvPushRouter {
         py: Python<'p>,
         token_ids: Vec<u32>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let inner = self.inner.clone();
+        let chooser = self.inner.chooser.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let loads = inner
+            let loads = chooser
                 .get_potential_loads(&token_ids)
                 .await
                 .map_err(to_pyerr)?;
 
+            // Return loads without aggregation - each (worker_id, dp_rank) pair is a separate entry
             // Use pythonize to convert Vec<PotentialLoad> to Python list of dicts
             Python::with_gil(|py| {
                 pythonize(py, &loads)
@@ -1106,10 +1332,10 @@ impl KvPushRouter {
 
     /// Dump all events from the KV router's indexer as a JSON string
     fn dump_events<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let inner = self.inner.clone();
+        let chooser = self.inner.chooser.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let events = inner.dump_events().await.map_err(to_pyerr)?;
+            let events = chooser.dump_events().await.map_err(to_pyerr)?;
             // Serialize to JSON string
             let json_str = serde_json::to_string(&events).map_err(to_pyerr)?;
             Ok(json_str)

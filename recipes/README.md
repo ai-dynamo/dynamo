@@ -1,12 +1,12 @@
 # Dynamo model serving recipes
 
-| Model family  | Backend | Mode                | Deployment | Benchmark |
-|---------------|---------|---------------------|------------|-----------|
-| llama-3-70b   | vllm    | agg                 |     ✓      |     ✓     |
-| llama-3-70b   | vllm    | disagg-multi-node   |     ✓      |     ✓     |
-| llama-3-70b   | vllm    | disagg-single-node  |     ✓      |     ✓     |
-| oss-gpt       | trtllm  | aggregated          |     ✓      |     ✓     |
-| DeepSeek-R1   | sglang  | disaggregated       |     ✓      |    🚧     |
+| Model family  | Backend | Mode                | GPU   | Deployment | Benchmark |
+|---------------|---------|---------------------|-------|------------|-----------|
+| llama-3-70b   | vllm    | agg                 | H100, H200  |     ✓      |     ✓     |
+| llama-3-70b   | vllm    | disagg-multi-node   | H100, H200  |     ✓      |     ✓     |
+| llama-3-70b   | vllm    | disagg-single-node  | H100, H200  |     ✓      |     ✓     |
+| DeepSeek-R1   | sglang  | disaggregated       | H200  |     ✓      |    🚧     |
+| oss-gpt       | trtllm  | aggregated          | GB200 |     ✓      |     ✓     |
 
 
 ## Prerequisites

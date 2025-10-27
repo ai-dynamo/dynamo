@@ -120,7 +120,7 @@ dynamo-build:
     COPY deploy/ deploy/
 
     ENV CARGO_TARGET_DIR=/workspace/target
-    RUN cargo build --release --locked --features llamacpp,cuda && \
+    RUN cargo build --release --locked --features cuda && \
         cargo doc --no-deps
 
     RUN cd /workspace/lib/bindings/python && \
@@ -159,7 +159,7 @@ dynamo-base-docker:
     ENV VIRTUAL_ENV=/opt/dynamo/venv
     ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
-    RUN uv pip install -r /tmp/requirements.txt
+    RUN UV_GIT_LFS=1 uv pip install -r /tmp/requirements.txt
 
     # Copy and install wheels -- ai-dynamo-runtime first, then ai-dynamo
     COPY +dynamo-build/ai_dynamo_runtime*.whl /tmp/wheels/

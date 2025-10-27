@@ -3,7 +3,7 @@
 
 use crate::config::HealthStatus;
 use crate::logging::make_request_span;
-use crate::metrics::MetricsRegistry;
+use crate::metrics::MetricsHierarchy;
 use crate::metrics::prometheus_names::{nats_client, nats_service};
 use crate::traits::DistributedRuntimeProvider;
 use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
@@ -83,14 +83,12 @@ pub async fn spawn_system_status_server(
         .drt()
         .system_health
         .lock()
-        .unwrap()
         .health_path()
         .to_string();
     let live_path = server_state
         .drt()
         .system_health
         .lock()
-        .unwrap()
         .live_path()
         .to_string();
 
@@ -160,7 +158,7 @@ pub async fn spawn_system_status_server(
 #[tracing::instrument(skip_all, level = "trace")]
 async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     // Get basic health status
-    let system_health = state.drt().system_health.lock().unwrap();
+    let system_health = state.drt().system_health.lock();
     let (healthy, endpoints) = system_health.get_health_status();
     let uptime = Some(system_health.uptime());
 
@@ -186,43 +184,25 @@ async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
 #[tracing::instrument(skip_all, level = "trace")]
 async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     // Update the uptime gauge with current value
-    state
-        .drt()
-        .system_health
-        .lock()
-        .unwrap()
-        .update_uptime_gauge();
+    state.drt().system_health.lock().update_uptime_gauge();
 
-    // Execute all the callbacks for all registered hierarchies
-    let all_hierarchies: Vec<String> = {
-        let registries = state.drt().hierarchy_to_metricsregistry.read().unwrap();
-        registries.keys().cloned().collect()
-    };
-
-    for hierarchy in &all_hierarchies {
-        let callback_results = state.drt().execute_metrics_callbacks(hierarchy);
-        for result in callback_results {
-            if let Err(e) = result {
-                tracing::error!(
-                    "Error executing metrics callback for hierarchy '{}': {}",
-                    hierarchy,
-                    e
-                );
-            }
-        }
-    }
-
-    // Get all metrics from DistributedRuntime (top-level)
-    match state.drt().prometheus_metrics_fmt() {
-        Ok(response) => (StatusCode::OK, response),
+    // Get all metrics from DistributedRuntime
+    // Note: In the new hierarchy-based architecture, metrics are automatically registered
+    // at all parent levels, so DRT's metrics include all metrics from children
+    // (Namespace, Component, Endpoint). The prometheus_expfmt() method also executes
+    // all update callbacks and expfmt callbacks before returning the metrics.
+    let response = match state.drt().metrics().prometheus_expfmt() {
+        Ok(r) => r,
         Err(e) => {
             tracing::error!("Failed to get metrics from registry: {}", e);
-            (
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to get metrics".to_string(),
-            )
+            );
         }
-    }
+    };
+
+    (StatusCode::OK, response)
 }
 
 // Regular tests: cargo test system_status_server --lib
@@ -267,7 +247,7 @@ mod tests {
 mod integration_tests {
     use super::*;
     use crate::distributed::distributed_test_utils::create_test_drt_async;
-    use crate::metrics::MetricsRegistry;
+    use crate::metrics::MetricsHierarchy;
     use anyhow::Result;
     use rstest::rstest;
     use std::sync::Arc;
@@ -280,13 +260,13 @@ mod integration_tests {
             let drt = create_test_drt_async().await;
 
             // Get uptime from SystemHealth
-            let uptime = drt.system_health.lock().unwrap().uptime();
+            let uptime = drt.system_health.lock().uptime();
             // Uptime should exist (even if close to zero)
             assert!(uptime.as_nanos() > 0 || uptime.is_zero());
 
             // Sleep briefly and check uptime increases
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let uptime_after = drt.system_health.lock().unwrap().uptime();
+            let uptime_after = drt.system_health.lock().uptime();
             assert!(uptime_after > uptime);
         })
         .await;
@@ -301,7 +281,7 @@ mod integration_tests {
             // so we don't need to create it again here
 
             // The uptime_seconds metric should already be registered and available
-            let response = drt.prometheus_metrics_fmt().unwrap();
+            let response = drt.metrics().prometheus_expfmt().unwrap();
             println!("Full metrics response:\n{}", response);
 
             // Filter out NATS client metrics for comparison
@@ -337,19 +317,19 @@ mod integration_tests {
             let drt = create_test_drt_async().await;
 
             // Get initial uptime
-            let initial_uptime = drt.system_health.lock().unwrap().uptime();
+            let initial_uptime = drt.system_health.lock().uptime();
 
             // Update the gauge with initial value
-            drt.system_health.lock().unwrap().update_uptime_gauge();
+            drt.system_health.lock().update_uptime_gauge();
 
             // Sleep for 100ms
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
             // Get uptime after sleep
-            let uptime_after_sleep = drt.system_health.lock().unwrap().uptime();
+            let uptime_after_sleep = drt.system_health.lock().uptime();
 
             // Update the gauge again
-            drt.system_health.lock().unwrap().update_uptime_gauge();
+            drt.system_health.lock().update_uptime_gauge();
 
             // Verify uptime increased by at least 100ms
             let elapsed = uptime_after_sleep - initial_uptime;
@@ -594,7 +574,7 @@ mod integration_tests {
 
                 // Now create a namespace, component, and endpoint to make the system healthy
                 let namespace = drt.namespace("ns1234").unwrap();
-                let component = namespace.component("comp1234").unwrap();
+                let mut component = namespace.component("comp1234").unwrap();
 
                 // Create a simple test handler
                 use crate::pipeline::{async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, SingleIn};
@@ -620,12 +600,8 @@ mod integration_tests {
                 // Start the service and endpoint with a health check payload
                 // This will automatically register the endpoint for health monitoring
                 tokio::spawn(async move {
-                    let _ = component
-                        .service_builder()
-                        .create()
-                        .await
-                        .unwrap()
-                        .endpoint(ENDPOINT_NAME)
+                    component.add_stats_service().await.unwrap();
+                    let _ = component.endpoint(ENDPOINT_NAME)
                         .endpoint_builder()
                         .handler(ingress)
                         .health_check_payload(serde_json::json!({
@@ -758,7 +734,7 @@ mod integration_tests {
 
                 // Register the endpoint and its health check payload
                 {
-                    let system_health = drt.system_health.lock().unwrap();
+                    let system_health = drt.system_health.lock();
                     system_health.register_health_check_target(
                         endpoint,
                         crate::component::Instance {
@@ -787,7 +763,6 @@ mod integration_tests {
                 // Set endpoint to healthy state
                 drt.system_health
                     .lock()
-                    .unwrap()
                     .set_endpoint_health_status(endpoint, HealthStatus::Ready);
 
                 // Check health again - should now be healthy
@@ -805,7 +780,6 @@ mod integration_tests {
                 let endpoint_status = drt
                     .system_health
                     .lock()
-                    .unwrap()
                     .get_endpoint_health_status(endpoint);
                 assert_eq!(
                     endpoint_status,

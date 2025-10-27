@@ -20,6 +20,7 @@ if "TLLM_LOG_LEVEL" not in os.environ and os.getenv(
     tllm_level = map_dyn_log_to_tllm_level(dyn_log)
     os.environ["TLLM_LOG_LEVEL"] = tllm_level
 import uvloop
+from prometheus_client import REGISTRY
 from tensorrt_llm.llmapi import (
     BuildConfig,
     CapacitySchedulerPolicy,
@@ -30,11 +31,13 @@ from tensorrt_llm.llmapi import (
 from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
+from tensorrt_llm.metrics import MetricsCollector
 from torch.cuda import device_count
 from transformers import AutoConfig
 
 import dynamo.nixl_connect as nixl_connect
 from dynamo.common.config_dump import dump_config
+from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -138,6 +141,22 @@ async def init(runtime: DistributedRuntime, config: Config):
             .client()
         )
 
+    # Set up prefill router client for decode workers
+    next_router_client = None
+    if config.disaggregation_mode.value == "decode":
+        try:
+            logging.info("Initializing prefill router client")
+            next_router_client = (
+                await runtime.namespace(config.namespace)
+                .component("router")  # Standalone router for prefill workers
+                .endpoint("generate")
+                .client()
+            )
+            logging.info("Prefill router client initialized successfully")
+        except Exception as e:
+            logging.warning(f"Failed to initialize prefill router client: {e}")
+            logging.info("Will use direct prefill worker client only")
+
     encode_client = None
     if config.encode_endpoint:
         logging.info(
@@ -202,6 +221,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         "max_seq_len": config.max_seq_len,
         "max_beam_width": config.max_beam_width,
         "max_batch_size": config.max_batch_size,
+        "return_perf_metrics": config.publish_events_and_metrics,
     }
 
     if config.extra_engine_args != "":
@@ -218,19 +238,21 @@ async def init(runtime: DistributedRuntime, config: Config):
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
+
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
-        kv_cache_config = None
-        if "kv_cache_config" not in arg_map:
-            kv_cache_config = {}
-            kv_cache_config["event_buffer_max_size"] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
-        else:
-            kv_cache_config = arg_map["kv_cache_config"]
-            if "event_buffer_max_size" not in kv_cache_config:
-                kv_cache_config[
+        # Convert KvCacheConfig object to dict and add the parameter
+        current_kv_config = arg_map["kv_cache_config"]
+        if isinstance(current_kv_config, KvCacheConfig):
+            arg_map["kv_cache_config"] = {
+                "free_gpu_memory_fraction": config.free_gpu_memory_fraction,
+                "event_buffer_max_size": DEFAULT_KV_EVENT_BUFFER_MAX_SIZE,
+            }
+        elif isinstance(current_kv_config, dict):
+            if "event_buffer_max_size" not in current_kv_config:
+                current_kv_config[
                     "event_buffer_max_size"
                 ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
-        arg_map["kv_cache_config"] = kv_cache_config
 
         # Only pytorch backend is supported for now to publish events and metrics.
         if "backend" not in arg_map:
@@ -257,6 +279,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         # We need to initialize the tokenizer for the test logits processor
         # But detokenizing still happens in the rust engine, so we do _not_ want
         # to set default_sampling_params.detokenize to True.
+        # This overrides the skip_tokenizer_init=True set earlier
         engine_args["skip_tokenizer_init"] = False
 
     if modality == "multimodal":
@@ -320,6 +343,31 @@ async def init(runtime: DistributedRuntime, config: Config):
         # 2. We need runtime config during registration, before any requests are made
         # 3. total_kv_blocks would ideally come from engine stats but is not critical for basic operation
 
+        # Initialize TensorRT-LLM MetricsCollector and register with global REGISTRY
+        # This enables exposing TRT-LLM's native Prometheus metrics (request latency, TTFT, TPOT, etc.)
+        metrics_collector = None
+        if config.publish_events_and_metrics:
+            try:
+                model_name_for_metrics = config.served_model_name or config.model_path
+                metrics_collector = MetricsCollector(
+                    {"model_name": model_name_for_metrics, "engine_type": "trtllm"}
+                )
+                logging.info("TensorRT-LLM MetricsCollector initialized")
+
+                # Register callback to expose TRT-LLM metrics via Dynamo endpoint
+                # Filter out python_/process_ metrics and add trtllm: prefix to remaining metrics
+                register_engine_metrics_callback(
+                    endpoint=endpoint,
+                    registry=REGISTRY,
+                    exclude_prefixes=["python_", "process_"],
+                    add_prefix="trtllm:",
+                )
+                logging.info("TensorRT-LLM Prometheus metrics registered")
+            except Exception as e:
+                logging.warning(
+                    f"Failed to initialize TensorRT-LLM Prometheus metrics: {e}"
+                )
+
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(
             component=component,
@@ -329,9 +377,12 @@ async def init(runtime: DistributedRuntime, config: Config):
             disaggregation_mode=config.disaggregation_mode,
             disaggregation_strategy=config.disaggregation_strategy,
             next_client=next_client,
+            next_router_client=next_router_client,
             encode_client=encode_client,
             multimodal_processor=multimodal_processor,
             connector=connector,
+            runtime=runtime,  # Pass runtime for graceful shutdown
+            metrics_collector=metrics_collector,
         )
 
         if next_client:
@@ -357,13 +408,15 @@ async def init(runtime: DistributedRuntime, config: Config):
         # Get health check payload (checks env var and falls back to TensorRT-LLM default)
         health_check_payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
 
-        if config.publish_events_and_metrics and is_first_worker(config):
+        if config.publish_events_and_metrics:
             # Initialize and pass in the publisher to the request handler to
             # publish events and metrics.
             kv_listener = runtime.namespace(config.namespace).component(
                 config.component
             )
-            metrics_labels = [("model", config.served_model_name)]
+            # Use model_path as fallback if served_model_name is not provided
+            model_name_for_metrics = config.served_model_name or config.model_path
+            metrics_labels = [("model", model_name_for_metrics)]
             async with get_publisher(
                 component,
                 engine,

@@ -5,18 +5,16 @@ use dynamo_llm::block_manager::connector::protocol::TransferType;
 use dynamo_llm::block_manager::connector::scheduler::{
     Scheduler, TransferSchedulerClient, WorkerSchedulerClient,
 };
-use dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics;
 
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use super::*;
-use crate::llm::block_manager::distributed::get_barrier_id_prefix;
+use crate::llm::block_manager::distributed::{get_leader_zmq_ack_url, get_leader_zmq_pub_url};
 use crate::{
     DistributedRuntime as PyDistributedRuntime, llm::block_manager::distributed::VllmTensor,
     to_pyerr,
 };
-use dynamo_runtime::metrics::prometheus_names::kvbm_connector;
 
 use crate::llm::block_manager::distributed::PyLayoutType;
 use anyhow;
@@ -75,8 +73,6 @@ pub struct KvConnectorWorker {
 
     /// cuda events created by the python side
     layer_events: Vec<u64>,
-
-    kvbm_metrics: KvbmMetrics,
 }
 
 impl KvConnectorWorker {
@@ -97,11 +93,6 @@ impl KvConnectorWorker {
         )?
         .detach();
 
-        let kvbm_metrics = KvbmMetrics::new(
-            &drt.namespace(kvbm_connector::KVBM_CONNECTOR_WORKER)
-                .unwrap(),
-        );
-
         tracing::info!(
             "KvConnectorWorker initialized with worker_id: {}",
             vllm_worker_id
@@ -120,7 +111,6 @@ impl KvConnectorWorker {
             layers_complete: 0,
             kv_cache_layers: Vec::new(),
             layer_events: Vec::new(),
-            kvbm_metrics,
         })
     }
 }
@@ -210,7 +200,8 @@ impl Worker for KvConnectorWorker {
             .tensors(vllm_tensors)
             .device_id(device_id)
             .dtype_width_bytes(dtype_width_bytes)
-            .barrier_id_prefix(get_barrier_id_prefix())
+            .leader_pub_url(get_leader_zmq_pub_url())
+            .leader_ack_url(get_leader_zmq_ack_url())
             .scheduler_client(Some(self.transfer_client.clone()))
             .device_layout_type(detected_device_layout_type)
             .host_layout_type(host_layout_type.unwrap_or(LayoutType::FullyContiguous))
@@ -324,7 +315,6 @@ impl Worker for KvConnectorWorker {
                 self.connector.enqueue_request(operation);
             }
         }
-        self.kvbm_metrics.save_kv_layer_requests.inc();
         Ok(())
     }
 

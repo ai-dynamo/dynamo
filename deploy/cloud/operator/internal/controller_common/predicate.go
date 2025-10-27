@@ -66,6 +66,16 @@ type Config struct {
 	// PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics
 	PrometheusEndpoint string
 	MpiRun             MpiRunConfig
+	// RBAC configuration for cross-namespace resource management
+	RBAC RBACConfig
+}
+
+// RBACConfig holds configuration for RBAC management
+type RBACConfig struct {
+	// PlannerClusterRoleName is the name of the ClusterRole for planner (cluster-wide mode only)
+	PlannerClusterRoleName string
+	// DGDRProfilingClusterRoleName is the name of the ClusterRole for DGDR profiling jobs (cluster-wide mode only)
+	DGDRProfilingClusterRoleName string
 }
 
 type IngressConfig struct {

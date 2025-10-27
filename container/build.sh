@@ -303,9 +303,6 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
-        --release-build)
-            RELEASE_BUILD=true
-            ;;
         --enable-kvbm)
             ENABLE_KVBM=true
             ;;
@@ -334,6 +331,7 @@ get_options() {
             ;;
 
         --vllm-max-jobs)
+            # Set MAX_JOBS for vLLM compilation (only used by Dockerfile.vllm)
             if [ "$2" ]; then
                 MAX_JOBS=$2
                 shift
@@ -483,6 +481,7 @@ show_help() {
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
+    echo "  [--vllm-max-jobs number of parallel jobs for compilation (only used by vLLM framework)]"
     echo ""
     echo "  Note: When using --use-sccache, AWS credentials must be set:"
     echo "        export AWS_ACCESS_KEY_ID=your_access_key"
@@ -593,7 +592,7 @@ fi
 
 # BUILD DEV IMAGE
 
-BUILD_ARGS+=" --build-arg BASE_IMAGE=$BASE_IMAGE --build-arg BASE_IMAGE_TAG=$BASE_IMAGE_TAG --build-arg FRAMEWORK=$FRAMEWORK --build-arg ${FRAMEWORK}_FRAMEWORK=1 --build-arg VERSION=$VERSION --build-arg PYTHON_PACKAGE_VERSION=$PYTHON_PACKAGE_VERSION"
+BUILD_ARGS+=" --build-arg BASE_IMAGE=$BASE_IMAGE --build-arg BASE_IMAGE_TAG=$BASE_IMAGE_TAG"
 
 if [ -n "${GITHUB_TOKEN}" ]; then
     BUILD_ARGS+=" --build-arg GITHUB_TOKEN=${GITHUB_TOKEN} "
@@ -695,28 +694,25 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
     fi
 fi
 
-if [ -n "${HF_TOKEN}" ]; then
-    BUILD_ARGS+=" --build-arg HF_TOKEN=${HF_TOKEN} "
+# ENABLE_KVBM: Used in base Dockerfile for block-manager feature.
+#              Declared but not currently used in Dockerfile.{vllm,trtllm}.
+if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
+    echo "Forcing enable_kvbm to true in ${FRAMEWORK} image build"
+    ENABLE_KVBM=true
 fi
-if [  ! -z ${RELEASE_BUILD} ]; then
-    echo "Performing a release build!"
-    BUILD_ARGS+=" --build-arg RELEASE_BUILD=${RELEASE_BUILD} "
-fi
-
-# if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
-#     echo "Forcing enable_kvbm to true in ${FRAMEWORK} image build"
-#     ENABLE_KVBM=true
-# fi
 
 if [  ! -z ${ENABLE_KVBM} ]; then
     echo "Enabling the KVBM in the ai-dynamo-runtime"
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
 fi
 
+# NIXL_UCX_REF: Used in base Dockerfile only.
+#               Passed to framework Dockerfile.{vllm,sglang,...} where it's NOT used.
 if [ -n "${NIXL_UCX_REF}" ]; then
     BUILD_ARGS+=" --build-arg NIXL_UCX_REF=${NIXL_UCX_REF} "
 fi
 
+# MAX_JOBS is only used by Dockerfile.vllm
 if [ -n "${MAX_JOBS}" ]; then
     BUILD_ARGS+=" --build-arg MAX_JOBS=${MAX_JOBS} "
 fi

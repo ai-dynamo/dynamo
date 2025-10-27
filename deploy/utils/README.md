@@ -17,9 +17,6 @@ This includes:
 
 - `setup_benchmarking_resources.sh` — Sets up benchmarking and profiling resources in your existing Dynamo namespace
 - `manifests/`
-  - `serviceaccount.yaml` — ServiceAccount `dynamo-sa` for benchmarking and profiling jobs
-  - `role.yaml` — Role `dynamo-role` with necessary permissions
-  - `rolebinding.yaml` — RoleBinding `dynamo-binding`
   - `pvc.yaml` — PVC `dynamo-pvc` for storing profiler results and configurations
   - `pvc-access-pod.yaml` — short‑lived pod for copying profiler results from the PVC
 - `kubernetes.py` — helper used by tooling to apply/read resources (e.g., access pod for PVC downloads)
@@ -34,6 +31,26 @@ This includes:
 
 After setting up Dynamo Cloud, use this script to prepare your namespace with the additional resources needed for benchmarking and profiling workflows:
 
+The setup script creates a `dynamo-pvc` with `ReadWriteMany` (RWX). If your cluster's default `storageClassName` does not support RWX, set `storageClassName` in `deploy/utils/manifests/pvc.yaml` to an RWX-capable class before running the script.
+
+Example (add under `spec` in `deploy/utils/manifests/pvc.yaml`):
+```yaml
+...
+spec:
+  accessModes:
+  - ReadWriteMany
+  storageClassName: <your-rwx-storageclass>
+...
+```
+
+> [!TIP]
+> **Check your clusters storage classes**
+>
+> - List storage classes and provisioners:
+> ```bash
+> kubectl get sc -o wide
+> ```
+
 ```bash
 export NAMESPACE=your-dynamo-namespace
 export HF_TOKEN=<HF_TOKEN>  # Optional: for HuggingFace model access
@@ -43,9 +60,6 @@ deploy/utils/setup_benchmarking_resources.sh
 
 This script applies the following manifests to your existing Dynamo namespace:
 
-- `deploy/utils/manifests/serviceaccount.yaml` - ServiceAccount `dynamo-sa`
-- `deploy/utils/manifests/role.yaml` - Role `dynamo-role`
-- `deploy/utils/manifests/rolebinding.yaml` - RoleBinding `dynamo-binding`
 - `deploy/utils/manifests/pvc.yaml` - PVC `dynamo-pvc`
 
 If `HF_TOKEN` is provided, it also creates a secret for HuggingFace model access.
@@ -53,7 +67,6 @@ If `HF_TOKEN` is provided, it also creates a secret for HuggingFace model access
 After running the setup script, verify the resources by checking:
 
 ```bash
-kubectl get serviceaccount dynamo-sa -n $NAMESPACE
 kubectl get pvc dynamo-pvc -n $NAMESPACE
 ```
 
@@ -110,5 +123,4 @@ For complete benchmarking and profiling workflows:
 
 ## Notes
 
-- Profiling job manifest remains in `benchmarks/profiler/deploy/profile_sla_job.yaml` and relies on the ServiceAccount/PVC created by the setup script.
 - This setup is focused on benchmarking and profiling resources only - the main Dynamo platform must be installed separately.

@@ -100,11 +100,11 @@ impl KvConnectorLeaderRecorder {
         let drt = drt.inner().clone();
         let handle: Handle = drt.runtime().primary();
 
-        let ns = drt
-            .namespace(kvbm_connector::KVBM_CONNECTOR_LEADER)
-            .unwrap();
-
-        let kvbm_metrics = KvbmMetrics::new(&ns);
+        let kvbm_metrics = KvbmMetrics::new(
+            &KvbmMetricsRegistry::default(),
+            kvbm_metrics_endpoint_enabled(),
+            parse_kvbm_metrics_port(),
+        );
         let kvbm_metrics_clone = kvbm_metrics.clone();
 
         let token = CancellationToken::new();
@@ -145,6 +145,7 @@ impl KvConnectorLeaderRecorder {
                     .leader(leader_py)
                     .page_size(page_size)
                     .disable_device_pool(false)
+                    .kvbm_metrics(kvbm_metrics_clone.clone())
                     .build()
                     .await
                 {
@@ -164,9 +165,6 @@ impl KvConnectorLeaderRecorder {
                 );
 
                 let _ = slot_manager_cell.set(sm);
-
-                // another barrier sync to make sure worker init won't return before leader is ready
-                leader.spawn_leader_readiness_barrier(drt);
 
                 if leader_ready_tx.send("finished".to_string()).is_err() {
                     tracing::error!("main routine receiver dropped before result was sent");

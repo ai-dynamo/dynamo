@@ -13,7 +13,7 @@ This directory contains scripts for benchmarking the Dynamo router with prefix c
 - etcd and NATS running (required for Dynamo coordination)
 - Required Python packages:
   - `dynamo` package (with vllm and frontend modules)
-  - `genai-perf` for benchmarking
+  - `aiperf` for benchmarking
   - `matplotlib` for plotting results
   - `data-generator` package (install with `pip install -e ./benchmarks` from repo root)
 
@@ -38,17 +38,22 @@ This will start both etcd and NATS with the required configurations in the backg
 
 ## Usage Instructions
 
-### Step 1: Launch vLLM Workers
+### Step 1: Launch Workers
 
-Make sure you have 8 GPUs for these examples, unless you are using mockers (see below). First, start the vLLM worker engines in a terminal.
+Make sure you have 8 GPUs for these examples, unless you are using mockers (see below). First, start the worker engines in a terminal.
+
+The script supports three modes:
+- **`agg` (default)**: Aggregated/monolithic workers that handle both prefill and decode
+- **`decode`**: Workers dedicated to decode (token generation) phase
+- **`prefill`**: Workers dedicated to prefill (prompt processing) phase
 
 ```bash
-# Default: 8 vLLM workers with DeepSeek model (explicitly sets --block-size 64)
+# Default: 8 aggregated workers with DeepSeek model (handles both prefill and decode)
 ./run_engines.sh \
     --num-workers 8 \
     --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 
-# Example: 4 vLLM workers with larger model using tensor parallelism (2 GPUs per worker)
+# Example: 4 workers with larger model using tensor parallelism (2 GPUs per worker)
 # NOTE: this requires having Hopper or later GPU SKUs to support MXFP4 precision.
 ./run_engines.sh \
     --num-workers 4 \
@@ -56,19 +61,20 @@ Make sure you have 8 GPUs for these examples, unless you are using mockers (see 
     --tensor-parallel-size 2
 ```
 
-#### Prefill Workers
+#### Disaggregated Serving (Decode + Prefill Workers)
 
-You can also launch separate decode and prefill workers for disaggregated serving. This allows you to dedicate specific GPUs to prefill (prompt processing) and decode (token generation) tasks:
+You can launch separate decode and prefill workers for disaggregated serving. This allows you to dedicate specific GPUs to prefill (prompt processing) and decode (token generation) tasks:
 
 ```bash
 # Launch 4 decode workers (GPUs 0-3)
 ./run_engines.sh \
+    --decode \
     --num-workers 4 \
     --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 
 # Launch 4 prefill workers (GPUs 4-7)
 ./run_engines.sh \
-    --prefills \
+    --prefill \
     --num-workers 4 \
     --base-gpu-offset 4 \
     --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
@@ -110,29 +116,16 @@ To see all available router arguments, run:
 python -m dynamo.frontend --help
 ```
 
-For detailed explanations of router arguments (especially KV cache routing parameters), see the [KV Cache Routing documentation](../../docs/architecture/kv_cache_routing.md).
+For detailed explanations of router arguments (especially KV cache routing parameters), see the [KV Cache Routing documentation](../../docs/router/kv_cache_routing.md).
 
-#### Launching a Standalone Router for Prefill Workers (Optional)
+#### Disaggregated Serving with Automatic Prefill Routing
 
-If you're using disaggregated serving with separate prefill and decode workers, you should also launch a standalone router for prefill workers. This router handles routing prefill requests to dedicated prefill workers. When using a standalone prefill router, it's recommended to start the frontend (decode router) with `--kv-overlap-score-weight 0` for pure load balancing (as prefix-aware routing is now handled by the standalone router):
+When you launch prefill workers using `run_engines.sh --prefill`, the frontend automatically detects them and activates an internal prefill router. This prefill router:
+- Automatically routes initial token processing to dedicated prefill workers
+- Uses KV-aware routing regardless of the frontend's `--router-mode` setting
+- Seamlessly integrates with your decode workers for token generation
 
-```bash
-# Start the decode router with pure load balancing
-python -m dynamo.frontend \
-    --router-mode kv \
-    --router-reset-states \
-    --http-port 8000 \
-    --kv-overlap-score-weight 0
-
-# In another terminal, start the standalone router for prefill workers
-python -m dynamo.router \
-    --endpoint dynamo.prefill.generate \
-    --block-size 64 \
-    --router-reset-states \
-    --no-track-active-blocks
-```
-
-The `--router-reset-states` flag clears any previous state, and `--no-track-active-blocks` disables active block tracking (suitable for prefill-only routing where decode load is not relevant).
+No additional configuration is needed - simply launch both decode and prefill workers, and the system handles the rest. See the [KV Cache Routing documentation](../../docs/router/kv_cache_routing.md#disaggregated-serving-prefill-and-decode) for more details.
 
 **Note**: If you're unsure whether your backend engines correctly emit KV events for certain models (e.g., hybrid models like gpt-oss or nemotron nano 2), use the `--no-kv-events` flag to disable KV event tracking and use approximate KV indexing instead:
 
@@ -191,7 +184,15 @@ python prefix_ratio_benchmark.py --output-dir results/experiment1
 
 ### Step 4 (Alternative): Run Benchmarks with Real Trace Data
 
-Instead of synthetic benchmarks with controlled prefix ratios, you can benchmark using real trace data in [mooncake-style format](https://github.com/kvcache-ai/Mooncake/blob/d21da178bae8db9651cf18a76824c084145fc725/mooncake_trace.jsonl). This approach uses actual request patterns from production traces, potentially modified with synthesis parameters.
+Instead of synthetic benchmarks with controlled prefix ratios, you can benchmark using real trace data. This approach uses actual request patterns from production traces, potentially modified with synthesis parameters.
+
+First, download the mooncake trace dataset:
+
+```bash
+wget https://raw.githubusercontent.com/kvcache-ai/Mooncake/d21da178bae8db9651cf18a76824c084145fc725/mooncake_trace.jsonl
+```
+
+Then run the benchmark:
 
 ```bash
 python real_data_benchmark.py --input-dataset mooncake_trace.jsonl
@@ -224,11 +225,24 @@ python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multipli
 ```
 
 > [!Note]
-> At the time of writing this documentation, you may need to install the latest genai-perf from the main source branch to loadgen on the trace files:
+> At the time of writing this documentation, you may need to install the latest aiperf from the main source branch to loadgen on the trace files:
 > ```bash
-> pip install git+https://github.com/triton-inference-server/perf_analyzer.git#subdirectory=genai-perf
+> pip install git+https://github.com/ai-dynamo/aiperf.git
 > ```
-> However, by the time of release, the genai-perf version included in the vLLM runtime container should be up to date enough to use as-is.
+> However, by the time of release, the aiperf version included in the vLLM runtime container should be up to date enough to use as-is.
+
+## Benchmarking Results
+
+We benchmarked the Dynamo KV Router against a baseline round-robin routing strategy to evaluate the performance benefits of cache-aware routing. The experiments were conducted using deepseek-ai/DeepSeek-R1-Distill-Llama-8B on 8 L40S GPUs under aggregated serving, with the following configuration:
+
+- **ISL/OSL**: 14000/200
+- **Prefix Ratios**: 0.1, 0.3, 0.5, 0.7, 0.9
+- **Workload**: 200 requests organized into 20 prefix groups
+- **Concurrency**: 20 concurrent requests
+
+![Router Performance Comparison](results.png)
+
+The results demonstrate that the Dynamo KV Router consistently outperforms round-robin routing across all prefix ratio settings, with performance gains increasing as the prefix ratio grows. This highlights the importance of cache-aware routing for workloads with significant prefix sharing such as multi-turn conversations, document Q&A, and prompt engineering iterations.
 
 ## Troubleshooting
 

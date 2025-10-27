@@ -7,6 +7,7 @@ import os
 import random
 
 import pandas as pd
+from prefix_data_generator.hasher import RollingHasher
 from tqdm import tqdm
 
 
@@ -154,8 +155,9 @@ def convert_to_mooncake(df, block_size, num_hash_blocks):
         DataFrame in mooncake format with columns: timestamp, input_length, output_length, hash_ids
     """
     mooncake_data = []
+    hasher = RollingHasher()  # Initialize once to maintain global state
 
-    for _, row in tqdm(df.iterrows(), total=len(df)):
+    for idx, row in tqdm(df.iterrows(), total=len(df)):
         # Convert timestamp from seconds to milliseconds (integer)
         timestamp_ms = int(row["Timestamp"] * 1000)
 
@@ -166,10 +168,14 @@ def convert_to_mooncake(df, block_size, num_hash_blocks):
         # Calculate hash array length based on block size
         hash_array_length = math.ceil(input_length / block_size)
 
-        # Generate random hash IDs
-        hash_ids = [
-            random.randint(0, num_hash_blocks) for _ in range(hash_array_length)
+        # Generate random content blocks (each block is a tuple of random integers)
+        # Using request index as seed for reproducibility
+        random.seed(idx)
+        content_blocks = [
+            (random.randint(0, num_hash_blocks),) for _ in range(hash_array_length)
         ]
+
+        hash_ids = hasher(content_blocks)
 
         mooncake_data.append(
             {

@@ -29,7 +29,6 @@ if TYPE_CHECKING:
 # from dynamo.llm.vllm_integration.rust import SchedulerOutput as RustSchedulerOutput
 
 from dynamo.llm import KvbmLeader
-from dynamo.llm.utils import find_and_set_available_port_from_env
 from dynamo.llm.vllm_integration.rust import KvbmRequest
 from dynamo.llm.vllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
 from dynamo.llm.vllm_integration.rust import SchedulerOutput as RustSchedulerOutput
@@ -54,7 +53,6 @@ class KvConnectorLeader:
     def __init__(self, vllm_config: "VllmConfig", engine_id: str, **kwargs):
         drt = kwargs.get("drt", None)
         if drt is None:
-            find_and_set_available_port_from_env("DYN_SYSTEM_PORT")
             self.drt = DistributedRuntime.detached()
         else:
             self.drt = drt
@@ -194,7 +192,9 @@ class KvConnectorLeader:
         if self._connector.has_slot(request.request_id):
             return None
 
-        if bool(request.mm_positions):
+        if bool(getattr(request, "mm_features", None)) or bool(
+            getattr(request, "mm_positions", None)
+        ):
             raise ValueError("Unsupported request - requires mm extra keys")
 
         all_token_ids = request.all_token_ids

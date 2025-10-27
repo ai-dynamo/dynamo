@@ -5,7 +5,6 @@ use anyhow::Context as _;
 use dynamo_llm::entrypoint::EngineConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
-use dynamo_runtime::CancellationToken;
 use dynamo_runtime::distributed::DistributedConfig;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
@@ -23,19 +22,34 @@ pub async fn run(
     mut flags: Flags,
 ) -> anyhow::Result<()> {
     //
+    // Download
+    //
+
+    let maybe_remote_repo = flags
+        .model_path_pos
+        .clone()
+        .or_else(|| flags.model_path_flag.clone());
+    let model_path = match maybe_remote_repo {
+        None => None,
+        Some(p) if p.exists() => {
+            // Already a local path
+            Some(p)
+        }
+        Some(p) => {
+            // model_path might be an HF repo, not a local path. Resolve it by downloading.
+            // Mocker only needs tokenizer, not weights
+            let ignore_weights = matches!(out_opt, Some(Output::Mocker));
+            Some(LocalModel::fetch(&p.display().to_string(), ignore_weights).await?)
+        }
+    };
+
+    //
     // Configure
     //
 
     let mut builder = LocalModelBuilder::default();
     builder
-        .model_path(
-            flags
-                .model_path_pos
-                .clone()
-                .or(flags.model_path_flag.clone()),
-        )
         .model_name(flags.model_name.clone())
-        .model_config(flags.model_config.clone())
         .kv_cache_block_size(flags.kv_cache_block_size)
         // Only set if user provides. Usually loaded from tokenizer_config.json
         .context_length(flags.context_length)
@@ -46,6 +60,11 @@ pub async fn run(
         .request_template(flags.request_template.clone())
         .migration_limit(flags.migration_limit)
         .is_mocker(matches!(out_opt, Some(Output::Mocker)));
+
+    // Only the worker has a model path
+    if let Some(model_path) = model_path {
+        builder.model_path(model_path);
+    }
 
     // TODO: old, address this later:
     // If `in=dyn` we want the trtllm/sglang/vllm subprocess to listen on that endpoint.
@@ -72,20 +91,12 @@ pub async fn run(
     print_cuda(&out_opt);
 
     // Now that we know the output we're targeting, check if we expect it to work
-    flags.validate(&local_model, &in_opt, &out_opt)?;
+    flags.validate(&in_opt, &out_opt)?;
 
     // Make an engine from the local_model, flags and output.
-    let engine_config = engine_for(
-        runtime.primary_token(),
-        out_opt,
-        flags.clone(),
-        local_model,
-        rt.clone(),
-    )
-    .await?;
-    //
-    // Run in from an input
-    //
+    let engine_config = engine_for(out_opt, flags.clone(), local_model, rt.clone()).await?;
+
+    // Run it from an input
     dynamo_llm::entrypoint::input::run_input(rt, in_opt, engine_config).await?;
 
     Ok(())
@@ -94,7 +105,6 @@ pub async fn run(
 /// Create the engine matching `out_opt`
 /// Note validation happens in Flags::validate. In here assume everything is going to work.
 async fn engine_for(
-    cancel_token: CancellationToken,
     out_opt: Output,
     flags: Flags,
     local_model: LocalModel,
@@ -120,12 +130,6 @@ async fn engine_for(
             model: Box::new(local_model),
             is_static: flags.static_worker,
         }),
-        #[cfg(feature = "llamacpp")]
-        Output::LlamaCpp => Ok(EngineConfig::StaticCore {
-            engine: dynamo_engine_llamacpp::make_engine(cancel_token, &local_model).await?,
-            model: Box::new(local_model),
-            is_static: flags.static_worker,
-        }),
         Output::Mocker => {
             let Either::Right(drt) = rt else {
                 panic!("Mocker requires a distributed runtime to run.");
@@ -141,23 +145,22 @@ async fn engine_for(
                 engine,
                 model: Box::new(local_model),
                 is_static: flags.static_worker,
+                is_prefill: false,
             })
         }
     }
 }
 
-/// If the user will benefit from CUDA/Metal/Vulkan, remind them to build with it.
+/// If the user will benefit from CUDA or Metal, remind them to build with it.
 /// If they have it, celebrate!
-// Only mistralrs and llamacpp need to be built with CUDA.
+// Only mistralrs needs to be built with CUDA.
 // The Python engines only need it at runtime.
-#[cfg(any(feature = "mistralrs", feature = "llamacpp"))]
+#[cfg(feature = "mistralrs")]
 fn print_cuda(output: &Output) {
     // These engines maybe be compiled in, but are they the chosen one?
     match output {
         #[cfg(feature = "mistralrs")]
         Output::MistralRs => {}
-        #[cfg(feature = "llamacpp")]
-        Output::LlamaCpp => {}
         _ => {
             return;
         }
@@ -171,15 +174,11 @@ fn print_cuda(output: &Output) {
     {
         tracing::info!("Metal on");
     }
-    #[cfg(feature = "vulkan")]
-    {
-        tracing::info!("Vulkan on");
-    }
-    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
-    tracing::info!("CPU mode. Rebuild with `--features cuda|metal|vulkan` for better performance");
+    #[cfg(not(any(feature = "cuda", feature = "metal")))]
+    tracing::info!("CPU mode. Rebuild with `--features cuda|metal` for better performance");
 }
 
-#[cfg(not(any(feature = "mistralrs", feature = "llamacpp")))]
+#[cfg(not(feature = "mistralrs"))]
 fn print_cuda(_output: &Output) {}
 
 fn default_engine_for(_local_model: &LocalModel) -> Output {

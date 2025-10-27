@@ -22,7 +22,7 @@ use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::grpc::service::openai::completion_response_stream;
-use crate::grpc::service::tensor::tensor_response_stream;
+use crate::grpc::service::tensor::{ExtendedNvCreateTensorResponse, tensor_response_stream};
 use std::convert::{TryFrom, TryInto};
 use tonic::{Request, Response, Status, transport::Server};
 
@@ -57,11 +57,11 @@ impl State {
         }
     }
 
-    pub fn new_with_etcd(manager: Arc<ModelManager>, etcd_client: Option<etcd::Client>) -> Self {
+    pub fn new_with_etcd(manager: Arc<ModelManager>, etcd_client: etcd::Client) -> Self {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
-            etcd_client,
+            etcd_client: Some(etcd_client),
         }
     }
 
@@ -155,7 +155,10 @@ impl KserveServiceConfigBuilder {
         let config: KserveServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let state = Arc::new(State::new_with_etcd(model_manager, config.etcd_client));
+        let state = match config.etcd_client {
+            Some(etcd_client) => Arc::new(State::new_with_etcd(model_manager, etcd_client)),
+            None => Arc::new(State::new(model_manager)),
+        };
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
@@ -192,18 +195,21 @@ impl GrpcInferenceService for KserveService {
 
         // [gluo TODO] refactor to reuse code, inference logic is largely the same
         if self.state().is_tensor_model(&model) {
-            // Fallback handling by assuming the model is OpenAI Completions model
+            let set_raw_output_contents = !request.raw_input_contents.is_empty();
             let tensor_request: NvCreateTensorRequest = NvCreateTensorRequest::try_from(request)
                 .map_err(|e| Status::invalid_argument(format!("Failed to parse request: {}", e)))?;
 
             let stream = tensor_response_stream(self.state_clone(), tensor_request, false).await?;
 
-            let tensor_response = NvCreateTensorResponse::from_annotated_stream(stream)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to fold completions stream: {:?}", e);
-                    Status::internal(format!("Failed to fold completions stream: {}", e))
-                })?;
+            let tensor_response = ExtendedNvCreateTensorResponse {
+                response: NvCreateTensorResponse::from_annotated_stream(stream)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Failed to fold completions stream: {:?}", e);
+                        Status::internal(format!("Failed to fold completions stream: {}", e))
+                    })?,
+                set_raw_output_contents,
+            };
 
             let mut reply: ModelInferResponse = tensor_response.try_into().map_err(|e| {
                 Status::invalid_argument(format!("Failed to parse response: {}", e))
@@ -213,6 +219,8 @@ impl GrpcInferenceService for KserveService {
             return Ok(Response::new(reply));
         }
 
+        // [gluo FIXME] check model existence first, otherwise the true error
+        // is masked by "Failed to parse request" below.
         // Fallback handling by assuming the model is OpenAI Completions model
         let mut completion_request: NvCreateCompletionRequest = request
             .try_into()
@@ -295,6 +303,7 @@ impl GrpcInferenceService for KserveService {
                 if state.is_tensor_model(&model) {
                     // Must keep track of 'request_id' which will be returned in corresponding response
                     let request_id = request.id.clone();
+                    let set_raw_output_contents = !request.raw_input_contents.is_empty();
                     let tensor_request: NvCreateTensorRequest = request.try_into().map_err(|e| {
                         Status::invalid_argument(format!("Failed to parse request: {}", e))
                     })?;
@@ -305,6 +314,9 @@ impl GrpcInferenceService for KserveService {
                     while let Some(response) = stream.next().await {
                         match response.data {
                             Some(data) => {
+                                let data = ExtendedNvCreateTensorResponse {response: data,
+                                    set_raw_output_contents,
+                                };
                                 let mut reply = ModelStreamInferResponse::try_from(data).map_err(|e| {
                                     Status::invalid_argument(format!("Failed to parse response: {}", e))
                                 })?;
