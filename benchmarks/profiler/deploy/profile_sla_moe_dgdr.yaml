@@ -10,11 +10,10 @@ metadata:
 spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
-  profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
-  dgdImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
 
   # ProfilingConfig maps directly to the profile_sla.py config format
   profilingConfig:
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
     config:
       # Engine configuration
       engine:
@@ -38,6 +37,10 @@ spec:
     configMapRef:
       name: deepseek-r1-config
       key: tep16p-dep16d-disagg.yaml
+
+  # Deployment overrides for the auto-created DGD
+  deploymentOverrides:
+    workersImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
 
   # Automatically create DynamoGraphDeployment after profiling
   autoApply: true

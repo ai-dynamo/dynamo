@@ -9,11 +9,10 @@ metadata:
 spec:
   model: Qwen/Qwen3-32B
   backend: trtllm
-  profilerImage: "nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-540.5"
-  dgdImage: "nvcr.io/nvidian/dynamo-dev/trtllm-runtime:dep-540.5"
 
   # ProfilingConfig maps directly to the profile_sla.py config format
   profilingConfig:
+    profilerImage: "nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-540.5"
     config:
       # Sweep/profiling configuration
       sweep:
@@ -29,6 +28,10 @@ spec:
         osl: 150    # Output sequence length
         ttft: 500.0 # Time To First Token target (milliseconds)
         itl: 30.0   # Inter-Token Latency target (milliseconds)
+
+  # Deployment overrides for the auto-created DGD
+  deploymentOverrides:
+    workersImage: "nvcr.io/nvidian/dynamo-dev/trtllm-runtime:dep-540.5"
 
   # Automatically create DynamoGraphDeployment after profiling
   autoApply: true

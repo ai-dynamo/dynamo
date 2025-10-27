@@ -39,7 +39,7 @@ A **DynamoGraphDeploymentRequest (DGDR)** is a Kubernetes Custom Resource that s
 - **How** it should perform (SLA targets: `ttft`, `itl`)
 - **Where** it should run (optional GPU preferences)
 - **Which** backend to use (`backend`: vllm, sglang, or trtllm)
-- **Which** images to use (`profilerImage`, `dgdImage`)
+- **Which** images to use (`profilingConfig.profilerImage`, `deploymentOverrides.workersImage`)
 
 The Dynamo Operator watches for DGDRs and automatically:
 1. Discovers available GPU resources in your cluster
@@ -67,20 +67,22 @@ Before creating a DGDR, ensure:
 
 Each DGDR requires you to specify container images for the profiling and deployment process:
 
-**profilerImage** (Required):
+**profilingConfig.profilerImage** (Required):
 Specifies the container image used for the profiling job itself. This image must contain the profiler code and dependencies needed for SLA-based profiling.
 
-**dgdImage** (Optional):
-Specifies the container image used for DynamoGraphDeployment components (frontend, workers, planner). This image is used for:
+**deploymentOverrides.workersImage** (Optional):
+Specifies the container image used for DynamoGraphDeployment worker components (frontend, workers, planner). This image is used for:
 - Temporary DGDs created during online profiling (for performance measurements)
 - The final DGD deployed after profiling completes
 
-If `dgdImage` is omitted, the image from the base config file (e.g., `disagg.yaml`) is used. You may use our public images (0.6.1 and later) or build and push your own.
+If `workersImage` is omitted, the image from the base config file (e.g., `disagg.yaml`) is used. You may use our public images (0.6.1 and later) or build and push your own.
 
 ```yaml
 spec:
-  profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
-  dgdImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"  # Optional
+  profilingConfig:
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+  deploymentOverrides:
+    workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"  # Optional
 ```
 
 ## Quick Start: Deploy with DGDR
@@ -105,10 +107,9 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"     # Update to your model
   backend: vllm                # Backend: vllm, sglang, or trtllm
-  profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"  # Required
-  dgdImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"       # Optional
 
   profilingConfig:
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"  # Required
     config:
       sla:
         isl: 3000    # Adjust to your workload
@@ -118,6 +119,9 @@ spec:
 
       sweep:
         use_ai_configurator: false  # Set to true for fast profiling (TensorRT-LLM only)
+
+  deploymentOverrides:
+    workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"  # Optional
 
   autoApply: true  # Auto-deploy after profiling
 ```
@@ -184,16 +188,16 @@ curl http://localhost:8000/v1/models
 |-------|------|-------------|
 | `spec.model` | string | Model identifier (e.g., "meta-llama/Llama-3-70b") |
 | `spec.backend` | enum | Inference backend: `vllm`, `sglang`, or `trtllm` |
-| `spec.profilerImage` | string | Container image for profiling job |
+| `spec.profilingConfig.profilerImage` | string | Container image for profiling job |
 | `spec.profilingConfig.config.sla` | object | SLA targets (isl, osl, ttft, itl) |
 
 ### Optional Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `spec.dgdImage` | string | Container image for DGD components (frontend, workers, planner). If omitted, uses image from base config file. |
+| `spec.deploymentOverrides.workersImage` | string | Container image for DGD worker components. If omitted, uses image from base config file. |
 | `spec.autoApply` | boolean | Automatically deploy DGD after profiling (default: false) |
-| `spec.deploymentOverrides` | object | Customize metadata (name, namespace, labels, annotations) for auto-created DGD |
+| `spec.deploymentOverrides` | object | Customize metadata (name, namespace, labels, annotations) and image for auto-created DGD |
 
 ### SLA Configuration
 
@@ -271,10 +275,9 @@ metadata:
 spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
-  profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
-  dgdImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
 
   profilingConfig:
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
     configMapRef:
       name: deepseek-r1-config
       key: disagg.yaml  # Must match the key used in --from-file
@@ -290,6 +293,9 @@ spec:
         system: h200_sxm
         model_name: DEEPSEEK_V3
         backend_version: "0.20.0"
+
+  deploymentOverrides:
+    workersImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
 
   autoApply: true
 ```

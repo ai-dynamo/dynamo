@@ -183,6 +183,7 @@ spec:
   backend: vllm                    # High-level: inference backend
 
   profilingConfig:
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"  # Required
     configMapRef:                  # Optional: base DGD config
       name: my-config
       key: disagg.yaml
@@ -193,6 +194,9 @@ spec:
       sweep: { ... }
       aic: { ... }
       planner: { ... }
+
+  deploymentOverrides:             # Optional
+    workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
 ```
 
 ### SLA Configuration (Required)
@@ -325,10 +329,9 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
-  dgdImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
 
   profilingConfig:
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
     config:
       sla:
         isl: 3000
@@ -344,6 +347,9 @@ spec:
         use_ai_configurator: false
         skip_existing_results: false
 
+  deploymentOverrides:
+    workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+
   autoApply: true
 ```
 
@@ -357,10 +363,9 @@ metadata:
 spec:
   model: "Qwen/Qwen3-32B"
   backend: trtllm
-  profilerImage: "nvcr.io/nvidia/ai-dynamo/trtllm-runtime:0.6.1"
-  dgdImage: "nvcr.io/nvidia/ai-dynamo/trtllm-runtime:0.6.1"
 
   profilingConfig:
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/trtllm-runtime:0.6.1"
     config:
       sla:
         isl: 4000
@@ -376,6 +381,9 @@ spec:
         model_name: QWEN3_32B
         backend_version: "0.20.0"
 
+  deploymentOverrides:
+    workersImage: "nvcr.io/nvidia/ai-dynamo/trtllm-runtime:0.6.1"
+
   autoApply: true
 ```
 
@@ -389,10 +397,9 @@ metadata:
 spec:
   model: "deepseek-ai/DeepSeek-R1"
   backend: sglang
-  profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
-  dgdImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
 
   profilingConfig:
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
     config:
       sla:
         isl: 2048
@@ -406,6 +413,9 @@ spec:
 
       engine:
         is_moe_model: true       # Enable MoE profiling mode
+
+  deploymentOverrides:
+    workersImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
 
   autoApply: true
 ```
@@ -456,6 +466,7 @@ AssertionError: num_heads <N> should be divisible by tp_size <M> and the divisio
 
 ```yaml
 profilingConfig:
+  profilerImage: "nvcr.io/nvidia/ai-dynamo/trtllm-runtime:0.6.1"
   config:
     hardware:
       max_num_gpus_per_engine: 4  # For Qwen3-0.6B (16 heads / 4 = max TP of 4)
