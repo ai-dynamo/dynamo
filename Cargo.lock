@@ -2096,7 +2096,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-async-openai"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-openai-macros",
  "backoff",
@@ -2134,7 +2134,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-mistralrs"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2152,7 +2152,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ahash",
  "aho-corasick",
@@ -2247,7 +2247,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "dynamo-async-openai",
@@ -2265,7 +2265,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-run"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2293,7 +2293,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2359,7 +2359,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "bytemuck",
  "derive-getters",
@@ -4294,7 +4294,7 @@ checksum = "58f929b4d672ea937a23a1ab494143d968337a5f47e56d0815df1e0890ddf174"
 
 [[package]]
 name = "libdynamo_llm"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-once-cell",

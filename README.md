@@ -179,7 +179,7 @@ Rerun with `curl -N` and change `stream` in the request to `true` to get the res
 Dynamo provides comprehensive benchmarking tools to evaluate and optimize your deployments:
 
 - **[Benchmarking Guide](docs/benchmarks/benchmarking.md)** – Compare deployment topologies (aggregated vs. disaggregated vs. vanilla vLLM) using AIPerf
-- **[Pre-Deployment Profiling](docs/benchmarks/pre_deployment_profiling.md)** – Optimize configurations before deployment to meet SLA requirements
+- **[SLA-Driven Dynamo Deployments](docs/planner/sla_planner_quickstart.md)** – Optimize your deployment to meet SLA requirements
 
 # Engines
 
