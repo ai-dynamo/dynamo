@@ -65,12 +65,13 @@ impl Client {
         })
     }
 
-    // Client with auto-discover instances using etcd
+    // Client with auto-discover instances: ServiceDiscovery or ETCD
     pub(crate) async fn new_dynamic(endpoint: Endpoint) -> Result<Self> {
-        // Always use ServiceDiscovery for now (we have it on DRT)
-        // In the future, we can add a flag to determine which backend to use
-        eprintln!("[DEBUG] new_dynamic called, using ServiceDiscovery v2");
-        Self::new_dynamic_v2(endpoint).await
+        if crate::config::is_service_discovery_enabled() {
+            Self::new_dynamic_v2(endpoint).await
+        } else {
+            Self::new_dynamic_etcd(endpoint).await
+        }
     }
 
     // V2: Client with auto-discover instances using ServiceDiscovery
@@ -201,14 +202,11 @@ impl Client {
                     .map(|instance| instance.id())
                     .collect();
 
-                println!("[Client::monitor] 📥 Received instance update: count={}, ids={:?}", 
-                    instance_ids.len(), instance_ids);
-
                 // TODO: this resets both tracked available and free instances
                 client.instance_avail.store(Arc::new(instance_ids.clone()));
                 client.instance_free.store(Arc::new(instance_ids.clone()));
-
-                println!("[Client::monitor] ✅ Updated instance_avail and instance_free");
+                
+                tracing::debug!("Instance source updated with {} instances", instance_ids.len());
 
                 if let Err(err) = rx.changed().await {
                     tracing::error!("The Sender is dropped: {}", err);
@@ -328,33 +326,12 @@ impl Client {
         let namespace = endpoint.component.namespace.name();
         let component = endpoint.component.name();
 
-        // Get service discovery interface
+        // Get service discovery interface and set up watch for instance changes
         let discovery = drt.service_discovery();
-        
-        // List current instances
-        let initial_instances = discovery.list_instances(&namespace, component).await?;
-
-        // Set up watch for instance changes
         let mut instance_watch = discovery.watch(&namespace, component).await?;
 
+        // Watch automatically streams existing instances as ADDED events, so no need to call list_instances()
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(vec![]);
-
-        // Convert discovery instances to runtime instances
-        // Store mapping of pod_name -> (runtime_instance, pod_name) for later use
-        let mut runtime_instances: Vec<Instance> = Vec::new();
-        let mut pod_name_mappings: Vec<(String, Instance)> = Vec::new();
-        
-        for disc_instance in initial_instances {
-            let pod_name = disc_instance.instance_id.clone();
-            if let Some(instance) = Self::convert_discovery_instance_to_runtime_instance(disc_instance, endpoint) {
-                println!("[Client] Initial: pod_name={} -> runtime_id={}", pod_name, instance.instance_id);
-                pod_name_mappings.push((pod_name, instance.clone()));
-                runtime_instances.push(instance);
-            }
-        }
-
-        // Send initial instances
-        let _ = watch_tx.send(runtime_instances.clone());
 
         let secondary = endpoint.component.drt.runtime.secondary().clone();
         let endpoint_name = endpoint.name.clone();
@@ -363,19 +340,10 @@ impl Client {
 
         // Spawn background task to process instance events
         secondary.spawn(async move {
-            println!("[Client] Starting ServiceDiscovery watcher for {}/{}", namespace_clone, component_clone);
+            tracing::debug!("Starting ServiceDiscovery watcher for {}/{}", namespace_clone, component_clone);
             
-            // Map by pod name (discovery instance_id), not runtime instance_id (u64)
-            // This ensures proper removal when Kubernetes sends REMOVED events
+            // Map instances by their discovery instance_id (string) for proper removal tracking
             let mut map: HashMap<String, Instance> = HashMap::new();
-            for (pod_name, inst) in pod_name_mappings {
-                println!("[Client] Initializing map: pod_name={} -> runtime_id={}", 
-                    pod_name, inst.instance_id);
-                map.insert(pod_name, inst);
-            }
-            
-            println!("[Client] Initial map has {} instances with keys: {:?}", 
-                map.len(), map.keys().collect::<Vec<_>>());
 
             loop {
                 let event = tokio::select! {
@@ -396,48 +364,27 @@ impl Client {
 
                 match event {
                     crate::discovery::InstanceEvent::Added(disc_instance) => {
-                        println!("[Client] ➕ ADDED event: pod_name={}", disc_instance.instance_id);
-                        
-                        // Assumption: 1 endpoint per component, so if ns/comp match, endpoint matches
-                        if let Some(runtime_instance) = Self::convert_discovery_instance_to_runtime_instance_static(
+                        if let Some(runtime_instance) = Self::convert_discovery_instance_to_runtime(
                             disc_instance.clone(),
                             &namespace_clone,
                             &component_clone,
                             &endpoint_name,
                         ) {
-                            println!("[Client]    Converted to runtime_id={}, inserting with key=pod_name:{}", 
-                                runtime_instance.instance_id, disc_instance.instance_id);
-                            
-                            // FIX: Use pod name (disc_instance.instance_id) as key
-                            // so that removal events can find and remove the instance
+                            // Use discovery instance_id as key for proper removal tracking
                             map.insert(disc_instance.instance_id.clone(), runtime_instance);
-                            
-                            println!("[Client]    Map now has {} instances: {:?}", 
-                                map.len(), map.keys().collect::<Vec<_>>());
+                            tracing::debug!("Added instance {}, total instances: {}", disc_instance.instance_id, map.len());
                         }
                     }
                     crate::discovery::InstanceEvent::Removed(instance_id) => {
-                        println!("[Client] ➖ REMOVED event: pod_name={}", instance_id);
-                        println!("[Client]    Map keys before removal: {:?}", map.keys().collect::<Vec<_>>());
-                        
-                        let removed = map.remove(&instance_id);
-                        
-                        if removed.is_some() {
-                            println!("[Client]    ✅ Successfully removed from map");
+                        if map.remove(&instance_id).is_some() {
+                            tracing::debug!("Removed instance {}, total instances: {}", instance_id, map.len());
                         } else {
-                            println!("[Client]    ⚠️  WARNING: Key not found in map!");
+                            tracing::warn!("Attempted to remove non-existent instance: {}", instance_id);
                         }
-                        
-                        println!("[Client]    Map now has {} instances: {:?}", 
-                            map.len(), map.keys().collect::<Vec<_>>());
                     }
                 }
 
                 let instances: Vec<Instance> = map.values().cloned().collect();
-                let instance_ids: Vec<u64> = instances.iter().map(|i| i.instance_id).collect();
-                
-                println!("[Client] 📤 Sending {} instances to watchers: runtime_ids={:?}", 
-                    instances.len(), instance_ids);
 
                 if watch_tx.send(instances).is_err() {
                     tracing::debug!("Unable to send watch updates; shutting down ServiceDiscovery watcher for {}/{}", namespace_clone, component_clone);
@@ -455,44 +402,15 @@ impl Client {
     }
 
     /// Convert a discovery::Instance to a runtime Instance
-    fn convert_discovery_instance_to_runtime_instance(
-        disc_instance: crate::discovery::Instance,
-        endpoint: &Endpoint,
-    ) -> Option<Instance> {
-        let namespace = endpoint.component.namespace.name();
-        let component = endpoint.component.name();
-        let endpoint_name = &endpoint.name;
-        
-        println!("[Client::convert] Converting discovery instance: pod_name={}", 
-            disc_instance.instance_id);
-        
-        Self::convert_discovery_instance_to_runtime_instance_static(
-            disc_instance,
-            &namespace,
-            component,
-            endpoint_name,
-        )
-    }
-
-    /// Static version that doesn't need endpoint reference
-    fn convert_discovery_instance_to_runtime_instance_static(
+    fn convert_discovery_instance_to_runtime(
         disc_instance: crate::discovery::Instance,
         namespace: &str,
         component: &str,
         endpoint_name: &str,
     ) -> Option<Instance> {
-        let id_str = &disc_instance.instance_id;
+        let instance_id = crate::discovery::instance_id_to_u64(&disc_instance.instance_id);
         
-        // Parse instance_id as u64, or hash if not numeric (e.g., UUID)
-        let instance_id = id_str.parse::<u64>().unwrap_or_else(|_| {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            id_str.hash(&mut hasher);
-            hasher.finish()
-        });
-        
-        // Hardcode transport for now - construct NATS subject
-        // Must match server side: service_name is slugified, then formatted with endpoint
+        // Construct NATS subject (must match server side)
         use crate::transports::nats::Slug;
         let service_name_raw = format!("{}_{}", namespace, component);
         let service_name = Slug::slugify(&service_name_raw).to_string();
