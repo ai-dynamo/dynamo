@@ -60,6 +60,7 @@ pub struct Instance {
     pub metadata: Value,
 }
 
+// add a getter for the metadata
 impl Instance {
     pub fn new(instance_id: String, metadata: Value) -> Self {
         Self {
