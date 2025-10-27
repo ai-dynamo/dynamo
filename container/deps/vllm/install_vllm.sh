@@ -139,10 +139,17 @@ echo "  USE_LOCAL_VLLM=$USE_LOCAL_VLLM | USE_LOCAL_DEEPEP=$USE_LOCAL_DEEPEP"
 
 if [ -n "$USE_LOCAL_VLLM" ]; then
     echo "\n=== Using local vLLM directory ==="
-    echo "Copying from: $USE_LOCAL_VLLM"
-    cd $INSTALLATION_DIR
-    cp -r "$USE_LOCAL_VLLM" vllm
-    cd vllm
+    echo "Local vLLM at: $USE_LOCAL_VLLM"
+    
+    # For Docker builds, vLLM should already be at /opt/vllm
+    # For other uses, we might need to handle it differently
+    if [ ! -d "$USE_LOCAL_VLLM" ]; then
+        echo "Error: Local vLLM directory not found at $USE_LOCAL_VLLM"
+        exit 1
+    fi
+    
+    # Just use the local vLLM where it is
+    cd "$USE_LOCAL_VLLM"
 else
     echo "\n=== Cloning vLLM repository ==="
     # We need to clone to install dependencies
@@ -259,37 +266,16 @@ fi
 echo "✓ DeepGEMM installation completed"
 
 echo "\n=== Installing EP Kernels (PPLX and DeepEP) ==="
-if [ -n "$USE_LOCAL_DEEPEP" ]; then
-    echo "Using local DeepEP from: $USE_LOCAL_DEEPEP"
-    
-    # Create ep_kernels directory structure if needed
-    mkdir -p ep_kernels/ep_kernels_workspace
-    cd ep_kernels/
-    
-    # Copy local DeepEP to the workspace
-    cp -r "$USE_LOCAL_DEEPEP" ep_kernels_workspace/DeepEP
-    
-    # Install local DeepEP
-    cd ep_kernels_workspace/DeepEP
-    if [ -f "install.sh" ]; then
-        echo "Running local DeepEP install script..."
-        bash install.sh
-    elif [ -f "setup.py" ] || [ -f "pyproject.toml" ]; then
-        echo "Installing local DeepEP as Python package..."
-        uv pip install -e .
-    else
-        echo "Warning: No setup.py or pyproject.toml found in local DeepEP"
-    fi
-    
-    # Still need to install other EP components (like PPLX) if they exist
-    cd $INSTALLATION_DIR/vllm/tools/ep_kernels/
-    if [ -f "install_python_libraries.sh" ]; then
-        echo "Running vLLM's EP kernels installation for other components..."
-        # Try to install other components, but don't fail if DeepEP is already installed
-        TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" bash install_python_libraries.sh || true
-    fi
+cd ep_kernels/
+
+# Check if the local script exists (when using local vLLM, you might have this script)
+if [ -n "$USE_LOCAL_DEEPEP" ] && [ -f "install_python_libraries_local_clean.sh" ]; then
+    echo "Using local DeepEP with install_python_libraries_local_clean.sh"
+    echo "Local DeepEP source: $USE_LOCAL_DEEPEP"
+    # The local script expects DeepEP at /workspace/DeepEP
+    cp -r "$USE_LOCAL_DEEPEP" /workspace/DeepEP
+    TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" bash install_python_libraries_local_clean.sh
 else
-    cd ep_kernels/
     TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" bash install_python_libraries.sh
 fi
 

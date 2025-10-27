@@ -127,9 +127,10 @@ cleanup() {
 # Set trap to cleanup on exit
 trap cleanup EXIT
 
-# Copy dynamo directory to build context
+# Copy dynamo directory contents to build context (not as subdirectory)
 print_info "Copying dynamo directory to build context..."
-cp -r "$SCRIPT_DIR" "$BUILD_CONTEXT/dynamo"
+# Use cp -a to preserve everything including hidden files
+cp -a "$SCRIPT_DIR/." "$BUILD_CONTEXT/"
 
 # Copy or link local directories to build context
 if [ -n "$VLLM_PATH" ]; then
@@ -162,7 +163,7 @@ cd "$BUILD_CONTEXT"
 if DOCKER_BUILDKIT=1 docker build \
     $BUILD_ARGS \
     $DOCKER_BUILD_ARGS \
-    -f dynamo/container/Dockerfile.vllm \
+    -f container/Dockerfile.vllm \
     -t "$IMAGE_TAG" \
     . ; then
     print_info "Docker image built successfully: $IMAGE_TAG"
