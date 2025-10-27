@@ -18,10 +18,10 @@ pub async fn create_lease(
 
     tokio::spawn(async move {
         let mut retry_count = 0;
-        const MAX_RETRIES: u32 = 10;
-        const RETRY_DELAY: Duration = Duration_from_millisecs(500);
+        const MAX_RETRIES: u32 = 12;
+        const RETRY_DELAY: Duration = Duration::from_millis(500);
         loop {
-                match keep_alive(lease_client, id, ttl, child).await {
+                match keep_alive(lease_client.clone(), id, ttl, child.clone()).await {
                     Ok(_) => {
                         tracing::trace!("keep alive task exited successfully");
                         retry_count = 0;
