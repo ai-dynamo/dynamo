@@ -31,7 +31,7 @@ spec:
         command: ["python", "-m", "benchmarks.profiler.profile_sla"]
         args:
           - --config
-          - /sgl-workspace/dynamo/recipes/deepseek-r1/sglang-wideep/tep16p-dep16d-disagg.yaml
+          - /sgl-workspace/dynamo/recipes/deepseek-r1/sglang/disagg-16gpu/deploy.yaml
           - --output-dir
           - /data/profiling_results
           - --namespace
