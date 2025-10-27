@@ -315,7 +315,7 @@ def generate_framework_versions(
         [
             "## See Also",
             "",
-            "- [Support Matrix](docs/support_matrix.md) - Supported platforms and versions",
+            "- [Support Matrix](docs/reference/support-matrix.md) - Supported platforms and versions",
             "- [Dependency Reports](.github/reports/README.md) - Full dependency tracking (262 total dependencies)",
             "- [Dependency Extraction System](.github/scripts/dependency-extraction/README.md) - How this doc is generated",
             "- [Container README](container/README.md) - Container build and usage details",

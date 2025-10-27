@@ -99,4 +99,3 @@ DEFAULT_CRITICAL_DEPENDENCIES = [
 
 # Baseline dependency count for warnings (updated dynamically from previous CSV)
 DEFAULT_BASELINE_COUNT = 251
-

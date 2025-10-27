@@ -214,4 +214,3 @@ class PythonDependencyExtractor(BaseExtractor):
             return full_name, version
 
         return dep_spec, "unspecified"
-

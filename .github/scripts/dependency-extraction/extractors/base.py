@@ -127,4 +127,3 @@ class BaseExtractor:
         except ValueError:
             # If path is not relative to repo_root, return as-is
             return str(file_path)
-
