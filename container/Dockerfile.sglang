@@ -98,7 +98,6 @@ RUN apt-get update \
         dkms \
         kmod \
         # Command line tools
-        wget \
         curl \
         jq \
         unzip \
@@ -201,11 +200,11 @@ RUN python3 -m pip install --no-cache-dir --ignore-installed pip==25.2 setuptool
     && FLASHINFER_LOGGING_LEVEL=warning python3 -m flashinfer --download-cubin
 
 # Download and extract NVSHMEM source, clone DeepEP (use Tom's fork for GB200)
-RUN --mount=type=cache,target=/var/cache/wget \
-    wget -nv -P /var/cache/wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/source/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
-    && tar -xf /var/cache/wget/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
+RUN --mount=type=cache,target=/var/cache/curl \
+    curl --retry 3 --retry-delay 2 -fsSL -o /var/cache/curl/nvshmem_src_cuda12-all-all-3.3.9.tar.gz https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/source/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
+    && tar -xf /var/cache/curl/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
     && mv nvshmem_src nvshmem \
-    && rm -f /var/cache/wget/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
+    && rm -f /var/cache/curl/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
     && if [ "$GRACE_BLACKWELL" = true ]; then \
         git clone --depth 1 https://github.com/fzyzcjy/DeepEP.git \
         && cd DeepEP \
@@ -326,17 +325,18 @@ ARG ARCH_ALT
 ARG PYTHON_VERSION
 
 ENV DYNAMO_HOME=/opt/dynamo
+ENV NVSHMEM_DIR=/sgl-workspace/nvshmem/install
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
-ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=${NIXL_LIB_DIR}/plugins
 ENV LD_LIBRARY_PATH=\
-/opt/nvshmem/install/lib:\
-$NIXL_LIB_DIR:\
-$NIXL_PLUGIN_DIR:\
+${NVSHMEM_DIR}/lib:\
+${NIXL_LIB_DIR}:\
+${NIXL_PLUGIN_DIR}:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 /usr/local/nvidia/lib64:\
-$LD_LIBRARY_PATH
+${LD_LIBRARY_PATH}
 
 # Copy NATS and ETCD from dynamo_base, and UCX/NIXL
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
@@ -438,16 +438,16 @@ RUN apt-get update -y && \
     locales \
     # NVIDIA tools dependencies
     gnupg && \
-    echo "deb http://developer.download.nvidia.com/devtools/repos/ubuntu2004/amd64 /" | tee /etc/apt/sources.list.d/nvidia-devtools.list && \
-    apt-key adv --fetch-keys http://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub && \
+    echo "deb https://developer.download.nvidia.com/devtools/repos/ubuntu2004/amd64 /" | tee /etc/apt/sources.list.d/nvidia-devtools.list && \
+    apt-key adv --fetch-keys https://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub && \
     apt-get update -y && \
     apt-get install -y nsight-systems-cli && \
     rm -rf /var/lib/apt/lists/*
 
 # Install clang-format and clangd
-RUN curl -LSso /usr/local/bin/clang-format https://github.com/muttleyxd/clang-tools-static-binaries/releases/download/master-32d3ac78/clang-format-16_linux-amd64 \
+RUN curl --retry 3 --retry-delay 2 -LSso /usr/local/bin/clang-format https://github.com/muttleyxd/clang-tools-static-binaries/releases/download/master-32d3ac78/clang-format-16_linux-amd64 \
     && chmod +x /usr/local/bin/clang-format \
-    && curl -L https://github.com/clangd/clangd/releases/download/18.1.3/clangd-linux-18.1.3.zip -o clangd.zip \
+    && curl --retry 3 --retry-delay 2 -L https://github.com/clangd/clangd/releases/download/18.1.3/clangd-linux-18.1.3.zip -o clangd.zip \
     && unzip clangd.zip \
     && cp -r clangd_18.1.3/bin/* /usr/local/bin/ \
     && cp -r clangd_18.1.3/lib/* /usr/local/lib/ \
