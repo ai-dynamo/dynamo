@@ -192,6 +192,10 @@ impl KvManager {
                         let Some(evicted) = self.inactive_blocks.evict() else {
                             return false;
                         };
+                        tracing::trace!(
+                            "Evicting block from inactive pool: {evicted:?}, dp_rank={}",
+                            self.dp_rank
+                        );
                         self.all_blocks.remove(&evicted);
                         if let UniqueBlock::FullBlock(evicted_full_block) = evicted {
                             self.publish_kv_event(vec![evicted_full_block], &[], None, false);
@@ -256,24 +260,30 @@ impl KvManager {
                 }
             }
 
-            MoveBlock::Promote(uuid, hash, parent_hash, local_hashes) => {
+            MoveBlock::Promote(uuid, hash, parent_hash, local_hash) => {
                 let uuid_block = UniqueBlock::PartialBlock(*uuid);
                 let hash_block = UniqueBlock::FullBlock(*hash);
 
-                let Some(ref_count) = self.active_blocks.remove(&uuid_block) else {
-                    let in_all_blocks = self.all_blocks.contains(&uuid_block);
-                    panic!(
-                        "Missing active block for promotion: {uuid_block:?}. Block still exists: {in_all_blocks}"
-                    );
+                assert_eq!(
+                    self.active_blocks.remove(&uuid_block),
+                    Some(1),
+                    "uuid_block {uuid_block:?} should exist and be unique with ref_count=1"
+                );
+
+                let hash_ref_count = if let Some(ref_count) = self.active_blocks.get(&hash_block) {
+                    *ref_count
+                } else if self.inactive_blocks.remove(&hash_block) {
+                    0
+                } else {
+                    self.publish_kv_event(vec![*hash], &[*local_hash], *parent_hash, true);
+                    0
                 };
 
-                // Replace with hash block, keeping the same reference count
-                self.active_blocks.insert(hash_block.clone(), ref_count);
+                self.active_blocks
+                    .insert(hash_block.clone(), hash_ref_count + 1);
 
-                // Update all_blocks
                 assert!(self.all_blocks.remove(&uuid_block));
                 self.all_blocks.insert(hash_block);
-                self.publish_kv_event(vec![*hash], local_hashes, *parent_hash, true);
             }
         }
 

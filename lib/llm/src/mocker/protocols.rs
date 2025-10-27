@@ -19,7 +19,7 @@ pub enum MoveBlock {
     Use(Vec<UniqueBlock>, Vec<BlockHash>),
     Destroy(Vec<UniqueBlock>),
     Deref(Vec<UniqueBlock>),
-    Promote(Uuid, SequenceHash, Option<u64>, Vec<BlockHash>),
+    Promote(Uuid, SequenceHash, Option<u64>, BlockHash),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

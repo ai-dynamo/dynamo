@@ -159,25 +159,26 @@ impl ActiveSequence {
 
         // Replace last partial block with full block if it exists
         if let Some(UniqueBlock::PartialBlock(uuid)) = self.unique_blocks.last().cloned() {
-            let last_block_hash = if self.enable_prefix_caching {
+            let last_seq_hash = if self.enable_prefix_caching {
                 self.tokens.last_complete_block().unwrap().sequence_hash()
             } else {
                 random::<u64>()
             };
+            let last_block_hash = self.tokens.last_complete_block().unwrap().block_hash();
             self.unique_blocks.pop();
             self.unique_blocks
-                .push(UniqueBlock::FullBlock(last_block_hash));
+                .push(UniqueBlock::FullBlock(last_seq_hash));
             signals.push(MoveBlock::Promote(
                 uuid,
-                last_block_hash,
+                last_seq_hash,
                 self.get_parent_hash(),
-                self.block_hashes(),
+                last_block_hash,
             ));
         }
 
         let new_partial_block = UniqueBlock::default();
         self.unique_blocks.push(new_partial_block.clone());
-        signals.push(MoveBlock::Use(vec![new_partial_block], self.block_hashes()));
+        signals.push(MoveBlock::Use(vec![new_partial_block], vec![]));
         Some(signals)
     }
 
@@ -306,7 +307,7 @@ mod tests {
 
         // First signal should be Promote for the previous block
         match &signal_16[0] {
-            MoveBlock::Promote(_, _, parent_hash, _hashes) => {
+            MoveBlock::Promote(_, _, parent_hash, _hash) => {
                 assert_eq!(*parent_hash, None);
             }
             _ => panic!("Expected Promote signal as second signal"),
@@ -401,7 +402,7 @@ mod tests {
 
         // Check that signal[0] is promote
         match &signal[0] {
-            MoveBlock::Promote(_, _, parent_hash, _hashes) => {
+            MoveBlock::Promote(_, _, parent_hash, _hash) => {
                 // Check that the parent_hash matches unique_blocks[1], which should be a full block
                 if let UniqueBlock::FullBlock(expected_hash) = seq1.unique_blocks()[1] {
                     assert_eq!(
@@ -453,7 +454,7 @@ mod tests {
 
         // First signal should be Promote
         match &signals_second[0] {
-            MoveBlock::Promote(_, _, parent_hash, _hashes) => {
+            MoveBlock::Promote(_, _, parent_hash, _hash) => {
                 assert_eq!(*parent_hash, None);
             }
             _ => panic!("Expected Promote signal as first signal after second token"),
