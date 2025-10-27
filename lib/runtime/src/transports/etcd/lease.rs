@@ -18,7 +18,7 @@ pub async fn create_lease(
 
     tokio::spawn(async move {
         let mut retry_count = 0;
-        const MAX_RETRIES: u32 = 12;
+        const MAX_RETRIES: u32 = 24;
         const RETRY_DELAY: Duration = Duration::from_millis(500);
         loop {
                 match keep_alive(lease_client.clone(), id, ttl, child.clone()).await {
