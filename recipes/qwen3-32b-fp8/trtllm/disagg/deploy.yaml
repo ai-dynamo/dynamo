@@ -1,0 +1,343 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-config-decode
+data:
+  config-decode.yaml: |
+    backend: pytorch
+    tensor_parallel_size: 2
+    pipeline_parallel_size: 1
+    enable_attention_dp: false
+    enable_chunked_prefill: false
+    max_batch_size: 128
+    max_num_tokens: 7800
+    max_seq_len: 7800
+    kv_cache_config:
+      enable_block_reuse: false
+      free_gpu_memory_fraction: 0.7
+      dtype: fp8
+    cache_transceiver_config:
+      backend: DEFAULT
+    cuda_graph_config:
+      enable_padding: true
+      batch_sizes:
+      - 1
+      - 2
+      - 3
+      - 4
+      - 5
+      - 6
+      - 7
+      - 8
+      - 9
+      - 10
+      - 11
+      - 12
+      - 13
+      - 14
+      - 15
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      - 21
+      - 22
+      - 23
+      - 24
+      - 25
+      - 26
+      - 27
+      - 28
+      - 29
+      - 30
+      - 31
+      - 32
+      - 33
+      - 34
+      - 35
+      - 36
+      - 37
+      - 38
+      - 39
+      - 40
+      - 41
+      - 42
+      - 43
+      - 44
+      - 45
+      - 46
+      - 47
+      - 48
+      - 49
+      - 50
+      - 51
+      - 52
+      - 53
+      - 54
+      - 55
+      - 56
+      - 57
+      - 58
+      - 59
+      - 60
+      - 61
+      - 62
+      - 63
+      - 64
+      - 65
+      - 66
+      - 67
+      - 68
+      - 69
+      - 70
+      - 71
+      - 72
+      - 73
+      - 74
+      - 75
+      - 76
+      - 77
+      - 78
+      - 79
+      - 80
+      - 81
+      - 82
+      - 83
+      - 84
+      - 85
+      - 86
+      - 87
+      - 88
+      - 89
+      - 90
+      - 91
+      - 92
+      - 93
+      - 94
+      - 95
+      - 96
+      - 97
+      - 98
+      - 99
+      - 100
+      - 101
+      - 102
+      - 103
+      - 104
+      - 105
+      - 106
+      - 107
+      - 108
+      - 109
+      - 110
+      - 111
+      - 112
+      - 113
+      - 114
+      - 115
+      - 116
+      - 117
+      - 118
+      - 119
+      - 120
+      - 121
+      - 122
+      - 123
+      - 124
+      - 125
+      - 126
+      - 127
+      - 128
+    disable_overlap_scheduler: false
+    print_iter_log: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-config-prefill
+data:
+  config-prefill.yaml: |
+    backend: pytorch
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    enable_attention_dp: false
+    enable_chunked_prefill: false
+    max_batch_size: 1
+    max_num_tokens: 7800
+    max_seq_len: 7800
+    kv_cache_config:
+      enable_block_reuse: false
+      free_gpu_memory_fraction: 0.7
+      dtype: fp8
+    cache_transceiver_config:
+      backend: DEFAULT
+    cuda_graph_config:
+      enable_padding: true
+      batch_sizes:
+        - 1
+        - 2
+        - 4
+        - 8
+        - 16
+        - 32
+        - 64
+        - 128
+        - 256
+    disable_overlap_scheduler: true
+    print_iter_log: false
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-32b-fp8-disagg
+spec:
+  backendFramework: trtllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      dynamoNamespace: qwen3-32b-fp8-disagg
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - qwen3-32b-fp8-disagg-frontend
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          args:
+          - python3 -m dynamo.frontend --router-mode round-robin --http-port 8000
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+      replicas: 1
+    TrtllmPrefillWorker:
+      componentType: worker
+      subComponentType: prefill
+      dynamoNamespace: qwen3-32b-fp8-disagg
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /root/.cache/huggingface
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: nvidia.com/gpu.present
+                  operator: In
+                  values:
+                  - "true"
+        mainContainer:
+          args:
+          - |
+            python3 -m dynamo.trtllm \
+              --model-path "${MODEL_PATH}" \
+              --served-model-name "${MODEL_PATH}" \
+              --extra-engine-args "${ENGINE_ARGS}" \
+              --tensor-parallel-size 1 \
+              --max-batch-size 1 \
+              --free-gpu-memory-fraction 0.9 \
+              --disaggregation-mode prefill \
+              --disaggregation-strategy prefill_first
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          env:
+          - name: TRTLLM_ENABLE_PDL
+            value: "1"
+          - name: TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL
+            value: "True"
+          - name: ENGINE_ARGS
+            value: "/opt/dynamo/configs/config-prefill.yaml"
+          - name: MODEL_PATH
+            value: "Qwen/Qwen3-32B-FP8"
+          volumeMounts:
+          - mountPath: /opt/dynamo/configs
+            name: llm-config-prefill
+            readOnly: true
+          workingDir: /workspace/components/backends/trtllm
+        volumes:
+        - configMap:
+            name: llm-config-prefill
+          name: llm-config-prefill
+      replicas: 4
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          gpu: "1"
+    TrtllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      dynamoNamespace: qwen3-32b-fp8-disagg
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /root/.cache/huggingface
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: nvidia.com/gpu.present
+                  operator: In
+                  values:
+                  - "true"
+        mainContainer:
+          args:
+          - |
+            python3 -m dynamo.trtllm \
+              --model-path "${MODEL_PATH}" \
+              --served-model-name "${MODEL_PATH}" \
+              --extra-engine-args "${ENGINE_ARGS}" \
+              --tensor-parallel-size 2 \
+              --max-batch-size 128 \
+              --free-gpu-memory-fraction 0.9 \
+              --disaggregation-mode decode \
+              --disaggregation-strategy prefill_first
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          env:
+          - name: TRTLLM_ENABLE_PDL
+            value: "1"
+          - name: TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL
+            value: "True"
+          - name: ENGINE_ARGS
+            value: "/opt/dynamo/configs/config-decode.yaml"
+          - name: MODEL_PATH
+            value: "Qwen/Qwen3-32B-FP8"
+          volumeMounts:
+          - mountPath: /opt/dynamo/configs
+            name: llm-config-decode
+            readOnly: true
+          workingDir: /workspace/components/backends/trtllm
+        volumes:
+        - configMap:
+            name: llm-config-decode
+          name: llm-config-decode
+      replicas: 2
+      resources:
+        limits:
+          gpu: "2"
+        requests:
+          gpu: "2"
