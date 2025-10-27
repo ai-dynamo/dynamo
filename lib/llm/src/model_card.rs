@@ -21,10 +21,6 @@ use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_type::{ModelInput, ModelType};
 use anyhow::{Context, Result};
 use derive_builder::Builder;
-use dynamo_runtime::DistributedRuntime;
-use dynamo_runtime::storage::key_value_store::{
-    EtcdStore, Key, KeyValueStore, KeyValueStoreManager,
-};
 use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned, transports::nats};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
@@ -445,28 +441,6 @@ impl ModelDeploymentCard {
 
     pub fn requires_preprocessing(&self) -> bool {
         matches!(self.model_input, ModelInput::Tokens)
-    }
-
-    /// Load a ModelDeploymentCard from storage the DistributedRuntime is configured to use.
-    /// Card should be fully local and ready to use when the call returns.
-    pub async fn load_from_store(
-        mdc_key: &Key,
-        drt: &DistributedRuntime,
-    ) -> anyhow::Result<Option<Self>> {
-        let Some(etcd_client) = drt.etcd_client() else {
-            // Should be impossible because we only get here on an etcd event
-            anyhow::bail!("Missing etcd_client");
-        };
-        let store: Box<dyn KeyValueStore> = Box::new(EtcdStore::new(etcd_client));
-        let card_store = Arc::new(KeyValueStoreManager::new(store));
-        let Some(mut card) = card_store
-            .load::<ModelDeploymentCard>(ROOT_PATH, mdc_key)
-            .await?
-        else {
-            return Ok(None);
-        };
-        card.move_from_nats(drt.nats_client()).await?;
-        Ok(Some(card))
     }
 
     /// Creates a ModelDeploymentCard from a local directory path.
