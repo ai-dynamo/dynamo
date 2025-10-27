@@ -5,7 +5,7 @@ pub use crate::component::Component;
 use crate::storage::key_value_store::{
     EtcdStore, KeyValueStore, KeyValueStoreEnum, KeyValueStoreManager, MemoryStore,
 };
-use crate::discovery::{ServiceDiscovery, mock::MockServiceDiscovery, filesystem::FilesystemServiceDiscovery, kubernetes::KubernetesServiceDiscovery};
+use crate::discovery::{ServiceDiscovery, kubernetes::KubernetesServiceDiscovery};
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
     ErrorContext, PrometheusUpdateCallback,
@@ -44,7 +44,7 @@ impl std::fmt::Debug for DistributedRuntime {
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
-        let (etcd_config, nats_config, is_static, use_mock_discovery) = config.dissolve();
+        let (etcd_config, nats_config, is_static) = config.dissolve();
 
         let runtime_clone = runtime.clone();
 
@@ -80,24 +80,8 @@ impl DistributedRuntime {
 
         let nats_client_for_metrics = nats_client.clone();
 
-        // Initialize service discovery
-        let service_discovery: Box<dyn ServiceDiscovery + Send + Sync> = if use_mock_discovery {
-            Box::new(MockServiceDiscovery::new())
-        } else {
-            // Check if Kubernetes discovery is enabled via environment variable
-            let use_k8s = std::env::var("USE_K8S_DISCOVERY")
-                .ok()
-                .and_then(|v| v.parse::<bool>().ok())
-                .unwrap_or(false);
-            
-            if use_k8s {
-                println!("[DistributedRuntime] Using Kubernetes EndpointSlice-based service discovery");
-                Box::new(KubernetesServiceDiscovery::new().await?)
-            } else {
-                // Use filesystem-based discovery for testing
-                Box::new(FilesystemServiceDiscovery::new())
-            }
-        };
+        // Initialize service discovery only if feature flag is enabled
+        let service_discovery = Self::create_service_discovery().await?;
 
         let distributed_runtime = Self {
             runtime,
@@ -114,7 +98,7 @@ impl DistributedRuntime {
                 crate::MetricsRegistryEntry,
             >::new())),
             system_health,
-            service_discovery: Arc::new(service_discovery),
+            service_discovery,
         };
 
         if let Some(nats_client_for_metrics) = nats_client_for_metrics {
@@ -223,6 +207,21 @@ impl DistributedRuntime {
         Self::new(runtime, config).await
     }
 
+    /// Create the appropriate ServiceDiscovery implementation based on environment.
+    /// Only initializes if USE_SERVICE_DISCOVERY feature flag is enabled.
+    async fn create_service_discovery() -> Result<Option<Arc<Box<dyn ServiceDiscovery>>>> {
+        if !crate::config::is_service_discovery_enabled() {
+            tracing::debug!("Service discovery disabled (USE_SERVICE_DISCOVERY not set)");
+            return Ok(None);
+        }
+
+        // Currently only Kubernetes discovery is supported
+        // In the future, this can be extended to support other backends
+        tracing::info!("Initializing Kubernetes-based service discovery");
+        let discovery: Box<dyn ServiceDiscovery> = Box::new(KubernetesServiceDiscovery::new().await?);
+        Ok(Some(Arc::new(discovery)))
+    }
+
     pub fn runtime(&self) -> &Runtime {
         &self.runtime
     }
@@ -311,9 +310,11 @@ impl DistributedRuntime {
         &self.store
     }
 
-    /// Get the service discovery interface
-    pub fn service_discovery(&self) -> Arc<Box<dyn ServiceDiscovery>> {
+    /// Get the service discovery interface.
+    /// Returns an error if service discovery is not initialized (USE_SERVICE_DISCOVERY not enabled).
+    pub fn service_discovery(&self) -> Result<Arc<Box<dyn ServiceDiscovery>>> {
         self.service_discovery.clone()
+            .ok_or_else(|| error!("Service discovery not initialized. Set USE_SERVICE_DISCOVERY=true to enable."))
     }
 
     pub fn child_token(&self) -> CancellationToken {
@@ -406,7 +407,6 @@ pub struct DistributedConfig {
     pub etcd_config: etcd::ClientOptions,
     pub nats_config: nats::ClientOptions,
     pub is_static: bool,
-    pub use_mock_discovery: bool,  // If true, use mock service discovery
 }
 
 impl DistributedConfig {
@@ -415,7 +415,6 @@ impl DistributedConfig {
             etcd_config: etcd::ClientOptions::default(),
             nats_config: nats::ClientOptions::default(),
             is_static,
-            use_mock_discovery: false,
         }
     }
 
@@ -424,7 +423,6 @@ impl DistributedConfig {
             etcd_config: etcd::ClientOptions::default(),
             nats_config: nats::ClientOptions::default(),
             is_static: false,
-            use_mock_discovery: false,
         };
 
         config.etcd_config.attach_lease = false;

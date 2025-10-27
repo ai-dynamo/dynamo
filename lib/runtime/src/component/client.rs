@@ -327,7 +327,7 @@ impl Client {
         let component = endpoint.component.name();
 
         // Get service discovery interface and set up watch for instance changes
-        let discovery = drt.service_discovery();
+        let discovery = drt.service_discovery()?;
         let mut instance_watch = discovery.watch(&namespace, component).await?;
 
         // Watch automatically streams existing instances as ADDED events, so no need to call list_instances()

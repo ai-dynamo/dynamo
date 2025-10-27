@@ -213,6 +213,6 @@ pub struct DistributedRuntime {
     // Uses RwLock for better concurrency - multiple threads can read (execute callbacks) simultaneously.
     hierarchy_to_metricsregistry: Arc<std::sync::RwLock<HashMap<String, MetricsRegistryEntry>>>,
 
-    // Service discovery interface
-    service_discovery: Arc<Box<dyn discovery::ServiceDiscovery>>,
+    // Service discovery interface (only initialized when USE_SERVICE_DISCOVERY is enabled)
+    service_discovery: Option<Arc<Box<dyn discovery::ServiceDiscovery>>>,
 }

@@ -434,7 +434,7 @@ impl Component {
     pub async fn register_instance(&self) -> anyhow::Result<()> {
         // Register with service discovery
         let instance_handle = {
-            let discovery = self.drt.service_discovery();
+            let discovery = self.drt.service_discovery()?;
             discovery.register_instance(&self.namespace.name(), &self.name).await?
         };
 
