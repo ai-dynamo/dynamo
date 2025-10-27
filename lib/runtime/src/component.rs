@@ -33,7 +33,6 @@ use std::fmt;
 
 use crate::{
     config::HealthStatus,
-    discovery::Lease,
     metrics::{MetricsHierarchy, MetricsRegistry, prometheus_names},
     service::ServiceSet,
     transports::etcd::{ETCD_ROOT_PATH, EtcdPath},
