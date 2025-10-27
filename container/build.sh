@@ -715,7 +715,7 @@ if [  ! -z ${ENABLE_KVBM} ]; then
     echo "Enabling the KVBM in the dynamo image"
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
 
-    if ! env -i ${SOURCE_DIR}/build_kvbm_wheel.sh -o ${KVBM_PIP_WHEEL_DIR} -n ${NIXL_REF} -a ${ARCH}; then
+    if ! env -i ${SOURCE_DIR}/build_kvbm_wheel.sh -o ${KVBM_PIP_WHEEL_DIR} -n ${NIXL_REF} -a ${ARCH} -t wheel; then
         error "ERROR: Failed to build KVBM wheel"
     fi
 fi

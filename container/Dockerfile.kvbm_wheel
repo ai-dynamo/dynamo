@@ -28,7 +28,7 @@
 ARG ARCH_ALT="x86_64"
 ARG BASE_IMAGE=quay.io/pypa/manylinux_2_28_${ARCH_ALT}
 
-FROM ${BASE_IMAGE} as base
+FROM ${BASE_IMAGE} AS wheel_builder
 
 ARG CARGO_BUILD_JOBS
 ARG ARCH_ALT
@@ -197,7 +197,6 @@ RUN dnf clean all && \
     librdmacm-devel
 
 ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
-
 ENV CUDA_PATH=/usr/local/cuda
 
 RUN cd /workspace && \
@@ -262,6 +261,9 @@ RUN echo "/usr/local/nixl/lib/$ARCH_ALT-linux-gnu" > /etc/ld.so.conf.d/nixl.conf
     echo "/usr/local/nixl/lib/$ARCH_ALT-linux-gnu/plugins" >> /etc/ld.so.conf.d/nixl.conf && \
     ldconfig
 
+
+FROM wheel_builder AS base
+
 # Copy necessary rust code for compiling
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
 COPY launch/ /opt/dynamo/launch/
@@ -281,3 +283,10 @@ RUN mkdir -p /opt/dynamo/lib/kvbm/python/kvbm/nixl-cu13 && \
     cd /opt/dynamo/lib/kvbm && \
     uv pip install maturin[patchelf] && \
     maturin build --release --out /opt/dynamo/dist
+
+
+FROM ubuntu:24.04 AS wheel
+
+# Copy the wheel into a lightweight image so it can be used later
+# in the CI pipeline to carry the wheel file.
+COPY --from=base /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/

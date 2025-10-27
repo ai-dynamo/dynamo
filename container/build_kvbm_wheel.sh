@@ -23,15 +23,18 @@ set -euo pipefail
 OUTPUT_DIR="/tmp/kvbm_wheel"
 NIXL_REF="0.6.0"
 ARCH="amd64"
+TARGET="wheel"
 
-# Flags: -o output dir, -n nixl ref, -a arch
-while getopts ":o:n:a:h" opt; do
+# Flags:
+# -o output dir, -n nixl ref, -a arch, -t docker build target
+while getopts ":o:n:a:t:h" opt; do
   case "$opt" in
     o) OUTPUT_DIR="$OPTARG" ;;
     n) NIXL_REF="$OPTARG" ;;
     a) ARCH="$OPTARG" ;;
+    t) TARGET="$OPTARG" ;;
     h)
-      echo "Usage: $0 [-o OUTPUT_DIR] [-n NIXL_REF] [-a ARCH{amd64|arm64}]"
+      echo "Usage: $0 [-o OUTPUT_DIR] [-n NIXL_REF] [-a ARCH{amd64|arm64}] [-t TARGET]"
       exit 0
       ;;
     \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
@@ -54,6 +57,7 @@ cleanup() { [[ -n "${cid}" ]] && docker rm -v "$cid" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 docker build \
+    --target "${TARGET}" \
     ${BUILD_ARGS} \
     -t kvbm-wheel:tmp \
     -f container/Dockerfile.kvbm_wheel .
@@ -61,5 +65,5 @@ docker build \
 cid=$(docker create kvbm-wheel:tmp)
 
 mkdir -p "$OUTPUT_DIR"
-docker cp "$cid":/opt/dynamo/dist/. "$OUTPUT_DIR"/
+docker cp "$cid":/opt/dynamo/wheelhouse/. "$OUTPUT_DIR"/
 # trap will remove container
