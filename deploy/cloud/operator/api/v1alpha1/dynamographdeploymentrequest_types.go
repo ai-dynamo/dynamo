@@ -60,6 +60,12 @@ type ProfilingConfigSpec struct {
 	// The path to this config will be set as engine.config in the profiling config.
 	// +kubebuilder:validation:Optional
 	ConfigMapRef *ConfigMapKeySelector `json:"configMapRef,omitempty"`
+
+	// ProfilerImage specifies the container image to use for profiling jobs.
+	// This image contains the profiler code and dependencies needed for SLA-based profiling.
+	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+	// +kubebuilder:validation:Required
+	ProfilerImage string `json:"profilerImage"`
 }
 
 // DeploymentOverridesSpec allows users to customize metadata for auto-created DynamoGraphDeployments.
@@ -83,6 +89,13 @@ type DeploymentOverridesSpec struct {
 	// Annotations are additional annotations to add to the DynamoGraphDeployment metadata.
 	// +kubebuilder:validation:Optional
 	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.
+	// This image is used for both temporary DGDs created during online profiling and the final DGD.
+	// If omitted, the image from the base config file (e.g., disagg.yaml) is used.
+	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+	// +kubebuilder:validation:Optional
+	WorkersImage string `json:"workersImage,omitempty"`
 }
 
 // DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
@@ -100,19 +113,6 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
 	Backend string `json:"backend"`
-
-	// ProfilerImage specifies the container image to use for profiling jobs.
-	// This image contains the profiler code and dependencies needed for SLA-based profiling.
-	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
-	// +kubebuilder:validation:Required
-	ProfilerImage string `json:"profilerImage"`
-
-	// DgdImage specifies the container image to use for DynamoGraphDeployment components.
-	// This image is used for both temporary DGDs created during online profiling and the final DGD.
-	// If omitted, the image from the base config file (e.g., disagg.yaml) is used.
-	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
-	// +kubebuilder:validation:Optional
-	DgdImage string `json:"dgdImage,omitempty"`
 
 	// ProfilingConfig provides the complete configuration for the profiling job.
 	// This configuration is passed directly to the profiler.
