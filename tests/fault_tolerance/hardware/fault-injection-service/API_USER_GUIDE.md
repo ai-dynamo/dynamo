@@ -22,6 +22,9 @@ Test network fault tolerance without Kubernetes expertise. Inject network partit
 The fastest way to test fault tolerance:
 
 ```bash
+# Run Pod-to-Pod blocking test (label-based, most precise)
+python scripts/run_test_incluster.py examples/test_specific_pod_to_pod_blocking.py
+
 # Run Worker→NATS partition test
 python scripts/run_test_incluster.py examples/test_partition_worker_to_nats.py
 
