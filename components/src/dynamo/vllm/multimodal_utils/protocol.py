@@ -174,4 +174,3 @@ class MyRequestOutput(BaseModel):
     # encoder_prompt_token_ids: Optional[List[int]] = None
     # num_cached_tokens: Optional[int] = None
     # multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
-

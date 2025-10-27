@@ -12,7 +12,11 @@ from dynamo.vllm.multimodal_utils.encode_utils import (
 )
 from dynamo.vllm.multimodal_utils.http_client import get_http_client
 from dynamo.vllm.multimodal_utils.image_loader import ImageLoader
-from dynamo.vllm.multimodal_utils.model import SupportedModels, construct_mm_data, load_vision_model
+from dynamo.vllm.multimodal_utils.model import (
+    SupportedModels,
+    construct_mm_data,
+    load_vision_model,
+)
 from dynamo.vllm.multimodal_utils.protocol import (
     MultiModalInput,
     MultiModalRequest,
@@ -36,4 +40,3 @@ __all__ = [
     "MyRequestOutput",
     "vLLMMultimodalRequest",
 ]
-

@@ -130,4 +130,3 @@ def get_encoder_components(
 
     else:
         raise NotImplementedError(f"Model not supported: {model_name}")
-

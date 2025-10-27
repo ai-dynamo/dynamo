@@ -175,7 +175,7 @@ def parse_args() -> Config:
         config.served_model_name = None
 
     config.namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
-    
+
     # Set component and endpoint based on worker type
     if args.multimodal_processor:
         config.component = "processor"
@@ -192,7 +192,7 @@ def parse_args() -> Config:
     else:
         config.component = "backend"
         config.endpoint = "generate"
-    
+
     config.engine_args = engine_args
     config.is_prefill_worker = args.is_prefill_worker
     config.migration_limit = args.migration_limit

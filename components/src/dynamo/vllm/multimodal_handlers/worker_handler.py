@@ -15,80 +15,53 @@
 
 import copy
 import logging
-import os
 
 import torch
 from vllm.inputs.data import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM
 
 import dynamo.nixl_connect as connect
-from dynamo.llm import ZmqKvEventPublisher, ZmqKvEventPublisherConfig
-from dynamo.runtime import Client, Component, DistributedRuntime, Endpoint
+from dynamo.runtime import Client, Component, DistributedRuntime
 
+from ..handlers import BaseWorkerHandler
 from ..multimodal_utils import (
     ImageLoader,
     MyRequestOutput,
     construct_mm_data,
     vLLMMultimodalRequest,
 )
-from ..publisher import StatLoggerFactory
 
 logger = logging.getLogger(__name__)
 
 
-class MultimodalBaseWorker:
-    """Base class for multimodal workers"""
+class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
+    """Decode worker for disaggregated multimodal serving"""
 
     def __init__(
         self,
-        component: Component,
-        endpoint: Endpoint,
-        engine_client: AsyncLLM,
+        runtime,
+        component,
+        engine_client,
         config,
     ):
-        self.component = component
-        self.endpoint = endpoint
-        self.engine_client = engine_client
+        # Get default_sampling_params from config
+        default_sampling_params = (
+            config.engine_args.create_model_config().get_diff_sampling_param()
+        )
+
+        # Call BaseWorkerHandler.__init__ with proper parameters
+        super().__init__(runtime, component, engine_client, default_sampling_params)
+
         self.config = config
         self.enable_disagg = config.is_prefill_worker
-        self.kv_publisher = None
-
-        # Set up stats logger
-        self.stats_logger = StatLoggerFactory(
-            component,
-            config.engine_args.data_parallel_rank or 0,
-            metrics_labels=[("model", config.model)],
-        )
-
-        # TODO Hack to get data, move this to registering in ETCD
-        vllm_config = config.engine_args.create_engine_config()
-        self.stats_logger.set_num_gpu_blocks_all(
-            vllm_config.cache_config.num_gpu_blocks
-        )
-        self.stats_logger.set_request_total_slots_all(
-            vllm_config.scheduler_config.max_num_seqs
-        )
-        self.stats_logger.init_publish()
 
     async def async_init(self, runtime: DistributedRuntime):
-        pass
+        """Async initialization - connector needs async setup"""
+        self._connector = connect.Connector()
+        await self._connector.initialize()
+        logger.info("Multimodal Decode Worker async initialization completed.")
 
-    def cleanup(self):
-        """Override in subclasses if cleanup is needed."""
-        pass
-
-    async def clear_kv_blocks(self, request=None):
-        try:
-            await self.engine_client.reset_prefix_cache()
-            yield {"status": "success", "message": "KV cache cleared"}
-        except Exception as e:
-            yield {"status": "error", "message": str(e)}
-
-
-class MultimodalDecodeWorkerHandler(MultimodalBaseWorker):
-    """Decode worker for disaggregated multimodal serving"""
-
-    async def generate(self, request: vLLMMultimodalRequest):
+    async def generate(self, request: vLLMMultimodalRequest, context):
         logger.debug(f"Got raw request: {request}")
         if not isinstance(request, vLLMMultimodalRequest):
             if isinstance(request, str):
@@ -120,23 +93,30 @@ class MultimodalDecodeWorkerHandler(MultimodalBaseWorker):
             ).model_dump_json()
 
 
-class MultimodalPDWorkerHandler(MultimodalBaseWorker):
+class MultimodalPDWorkerHandler(BaseWorkerHandler):
     """Prefill/Decode or Prefill-only worker for multimodal serving"""
 
     def __init__(
         self,
+        runtime,
         component: Component,
-        endpoint: Endpoint,
         engine_client: AsyncLLM,
         config,
         decode_worker_client: Client = None,
     ):
-        super().__init__(component, endpoint, engine_client, config)
-        self.decode_worker_client = decode_worker_client
-        self._connector = None
-        self.image_loader = None
+        # Get default_sampling_params from config
+        default_sampling_params = (
+            config.engine_args.create_model_config().get_diff_sampling_param()
+        )
 
-    async def async_init(self, runtime: DistributedRuntime):
+        # Call BaseWorkerHandler.__init__ with proper parameters
+        super().__init__(runtime, component, engine_client, default_sampling_params)
+
+        self.config = config
+        self.decode_worker_client = decode_worker_client
+        self.enable_disagg = config.is_prefill_worker
+
+        # Initialize multimodal-specific components
         logger.info("Multimodal PD Worker startup started.")
 
         if "video" in self.config.model.lower():
@@ -147,15 +127,21 @@ class MultimodalPDWorkerHandler(MultimodalBaseWorker):
         self.EMBEDDINGS_DEVICE = "cpu"
 
         # Create and initialize a dynamo connector for this worker.
-        # We'll needs this to move data between this worker and remote workers efficiently.
-        self._connector = connect.Connector()
-        await self._connector.initialize()
-
+        # We'll need this to move data between this worker and remote workers efficiently.
+        # Note: This is synchronous initialization, async initialization happens in async_init
+        self._connector = None  # Will be initialized in async_init
         self.image_loader = ImageLoader()
 
         logger.info("Multimodal PD Worker has been initialized")
 
-    async def generate(self, request: vLLMMultimodalRequest):
+    async def async_init(self, runtime: DistributedRuntime):
+        """Async initialization for connector that requires async setup"""
+        # Initialize the connector asynchronously
+        self._connector = connect.Connector()
+        await self._connector.initialize()
+        logger.info("Multimodal PD Worker async initialization completed.")
+
+    async def generate(self, request: vLLMMultimodalRequest, context):
         logger.debug(f"Got raw request: {request}")
         if type(request) is not vLLMMultimodalRequest:
             if type(request) is str:
@@ -284,4 +270,3 @@ class MultimodalPDWorkerHandler(MultimodalBaseWorker):
                     metrics=response.metrics,
                     kv_transfer_params=response.kv_transfer_params,
                 ).model_dump_json()
-

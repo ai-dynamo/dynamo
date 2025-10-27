@@ -85,7 +85,7 @@ class EncodeWorkerHandler:
         logger.info("Encode worker startup completed.")
 
     async def generate(
-        self, request: vLLMMultimodalRequest
+        self, request: vLLMMultimodalRequest, context
     ) -> AsyncIterator[MyRequestOutput]:
         logger.debug(f"Got raw request: {request}")
         if not isinstance(request, vLLMMultimodalRequest):
@@ -135,9 +135,12 @@ class EncodeWorkerHandler:
                 f"Pixel values stats: mean={image_embeds['pixel_values'].mean().item()}, std={image_embeds['pixel_values'].std().item()}, min={image_embeds['pixel_values'].min().item()}, max={image_embeds['pixel_values'].max().item()}"
             )
 
+            # Move embeddings to CPU for NIXL transfer to avoid UCX/InfiniBand issues
+            embeddings_cpu = embeddings.cpu()
+
             request.image_grid_thw = image_grid_thw
             request.embeddings_shape = tuple(embeddings.shape)
-            descriptor = connect.Descriptor(embeddings)
+            descriptor = connect.Descriptor(embeddings_cpu)
 
             with self._connector.create_readable(descriptor) as readable:
                 request.serialized_request = readable.metadata()
@@ -148,7 +151,7 @@ class EncodeWorkerHandler:
 
                 # Get the response generator
                 response_generator = await self.pd_worker_client.round_robin(
-                    request.model_dump_json()
+                    request.model_dump_json(), context=context
                 )
                 await readable.wait_for_completion()
 
@@ -166,4 +169,3 @@ class EncodeWorkerHandler:
         except Exception as e:
             logger.error(f"Error processing request {request_id}: {e}")
             raise
-

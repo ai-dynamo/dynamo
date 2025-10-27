@@ -45,4 +45,3 @@ def get_http_client(timeout: float = 60.0) -> httpx.AsyncClient:
         logger.info(f"Shared HTTP client initialized with timeout={timeout}s")
 
     return _global_http_client
-

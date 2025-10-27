@@ -89,6 +89,7 @@ class ProcessorHandler(ProcessMixIn):
         raw_request: Union[CompletionRequest, ChatCompletionRequest],
         multimodal_input: MultiModalInput,
         request_type: RequestType,
+        context,
     ):
         request_id = str(uuid.uuid4().hex)
         logger.debug(f"Got raw request: {raw_request}")
@@ -112,7 +113,7 @@ class ProcessorHandler(ProcessMixIn):
         # in vLLMMultimodalRequest is not a Pydantic class and will
         # cause TypeError: unsupported type SamplingParams
         response_generator = await self.encode_worker_client.round_robin(
-            worker_request.model_dump_json()
+            worker_request.model_dump_json(), context=context
         )
 
         output = self._generate_responses(response_generator, request_type)
@@ -156,7 +157,7 @@ class ProcessorHandler(ProcessMixIn):
                 )
 
     # The generate endpoint will be used by the frontend to handle incoming requests.
-    async def generate(self, raw_request: MultiModalRequest):
+    async def generate(self, raw_request: MultiModalRequest, context):
         logger.debug(f"Got raw request: {raw_request}")
         if not isinstance(raw_request, MultiModalRequest):
             # If the request is not MultiModalRequest, convert it to MultiModalRequest
@@ -206,7 +207,7 @@ class ProcessorHandler(ProcessMixIn):
             raise ValueError("Either image URL or video URL is required")
 
         async for response in self._generate(
-            chat_request, multimodal_input, RequestType.CHAT
+            chat_request, multimodal_input, RequestType.CHAT, context
         ):
             logger.debug(
                 f"Generated response type {type(response)}, content: {response}"
@@ -216,4 +217,3 @@ class ProcessorHandler(ProcessMixIn):
                 break
             response = json.loads(response.lstrip("data: "))
             yield response
-

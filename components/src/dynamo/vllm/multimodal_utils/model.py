@@ -84,4 +84,3 @@ def _construct_qwen_image_data(
             "image_grid_thw": grid_thw_tensor,
         }
     }
-

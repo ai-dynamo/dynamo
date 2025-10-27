@@ -82,7 +82,7 @@ async def worker(runtime: DistributedRuntime):
     logging.debug("Signal handlers set up for graceful shutdown")
 
     dump_config(config.dump_config_to, config)
-    
+
     # Route to appropriate initialization based on config flags
     if config.multimodal_processor:
         await init_multimodal_processor(runtime, config)
@@ -394,8 +394,10 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
     )
 
     # Get prompt template from args (must be passed via environment or command line)
-    prompt_template = os.environ.get("MULTIMODAL_PROMPT_TEMPLATE", "USER: <image>\n<prompt> ASSISTANT:")
-    
+    prompt_template = os.environ.get(
+        "MULTIMODAL_PROMPT_TEMPLATE", "USER: <image>\n<prompt> ASSISTANT:"
+    )
+
     handler = ProcessorHandler(
         config.engine_args,
         encode_worker_client,
@@ -404,6 +406,7 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
 
     logger.info("Waiting for Encoder Worker Instances ...")
     await encode_worker_client.wait_for_instances()
+    # await asyncio.sleep(2)  # Give time for service discovery to fully propagate
 
     # Register the endpoint as entrypoint to a model
     await register_llm(
@@ -415,7 +418,7 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
         kv_cache_block_size=config.engine_args.block_size,
     )
 
-    logger.info(f"Starting to serve the processor endpoint...")
+    logger.info("Starting to serve the processor endpoint...")
 
     try:
         await asyncio.gather(
@@ -440,9 +443,11 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
     generate_endpoint = component.endpoint(config.endpoint)
 
     # Get PD worker client
+    # In multimodal mode, the PD worker always registers as "backend"
+    # (even in disaggregated mode with prefill/decode split, we still connect to "backend")
     pd_worker_client = (
         await runtime.namespace(config.namespace)
-        .component("backend" if not config.is_prefill_worker else "prefill")
+        .component("backend")
         .endpoint("generate")
         .client()
     )
@@ -452,11 +457,9 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
         pd_worker_client,
     )
     await handler.async_init(runtime)
-
     logger.info("Waiting for PD Worker Instances ...")
     await pd_worker_client.wait_for_instances()
-
-    logger.info(f"Starting to serve the encode worker endpoint...")
+    logger.info("Starting to serve the encode worker endpoint...")
 
     try:
         await asyncio.gather(
@@ -473,10 +476,7 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
 
 async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     """Initialize multimodal worker component for aggregated or disaggregated mode"""
-    from dynamo.vllm.multimodal_handlers import (
-        MultimodalDecodeWorkerHandler,
-        MultimodalPDWorkerHandler,
-    )
+    from dynamo.vllm.multimodal_handlers import MultimodalPDWorkerHandler
 
     component = runtime.namespace(config.namespace).component(config.component)
     await component.create_service()
@@ -487,23 +487,23 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     engine_client, vllm_config, default_sampling_params = setup_vllm_engine(config)
 
     decode_worker_client = None
-    
-    # If this is a prefill worker in disaggregated mode, get decode worker client
+
+    # For multimodal workers, we always use MultimodalPDWorkerHandler
+    # It handles both aggregated mode (prefill+decode) and prefill-only in disaggregated mode
+    # Note: MultimodalDecodeWorkerHandler is currently not used - we may add it later for disagg decode
+
     if config.is_prefill_worker:
+        # Prefill worker in disaggregated mode - needs decode worker client
         decode_worker_client = (
             await runtime.namespace(config.namespace)
             .component("backend")  # decode workers use backend component
             .endpoint("generate")
             .client()
         )
-        handler = MultimodalPDWorkerHandler(
-            component, generate_endpoint, engine_client, config, decode_worker_client
-        )
-    else:
-        # This is a decode worker
-        handler = MultimodalDecodeWorkerHandler(
-            component, generate_endpoint, engine_client, config
-        )
+
+    handler = MultimodalPDWorkerHandler(
+        runtime, component, engine_client, config, decode_worker_client
+    )
 
     await handler.async_init(runtime)
 
@@ -513,8 +513,6 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     )
     if kv_publisher:
         handler.kv_publisher = kv_publisher
-
-    logger.info(f"Starting to serve the multimodal worker endpoint...")
 
     metrics_labels = [("model", config.model)]
 

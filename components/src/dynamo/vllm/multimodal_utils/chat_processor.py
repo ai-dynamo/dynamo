@@ -317,4 +317,3 @@ class CompletionsProcessor:
             response = json.loads(raw_response.lstrip("data: "))
 
             yield response
-

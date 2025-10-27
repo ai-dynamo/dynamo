@@ -105,4 +105,3 @@ class ImageLoader:
         except Exception as e:
             logger.error(f"Error loading image: {e}")
             raise ValueError(f"Failed to load image: {e}")
-
