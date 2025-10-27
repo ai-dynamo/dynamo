@@ -195,7 +195,9 @@ markers = [
     "slow: marks tests as known to be slow",
     "h100: marks tests to run on H100",
     "kvbm: marks tests for KV behavior and model determinism",
-    "model: model id used by a test or parameter"
+    "model: model id used by a test or parameter",
+    "k8s: marks tests as requiring Kubernetes",
+    "fault_tolerance: marks tests as fault tolerance tests"
 ]
 
 # Linting/formatting

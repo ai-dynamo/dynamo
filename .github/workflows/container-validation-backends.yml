@@ -419,7 +419,7 @@ jobs:
           echo "Using image: $IMAGE"
 
           # Run the pytest command
-          pytest tests/fault_tolerance/deploy/test_deployment.py::test_fault_scenario[${{ matrix.framework.test_scenario }}] \
+          pytest -m "k8s and fault_tolerance" -k "${{ matrix.framework.test_scenario }}" \
             -s -v \
             --namespace ${NAMESPACE} \
             --image ${IMAGE} \
