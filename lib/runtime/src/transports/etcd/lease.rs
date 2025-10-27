@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use std::time::Duration;
+use rand::Rng;
 
 /// Create a [`Lease`] with a given time-to-live (TTL) attached to the [`CancellationToken`].
 pub async fn create_lease(
@@ -16,38 +18,49 @@ pub async fn create_lease(
     let child = token.child_token();
     let clone = token.clone();
 
-    tokio::spawn(async move {
-        let mut retry_count = 0;
-        const MAX_RETRIES: u32 = 24;
-        const RETRY_DELAY: Duration = Duration::from_millis(500);
-        loop {
-                match keep_alive(lease_client.clone(), id, ttl, child.clone()).await {
-                    Ok(_) => {
-                        tracing::trace!("keep alive task exited successfully");
-                        retry_count = 0;
-                    },
-                    Err(e) => {
-                        retry_count += 1;
+    let mut retry_count = 0;
+    const MAX_RETRIES: u32 = 20;
+    const RETRY_DELAY: Duration = Duration::from_millis(500);
+    const RETRY_JITTER: u64 = 100;
+    let mut last_retry_time = std::time::Instant::now();
 
+    tokio::spawn(async move {
+        loop {      
+            match keep_alive(lease_client.clone(), id, ttl, child.clone()).await {
+                Ok(_) => {
+                    tracing::trace!("keep alive task exited successfully");
+                },
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "Unable to maintain lease. Check etcd server status"
+                    );
+
+                    if retry_count > 0 {
+                        let time_since_last_retry = std::time::Instant::now().duration_since(last_retry_time);
+                        if time_since_last_retry.as_secs() >= ttl {
+                            retry_count = 0;
+                        }
+                    }
+                    retry_count += 1;
+                    if retry_count >= MAX_RETRIES {
                         tracing::error!(
                             error = %e,
-                            "Attempting to maintain lease. Check etcd server status, attempt {}/{}",
-                            retry_count, MAX_RETRIES
+                            "Unable to maintain lease after {} retries. Check etcd server status",
+                            MAX_RETRIES
                         );
-                        if retry_count >= MAX_RETRIES {
-                            tracing::error!(
-                                error = %e,
-                                "Unable to maintain lease. Check etcd server status"
-                            );
-                            token.cancel();
-                            break;
-                        }
-                        tokio::time::sleep(RETRY_DELAY).await;
+                        token.cancel();
+                        break
                     }
+                    last_retry_time = std::time::Instant::now();
+                    let jitter_ms = rand::random_range(0..RETRY_JITTER);
+                    let sleep = RETRY_DELAY + Duration::from_millis(jitter_ms);
+                    tokio::time::sleep(sleep).await;
+                    continue;
                 }
             }
         }
-    );
+    });
 
     Ok(Lease {
         id,
