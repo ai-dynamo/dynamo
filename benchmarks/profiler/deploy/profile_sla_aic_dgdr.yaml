@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# DynamoGraphDeploymentRequest for AI Configurator-based profiling
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: sla-aic
+spec:
+  model: Qwen/Qwen3-32B
+  backend: trtllm
+
+  # ProfilingConfig maps directly to the profile_sla.py config format
+  profilingConfig:
+    profilerImage: "nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-540.5"
+    config:
+      # Sweep/profiling configuration
+      sweep:
+        # AI Configurator mode (fast simulation-based profiling)
+        use_ai_configurator: true
+        aic_system: h200_sxm
+        aic_model_name: QWEN3_32B
+        aic_backend_version: "0.20.0"
+
+      # SLA targets for profiling
+      sla:
+        isl: 3000   # Input sequence length
+        osl: 150    # Output sequence length
+        ttft: 500.0 # Time To First Token target (milliseconds)
+        itl: 30.0   # Inter-Token Latency target (milliseconds)
+
+  # Deployment overrides for the auto-created DGD
+  deploymentOverrides:
+    workersImage: "nvcr.io/nvidian/dynamo-dev/trtllm-runtime:dep-540.5"
+
+  # Automatically create DynamoGraphDeployment after profiling
+  autoApply: true
+

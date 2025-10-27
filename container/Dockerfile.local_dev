@@ -88,6 +88,7 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR}
 #                * Contains rust toolchain binaries that must be at expected system paths
 #                * Workspace mount point would break rustup's toolchain resolution
 # - PATH: Includes cargo binaries for rust tool access
+ENV HOME=/home/$USERNAME
 ENV DYNAMO_HOME=${WORKSPACE_DIR}
 ENV CARGO_TARGET_DIR=${WORKSPACE_DIR}/target
 ENV CARGO_HOME=${HOME}/.cargo
@@ -110,7 +111,6 @@ RUN rsync -a --chown=$USER_UID:$USER_GID ${VIRTUAL_ENV}/ /tmp/venv-temp/ && \
 
 # At this point, we are executing as the ubuntu user
 USER $USERNAME
-ENV HOME=/home/$USERNAME
 WORKDIR $HOME
 
 # https://code.visualstudio.com/remote/advancedcontainers/persist-bash-history
