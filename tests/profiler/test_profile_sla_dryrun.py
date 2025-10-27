@@ -169,9 +169,7 @@ class TestProfileSLADryRun:
         class Args:
             def __init__(self):
                 self.backend = "sglang"
-                self.config = (
-                    "recipes/deepseek-r1/sglang-wideep/tep16p-dep16d-disagg.yaml"
-                )
+                self.config = "recipes/deepseek-r1/sglang/disagg-16gpu/deploy.yaml"
                 self.output_dir = "/tmp/test_profiling_results"
                 self.namespace = "test-namespace"
                 self.min_num_gpus_per_engine = 8
