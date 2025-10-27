@@ -157,7 +157,7 @@ class Endpoint:
         """
         ...
 
-    async def connection_id(self) -> int:
+    def connection_id(self) -> int:
         """
         Opaque unique ID for this worker. May change over worker lifetime.
         """

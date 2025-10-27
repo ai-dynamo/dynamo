@@ -247,7 +247,6 @@ impl MockVllmEngine {
 
         tracing::debug!("Getting worker_id");
         let worker_id = comp.drt().connection_id();
-        // let worker_id = 0;
         tracing::debug!("Worker_id set to: {worker_id}");
 
         tracing::debug!("Creating KV event publisher");
