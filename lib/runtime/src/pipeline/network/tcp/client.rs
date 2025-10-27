@@ -166,9 +166,16 @@ impl TcpClient {
 
                     Ok(())
                 }
-                _ => {
-                    tracing::error!("failed to join reader and writer tasks");
-                    anyhow::bail!("failed to join reader and writer tasks");
+                (Err(reader_err), Ok(_)) => {
+                    anyhow::bail!("reader task failed to join: {reader_err:?}");
+                }
+                (Ok(_), Err(writer_err)) => {
+                    anyhow::bail!("writer task failed to join: {writer_err:?}");
+                }
+                (Err(reader_err), Err(writer_err)) => {
+                    anyhow::bail!(
+                        "both reader and writer tasks failed to join - reader: {reader_err:?}, writer: {writer_err:?}"
+                    );
                 }
             }
         });
@@ -227,10 +234,10 @@ async fn handle_reader(
                            }
                         }
                     }
-                    Some(Err(_)) => {
+                    Some(Err(e)) => {
                         // TODO(#171) - address fatal errors
                         // in this case the binary representation of the message is invalid
-                        panic!("fatal error - failed to decode message from stream; invalid line protocol");
+                        panic!("fatal error - failed to decode message from stream; invalid line protocol: {e:?}");
                     }
                     None => {
                         tracing::debug!("tcp stream closed by server");
