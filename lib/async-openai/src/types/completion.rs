@@ -74,26 +74,6 @@ where
             Ok(Some(value))
         }
 
-        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Err(E::invalid_type(
-                serde::de::Unexpected::Signed(value),
-                &"echo parameter to be a boolean (true or false)",
-            ))
-        }
-
-        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Err(E::invalid_type(
-                serde::de::Unexpected::Unsigned(value),
-                &"echo parameter to be a boolean (true or false)",
-            ))
-        }
-
         // Explicitly reject strings (including "null", "true", "false")
         fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
         where
