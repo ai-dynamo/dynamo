@@ -357,6 +357,29 @@ def set_argument_value(args: list, arg_name: str, value: str):
     return args
 
 
+def update_image(config: dict, image: str) -> dict:
+    """Update container image for all DGD services (frontend, planner, workers).
+
+    This is a shared utility function used by all backend config modifiers.
+
+    Args:
+        config: Configuration dictionary
+        image: Container image to set for all services
+
+    Returns:
+        Updated configuration dictionary
+    """
+    cfg = Config.model_validate(config)
+
+    # Update image for all services
+    for service_name, service_config in cfg.spec.services.items():
+        if service_config.extraPodSpec and service_config.extraPodSpec.mainContainer:
+            service_config.extraPodSpec.mainContainer.image = image
+            logger.debug(f"Updated image for {service_name} to {image}")
+
+    return cfg.model_dump()
+
+
 class ConfigModifierProtocol(Protocol):
     @classmethod
     def convert_config(

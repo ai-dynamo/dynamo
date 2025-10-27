@@ -18,6 +18,7 @@ from benchmarks.profiler.utils.config import (
     remove_valued_arguments,
     set_argument_value,
     setup_worker_service_resources,
+    update_image,
     validate_and_get_worker_args,
 )
 from benchmarks.profiler.utils.defaults import (
@@ -77,18 +78,7 @@ class TrtllmConfigModifier:
     @classmethod
     def update_image(cls, config, image: str) -> dict:
         """Update container image for all DGD services (frontend, planner, workers)."""
-        cfg = Config.model_validate(config)
-
-        # Update image for all services
-        for service_name, service_config in cfg.spec.services.items():
-            if (
-                service_config.extraPodSpec
-                and service_config.extraPodSpec.mainContainer
-            ):
-                service_config.extraPodSpec.mainContainer.image = image
-                logger.debug(f"Updated image for {service_name} to {image}")
-
-        return cfg.model_dump()
+        return update_image(config, image)
 
     @classmethod
     def convert_config(
