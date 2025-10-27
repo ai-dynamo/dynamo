@@ -3,14 +3,15 @@
 
 use crate::{ErrorContext, Result, error};
 use etcd_client::ConnectOptions;
+use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 use tokio::time::sleep;
 
 /// Manages ETCD client connections with reconnection support
 pub struct Connector {
     /// The actual ETCD client, protected by RwLock for safe updates during reconnection
+    /// WARNING: Do not recursively acquire a read lock when the current thread already holds one
     client: RwLock<etcd_client::Client>,
     /// Configuration for connecting to ETCD
     etcd_urls: Vec<String>,
@@ -55,8 +56,8 @@ impl Connector {
     }
 
     /// Get a clone of the current ETCD client
-    pub async fn get_client(&self) -> etcd_client::Client {
-        self.client.read().await.clone()
+    pub fn get_client(&self) -> etcd_client::Client {
+        self.client.read().clone()
     }
 
     /// Reconnect to ETCD cluster with retry logic
@@ -81,7 +82,7 @@ impl Connector {
                 Ok(new_client) => {
                     tracing::info!("Successfully reconnected to ETCD cluster");
                     // Update the client behind the lock
-                    let mut client_guard = self.client.write().await;
+                    let mut client_guard = self.client.write();
                     *client_guard = new_client;
                     return Ok(());
                 }

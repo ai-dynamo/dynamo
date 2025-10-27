@@ -13,7 +13,7 @@ pub async fn create_lease(
     ttl: u64,
     token: CancellationToken,
 ) -> Result<Lease> {
-    let mut lease_client = connector.get_client().await.lease_client();
+    let mut lease_client = connector.get_client().lease_client();
     let lease = lease_client.grant(ttl as i64, None).await?;
 
     let id = lease.id() as u64;
@@ -42,7 +42,7 @@ pub async fn create_lease(
 
 /// Revoke a lease given its lease id. A wrapper over etcd_client::LeaseClient::revoke
 pub async fn revoke_lease(connector: Arc<Connector>, lease_id: u64) -> Result<()> {
-    let mut lease_client = connector.get_client().await.lease_client();
+    let mut lease_client = connector.get_client().lease_client();
     match lease_client.revoke(lease_id as i64).await {
         Ok(_) => Ok(()),
         Err(e) => {
@@ -65,7 +65,7 @@ async fn keep_alive(
 
     loop {
         // Try to establish or re-establish the keep-alive stream
-        let mut lease_client = connector.get_client().await.lease_client();
+        let mut lease_client = connector.get_client().lease_client();
         let (mut heartbeat_sender, mut heartbeat_receiver) = match lease_client
             .keep_alive(lease_id as i64)
             .await

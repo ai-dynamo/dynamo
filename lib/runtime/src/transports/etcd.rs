@@ -149,18 +149,9 @@ impl Client {
     }
 
     /// Get a clone of the underlying [`etcd_client::Client`] instance.
-    /// This returns a clone since the client is behind an Arc<RwLock>
-    /// Uses blocking to maintain backward compatibility (non-async interface)
-    ///
-    /// WARNING: This method will panic if called from within an async runtime.
-    /// Use `etcd_client_async()` instead when calling from async code.
+    /// This returns a clone since the client is behind an RwLock.
     pub fn etcd_client(&self) -> etcd_client::Client {
-        self.rt.block_on(self.connector.get_client())
-    }
-
-    /// Async version of etcd_client().
-    pub async fn etcd_client_async(&self) -> etcd_client::Client {
-        self.connector.get_client().await
+        self.connector.get_client()
     }
 
     /// Get the primary lease ID.
@@ -204,13 +195,7 @@ impl Client {
             ]);
 
         // Execute the transaction
-        let result = self
-            .connector
-            .get_client()
-            .await
-            .kv_client()
-            .txn(txn)
-            .await?;
+        let result = self.connector.get_client().kv_client().txn(txn).await?;
 
         if result.succeeded() {
             Ok(())
@@ -249,13 +234,7 @@ impl Client {
             ]);
 
         // Execute the transaction
-        let result = self
-            .connector
-            .get_client()
-            .await
-            .kv_client()
-            .txn(txn)
-            .await?;
+        let result = self.connector.get_client().kv_client().txn(txn).await?;
 
         // We have to enumerate the response paths to determine if the transaction succeeded
         if result.succeeded() {
@@ -291,7 +270,6 @@ impl Client {
         let _ = self
             .connector
             .get_client()
-            .await
             .kv_client()
             .put(key.as_ref(), value.as_ref(), Some(put_options))
             .await?;
@@ -309,7 +287,6 @@ impl Client {
             .with_lease(self.primary_lease().id() as i64);
         self.connector
             .get_client()
-            .await
             .kv_client()
             .put(key.as_ref(), value.as_ref(), Some(options))
             .await
@@ -324,7 +301,6 @@ impl Client {
         let mut get_response = self
             .connector
             .get_client()
-            .await
             .kv_client()
             .get(key, options)
             .await?;
@@ -338,7 +314,6 @@ impl Client {
     ) -> Result<u64> {
         self.connector
             .get_client()
-            .await
             .kv_client()
             .delete(key, options)
             .await
@@ -350,7 +325,6 @@ impl Client {
         let mut get_response = self
             .connector
             .get_client()
-            .await
             .kv_client()
             .get(prefix.as_ref(), Some(GetOptions::new().with_prefix()))
             .await?;
@@ -365,7 +339,7 @@ impl Client {
         key: impl Into<Vec<u8>>,
         lease_id: Option<u64>,
     ) -> Result<LockResponse> {
-        let mut lock_client = self.connector.get_client().await.lock_client();
+        let mut lock_client = self.connector.get_client().lock_client();
         let id = lease_id.unwrap_or(self.lease_id());
         let options = LockOptions::new().with_lease(id as i64);
         lock_client
@@ -376,7 +350,7 @@ impl Client {
 
     /// Release a distributed lock using the key from the LockResponse
     pub async fn unlock(&self, lock_key: impl Into<Vec<u8>>) -> Result<()> {
-        let mut lock_client = self.connector.get_client().await.lock_client();
+        let mut lock_client = self.connector.get_client().lock_client();
         lock_client
             .unlock(lock_key)
             .await
@@ -404,7 +378,7 @@ impl Client {
         prefix: impl AsRef<str> + std::fmt::Display,
         include_existing: bool,
     ) -> Result<PrefixWatcher> {
-        let client = self.connector.get_client().await;
+        let client = self.connector.get_client();
         let mut kv_client = client.kv_client();
         let mut watch_client = client.watch_client();
 
@@ -843,7 +817,7 @@ mod tests {
         assert_eq!(external_update, Some(b"external_update".to_vec()));
 
         // Clean up - delete the test keys
-        let etcd_client = client.etcd_client_async().await;
+        let etcd_client = client.etcd_client();
         let _ = etcd_client
             .kv_client()
             .delete(
