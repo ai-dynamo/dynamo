@@ -175,9 +175,9 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
     parser.add_argument(
         "--gpu_type",
         type=str,
-        choices=["gb200-fp8", "gb200-fp4"],
+        choices=["gb200-fp8", "gb200-fp4-decode", "gb200-fp4-prefill"],
         default="gb200-fp8",
-        help="Type of GPU to use. You can choose between gb200-fp8 and gb200-fp4.",
+        help="Type of GPU to use. You can choose between gb200-fp8, gb200-fp4-decode, and gb200-fp4-prefill.",
     )
 
     parser.add_argument(

@@ -112,10 +112,10 @@ if [ "$mode" = "prefill" ]; then
         --chunked-prefill-size 65536 \
         --eplb-algorithm deepseek \
         --trust-remote-code \
-	--offload-mode cpu  \
-	--offload-group-size 2  \
-	--offload-num-in-group 1 \
-	--offload-prefetch-step 1 \
+        --offload-mode cpu  \
+        --offload-group-size 2  \
+        --offload-num-in-group 1 \
+        --offload-prefetch-step 1 \
         --disable-cuda-graph \
         --mem-fraction-static 0.84 \
         --max-total-tokens 131072 \
@@ -127,9 +127,9 @@ if [ "$mode" = "prefill" ]; then
         --disaggregation-bootstrap-port 30001 \
         --nnodes "$TOTAL_NODES" \
         --node-rank "$RANK" \
-	--ep-size "$((TOTAL_GPUS - 2))" \
-	--tp-size "$((TOTAL_GPUS - 2))" \
-	--dp-size "$((TOTAL_GPUS - 2))" \
+        --ep-size "$((TOTAL_GPUS - 2))" \
+        --tp-size "$((TOTAL_GPUS - 2))" \
+        --dp-size "$((TOTAL_GPUS - 2))" \
         --enable-dp-attention \
         --host 0.0.0.0 \
         --stream-interval 2 \
