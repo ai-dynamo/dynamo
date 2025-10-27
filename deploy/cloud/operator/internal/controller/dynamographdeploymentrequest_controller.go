@@ -693,9 +693,9 @@ func isOnlineProfiling(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) boo
 
 // validateSpec validates the DGDR spec
 func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
-	// Validate profiler image is specified (either in new or deprecated location)
-	if dgdr.Spec.ProfilingConfig.ProfilerImage == "" && dgdr.Spec.ProfilerImage == "" {
-		return errors.New("profilerImage is required: specify either spec.profilingConfig.profilerImage or spec.profilerImage (deprecated)")
+	// Validate profiler image is specified in the new location
+	if dgdr.Spec.ProfilingConfig.ProfilerImage == "" {
+		return errors.New("profilingConfig.profilerImage is required")
 	}
 
 	// Basic validation - check that profilingConfig.config is provided
@@ -826,16 +826,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		// Set deployment.model from spec.model
 		deploymentConfig["model"] = dgdr.Spec.Model
 
-		// Set deployment.dgd_image from deploymentOverrides.workersImage or fall back to deprecated field
-		dgdImage := ""
+		// Set deployment.dgd_image from deploymentOverrides.workersImage if provided
 		if dgdr.Spec.DeploymentOverrides != nil && dgdr.Spec.DeploymentOverrides.WorkersImage != "" {
-			dgdImage = dgdr.Spec.DeploymentOverrides.WorkersImage
-		} else if dgdr.Spec.DgdImage != "" {
-			// Fall back to deprecated field for backward compatibility
-			dgdImage = dgdr.Spec.DgdImage
-		}
-		if dgdImage != "" {
-			deploymentConfig["dgd_image"] = dgdImage
+			deploymentConfig["dgd_image"] = dgdr.Spec.DeploymentOverrides.WorkersImage
 		}
 
 		// Set output_dir if not already set
@@ -927,12 +920,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			"--profile-config", string(configYAML),
 		}
 
-		// Use profiler image from DGDR spec, with preference for new location
+		// Use profiler image from profilingConfig
 		imageName := dgdr.Spec.ProfilingConfig.ProfilerImage
-		if imageName == "" {
-			// Fall back to deprecated field for backward compatibility
-			imageName = dgdr.Spec.ProfilerImage
-		}
 		logger.Info("Using profiler image", "image", imageName)
 
 		profilerContainer := corev1.Container{
