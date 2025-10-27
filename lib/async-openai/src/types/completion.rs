@@ -81,7 +81,7 @@ where
         {
             Err(E::invalid_type(
                 serde::de::Unexpected::Str(value),
-                &"echo parameter to be a boolean (true or false)",
+                &"echo parameter to be a boolean (true or false) or null",
             ))
         }
     }
