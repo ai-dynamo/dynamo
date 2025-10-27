@@ -187,8 +187,7 @@ RUN git clone --depth 1 --branch ${GDRCOPY_COMMIT} https://github.com/NVIDIA/gdr
 RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so
 
 # Install SGLang (requires CUDA 12.8.1 or 12.9.1)
-RUN python3 -m pip install --no-cache-dir --ignore-installed pip==25.2 \
-    && python3 -m pip install --no-cache-dir --ignore-installed --upgrade setuptools wheel html5lib six \
+RUN python3 -m pip install --no-cache-dir --ignore-installed pip==25.2 setuptools==80.9.0 wheel==0.45.1 html5lib==1.1 six==1.17.0 \
     && git clone --depth 1 --branch v${SGLANG_COMMIT} https://github.com/sgl-project/sglang.git \
     && cd sglang \
     && case "$CUDA_VERSION" in \
@@ -290,8 +289,8 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 # Install essential Python build tools
 RUN python3 -m pip install --no-cache-dir \
     mooncake-transfer-engine==0.3.6.post1 \
-    scikit-build-core \
-    setuptools-rust
+    scikit-build-core==0.11.6 \
+    setuptools-rust==1.12.0
 
 # Build and install sgl-router
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
