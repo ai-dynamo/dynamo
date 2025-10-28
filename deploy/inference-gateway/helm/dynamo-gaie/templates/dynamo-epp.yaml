@@ -18,7 +18,6 @@
 {{- $useDynamo    := default false .Values.epp.useDynamo -}}
 {{- $dynNsAll     := default .Values.dynamoNamespace .Values.epp.dynamo.namespace -}}
 {{- $ns           := ternary (required "set epp.dynamo.namespace (or top-level dynamoNamespace) when epp.useDynamo=true" $dynNsAll) "" $useDynamo -}}
-{{- $comp         := default "backend" .Values.epp.dynamo.component -}}
 {{- $kv           := default "16" .Values.epp.dynamo.kvBlockSize -}}
 {{- $std          := .Values.extension.standardImage -}}
 {{- $dyn          := .Values.extension.dynamoImage -}}
@@ -94,8 +93,6 @@ spec:
             value: "nats://{{ $platformName }}-nats.{{ $platformNs }}:4222"
           - name: DYN_NAMESPACE
             value: "{{ $ns }}"
-          - name: DYNAMO_COMPONENT
-            value: "{{ $comp }}"
           - name: DYNAMO_KV_BLOCK_SIZE
             value: "{{ $kv }}"
           - name: DYNAMO_ROUTER_REPLICA_SYNC

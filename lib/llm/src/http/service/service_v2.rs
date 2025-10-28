@@ -20,10 +20,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
 use dynamo_runtime::logging::make_request_span;
 use dynamo_runtime::metrics::prometheus_names::name_prefix;
-use dynamo_runtime::storage::key_value_store::EtcdStore;
-use dynamo_runtime::storage::key_value_store::KeyValueStore;
-use dynamo_runtime::storage::key_value_store::MemoryStore;
-use dynamo_runtime::transports::etcd;
+use dynamo_runtime::storage::key_value_store::KeyValueStoreManager;
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -33,8 +30,7 @@ use tower_http::trace::TraceLayer;
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
-    etcd_client: Option<etcd::Client>,
-    store: Arc<dyn KeyValueStore>,
+    store: KeyValueStoreManager,
     flags: StateFlags,
 }
 
@@ -75,12 +71,11 @@ impl StateFlags {
 }
 
 impl State {
-    pub fn new(manager: Arc<ModelManager>) -> Self {
+    pub fn new(manager: Arc<ModelManager>, store: KeyValueStoreManager) -> Self {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
-            etcd_client: None,
-            store: Arc::new(MemoryStore::new()),
+            store,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
@@ -90,20 +85,6 @@ impl State {
         }
     }
 
-    pub fn new_with_etcd(manager: Arc<ModelManager>, etcd_client: etcd::Client) -> Self {
-        Self {
-            manager,
-            metrics: Arc::new(Metrics::default()),
-            store: Arc::new(EtcdStore::new(etcd_client.clone())),
-            etcd_client: Some(etcd_client),
-            flags: StateFlags {
-                chat_endpoints_enabled: AtomicBool::new(false),
-                cmpl_endpoints_enabled: AtomicBool::new(false),
-                embeddings_endpoints_enabled: AtomicBool::new(false),
-                responses_endpoints_enabled: AtomicBool::new(false),
-            },
-        }
-    }
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests
     pub fn metrics_clone(&self) -> Arc<Metrics> {
         self.metrics.clone()
@@ -117,12 +98,8 @@ impl State {
         self.manager.clone()
     }
 
-    pub fn etcd_client(&self) -> Option<&etcd::Client> {
-        self.etcd_client.as_ref()
-    }
-
-    pub fn store(&self) -> Arc<dyn KeyValueStore> {
-        self.store.clone()
+    pub fn store(&self) -> &KeyValueStoreManager {
+        &self.store
     }
 
     // TODO
@@ -186,8 +163,8 @@ pub struct HttpServiceConfig {
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
 
-    #[builder(default = "None")]
-    etcd_client: Option<etcd::Client>,
+    #[builder(default)]
+    store: KeyValueStoreManager,
 
     // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
     #[builder(default = "None")]
@@ -335,10 +312,7 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let state = match config.etcd_client {
-            Some(etcd_client) => Arc::new(State::new_with_etcd(model_manager, etcd_client)),
-            None => Arc::new(State::new(model_manager)),
-        };
+        let state = Arc::new(State::new(model_manager, config.store));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -419,11 +393,6 @@ impl HttpServiceConfigBuilder {
 
     pub fn with_request_template(mut self, request_template: Option<RequestTemplate>) -> Self {
         self.request_template = Some(request_template);
-        self
-    }
-
-    pub fn with_etcd_client(mut self, etcd_client: Option<etcd::Client>) -> Self {
-        self.etcd_client = Some(etcd_client);
         self
     }
 

@@ -10,10 +10,10 @@
 use std::sync::Arc;
 
 use crate::component::{INSTANCE_ROOT_PATH, Instance};
-use crate::storage::key_value_store::KeyValueStore;
+use crate::storage::key_value_store::{KeyValueStore, KeyValueStoreManager};
 use crate::transports::etcd::Client as EtcdClient;
 
-pub async fn list_all_instances(client: Arc<dyn KeyValueStore>) -> anyhow::Result<Vec<Instance>> {
+pub async fn list_all_instances(client: &KeyValueStoreManager) -> anyhow::Result<Vec<Instance>> {
     let Some(bucket) = client.get_bucket(INSTANCE_ROOT_PATH).await? else {
         return Ok(vec![]);
     };

@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod approx;
 pub mod indexer;
+pub mod prefill_router;
 pub mod protocols;
 pub mod publisher;
 pub mod recorder;
@@ -29,6 +30,8 @@ pub mod scheduler;
 pub mod scoring;
 pub mod sequence;
 pub mod subscriber;
+
+pub use prefill_router::PrefillRouter;
 
 use crate::{
     kv_router::{
@@ -221,13 +224,7 @@ impl KvRouter {
         consumer_uuid: String,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
-
-        let cancellation_token = component
-            .drt()
-            .primary_lease()
-            .expect("Cannot KV route static workers")
-            .primary_token();
-
+        let cancellation_token = component.drt().primary_token();
         let generate_endpoint = component.endpoint("generate");
         let client = generate_endpoint.client().await?;
 
@@ -247,7 +244,7 @@ impl KvRouter {
 
         let runtime_configs_watcher = watch_prefix_with_extraction(
             etcd_client,
-            model_card::ROOT_PATH,
+            &format!("{}/{}", model_card::ROOT_PATH, component.path()),
             key_extractors::lease_id,
             |card: ModelDeploymentCard| Some(card.runtime_config),
             cancellation_token.clone(),

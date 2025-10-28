@@ -32,7 +32,7 @@ enum MapState {
 }
 
 enum EndpointEvent {
-    Put(String, i64),
+    Put(String, u64),
     Delete(String),
 }
 
@@ -43,9 +43,9 @@ pub struct Client {
     // These are the remotes I know about from watching etcd
     pub instance_source: Arc<InstanceSource>,
     // These are the instance source ids less those reported as down from sending rpc
-    instance_avail: Arc<ArcSwap<Vec<i64>>>,
+    instance_avail: Arc<ArcSwap<Vec<u64>>>,
     // These are the instance source ids less those reported as busy (above threshold)
-    instance_free: Arc<ArcSwap<Vec<i64>>>,
+    instance_free: Arc<ArcSwap<Vec<u64>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -104,15 +104,15 @@ impl Client {
         }
     }
 
-    pub fn instance_ids(&self) -> Vec<i64> {
+    pub fn instance_ids(&self) -> Vec<u64> {
         self.instances().into_iter().map(|ep| ep.id()).collect()
     }
 
-    pub fn instance_ids_avail(&self) -> arc_swap::Guard<Arc<Vec<i64>>> {
+    pub fn instance_ids_avail(&self) -> arc_swap::Guard<Arc<Vec<u64>>> {
         self.instance_avail.load()
     }
 
-    pub fn instance_ids_free(&self) -> arc_swap::Guard<Arc<Vec<i64>>> {
+    pub fn instance_ids_free(&self) -> arc_swap::Guard<Arc<Vec<u64>>> {
         self.instance_free.load()
     }
 
@@ -139,7 +139,7 @@ impl Client {
     }
 
     /// Mark an instance as down/unavailable
-    pub fn report_instance_down(&self, instance_id: i64) {
+    pub fn report_instance_down(&self, instance_id: u64) {
         let filtered = self
             .instance_ids_avail()
             .iter()
@@ -151,9 +151,9 @@ impl Client {
     }
 
     /// Update the set of free instances based on busy instance IDs
-    pub fn update_free_instances(&self, busy_instance_ids: &[i64]) {
+    pub fn update_free_instances(&self, busy_instance_ids: &[u64]) {
         let all_instance_ids = self.instance_ids();
-        let free_ids: Vec<i64> = all_instance_ids
+        let free_ids: Vec<u64> = all_instance_ids
             .into_iter()
             .filter(|id| !busy_instance_ids.contains(id))
             .collect();
@@ -173,7 +173,7 @@ impl Client {
                 InstanceSource::Dynamic(rx) => rx.clone(),
             };
             while !cancel_token.is_cancelled() {
-                let instance_ids: Vec<i64> = rx
+                let instance_ids: Vec<u64> = rx
                     .borrow_and_update()
                     .iter()
                     .map(|instance| instance.id())

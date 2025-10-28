@@ -54,6 +54,7 @@ impl From<RouterMode> for RsRouterMode {
 mod context;
 mod engine;
 mod http;
+mod kserve_grpc;
 mod llm;
 mod parsers;
 mod planner;
@@ -118,6 +119,18 @@ fn create_request_context(
 /// import the module.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Initialize logging early unless OTEL export is enabled (which requires tokio runtime)
+    if std::env::var("OTEL_EXPORT_ENABLED")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        eprintln!(
+            "Warning: OTEL_EXPORT_ENABLED=1 detected. Logging initialization deferred until runtime is available. Early logs may be dropped."
+        );
+    } else {
+        rs::logging::init();
+    }
+
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
@@ -164,6 +177,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::KvPushRouter>()?;
     m.add_class::<llm::kv::KvPushRouterStream>()?;
     m.add_class::<RouterMode>()?;
+    m.add_class::<kserve_grpc::KserveGrpcService>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<planner::VirtualConnectorCoordinator>()?;
     m.add_class::<planner::VirtualConnectorClient>()?;
@@ -425,9 +439,14 @@ impl DistributedRuntime {
 
         // Initialize logging in context where tokio runtime is available
         // otel exporter requires it
-        runtime.secondary().block_on(async {
-            rs::logging::init();
-        });
+        if std::env::var("OTEL_EXPORT_ENABLED")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            runtime.secondary().block_on(async {
+                rs::logging::init();
+            });
+        }
 
         let inner =
             if is_static {
@@ -754,12 +773,9 @@ impl Endpoint {
         })
     }
 
-    fn lease_id(&self) -> i64 {
-        self.inner
-            .drt()
-            .primary_lease()
-            .map(|l| l.id())
-            .unwrap_or(0)
+    // Opaque unique ID for this worker. May change over worker lifetime.
+    fn connection_id(&self) -> u64 {
+        self.inner.drt().connection_id()
     }
 
     /// Get a RuntimeMetrics helper for creating Prometheus metrics
@@ -790,7 +806,7 @@ impl Namespace {
 impl Client {
     /// Get list of current instances.
     /// Replaces endpoint_ids.
-    fn instance_ids(&self) -> Vec<i64> {
+    fn instance_ids(&self) -> Vec<u64> {
         self.router.client.instance_ids()
     }
 
@@ -802,7 +818,7 @@ impl Client {
             inner
                 .wait_for_instances()
                 .await
-                .map(|v| v.into_iter().map(|cei| cei.id()).collect::<Vec<i64>>())
+                .map(|v| v.into_iter().map(|cei| cei.id()).collect::<Vec<u64>>())
                 .map_err(to_pyerr)
         })
     }
@@ -903,7 +919,7 @@ impl Client {
         &self,
         py: Python<'p>,
         request: PyObject,
-        instance_id: i64,
+        instance_id: u64,
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
