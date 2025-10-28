@@ -15,9 +15,9 @@ ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 ARG CUDA_VERSION="12.8"
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG VLLM_REF="gluo/mla_tp_nixl"
+ARG VLLM_REF="nixl-ptp-gt-dtp"
 # FlashInfer only respected when building vLLM from source, ie when VLLM_REF does not start with 'v' or for arm64 builds
-ARG FLASHINF_REF="v0.3.1"
+ARG FLASHINF_REF="v0.4.1"
 ARG TORCH_BACKEND="cu128"
 
 # If left blank, then we will fallback to vLLM defaults
@@ -103,7 +103,7 @@ ARG ARCH
 # Install vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
 ARG VLLM_REF
-ARG VLLM_GIT_URL="https://github.com/GuanLuo/vllm.git"
+ARG VLLM_GIT_URL="https://github.com/NickLucche/vllm.git"
 ARG DEEPGEMM_REF
 ARG FLASHINF_REF
 ARG TORCH_BACKEND
