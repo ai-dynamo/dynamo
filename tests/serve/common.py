@@ -4,16 +4,19 @@
 """Common base classes and utilities for engine tests (vLLM, TRT-LLM, etc.)"""
 
 import logging
+import os
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 import pytest
 
+from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.utils.client import send_request
 from tests.utils.engine_process import EngineConfig, EngineProcess
 
 DEFAULT_TIMEOUT = 10
-SERVE_TEST_DIR = "/workspace/tests/serve"
+
+SERVE_TEST_DIR = os.path.join(WORKSPACE_DIR, "tests/serve")
 
 
 def run_serve_deployment(

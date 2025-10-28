@@ -13,9 +13,12 @@
 
 pub mod prompt;
 pub mod tools;
-
+use anyhow::Context;
 use anyhow::{Result, bail};
-use dynamo_async_openai::types::{ChatCompletionToolChoiceOption, EncodingFormat};
+use dynamo_async_openai::types::{
+    ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
+    ChatCompletionRequestUserMessageContentPart, ChatCompletionToolChoiceOption, EncodingFormat,
+};
 use futures::Stream;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
@@ -24,7 +27,10 @@ use tracing;
 
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::prompt::OAIChatLikeRequest;
-use crate::protocols::common::preprocessor::PreprocessedRequestBuilder;
+use crate::protocols::common::preprocessor::{
+    MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder,
+};
+
 use crate::tokenizers::Encoding;
 
 use dynamo_parsers::{ReasoningParser, ReasoningParserType};
@@ -168,8 +174,14 @@ impl OpenAIPreprocessor {
         request: &R,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>)> {
         let mut builder = self.builder(request)?;
-        let formatted_prompt = self.apply_template(request)?;
-        let annotations = self.gather_tokens(request, &mut builder, formatted_prompt)?;
+        let formatted_prompt = self
+            .apply_template(request)
+            .with_context(|| "Failed to apply prompt template")?;
+        let annotations = self
+            .gather_tokens(request, &mut builder, formatted_prompt)
+            .with_context(|| "Failed to gather tokens")?;
+        self.gather_multi_modal_data(request, &mut builder)
+            .with_context(|| "Failed to gather multimodal data")?;
 
         Ok((builder.build()?, annotations))
     }
@@ -253,6 +265,57 @@ impl OpenAIPreprocessor {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn gather_multi_modal_data<R: OAIChatLikeRequest>(
+        &self,
+        request: &R,
+        builder: &mut PreprocessedRequestBuilder,
+    ) -> Result<()> {
+        let messages = request.messages();
+        let message_count = messages.len().unwrap_or(0);
+        let mut media_map: MultimodalDataMap = HashMap::new();
+
+        for idx in 0..message_count {
+            let msg = messages
+                .get_item_by_index(idx)
+                .map_err(|_| anyhow::Error::msg(format!("Cannot get message at index {idx}")))?;
+
+            let msg_json: serde_json::Value = serde_json::to_value(&msg)?;
+            let message: ChatCompletionRequestMessage = serde_json::from_value(msg_json)?;
+
+            let content_parts = match &message {
+                ChatCompletionRequestMessage::User(u) => match &u.content {
+                    ChatCompletionRequestUserMessageContent::Array(parts) => parts,
+                    _ => continue,
+                },
+                _ => continue,
+            };
+
+            // Iterate over content parts
+            for content_part in content_parts {
+                let (type_str, url) = match content_part {
+                    ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
+                        ("image_url".to_string(), image_part.image_url.url.clone())
+                    }
+                    ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
+                        ("video_url".to_string(), video_part.video_url.url.clone())
+                    }
+                    ChatCompletionRequestUserMessageContentPart::AudioUrl(audio_part) => {
+                        ("audio_url".to_string(), audio_part.audio_url.url.clone())
+                    }
+                    _ => continue,
+                };
+
+                let map_item = media_map.entry(type_str.clone()).or_default();
+                map_item.push(MultimodalData::Url(url));
+            }
+        }
+        if !media_map.is_empty() {
+            builder.multi_modal_data(Some(media_map));
+        }
+
+        Ok(())
     }
 
     pub fn gather_tokens<
@@ -789,7 +852,6 @@ impl
 
         // forward the common completion request to the next operator
         let response_stream = next.generate(common_request).await?;
-
         // Extract context once
         let context = response_stream.context();
 
@@ -898,6 +960,8 @@ impl
         // convert the chat completion request to a common completion request
         let mut builder = self.builder(&request)?;
         let annotations = self.gather_tokens(&request, &mut builder, None)?;
+        self.gather_multi_modal_data(&request, &mut builder)?;
+
         let common_request = builder.build()?;
 
         // update isl

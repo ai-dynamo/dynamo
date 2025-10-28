@@ -224,13 +224,7 @@ impl KvRouter {
         consumer_uuid: String,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
-
-        let cancellation_token = component
-            .drt()
-            .primary_lease()
-            .expect("Cannot KV route static workers")
-            .primary_token();
-
+        let cancellation_token = component.drt().primary_token();
         let generate_endpoint = component.endpoint("generate");
         let client = generate_endpoint.client().await?;
 

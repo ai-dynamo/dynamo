@@ -92,6 +92,11 @@ async def run_profile(args):
         with open(args.config, "r") as f:
             config = yaml.safe_load(f)
 
+        config = config_modifier.update_model(config, args.model)
+        if args.dgd_image:
+            config = config_modifier.update_image(config, args.dgd_image)
+            logger.info(f"Using DGD image: {args.dgd_image}")
+
         if args.is_moe_model:
             # For MoE models, use range with stride of num_gpus_per_node
             profile_num_gpus = list(

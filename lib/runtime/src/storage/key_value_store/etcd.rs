@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::time::Duration;
 
-use crate::{storage::key_value_store::Key, transports::etcd::Client};
+use crate::{
+    storage::key_value_store::{Key, KeyValue, WatchEvent},
+    transports::etcd::Client,
+};
 use async_stream::stream;
 use async_trait::async_trait;
 use etcd_client::{Compare, CompareOp, EventType, PutOptions, Txn, TxnOp, WatchOptions};
@@ -104,24 +107,39 @@ impl KeyValueBucket for EtcdBucket {
 
     async fn watch(
         &self,
-    ) -> Result<Pin<Box<dyn futures::Stream<Item = bytes::Bytes> + Send + 'life0>>, StoreError>
-    {
-        let k = make_key(&self.bucket_name, &"".into());
-        tracing::trace!("etcd watch: {k}");
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + 'life0>>, StoreError> {
+        let prefix = make_key(&self.bucket_name, &"".into());
+        tracing::trace!("etcd watch: {prefix}");
         let (watcher, mut watch_stream) = self
             .client
             .etcd_client()
             .clone()
-            .watch(k.as_bytes(), Some(WatchOptions::new().with_prefix()))
+            .watch(prefix.as_bytes(), Some(WatchOptions::new().with_prefix()))
             .await
             .map_err(|e| StoreError::EtcdError(e.to_string()))?;
         let output = stream! {
             let _watcher = watcher; // Keep it alive. Not sure if necessary.
             while let Ok(Some(resp)) = watch_stream.message().await {
                 for e in resp.events() {
-                    if matches!(e.event_type(), EventType::Put) && e.kv().is_some() {
-                        let b: bytes::Bytes = e.kv().unwrap().value().to_vec().into();
-                        yield b;
+                    let Some(kv) = e.kv() else {
+                        continue;
+                    };
+                    let (k_bytes, v_bytes) = kv.clone().into_key_value();
+                    let key = match String::from_utf8(k_bytes) {
+                        Ok(k) => k,
+                        Err(err) => {
+                            tracing::error!(%err, prefix, "Invalid UTF8 in etcd key");
+                            continue;
+                        }
+                    };
+                    let item = KeyValue::new(key, v_bytes.into());
+                    match e.event_type() {
+                        EventType::Put => {
+                            yield WatchEvent::Put(item);
+                        }
+                        EventType::Delete => {
+                            yield WatchEvent::Delete(item);
+                        }
                     }
                 }
             }
@@ -156,7 +174,7 @@ impl EtcdBucket {
         tracing::trace!("etcd create: {k}");
 
         // Use atomic transaction to check and create in one operation
-        let put_options = PutOptions::new().with_lease(self.client.primary_lease().id() as i64);
+        let put_options = PutOptions::new().with_lease(self.client.lease_id() as i64);
 
         // Build transaction that creates key only if it doesn't exist
         let txn = Txn::new()
@@ -225,7 +243,7 @@ impl EtcdBucket {
         }
 
         let put_options = PutOptions::new()
-            .with_lease(self.client.primary_lease().id() as i64)
+            .with_lease(self.client.lease_id() as i64)
             .with_prev_key();
         let mut put_resp = self
             .client
