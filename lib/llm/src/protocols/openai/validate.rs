@@ -249,6 +249,27 @@ pub fn validate_n(n: Option<u8>) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+/// Validates n and temperature interaction
+/// When n > 1, temperature must be > 0 to ensure diverse outputs
+pub fn validate_n_with_temperature(
+    n: Option<u8>,
+    temperature: Option<f32>,
+) -> Result<(), anyhow::Error> {
+    if let Some(n_value) = n
+        && n_value > 1
+    {
+        let temp = temperature.unwrap_or(1.0);
+        if temp == 0.0 {
+            anyhow::bail!(
+                "When n > 1, temperature must be greater than 0 to ensure diverse outputs. Got n={}, temperature={}",
+                n_value,
+                temp
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Validates model parameter
 pub fn validate_model(model: &str) -> Result<(), anyhow::Error> {
     if model.trim().is_empty() {

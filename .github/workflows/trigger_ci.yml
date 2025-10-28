@@ -81,22 +81,36 @@ jobs:
         #!/bin/bash -e
         declare -A ci_variables
 
+        # Set ENABLE_PREMERGE to true by default
+        ci_variables["ENABLE_PREMERGE"]="true"
+        # Override to false if validation workflow is running
         if [[ "${{ vars.ALLOW_GITLAB_TEST_SKIP }}" == "1" && "${{ steps.check_workflow.outputs.skip_ci }}" == "true" ]]; then
-          echo "Github Workflow has run and RUN_PRE_MERGE_TESTS variable value is False"
-          ci_variables["RUN_PRE_MERGE_TESTS"]="false"
+          echo "Github Workflow has run and ENABLE_PREMERGE variable value is False"
+          ci_variables["ENABLE_PREMERGE"]="false"
         fi
 
+        # Build space-separated FRAMEWORKS variable
+        frameworks=""
         if [ "${{ steps.src_changes.outputs.vllm }}" == "true" ]; then
-          ci_variables["RUN_VLLM"]="true"
+          frameworks+="vllm "
         fi
 
         if [ "${{ steps.src_changes.outputs.trtllm }}" == "true" ]; then
-          ci_variables["RUN_TRTLLM"]="true"
+          frameworks+="trtllm "
         fi
 
         if [ "${{ steps.src_changes.outputs.sglang }}" == "true" ]; then
-          ci_variables["RUN_SGLANG"]="true"
+          frameworks+="sglang "
         fi
+
+        # Trim trailing space and set FRAMEWORKS variable if any frameworks detected
+        frameworks=$(echo "$frameworks" | xargs)
+        if [ -n "$frameworks" ]; then
+          ci_variables["FRAMEWORKS"]="$frameworks"
+        fi
+
+        # Set BUILD_ARCHS to empty string to build both amd64 and arm64
+        ci_variables["BUILD_ARCHS"]=""
 
         ci_args=""
         for key in "${!ci_variables[@]}"; do
