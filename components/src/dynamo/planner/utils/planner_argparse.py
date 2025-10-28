@@ -28,7 +28,7 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--environment",
         default=SLAPlannerDefaults.environment,
-        choices=["kubernetes", "virtual"],
+        choices=["kubernetes", "virtual", "global"],
         help="Environment type",
     )
     parser.add_argument(

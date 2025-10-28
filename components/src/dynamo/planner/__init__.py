@@ -5,6 +5,7 @@ __all__ = [
     "PlannerConnector",
     "KubernetesConnector",
     "VirtualConnector",
+    "GlobalConnector",
     "LoadPlannerDefaults",
     "SLAPlannerDefaults",
     "TargetReplica",
@@ -18,6 +19,7 @@ from dynamo.planner.defaults import (
 )
 from dynamo.planner.kubernetes_connector import KubernetesConnector, TargetReplica
 from dynamo.planner.planner_connector import PlannerConnector
+from dynamo.planner.global_connector import GlobalConnector
 from dynamo.planner.virtual_connector import VirtualConnector
 
 try:

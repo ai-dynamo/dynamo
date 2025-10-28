@@ -1,0 +1,738 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Complete deployment with scheduler, global planner, and two DynamoGraphDeployments
+#
+# COMPONENTS:
+#   - Scheduler: Routes requests to frontends across all deployments
+#   - Global Planner: Centralized scaling controller that batches and prioritizes
+#                     scaling requests from deployment-level planners
+#   - DynamoGraphDeployments (2): Each with frontend, prefill/decode workers, and planner
+#
+# ARCHITECTURE:
+#   - The scheduler discovers frontends via Kubernetes API
+#   - Each deployment has its own planner that sends scaling requests to global planner
+#   - Global planner batches requests and applies GPU-aware priority-based scaling
+#   - Service discovery uses Kubernetes DNS (*.svc.cluster.local)
+#
+# DEPLOYMENT:
+#   Deploy to default namespace:
+#     kubectl apply -f deployment.yaml
+#
+#   Deploy to specific namespace:
+#     kubectl apply -f deployment.yaml -n my-namespace
+#
+#   Or use the deploy script:
+#     NAMESPACE=my-namespace ./deploy.sh
+#
+# NOTE: No namespaces are hardcoded - you can deploy to any namespace
+#
+# PREREQUISITES:
+#   - ssh-key-secret must exist in the namespace for git clone
+#   - hf-token-secret must exist for HuggingFace model downloads
+#
+# RBAC:
+#   The scheduler and global planner share a ServiceAccount with permissions to:
+#     - List/watch services (for frontend discovery)
+#     - Get/list/watch/update/patch DynamoGraphDeployments (for scaling)
+
+---
+# ServiceAccount for scheduler
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dynamo-scheduler
+  labels:
+    app: dynamo-scheduler
+
+---
+# Role with permissions to list services and manage DynamoGraphDeployments
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dynamo-scheduler-role
+  labels:
+    app: dynamo-scheduler
+rules:
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamographdeployments"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+
+---
+# RoleBinding to grant scheduler permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dynamo-scheduler-binding
+  labels:
+    app: dynamo-scheduler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dynamo-scheduler-role
+subjects:
+- kind: ServiceAccount
+  name: dynamo-scheduler
+
+---
+# Scheduler Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dynamo-scheduler
+  labels:
+    app: dynamo-scheduler
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: dynamo-scheduler
+  template:
+    metadata:
+      labels:
+        app: dynamo-scheduler
+    spec:
+      serviceAccountName: dynamo-scheduler
+      containers:
+      - name: scheduler
+        image: python:3.12-slim
+        workingDir: /workspace/examples/global_planner_scheduler/scheduler
+        command:
+          - /bin/bash
+          - -c
+          - |
+            set -e
+            
+            # Install git and ssh
+            echo "Installing git and ssh..."
+            apt-get update && apt-get install -y git openssh-client && rm -rf /var/lib/apt/lists/*
+            
+            # Setup SSH for git clone
+            echo "Setting up SSH..."
+            mkdir -p /root/.ssh
+            cp /ssh-key/ssh-privatekey /root/.ssh/id_rsa
+            chmod 600 /root/.ssh/id_rsa
+            
+            # Clone repository
+            echo "Cloning repository..."
+            cd /workspace
+            git clone --branch darfeen/multi-dgd-planner https://github.com/ai-dynamo/dynamo.git dynamo
+            
+            # Install scheduler dependencies
+            echo "Installing dependencies..."
+            pip install --no-cache-dir -r /workspace/dynamo/examples/global_planner_scheduler/scheduler/reqs.txt
+            
+            echo "Starting scheduler..."
+            cd /workspace/dynamo/examples/global_planner_scheduler/scheduler
+            exec uvicorn app:app --host 0.0.0.0 --port 8080
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        env:
+        # Dynamo namespace for model discovery (used for logging/reference)
+        - name: NAMESPACE
+          value: "llama-deployment"
+        # Kubernetes namespace to search for frontend services
+        # Use POD_NAMESPACE to automatically use the scheduler's own namespace
+        - name: K8S_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        # Optional: Filter services by label selector (e.g., "app=dynamo-frontend")
+        - name: FRONTEND_LABEL_SELECTOR
+          value: ""
+        # Optional: Filter services by name pattern (default: "frontend")
+        - name: FRONTEND_SERVICE_PATTERN
+          value: "frontend"
+        # Discovery interval in seconds
+        - name: DISCOVERY_INTERVAL
+          value: "5"
+        # Log level: DEBUG, INFO, WARNING, ERROR
+        - name: LOG_LEVEL
+          value: "INFO"
+        # Optional: Static frontends as fallback (comma-separated)
+        # - name: STATIC_FRONTENDS
+        #   value: "http://fallback-1:8000,http://fallback-2:8000"
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: ssh-key
+          mountPath: /ssh-key
+          readOnly: true
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 25
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: workspace
+        emptyDir: {}
+      - name: ssh-key
+        secret:
+          secretName: ssh-key-secret
+          defaultMode: 0600
+
+---
+# Scheduler Service - Option 1: ClusterIP with Ingress (Recommended for production)
+apiVersion: v1
+kind: Service
+metadata:
+  name: dynamo-scheduler
+  labels:
+    app: dynamo-scheduler
+spec:
+  selector:
+    app: dynamo-scheduler
+  ports:
+  - name: http
+    protocol: TCP
+    port: 80
+    targetPort: 8080
+  type: ClusterIP
+  sessionAffinity: None
+
+---
+# Ingress for Scheduler (Requires Ingress Controller like nginx-ingress or traefik)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dynamo-scheduler-ingress
+  annotations:
+    # Nginx Ingress Controller annotations
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # Enable streaming support
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    # For Traefik, use these instead:
+    # traefik.ingress.kubernetes.io/router.middlewares: default-streaming@kubernetescrd
+spec:
+  ingressClassName: nginx  # Change to your ingress class (nginx, traefik, etc.)
+  rules:
+  - host: dynamo-scheduler.example.com  # Change to your domain
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: dynamo-scheduler
+            port:
+              number: 80
+  # Uncomment for TLS/HTTPS
+  # tls:
+  # - hosts:
+  #   - dynamo-scheduler.example.com
+  #   secretName: dynamo-scheduler-tls
+
+---
+# Alternative: NodePort Service (Uncomment if not using Ingress)
+# Exposes service on each node's IP at a static port (30000-32767)
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: dynamo-scheduler-nodeport
+#   namespace: default
+#   labels:
+#     app: dynamo-scheduler
+# spec:
+#   selector:
+#     app: dynamo-scheduler
+#   ports:
+#   - name: http
+#     protocol: TCP
+#     port: 80
+#     targetPort: 8080
+#     nodePort: 30080  # Optional: specify port in range 30000-32767
+#   type: NodePort
+#   sessionAffinity: None
+
+---
+# Global Planner Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dynamo-global-planner
+  labels:
+    app: dynamo-global-planner
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dynamo-global-planner
+  template:
+    metadata:
+      labels:
+        app: dynamo-global-planner
+    spec:
+      serviceAccountName: dynamo-scheduler  # Reuse scheduler's service account with RBAC permissions
+      containers:
+      - name: global-planner
+        image: python:3.12-slim
+        workingDir: /workspace/examples/global_planner_scheduler/global_planner
+        env:
+        - name: K8S_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: BATCHING_WINDOW
+          value: "60"
+        - name: MAX_GPU_LIMIT
+          value: "100"
+        command:
+          - /bin/bash
+          - -c
+          - |
+            set -e
+            
+            # Install git and ssh
+            echo "Installing git and ssh..."
+            apt-get update && apt-get install -y git openssh-client && rm -rf /var/lib/apt/lists/*
+            
+            # Setup SSH for git clone
+            echo "Setting up SSH..."
+            mkdir -p /root/.ssh
+            cp /ssh-key/ssh-privatekey /root/.ssh/id_rsa
+            chmod 600 /root/.ssh/id_rsa
+            
+            # Clone repository
+            echo "Cloning repository..."
+            cd /workspace
+            git clone --branch darfeen/multi-dgd-planner https://github.com/ai-dynamo/dynamo.git dynamo
+            
+            # Install dependencies
+            echo "Installing Python dependencies..."
+            pip install --no-cache-dir aiohttp uvloop pydantic kubernetes
+            
+            # Install dynamo
+            echo "Installing dynamo..."
+            cd /workspace/dynamo
+            pip install --no-cache-dir -e .
+            
+            # Start global planner
+            echo "Starting global planner..."
+            cd /workspace/dynamo/examples/global_planner_scheduler/global_planner
+            exec python app.py
+        ports:
+        - name: http
+          containerPort: 9000
+          protocol: TCP
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+        livenessProbe:
+          httpGet:
+            path: /scale
+            port: 9000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+        volumeMounts:
+        - name: ssh-key
+          mountPath: /ssh-key
+          readOnly: true
+      volumes:
+      - name: ssh-key
+        secret:
+          secretName: ssh-key-secret
+          defaultMode: 0600
+
+---
+# Global Planner Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: dynamo-global-planner
+  labels:
+    app: dynamo-global-planner
+spec:
+  selector:
+    app: dynamo-global-planner
+  ports:
+  - name: http
+    protocol: TCP
+    port: 9000
+    targetPort: 9000
+  type: ClusterIP
+  sessionAffinity: None
+
+---
+# First DynamoGraphDeployment - vLLM Backend
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: llama-deployment-a
+spec:
+  backendFramework: vllm
+  services:
+    Frontend:
+      # IMPORTANT: This dynamoNamespace must match the NAMESPACE env var in the scheduler
+      dynamoNamespace: llama-deployment-a
+      componentType: frontend
+      replicas: 1
+      resources:
+        requests:
+          cpu: "2"
+          memory: "4Gi"
+        limits:
+          cpu: "4"
+          memory: "8Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.1
+          command:
+            - python3
+            - -m
+            - dynamo.frontend
+    
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: llama-deployment-a
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.1
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --max-model-len
+            - "4096"
+            - --gpu-memory-utilization
+            - "0.85"
+    
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: llama-deployment-a
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.1
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --max-model-len
+            - "4096"
+            - --gpu-memory-utilization
+            - "0.85"
+    
+    Planner:
+      dynamoNamespace: llama-deployment-a
+      componentType: planner
+      replicas: 1
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "512Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+      extraPodSpec:
+        volumes:
+        - name: ssh-key
+          secret:
+            secretName: ssh-key-secret
+            defaultMode: 0600
+        
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.1
+          workingDir: /workspace
+          env:
+          - name: PLANNER_PRIORITY
+            value: "10"
+          - name: GLOBAL_PLANNER_SERVICE
+            value: "dynamo-global-planner"
+          - name: K8S_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              
+              # Install git if not present
+              echo "Checking for git..."
+              if ! command -v git &> /dev/null; then
+                  echo "Installing git..."
+                  apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+              fi
+              
+              # Setup SSH for git clone
+              echo "Setting up SSH..."
+              mkdir -p /root/.ssh
+              cp /ssh-key/ssh-privatekey /root/.ssh/id_rsa
+              chmod 600 /root/.ssh/id_rsa
+              
+              # Clone repository
+              echo "Cloning repository..."
+              cd /workspace
+              git clone --branch darfeen/multi-dgd-planner https://github.com/ai-dynamo/dynamo.git dynamo
+              
+              # Install dynamo
+              echo "Installing dynamo..."
+              cd /workspace/dynamo
+              uv pip install -e .
+              
+              echo "Starting planner..."
+              exec python3 -m dynamo.planner.planner_sla \
+                --namespace llama-deployment-a \
+                --environment global \
+                --backend vllm \
+                --adjustment-interval=60 \
+                --profile-results-dir=/workspace/dynamo/tests/planner/profiling_results/H200_TP1P_TP1D \
+                --ttft=100 \
+                --itl=10 \
+                --load-predictor=constant \
+                --no-correction
+          volumeMounts:
+          - name: ssh-key
+            mountPath: /ssh-key
+            readOnly: true
+
+---
+# Second DynamoGraphDeployment - Also vLLM Backend (different model or config)
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: llama-deployment-b
+spec:
+  backendFramework: vllm
+  services:
+    Frontend:
+      # IMPORTANT: Same dynamoNamespace so scheduler discovers both deployments
+      dynamoNamespace: llama-deployment-b
+      componentType: frontend
+      replicas: 1
+      resources:
+        requests:
+          cpu: "2"
+          memory: "4Gi"
+        limits:
+          cpu: "4"
+          memory: "8Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.1
+          command:
+            - python3
+            - -m
+            - dynamo.frontend
+    
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: llama-deployment-b
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.1
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --max-model-len
+            - "4096"
+            - --gpu-memory-utilization
+            - "0.85"
+    
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: llama-deployment-b
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.1
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --max-model-len
+            - "4096"
+            - --gpu-memory-utilization
+            - "0.85"
+    
+    Planner:
+      dynamoNamespace: llama-deployment-b
+      componentType: planner
+      replicas: 1
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "512Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+      extraPodSpec:
+        volumes:
+        - name: ssh-key
+          secret:
+            secretName: ssh-key-secret
+            defaultMode: 0600
+        
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.1
+          workingDir: /workspace
+          env:
+          - name: PLANNER_PRIORITY
+            value: "5"
+          - name: GLOBAL_PLANNER_SERVICE
+            value: "dynamo-global-planner"
+          - name: K8S_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              
+              # Install git if not present
+              echo "Checking for git..."
+              if ! command -v git &> /dev/null; then
+                  echo "Installing git..."
+                  apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+              fi
+              
+              # Setup SSH for git clone
+              echo "Setting up SSH..."
+              mkdir -p /root/.ssh
+              cp /ssh-key/ssh-privatekey /root/.ssh/id_rsa
+              chmod 600 /root/.ssh/id_rsa
+              
+              # Clone repository
+              echo "Cloning repository..."
+              cd /workspace
+              git clone --branch darfeen/multi-dgd-planner https://github.com/ai-dynamo/dynamo.git dynamo
+              
+              # Install dynamo
+              echo "Installing dynamo..."
+              cd /workspace/dynamo
+              uv pip install -e .
+              
+              echo "Starting planner..."
+              exec python3 -m dynamo.planner.planner_sla \
+                --namespace llama-deployment-b \
+                --environment global \
+                --backend vllm \
+                --adjustment-interval=60 \
+                --profile-results-dir=/workspace/dynamo/tests/planner/profiling_results/H200_TP1P_TP1D \
+                --ttft=100 \
+                --itl=10 \
+                --load-predictor=constant \
+                --no-correction
+          volumeMounts:
+          - name: ssh-key
+            mountPath: /ssh-key
+            readOnly: true
+
+---
+# Optional: ConfigMap for scheduler configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dynamo-scheduler-config
+data:
+  config.yaml: |
+    namespace: llama-deployment
+    discovery_interval: 5
+    log_level: INFO
+
+---
+# Optional: HorizontalPodAutoscaler for scheduler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: dynamo-scheduler-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: dynamo-scheduler
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 30
+      - type: Pods
+        value: 2
+        periodSeconds: 30
+      selectPolicy: Max
+

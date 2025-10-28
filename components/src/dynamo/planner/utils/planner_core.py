@@ -16,6 +16,7 @@ from dynamo.planner import (
     SubComponentType,
     TargetReplica,
     VirtualConnector,
+    GlobalConnector,
 )
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SLAPlannerDefaults
 from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
@@ -85,6 +86,12 @@ class Planner:
                         runtime,
                         self.namespace,
                         args.model_name,
+                    )
+                elif args.environment == "global":
+                    # GlobalConnector no longer requires runtime
+                    # Priority is configured via PLANNER_PRIORITY environment variable
+                    self.connector = GlobalConnector(
+                        namespace=self.namespace,
                     )
                 else:
                     raise ValueError(f"Invalid environment: {args.environment}")
