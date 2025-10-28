@@ -6,14 +6,14 @@ use serde::{Deserialize, Serialize};
 
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::kv_router::RouterConfigOverride;
-use crate::preprocessor::media::DecodedMediaData;
+use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum MultimodalData {
     Url(url::Url),
-    Decoded(DecodedMediaData),
+    Decoded(RdmaMediaDataDescriptor),
 }
 
 // (type, data)

@@ -364,6 +364,30 @@ impl SystemStorage {
     }
 }
 
+impl TryFrom<Vec<u8>> for SystemStorage {
+    type Error = StorageError;
+
+    /// Create SystemStorage from an existing Vec<u8>
+    /// Takes ownership of the Vec and uses its memory directly (zero-copy)
+    fn try_from(mut vec: Vec<u8>) -> Result<Self, Self::Error> {
+        let size = vec.len();
+        let layout =
+            Layout::array::<u8>(size).map_err(|e| StorageError::AllocationFailed(e.to_string()))?;
+        let ptr = NonNull::new(vec.as_mut_ptr())
+            .ok_or_else(|| StorageError::AllocationFailed("vec pointer is null".into()))?;
+
+        // prevents Vec from freeing the memory
+        std::mem::forget(vec);
+
+        Ok(Self {
+            ptr,
+            layout,
+            len: size,
+            handles: RegistrationHandles::new(),
+        })
+    }
+}
+
 impl Drop for SystemStorage {
     fn drop(&mut self) {
         self.handles.release();

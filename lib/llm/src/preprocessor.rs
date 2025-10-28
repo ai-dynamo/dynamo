@@ -321,11 +321,11 @@ impl OpenAIPreprocessor {
                     _ => continue,
                 };
 
-                let map_item = media_map.entry(type_str.clone()).or_insert_with(Vec::new);
+                let map_item = media_map.entry(type_str.clone()).or_default();
 
                 if let Some(loader) = &self.media_loader {
-                    let decoded_data = loader.fetch_and_decode_media_part(content_part).await?;
-                    map_item.push(MultimodalData::Decoded(decoded_data));
+                    let rdma_descriptor = loader.fetch_and_decode_media_part(content_part).await?;
+                    map_item.push(MultimodalData::Decoded(rdma_descriptor));
                 } else {
                     map_item.push(MultimodalData::Url(url));
                 }
