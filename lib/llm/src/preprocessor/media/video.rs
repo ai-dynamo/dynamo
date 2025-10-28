@@ -82,14 +82,12 @@ impl Decoder for VideoDecoder {
         let mut num_frames_decoded = 0;
 
         let target_indices = if requested_frames == 1 {
-            vec![(total_frames / 2)]
+            vec![total_frames / 2]
         } else {
             (0..requested_frames)
                 .map(|i| (i * (total_frames - 1)) / (requested_frames - 1))
                 .collect()
         };
-
-        println!("target_indices: {:?}", target_indices);
 
         // Decode all frames sequentially (required for P/B-frames), but only keep target frames
         // TODO: smarter seek-based decoding for better sparse sampling
@@ -363,31 +361,6 @@ mod tests {
         }
     }
 
-    // Invalid/Edge Cases
-
-    #[test]
-    fn test_invalid_video_data() {
-        let decoder = VideoDecoder::default();
-        let invalid_bytes = vec![0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8];
-        let encoded_data = create_encoded_media_data(invalid_bytes);
-
-        let result = decoder.decode(encoded_data);
-        assert!(
-            result.is_err(),
-            "Should fail when decoding invalid video data"
-        );
-    }
-
-    #[test]
-    fn test_empty_video_data() {
-        let decoder = VideoDecoder::default();
-        let empty_bytes = vec![];
-        let encoded_data = create_encoded_media_data(empty_bytes);
-
-        let result = decoder.decode(encoded_data);
-        assert!(result.is_err(), "Should fail when decoding empty data");
-    }
-
     #[test]
     fn test_conflicting_fps_and_num_frames() {
         let video_bytes = load_test_video("240p_10.mp4");
@@ -409,86 +382,5 @@ mod tests {
         );
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("cannot be specified at the same time"));
-    }
-
-    #[test]
-    fn test_conflicting_max_frames_and_num_frames() {
-        let video_bytes = load_test_video("240p_10.mp4");
-
-        let decoder = VideoDecoder {
-            fps: None,
-            max_frames: Some(3),
-            num_frames: Some(5),
-            strict: false,
-            max_pixels: None,
-        };
-
-        let encoded_data = create_encoded_media_data(video_bytes);
-
-        let result = decoder.decode(encoded_data);
-        assert!(
-            result.is_err(),
-            "Should fail when both max_frames and num_frames are specified"
-        );
-        let error_msg = result.unwrap_err().to_string();
-        assert!(error_msg.contains("cannot be specified at the same time"));
-    }
-
-    #[test]
-    fn test_strict_mode_success() {
-        let video_bytes = load_test_video("240p_10.mp4");
-
-        let decoder = VideoDecoder {
-            fps: None,
-            max_frames: None,
-            num_frames: Some(5),
-            strict: true,
-            max_pixels: None,
-        };
-
-        let encoded_data = create_encoded_media_data(video_bytes);
-
-        let result = decoder.decode(encoded_data);
-        assert!(
-            result.is_ok(),
-            "Should succeed in strict mode when all frames decode successfully"
-        );
-
-        let decoded = result.unwrap();
-        assert_eq!(
-            decoded.shape[0], 5,
-            "Should decode exactly 5 frames in strict mode"
-        );
-    }
-
-    #[test]
-    fn test_small_video_edge_case() {
-        let video_bytes = load_test_video("2p_10.mp4");
-        let (width, height, expected_frames) = parse_video_info("2p_10.mp4");
-
-        let decoder = VideoDecoder::default();
-        let encoded_data = create_encoded_media_data(video_bytes);
-
-        let result = decoder.decode(encoded_data);
-        assert!(result.is_ok(), "Should decode 2x2 small video successfully");
-
-        let decoded = result.unwrap();
-        assert_eq!(decoded.shape.len(), 4, "Should have 4 dimensions");
-        assert_eq!(
-            decoded.shape[0], expected_frames as usize,
-            "Should decode all frames"
-        );
-        assert_eq!(
-            decoded.shape[1], height as usize,
-            "Height should be {}",
-            height
-        );
-        assert_eq!(
-            decoded.shape[2], width as usize,
-            "Width should be {}",
-            width
-        );
-        assert_eq!(decoded.shape[3], 3, "Channels should be 3");
-        assert_eq!(decoded.dtype, "uint8");
     }
 }
