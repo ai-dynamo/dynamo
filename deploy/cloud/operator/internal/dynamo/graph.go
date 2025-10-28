@@ -853,25 +853,10 @@ func GenerateBasePodSpec(
 	}
 	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
-	podSpec.ImagePullSecrets = ensureUniqueImagePullSecrets(podSpec.ImagePullSecrets, imagePullSecrets)
+	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, imagePullSecrets...)
 
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName)
 	return controller_common.CanonicalizePodSpec(&podSpec), nil
-}
-
-func ensureUniqueImagePullSecrets(existing, new []corev1.LocalObjectReference) []corev1.LocalObjectReference {
-	if len(existing) == 0 && len(new) == 0 {
-		return nil
-	}
-	uniqueSecrets := make(map[string]corev1.LocalObjectReference)
-	for _, secret := range append(existing, new...) {
-		uniqueSecrets[secret.Name] = secret
-	}
-	uniqueSecretsList := make([]corev1.LocalObjectReference, 0, len(uniqueSecrets))
-	for _, secret := range uniqueSecrets {
-		uniqueSecretsList = append(uniqueSecretsList, secret)
-	}
-	return uniqueSecretsList
 }
 
 func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.DynamoGraphDeployment) {
