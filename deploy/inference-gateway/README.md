@@ -53,7 +53,7 @@ b. Install the Inference Extension CRDs (Inference Model and Inference Pool CRDs
 
 ```bash
 INFERENCE_EXTENSION_VERSION=v0.5.1
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/$INFERENCE_EXTENSION_VERSION/manifests.yaml -n  my-model
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/$INFERENCE_EXTENSION_VERSION/manifests.yaml
 ```
 
 c. Install `kgateway` CRDs and kgateway.

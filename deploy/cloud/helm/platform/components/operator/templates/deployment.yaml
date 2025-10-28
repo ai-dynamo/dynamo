@@ -87,12 +87,12 @@ spec:
         {{- if .Values.natsAddr }}
           - --natsAddr={{ .Values.natsAddr }}
         {{- else }}
-          - --natsAddr=nats://{{ .Release.Name }}-nats.{{ .Release.Namespace }}:4222
+          - --natsAddr=nats://{{ .Release.Name }}-nats.{{ .Release.Namespace }}.svc.cluster.local:4222
         {{- end }}
         {{- if .Values.etcdAddr }}
           - --etcdAddr={{ .Values.etcdAddr }}
         {{- else }}
-          - --etcdAddr={{ .Release.Name }}-etcd.{{ .Release.Namespace }}:2379
+          - --etcdAddr={{ .Release.Name }}-etcd.{{ .Release.Namespace }}.svc.cluster.local:2379
         {{- end }}
         {{- if and .Values.dynamo.istio.enabled .Values.dynamo.istio.gateway }}
           - --istio-virtual-service-gateway={{ .Values.dynamo.istio.gateway }}

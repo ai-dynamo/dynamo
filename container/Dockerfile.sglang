@@ -400,6 +400,18 @@ CMD []
 FROM runtime AS dev
 
 ARG WORKSPACE_DIR=/sgl-workspace/dynamo
+ARG PYTHON_VERSION
+
+# NOTE: SGLang uses system Python (not a virtualenv in framework/runtime stages) to align with
+# upstream SGLang Dockerfile: https://github.com/sgl-project/sglang/blob/main/docker/Dockerfile
+# For dev stage, we create a lightweight venv with --system-site-packages to satisfy maturin develop
+# requirements while still accessing all system-installed packages (sglang, torch, deepep, etc.)
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+RUN mkdir -p /opt/dynamo/venv && \
+    uv venv /opt/dynamo/venv --python $PYTHON_VERSION --system-site-packages
+
+ENV VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH="/opt/dynamo/venv/bin:${PATH}"
 
 # Install development tools and utilities
 RUN apt-get update -y && \
