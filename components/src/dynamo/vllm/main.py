@@ -466,7 +466,6 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
 
     logger.info("Waiting for Encoder Worker Instances ...")
     await encode_worker_client.wait_for_instances()
-    # await asyncio.sleep(2)  # Give time for service discovery to fully propagate
 
     # Register the endpoint as entrypoint to a model
     await register_llm(

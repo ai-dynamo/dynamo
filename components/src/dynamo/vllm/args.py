@@ -195,6 +195,17 @@ def parse_args() -> Config:
 
     config.namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
 
+    # Check multimodal role exclusivity
+    mm_flags = (
+        int(bool(args.multimodal_processor))
+        + int(bool(args.multimodal_encode_worker))
+        + int(bool(args.multimodal_worker))
+    )
+    if mm_flags > 1:
+        raise ValueError(
+            "Use only one of --multimodal-processor, --multimodal-encode-worker, or --multimodal-worker"
+        )
+
     # Set component and endpoint based on worker type
     if args.multimodal_processor:
         config.component = "processor"

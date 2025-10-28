@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Optional
 import torch
 from transformers import AutoModel
 
+from .encode_utils import is_model_supported
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,7 +64,7 @@ def construct_mm_data(
     image_embeds = image_embeds.to(embeddings_dtype)
 
     # Model-specific image handling
-    if model == SupportedModels.QWEN_2_5_VL_7B:
+    if is_model_supported(model, SupportedModels.QWEN_2_5_VL_7B):
         return _construct_qwen_image_data(image_embeds, image_grid_thw)
     else:
         # Default image handling for other models (e.g., LLAVA_1_5_7B)
