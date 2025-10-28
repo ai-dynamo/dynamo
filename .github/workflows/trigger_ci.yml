@@ -120,7 +120,7 @@ jobs:
 
         ci_args=""
         for key in "${!ci_variables[@]}"; do
-          ci_args+="--form variables[$key]=${ci_variables[$key]} "
+          ci_args+="--form variables[$key]=\"${ci_variables[$key]}\" "
         done
 
         echo "Running Pipeline with Variables: $ci_args"
