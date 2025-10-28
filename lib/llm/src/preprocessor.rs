@@ -830,18 +830,7 @@ impl
         // For non-streaming requests (stream=false), enable usage by default
         // This ensures compliance with OpenAI API spec where non-streaming responses
         // always include usage statistics
-        if !original_stream_flag {
-            // If stream_options doesn't exist, create it
-            if request.inner.stream_options.is_none() {
-                request.inner.stream_options =
-                    Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
-                        include_usage: true,
-                    });
-            } else if let Some(ref mut opts) = request.inner.stream_options {
-                // If stream_options exists, ensure include_usage is true for non-streaming
-                opts.include_usage = true;
-            }
-        }
+        request.enable_usage_for_nonstreaming(original_stream_flag);
 
         // Set stream=true for internal processing (after audit capture)
         request.inner.stream = Some(true);
@@ -975,18 +964,7 @@ impl
         // For non-streaming requests (stream=false), enable usage by default
         // This ensures compliance with OpenAI API spec where non-streaming responses
         // always include usage statistics
-        if !original_stream_flag {
-            // If stream_options doesn't exist, create it
-            if request.inner.stream_options.is_none() {
-                request.inner.stream_options =
-                    Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
-                        include_usage: true,
-                    });
-            } else if let Some(ref mut opts) = request.inner.stream_options {
-                // If stream_options exists, ensure include_usage is true for non-streaming
-                opts.include_usage = true;
-            }
-        }
+        request.enable_usage_for_nonstreaming(original_stream_flag);
 
         request.inner.stream = Some(true);
 
