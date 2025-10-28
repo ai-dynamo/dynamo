@@ -9,7 +9,6 @@ export PYTHONHASHSEED=0
 
 # Common configuration
 MODEL="Qwen/Qwen3-0.6B"
-BLOCK_SIZE=64
 
 # run decode router with kv-overlap-score-weight 0 for pure load balancing
 python -m dynamo.frontend \
@@ -21,7 +20,6 @@ python -m dynamo.frontend \
 # run standalone router service for prefill workers
 python -m dynamo.router \
     --endpoint dynamo.prefill.generate \
-    --block-size $BLOCK_SIZE \
     --router-reset-states \
     --no-track-active-blocks &
 
@@ -29,31 +27,28 @@ python -m dynamo.router \
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model $MODEL \
-    --block-size $BLOCK_SIZE \
     --enforce-eager &
 
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model $MODEL \
-    --block-size $BLOCK_SIZE \
     --enforce-eager &
 
 # two prefill workers with KVBM enabled
-# Each worker needs unique barrier ID to avoid KVBM coordination conflicts
-DYN_KVBM_BARRIER_ID_PREFIX=kvbm_prefill_0 \
+# Each worker needs unique ZMQ ports to avoid KVBM coordination conflicts
+DYN_KVBM_LEADER_ZMQ_PUB_PORT=56001 \
+DYN_KVBM_LEADER_ZMQ_ACK_PORT=56002 \
 CUDA_VISIBLE_DEVICES=2 DYN_KVBM_CPU_CACHE_GB=20 \
     python3 -m dynamo.vllm \
     --model $MODEL \
-    --block-size $BLOCK_SIZE \
     --enforce-eager \
     --is-prefill-worker \
     --connector kvbm &
 
-DYN_KVBM_BARRIER_ID_PREFIX=kvbm_prefill_1 \
+DYN_KVBM_LEADER_ZMQ_PUB_PORT=56003 \
+DYN_KVBM_LEADER_ZMQ_ACK_PORT=56004 \
 CUDA_VISIBLE_DEVICES=3 DYN_KVBM_CPU_CACHE_GB=20 \
     python3 -m dynamo.vllm \
     --model $MODEL \
-    --block-size $BLOCK_SIZE \
     --enforce-eager \
     --is-prefill-worker \
     --connector kvbm
-

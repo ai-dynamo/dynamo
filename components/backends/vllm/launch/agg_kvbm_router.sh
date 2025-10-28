@@ -9,7 +9,6 @@ export PYTHONHASHSEED=0
 
 # Common configuration
 MODEL="Qwen/Qwen3-0.6B"
-BLOCK_SIZE=64
 
 # run frontend + KV router
 python -m dynamo.frontend \
@@ -19,20 +18,19 @@ python -m dynamo.frontend \
 
 # run workers with KVBM enabled
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
-# Each worker needs unique barrier ID to avoid KVBM coordination conflicts
-DYN_KVBM_BARRIER_ID_PREFIX=kvbm_worker_0 \
-CUDA_VISIBLE_DEVICES=0 DYN_KVBM_CPU_CACHE_GB=20 \
+# Each worker needs unique ZMQ ports to avoid KVBM coordination conflicts
+DYN_KVBM_LEADER_ZMQ_PUB_PORT=56001 \
+DYN_KVBM_LEADER_ZMQ_ACK_PORT=56002 \
+CUDA_VISIBLE_DEVICES=0 DYN_KVBM_CPU_CACHE_GB=2 \
     python3 -m dynamo.vllm \
     --model $MODEL \
-    --block-size $BLOCK_SIZE \
     --enforce-eager \
-    --connector kvbm &
+    --connector kvbm --gpu-memory-utilization 0.4 &
 
-DYN_KVBM_BARRIER_ID_PREFIX=kvbm_worker_1 \
-CUDA_VISIBLE_DEVICES=1 DYN_KVBM_CPU_CACHE_GB=20 \
+DYN_KVBM_LEADER_ZMQ_PUB_PORT=56003 \
+DYN_KVBM_LEADER_ZMQ_ACK_PORT=56004 \
+CUDA_VISIBLE_DEVICES=0 DYN_KVBM_CPU_CACHE_GB=2 \
     python3 -m dynamo.vllm \
     --model $MODEL \
-    --block-size $BLOCK_SIZE \
     --enforce-eager \
-    --connector kvbm
-
+    --connector kvbm --gpu-memory-utilization 0.4
