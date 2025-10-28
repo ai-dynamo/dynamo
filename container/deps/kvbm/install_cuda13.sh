@@ -18,6 +18,10 @@
 # It compensates for the lack of a public CUDA manylinux image,
 # while still allowing external users to build from source.
 
+# A long-term fix would be to push for an official CUDA manylinux image
+# or have the Nixl team release a nixl-dev deb package,
+# so we don't have to compile everything from source.
+
 set -ex
 
 ARCH_ALT="${ARCH_ALT:-$(uname -m)}"

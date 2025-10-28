@@ -30,6 +30,10 @@ ARG BASE_IMAGE=quay.io/pypa/manylinux_2_28_${ARCH_ALT}
 
 FROM ${BASE_IMAGE} AS wheel_builder
 
+ARG USE_SCCACHE
+ARG SCCACHE_BUCKET=""
+ARG SCCACHE_REGION=""
+
 ARG CARGO_BUILD_JOBS
 ARG ARCH_ALT
 ARG ARCH=amd64
@@ -83,9 +87,26 @@ RUN yum groupinstall -y 'Development Tools' &&  \
     wget \
     zlib
 
+COPY container/use-sccache.sh /tmp/use-sccache.sh
+RUN chmod +x /tmp/use-sccache.sh && \
+    if [ "${USE_SCCACHE}" = "true" ]; then \
+        ARCH_ALT="${ARCH_ALT}" /tmp/use-sccache.sh install; \
+    fi
+
+# Set SCCACHE environment variables
+ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
+    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
+    RUSTC_WRAPPER=${USE_SCCACHE:+sccache} \
+    CMAKE_C_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
+    CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
+    CMAKE_CUDA_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache}
+
 # Build OpenSSL 3.x
 RUN yum install -y perl-IPC-Cmd perl-Test-Simple perl-Data-Dumper
-RUN cd /tmp && \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    cd /tmp && \
     wget -q https://www.openssl.org/source/openssl-3.0.16.tar.gz && \
     tar -xzf openssl-3.0.16.tar.gz && \
     cd openssl-3.0.16 && \
@@ -107,7 +128,10 @@ ENV OPENSSL_INCLUDE_DIR="/usr/local/openssl3/include"
 
 WORKDIR /workspace
 
-RUN git clone --recurse-submodules -b v1.73.0 --depth 1 --shallow-submodules https://github.com/grpc/grpc && \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    git clone --recurse-submodules -b v1.73.0 --depth 1 --shallow-submodules https://github.com/grpc/grpc && \
     cd grpc && \
     mkdir -p cmake/build && \
     cd cmake/build && \
@@ -124,7 +148,10 @@ RUN git clone --recurse-submodules -b v1.73.0 --depth 1 --shallow-submodules htt
 
 ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH
 
-RUN cd /workspace && \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    cd /workspace && \
     git clone --depth 1 https://github.com/etcd-cpp-apiv3/etcd-cpp-apiv3.git && \
     cd etcd-cpp-apiv3 && \
     sed -i '/^find_dependency(cpprestsdk)$/d' etcd-cpp-api-config.in.cmake && \
@@ -133,13 +160,19 @@ RUN cd /workspace && \
 
 # The base image libcurl is linked against openssl 1.x, so we need to build from source
 # in order to use openssl 3.x. This is needed to build aws-sdk-cpp.
-RUN wget https://curl.se/download/curl-8.5.0.tar.gz && \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    wget https://curl.se/download/curl-8.5.0.tar.gz && \
     tar xzf curl-8.5.0.tar.gz && cd curl-8.5.0 && \
     ./configure --prefix=/usr/local --with-ssl=/usr/local/openssl3 --enable-shared && \
     make -j$(nproc) && make install
 
 RUN git clone --recurse-submodules --depth 1 --shallow-submodules https://github.com/aws/aws-sdk-cpp.git --branch 1.11.581
-RUN mkdir aws_sdk_build && cd aws_sdk_build && \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    mkdir aws_sdk_build && cd aws_sdk_build && \
     export LDFLAGS="-L/usr/local/openssl3/lib64 -L/usr/local/openssl3/lib" && \
     export CFLAGS="-I/usr/local/openssl3/include" && \
     export CXXFLAGS="-I/usr/local/openssl3/include" && \
@@ -210,7 +243,10 @@ RUN uv venv $VIRTUAL_ENV --python $DEFAULT_PYTHON_VERSION && \
 RUN rm -rf /usr/lib/ucx
 RUN rm -rf /opt/hpcx/ucx
 
-RUN cd /workspace && \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    cd /workspace && \
     git clone --depth 1 https://github.com/NVIDIA/gdrcopy.git && \
     cd gdrcopy && \
     git fetch --tags --depth=1 && \
@@ -222,7 +258,14 @@ RUN cd /workspace && \
     rpm -Uvh gdrcopy-*.el8.$ARCH_ALT.rpm && \
     rpm -Uvh gdrcopy-devel-*.el8.noarch.rpm
 
-RUN cd /usr/local/src && \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    CC=${USE_SCCACHE:+sccache gcc} && \
+    CXX=${USE_SCCACHE:+sccache g++} && \
+    export CC=${CC} && \
+    export CXX=${CXX} && \
+    cd /usr/local/src && \
      git clone https://github.com/openucx/ucx.git && \
      cd ucx && 			     \
      git checkout $UCX_REF &&	     \
@@ -243,7 +286,10 @@ RUN cd /usr/local/src && \
      make -j install-strip &&        \
      ldconfig
 
-RUN rm -rf build && \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    rm -rf build && \
     mkdir build && \
     uv run meson setup build/ --prefix=/usr/local/nixl --buildtype=release \
     -Dcudapath_lib="/usr/local/cuda/lib64" \
@@ -276,13 +322,17 @@ ENV PATH="/workspace/nixl/.venv/bin:${PATH}"
 # so KVBM works with CUDA 13 Nixl even when Nixl isn’t installed on the system.
 # TODO: Remove this once the Nixl team releases a `nixl-cu13` pip wheel.
 #       That wheel will become a dependency of KVBM.
-RUN mkdir -p /opt/dynamo/lib/kvbm/python/kvbm/nixl-cu13 && \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    mkdir -p /opt/dynamo/lib/kvbm/python/kvbm/nixl-cu13 && \
     cp -r /usr/local/nixl/lib64/* /opt/dynamo/lib/kvbm/python/kvbm/nixl-cu13/ && \
     rm -rf /opt/dynamo/lib/kvbm/python/kvbm/nixl-cu13/plugins/libplugin_GPUNETIO.so && \
     rm -rf /opt/dynamo/lib/kvbm/python/kvbm/nixl-cu13/plugins/libplugin_OBJ.so  && \
     cd /opt/dynamo/lib/kvbm && \
     uv pip install maturin[patchelf] && \
-    maturin build --release --out /opt/dynamo/dist
+    maturin build --release --out /opt/dynamo/dist && \
+    /tmp/use-sccache.sh show-stats "KVBM"
 
 
 FROM ubuntu:24.04 AS wheel
