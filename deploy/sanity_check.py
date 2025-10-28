@@ -1116,7 +1116,14 @@ class FilePermissionsInfo(NodeInfo):
             )
 
     def _check_site_packages_permissions(self):
-        """Check site-packages directory writability"""
+        """Check site-packages directory writability
+
+        Logic:
+        - If running in a virtualenv and its site-packages is writable: PASS
+          (system site-packages being read-only is expected and shown as WARNING)
+        - If no virtualenv and no writable site-packages: ERROR
+          (can't install packages anywhere)
+        """
         try:
             import site
 
@@ -1126,15 +1133,33 @@ class FilePermissionsInfo(NodeInfo):
             if user_site:
                 site_packages_dirs.append(user_site)
 
-            # Check each existing site-packages directory
+            # First pass: check which directories are writable
+            writable_dirs = []
+            all_results = []
             recursive = self.thorough_check
+
             for site_dir in site_packages_dirs:
                 if os.path.exists(site_dir):
                     results = self._check_permissions_unified(
                         [site_dir], "site-packages", recursive=recursive
                     )
-                    for result in results:
-                        self.add_child(result)
+                    all_results.append((site_dir, results))
+
+                    # Check if this directory is writable
+                    if results and results[0].status == NodeStatus.OK:
+                        writable_dirs.append(site_dir)
+
+            # Determine if we have at least one writable site-packages
+            has_writable_site_packages = len(writable_dirs) > 0
+
+            # Second pass: add results with adjusted status
+            for site_dir, results in all_results:
+                for result in results:
+                    # If we have at least one writable site-packages,
+                    # downgrade ERROR to WARNING for non-writable ones
+                    if has_writable_site_packages and result.status == NodeStatus.ERROR:
+                        result.status = NodeStatus.WARNING
+                    self.add_child(result)
 
         except Exception as e:
             self.add_child(
