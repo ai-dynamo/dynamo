@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 import pytest
+import requests
 
 from tests.kvbm.common import ApiTester, check_logs_for_patterns
 from tests.utils.managed_process import ManagedProcess
@@ -98,6 +99,42 @@ def extract_consolidator_stats(log_path: Path) -> dict:
         logger.warning(f"Error extracting consolidator stats: {e}")
 
     return stats
+
+
+def wait_for_worker_registration(
+    frontend_url: str, max_wait_seconds: int = 120, poll_interval: int = 2
+) -> bool:
+    """
+    Poll frontend health endpoint until a worker registers.
+
+    Args:
+        frontend_url: Base URL of the frontend (e.g., "http://localhost:8000")
+        max_wait_seconds: Maximum time to wait for registration
+        poll_interval: Seconds between health checks
+
+    Returns:
+        True if worker registered, False if timeout
+    """
+
+    start_time = time.time()
+
+    while time.time() - start_time < max_wait_seconds:
+        try:
+            response = requests.get(f"{frontend_url}/health", timeout=5)
+            health_data = response.json()
+            if health_data.get("instances"):
+                elapsed = time.time() - start_time
+                logger.info(f"vLLM worker registered after {elapsed:.1f}s")
+                return True
+        except Exception as e:
+            logger.debug(f"Health check failed: {e}")
+
+        time.sleep(poll_interval)
+
+    elapsed = time.time() - start_time
+    logger.error(f"vLLM worker failed to register after {elapsed:.1f}s")
+    logger.error("Check vLLM logs for initialization errors")
+    return False
 
 
 @pytest.fixture
@@ -205,7 +242,15 @@ def vllm_worker(frontend_server, test_directory, runtime_services):
         terminate_existing=False,
     ) as vllm_process:
         logger.info("Waiting for vLLM worker and consolidator to initialize...")
-        time.sleep(30)  # Increased wait time for model loading + consolidator
+
+        # Wait for worker to register with frontend
+        worker_registered = wait_for_worker_registration(frontend_server["base_url"])
+
+        if not worker_registered:
+            logger.warning("Continuing test despite worker registration failure")
+
+        # Additional wait for consolidator to fully initialize
+        time.sleep(5)
 
         # Verify consolidator started by checking logs
         stats = extract_consolidator_stats(log_file)
@@ -554,7 +599,17 @@ class TestConsolidatorRouterE2E:
                 terminate_existing=False,
             ) as _vllm_process:
                 logger.info("Waiting for vLLM worker to initialize...")
-                time.sleep(30)
+
+                # Wait for worker to register with frontend
+                worker_registered = wait_for_worker_registration(
+                    f"http://localhost:{FRONTEND_PORT}"
+                )
+
+                if not worker_registered:
+                    pytest.fail("vLLM worker failed to register with frontend")
+
+                # Additional wait for consolidator to fully initialize
+                time.sleep(5)
 
                 # Create tester
                 tester = ApiTester(
