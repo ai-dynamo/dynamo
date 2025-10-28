@@ -161,16 +161,14 @@ jobs:
     needs: changed-files
     if: needs.changed-files.outputs.has_code_changes == 'true'
     # OPS-1140: Uncomment this for sglang arm switch to wideep
-    # strategy:
-    #   fail-fast: false
-    #   matrix:
-    #     platform:
-    #       - { arch: amd64, runner: gpu-l40-amd64 }
-    #       - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    # name: sglang (${{ matrix.platform.arch }})
-    # runs-on: ${{ matrix.platform.runner }}
-    # OPS-1140: Remove this runs-on line, replaced with the above line
-    runs-on: gpu-l40-amd64
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: gpu-l40-amd64 }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+    name: sglang (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
