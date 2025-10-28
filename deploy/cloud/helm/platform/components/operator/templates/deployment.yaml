@@ -124,9 +124,7 @@ spec:
           - --mpi-run-ssh-secret-name={{ .Values.dynamo.mpiRun.secretName }}
           - --mpi-run-ssh-secret-namespace={{ .Release.Namespace }}
         {{- end }}
-        {{- if .Values.namespaceRestriction.enabled }}
-          - --dgdr-profiling-cluster-role-name={{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-dgdr-profiling-nodes
-        {{- else }}
+        {{- if not .Values.namespaceRestriction.enabled }}
           - --dgdr-profiling-cluster-role-name={{ include "dynamo-operator.fullname" . }}-dgdr-profiling
           - --planner-cluster-role-name={{ include "dynamo-operator.fullname" . }}-planner
         {{- end }}

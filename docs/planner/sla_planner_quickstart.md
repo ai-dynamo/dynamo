@@ -229,25 +229,30 @@ sweep:
 # Offline Profiling (AI Configurator - TensorRT-LLM only)
 sweep:
   use_ai_configurator: true
-aic:
-  system: h200_sxm
-  model_name: QWEN3_32B
-  backend_version: "0.20.0"
+  aic_system: h200_sxm
+  aic_model_name: QWEN3_32B
+  aic_backend_version: "0.20.0"
 ```
 
 > [!NOTE]
 > For detailed comparison, supported configurations, and limitations, see [SLA-Driven Profiling Documentation](/docs/benchmarks/sla_driven_profiling.md#profiling-methods).
 
-### GPU Discovery
+### GPU and Hardware Configuration
 
-By default, the DGDR controller automatically discovers available GPU resources. Optionally specify preferences:
+**Cluster-Scoped Operators:** GPU discovery is automatic. Hardware constraints are optional.
+
+**Namespace-Restricted Operators:** GPU discovery is disabled (requires cluster-wide node access). Hardware configuration is required.
 
 ```yaml
-spec:
-  gpu:
-    type: h200           # GPU type (e.g., h100, h200)
-    count: 8             # Number of GPUs to use
-    memoryGB: 141        # GPU memory in GB
+profilingConfig:
+  config:
+    sweep:
+      aic_system: h200_sxm
+
+    hardware:
+      min_num_gpus_per_engine: 1
+      max_num_gpus_per_engine: 8
+      num_gpus_per_node: 8
 ```
 
 ### Advanced Configuration

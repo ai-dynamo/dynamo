@@ -42,16 +42,19 @@ The recommended way to profile models is through DGDRs. Sample configurations ar
 - **`profile_sla_moe_dgdr.yaml`**: MoE model profiling
 
 The Dynamo Operator automatically:
-1. Discovers GPU resources
+1. Discovers GPU resources (cluster-scoped operators only)
 2. Runs profiling (AIPerf on real engines or AI Configurator simulation)
 3. Generates optimal DGD configuration with SLA planner
 4. Deploys the DGD to your cluster
+
+> [!IMPORTANT]
+> **Namespace-Restricted Operators:** GPU discovery requires cluster-wide permissions to access node resources. If your operator is installed with `namespaceRestriction.enabled=true`, you must manually provide hardware configuration in your DGDR. See the [GPU and Hardware Configuration section in the Quick Start Guide](/docs/planner/sla_planner_quickstart.md#gpu-and-hardware-configuration) for details.
 
 See the [Quick Start Guide](/docs/planner/sla_planner_quickstart.md) for prerequisites and detailed instructions.
 
 ## Profiling Method
 
-1. **GPU Discovery**: Detects available GPUs and their specifications
+1. **GPU Discovery**: Detects available GPUs and their specifications (automatic in cluster-scoped mode, manual specification required in namespace-restricted mode)
 2. **Identify Sweep Ranges**: Automatically determine minimum and maximum number of GPUs per engine. Minimum is determined by the model size and GPU VRAM. Maximum is set to one node for dense model and 4 nodes for MoE models.
 3. **Parallelization Mapping Sweep**: Use the input ISL and OSL, test the performance of the engines with different parallelization mappings. For dense models, we test different TP sizes for both prefill and decode. For MoE models, we test different TEP sizes for prefill and DEP sizes for decode.
    - **Prefill**: For prefill, since there is no in-flight batching (assume isl is long enough to saturate the GPU), we directly measure the TTFT for a request with given isl without kv-reusing. For example, the below plot shows the prefill parallelization mapping sweep results for H100 for deepseek-ai/DeepSeek-R1-Distill-Llama-8B.
