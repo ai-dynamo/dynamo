@@ -30,6 +30,7 @@ vllm: &vllm
   - 'container/deps/vllm/**'
   - 'components/backends/vllm/**'
   - 'components/src/dynamo/vllm/**'
+  - 'container/build.sh'
   - 'tests/serve/test_vllm.py'
 
 sglang: &sglang
