@@ -237,23 +237,9 @@ sweep:
 > [!NOTE]
 > For detailed comparison, supported configurations, and limitations, see [SLA-Driven Profiling Documentation](/docs/benchmarks/sla_driven_profiling.md#profiling-methods).
 
-### GPU and Hardware Configuration
+### Hardware Configuration
 
-**Cluster-Scoped Operators:** GPU discovery is automatic. Hardware constraints are optional.
-
-**Namespace-Restricted Operators:** GPU discovery is disabled (requires cluster-wide node access). Hardware configuration is required.
-
-```yaml
-profilingConfig:
-  config:
-    sweep:
-      aic_system: h200_sxm
-
-    hardware:
-      min_num_gpus_per_engine: 1
-      max_num_gpus_per_engine: 8
-      num_gpus_per_node: 8
-```
+For details on hardware configuration and GPU discovery options, see [Hardware Configuration in SLA-Driven Profiling](/docs/benchmarks/sla_driven_profiling.md#hardware-configuration).
 
 ### Advanced Configuration
 

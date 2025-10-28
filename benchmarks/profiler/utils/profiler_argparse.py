@@ -158,13 +158,13 @@ def create_profiler_parser() -> argparse.Namespace:
     parser.add_argument(
         "--min-num-gpus-per-engine",
         type=int,
-        default=config.get("hardware", {}).get("min_num_gpus_per_engine", 0),
+        default=config.get("hardware", {}).get("min_num_gpus_per_engine", 1),
         help="minimum number of GPUs per engine",
     )
     parser.add_argument(
         "--max-num-gpus-per-engine",
         type=int,
-        default=config.get("hardware", {}).get("max_num_gpus_per_engine", 0),
+        default=config.get("hardware", {}).get("max_num_gpus_per_engine", 8),
         help="maximum number of GPUs per engine",
     )
     parser.add_argument(
@@ -245,8 +245,14 @@ def create_profiler_parser() -> argparse.Namespace:
     parser.add_argument(
         "--num-gpus-per-node",
         type=int,
-        default=config.get("hardware", {}).get("num_gpus_per_node", 0),
+        default=config.get("hardware", {}).get("num_gpus_per_node", 8),
         help="Number of GPUs per node for MoE models - this will be the granularity when searching for the best TEP/DEP size",
+    )
+    parser.add_argument(
+        "--enable-gpu-discovery",
+        action="store_true",
+        default=config.get("hardware", {}).get("enable_gpu_discovery", False),
+        help="Enable automatic GPU discovery from Kubernetes cluster nodes. When enabled, overrides any manually specified hardware configuration. Requires cluster-wide node access permissions.",
     )
 
     # Dynamically add all planner arguments from planner_argparse.py
@@ -305,6 +311,20 @@ def create_profiler_parser() -> argparse.Namespace:
     if not args.model and not args.config:
         parser.error("--model or --config is required (provide at least one)")
 
-    auto_generate_search_space(args)
+    # Only run auto-generation if GPU discovery is enabled
+    if args.enable_gpu_discovery:
+        auto_generate_search_space(args)
+    else:
+        # Validate that required hardware parameters are provided when GPU discovery is disabled
+        if args.min_num_gpus_per_engine == 0 or args.max_num_gpus_per_engine == 0:
+            parser.error(
+                "When --enable-gpu-discovery is false, you must provide non-zero values for "
+                "--min-num-gpus-per-engine and --max-num-gpus-per-engine"
+            )
+        if args.is_moe_model and args.num_gpus_per_node == 0:
+            parser.error(
+                "When --enable-gpu-discovery is false and --is-moe-model is true, "
+                "you must provide a non-zero value for --num-gpus-per-node"
+            )
 
     return args
