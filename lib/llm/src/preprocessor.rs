@@ -144,9 +144,20 @@ impl OpenAIPreprocessor {
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
-        let media_loader = match mdc.media_decoder.clone() {
-            Some(decoder) => Some(MediaLoader::new(decoder)?),
-            None => Some(MediaLoader::new(MediaDecoder::default())?),
+
+        // Conditionally enable media loader only when media-loading feature is enabled
+        #[cfg(feature = "media-loading")]
+        let media_loader = {
+            match mdc.media_decoder.clone() {
+                Some(decoder) => Some(MediaLoader::new(decoder)?),
+                None => Some(MediaLoader::new(MediaDecoder::default())?),
+            }
+        };
+
+        #[cfg(not(feature = "media-loading"))]
+        let media_loader = {
+            let _ = mdc; // silence unused warning when feature disabled
+            None
         };
 
         Ok(Arc::new(Self {

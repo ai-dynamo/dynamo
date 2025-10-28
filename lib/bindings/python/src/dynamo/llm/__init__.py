@@ -26,9 +26,9 @@ from dynamo._core import KvPushRouter as KvPushRouter
 from dynamo._core import KvRecorder as KvRecorder
 from dynamo._core import KvRouterConfig as KvRouterConfig
 from dynamo._core import KvStats as KvStats
+from dynamo._core import MediaDecoder as MediaDecoder
 from dynamo._core import ModelInput as ModelInput
 from dynamo._core import ModelRuntimeConfig as ModelRuntimeConfig
-from dynamo._core import MediaDecoder as MediaDecoder
 from dynamo._core import ModelType as ModelType
 from dynamo._core import OverlapScores as OverlapScores
 from dynamo._core import PythonAsyncEngine as PythonAsyncEngine
