@@ -240,14 +240,21 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 
         let request_uuid = ctx.id().parse().unwrap_or(Uuid::new_v4());
 
+        // For prefill workers, override max_tokens to 1
+        let is_prefill = self.engine_args.worker_type == WorkerType::Prefill;
+        let max_output_tokens = if is_prefill {
+            1
+        } else {
+            request
+                .stop_conditions
+                .max_tokens
+                .expect("max_output_tokens must be specified for mocker") as usize
+        };
+
         // Convert PreprocessedRequest to DirectRequest for scheduler
         let direct_request = DirectRequest {
             tokens: request.token_ids.clone(),
-            max_output_tokens: request
-                .stop_conditions
-                .max_tokens
-                .expect("max_output_tokens must be specified for mocker")
-                as usize,
+            max_output_tokens,
             uuid: Some(request_uuid),
             dp_rank,
         };
@@ -266,13 +273,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 
         let active_requests = self.active_requests.clone();
         let async_context = ctx.context();
-        let is_prefill = self.engine_args.worker_type == WorkerType::Prefill;
-        // Override max_tokens to 1 for prefill workers
-        let max_tokens = if is_prefill {
-            1
-        } else {
-            request.stop_conditions.max_tokens.unwrap() as usize
-        };
 
         // Spawn a task to handle the complex async logic
         tokio::spawn(async move {
@@ -308,7 +308,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             extra_args: None,
                         };
 
-                        if signal.completed && token_count < max_tokens {
+                        if signal.completed && token_count < max_output_tokens {
                             let _ = stream_tx.send(LLMEngineOutput::error("Completion signal received before max tokens reached".to_string()));
                             break;
                         }
