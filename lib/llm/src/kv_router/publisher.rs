@@ -97,13 +97,15 @@ pub struct KvEventPublisher {
 impl KvEventPublisher {
     pub fn new(
         component: Component,
-        worker_id: u64,
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
     ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
 
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+
+        // Infer worker_id from component's connection
+        let worker_id = component.drt().connection_id();
 
         // Create our event source (if any)
         let mut source = None;
