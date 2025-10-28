@@ -15,12 +15,7 @@ pub mod media;
 pub mod prompt;
 pub mod tools;
 use anyhow::Context;
-use anyhow::Context;
 use anyhow::{Result, bail};
-use dynamo_async_openai::types::{
-    ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
-    ChatCompletionRequestUserMessageContentPart, ChatCompletionToolChoiceOption, EncodingFormat,
-};
 use dynamo_async_openai::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
     ChatCompletionRequestUserMessageContentPart, ChatCompletionToolChoiceOption, EncodingFormat,
