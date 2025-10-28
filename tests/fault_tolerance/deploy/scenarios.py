@@ -103,6 +103,12 @@ class Load:
     client_type: str = "aiperf"  # "aiperf" or "legacy"
     max_request_rate: float = 1.0  # Rate limiting for legacy client (requests/sec)
 
+    # For mixed token testing (overflow + recovery)
+    mixed_token_test: bool = False
+    overflow_token_length: Optional[int] = None  # Tokens for overflow requests
+    overflow_request_count: int = 15  # Number of overflow requests
+    normal_request_count: int = 15  # Number of normal requests after overflow
+
 
 @dataclass
 class Failure:
@@ -111,6 +117,32 @@ class Failure:
     command: str
     signal: str = "SIGINT"
     replicas: int = 1
+
+
+@dataclass
+class TokenOverflowFailure(Failure):
+    """
+    Failure type for injecting token overflow (prompt > max_seq_len)
+    """
+
+    overflow_multiplier: float = 2.0  # How much to exceed max_seq_len (e.g., 2.0 = 2x)
+    max_seq_len: int = 1024
+
+    def __init__(
+        self,
+        time: int,
+        max_seq_len: int = 1024,
+        overflow_multiplier: float = 2.0,
+        duration: int = 30,
+    ):
+        super().__init__(
+            time=time,
+            pod_name="Fronted",
+            command="token_overflow",
+        )
+        self.max_seq_len = max_seq_len
+        self.overflow_multiplier = overflow_multiplier
+        self.overflow_token_count = int(max_seq_len * overflow_multiplier)
 
 
 @dataclass
@@ -481,3 +513,141 @@ for deployment_name, deployment_info in deployment_specs.items():
             model=scenario_model,
             backend=backend,
         )
+
+
+# Add token overflow test scenarios
+def add_token_overflow_scenarios():
+    """
+    Add test scenarios for token overflow (prompt > max_seq_len) failures
+    """
+    overflow_test_configs = [
+        # vLLM tests
+        {
+            "name": "vllm_agg_token_overflow_2x",
+            "deployment_key": "vllm-agg-tp-1-dp-1",
+            "backend": "vllm",
+        },
+        {
+            "name": "vllm_disagg_token_overflow_2x",
+            "deployment_key": "vllm-disagg-prefill-tp-2-decode-tp-2-dp-1",
+            "backend": "vllm",
+        },
+        # TRT-LLM tests
+        {
+            "name": "trtllm_agg_token_overflow_2x",
+            "deployment_key": "trtllm-agg-tp-1-dp-1",
+            "backend": "trtllm",
+        },
+        {
+            "name": "trtllm_disagg_token_overflow_2x",
+            "deployment_key": "trtllm-disagg-prefill-tp-2-decode-tp-2-dp-1",
+            "backend": "trtllm",
+        },
+        # SGLang tests
+        {
+            "name": "sglang_agg_token_overflow_2x",
+            "deployment_key": "sglang-agg-tp-1-dp-1",
+            "backend": "sglang",
+        },
+        {
+            "name": "sglang_disagg_token_overflow_2x",
+            "deployment_key": "sglang-disagg-prefill-tp-2-decode-tp-2-dp-1",
+            "backend": "sglang",
+        },
+    ]
+
+    # Common configuration for all tests
+    MAX_SEQ_LEN = 1024
+    OVERFLOW_MULTIPLIER = 2.0
+    OVERFLOW_REQUESTS = 15  # Number of oversized requests to send
+    NORMAL_REQUESTS = 15  # Number of normal requests to send after overflow
+
+    for config in overflow_test_configs:
+        # Skip if deployment doesn't exist
+        if config["deployment_key"] not in deployment_specs:
+            continue
+
+        overflow_scenario_name = config["name"]
+        deployment_info = deployment_specs[config["deployment_key"]]
+
+        scenario_model = deployment_info.get("model", model)
+
+        deployment_spec = deployment_info["spec"]
+
+        backend = config["backend"]
+        is_agg = (
+            "disagg" not in config["deployment_key"]
+        )  # If not disaggregated, then it's aggregated
+
+        workers = WORKER_MAP[backend]
+
+        # Get the correct decode worker name
+        if backend == "trtllm" and is_agg:
+            decode_worker = workers["decode_agg"]
+        else:
+            decode_worker = workers["decode"]
+
+        prefill_worker = workers["prefill"]
+
+        # Determine argument name based on backend
+        if backend == "trtllm":
+            arg_name = "--max-seq-len"
+        elif backend == "sglang":
+            arg_name = "--context-length"
+        else:  # vllm
+            arg_name = "--max-model-len"
+
+        # Add arguments to appropriate workers
+        if is_agg:
+            # For aggregated, add only to decode worker
+            deployment_spec.add_arg_to_service(
+                decode_worker, arg_name, str(MAX_SEQ_LEN)
+            )
+        else:
+            # For disaggregated, add to both prefill and decode workers
+            deployment_spec.add_arg_to_service(
+                prefill_worker, arg_name, str(MAX_SEQ_LEN)
+            )
+            deployment_spec.add_arg_to_service(
+                decode_worker, arg_name, str(MAX_SEQ_LEN)
+            )
+
+        # Create overflow failure
+        overflow_failure = TokenOverflowFailure(
+            time=30,  # Start after 30 seconds
+            max_seq_len=MAX_SEQ_LEN,
+            overflow_multiplier=OVERFLOW_MULTIPLIER,
+            duration=30,  # Send overflow requests for 30 seconds
+        )
+
+        # Create mixed load configuration for overflow + recovery testing
+        overflow_tokens = int(MAX_SEQ_LEN * OVERFLOW_MULTIPLIER)
+        normal_tokens = 512  # Well within MAX_SEQ_LEN
+
+        # Total requests = overflow + normal
+        total_requests = OVERFLOW_REQUESTS + NORMAL_REQUESTS
+
+        # Mixed load that tests both rejection and recovery
+        mixed_load = Load(
+            clients=3,
+            requests_per_client=total_requests,
+            input_token_length=normal_tokens,
+            output_token_length=50,
+            # Mixed token test configuration
+            mixed_token_test=True,
+            overflow_token_length=overflow_tokens,
+            overflow_request_count=OVERFLOW_REQUESTS,
+            normal_request_count=NORMAL_REQUESTS,
+        )
+
+        scenarios[overflow_scenario_name] = Scenario(
+            deployment=deployment_spec,
+            load=mixed_load,
+            failures=[overflow_failure],
+            model=scenario_model,
+            backend=backend,
+        )
+
+
+# Add the token overflow scenarios
+add_token_overflow_scenarios()
