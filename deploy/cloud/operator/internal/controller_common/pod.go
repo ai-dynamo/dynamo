@@ -101,9 +101,11 @@ func CanonicalizePodSpec(podSpec *corev1.PodSpec) *corev1.PodSpec {
 
 	// Sort image pull secrets
 	if len(podSpec.ImagePullSecrets) > 1 {
-		sort.Slice(podSpec.ImagePullSecrets, func(i, j int) bool {
-			return podSpec.ImagePullSecrets[i].Name < podSpec.ImagePullSecrets[j].Name
+		uniqueSecrets := ensureUniqueImagePullSecrets(podSpec.ImagePullSecrets)
+		sort.Slice(uniqueSecrets, func(i, j int) bool {
+			return uniqueSecrets[i].Name < uniqueSecrets[j].Name
 		})
+		podSpec.ImagePullSecrets = uniqueSecrets
 	}
 
 	// Sort volumes and their nested items
@@ -274,4 +276,19 @@ func CanonicalizePodSpec(podSpec *corev1.PodSpec) *corev1.PodSpec {
 	}
 
 	return podSpec
+}
+
+func ensureUniqueImagePullSecrets(secrets []corev1.LocalObjectReference) []corev1.LocalObjectReference {
+	if len(secrets) == 0 {
+		return nil
+	}
+	uniqueSecrets := make(map[string]corev1.LocalObjectReference)
+	for _, secret := range secrets {
+		uniqueSecrets[secret.Name] = secret
+	}
+	uniqueSecretsList := make([]corev1.LocalObjectReference, 0, len(uniqueSecrets))
+	for secretName := range uniqueSecrets {
+		uniqueSecretsList = append(uniqueSecretsList, corev1.LocalObjectReference{Name: secretName})
+	}
+	return uniqueSecretsList
 }
