@@ -160,17 +160,14 @@ jobs:
   sglang:
     needs: changed-files
     if: needs.changed-files.outputs.has_code_changes == 'true'
-    # OPS-1140: Uncomment this for sglang arm switch to wideep
-    # strategy:
-    #   fail-fast: false
-    #   matrix:
-    #     platform:
-    #       - { arch: amd64, runner: gpu-l40-amd64 }
-    #       - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    # name: sglang (${{ matrix.platform.arch }})
-    # runs-on: ${{ matrix.platform.runner }}
-    # OPS-1140: Remove this runs-on line, replaced with the above line
-    runs-on: gpu-l40-amd64
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: gpu-l40-amd64 }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+    name: sglang (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -181,9 +178,7 @@ jobs:
         with:
           framework: sglang
           target: runtime
-          platform: 'linux/amd64'
-          # OPS-1140: Replace the above line with the uncommented below line
-          # platform: 'linux/${{ matrix.platform.arch }}'
+          platform: 'linux/${{ matrix.platform.arch }}'
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -196,9 +191,7 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:${{ github.sha }}-sglang-amd64
-          # OPS-1140: Replace the above line with the uncommented below line
-          # push_tag: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
+          push_tag: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
           # OPS-1145: Switch aws_push to true
           aws_push: 'false'
           azure_push: 'true'
@@ -209,8 +202,7 @@ jobs:
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
       - name: Run unit tests
-        # OPS-1140: Uncomment the below line
-        # if: ${{ matrix.platform.arch != 'arm64' }}
+        if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
@@ -219,8 +211,7 @@ jobs:
           test_type: "unit"
           platform_arch: ${{ matrix.platform.arch }}
       - name: Run e2e tests
-        # OPS-1140: Uncomment the below line
-        # if: ${{ matrix.platform.arch != 'arm64' }}
+        if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
