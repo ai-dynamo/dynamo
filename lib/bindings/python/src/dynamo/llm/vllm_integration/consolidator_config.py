@@ -33,7 +33,7 @@ def should_enable_consolidator(vllm_config) -> bool:
     """
     Determine if the KV Event Consolidator should be enabled based on vLLM config.
 
-    The consolidator can be controlled via the DYN_KV_EVENTS_ENABLE_CONSOLIDATOR environment variable:
+    The consolidator can be controlled via the DYN_KVBM_KV_EVENTS_ENABLE_CONSOLIDATOR environment variable:
     - Set to truthy values ("1", "true", "on", "yes") to enable (default)
     - Set to any other value to disable
     - If not set, defaults to enabled and auto-detects based on KVBM connector and prefix caching settings
@@ -45,10 +45,10 @@ def should_enable_consolidator(vllm_config) -> bool:
         True if consolidator should be enabled, False otherwise
     """
     # Check environment variable override
-    env_override = os.getenv("DYN_KV_EVENTS_ENABLE_CONSOLIDATOR", "true")
+    env_override = os.getenv("DYN_KVBM_KV_EVENTS_ENABLE_CONSOLIDATOR", "true")
     if not is_truthy(env_override):
         logger.info(
-            "KV Event Consolidator disabled via DYN_KV_EVENTS_ENABLE_CONSOLIDATOR environment variable"
+            "KV Event Consolidator disabled via DYN_KVBM_KV_EVENTS_ENABLE_CONSOLIDATOR environment variable"
         )
         return False
 
@@ -64,11 +64,21 @@ def should_enable_consolidator(vllm_config) -> bool:
 
     kv_transfer_config = vllm_config.kv_transfer_config
 
-    # Check if this is the DynamoConnector
-    connector_module = getattr(kv_transfer_config, "kv_connector_module_path", None)
-    if connector_module != "dynamo.llm.vllm_integration.connector":
+    # Check if DynamoConnector is present
+    connector_name = getattr(kv_transfer_config, "kv_connector", None)
+    is_dynamo_connector = connector_name == "DynamoConnector"
+
+    # For multi-connector (PdConnector), check if DynamoConnector is in the list
+    if connector_name == "PdConnector":
+        extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", {})
+        connectors = extra_config.get("connectors", [])
+        is_dynamo_connector = any(
+            conn.get("kv_connector") == "DynamoConnector" for conn in connectors
+        )
+
+    if not is_dynamo_connector:
         logger.warning(
-            f"KV Event Consolidator is not enabled due to invalid kv_connector_module_path: {connector_module}"
+            f"KV Event Consolidator is not enabled: DynamoConnector (KVBM) not found (current connector: {connector_name})"
         )
         return False
 
@@ -104,11 +114,20 @@ def get_consolidator_endpoints(vllm_config) -> Optional[Tuple[str, str, str]]:
     if not should_enable_consolidator(vllm_config):
         return None
 
-    # Get vLLM's ZMQ endpoint (with data_parallel_rank offset)
+    # Get vLLM's ZMQ endpoint
+    # TODO: Data parallelism is not yet supported for consolidator
+    # Currently assumes data_parallel_rank=0
     base_endpoint = vllm_config.kv_events_config.endpoint
     data_parallel_rank = (
         getattr(vllm_config.parallel_config, "data_parallel_rank", 0) or 0
     )
+
+    if data_parallel_rank != 0:
+        logger.warning(
+            f"KV Event Consolidator does not yet support data_parallel_rank={data_parallel_rank}. "
+            "Only rank 0 is supported. Proceeding with rank 0."
+        )
+        data_parallel_rank = 0
 
     vllm_endpoint = ZmqEventPublisher.offset_endpoint_port(
         base_endpoint,

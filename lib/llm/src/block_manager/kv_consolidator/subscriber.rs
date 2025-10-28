@@ -16,9 +16,11 @@ use zeromq::{Socket, SocketRecv, SubSocket};
 
 use super::tracker::{CacheStatusTracker, StorageTier};
 
-/// vLLM's raw event batch structure (matches msgspec encoding with array_like=True)
+/// Event batch received from vLLM (array format)
 /// Format: [timestamp, [events], data_parallel_rank]
-
+///
+/// Note: This uses a tuple struct to deserialize from array [ts, events, rank]
+/// rather than an object {"ts": ..., "events": ..., "rank": ...} for vLLM compatibility.
 #[derive(Debug, Deserialize)]
 struct VllmEventBatch(
     f64,               // ts

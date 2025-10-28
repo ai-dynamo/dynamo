@@ -19,6 +19,9 @@ use super::tracker::{CacheStatusTracker, ConsolidatedEvent};
 
 /// Event batch structure matching vLLM's format (array_like=True)
 /// Format: [timestamp, [events], data_parallel_rank]
+///
+/// Note: This uses a tuple struct to serialize as an array [ts, events, rank]
+/// rather than an object {"ts": ..., "events": ..., "rank": ...} for vLLM compatibility.
 #[derive(Debug, Serialize)]
 struct EventBatch(
     f64,         // ts

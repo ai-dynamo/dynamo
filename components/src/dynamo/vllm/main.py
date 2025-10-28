@@ -141,7 +141,7 @@ def setup_kv_event_publisher(
 
     for dp_rank in range(data_parallel_size):
         if consolidator_enabled:
-            # TODO: Use different port for each dp_rank
+            # TODO: Use different port for each dp_rank once KVBM supports DP
             zmq_endpoint = f"tcp://127.0.0.1:{consolidator_port}"
             logger.info(
                 f"KV event publisher for dp_rank={dp_rank} subscribing to consolidator at {zmq_endpoint}"
@@ -200,7 +200,7 @@ def setup_vllm_engine(config, stat_logger=None):
 
     # Set up consolidator endpoints if KVBM is enabled
     consolidator_endpoints = None
-    if config.connector_list and "kvbm" in config.connector_list:
+    if config.has_connector("kvbm"):
         consolidator_endpoints = get_consolidator_endpoints(vllm_config)
     vllm_config.consolidator_endpoints = consolidator_endpoints
 
