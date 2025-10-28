@@ -27,6 +27,7 @@ use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
+#[cfg(feature = "media-loading")]
 use crate::preprocessor::media::{MediaDecoder, MediaLoader};
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::{
@@ -115,6 +116,7 @@ pub struct OpenAIPreprocessor {
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
     tool_call_parser: Option<String>,
+    #[cfg(feature = "media-loading")]
     media_loader: Option<MediaLoader>,
 }
 
@@ -154,12 +156,6 @@ impl OpenAIPreprocessor {
             }
         };
 
-        #[cfg(not(feature = "media-loading"))]
-        let media_loader = {
-            let _ = mdc; // silence unused warning when feature disabled
-            None
-        };
-
         Ok(Arc::new(Self {
             formatter,
             tokenizer,
@@ -167,6 +163,7 @@ impl OpenAIPreprocessor {
             mdcsum,
             runtime_config,
             tool_call_parser,
+            #[cfg(feature = "media-loading")]
             media_loader,
         }))
     }
@@ -329,10 +326,18 @@ impl OpenAIPreprocessor {
 
                 let map_item = media_map.entry(type_str.clone()).or_default();
 
-                if let Some(loader) = &self.media_loader {
-                    let rdma_descriptor = loader.fetch_and_decode_media_part(content_part).await?;
-                    map_item.push(MultimodalData::Decoded(rdma_descriptor));
-                } else {
+                #[cfg(feature = "media-loading")]
+                {
+                    if let Some(loader) = &self.media_loader {
+                        let rdma_descriptor = loader.fetch_and_decode_media_part(content_part).await?;
+                        map_item.push(MultimodalData::Decoded(rdma_descriptor));
+                    } else {
+                        map_item.push(MultimodalData::Url(url));
+                    }
+                }
+                #[cfg(not(feature = "media-loading"))]
+                {
+                    let _ = content_part; // silence unused
                     map_item.push(MultimodalData::Url(url));
                 }
             }

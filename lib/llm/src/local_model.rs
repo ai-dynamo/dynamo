@@ -14,6 +14,7 @@ use crate::entrypoint::RouterConfig;
 use crate::mocker::protocols::MockEngineArgs;
 use crate::model_card::{self, ModelDeploymentCard};
 use crate::model_type::{ModelInput, ModelType};
+#[cfg(feature = "media-loading")]
 use crate::preprocessor::media::MediaDecoder;
 use crate::request_template::RequestTemplate;
 
@@ -53,6 +54,7 @@ pub struct LocalModelBuilder {
     namespace: Option<String>,
     custom_backend_metrics_endpoint: Option<String>,
     custom_backend_metrics_polling_interval: Option<f64>,
+    #[cfg(feature = "media-loading")]
     media_decoder: Option<MediaDecoder>,
 }
 
@@ -79,6 +81,7 @@ impl Default for LocalModelBuilder {
             namespace: Default::default(),
             custom_backend_metrics_endpoint: Default::default(),
             custom_backend_metrics_polling_interval: Default::default(),
+            #[cfg(feature = "media-loading")]
             media_decoder: Default::default(),
         }
     }
@@ -187,6 +190,7 @@ impl LocalModelBuilder {
         self
     }
 
+    #[cfg(feature = "media-loading")]
     pub fn media_decoder(&mut self, media_decoder: Option<MediaDecoder>) -> &mut Self {
         self.media_decoder = media_decoder;
         self
@@ -238,8 +242,11 @@ impl LocalModelBuilder {
             card.migration_limit = self.migration_limit;
             card.user_data = self.user_data.take();
             card.runtime_config = self.runtime_config.clone();
-            //card.media_decoder = self.media_decoder.clone();
-            card.media_decoder = Some(MediaDecoder::default());
+            #[cfg(feature = "media-loading")]
+            {
+                //card.media_decoder = self.media_decoder.clone();
+                card.media_decoder = Some(MediaDecoder::default());
+            }
 
             return Ok(LocalModel {
                 card,
@@ -290,7 +297,10 @@ impl LocalModelBuilder {
         card.migration_limit = self.migration_limit;
         card.user_data = self.user_data.take();
         card.runtime_config = self.runtime_config.clone();
-        card.media_decoder = Some(MediaDecoder::default());
+        #[cfg(feature = "media-loading")]
+        {
+            card.media_decoder = Some(MediaDecoder::default());
+        }
 
         Ok(LocalModel {
             card,
