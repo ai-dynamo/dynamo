@@ -9,6 +9,7 @@ use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionReque
 use serde::{Deserialize, Serialize};
 
 use hf_hub::{Cache, Repo, RepoType, api::tokio::ApiBuilder};
+use rstest::rstest;
 
 use std::path::PathBuf;
 
@@ -491,4 +492,98 @@ async fn test_multi_turn_with_continuation() {
     }, {
       insta::assert_snapshot!(formatted_prompt);
     });
+}
+
+// Helper to build message with media chunks (single or mixed types)
+fn build_message(text: &str, chunks: &[(&str, usize)]) -> String {
+    let mut content_parts = vec![format!(r#"{{"type": "text", "text": "{}"}}"#, text)];
+
+    for (chunk_type, count) in chunks {
+        for i in 1..=*count {
+            let chunk = match *chunk_type {
+                "image_url" => format!(
+                    r#"{{"type": "image_url", "image_url": {{"url": "https://example.com/img{}.jpg"}}}}"#,
+                    i
+                ),
+                "video_url" => format!(
+                    r#"{{"type": "video_url", "video_url": {{"url": "https://example.com/vid{}.mp4"}}}}"#,
+                    i
+                ),
+                "audio_url" => format!(
+                    r#"{{"type": "audio_url", "audio_url": {{"url": "https://example.com/audio{}.mp3"}}}}"#,
+                    i
+                ),
+                _ => panic!("Unknown chunk type: {}", chunk_type),
+            };
+            content_parts.push(chunk);
+        }
+    }
+
+    format!(
+        r#"[{{"role": "user", "content": [{}]}}]"#,
+        content_parts.join(", ")
+    )
+}
+
+/// Test the preprocessor with multimodal data (single and mixed types) to verify gather_multi_modal_data code path
+#[rstest]
+// No media case
+#[case::no_media(&[])]
+// Single media item cases
+#[case::single_video(&[("video_url", 1)])]
+// Multiple media items of the same type
+#[case::three_images(&[("image_url", 3)])]
+// Mixed media types
+#[case::mixed_multiple(&[("image_url", 2), ("video_url", 1), ("audio_url", 2)])]
+#[tokio::test]
+async fn test_media_url_passthrough(#[case] media_chunks: &[(&str, usize)]) {
+    if let Err(e) = get_hf_token() {
+        println!("HF_TOKEN is not set, skipping test: {}", e);
+        return;
+    }
+
+    let mdcs = make_mdcs().await;
+
+    for mdc in mdcs.iter() {
+        let preprocessor = dynamo_llm::preprocessor::OpenAIPreprocessor::new(mdc.clone()).unwrap();
+
+        // Build the message with the specified media chunks
+        let message = build_message("Test multimodal content", media_chunks);
+        let request = Request::from(&message, None, None, mdc.slug().to_string());
+
+        let (preprocessed, _annotations) = preprocessor.preprocess_request(&request).unwrap();
+
+        // Verify multimodal data handling
+        if media_chunks.is_empty() {
+            // No media case - should be None or empty
+            assert!(
+                preprocessed.multi_modal_data.is_none()
+                    || preprocessed.multi_modal_data.as_ref().unwrap().is_empty(),
+                "Multimodal data should be None or empty when no media is present"
+            );
+        } else {
+            // Media present - should be captured
+            assert!(
+                preprocessed.multi_modal_data.is_some(),
+                "Multimodal data should be present"
+            );
+            let media_map = preprocessed.multi_modal_data.as_ref().unwrap();
+
+            // Check each media type and count
+            for (media_type, expected_count) in media_chunks {
+                assert!(
+                    media_map.contains_key(*media_type),
+                    "Should contain {} key",
+                    media_type
+                );
+                assert_eq!(
+                    media_map.get(*media_type).unwrap().len(),
+                    *expected_count,
+                    "Should have {} {} item(s)",
+                    expected_count,
+                    media_type
+                );
+            }
+        }
+    }
 }

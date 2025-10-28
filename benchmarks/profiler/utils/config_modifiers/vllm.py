@@ -14,6 +14,7 @@ from benchmarks.profiler.utils.config import (
     get_worker_service_from_config,
     set_argument_value,
     setup_worker_service_resources,
+    update_image,
     validate_and_get_worker_args,
 )
 from benchmarks.profiler.utils.defaults import (
@@ -68,6 +69,11 @@ class VllmV1ConfigModifier:
                 continue
 
         return cfg.model_dump()
+
+    @classmethod
+    def update_image(cls, config, image: str) -> dict:
+        """Update container image for all DGD services (frontend, planner, workers)."""
+        return update_image(config, image)
 
     @classmethod
     def convert_config(

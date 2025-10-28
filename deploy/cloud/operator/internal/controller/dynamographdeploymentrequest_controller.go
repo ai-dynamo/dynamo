@@ -144,10 +144,10 @@ const (
 	MessageConfigMapKeyNotFound      = "key %s not found in ConfigMap %s"
 
 	// Validation messages
-	ValidationErrorModelNameRequired = "modelName is required"
-	ValidationErrorITLPositive       = "sla.itl must be positive"
-	ValidationErrorTTFTPositive      = "sla.ttft must be positive"
-	ValidationErrorInvalidBackend    = "invalid backend: %s (must be vllm, sglang, or trtllm)"
+	ValidationErrorModelRequired  = "model is required"
+	ValidationErrorITLPositive    = "sla.itl must be positive"
+	ValidationErrorTTFTPositive   = "sla.ttft must be positive"
+	ValidationErrorInvalidBackend = "invalid backend: %s (must be vllm, sglang, or trtllm)"
 
 	// Valid backend values
 	BackendVLLM   = "vllm"
@@ -198,8 +198,6 @@ type DynamoGraphDeploymentRequestReconciler struct {
 	Recorder record.EventRecorder
 	Config   commonController.Config
 
-	// ProfilerImage is the container image to use for profiling jobs (both online and offline/AIC)
-	ProfilerImage string
 	// RBACMgr handles RBAC setup for profiling jobs
 	RBACManager RBACManager
 }
@@ -217,13 +215,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) GetRecorder() record.EventRecor
 // FinalizeResource implements commonController.Finalizer interface
 func (r *DynamoGraphDeploymentRequestReconciler) FinalizeResource(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
 	logger := log.FromContext(ctx)
-	logger.Info("Finalizing DGDR", "name", dgdr.Name)
-
-	// Cleanup profiling resources
-	if err := r.cleanupProfilingResources(ctx, dgdr); err != nil {
-		logger.Error(err, "Failed to cleanup profiling resources")
-		return err
-	}
 
 	logger.Info("DGDR finalized successfully", "name", dgdr.Name)
 	return nil
@@ -320,8 +311,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleInitialState(ctx context.
 	// Set observedGeneration to track the spec we're processing
 	dgdr.Status.ObservedGeneration = dgdr.Generation
 
-	// Extract and populate backend from config for display in kubectl output
-	dgdr.Status.Backend = getBackendFromConfig(dgdr)
+	// Populate backend in status from spec for display in kubectl output
+	dgdr.Status.Backend = dgdr.Spec.Backend
 
 	// Initialize status
 	r.Recorder.Event(dgdr, corev1.EventTypeNormal, EventReasonInitialized, MessageInitialized)
@@ -664,11 +655,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleFailedState(ctx context.C
 	logger := log.FromContext(ctx)
 	logger.Info("DGDR is in failed state", "name", dgdr.Name)
 
-	// Cleanup profiling resources if any
-	if err := r.cleanupProfilingResources(ctx, dgdr); err != nil {
-		logger.Error(err, "Failed to cleanup profiling resources")
-	}
-
 	// Could implement retry logic here if desired
 	return ctrl.Result{}, nil
 }
@@ -705,27 +691,13 @@ func isOnlineProfiling(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) boo
 	return true
 }
 
-// getBackendFromConfig extracts the backend value from profilingConfig.config.engine.backend
-func getBackendFromConfig(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) string {
-	if dgdr.Spec.ProfilingConfig.Config == nil {
-		return ""
-	}
-
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(dgdr.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
-		return ""
-	}
-
-	if engine, ok := config["engine"].(map[string]interface{}); ok {
-		if backend, ok := engine["backend"].(string); ok {
-			return backend
-		}
-	}
-	return ""
-}
-
 // validateSpec validates the DGDR spec
 func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
+	// Validate profiler image is specified in the new location
+	if dgdr.Spec.ProfilingConfig.ProfilerImage == "" {
+		return errors.New("profilingConfig.profilerImage is required")
+	}
+
 	// Basic validation - check that profilingConfig.config is provided
 	if dgdr.Spec.ProfilingConfig.Config == nil || len(dgdr.Spec.ProfilingConfig.Config.Raw) == 0 {
 		return errors.New("profilingConfig.config is required and must not be empty")
@@ -764,15 +736,20 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 		return fmt.Errorf("failed to parse profilingConfig.config: %w", err)
 	}
 
-	// Additional validation: Ensure engine.config is set (either as path or will be set from ConfigMapRef)
-	engineConfig, hasEngine := config["engine"].(map[string]interface{})
-	if hasEngine {
-		_, hasConfig := engineConfig["config"]
-		if !hasConfig && dgdr.Spec.ProfilingConfig.ConfigMapRef == nil {
-			return errors.New("either profilingConfig.config.engine.config must be set, or profilingConfig.configMapRef must be provided")
+	// Warn if deployment.model or engine.backend are specified in config (they will be overwritten by spec fields)
+	if engineConfig, ok := config["engine"].(map[string]interface{}); ok {
+		if backend, ok := engineConfig["backend"].(string); ok && backend != "" && backend != dgdr.Spec.Backend {
+			logger := log.FromContext(ctx)
+			logger.Info("Warning: profilingConfig.config.engine.backend will be overwritten by spec.backend",
+				"configBackend", backend, "specBackend", dgdr.Spec.Backend)
 		}
-	} else if dgdr.Spec.ProfilingConfig.ConfigMapRef == nil {
-		return errors.New("profilingConfig.config must contain 'engine' section, or profilingConfig.configMapRef must be provided")
+	}
+	if deployment, ok := config["deployment"].(map[string]interface{}); ok {
+		if model, ok := deployment["model"].(string); ok && model != "" && model != dgdr.Spec.Model {
+			logger := log.FromContext(ctx)
+			logger.Info("Warning: profilingConfig.config.deployment.model will be overwritten by spec.model",
+				"configModel", model, "specModel", dgdr.Spec.Model)
+		}
 	}
 
 	// The profiler will validate the rest of the configuration
@@ -783,7 +760,29 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
 	logger := log.FromContext(ctx)
 
-	// Ensure profiling job RBAC exists in cluster-wide mode
+	// Delete any existing output ConfigMap to ensure fresh profiling results
+	// This prevents using stale data from previous profiling runs
+	outputConfigMapName := getOutputConfigMapName(dgdr)
+	existingCM := &corev1.ConfigMap{}
+	err := r.Get(ctx, types.NamespacedName{
+		Name:      outputConfigMapName,
+		Namespace: dgdr.Namespace,
+	}, existingCM)
+	if err == nil {
+		// ConfigMap exists, delete it
+		logger.Info("Deleting existing output ConfigMap to ensure fresh profiling results", "configMap", outputConfigMapName)
+		if err := r.Delete(ctx, existingCM); err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "Failed to delete existing output ConfigMap", "configMap", outputConfigMapName)
+			return fmt.Errorf("failed to delete existing output ConfigMap: %w", err)
+		}
+		logger.Info("Successfully deleted old output ConfigMap", "configMap", outputConfigMapName)
+	} else if !apierrors.IsNotFound(err) {
+		// Unexpected error checking for ConfigMap
+		logger.Error(err, "Failed to check for existing output ConfigMap", "configMap", outputConfigMapName)
+		return fmt.Errorf("failed to check for existing output ConfigMap: %w", err)
+	}
+
+	// Ensure profiling job RBAC exists (only for cluster-wide installation)
 	if r.Config.RestrictedNamespace == "" {
 		if err := r.RBACManager.EnsureServiceAccountWithRBAC(
 			ctx,
@@ -808,12 +807,28 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 
 		// Set deployment.namespace if not already set
-		if _, hasDeployment := config["deployment"]; !hasDeployment {
-			config["deployment"] = make(map[string]interface{})
+		deploymentVal, hasDeployment := config["deployment"]
+		var deploymentConfig map[string]interface{}
+		if !hasDeployment || deploymentVal == nil {
+			deploymentConfig = make(map[string]interface{})
+			config["deployment"] = deploymentConfig
+		} else {
+			var ok bool
+			deploymentConfig, ok = deploymentVal.(map[string]interface{})
+			if !ok {
+				return nil, false, fmt.Errorf("profilingConfig.config.deployment must be an object, got %T", deploymentVal)
+			}
 		}
-		deploymentConfig := config["deployment"].(map[string]interface{})
 		if _, hasNamespace := deploymentConfig["namespace"]; !hasNamespace {
 			deploymentConfig["namespace"] = dgdr.Namespace
+		}
+
+		// Set deployment.model from spec.model
+		deploymentConfig["model"] = dgdr.Spec.Model
+
+		// Set deployment.dgd_image from deploymentOverrides.workersImage if provided
+		if dgdr.Spec.DeploymentOverrides != nil && dgdr.Spec.DeploymentOverrides.WorkersImage != "" {
+			deploymentConfig["dgd_image"] = dgdr.Spec.DeploymentOverrides.WorkersImage
 		}
 
 		// Set output_dir if not already set
@@ -821,12 +836,23 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			config["output_dir"] = ProfilingOutputPath
 		}
 
+		// Set engine.backend from spec.backend
+		engineVal, hasEngine := config["engine"]
+		var engineConfig map[string]interface{}
+		if !hasEngine || engineVal == nil {
+			engineConfig = make(map[string]interface{})
+			config["engine"] = engineConfig
+		} else {
+			var ok bool
+			engineConfig, ok = engineVal.(map[string]interface{})
+			if !ok {
+				return nil, false, fmt.Errorf("profilingConfig.config.engine must be an object, got %T", engineVal)
+			}
+		}
+		engineConfig["backend"] = dgdr.Spec.Backend
+
 		// If ConfigMapRef is provided, set engine.config path
 		if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
-			if _, hasEngine := config["engine"]; !hasEngine {
-				config["engine"] = make(map[string]interface{})
-			}
-			engineConfig := config["engine"].(map[string]interface{})
 			engineConfig["config"] = fmt.Sprintf("%s/%s", ProfilingConfigPath, ProfilingConfigFile)
 		}
 
@@ -857,6 +883,19 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 				Name:  "ETCD_ENDPOINTS",
 				Value: fmt.Sprintf("%s-etcd:2379", dgdr.Namespace),
 			},
+			// DGDR metadata for setting ownerReferences
+			{
+				Name:  "DGDR_NAME",
+				Value: dgdr.Name,
+			},
+			{
+				Name:  "DGDR_NAMESPACE",
+				Value: dgdr.Namespace,
+			},
+			{
+				Name:  "DGDR_UID",
+				Value: string(dgdr.UID),
+			},
 		}
 
 		// Build volume mounts
@@ -881,11 +920,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			"--profile-config", string(configYAML),
 		}
 
-		// Determine profiler image
-		imageName := r.ProfilerImage
-		if imageName == "" {
-			return nil, false, fmt.Errorf("profiler image not configured: configure dynamo-operator.dynamo.dgdr.profilerImage in Helm values")
-		}
+		// Use profiler image from profilingConfig
+		imageName := dgdr.Spec.ProfilingConfig.ProfilerImage
 		logger.Info("Using profiler image", "image", imageName)
 
 		profilerContainer := corev1.Container{
@@ -1142,25 +1178,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	logger.Info("Successfully generated DGD from profiling output", "dgdName", dgd.Name)
 
 	return r.Status().Update(ctx, dgdr)
-}
-
-// cleanupProfilingResources cleans up profiling resources
-func (r *DynamoGraphDeploymentRequestReconciler) cleanupProfilingResources(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
-	logger := log.FromContext(ctx)
-	logger.Info("Cleaning up profiling resources", "name", dgdr.Name)
-
-	// Cleanup behavior when DGDR is deleted:
-	// - Profiling Job: Automatically deleted via ownerReference (set by SyncResource)
-	// - Output ConfigMap: NOT deleted (no ownerReference) - contains valuable profiling data
-	// - Auto-created DGD: NOT deleted (no ownerReference) - may be serving traffic
-	//
-	// We use labels (LabelDGDRName) to track relationships without cascade delete.
-	// Users can manually clean up ConfigMaps and DGDs if needed using label selectors:
-	//   kubectl delete configmap -l dgdr.nvidia.com/name=<dgdr-name>
-	//   kubectl delete dynamographdeployment -l dgdr.nvidia.com/name=<dgdr-name>
-
-	logger.Info("Profiling job will be automatically deleted via ownerReference")
-	return nil
 }
 
 // updateStateAndRequeue updates the DGDR state and requeues

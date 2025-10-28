@@ -358,6 +358,29 @@ def set_argument_value(args: list, arg_name: str, value: str):
     return args
 
 
+def update_image(config: dict, image: str) -> dict:
+    """Update container image for all DGD services (frontend, planner, workers).
+
+    This is a shared utility function used by all backend config modifiers.
+
+    Args:
+        config: Configuration dictionary
+        image: Container image to set for all services
+
+    Returns:
+        Updated configuration dictionary
+    """
+    cfg = Config.model_validate(config)
+
+    # Update image for all services
+    for service_name, service_config in cfg.spec.services.items():
+        if service_config.extraPodSpec and service_config.extraPodSpec.mainContainer:
+            service_config.extraPodSpec.mainContainer.image = image
+            logger.debug(f"Updated image for {service_name} to {image}")
+
+    return cfg.model_dump()
+
+
 class ConfigModifierProtocol(Protocol):
     @classmethod
     def convert_config(
@@ -419,6 +442,10 @@ class ConfigModifierProtocol(Protocol):
     def update_model(cls, config: dict, model_name: str) -> dict:
         ...
 
+    @classmethod
+    def update_image(cls, config: dict, image: str) -> dict:
+        ...
+
 
 def generate_dgd_config_with_planner(
     config_path: str,
@@ -449,6 +476,15 @@ def generate_dgd_config_with_planner(
     # Load config from file
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
+
+    # Update model name in config from profiling args
+    # This ensures the final DGD uses the model specified in the DGDR, not the default in the config file
+    config = config_modifier.update_model(config, args.model)
+
+    # Update container image if provided
+    # This overrides the default image in the config file for all DGD components
+    if args.dgd_image:
+        config = config_modifier.update_image(config, args.dgd_image)
 
     if not is_moe_model:
         # dense model, use TP for both prefill and decode
