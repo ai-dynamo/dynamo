@@ -157,7 +157,7 @@ def setup_kv_event_publisher(
             )
 
         zmq_config = ZmqKvEventPublisherConfig(
-            worker_id=generate_endpoint.lease_id(),
+            worker_id=generate_endpoint.connection_id(),
             kv_block_size=vllm_config.cache_config.block_size,
             zmq_endpoint=zmq_endpoint,
         )

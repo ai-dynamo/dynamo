@@ -20,10 +20,12 @@ use etcd_client::{
 pub use etcd_client::{ConnectOptions, KeyValue, LeaseClient};
 use tokio::time::{Duration, interval};
 
+mod connector;
 mod lease;
 mod lock;
 mod path;
 
+use connector::Connector;
 use lease::*;
 pub use lock::*;
 pub use path::*;
@@ -33,7 +35,7 @@ use super::utils::build_in_runtime;
 /// ETCD Client
 #[derive(Clone)]
 pub struct Client {
-    client: etcd_client::Client,
+    connector: Arc<Connector>,
     primary_lease: u64,
     runtime: Runtime,
     rt: Arc<tokio::runtime::Runtime>,
@@ -42,47 +44,6 @@ pub struct Client {
 impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "etcd::Client primary_lease={}", self.primary_lease)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Lease {
-    /// ETCD lease ID
-    /// Delivered as i64 by etcd because of documented gRPC limitations.
-    id: u64,
-
-    /// [`CancellationToken`] associated with the lease
-    cancel_token: CancellationToken,
-}
-
-impl Lease {
-    /// Get the lease ID
-    pub fn id(&self) -> u64 {
-        self.id
-    }
-
-    /// Get the primary [`CancellationToken`] associated with the lease.
-    /// This token will revoke the lease if canceled.
-    pub fn primary_token(&self) -> CancellationToken {
-        self.cancel_token.clone()
-    }
-
-    /// Get a child [`CancellationToken`] from the lease's [`CancellationToken`].
-    /// This child token will be triggered if the lease is revoked, but will not revoke the lease if canceled.
-    pub fn child_token(&self) -> CancellationToken {
-        self.cancel_token.child_token()
-    }
-
-    /// Revoke the lease triggering the [`CancellationToken`].
-    pub fn revoke(&self) {
-        self.cancel_token.cancel();
-    }
-
-    /// Check if the lease is still valid (not revoked)
-    pub async fn is_valid(&self) -> Result<bool> {
-        // A lease is valid if its cancellation token has not been triggered
-        // We can use try_cancelled which returns immediately with a boolean
-        Ok(!self.cancel_token.is_cancelled())
     }
 }
 
@@ -102,83 +63,57 @@ impl Client {
     pub async fn new(config: ClientOptions, runtime: Runtime) -> Result<Self> {
         let token = runtime.primary_token();
 
-        let ((client, lease_id), rt) = build_in_runtime(
+        let ((connector, lease_id), rt) = build_in_runtime(
             async move {
-                let client = etcd_client::Client::connect(
-                    config.etcd_url.clone(),
-                    config.etcd_connect_options,
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "Unable to connect to etcd server at {}. Check etcd server status",
-                        config.etcd_url.join(", ")
-                    )
-                })?;
+                let etcd_urls = config.etcd_url.clone();
+                let connect_options = config.etcd_connect_options.clone();
+
+                // Create the connector
+                let connector = Connector::new(etcd_urls, connect_options)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Unable to connect to etcd server at {}. Check etcd server status",
+                            config.etcd_url.join(", ")
+                        )
+                    })?;
 
                 let lease_id = if config.attach_lease {
-                    let lease_client = client.lease_client();
-
-                    let lease = create_lease(lease_client, 10, token)
+                    create_lease(connector.clone(), 10, token)
                         .await
                         .with_context(|| {
                             format!(
                                 "Unable to create lease. Check etcd server status at {}",
                                 config.etcd_url.join(", ")
                             )
-                        })?;
-
-                    lease.id
+                        })?
                 } else {
                     0
                 };
 
-                Ok((client, lease_id))
+                Ok((connector, lease_id))
             },
             1,
         )
         .await?;
 
         Ok(Client {
-            client,
+            connector,
             primary_lease: lease_id,
             rt,
             runtime,
         })
     }
 
-    /// Get a reference to the underlying [`etcd_client::Client`] instance.
-    pub(crate) fn etcd_client(&self) -> &etcd_client::Client {
-        &self.client
+    /// Get a clone of the underlying [`etcd_client::Client`] instance.
+    /// This returns a clone since the client is behind an RwLock.
+    pub fn etcd_client(&self) -> etcd_client::Client {
+        self.connector.get_client()
     }
 
     /// Get the primary lease ID.
     pub fn lease_id(&self) -> u64 {
         self.primary_lease
-    }
-
-    /// Primary [`Lease`]
-    pub fn primary_lease(&self) -> Lease {
-        Lease {
-            id: self.primary_lease,
-            cancel_token: self.runtime.primary_token(),
-        }
-    }
-
-    /// Create a [`Lease`] with a given time-to-live (TTL).
-    /// This [`Lease`] will be tied to the [`Runtime`], specifically a child [`CancellationToken`].
-    pub async fn create_lease(&self, ttl: u64) -> Result<Lease> {
-        let token = self.runtime.child_token();
-        let lease_client = self.client.lease_client();
-        self.rt
-            .spawn(create_lease(lease_client, ttl, token))
-            .await?
-    }
-
-    // Revoke an etcd lease given its lease id. A wrapper over etcd_client::LeaseClient::revoke
-    pub async fn revoke_lease(&self, lease_id: u64) -> Result<()> {
-        let lease_client = self.client.lease_client();
-        self.rt.spawn(revoke_lease(lease_client, lease_id)).await?
     }
 
     pub async fn kv_create(&self, key: &str, value: Vec<u8>, lease_id: Option<u64>) -> Result<()> {
@@ -193,7 +128,7 @@ impl Client {
             ]);
 
         // Execute the transaction
-        let result = self.client.kv_client().txn(txn).await?;
+        let result = self.connector.get_client().kv_client().txn(txn).await?;
 
         if result.succeeded() {
             Ok(())
@@ -232,7 +167,7 @@ impl Client {
             ]);
 
         // Execute the transaction
-        let result = self.client.kv_client().txn(txn).await?;
+        let result = self.connector.get_client().kv_client().txn(txn).await?;
 
         // We have to enumerate the response paths to determine if the transaction succeeded
         if result.succeeded() {
@@ -266,7 +201,8 @@ impl Client {
         let id = lease_id.unwrap_or(self.lease_id());
         let put_options = PutOptions::new().with_lease(id as i64);
         let _ = self
-            .client
+            .connector
+            .get_client()
             .kv_client()
             .put(key.as_ref(), value.as_ref(), Some(put_options))
             .await?;
@@ -281,8 +217,9 @@ impl Client {
     ) -> Result<PutResponse> {
         let options = options
             .unwrap_or_default()
-            .with_lease(self.primary_lease().id() as i64);
-        self.client
+            .with_lease(self.lease_id() as i64);
+        self.connector
+            .get_client()
             .kv_client()
             .put(key.as_ref(), value.as_ref(), Some(options))
             .await
@@ -294,7 +231,12 @@ impl Client {
         key: impl Into<Vec<u8>>,
         options: Option<GetOptions>,
     ) -> Result<Vec<KeyValue>> {
-        let mut get_response = self.client.kv_client().get(key, options).await?;
+        let mut get_response = self
+            .connector
+            .get_client()
+            .kv_client()
+            .get(key, options)
+            .await?;
         Ok(get_response.take_kvs())
     }
 
@@ -303,7 +245,8 @@ impl Client {
         key: impl Into<Vec<u8>>,
         options: Option<DeleteOptions>,
     ) -> Result<u64> {
-        self.client
+        self.connector
+            .get_client()
             .kv_client()
             .delete(key, options)
             .await
@@ -313,7 +256,8 @@ impl Client {
 
     pub async fn kv_get_prefix(&self, prefix: impl AsRef<str>) -> Result<Vec<KeyValue>> {
         let mut get_response = self
-            .client
+            .connector
+            .get_client()
             .kv_client()
             .get(prefix.as_ref(), Some(GetOptions::new().with_prefix()))
             .await?;
@@ -328,7 +272,7 @@ impl Client {
         key: impl Into<Vec<u8>>,
         lease_id: Option<u64>,
     ) -> Result<LockResponse> {
-        let mut lock_client = self.client.lock_client();
+        let mut lock_client = self.connector.get_client().lock_client();
         let id = lease_id.unwrap_or(self.lease_id());
         let options = LockOptions::new().with_lease(id as i64);
         lock_client
@@ -339,7 +283,7 @@ impl Client {
 
     /// Release a distributed lock using the key from the LockResponse
     pub async fn unlock(&self, lock_key: impl Into<Vec<u8>>) -> Result<()> {
-        let mut lock_client = self.client.lock_client();
+        let mut lock_client = self.connector.get_client().lock_client();
         lock_client
             .unlock(lock_key)
             .await
@@ -367,8 +311,9 @@ impl Client {
         prefix: impl AsRef<str> + std::fmt::Display,
         include_existing: bool,
     ) -> Result<PrefixWatcher> {
-        let mut kv_client = self.client.kv_client();
-        let mut watch_client = self.client.watch_client();
+        let client = self.connector.get_client();
+        let mut kv_client = client.kv_client();
+        let mut watch_client = client.watch_client();
 
         let mut get_response = kv_client
             .get(prefix.as_ref(), Some(GetOptions::new().with_prefix()))
@@ -690,10 +635,7 @@ mod tests {
         let value = b"test_value";
 
         let client = drt.etcd_client().expect("etcd client should be available");
-        let lease_id = drt
-            .primary_lease()
-            .expect("primary lease should be available")
-            .id();
+        let lease_id = drt.connection_id();
 
         // Create the key
         let result = client.kv_create(key, value.to_vec(), Some(lease_id)).await;

@@ -33,7 +33,7 @@ spec:
   scope: Namespaced
   versions:
     - additionalPrinterColumns:
-        - jsonPath: .spec.modelName
+        - jsonPath: .spec.model
           name: Model
           type: string
         - jsonPath: .status.backend
@@ -94,6 +94,15 @@ spec:
                     after profiling completes. If false, only the spec is generated and stored in status.
                     Users can then manually create a DGD using the generated spec.
                   type: boolean
+                backend:
+                  description: |-
+                    Backend specifies the inference backend to use.
+                    The controller automatically sets this value in profilingConfig.config.engine.backend.
+                  enum:
+                    - vllm
+                    - sglang
+                    - trtllm
+                  type: string
                 deploymentOverrides:
                   description: |-
                     DeploymentOverrides allows customizing metadata for the auto-created DGD.
@@ -121,18 +130,27 @@ spec:
                         Namespace is the desired namespace for the created DynamoGraphDeployment.
                         If not specified, defaults to the DGDR namespace.
                       type: string
+                    workersImage:
+                      description: |-
+                        WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.
+                        This image is used for both temporary DGDs created during online profiling and the final DGD.
+                        If omitted, the image from the base config file (e.g., disagg.yaml) is used.
+                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+                      type: string
                   type: object
-                modelName:
+                model:
                   description: |-
-                    ModelName specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
+                    Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
                     This is a high-level identifier for easy reference in kubectl output and logs.
+                    The controller automatically sets this value in profilingConfig.config.deployment.model.
                   type: string
                 profilingConfig:
                   description: |-
                     ProfilingConfig provides the complete configuration for the profiling job.
                     This configuration is passed directly to the profiler.
                     The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).
-                    The profiler will validate the configuration and report any errors.
+                    Note: deployment.model and engine.backend are automatically set from the high-level
+                    modelName and backend fields and should not be specified in this config.
                   properties:
                     config:
                       description: |-
@@ -156,9 +174,18 @@ spec:
                       required:
                         - name
                       type: object
+                    profilerImage:
+                      description: |-
+                        ProfilerImage specifies the container image to use for profiling jobs.
+                        This image contains the profiler code and dependencies needed for SLA-based profiling.
+                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+                      type: string
+                  required:
+                    - profilerImage
                   type: object
               required:
-                - modelName
+                - backend
+                - model
                 - profilingConfig
               type: object
             status:

@@ -8,6 +8,15 @@ use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::kv_router::RouterConfigOverride;
 use crate::protocols::TokenIdType;
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum MultimodalData {
+    Url(url::Url),
+    // TODO: Decoded(DecodedMediaData),
+}
+
+// multimodal map containing {mm_part_type: [data...]}
+pub type MultimodalDataMap = std::collections::HashMap<String, Vec<MultimodalData>>;
+
 /// [`PreprocessedRequest`] is the internal representation of an LLM request. The [`dynamo.llm-preprocessor`]
 /// crate is responsible for converting request from the public APIs to this internal representation.
 #[derive(Serialize, Deserialize, Debug, Clone, Builder)]
@@ -18,6 +27,10 @@ pub struct PreprocessedRequest {
     /// Type of prompt
     pub token_ids: Vec<TokenIdType>,
 
+    // Multimodal data
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_modal_data: Option<MultimodalDataMap>,
     /// StopConditions are conditions that the inference engine will use to stop generation.
     pub stop_conditions: StopConditions,
 
