@@ -5,7 +5,9 @@ use anyhow::Result;
 use image::GenericImageView;
 use ndarray::Array3;
 
-use super::common::{DecodedMediaData, Decoder, EncodedMediaData};
+use super::super::common::EncodedMediaData;
+use super::super::rdma::DecodedMediaData;
+use super::Decoder;
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]

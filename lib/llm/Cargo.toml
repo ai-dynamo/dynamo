@@ -24,7 +24,7 @@ testing-etcd = []
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
-media-loading = ["dep:ndarray", "dep:video-rs", "dep:image", "dep:reqwest", "dep:base64", "dep:tokio-rayon", "block-manager"]
+media-loading = ["dep:ndarray", "dep:video-rs", "dep:image", "dep:reqwest", "dep:base64", "dep:tokio-rayon", "dep:flate2", "block-manager"]
 
 [[bench]]
 name = "tokenizer"
@@ -145,6 +145,7 @@ image = { version = "0.25", optional = true }
 reqwest = { workspace = true, optional = true }
 base64 = { version = "0.22", optional = true }
 tokio-rayon = {version = "2", optional = true }
+flate2 = { version = "1.1.2", optional = true }
 
 # Publishers
 zeromq = "0.4.1"

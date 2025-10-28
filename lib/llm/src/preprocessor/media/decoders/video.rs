@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::common::{DecodedMediaData, Decoder, EncodedMediaData};
+use super::super::common::EncodedMediaData;
+use super::super::rdma::DecodedMediaData;
+use super::Decoder;
 use anyhow::Result;
 use ndarray::Array4;
 use std::io::Write;

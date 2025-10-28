@@ -303,7 +303,7 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
 # Install system dependencies
 RUN dnf install -y https://download1.rpmfusion.org/free/el/rpmfusion-free-release-8.noarch.rpm && dnf install -y https://download1.rpmfusion.org/nonfree/el/rpmfusion-nonfree-release-8.noarch.rpm
 RUN dnf update -y \
-    && dnf install -y llvm-toolset protobuf-compiler wget unzip ffmpeg-devel \
+    && dnf install -y llvm-toolset protobuf-compiler wget unzip libavdevice-dev libavutil-dev libavcodec-dev libavformat-dev pkg-config \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
