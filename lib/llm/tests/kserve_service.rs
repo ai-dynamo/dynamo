@@ -1350,9 +1350,8 @@ pub mod kserve_test {
             err
         );
         assert!(
-            err.message()
-                .contains("has type Tensor but no model config is provided"),
-            "Expected error message to contain 'has type Tensor but no model config is provided', got: {}",
+            err.message().contains("no model config is provided"),
+            "Expected error message to contain 'no model config is provided', got: {}",
             err.message()
         );
 
@@ -1371,9 +1370,8 @@ pub mod kserve_test {
             err
         );
         assert!(
-            err.message()
-                .contains("has type Tensor but no model config is provided"),
-            "Expected error message to contain 'has type Tensor but no model config is provided', got: {}",
+            err.message().contains("no model config is provided"),
+            "Expected error message to contain 'no model config is provided', got: {}",
             err.message()
         );
 

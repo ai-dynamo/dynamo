@@ -124,7 +124,7 @@ pub struct TensorMetadata {
     pub parameters: Parameters,
 }
 
-#[derive(Serialize, Deserialize, Validate, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Validate, Debug, Clone, PartialEq, Default)]
 pub struct TensorModelConfig {
     pub name: String,
     pub inputs: Vec<TensorMetadata>,
@@ -133,17 +133,6 @@ pub struct TensorModelConfig {
     // if provided, it supersedes the basic model config defined above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triton_model_config: Option<Vec<u8>>,
-}
-
-impl Default for TensorModelConfig {
-    fn default() -> Self {
-        Self {
-            name: "".to_string(),
-            inputs: vec![],
-            outputs: vec![],
-            triton_model_config: None,
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
