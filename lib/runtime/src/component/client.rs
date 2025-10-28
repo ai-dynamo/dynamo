@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio::net::unix::pipe::Receiver;
 
 use crate::{
+    discovery::{DiscoveryClient, DiscoveryEvent, DiscoveryKey},
     pipeline::async_trait,
     transports::etcd::{Client as EtcdClient, WatchEvent},
 };
@@ -65,17 +66,15 @@ impl Client {
         })
     }
 
-    // Client with auto-discover instances using etcd
+    // Client with auto-discover instances using discovery client
     pub(crate) async fn new_dynamic(endpoint: Endpoint) -> Result<Self> {
         const INSTANCE_REFRESH_PERIOD: Duration = Duration::from_secs(1);
 
-        // create live endpoint watcher
-        let Some(etcd_client) = &endpoint.component.drt.etcd_client else {
-            anyhow::bail!("Attempt to create a dynamic client on a static endpoint");
-        };
+        // Get the discovery client from DRT
+        let discovery_client = endpoint.component.drt.discovery_client().await?;
 
         let instance_source =
-            Self::get_or_create_dynamic_instance_source(etcd_client, &endpoint).await?;
+            Self::get_or_create_dynamic_instance_source(discovery_client, &endpoint).await?;
 
         let client = Client {
             endpoint,
@@ -194,7 +193,7 @@ impl Client {
     }
 
     async fn get_or_create_dynamic_instance_source(
-        etcd_client: &EtcdClient,
+        discovery_client: Arc<dyn DiscoveryClient>,
         endpoint: &Endpoint,
     ) -> Result<Arc<InstanceSource>> {
         let drt = endpoint.drt();
@@ -209,72 +208,108 @@ impl Client {
             }
         }
 
-        let prefix_watcher = etcd_client
-            .kv_get_and_watch_prefix(endpoint.etcd_root())
-            .await?;
+        // Create discovery key from endpoint info
+        let discovery_key = DiscoveryKey::Endpoint {
+            namespace: endpoint.component.namespace.name.clone(),
+            component: endpoint.component.name.clone(),
+            endpoint: endpoint.name.clone(),
+        };
 
-        let (prefix, _watcher, mut kv_event_rx) = prefix_watcher.dissolve();
+        // Start list_and_watch on the discovery client
+        let mut discovery_stream = discovery_client
+            .list_and_watch(discovery_key.clone())
+            .await?;
 
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(vec![]);
 
         let secondary = endpoint.component.drt.runtime.secondary().clone();
+        let endpoint_path = endpoint.path();
 
-        // this task should be included in the registry
-        // currently this is created once per client, but this object/task should only be instantiated
-        // once per worker/instance
+        // Spawn task to handle discovery events
         secondary.spawn(async move {
-            tracing::debug!("Starting endpoint watcher for prefix: {}", prefix);
+            tracing::debug!("Starting discovery watcher for endpoint: {}", endpoint_path);
             let mut map = HashMap::new();
 
+            // Use StreamExt to iterate over the discovery stream
+            use futures::StreamExt;
+
             loop {
-                let kv_event = tokio::select! {
+                let discovery_event = tokio::select! {
                     _ = watch_tx.closed() => {
-                        tracing::debug!("all watchers have closed; shutting down endpoint watcher for prefix: {prefix}");
+                        tracing::debug!("all watchers have closed; shutting down discovery watcher for endpoint: {endpoint_path}");
                         break;
                     }
-                    kv_event = kv_event_rx.recv() => {
-                        match kv_event {
-                            Some(kv_event) => kv_event,
+                    event = discovery_stream.next() => {
+                        match event {
+                            Some(Ok(event)) => event,
+                            Some(Err(e)) => {
+                                tracing::error!("discovery stream error: {}; shutting down discovery watcher for endpoint: {endpoint_path}", e);
+                                break;
+                            }
                             None => {
-                                tracing::debug!("watch stream has closed; shutting down endpoint watcher for prefix: {prefix}");
+                                tracing::debug!("discovery stream closed; shutting down discovery watcher for endpoint: {endpoint_path}");
                                 break;
                             }
                         }
                     }
                 };
 
-                match kv_event {
-                    WatchEvent::Put(kv) => {
-                        let key = String::from_utf8(kv.key().to_vec());
-                        let val = serde_json::from_slice::<Instance>(kv.value());
-                        if let (Ok(key), Ok(val)) = (key, val) {
-                            map.insert(key.clone(), val);
-                        } else {
-                            tracing::error!("Unable to parse put endpoint event; shutting down endpoint watcher for prefix: {prefix}");
-                            break;
-                        }
+                match discovery_event {
+                    DiscoveryEvent::Added(discovery_instance) => {
+                        // Extract fields from discovery instance
+                        let (namespace, component, endpoint_name, instance_id) = match &discovery_instance {
+                            crate::discovery::DiscoveryInstance::Endpoint {
+                                namespace,
+                                component,
+                                endpoint,
+                                instance_id
+                            } => (
+                                namespace.clone(),
+                                component.clone(),
+                                endpoint.clone(),
+                                *instance_id
+                            ),
+                        };
+
+                        // For now, create a test Instance with NatsTcp transport
+                        // TODO: Discovery should store full Instance details, not just metadata
+                        let instance = Instance {
+                            component,
+                            endpoint: endpoint_name,
+                            namespace,
+                            instance_id,
+                            transport: TransportType::NatsTcp("".to_string()),
+                        };
+
+                        tracing::debug!(
+                            instance_id = %instance.id(),
+                            endpoint = %endpoint_path,
+                            "Discovery: Added instance"
+                        );
+
+                        // Use instance_id as the key in the HashMap
+                        map.insert(instance_id.to_string(), instance);
                     }
-                    WatchEvent::Delete(kv) => {
-                        match String::from_utf8(kv.key().to_vec()) {
-                            Ok(key) => { map.remove(&key); }
-                            Err(_) => {
-                                tracing::error!("Unable to parse delete endpoint event; shutting down endpoint watcher for prefix: {}", prefix);
-                                break;
-                            }
-                        }
+                    DiscoveryEvent::Removed(instance_id) => {
+                        tracing::debug!(
+                            instance_id = %instance_id,
+                            endpoint = %endpoint_path,
+                            "Discovery: Removed instance"
+                        );
+                        map.remove(&instance_id.to_string());
                     }
                 }
 
+                // Send complete snapshot of current instances
                 let instances: Vec<Instance> = map.values().cloned().collect();
 
                 if watch_tx.send(instances).is_err() {
-                    tracing::debug!("Unable to send watch updates; shutting down endpoint watcher for prefix: {}", prefix);
+                    tracing::debug!("Unable to send watch updates; shutting down discovery watcher for endpoint: {}", endpoint_path);
                     break;
                 }
-
             }
 
-            tracing::debug!("Completed endpoint watcher for prefix: {prefix}");
+            tracing::debug!("Completed discovery watcher for endpoint: {endpoint_path}");
             let _ = watch_tx.send(vec![]);
         });
 

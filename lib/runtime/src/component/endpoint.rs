@@ -118,8 +118,6 @@ impl EndpointConfigBuilder {
         let endpoint_name = endpoint.name.clone();
         let system_health = endpoint.drt().system_health.clone();
         let subject = endpoint.subject_to(connection_id);
-        let etcd_path = endpoint.etcd_path_with_lease_id(connection_id);
-        let etcd_client = endpoint.component.drt.etcd_client.clone();
 
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
@@ -193,35 +191,52 @@ impl EndpointConfigBuilder {
             result
         });
 
-        // make the components service endpoint discovery in etcd
-
-        // client.register_service()
-        let info = Instance {
+        // Register the endpoint with the discovery service
+        let discovery_key = crate::discovery::DiscoveryKey::Endpoint {
+            namespace: namespace_name.clone(),
             component: component_name.clone(),
             endpoint: endpoint_name.clone(),
-            namespace: namespace_name.clone(),
-            instance_id: connection_id,
-            transport: TransportType::NatsTcp(subject),
         };
 
-        let info = serde_json::to_vec_pretty(&info)?;
+        // Attempt to get discovery client and register
+        let discovery_client = match endpoint.component.drt.discovery_client().await {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::error!(
+                    component_name,
+                    endpoint_name,
+                    error = %e,
+                    "Unable to get discovery client"
+                );
+                endpoint_shutdown_token.cancel();
+                return Err(error!(
+                    "Unable to get discovery client. Check discovery service configuration"
+                ));
+            }
+        };
 
-        if let Some(etcd_client) = &etcd_client
-            && let Err(e) = etcd_client
-                .kv_create(&etcd_path, info, Some(connection_id))
-                .await
-        {
+        // Use the discovery client's instance_id (which is the connection_id)
+        let instance_id = discovery_client.instance_id();
+
+        if let Err(e) = discovery_client.serve(discovery_key).await {
             tracing::error!(
                 component_name,
                 endpoint_name,
                 error = %e,
-                "Unable to register service for discovery"
+                "Unable to register endpoint with discovery service"
             );
             endpoint_shutdown_token.cancel();
             return Err(error!(
-                "Unable to register service for discovery. Check discovery service status"
+                "Unable to register endpoint with discovery service. Check discovery service status"
             ));
         }
+
+        tracing::debug!(
+            component_name,
+            endpoint_name,
+            instance_id = %instance_id,
+            "Successfully registered endpoint with discovery service"
+        );
         task.await??;
 
         Ok(())
