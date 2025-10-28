@@ -311,20 +311,9 @@ def create_profiler_parser() -> argparse.Namespace:
     if not args.model and not args.config:
         parser.error("--model or --config is required (provide at least one)")
 
-    # Only run auto-generation if GPU discovery is enabled
+    # Run auto-generation if GPU discovery is enabled
+    # This will override any manually specified hardware parameters
     if args.enable_gpu_discovery:
         auto_generate_search_space(args)
-    else:
-        # Validate that required hardware parameters are provided when GPU discovery is disabled
-        if args.min_num_gpus_per_engine == 0 or args.max_num_gpus_per_engine == 0:
-            parser.error(
-                "When --enable-gpu-discovery is false, you must provide non-zero values for "
-                "--min-num-gpus-per-engine and --max-num-gpus-per-engine"
-            )
-        if args.is_moe_model and args.num_gpus_per_node == 0:
-            parser.error(
-                "When --enable-gpu-discovery is false and --is-moe-model is true, "
-                "you must provide a non-zero value for --num-gpus-per-node"
-            )
 
     return args

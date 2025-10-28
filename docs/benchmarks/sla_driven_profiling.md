@@ -76,7 +76,7 @@ spec:
   enableGpuDiscovery: true
 ```
 
-This feature is nly available with cluster-scoped operators (`namespaceRestriction.enabled=false`) as it requires cluster-wide node access permissions. It is not available for namespace-restricted operators.
+This feature is only available with cluster-scoped operators (`namespaceRestriction.enabled=false`) as it requires cluster-wide node access permissions. It is not available for namespace-restricted operators.
 
 ## Profiling Method
 
