@@ -31,7 +31,6 @@
 
 use std::fmt;
 
-pub use crate::transports::etcd::Lease;
 use crate::{
     config::HealthStatus,
     metrics::{MetricsHierarchy, MetricsRegistry, prometheus_names},

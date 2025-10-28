@@ -123,10 +123,8 @@ class DynamoSglangPublisher:
             ep = kv_events.get("endpoint")
             zmq_ep = ep.replace("*", get_local_ip_auto()) if ep else None
 
-            lease_id = self.generate_endpoint.lease_id()
-
             zmq_config = ZmqKvEventPublisherConfig(
-                worker_id=lease_id,
+                worker_id=self.generate_endpoint.connection_id(),
                 kv_block_size=self.server_args.page_size,
                 zmq_endpoint=zmq_ep,
             )

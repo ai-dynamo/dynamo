@@ -784,15 +784,7 @@ impl WorkerMetricsPublisher {
     }
 
     pub async fn create_endpoint(&self, component: Component) -> Result<()> {
-        let worker_id = component
-            .drt()
-            .primary_lease()
-            .map(|lease| lease.id())
-            .unwrap_or_else(|| {
-                tracing::warn!("Component is static, assuming worker_id of 0");
-                0
-            });
-
+        let worker_id = component.drt().connection_id();
         self.start_nats_metrics_publishing(component.namespace().clone(), worker_id);
         Ok(())
     }

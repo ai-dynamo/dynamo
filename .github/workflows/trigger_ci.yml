@@ -112,6 +112,12 @@ jobs:
         # Set BUILD_ARCHS to empty string to build both amd64 and arm64
         ci_variables["BUILD_ARCHS"]=""
 
+        # Set additional pipeline variables
+        ci_variables["ENABLE_E2E_TEST"]="true"
+        ci_variables["ENABLE_JET_BENCHMARKS"]="false"
+        ci_variables["ENABLE_SECURITY_SCAN"]="false"
+        ci_variables["RELEASE_BUILD"]="false"
+
         ci_args=""
         for key in "${!ci_variables[@]}"; do
           ci_args+="--form variables[$key]=${ci_variables[$key]} "

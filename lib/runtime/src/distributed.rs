@@ -9,7 +9,7 @@ use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
     ErrorContext,
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
-    discovery::{self, DiscoveryClient, MockDiscoveryClient, SharedMockRegistry},
+    discovery::DiscoveryClient,
     metrics::PrometheusUpdateCallback,
     metrics::{MetricsHierarchy, MetricsRegistry},
     service::ServiceClient,
@@ -212,10 +212,8 @@ impl DistributedRuntime {
         self.runtime.primary_token()
     }
 
-    /// The etcd lease all our components will be attached to.
-    /// Not available for static workers.
-    pub fn primary_lease(&self) -> Option<etcd::Lease> {
-        self.etcd_client.as_ref().map(|c| c.primary_lease())
+    pub fn connection_id(&self) -> u64 {
+        self.store.connection_id()
     }
 
     pub fn shutdown(&self) {
@@ -226,18 +224,6 @@ impl DistributedRuntime {
     pub fn namespace(&self, name: impl Into<String>) -> Result<Namespace> {
         Namespace::new(self.clone(), name.into(), self.is_static)
     }
-
-    // /// Create a [`Component`]
-    // pub fn component(
-    //     &self,
-    //     name: impl Into<String>,
-    //     namespace: impl Into<String>,
-    // ) -> Result<Component> {
-    //     Ok(ComponentBuilder::from_runtime(self.clone())
-    //         .name(name.into())
-    //         .namespace(namespace.into())
-    //         .build()?)
-    // }
 
     /// Get (and/or init) the service discovery client
     pub async fn discovery_client(&self) -> Result<Arc<dyn DiscoveryClient>> {

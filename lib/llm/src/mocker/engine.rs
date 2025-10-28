@@ -246,12 +246,7 @@ impl MockVllmEngine {
         tracing::debug!("Component found for KV events publishing");
 
         tracing::debug!("Getting worker_id");
-        let worker_id = comp
-            .drt()
-            .primary_lease()
-            .expect("Cannot publish KV events without lease") // ← This will PANIC on static!
-            .id();
-        // let worker_id = 0;
+        let worker_id = comp.drt().connection_id();
         tracing::debug!("Worker_id set to: {worker_id}");
 
         tracing::debug!("Creating KV event publisher");

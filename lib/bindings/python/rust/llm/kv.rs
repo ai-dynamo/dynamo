@@ -991,14 +991,7 @@ async fn create_kv_router_from_endpoint(
     // Get component from endpoint
     let component = endpoint.inner.component();
 
-    // Verify we're not in static mode
-    if component.drt().primary_lease().is_none() {
-        return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Failed to get primary lease: Cannot KV route static workers",
-        ));
-    }
-
-    // Create ModelManager and use it to create KvRouter (ensures etcd registration)
+    // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
     let kv_router = model_manager
         .kv_chooser_for(component, block_size as u32, kv_router_config)
