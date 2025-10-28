@@ -67,6 +67,20 @@ jobs:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
+      - name: Linter
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          cd deploy/cloud/operator
+          docker build --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+      - name: Tester
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          cd deploy/cloud/operator
+          docker build --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
       - name: Build Container
         id: build-image
         shell: bash

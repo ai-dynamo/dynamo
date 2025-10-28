@@ -166,14 +166,18 @@ impl ZmqActiveMessageLeader {
             }
         };
 
-        let workers: Vec<WorkerMetadata> = workers_payloads
-            .into_iter()
-            .map(|b| bincode::deserialize::<WorkerMetadata>(&b))
-            .collect::<std::result::Result<_, _>>()?;
+        let mut workers: Vec<WorkerMetadata> = Vec::with_capacity(workers_payloads.len());
+
+        for payload in workers_payloads {
+            let worker: WorkerMetadata =
+                bincode::serde::decode_from_slice(&payload, bincode::config::standard())?.0;
+            workers.push(worker);
+        }
 
         // 2) Compute & broadcast LeaderMetadata; wait for ALL acks in the SAME round.
         let leader_meta = make_leader_meta(&workers);
-        let leader_meta_bytes = bincode::serialize(&leader_meta)?;
+        let leader_meta_bytes =
+            bincode::serde::encode_to_vec(&leader_meta, bincode::config::standard())?;
 
         loop {
             if Instant::now() >= deadline {

@@ -81,8 +81,10 @@ jobs:
         #!/bin/bash -e
         declare -A ci_variables
 
-        # Set ENABLE_PREMERGE to true by default
+        ci_variables["ENABLE_BUILD"]="true"
         ci_variables["ENABLE_PREMERGE"]="true"
+        ci_variables["ENABLE_E2E_TEST"]="true"
+
         # Override to false if validation workflow is running
         if [[ "${{ vars.ALLOW_GITLAB_TEST_SKIP }}" == "1" && "${{ steps.check_workflow.outputs.skip_ci }}" == "true" ]]; then
           echo "Github Workflow has run and ENABLE_PREMERGE variable value is False"
@@ -113,7 +115,7 @@ jobs:
         ci_variables["BUILD_ARCHS"]=""
 
         # Set additional pipeline variables
-        ci_variables["ENABLE_E2E_TEST"]="true"
+        ci_variables["ENABLE_PUBLISH_WHEELS"]="false"
         ci_variables["ENABLE_JET_BENCHMARKS"]="false"
         ci_variables["ENABLE_SECURITY_SCAN"]="false"
         ci_variables["RELEASE_BUILD"]="false"
