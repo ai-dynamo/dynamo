@@ -329,7 +329,8 @@ impl OpenAIPreprocessor {
                 #[cfg(feature = "media-loading")]
                 {
                     if let Some(loader) = &self.media_loader {
-                        let rdma_descriptor = loader.fetch_and_decode_media_part(content_part).await?;
+                        let rdma_descriptor =
+                            loader.fetch_and_decode_media_part(content_part).await?;
                         map_item.push(MultimodalData::Decoded(rdma_descriptor));
                     } else {
                         map_item.push(MultimodalData::Url(url));
