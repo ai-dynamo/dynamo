@@ -36,7 +36,7 @@ pub const MOCKER_COMPONENT: &str = "mocker";
 
 fn generate_random_token() -> TokenIdType {
     let mut rng = rand::rng();
-    rng.random_range(100..200)
+    rng.random_range(1000..2000)
 }
 
 /// AsyncEngine wrapper around the Scheduler that generates random character tokens
