@@ -125,6 +125,11 @@ RUN apt-get update -y \
         clang \
         libclang-dev \
         protobuf-compiler \
+        # media-loading rust build+runtime dependencies
+        libavcodec-dev \
+        libavutil-dev \
+        libavformat-dev \
+        pkg-config \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -296,8 +301,9 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
     PATH=/usr/local/cargo/bin:/opt/dynamo/venv/bin:$PATH
 
 # Install system dependencies
+RUN dnf install -y https://download1.rpmfusion.org/free/el/rpmfusion-free-release-8.noarch.rpm && dnf install -y https://download1.rpmfusion.org/nonfree/el/rpmfusion-nonfree-release-8.noarch.rpm
 RUN dnf update -y \
-    && dnf install -y llvm-toolset protobuf-compiler wget unzip \
+    && dnf install -y llvm-toolset protobuf-compiler wget unzip libavdevice-dev libavutil-dev libavcodec-dev libavformat-dev pkg-config \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
