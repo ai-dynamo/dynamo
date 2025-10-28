@@ -92,8 +92,8 @@ vllm:time_to_first_token_seconds_sum{model_name="meta-llama/Llama-3.1-8B"} 89.38
 
 ### vLLM Metrics
 - [Official vLLM Metrics Design Documentation](https://docs.vllm.ai/en/latest/design/metrics.html)
-- [vLLM Production Metrics User Guide](https://docs.vllm.ai/en/latest/user/production_metrics.html)
-- [vLLM GitHub - Metrics Implementation](https://github.com/vllm-project/vllm/tree/main/vllm/engine/metrics)
+- [vLLM Production Metrics User Guide](https://docs.vllm.ai/en/latest/usage/metrics.html)
+- [vLLM GitHub - Metrics Implementation](https://github.com/vllm-project/vllm/tree/main/vllm/v1/metrics)
 
 ### Dynamo Metrics
 - **Dynamo Metrics Guide**: See [docs/observability/metrics.md](../../observability/metrics.md) for complete documentation on Dynamo runtime metrics

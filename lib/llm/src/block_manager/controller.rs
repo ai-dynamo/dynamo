@@ -112,7 +112,7 @@ mod tests {
             .await
             .unwrap();
 
-        let worker_id = drt.primary_lease().unwrap().id();
+        let worker_id = drt.connection_id();
 
         let block_manager = create_reference_block_manager_with_counts(8, 16, 0).await;
 
