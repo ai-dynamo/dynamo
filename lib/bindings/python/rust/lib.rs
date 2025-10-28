@@ -32,6 +32,7 @@ use dynamo_llm::{self as llm_rs};
 use dynamo_llm::{entrypoint::RouterConfig, kv_router::KvRouterConfig};
 
 use crate::llm::local_model::ModelRuntimeConfig;
+use crate::llm::preprocessor::MediaDecoder;
 
 #[pyclass(eq, eq_int)]
 #[derive(Clone, Debug, PartialEq)]
@@ -154,6 +155,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?;
     m.add_class::<llm::local_model::ModelRuntimeConfig>()?;
+    m.add_class::<llm::preprocessor::MediaDecoder>()?;
     m.add_class::<llm::preprocessor::OAIChatPreprocessor>()?;
     m.add_class::<llm::backend::Backend>()?;
     m.add_class::<llm::kv::OverlapScores>()?;
@@ -214,7 +216,7 @@ fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) 
 /// Create an engine and attach it to an endpoint to make it visible to the frontend.
 /// This is the main way you create a Dynamo worker / backend.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_llm<'p>(
     py: Python<'p>,
@@ -230,6 +232,7 @@ fn register_llm<'p>(
     runtime_config: Option<ModelRuntimeConfig>,
     user_data: Option<&Bound<'p, PyDict>>,
     custom_template_path: Option<&str>,
+    media_decoder: Option<MediaDecoder>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Validate Prefill model type requirements
     if model_type.inner == llm_rs::model_type::ModelType::Prefill {
@@ -302,7 +305,8 @@ fn register_llm<'p>(
             .migration_limit(Some(migration_limit))
             .runtime_config(runtime_config.unwrap_or_default().inner)
             .user_data(user_data_json)
-            .custom_template_path(custom_template_path_owned);
+            .custom_template_path(custom_template_path_owned)
+            .media_decoder(media_decoder.map(|m| m.inner));
         // Load the ModelDeploymentCard
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
         // Advertise ourself on etcd so ingress can find us

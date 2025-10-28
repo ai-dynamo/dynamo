@@ -6,6 +6,7 @@ use crate::llm::model_card::ModelDeploymentCard;
 
 use llm_rs::{
     preprocessor::OpenAIPreprocessor,
+    preprocessor::media::{ImageDecoder as RsImageDecoder, VideoDecoder as RsVideoDecoder, MediaDecoder as RsMediaDecoder},
     protocols::common::llm_backend::{BackendOutput, PreprocessedRequest},
     types::{
         Annotated,
@@ -72,5 +73,37 @@ impl OAIChatPreprocessor {
             builder.start().await.map_err(to_pyerr)?;
             Ok(())
         })
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
+pub struct MediaDecoder {
+    pub(crate) inner: RsMediaDecoder,
+}
+
+#[pymethods]
+impl MediaDecoder {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: RsMediaDecoder::default(),
+        }
+    }
+
+    fn set_image_decoder(&mut self, image_decoder: &Bound<'_, PyDict>) -> PyResult<()> {
+        let image_decoder = pythonize::depythonize(image_decoder).map_err(|err| {
+            PyErr::new::<PyException, _>(format!("Failed to parse image_decoder: {}", err))
+        })?;
+        self.inner.image_decoder = image_decoder;
+        Ok(())
+    }
+
+    fn set_video_decoder(&mut self, video_decoder: &Bound<'_, PyDict>) -> PyResult<()> {
+        let video_decoder = pythonize::depythonize(video_decoder).map_err(|err| {
+            PyErr::new::<PyException, _>(format!("Failed to parse video_decoder: {}", err))
+        })?;
+        self.inner.video_decoder = video_decoder;
+        Ok(())
     }
 }
