@@ -106,7 +106,6 @@ fn get_model_express_cache_dir() -> PathBuf {
         return PathBuf::from(cache_path);
     }
 
-
     let home = env::var("HOME")
         .or_else(|_| env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
