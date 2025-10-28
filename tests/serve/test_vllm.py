@@ -12,6 +12,7 @@ from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
     chat_payload,
     chat_payload_default,
+    completion_payload,
     completion_payload_default,
     metric_payload_default,
 )
@@ -39,6 +40,11 @@ vllm_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            completion_payload(
+                prompt="Basketball is a",
+                echo=True,  # Test echo parameter: prompt should appear in completion output
+                expected_response=["Basketball is a"],
+            ),
             metric_payload_default(min_num_requests=6),
         ],
     ),

@@ -114,14 +114,19 @@ def completion_payload(
     max_tokens: int = 150,
     temperature: float = 0.1,
     stream: bool = False,
+    echo: bool = False,
 ) -> CompletionPayload:
+    body = {
+        "prompt": prompt,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": stream,
+    }
+    if echo:
+        body["echo"] = echo
+
     return CompletionPayload(
-        body={
-            "prompt": prompt,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": stream,
-        },
+        body=body,
         repeat_count=repeat_count,
         expected_log=expected_log or [],
         expected_response=expected_response or [],
