@@ -2,24 +2,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::connector::Connector;
-use super::*;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::time::{sleep, timeout};
+use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
-/// Create a [`Lease`] with a given time-to-live (TTL) attached to the [`CancellationToken`].
+/// Create an etcd lease with the given TTL, attach it to the provided cancellation token,
+/// spawn a keep-alive task, and return the lease id (u64).
+///
+/// Note: this function spawns a background task that maintains the lease until the token is
+/// cancelled or an unrecoverable error occurs.
 pub async fn create_lease(
     connector: Arc<Connector>,
     ttl: u64,
     token: CancellationToken,
-) -> Result<Lease> {
+) -> anyhow::Result<u64> {
     let mut lease_client = connector.get_client().lease_client();
     let lease = lease_client.grant(ttl as i64, None).await?;
 
     let id = lease.id() as u64;
     let ttl = lease.ttl() as u64;
     let child = token.child_token();
-    let clone = token.clone();
 
     tokio::spawn(async move {
         match keep_alive(connector, id, ttl, child).await {
@@ -34,22 +36,7 @@ pub async fn create_lease(
         }
     });
 
-    Ok(Lease {
-        id,
-        cancel_token: clone,
-    })
-}
-
-/// Revoke a lease given its lease id. A wrapper over etcd_client::LeaseClient::revoke
-pub async fn revoke_lease(connector: Arc<Connector>, lease_id: u64) -> Result<()> {
-    let mut lease_client = connector.get_client().lease_client();
-    match lease_client.revoke(lease_id as i64).await {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            tracing::warn!("failed to revoke lease: {:?}", e);
-            Err(e.into())
-        }
-    }
+    Ok(id)
 }
 
 /// Task to keep leases alive with reconnection support.
@@ -60,8 +47,8 @@ async fn keep_alive(
     lease_id: u64,
     mut ttl: u64,
     token: CancellationToken,
-) -> Result<()> {
-    let mut deadline = create_deadline(ttl)?;
+) -> anyhow::Result<()> {
+    let mut deadline = Instant::now() + Duration::from_secs(ttl);
 
     loop {
         // Try to establish or re-establish the keep-alive stream
@@ -99,9 +86,9 @@ async fn keep_alive(
         // Keep-alive loop with the established stream
         loop {
             if deadline < std::time::Instant::now() {
-                return Err(error!(
+                anyhow::bail!(
                     "Unable to refresh lease - deadline exceeded. Check etcd server status"
-                ));
+                );
             }
 
             tokio::select! {
@@ -114,10 +101,10 @@ async fn keep_alive(
 
                             // Update ttl and deadline from response
                             ttl = resp.ttl() as u64;
-                            deadline = create_deadline(ttl)?;
+                            deadline = Instant::now() + Duration::from_secs(ttl);
 
                             if resp.ttl() == 0 {
-                                return Err(error!("Unable to maintain lease - expired or revoked. Check etcd server status"));
+                                anyhow::bail!("Unable to maintain lease - expired or revoked. Check etcd server status");
                             }
                         }
                         Ok(None) => {
@@ -163,9 +150,4 @@ async fn keep_alive(
             }
         }
     }
-}
-
-/// Create a deadline for a given time-to-live (TTL).
-fn create_deadline(ttl: u64) -> Result<std::time::Instant> {
-    Ok(std::time::Instant::now() + std::time::Duration::from_secs(ttl))
 }

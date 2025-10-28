@@ -421,7 +421,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 component,
                 engine,
                 kv_listener,
-                int(endpoint.lease_id()),
+                int(endpoint.connection_id()),
                 config.kv_block_size,
                 metrics_labels,
             ) as publisher:

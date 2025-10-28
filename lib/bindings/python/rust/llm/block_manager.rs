@@ -225,12 +225,7 @@ impl BlockManager {
 
         self._controller = Some(Arc::new(controller));
 
-        let instance_id = component
-            .inner
-            .drt()
-            .primary_lease()
-            .map(|lease| lease.id())
-            .ok_or_else(|| to_pyerr(anyhow::anyhow!("no instance id")))?;
+        let instance_id = component.inner.drt().connection_id();
 
         tracing::info!(
             "Dynamo KVBM Controller: {}.{}:{}",

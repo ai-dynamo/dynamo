@@ -157,9 +157,9 @@ class Endpoint:
         """
         ...
 
-    async def lease_id(self) -> int:
+    def connection_id(self) -> int:
         """
-        Return primary lease id. Currently, cannot set a different lease id.
+        Opaque unique ID for this worker. May change over worker lifetime.
         """
         ...
 

@@ -677,14 +677,7 @@ impl KvbmWorker {
         bytes_per_block: usize,
     ) -> anyhow::Result<()> {
         let drt = config.drt.clone();
-
-        let worker_id = drt
-            .primary_lease()
-            .ok_or(anyhow::anyhow!(
-                "unable to get primary lease; check that drt is not static"
-            ))?
-            .id() as usize;
-
+        let worker_id = drt.connection_id() as usize;
         // Readiness gating for ping
         let state = Arc::new(WorkerState::new());
 
