@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+backend: pytorch
+cuda_graph_config:
+  max_batch_size: 8
+kv_cache_config:
+  enable_partial_reuse: false
+  free_gpu_memory_fraction: 0.80
+  max_tokens: 8192
+kv_connector_config:
+  connector_module: dynamo.llm.trtllm_integration.connector
+  connector_scheduler_class: DynamoKVBMConnectorLeader
+  connector_worker_class: DynamoKVBMConnectorWorker

@@ -1,267 +1,441 @@
-# SLA Planner Quick Start Guide
+# SLA-Driven Profiling and Planner Deployment Quick Start Guide
 
-Complete workflow to deploy SLA-based autoscaling for Dynamo deployments. This guide consolidates all necessary steps into a clear, sequential process.
+Complete workflow to deploy SLA-optimized Dynamo models using DynamoGraphDeploymentRequests (DGDR). This guide shows how to automatically profile models and deploy them with optimal configurations that meet your Service Level Agreements (SLAs).
 
 > [!IMPORTANT]
 > **Prerequisites**: This guide assumes you have a Kubernetes cluster with GPU nodes and have completed the [Dynamo Platform installation](/docs/kubernetes/installation_guide.md).
 
 ## Overview
 
-The SLA Planner automatically scales prefill and decode workers to meet your TTFT (Time To First Token) and ITL (Inter-Token Latency) targets.
+The DGDR workflow automates the entire process from SLA specification to deployment:
 
-The deployment process consists of two mandatory phases:
-
-1. **Pre-Deployment Profiling** (2-4 hours) - Generates performance data
-2. **SLA Planner Deployment** (5-10 minutes) - Enables autoscaling
-
-> [!TIP]
-> **Fast Profiling with AI Configurator**: For TensorRT-LLM users, we provide AI Configurator (AIC) that can complete profiling in 20-30 seconds using performance simulation instead of real deployments. Support for vLLM and SGLang coming soon. See [AI Configurator section](/docs/benchmarks/pre_deployment_profiling.md#running-the-profiling-script-with-ai-configurator) in the Profiling Guide.
+1. **Define SLAs**: Specify performance requirements (TTFT, ITL) and model information in a DGDR Custom Resource
+2. **Automatic Profiling**: The Dynamo Operator automatically profiles your model to find optimal configurations
+3. **Auto-Deploy**: The system automatically deploys the optimal configuration that meets your SLAs
 
 ```mermaid
 flowchart TD
-    A[Start Setup] --> B{Profiling Done?}
-    B -->|No| C[Run Profiling<br/>2-4 hours]
-    C --> D[Verify Results]
-    D --> E[Deploy Planner<br/>5-10 minutes]
-    B -->|Yes| E
-    E --> F[Test System]
-    F --> G[Ready!]
+    A[Create DGDR] --> B[DGDR Controller]
+    B --> C{Profiling Method}
+    C -->|Online| D[Run Profiling Job<br/>2-4 hours]
+    C -->|Offline/AIC| E[AI Configurator<br/>20-30 seconds]
+    D --> F[Generate DGD Config]
+    E --> F
+    F --> G[Auto-Deploy DGD]
+    G --> H[Monitor & Scale]
 
     style A fill:#e1f5fe
-    style C fill:#fff3e0
+    style D fill:#fff3e0
     style E fill:#e8f5e8
     style G fill:#f3e5f5
-    style B fill:#fff8e1
+    style H fill:#fff8e1
 ```
+
+## What is a DynamoGraphDeploymentRequest (DGDR)?
+
+A **DynamoGraphDeploymentRequest (DGDR)** is a Kubernetes Custom Resource that serves as the primary interface for users to request model deployments with specific performance and resource constraints. Think of it as a "deployment order" where you specify:
+
+- **What** model you want to deploy (`model`)
+- **How** it should perform (SLA targets: `ttft`, `itl`)
+- **Where** it should run (optional GPU preferences)
+- **Which** backend to use (`backend`: vllm, sglang, or trtllm)
+- **Which** images to use (`profilingConfig.profilerImage`, `deploymentOverrides.workersImage`)
+
+The Dynamo Operator watches for DGDRs and automatically:
+1. Discovers available GPU resources in your cluster
+2. Runs profiling (online or offline) to find optimal configurations
+3. Generates an optimized DynamoGraphDeployment (DGD) configuration
+4. Deploys the DGD to your cluster
+
+**Key Benefits:**
+- **Declarative**: Specify what you want, not how to achieve it
+- **Automated**: No manual profiling job setup or result processing
+- **SLA-Driven**: Ensures deployments meet your performance requirements
+- **Integrated**: Works seamlessly with the Dynamo Operator
 
 ## Prerequisites
 
-Before deploying the SLA planner, ensure:
-- **Dynamo platform installed** (see [Installation Guide](/docs/kubernetes/installation_guide.md))
-- **[kube-prometheus-stack](/docs/kubernetes/observability/metrics.md) installed and running.** By default, the prometheus server is not deployed in the `monitoring` namespace. If it is deployed to a different namespace, set `dynamo-operator.dynamo.metrics.prometheusEndpoint="http://prometheus-kube-prometheus-prometheus.<namespace>.svc.cluster.local:9090"`.
-- **Benchmarking resources setup** (see [Kubernetes utilities for Dynamo Benchmarking and Profiling](../../deploy/utils/README.md)) The script will create a `dynamo-pvc` with `ReadWriteMany` access, if your cluster's default storageClassName does not allow `ReadWriteMany`, you need to specify a different storageClassName in `deploy/utils/manifests/pvc.yaml` which does support `ReadWriteMany`.
+Before creating a DGDR, ensure:
+- **Dynamo platform installed** with the operator running (see [Installation Guide](/docs/kubernetes/installation_guide.md))
+- **[kube-prometheus-stack](/docs/kubernetes/observability/metrics.md) installed and running** (required for SLA planner)
+- **Profiling PVC created** (see [Benchmarking Resource Setup](/deploy/utils/README.md#benchmarking-resource-setup#BenchmarkingResourceSetup))
+- **Image pull secrets configured** if using private registries (typically `nvcr-imagepullsecret` for NVIDIA images)
+- **Sufficient GPU resources** available in your cluster for profiling
+- **Runtime images available** that contain both profiler and runtime components
 
+### Container Images
 
-## Pre-Deployment Profiling
+Each DGDR requires you to specify container images for the profiling and deployment process:
 
-Deploying planner starts with running pre-deployment profiling.
+**profilingConfig.profilerImage** (Required):
+Specifies the container image used for the profiling job itself. This image must contain the profiler code and dependencies needed for SLA-based profiling.
 
-> [!WARNING]
-> **MANDATORY**: Pre-deployment profiling must be completed before deploying SLA planner. This process analyzes your model's performance characteristics to determine optimal tensor parallelism configurations and scaling parameters.
+**deploymentOverrides.workersImage** (Optional):
+Specifies the container image used for DynamoGraphDeployment worker components (frontend, workers, planner). This image is used for:
+- Temporary DGDs created during online profiling (for performance measurements)
+- The final DGD deployed after profiling completes
 
-### Step 1.1: Set Up Profiling Environment
-
-Set up your Kubernetes namespace for profiling (one-time per namespace). If your namespace is already set up, skip this step.
-
-```bash
-export NAMESPACE=your-namespace
-```
-
-**Prerequisites**: Ensure all dependencies are installed:
-```bash
-pip install -r deploy/utils/requirements.txt
-```
-
-### Step 1.2: Inject Your Configuration
-
-Use the injector utility to place your DGD manifest into the PVC:
-
-```bash
-# Use default disagg.yaml config
-python3 -m deploy.utils.inject_manifest --namespace $NAMESPACE --src components/backends/vllm/deploy/disagg.yaml --dest /data/configs/disagg.yaml
-
-# Or use a custom disagg config file
-python3 -m deploy.utils.inject_manifest --namespace $NAMESPACE --src my-custom-disagg.yaml --dest /data/configs/disagg.yaml
-```
-
-> **Note**: All paths must start with `/data/` for security reasons.
-
-### Step 1.3: Configure SLA Targets
-
-For dense models, edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_job.yaml`:
+If `workersImage` is omitted, the image from the base config file (e.g., `disagg.yaml`) is used. You may use our public images (0.6.1 and later) or build and push your own.
 
 ```yaml
 spec:
-  template:
-    spec:
-      containers:
-        - name: profile-sla
-          args:
-            - --isl
-            - "3000" # average ISL is 3000 tokens
-            - --osl
-            - "150" # average OSL is 150 tokens
-            - --ttft
-            - "200" # target TTFT is 200ms
-            - --itl
-            - "20" # target ITL is 20ms
-            - --backend
-            - <vllm/sglang>
+  profilingConfig:
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+  deploymentOverrides:
+    workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"  # Optional
 ```
 
-For MoE models, edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_moe_job.yaml` instead.
+## Quick Start: Deploy with DGDR
 
-### Step 1.4: Run Profiling
+### Step 1: Create Your DGDR
 
-Set the container image and config path:
+Dynamo provides sample DGDR configurations in `benchmarks/profiler/deploy/`. You can use these as starting points:
 
-```bash
-export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-export DGD_CONFIG_FILE=/data/configs/disagg.yaml
+**Available Sample DGDRs:**
+- **`profile_sla_dgdr.yaml`**: Standard online profiling for dense models
+- **`profile_sla_aic_dgdr.yaml`**: Fast offline profiling using AI Configurator (TensorRT-LLM)
+- **`profile_sla_moe_dgdr.yaml`**: Online profiling for MoE models (SGLang)
+
+Or, you can create your own DGDR for your own needs:
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: my-model-deployment  # Change the name
+  namespace: default         # Change the namespace
+spec:
+  model: "Qwen/Qwen3-0.6B"     # Update to your model
+  backend: vllm                # Backend: vllm, sglang, or trtllm
+
+  profilingConfig:
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"  # Required
+    config:
+      sla:
+        isl: 3000    # Adjust to your workload
+        osl: 150     # Adjust to your workload
+        ttft: 200    # Your target (ms)
+        itl: 20      # Your target (ms)
+
+      sweep:
+        use_ai_configurator: false  # Set to true for fast profiling (TensorRT-LLM only)
+
+  deploymentOverrides:
+    workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"  # Optional
+
+  autoApply: true  # Auto-deploy after profiling
 ```
 
-Run profiling:
+> [!TIP]
+> For detailed explanations of all configuration options (SLA, hardware, sweep, AIC, planner), see the [DGDR Configuration Reference](/docs/benchmarks/sla_driven_profiling.md#dgdr-configuration-reference).
+
+### Step 2: Apply the DGDR
+
+The rest of this quickstart will use the DGDR sample that uses AIC profiling. If you use a different DGDR file and/or name, be sure to adjust the commands accordingly.
 
 ```bash
-# for dense models
-envsubst < benchmarks/profiler/deploy/profile_sla_job.yaml | kubectl apply -f -
-
-# for MoE models
-envsubst < benchmarks/profiler/deploy/profile_sla_moe_job.yaml | kubectl apply -f -
-
-# using aiconfigurator instead of real sweeping (see below for more details)
-envsubst < benchmarks/profiler/deploy/profile_sla_aic_job.yaml | kubectl apply -f -
+export NAMESPACE=your-namespace
+kubectl apply -f benchmarks/profiler/deploy/profile_sla_aic_dgdr.yaml -n $NAMESPACE
 ```
 
-### Step 1.5: Monitor Profiling Progress
+The Dynamo Operator will immediately begin processing your request.
+
+### Step 3: Monitor Progress
+
+Watch the DGDR status:
 
 ```bash
-kubectl get jobs -n $NAMESPACE
-kubectl logs job/profile-sla -n $NAMESPACE
+# View status
+kubectl get dgdr -n $NAMESPACE
+
+# Detailed status
+kubectl describe dgdr sla-aic -n $NAMESPACE
+
+# Watch profiling job logs
+kubectl logs -f job/profile-sla-aic -n $NAMESPACE
+```
+
+**DGDR Status States:**
+- `Pending`: Initial state, preparing to profile
+- `Profiling`: Running profiling job (20-30 seconds for AIC, 2-4 hours for online)
+- `Deploying`: Generating and applying DGD configuration
+- `Ready`: DGD successfully deployed and running
+- `Failed`: Error occurred (check events for details)
+
+> [!NOTE]
+> With AI Configurator, profiling completes in **20-30 seconds**! This is much faster than online profiling which takes 2-4 hours.
+
+### Step 4: Access Your Deployment
+
+Once the DGDR reaches `Ready` state, your model is deployed and ready to serve:
+
+```bash
+# Find the frontend service
+kubectl get svc -n $NAMESPACE | grep trtllm-disagg
+
+# Port-forward to access locally
+kubectl port-forward svc/trtllm-disagg-frontend 8000:8000 -n $NAMESPACE
+
+# Test the endpoint
+curl http://localhost:8000/v1/models
+```
+
+## DGDR Configuration Details
+
+### Required Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `spec.model` | string | Model identifier (e.g., "meta-llama/Llama-3-70b") |
+| `spec.backend` | enum | Inference backend: `vllm`, `sglang`, or `trtllm` |
+| `spec.profilingConfig.profilerImage` | string | Container image for profiling job |
+| `spec.profilingConfig.config.sla` | object | SLA targets (isl, osl, ttft, itl) |
+
+### Optional Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `spec.deploymentOverrides.workersImage` | string | Container image for DGD worker components. If omitted, uses image from base config file. |
+| `spec.autoApply` | boolean | Automatically deploy DGD after profiling (default: false) |
+| `spec.deploymentOverrides` | object | Customize metadata (name, namespace, labels, annotations) and image for auto-created DGD |
+
+### SLA Configuration
+
+The `sla` section defines performance requirements and workload characteristics:
+
+```yaml
+sla:
+  isl: 3000      # Average input sequence length (tokens)
+  osl: 150       # Average output sequence length (tokens)
+  ttft: 200      # Target Time To First Token (milliseconds, float)
+  itl: 20        # Target Inter-Token Latency (milliseconds, float)
+```
+
+**Choosing SLA Values:**
+- **ISL/OSL**: Based on your expected traffic patterns
+- **TTFT**: First token latency target (lower = more GPUs needed)
+- **ITL**: Token generation latency target (lower = more GPUs needed)
+- **Trade-offs**: Tighter SLAs require more GPU resources
+
+### Profiling Methods
+
+Choose between **online profiling** (real measurements, 2-4 hours) or **offline profiling** with AI Configurator (estimated, 20-30 seconds):
+
+```yaml
+# Online Profiling (Default)
+sweep:
+  use_ai_configurator: false
+
+# Offline Profiling (AI Configurator - TensorRT-LLM only)
+sweep:
+  use_ai_configurator: true
+aic:
+  system: h200_sxm
+  model_name: QWEN3_32B
+  backend_version: "0.20.0"
 ```
 
 > [!NOTE]
-> **Time Investment**: This profiling process is comprehensive and typically takes **2-4 hours** to complete. The script systematically tests multiple tensor parallelism configurations and load conditions to find optimal performance settings.
+> For detailed comparison, supported configurations, and limitations, see [SLA-Driven Profiling Documentation](/docs/benchmarks/sla_driven_profiling.md#profiling-methods).
 
-### Step 1.6: Download Profiling Results
+### GPU Discovery
 
-If you want to view the profiling results and performance plots:
+By default, the DGDR controller automatically discovers available GPU resources. Optionally specify preferences:
+
+```yaml
+spec:
+  gpu:
+    type: h200           # GPU type (e.g., h100, h200)
+    count: 8             # Number of GPUs to use
+    memoryGB: 141        # GPU memory in GB
+```
+
+### Advanced Configuration
+
+#### Using Existing DGD Configs (Recommended for Custom Setups)
+
+If you have an existing DynamoGraphDeployment config (e.g., from `components/backends/*/deploy/disagg.yaml` or custom recipes), you can reference it via ConfigMap:
+
+**Step 1: Create ConfigMap from your DGD config file:**
 
 ```bash
-# Download to directory
-python3 -m deploy.utils.download_pvc_results --namespace $NAMESPACE --output-dir ./results --folder /data/profiling_results
+kubectl create configmap deepseek-r1-config \
+  --from-file=disagg.yaml=/path/to/your/disagg.yaml \
+  --namespace $NAMESPACE \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-For detailed information about the output structure, performance plots, and how to analyze the results, see the [Viewing Profiling Results](/docs/benchmarks/pre_deployment_profiling.md#viewing-profiling-results) section in the Profiling Guide.
+**Step 2: Reference the ConfigMap in your DGDR:**
 
-**Verify Success**: Look for terminal output like:
-```
-Suggested prefill TP:4 (TTFT 48.37 ms, throughput 15505.23 tokens/s/GPU)
-Suggested decode TP:4 (ITL 4.83 ms, throughput 51.22 tokens/s/GPU)
-...
-Final DGD config with planner: {...}
-Deploying the optimized DGD with planner...
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: deepseek-r1
+spec:
+  model: deepseek-ai/DeepSeek-R1
+  backend: sglang
+
+  profilingConfig:
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
+    configMapRef:
+      name: deepseek-r1-config
+      key: disagg.yaml  # Must match the key used in --from-file
+    config:
+      sla:
+        isl: 4000
+        osl: 500
+        ttft: 300
+        itl: 10
+      sweep:
+        use_ai_configurator: true
+      aic:
+        system: h200_sxm
+        model_name: DEEPSEEK_V3
+        backend_version: "0.20.0"
+
+  deploymentOverrides:
+    workersImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
+
+  autoApply: true
 ```
 
-### Step 1.7: Deploy the DGD with Planner
+> **What's happening**: The profiler uses the DGD config from the ConfigMap as a **base template**, then optimizes it based on your SLA targets. The controller automatically injects `spec.model` into `deployment.model` and `spec.backend` into `engine.backend` in the final configuration.
+
+#### Inline Configuration (Simple Use Cases)
+
+For simple use cases without a custom DGD config, provide profiler configuration directly. The profiler will auto-generate a basic DGD configuration from your `model` and `backend`:
+
+```yaml
+profilingConfig:
+  config:
+    # SLA targets (required for profiling)
+    sla:
+      isl: 8000   # Input sequence length
+      osl: 200    # Output sequence length
+      ttft: 200.0 # Time To First Token (ms)
+      itl: 10.0   # Inter-Token Latency (ms)
+
+    # Hardware constraints (optional)
+    hardware:
+      min_num_gpus_per_engine: 2
+      max_num_gpus_per_engine: 8
+      gpu_type: h200_sxm
+
+    # Profiling sweep settings (optional)
+    sweep:
+      skip_existing_results: false
+      force_rerun: false
+```
+
+> **Note**: `engine.config` is a **file path** to a DGD YAML file, not inline configuration. Use ConfigMapRef (recommended) or leave it unset to auto-generate.
+
+#### Planner Configuration Passthrough
+Add planner-specific settings. Planner arguments use a `planner_` prefix:
+
+```yaml
+profilingConfig:
+  config:
+    planner:
+      planner_min_endpoint: 2
+```
+
+## Understanding Profiling Results
+
+For details about the profiling process, performance plots, and interpolation data, see [SLA-Driven Profiling Documentation](/docs/benchmarks/sla_driven_profiling.md#profiling-process-details).
+
+## Advanced Topics
+
+### DGDR Immutability
+
+DGDRs are **immutable** - if you need to update SLAs or configuration:
+
+1. Delete the existing DGDR: `kubectl delete dgdr sla-aic`
+2. Create a new DGDR with updated specifications
+
+### Manual Deployment Control
+
+Disable auto-deployment to review configurations before deploying:
+
+```yaml
+spec:
+  autoApply: false
+```
+
+Then manually apply the generated DGD:
 
 ```bash
-kubectl apply -f ./results/config_with_planner.yaml
+# Extract generated config
+kubectl get dgdr sla-aic -n $NAMESPACE -o jsonpath='{.status.generatedConfig}' > my-dgd.yaml
+
+# Review and modify if needed
+vi my-dgd.yaml
+
+# Deploy manually
+kubectl apply -f my-dgd.yaml -n $NAMESPACE
 ```
 
-### Step 1.8: Wait for Deployment to be Ready
+### Relationship to DynamoGraphDeployment (DGD)
+
+- **DGDR**: High-level "intent" - what you want deployed
+- **DGD**: Low-level "implementation" - how it's deployed
+
+The DGDR controller generates a DGD that:
+- Uses optimal TP configurations from profiling
+- Includes SLA planner for autoscaling
+- Has deployment and engine settings tuned for your SLAs
+
+The generated DGD is tracked via labels:
+```yaml
+metadata:
+  labels:
+    dgdr.nvidia.com/name: sla-aic
+    dgdr.nvidia.com/namespace: your-namespace
+```
+
+## Troubleshooting
+
+### Quick Diagnostics
 
 ```bash
-kubectl get pods -n $NAMESPACE
+# Check DGDR status and events
+kubectl describe dgdr sla-aic -n $NAMESPACE
+
+# Check operator logs
+kubectl logs -n $NAMESPACE -l app.kubernetes.io/name=dynamo-operator --tail=100
+
+# Check profiling job logs
+kubectl logs -l job-name=profile-sla-aic -n $NAMESPACE
 ```
 
-**Expected pods** (all should be `1/1 Running`):
-```
-vllm-disagg-planner-frontend-*            1/1 Running
-vllm-disagg-planner-planner-*             1/1 Running
-vllm-disagg-planner-backend-*             1/1 Running
-vllm-disagg-planner-prefill-*             1/1 Running
-```
+### Common Issues
 
-### Step 1.9: Test the System
+| Issue | Quick Fix |
+|-------|-----------|
+| **DGDR stuck in Pending** | Check GPU availability: `kubectl get nodes -o jsonpath='{.items[*].status.allocatable.nvidia\.com/gpu}'` |
+| **Image pull errors** | Verify secret exists: `kubectl get secret nvcr-imagepullsecret -n $NAMESPACE` |
+| **Profiling fails** | Check job logs: `kubectl logs -l job-name=profile-sla-aic -n $NAMESPACE` |
+| **SLA cannot be met** | Relax TTFT/ITL targets or add more GPUs |
+| **DGD not deployed** | Verify `autoApply: true` in DGDR spec |
 
-```bash
-# Port forward to frontend
-kubectl port-forward -n $NAMESPACE deployment/vllm-disagg-planner-frontend 8000:8000
+> [!NOTE]
+> For comprehensive troubleshooting including AI Configurator constraints, performance debugging, and backend-specific issues, see [SLA-Driven Profiling Troubleshooting](/docs/benchmarks/sla_driven_profiling.md#troubleshooting).
 
-# Send a request
-curl -N http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-0.6B",
-    "messages": [
-    {
-        "role": "user",
-        "content": "Hello, how are you?"
-    }
-    ],
-    "stream":true,
-    "max_tokens": 30
-  }'
-```
+## Configuration Reference
 
-### Step 1.10: Monitor Scaling
+For comprehensive documentation of all DGDR configuration options, see the [DGDR Configuration Reference](/docs/benchmarks/sla_driven_profiling.md#dgdr-configuration-reference).
 
-```bash
-# Check planner logs for scaling decisions
-kubectl logs -n $NAMESPACE deployment/vllm-disagg-planner-planner --tail=10
-```
+This includes detailed explanations of:
+- **SLA Configuration**: ISL, OSL, TTFT, ITL with use cases and trade-offs
+- **Hardware Configuration**: GPU constraints and search space control
+- **Sweep Configuration**: Profiling behavior and interpolation settings
+- **AI Configurator Configuration**: System types, model mappings, backend versions
+- **Planner Configuration**: Autoscaling and adjustment parameters
+- **Complete Examples**: Full DGDRs for online, offline (AIC), and MoE profiling
 
-**Expected successful output** (after streaming requests):
-```
-New adjustment interval started!
-Observed num_req: X.XXX isl: X.XXX osl: X.XXX
-Observed ttft: X.XXms itl: X.XXms
-Number of prefill workers: 1, number of decode workers: 1
-```
+## Related Documentation
 
-## Production Readiness
-
-### Monitoring Metrics
-
-- **Basic metrics** (request count): Available with any request type
-- **Latency metrics** (TTFT/ITL): Available for both streaming and non-streaming requests
-- **Scaling decisions**: Require sufficient request volume
-
-### Troubleshooting
-
-**Connection Issues:**
-```bash
-# Verify Prometheus is accessible
-kubectl port-forward svc/prometheus-kube-prometheus-prometheus -n monitoring 9090:9090
-curl "http://localhost:9090/api/v1/query?query=up"
-```
-
-**Missing Metrics:**
-```bash
-# Check frontend metrics
-kubectl port-forward -n $NAMESPACE deployment/vllm-disagg-planner-frontend 8000:8000
-curl http://localhost:8000/metrics | grep nv_llm_http_service
-```
-
-**Worker Issues:**
-- Large models can take 10+ minutes to initialize
-- Check worker logs: `kubectl logs -n $NAMESPACE deployment/vllm-disagg-planner-backend`
-- Ensure GPU resources are available for workers
-
-**Unknown Field subComponentType:**
-
-If you encounter the following error when applying the deployment:
-```bash
-Error from server (BadRequest): error when creating "components/backends/vllm/deploy/disagg.yaml": DynamoGraphDeployment in version "v1alpha1" cannot be handled as a DynamoGraphDeployment: strict decoding error: unknown field "spec.services.DecodeWorker.subComponentType", unknown field "spec.services.PrefillWorker.subComponentType"
-```
-This is because the `subComponentType` field has only been added in newer versions of the DynamoGraphDeployment CRD (> 0.5.0). You can upgrade the CRD version by following the instructions [here](/docs/kubernetes/installation_guide.md).
-
-## Next Steps
-
-- **Architecture Details**: See [SLA-based Planner Architecture](/docs/planner/sla_planner.md) for technical details
-- **Performance Tuning**: See [Pre-Deployment Profiling Guide](/docs/benchmarks/pre_deployment_profiling.md) for advanced profiling options
-- **Load Testing**: See [SLA Planner Load Test](/tests/planner/README.md) for comprehensive testing tools
-
-## Quick Reference
-
-| Phase | Duration | Purpose | Status Check |
-|-------|----------|---------|--------------|
-| Profiling | 2-4 hours | Generate performance data | `kubectl logs job/profile-sla` |
-| Deployment | 5-10 minutes | Enable autoscaling | `kubectl get pods` |
-| Testing | 5 minutes | Verify functionality | `kubectl logs deployment/planner` |
-
----
-
-> [!TIP]
-> **Need Help?** If you encounter issues, check the [troubleshooting section](#troubleshooting) or refer to the detailed guides linked in [Next Steps](#next-steps).
+- [DGDR API Reference](/docs/kubernetes/api_reference.md)
+- [Pre-Deployment Profiling Details](/docs/benchmarks/sla_driven_profiling.md)
+- [SLA Planner Architecture](/docs/planner/sla_planner.md)
+- [Dynamo Operator Guide](/docs/kubernetes/dynamo_operator.md)

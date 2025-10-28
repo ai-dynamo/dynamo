@@ -30,7 +30,7 @@ class TRTLLMConfig(EngineConfig):
 
 
 trtllm_dir = os.environ.get("TRTLLM_DIR") or os.path.join(
-    WORKSPACE_DIR, "components", "backends", "trtllm"
+    WORKSPACE_DIR, "components/backends/trtllm"
 )
 
 # trtllm test configurations
