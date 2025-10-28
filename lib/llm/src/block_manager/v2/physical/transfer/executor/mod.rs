@@ -10,9 +10,7 @@ mod nixl;
 use super::strategy::select_strategy;
 use super::validation::validate_block_transfer;
 use super::{PhysicalLayout, TransferContext, TransferOptions, TransferPlan, TransferStrategy};
-use crate::block_manager::v2::physical::transfer::{
-    StorageKind, context::TransferCompleteNotification,
-};
+use crate::block_manager::v2::physical::transfer::{StorageKind, context::TransferCompleteNotification};
 use anyhow::Result;
 use std::ops::Range;
 use std::sync::Arc;
@@ -181,6 +179,95 @@ struct TwoHopTransferParams<'a> {
     ctx: &'a TransferContext,
 }
 
+type TransferGroup = (Vec<usize>, bool);
+
+async fn handle_buffered_transfer(
+    src: &PhysicalLayout,
+    bounce_layout: &PhysicalLayout,
+    dst: &PhysicalLayout,
+    src_block_ids: &[usize],
+    bounce_block_ids: &[usize],
+    dst_block_ids: &[usize],
+    first_strategy: TransferStrategy,
+    second_strategy: TransferStrategy,
+    layer_range: &Option<Range<usize>>,
+    ctx: &TransferContext,
+) -> Result<()> {
+    let bounce_groups = &bounce_block_ids
+        [0..std::cmp::min(src_block_ids.len(), bounce_block_ids.len())];
+    let bounce_groups = bounce_groups.split_at(bounce_groups.len() / 2);
+    let bounce_groups = [bounce_groups.0, bounce_groups.1];
+
+    let mut src_to_bounce: Option<TransferGroup> = None;
+    let mut bounce_to_dst: Option<TransferGroup>;
+    let mut src_iter = src_block_ids.iter();
+    let mut dst_iter = dst_block_ids.iter();
+
+    loop {
+        bounce_to_dst = src_to_bounce
+            .as_ref()
+            .map(|(src_ids, bounce_buffer_group)| {
+                (
+                    dst_iter
+                        .by_ref()
+                        .take(src_ids.len())
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    *bounce_buffer_group,
+                )
+            });
+
+        let bounce_group = src_to_bounce
+            .map(|(_, bounce_buffer_group)| !bounce_buffer_group)
+            .unwrap_or(false);
+
+        let new_src_ids = src_iter
+            .by_ref()
+            .take(bounce_groups[bounce_group as usize].len())
+            .copied()
+            .collect::<Vec<_>>();
+
+        src_to_bounce = if new_src_ids.is_empty() {
+            None
+        } else {
+            Some((new_src_ids, bounce_group))
+        };
+
+        if src_to_bounce.is_none() && bounce_to_dst.is_none() {
+            break;
+        }
+
+        let mut futures = Vec::new();
+        if let Some(src_to_bounce) = src_to_bounce.as_ref() {
+            futures.push(execute_direct_transfer(
+                src,
+                bounce_layout,
+                &src_to_bounce.0,
+                &bounce_groups[src_to_bounce.1 as usize][0..src_to_bounce.0.len()],
+                layer_range.clone(),
+                first_strategy,
+                ctx,
+            )?);
+        }
+
+        if let Some(bounce_to_dst) = bounce_to_dst.as_ref() {
+            futures.push(execute_direct_transfer(
+                bounce_layout,
+                dst,
+                &bounce_groups[bounce_to_dst.1 as usize][0..bounce_to_dst.0.len()],
+                &bounce_to_dst.0,
+                layer_range.clone(),
+                second_strategy,
+                ctx,
+            )?);
+        }
+
+        futures::future::try_join_all(futures).await?;
+    }
+
+    Ok(())
+}
+
 fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferCompleteNotification> {
     let TwoHopTransferParams {
         src,
@@ -225,20 +312,16 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
 
         let num_bounce_blocks = bounce_buffer_spec.block_ids().len();
 
-        if num_bounce_blocks < src_block_ids.len() {
-            for (src_block_ids, dst_block_ids) in src_block_ids
-                .chunks(num_bounce_blocks)
-                .zip(dst_block_ids.chunks(num_bounce_blocks))
-            {
-                let bounce_block_ids_to_use =
-                    &bounce_buffer_spec.block_ids()[..src_block_ids.len()];
+        if num_bounce_blocks == 1 {
+            let bounce_block = bounce_buffer_spec.block_ids()[0];
+            for (src_block_id, dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
                 if let Err(e) = execute_two_hop_transfer_chunk(
                     &src_clone,
                     bounce_buffer_spec.layout(),
                     &dst_clone,
-                    src_block_ids,
-                    bounce_block_ids_to_use,
-                    dst_block_ids,
+                    &[*src_block_id],
+                    &[bounce_block],
+                    &[*dst_block_id],
                     first_strategy,
                     second_strategy,
                     &options_clone.layer_range,
@@ -252,22 +335,24 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
             }
             tx.send(Ok(())).unwrap();
         } else {
-            let bounce_block_ids_to_use = &bounce_buffer_spec.block_ids()[..src_block_ids.len()];
-            let result = execute_two_hop_transfer_chunk(
+            if let Err(e) = handle_buffered_transfer(
                 &src_clone,
                 bounce_buffer_spec.layout(),
                 &dst_clone,
-                src_block_ids.as_slice(),
-                bounce_block_ids_to_use,
-                dst_block_ids.as_slice(),
+                &src_block_ids,
+                bounce_buffer_spec.block_ids(),
+                &dst_block_ids,
                 first_strategy,
                 second_strategy,
                 &options_clone.layer_range,
                 &ctx_clone,
             )
-            .await;
-
-            tx.send(result).unwrap();
+            .await
+            {
+                tx.send(Err(e)).unwrap();
+                return;
+            }
+            tx.send(Ok(())).unwrap();
         }
     });
 
