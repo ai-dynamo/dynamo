@@ -32,6 +32,7 @@ use dynamo_llm::{self as llm_rs};
 use dynamo_llm::{entrypoint::RouterConfig, kv_router::KvRouterConfig};
 
 use crate::llm::local_model::ModelRuntimeConfig;
+#[cfg(feature = "media-loading")]
 use crate::llm::preprocessor::MediaDecoder;
 
 #[pyclass(eq, eq_int)]
@@ -155,6 +156,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?;
     m.add_class::<llm::local_model::ModelRuntimeConfig>()?;
+    #[cfg(feature = "media-loading")]
     m.add_class::<llm::preprocessor::MediaDecoder>()?;
     m.add_class::<llm::preprocessor::OAIChatPreprocessor>()?;
     m.add_class::<llm::backend::Backend>()?;
@@ -232,7 +234,8 @@ fn register_llm<'p>(
     runtime_config: Option<ModelRuntimeConfig>,
     user_data: Option<&Bound<'p, PyDict>>,
     custom_template_path: Option<&str>,
-    media_decoder: Option<MediaDecoder>,
+    // The type is PyObject because the MediaDecoder class is only available when built with the `media-loading` feature
+    media_decoder: Option<PyObject>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Validate Prefill model type requirements
     if model_type.inner == llm_rs::model_type::ModelType::Prefill {
@@ -296,7 +299,7 @@ fn register_llm<'p>(
         };
 
         let mut builder = dynamo_llm::local_model::LocalModelBuilder::default();
-        builder
+    builder
             .model_path(model_path)
             .model_name(model_name)
             .context_length(context_length)
@@ -305,8 +308,29 @@ fn register_llm<'p>(
             .migration_limit(Some(migration_limit))
             .runtime_config(runtime_config.unwrap_or_default().inner)
             .user_data(user_data_json)
-            .custom_template_path(custom_template_path_owned)
-            .media_decoder(media_decoder.map(|m| m.inner));
+            .custom_template_path(custom_template_path_owned);
+        #[cfg(feature = "media-loading")]
+        {
+            let media_decoder_inner = match media_decoder {
+                Some(obj) => {
+                    let decoder = Python::with_gil(|py| {
+                        obj.bind(py).extract::<llm::preprocessor::MediaDecoder>()
+                    })
+                    .map_err(to_pyerr)?;
+                    Some(decoder.inner)
+                }
+                None => None,
+            };
+            builder.media_decoder(media_decoder_inner);
+        }
+        #[cfg(not(feature = "media-loading"))]
+        {
+            if media_decoder.is_some() {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "media_decoder requires building with feature 'media-loading'",
+                ));
+            }
+        }
         // Load the ModelDeploymentCard
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
         // Advertise ourself on etcd so ingress can find us
