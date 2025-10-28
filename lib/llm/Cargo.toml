@@ -13,7 +13,6 @@ readme.workspace = true
 description = "Dynamo LLM Library"
 
 [features]
-default = ["media-loading"]
 # todo(ops): get this working in CI as a default.
 # default = ["block-manager", "testing-full"]
 

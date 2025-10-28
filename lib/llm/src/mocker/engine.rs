@@ -312,6 +312,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
     ) -> Result<ManyOut<LLMEngineOutput>, Error> {
         let (request, ctx) = input.into_parts();
 
+        println!("multi_modal_data: {:?}", request.multi_modal_data);
         // Extract dp_rank from request field (defaults to 0 if not set)
         let dp_rank = request.dp_rank.unwrap_or(0);
 

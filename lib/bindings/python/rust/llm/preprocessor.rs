@@ -6,7 +6,6 @@ use crate::llm::model_card::ModelDeploymentCard;
 
 use llm_rs::{
     preprocessor::OpenAIPreprocessor,
-    preprocessor::media::{ImageDecoder as RsImageDecoder, VideoDecoder as RsVideoDecoder, MediaDecoder as RsMediaDecoder},
     protocols::common::llm_backend::{BackendOutput, PreprocessedRequest},
     types::{
         Annotated,
@@ -15,6 +14,9 @@ use llm_rs::{
         },
     },
 };
+
+#[cfg(feature = "media-loading")]
+use llm_rs::preprocessor::media::{ImageDecoder as RsImageDecoder, VideoDecoder as RsVideoDecoder, MediaDecoder as RsMediaDecoder};
 
 use dynamo_runtime::pipeline::{
     ManyOut, Operator, PushRouter, SegmentSink, ServiceFrontend, SingleIn, Source,
@@ -76,12 +78,14 @@ impl OAIChatPreprocessor {
     }
 }
 
+#[cfg(feature = "media-loading")]
 #[pyclass]
 #[derive(Clone)]
 pub struct MediaDecoder {
     pub(crate) inner: RsMediaDecoder,
 }
 
+#[cfg(feature = "media-loading")]
 #[pymethods]
 impl MediaDecoder {
     #[new]

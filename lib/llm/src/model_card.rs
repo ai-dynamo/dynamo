@@ -25,6 +25,7 @@ use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
 
+#[cfg(feature = "media-loading")]
 use crate::preprocessor::media::MediaDecoder;
 use crate::protocols::TokenIdType;
 
@@ -219,6 +220,7 @@ pub struct ModelDeploymentCard {
     pub runtime_config: ModelRuntimeConfig,
 
     /// Media decoding configuration
+    #[cfg(feature = "media-loading")]
     #[serde(default)]
     pub media_decoder: Option<MediaDecoder>,
 
@@ -525,6 +527,7 @@ impl ModelDeploymentCard {
             model_input: Default::default(), // set later
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
+            #[cfg(feature = "media-loading")]
             media_decoder: None,
             checksum: OnceLock::new(),
         })

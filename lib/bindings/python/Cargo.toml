@@ -24,6 +24,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 block-manager = ["dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc"]
+media-loading = ["dynamo-llm/media-loading","block-manager"]
 
 [dependencies]
 dynamo-llm = { path = "../../llm" }
