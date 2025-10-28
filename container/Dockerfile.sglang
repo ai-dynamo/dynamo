@@ -45,11 +45,13 @@ FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS framework
 # Declare all ARGs
 ARG BUILD_TYPE=all
 ARG DEEPEP_COMMIT=9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee
+ARG DEEPEP_GB_COMMIT=1b14ad661c7640137fcfe93cccb2694ede1220b0
 ARG CMAKE_BUILD_PARALLEL_LEVEL=2
 ARG FLASHMLA_COMMIT=1408756a88e52a25196b759eaf8db89d2b51b5a1
 ARG SGL_KERNEL_VERSION=0.3.15
-ARG SGLANG_COMMIT=0.5.4.post1
+ARG SGLANG_COMMIT=0.5.3.post2
 ARG GDRCOPY_COMMIT=v2.4.4
+ARG NVSHMEM_VERSION=3.3.9
 ARG GRACE_BLACKWELL=false
 ARG ARCH
 ARG ARCH_ALT
@@ -202,15 +204,15 @@ RUN python3 -m pip install --no-cache-dir --ignore-installed pip==25.3 setuptool
 
 # Download and extract NVSHMEM source, clone DeepEP (use Tom's fork for GB200)
 RUN --mount=type=cache,target=/var/cache/curl \
-    curl --retry 3 --retry-delay 2 -fsSL -o /var/cache/curl/nvshmem_src_cuda12-all-all-3.3.9.tar.gz https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/source/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
-    && tar -xf /var/cache/curl/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
+    curl --retry 3 --retry-delay 2 -fsSL -o /var/cache/curl/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz https://developer.download.nvidia.com/compute/redist/nvshmem/${NVSHMEM_VERSION}/source/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz \
+    && tar -xf /var/cache/curl/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz \
     && mv nvshmem_src nvshmem \
-    && rm -f /var/cache/curl/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
+    && rm -f /var/cache/curl/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz \
     && if [ "$GRACE_BLACKWELL" = true ]; then \
         git clone --depth 1 https://github.com/fzyzcjy/DeepEP.git \
         && cd DeepEP \
-        && git fetch --depth 1 origin 1b14ad661c7640137fcfe93cccb2694ede1220b0 \
-        && git checkout 1b14ad661c7640137fcfe93cccb2694ede1220b0; \
+        && git fetch --depth 1 origin ${DEEPEP_GB_COMMIT} \
+        && git checkout ${DEEPEP_GB_COMMIT}; \
     else \
         git clone --depth 1 https://github.com/deepseek-ai/DeepEP.git \
         && cd DeepEP \
@@ -398,6 +400,18 @@ CMD []
 FROM runtime AS dev
 
 ARG WORKSPACE_DIR=/sgl-workspace/dynamo
+ARG PYTHON_VERSION
+
+# NOTE: SGLang uses system Python (not a virtualenv in framework/runtime stages) to align with
+# upstream SGLang Dockerfile: https://github.com/sgl-project/sglang/blob/main/docker/Dockerfile
+# For dev stage, we create a lightweight venv with --system-site-packages to satisfy maturin develop
+# requirements while still accessing all system-installed packages (sglang, torch, deepep, etc.)
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+RUN mkdir -p /opt/dynamo/venv && \
+    uv venv /opt/dynamo/venv --python $PYTHON_VERSION --system-site-packages
+
+ENV VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH="/opt/dynamo/venv/bin:${PATH}"
 
 # Install development tools and utilities
 RUN apt-get update -y && \

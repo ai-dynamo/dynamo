@@ -9,6 +9,7 @@ import pytest
 
 from tests.serve.common import (
     SERVE_TEST_DIR,
+    WORKSPACE_DIR,
     params_with_model_mark,
     run_serve_deployment,
 )
@@ -32,7 +33,9 @@ class SGLangConfig(EngineConfig):
     stragglers: list[str] = field(default_factory=lambda: ["SGLANG:EngineCore"])
 
 
-sglang_dir = os.environ.get("SGLANG_DIR", "/workspace/components/backends/sglang")
+sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
+    WORKSPACE_DIR, "components/backends/sglang"
+)
 
 sglang_configs = {
     "aggregated": SGLangConfig(

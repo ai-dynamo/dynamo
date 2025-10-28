@@ -60,6 +60,12 @@ type ProfilingConfigSpec struct {
 	// The path to this config will be set as engine.config in the profiling config.
 	// +kubebuilder:validation:Optional
 	ConfigMapRef *ConfigMapKeySelector `json:"configMapRef,omitempty"`
+
+	// ProfilerImage specifies the container image to use for profiling jobs.
+	// This image contains the profiler code and dependencies needed for SLA-based profiling.
+	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+	// +kubebuilder:validation:Required
+	ProfilerImage string `json:"profilerImage"`
 }
 
 // DeploymentOverridesSpec allows users to customize metadata for auto-created DynamoGraphDeployments.
@@ -83,21 +89,36 @@ type DeploymentOverridesSpec struct {
 	// Annotations are additional annotations to add to the DynamoGraphDeployment metadata.
 	// +kubebuilder:validation:Optional
 	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.
+	// This image is used for both temporary DGDs created during online profiling and the final DGD.
+	// If omitted, the image from the base config file (e.g., disagg.yaml) is used.
+	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+	// +kubebuilder:validation:Optional
+	WorkersImage string `json:"workersImage,omitempty"`
 }
 
 // DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
 // This CRD serves as the primary interface for users to request model deployments with
 // specific performance constraints and resource requirements, enabling SLA-driven deployments.
 type DynamoGraphDeploymentRequestSpec struct {
-	// ModelName specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
+	// Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
 	// This is a high-level identifier for easy reference in kubectl output and logs.
+	// The controller automatically sets this value in profilingConfig.config.deployment.model.
 	// +kubebuilder:validation:Required
-	ModelName string `json:"modelName"`
+	Model string `json:"model"`
+
+	// Backend specifies the inference backend to use.
+	// The controller automatically sets this value in profilingConfig.config.engine.backend.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
+	Backend string `json:"backend"`
 
 	// ProfilingConfig provides the complete configuration for the profiling job.
 	// This configuration is passed directly to the profiler.
 	// The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).
-	// The profiler will validate the configuration and report any errors.
+	// Note: deployment.model and engine.backend are automatically set from the high-level
+	// modelName and backend fields and should not be specified in this config.
 	// +kubebuilder:validation:Required
 	ProfilingConfig ProfilingConfigSpec `json:"profilingConfig"`
 
@@ -191,7 +212,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=dgdr
-// +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.modelName`
+// +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model`
 // +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.status.backend`
 // +kubebuilder:printcolumn:name="State",type=string,JSONPath=`.status.state`
 // +kubebuilder:printcolumn:name="DGD-State",type=string,JSONPath=`.status.deployment.state`

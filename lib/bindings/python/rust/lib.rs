@@ -773,12 +773,9 @@ impl Endpoint {
         })
     }
 
-    fn lease_id(&self) -> u64 {
-        self.inner
-            .drt()
-            .primary_lease()
-            .map(|l| l.id())
-            .unwrap_or(0)
+    // Opaque unique ID for this worker. May change over worker lifetime.
+    fn connection_id(&self) -> u64 {
+        self.inner.drt().connection_id()
     }
 
     /// Get a RuntimeMetrics helper for creating Prometheus metrics
