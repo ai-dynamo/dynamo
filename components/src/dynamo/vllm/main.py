@@ -26,6 +26,11 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.multimodal_handlers import (
+    EncodeWorkerHandler,
+    MultimodalPDWorkerHandler,
+    ProcessorHandler,
+)
 
 from .args import ENABLE_LMCACHE, Config, configure_ports, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
@@ -83,7 +88,7 @@ async def worker(runtime: DistributedRuntime):
     logging.debug("Signal handlers set up for graceful shutdown")
 
     dump_config(config.dump_config_to, config)
-    
+
     # Download the model if necessary.
     # register_llm would do this for us, but we want it on disk before we start vllm.
     # Ensure the original HF name (e.g. "Qwen/Qwen3-0.6B") is used as the served_model_name.
@@ -437,9 +442,6 @@ def get_engine_cache_info(engine: AsyncLLM):
 
 async def init_multimodal_processor(runtime: DistributedRuntime, config: Config):
     """Initialize multimodal processor component"""
-    from dynamo.llm import ModelInput, ModelType, register_llm
-    from dynamo.vllm.multimodal_handlers import ProcessorHandler
-
     component = runtime.namespace(config.namespace).component(config.component)
     await component.create_service()
 
@@ -493,8 +495,6 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
 
 async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Config):
     """Initialize multimodal encode worker component"""
-    from dynamo.vllm.multimodal_handlers import EncodeWorkerHandler
-
     component = runtime.namespace(config.namespace).component(config.component)
     await component.create_service()
 
@@ -534,7 +534,6 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
 
 async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     """Initialize multimodal worker component for aggregated or disaggregated mode"""
-    from dynamo.vllm.multimodal_handlers import MultimodalPDWorkerHandler
 
     component = runtime.namespace(config.namespace).component(config.component)
     await component.create_service()
