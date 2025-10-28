@@ -230,8 +230,15 @@ impl DistributedRuntime {
         let client = self
             .discovery_client
             .get_or_try_init(async {
-                // TODO: Replace when KeyValueDiscoveryClient is implemented
-                Err(error!("No discovery clients yet implemented."))
+                // Fixed to KeyValueDiscoveryClient for now which is backed by ETCD
+                // Use the connection_id as the instance_id (etcd lease ID or generated ID)
+                let instance_id = self.store.connection_id();
+                let store = Arc::new(self.store.clone());
+                let discovery_client =
+                    crate::discovery::KeyValueDiscoveryClient::new(instance_id, store);
+                Ok::<Arc<dyn DiscoveryClient>, anyhow::Error>(
+                    Arc::new(discovery_client) as Arc<dyn DiscoveryClient>
+                )
             })
             .await?;
 

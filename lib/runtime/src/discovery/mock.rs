@@ -22,14 +22,14 @@ impl SharedMockRegistry {
 /// Mock implementation of DiscoveryClient for testing
 /// We can potentially remove this once we have KeyValueDiscoveryClient implemented
 pub struct MockDiscoveryClient {
-    instance_id: String,
+    instance_id: u64,
     registry: SharedMockRegistry,
 }
 
 impl MockDiscoveryClient {
-    pub fn new(instance_id: impl Into<String>, registry: SharedMockRegistry) -> Self {
+    pub fn new(instance_id: u64, registry: SharedMockRegistry) -> Self {
         Self {
-            instance_id: instance_id.into(),
+            instance_id,
             registry,
         }
     }
@@ -37,8 +37,8 @@ impl MockDiscoveryClient {
 
 #[async_trait]
 impl DiscoveryClient for MockDiscoveryClient {
-    fn instance_id(&self) -> String {
-        self.instance_id.clone()
+    fn instance_id(&self) -> u64 {
+        self.instance_id
     }
 
     async fn serve(&self, key: DiscoveryKey) -> Result<DiscoveryInstance> {
@@ -51,7 +51,7 @@ impl DiscoveryClient for MockDiscoveryClient {
                 namespace: namespace.clone(),
                 component: component.clone(),
                 endpoint: endpoint.clone(),
-                instance_id: self.instance_id.clone(),
+                instance_id: self.instance_id,
             },
         };
 
@@ -82,14 +82,14 @@ impl DiscoveryClient for MockDiscoveryClient {
 
                 let current_ids: HashSet<_> = current.iter().map(|i| {
                     match i {
-                        DiscoveryInstance::Endpoint { instance_id, .. } => instance_id.clone(),
+                        DiscoveryInstance::Endpoint { instance_id, .. } => *instance_id,
                     }
                 }).collect();
 
                 // Emit Added events for new instances
                 for instance in current {
                     let id = match &instance {
-                        DiscoveryInstance::Endpoint { instance_id, .. } => instance_id.clone(),
+                        DiscoveryInstance::Endpoint { instance_id, .. } => *instance_id,
                     };
                     if known_instances.insert(id) {
                         yield Ok(DiscoveryEvent::Added(instance));
@@ -98,7 +98,7 @@ impl DiscoveryClient for MockDiscoveryClient {
 
                 // Emit Removed events for instances that are gone
                 for id in known_instances.difference(&current_ids).cloned().collect::<Vec<_>>() {
-                    yield Ok(DiscoveryEvent::Removed(id.clone()));
+                    yield Ok(DiscoveryEvent::Removed(id));
                     known_instances.remove(&id);
                 }
 
@@ -118,8 +118,8 @@ mod tests {
     #[tokio::test]
     async fn test_mock_discovery_add_and_remove() {
         let registry = SharedMockRegistry::new();
-        let client1 = MockDiscoveryClient::new("instance-1", registry.clone());
-        let client2 = MockDiscoveryClient::new("instance-2", registry.clone());
+        let client1 = MockDiscoveryClient::new(1, registry.clone());
+        let client2 = MockDiscoveryClient::new(2, registry.clone());
 
         let key = DiscoveryKey::Endpoint {
             namespace: "test-ns".to_string(),
@@ -136,7 +136,7 @@ mod tests {
         let event = stream.next().await.unwrap().unwrap();
         match event {
             DiscoveryEvent::Added(DiscoveryInstance::Endpoint { instance_id, .. }) => {
-                assert_eq!(instance_id, "instance-1");
+                assert_eq!(instance_id, 1);
             }
             _ => panic!("Expected Added event for instance-1"),
         }
@@ -147,7 +147,7 @@ mod tests {
         let event = stream.next().await.unwrap().unwrap();
         match event {
             DiscoveryEvent::Added(DiscoveryInstance::Endpoint { instance_id, .. }) => {
-                assert_eq!(instance_id, "instance-2");
+                assert_eq!(instance_id, 2);
             }
             _ => panic!("Expected Added event for instance-2"),
         }
@@ -160,13 +160,13 @@ mod tests {
             .get_mut(&key)
             .unwrap()
             .retain(|i| match i {
-                DiscoveryInstance::Endpoint { instance_id, .. } => instance_id != "instance-1",
+                DiscoveryInstance::Endpoint { instance_id, .. } => *instance_id != 1,
             });
 
         let event = stream.next().await.unwrap().unwrap();
         match event {
             DiscoveryEvent::Removed(instance_id) => {
-                assert_eq!(instance_id, "instance-1");
+                assert_eq!(instance_id, 1);
             }
             _ => panic!("Expected Removed event for instance-1"),
         }
