@@ -833,11 +833,10 @@ impl
         if !original_stream_flag {
             // If stream_options doesn't exist, create it
             if request.inner.stream_options.is_none() {
-                request.inner.stream_options = Some(
-                    dynamo_async_openai::types::ChatCompletionStreamOptions {
+                request.inner.stream_options =
+                    Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
                         include_usage: true,
-                    }
-                );
+                    });
             } else if let Some(ref mut opts) = request.inner.stream_options {
                 // If stream_options exists, ensure include_usage is true for non-streaming
                 opts.include_usage = true;
@@ -979,11 +978,10 @@ impl
         if !original_stream_flag {
             // If stream_options doesn't exist, create it
             if request.inner.stream_options.is_none() {
-                request.inner.stream_options = Some(
-                    dynamo_async_openai::types::ChatCompletionStreamOptions {
+                request.inner.stream_options =
+                    Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
                         include_usage: true,
-                    }
-                );
+                    });
             } else if let Some(ref mut opts) = request.inner.stream_options {
                 // If stream_options exists, ensure include_usage is true for non-streaming
                 opts.include_usage = true;
