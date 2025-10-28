@@ -131,10 +131,14 @@ mod tests {
         assert!(cache_dir.is_absolute() || cache_dir.starts_with("."));
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_get_model_express_cache_dir_with_hf_home() {
         // Test that HF_HOME is respected when set
         unsafe {
+            // Clear other cache env vars to ensure HF_HOME is tested
+            env::remove_var("HF_HUB_CACHE");
+            env::remove_var("MODEL_EXPRESS_CACHE_PATH");
             env::set_var("HF_HOME", "/custom/cache/path");
             let cache_dir = get_model_express_cache_dir();
             assert_eq!(cache_dir, PathBuf::from("/custom/cache/path/hub"));
