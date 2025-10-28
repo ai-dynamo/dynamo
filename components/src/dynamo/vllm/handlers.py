@@ -125,6 +125,7 @@ class BaseWorkerHandler(ABC):
             )
 
             num_output_tokens_so_far = 0
+            first_batch = True
             try:
                 async for res in gen:
                     # res is vllm's RequestOutput
@@ -136,19 +137,18 @@ class BaseWorkerHandler(ABC):
                     output = res.outputs[0]
                     next_total_toks = len(output.token_ids)
 
-                    # On first iteration, prepend prompt tokens if prompt_logprobs was requested (echo behavior)
+                    # On first batch, prepend prompt tokens if prompt_logprobs was requested (when echo=true <-> prompt_logprobs=1)
                     if (
-                        num_output_tokens_so_far == 0
+                        first_batch
                         and hasattr(res, "prompt_token_ids")
                         and res.prompt_token_ids
                         and hasattr(res, "prompt_logprobs")
                         and res.prompt_logprobs is not None
                     ):
                         # Include prompt tokens when prompt_logprobs was requested (echo=true)
-                        all_tokens = res.prompt_token_ids + output.token_ids
-                        out = {"token_ids": all_tokens}
+                        out = {"token_ids": res.prompt_token_ids + output.token_ids}
+                        first_batch = False
                     else:
-                        # Normal incremental output
                         out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
 
                     if output.finish_reason:
