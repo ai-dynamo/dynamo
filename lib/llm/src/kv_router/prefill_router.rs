@@ -170,22 +170,19 @@ impl PrefillRouter {
             bail!("Prefill router returned no output (stream ended)");
         };
 
+        while prefill_response.next().await.is_some() {}
+
         if let Some(err) = first_output.err() {
-            while prefill_response.next().await.is_some() {}
-            bail!("Prefill router returned error in output: {:?}", err);
+            bail!("Prefill router returned error in output: {err:?}");
         }
 
         let Some(output) = &first_output.data else {
-            while prefill_response.next().await.is_some() {}
             bail!("Prefill router output has no data field");
         };
 
         let Some(disaggregated_params) = output.disaggregated_params.clone() else {
-            while prefill_response.next().await.is_some() {}
             bail!("Prefill router output missing disaggregated_params");
         };
-
-        while prefill_response.next().await.is_some() {}
 
         Ok(disaggregated_params)
     }

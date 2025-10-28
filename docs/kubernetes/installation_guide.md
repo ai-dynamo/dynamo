@@ -19,18 +19,42 @@ limitations under the License.
 
 Deploy and manage Dynamo inference graphs on Kubernetes with automated orchestration and scaling, using the Dynamo Kubernetes Platform.
 
-## Quick Start Paths
+## Before You Start
 
-Platform is installed using Dynamo Kubernetes Platform [helm chart](/deploy/cloud/helm/platform/README.md).
+Determine your cluster environment:
 
-**Path A: Production Install**
-Install from published artifacts on your existing cluster → [Jump to Path A](#path-a-production-install)
+**Shared/Multi-Tenant Cluster** (K8s cluster with existing Dynamo artifacts):
+- CRDs already installed cluster-wide - skip CRD installation step
+- Must use namespace-restricted installation (see note in installation steps)
 
-**Path B: Local Development**
-Set up Minikube first → [Minikube Setup](minikube.md) → Then follow Path A
+**Dedicated Cluster** (full cluster admin access):
+- You install CRDs yourself
+- Can use cluster-wide operator (default)
 
-**Path C: Custom Development**
-Build from source for customization → [Jump to Path C](#path-c-custom-development)
+**Local Development** (Minikube, testing):
+- See [Minikube Setup](deployment/minikube.md) first, then follow installation steps below
+
+To check if CRDs already exist:
+```bash
+kubectl get crd | grep dynamo
+# If you see dynamographdeployments, dynamocomponentdeployments, etc., CRDs are already installed
+```
+
+## Installation Paths
+
+Platform is installed using Dynamo Kubernetes Platform [helm chart](../../deploy/cloud/helm/platform/README.md).
+
+**Path A: Pre-built Artifacts**
+- Use case: Production deployment, shared or dedicated clusters
+- Source: NGC published Helm charts
+- Time: ~10 minutes
+- Jump to: [Path A](#path-a-production-install)
+
+**Path B: Custom Build from Source**
+- Use case: Contributing to Dynamo, using latest features from main branch, customization
+- Requirements: Docker build environment
+- Time: ~30 minutes
+- Jump to: [Path B](#path-b-custom-build-from-source)
 
 All helm install commands could be overridden by either setting the values.yaml file or by passing in your own values.yaml:
 
@@ -48,31 +72,39 @@ helm install ...
 
 ## Prerequisites
 
+Verify before proceeding:
+
+- Kubernetes cluster v1.24+ access
+- kubectl v1.24+ installed and configured
+- Helm v3.0+ installed
+- Cluster type determined (shared vs dedicated)
+- CRD status checked if on shared cluster
+- NGC credentials if using NVIDIA images (optional for public images)
+
+Estimated time: 5-30 minutes depending on path
+
 ```bash
-# Required tools
+# Check required tools
 kubectl version --client  # v1.24+
 helm version             # v3.0+
-docker version           # Running daemon
+docker version           # Running daemon (for Path D only)
 
-# Set your inference runtime image
+# Set your release version
 export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
-export DYNAMO_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:${RELEASE_VERSION}
-# Also available: sglang-runtime, tensorrtllm-runtime
 ```
 
-> [!TIP]
-> No cluster? See [Minikube Setup](minikube.md) for local development.
+> No cluster? See [Minikube Setup](deployment/minikube.md) for local development.
 
 ## Path A: Production Install
 
-Install from [NGC published artifacts](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts) in 3 steps.
+Install from [NGC published artifacts](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts).
 
 ```bash
 # 1. Set environment
 export NAMESPACE=dynamo-system
 export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
 
-# 2. Install CRDs
+# 2. Install CRDs (skip if on shared cluster where CRDs already exist)
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-${RELEASE_VERSION}.tgz
 helm install dynamo-crds dynamo-crds-${RELEASE_VERSION}.tgz --namespace default
 
@@ -81,10 +113,27 @@ helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
 ```
 
+**For Shared/Multi-Tenant Clusters:**
+
+If your cluster has namespace-restricted Dynamo operators, you MUST add namespace restriction to your installation:
+
+```bash
+# Add this flag to the helm install command above
+--set dynamo-operator.namespaceRestriction.enabled=true
+```
+
+Note: Use the full path `dynamo-operator.namespaceRestriction.enabled=true` (not just `namespaceRestriction.enabled=true`).
+
+If you see this validation error, you need namespace restriction:
+```
+VALIDATION ERROR: Cannot install cluster-wide Dynamo operator.
+Found existing namespace-restricted Dynamo operators in namespaces: ...
+```
+
 > [!TIP]
-> For multinode deployments, you need to enable Grove and Kai Scheduler.
+> For multinode deployments, you need to enable Grove and KAI Scheduler.
 > You might chose to install them manually or through the dynamo-platform helm install command.
-> When using the dynamo-platform helm install command, Grove and Kai Scheduler are NOT installed by default. You can enable their installation by setting the following flags in the helm install command:
+> When using the dynamo-platform helm install command, Grove and KAI Scheduler are NOT installed by default. You can enable their installation by setting the following flags in the helm install command:
 
 ```bash
 --set "grove.enabled=true"
@@ -111,9 +160,11 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 
 → [Verify Installation](#verify-installation)
 
-## Path B: Custom Development
+## Path B: Custom Build from Source
 
-Build and deploy from source for customization.
+Build and deploy from source for customization, contributing to Dynamo, or using the latest features from the main branch.
+
+Note: This gives you access to the latest unreleased features and fixes on the main branch.
 
 ```bash
 # 1. Set environment
@@ -190,15 +241,42 @@ kubectl get pods -n ${NAMESPACE}
    ```
 
 2. **Explore Backend Guides**
-   - [vLLM Deployments](/components/backends/vllm/deploy/README.md)
-   - [SGLang Deployments](/components/backends/sglang/deploy/README.md)
-   - [TensorRT-LLM Deployments](/components/backends/trtllm/deploy/README.md)
+   - [vLLM Deployments](../../components/backends/vllm/deploy/README.md)
+   - [SGLang Deployments](../../components/backends/sglang/deploy/README.md)
+   - [TensorRT-LLM Deployments](../../components/backends/trtllm/deploy/README.md)
 
 3. **Optional:**
-   - [Set up Prometheus & Grafana](metrics.md)
+   - [Set up Prometheus & Grafana](./observability/metrics.md)
    - [SLA Planner Quickstart Guide](../planner/sla_planner_quickstart.md) (for SLA-aware scheduling and autoscaling)
 
 ## Troubleshooting
+
+**"VALIDATION ERROR: Cannot install cluster-wide Dynamo operator"**
+
+```
+VALIDATION ERROR: Cannot install cluster-wide Dynamo operator.
+Found existing namespace-restricted Dynamo operators in namespaces: ...
+```
+
+Cause: Attempting cluster-wide install on a shared cluster with existing namespace-restricted operators.
+
+Solution: Add namespace restriction to your installation:
+```bash
+--set dynamo-operator.namespaceRestriction.enabled=true
+```
+
+Note: Use the full path `dynamo-operator.namespaceRestriction.enabled=true` (not just `namespaceRestriction.enabled=true`).
+
+**CRDs already exist**
+
+Cause: Installing CRDs on a cluster where they're already present (common on shared clusters).
+
+Solution: Skip step 2 (CRD installation), proceed directly to platform installation.
+
+To check if CRDs exist:
+```bash
+kubectl get crd | grep dynamo
+```
 
 **Pods not starting?**
 ```bash
@@ -232,8 +310,7 @@ just add the following to the helm install command:
 
 ## Advanced Options
 
-- [Helm Chart Configuration](/deploy/cloud/helm/platform/README.md)
-- [GKE-specific setup](gke_setup.md)
-- [Create custom deployments](create_deployment.md)
-- [Dynamo Operator details](dynamo_operator.md)
+- [Helm Chart Configuration](../../deploy/cloud/helm/platform/README.md)
+- [Create custom deployments](./deployment/create_deployment.md)
+- [Dynamo Operator details](./dynamo_operator.md)
 - [Model Express Server details](https://github.com/ai-dynamo/modelexpress)

@@ -62,9 +62,7 @@ pub async fn prepare_engine(
         EngineConfig::Dynamic(local_model) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
 
-            let Some(etcd_client) = distributed_runtime.etcd_client() else {
-                anyhow::bail!("Cannot be both static mode and run with dynamic discovery.");
-            };
+            let store = Arc::new(distributed_runtime.store().clone());
             let model_manager = Arc::new(ModelManager::new());
             let watch_obj = Arc::new(ModelWatcher::new(
                 distributed_runtime,
@@ -73,11 +71,7 @@ pub async fn prepare_engine(
                 None,
                 None,
             ));
-            let models_watcher = etcd_client
-                .kv_get_and_watch_prefix(model_card::ROOT_PATH)
-                .await?;
-            let (_prefix, _watcher, receiver) = models_watcher.dissolve();
-
+            let (_, receiver) = store.watch(model_card::ROOT_PATH, None, runtime.primary_token());
             let inner_watch_obj = watch_obj.clone();
             let _watcher_task = tokio::spawn(async move {
                 inner_watch_obj.watch(receiver, None).await;
@@ -100,9 +94,6 @@ pub async fn prepare_engine(
             })
         }
         EngineConfig::StaticRemote(local_model) => {
-            // For now we only do ModelType.Backend
-            // For batch/text we only do Chat Completions
-
             // The card should have been loaded at 'build' phase earlier
             let card = local_model.card();
             let router_mode = local_model.router_config().router_mode;

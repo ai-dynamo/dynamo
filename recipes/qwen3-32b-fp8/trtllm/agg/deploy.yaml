@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-config
+data:
+  config.yaml: |
+    backend: pytorch
+    tensor_parallel_size: 2
+    pipeline_parallel_size: 1
+    enable_attention_dp: false
+    enable_chunked_prefill: false
+    max_batch_size: 96
+    max_num_tokens: 7964
+    max_seq_len: 7964
+    kv_cache_config:
+      enable_block_reuse: false
+      free_gpu_memory_fraction: 0.7
+      dtype: fp8
+    cuda_graph_config:
+      enable_padding: true
+      batch_sizes:
+        - 1
+        - 2
+        - 4
+        - 8
+        - 16
+        - 32
+        - 64
+        - 96
+    disable_overlap_scheduler: false
+    print_iter_log: false
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-32b-fp8-agg
+spec:
+  backendFramework: trtllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      dynamoNamespace: qwen3-32b-fp8-agg
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - qwen3-32b-fp8-agg-frontend
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          args:
+          - python3 -m dynamo.frontend --router-mode round-robin --http-port 8000
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+      replicas: 1
+    TrtllmWorker:
+      componentType: main
+      dynamoNamespace: qwen3-32b-fp8-agg
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /root/.cache/huggingface
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: nvidia.com/gpu.present
+                  operator: In
+                  values:
+                  - "true"
+        mainContainer:
+          args:
+          - |
+            python3 -m dynamo.trtllm \
+              --model-path "${MODEL_PATH}" \
+              --served-model-name "${MODEL_PATH}" \
+              --extra-engine-args "${ENGINE_ARGS}" \
+              --tensor-parallel-size 2 \
+              --max-batch-size 96 \
+              --free-gpu-memory-fraction 0.9
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          env:
+          - name: TRTLLM_ENABLE_PDL
+            value: "1"
+          - name: TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL
+            value: "True"
+          - name: ENGINE_ARGS
+            value: "/opt/dynamo/configs/config.yaml"
+          - name: MODEL_PATH
+            value: "Qwen/Qwen3-32B-FP8"
+          volumeMounts:
+          - mountPath: /opt/dynamo/configs
+            name: llm-config
+            readOnly: true
+          workingDir: /workspace/components/backends/trtllm
+        volumes:
+        - configMap:
+            name: llm-config
+          name: llm-config
+      replicas: 1
+      resources:
+        limits:
+          gpu: "2"
+        requests:
+          gpu: "2"

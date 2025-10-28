@@ -112,7 +112,7 @@ impl DistributedRWLock {
     ) -> Option<WriteLockGuard<'a>> {
         let write_key = format!("v1/{}/writer", self.lock_prefix);
         let lease_id = etcd_client.lease_id();
-        let put_options = PutOptions::new().with_lease(lease_id);
+        let put_options = PutOptions::new().with_lease(lease_id as i64);
 
         // Step 1: Atomically create write lock only if it doesn't exist
         let txn = Txn::new()
@@ -204,7 +204,7 @@ impl DistributedRWLock {
 
             // Try to atomically acquire read lock
             // The transaction checks that no writer exists and creates reader key atomically
-            let put_options = PutOptions::new().with_lease(lease_id);
+            let put_options = PutOptions::new().with_lease(lease_id as i64);
 
             // Build atomic transaction: create reader key only if write_key doesn't exist
             let txn = Txn::new()

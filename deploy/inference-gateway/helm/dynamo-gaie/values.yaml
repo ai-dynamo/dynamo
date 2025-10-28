@@ -73,7 +73,6 @@ epp:
   configFile: "/etc/epp/epp-config-dynamo.yaml"
   dynamo:
     namespace: "vllm-agg" # Required when useDynamo: true.
-    component: "backend"
     kvBlockSize: "16"
 
 # Platform configuration (for Dynamo mode)

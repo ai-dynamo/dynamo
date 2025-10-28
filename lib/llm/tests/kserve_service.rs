@@ -18,6 +18,7 @@ pub mod kserve_test {
     use anyhow::Error;
     use async_stream::stream;
     use dynamo_llm::grpc::service::kserve::KserveService;
+    use dynamo_llm::grpc::service::kserve::inference as kserve_inference;
     use dynamo_llm::protocols::{
         Annotated,
         openai::{
@@ -224,6 +225,7 @@ pub mod kserve_test {
                         id: request.id.clone(),
                         model: request.model.clone(),
                         tensors: request.tensors.clone(),
+                        parameters: Default::default(),
                     });
                 }
             };
@@ -1163,11 +1165,13 @@ pub mod kserve_test {
                     name: "input".to_string(),
                     data_type: tensor::DataType::Int32,
                     shape: vec![1],
+                    parameters: Default::default(),
                 }],
                 outputs: vec![tensor::TensorMetadata {
                     name: "output".to_string(),
                     data_type: tensor::DataType::Bool,
                     shape: vec![-1],
+                    parameters: Default::default(),
                 }],
             }),
             ..Default::default()
@@ -1293,11 +1297,13 @@ pub mod kserve_test {
                     name: "input".to_string(),
                     data_type: tensor::DataType::Bytes,
                     shape: vec![1],
+                    parameters: Default::default(),
                 }],
                 outputs: vec![tensor::TensorMetadata {
                     name: "output".to_string(),
                     data_type: tensor::DataType::Bool,
                     shape: vec![-1],
+                    parameters: Default::default(),
                 }],
             }),
             ..Default::default()
@@ -1540,5 +1546,63 @@ pub mod kserve_test {
                 panic!("Unexpected output name: {}", output.name);
             }
         }
+    }
+
+    #[test]
+    fn test_parameter_conversion_round_trip() {
+        use kserve_inference::infer_parameter::ParameterChoice;
+
+        // Test all 5 parameter types for round-trip conversion
+        let test_cases = vec![
+            ("bool_param", ParameterChoice::BoolParam(true)),
+            ("int64_param", ParameterChoice::Int64Param(42)),
+            (
+                "string_param",
+                ParameterChoice::StringParam("test_value".to_string()),
+            ),
+            ("double_param", ParameterChoice::DoubleParam(2.5)),
+            ("uint64_param", ParameterChoice::Uint64Param(9999)),
+        ];
+
+        for (name, choice) in test_cases {
+            let kserve_param = kserve_inference::InferParameter {
+                parameter_choice: Some(choice.clone()),
+            };
+
+            // Convert KServe -> Dynamo -> KServe
+            let dynamo_param =
+                dynamo_llm::grpc::service::tensor::kserve_param_to_dynamo(name, &kserve_param)
+                    .expect("Conversion to Dynamo should succeed");
+
+            let back_to_kserve =
+                dynamo_llm::grpc::service::tensor::dynamo_param_to_kserve(&dynamo_param);
+
+            // Verify round-trip preserves the value
+            assert_eq!(
+                kserve_param.parameter_choice, back_to_kserve.parameter_choice,
+                "Parameter '{}' failed round-trip conversion",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_parameter_conversion_error_cases() {
+        // Test conversion of parameter with no value
+        let empty_param = kserve_inference::InferParameter {
+            parameter_choice: None,
+        };
+
+        let result =
+            dynamo_llm::grpc::service::tensor::kserve_param_to_dynamo("empty_param", &empty_param);
+
+        assert!(
+            result.is_err(),
+            "Expected error for parameter with no value"
+        );
+        assert!(
+            result.unwrap_err().message().contains("has no value"),
+            "Expected error message about missing value"
+        );
     }
 }
