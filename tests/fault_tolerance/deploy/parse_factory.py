@@ -104,6 +104,7 @@ def parse_test_results(
     tablefmt: str = "grid",
     sla: Optional[float] = None,
     force_parser: Optional[str] = None,
+    print_output: bool = True,
 ) -> Any:
     """Auto-detect and parse test results using the appropriate parser.
 
@@ -118,6 +119,7 @@ def parse_test_results(
         sla: Optional SLA threshold for latency violations
         force_parser: Optional override to force using a specific parser
                      ("aiperf" or "legacy"). If not provided, auto-detection is used.
+        print_output: If True, print tables and summaries. If False, only return results.
 
     Returns:
         Results from the appropriate parser
@@ -189,6 +191,7 @@ def parse_test_results(
                 log_paths=log_paths,
                 tablefmt=tablefmt,
                 sla=sla,
+                print_output=print_output,
             )
         else:
             return parse_aiperf(
@@ -196,6 +199,7 @@ def parse_test_results(
                 log_paths=None,
                 tablefmt=tablefmt,
                 sla=sla,
+                print_output=print_output,
             )
 
     elif parser_type == "legacy":
@@ -209,6 +213,7 @@ def parse_test_results(
                 log_paths=log_paths,
                 tablefmt=tablefmt,
                 sla=sla,
+                print_output=print_output,
             )
         else:
             return parse_legacy(
@@ -216,6 +221,7 @@ def parse_test_results(
                 log_paths=None,
                 tablefmt=tablefmt,
                 sla=sla,
+                print_output=print_output,
             )
 
     else:
