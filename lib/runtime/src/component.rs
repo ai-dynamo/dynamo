@@ -31,9 +31,9 @@
 
 use std::fmt;
 
+pub use crate::transports::etcd::Lease;
 use crate::{
     config::HealthStatus,
-    discovery::Lease,
     metrics::{MetricsHierarchy, MetricsRegistry, prometheus_names},
     service::ServiceSet,
     transports::etcd::{ETCD_ROOT_PATH, EtcdPath},

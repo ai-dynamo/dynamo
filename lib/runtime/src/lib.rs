@@ -96,6 +96,9 @@ pub struct DistributedRuntime {
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
 
+    // Service discovery client (lazy-initialized)
+    discovery_client: Arc<OnceCell<Arc<dyn discovery::DiscoveryClient>>>,
+
     // local registry for components
     // the registry allows us to use share runtime resources across instances of the same component object.
     // take for example two instances of a client to the same remote component. The registry allows us to use

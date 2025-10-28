@@ -9,7 +9,7 @@ use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
     ErrorContext,
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
-    discovery::DiscoveryClient,
+    discovery::{self, DiscoveryClient, MockDiscoveryClient, SharedMockRegistry},
     metrics::PrometheusUpdateCallback,
     metrics::{MetricsHierarchy, MetricsRegistry},
     service::ServiceClient,
@@ -91,6 +91,7 @@ impl DistributedRuntime {
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
+            discovery_client: Arc::new(OnceCell::new()),
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
@@ -238,13 +239,17 @@ impl DistributedRuntime {
     //         .build()?)
     // }
 
-    pub(crate) fn discovery_client(&self, namespace: impl Into<String>) -> DiscoveryClient {
-        DiscoveryClient::new(
-            namespace.into(),
-            self.etcd_client
-                .clone()
-                .expect("Attempt to get discovery_client on static DistributedRuntime"),
-        )
+    /// Get (and/or init) the service discovery client
+    pub async fn discovery_client(&self) -> Result<Arc<dyn DiscoveryClient>> {
+        let client = self
+            .discovery_client
+            .get_or_try_init(async {
+                // TODO: Replace when KeyValueDiscoveryClient is implemented
+                Err(error!("No discovery clients yet implemented."))
+            })
+            .await?;
+
+        Ok(client.clone())
     }
 
     pub(crate) fn service_client(&self) -> Option<ServiceClient> {
