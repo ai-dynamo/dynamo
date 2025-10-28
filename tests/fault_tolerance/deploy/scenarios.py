@@ -133,11 +133,10 @@ class TokenOverflowFailure(Failure):
         time: int,
         max_seq_len: int = 1024,
         overflow_multiplier: float = 2.0,
-        duration: int = 30,
     ):
         super().__init__(
             time=time,
-            pod_name="Fronted",
+            pod_name="Client",
             command="token_overflow",
         )
         self.max_seq_len = max_seq_len

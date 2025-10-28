@@ -210,7 +210,7 @@ def extract_test_info_from_dir(
     return backend, deploy_type
 
 
-def get_decode_worker_dir(backend: str, deploy_type: str) -> str:
+def get_decode_worker_dir(backend: str, deploy_type: str) -> Optional[str]:
     """
     Get decode worker directory name from WORKER_MAP.
     Reuses the exact logic from scenarios.py.
@@ -725,21 +725,27 @@ def process_overflow_recovery_test(
     print("SESSION SUMMARY - COMBINED OVERFLOW/RECOVERY TEST")
     print(f"{'='*60}")
     print("\nPhase Breakdown:")
-    overflow_rate = (
-        overflow_results["metrics"]["failed_requests"]
-        / overflow_results["metrics"]["total_requests"]
-        * 100
-    )
+    if overflow_results["metrics"]["total_requests"] == 0:
+        overflow_rate = 0
+    else:
+        overflow_rate = (
+            overflow_results["metrics"]["failed_requests"]
+            / overflow_results["metrics"]["total_requests"]
+            * 100
+        )
     print(
         f"  Overflow: {overflow_results['metrics']['failed_requests']}/"
         f"{overflow_results['metrics']['total_requests']} rejected ({overflow_rate:.1f}%)"
     )
 
-    recovery_rate = (
-        recovery_results["metrics"]["successful_requests"]
-        / recovery_results["metrics"]["total_requests"]
-        * 100
-    )
+    if recovery_results["metrics"]["total_requests"] == 0:
+        recovery_rate = 0
+    else:
+        recovery_rate = (
+            recovery_results["metrics"]["successful_requests"]
+            / recovery_results["metrics"]["total_requests"]
+            * 100
+        )
     print(
         f"  Recovery: {recovery_results['metrics']['successful_requests']}/"
         f"{recovery_results['metrics']['total_requests']} succeeded ({recovery_rate:.1f}%)"

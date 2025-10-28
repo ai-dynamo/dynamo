@@ -252,8 +252,8 @@ def results_table(request, scenario):  # noqa: F811
             # force_parser can be set based on client_type if needed
             # force_parser=scenario.load.client_type,
         )
-    except Exception as e:
-        logging.error(f"Failed to parse results for {request.node.name}: {e}")
+    except Exception:
+        logging.exception("Failed to parse results for %s", request.node.name)
 
     # Add all directories to global list for session summary
     global_result_list.extend(log_paths)
@@ -287,14 +287,14 @@ def results_summary():
     # Step 2: Process all tests (get results) but only print paired ones
     try:
         # First, silently parse all tests to get results (for any downstream processing)
-        all_results = parse_test_results(
+        parse_test_results(
             log_dir=None,
             log_paths=global_result_list,
             tablefmt="fancy_grid",
             print_output=False,  # Don't print anything
         )
 
-        for base_name, paths in test_groups.items():
+        for _, paths in test_groups.items():
             if "overflow" in paths and "recovery" in paths:
                 # This function will print the combined summary
                 process_overflow_recovery_test(
