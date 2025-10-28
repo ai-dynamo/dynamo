@@ -125,6 +125,8 @@ RUN apt-get update -y \
         clang \
         libclang-dev \
         protobuf-compiler \
+        # For sudo support
+        sudo \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -247,26 +249,6 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     fi
 
 ##################################
-########## Python Environment ####
-##################################
-
-# Create and activate virtual environment
-ARG PYTHON_VERSION
-RUN mkdir -p /opt/dynamo/venv && \
-    uv venv /opt/dynamo/venv --python $PYTHON_VERSION
-
-ENV VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH="/opt/dynamo/venv/bin:${PATH}"
-
-# Install common and test dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    UV_GIT_LFS=1 uv pip install \
-        --no-cache \
-        --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt
-
-##################################
 ##### Wheel Build Image ##########
 ##################################
 
@@ -374,13 +356,40 @@ ENV DYNAMO_HOME=/opt/dynamo \
 
 WORKDIR /opt/dynamo
 
+# Create dynamo user
+RUN groupadd dynamo && \
+    useradd -g dynamo -m -s /bin/bash dynamo && \
+    mkdir -p /home/dynamo && \
+    chown -R dynamo:dynamo /opt/dynamo && \
+    echo dynamo ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/dynamo && \
+    chmod 0440 /etc/sudoers.d/dynamo
+
+# Switch to dynamo user
+USER dynamo
+ENV HOME=/home/dynamo
+
+# Create and activate virtual environment
+ARG PYTHON_VERSION
+RUN uv venv /opt/dynamo/venv --python $PYTHON_VERSION
+
+ENV VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH="/opt/dynamo/venv/bin:${PATH}"
+
+# Install common and test dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    UV_GIT_LFS=1 uv pip install \
+        --no-cache \
+        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.test.txt
+
 # Copy built artifacts
-COPY --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-COPY --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
-COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
+COPY --chown=dynamo:dynamo --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+COPY --chown=dynamo:dynamo --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
+COPY --chown=dynamo:dynamo --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
 # Install Python packages
-COPY benchmarks/ /opt/dynamo/benchmarks/
+COPY --chown=dynamo:dynamo benchmarks/ /opt/dynamo/benchmarks/
 RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
@@ -392,8 +401,9 @@ RUN uv pip install \
 
 # Setup launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
-    sed '/^#\s/d' /opt/dynamo/launch_message.txt > ~/.launch_screen && \
-    echo "cat ~/.launch_screen" >> ~/.bashrc
+    sed '/^#\s/d' /opt/dynamo/launch_message.txt > ${HOME}/.launch_screen && \
+    echo "cat ${HOME}/.launch_screen" >> ${HOME}/.bashrc
+
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
