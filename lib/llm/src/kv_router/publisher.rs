@@ -104,12 +104,8 @@ impl KvEventPublisher {
 
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
 
-        // Infer worker_id from component's primary lease
-        let worker_id = component
-            .drt()
-            .primary_lease()
-            .expect("Cannot publish KV events without lease")
-            .id();
+        // Infer worker_id from component's connection
+        let worker_id = component.drt().connection_id();
 
         // Create our event source (if any)
         let mut source = None;
