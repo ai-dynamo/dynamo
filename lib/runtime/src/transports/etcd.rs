@@ -32,47 +32,6 @@ pub use path::*;
 
 use super::utils::build_in_runtime;
 
-#[derive(Debug, Clone)]
-pub struct Lease {
-    /// ETCD lease ID
-    /// Delivered as i64 by etcd because of documented gRPC limitations.
-    id: u64,
-
-    /// [`CancellationToken`] associated with the lease
-    cancel_token: CancellationToken,
-}
-
-impl Lease {
-    /// Get the lease ID
-    pub fn id(&self) -> u64 {
-        self.id
-    }
-
-    /// Get the primary [`CancellationToken`] associated with the lease.
-    /// This token will revoke the lease if canceled.
-    pub fn primary_token(&self) -> CancellationToken {
-        self.cancel_token.clone()
-    }
-
-    /// Get a child [`CancellationToken`] from the lease's [`CancellationToken`].
-    /// This child token will be triggered if the lease is revoked, but will not revoke the lease if canceled.
-    pub fn child_token(&self) -> CancellationToken {
-        self.cancel_token.child_token()
-    }
-
-    /// Revoke the lease triggering the [`CancellationToken`].
-    pub fn revoke(&self) {
-        self.cancel_token.cancel();
-    }
-
-    /// Check if the lease is still valid (not revoked)
-    pub async fn is_valid(&self) -> Result<bool> {
-        // A lease is valid if its cancellation token has not been triggered
-        // We can use try_cancelled which returns immediately with a boolean
-        Ok(!self.cancel_token.is_cancelled())
-    }
-}
-
 /// ETCD Client
 #[derive(Clone)]
 pub struct Client {
@@ -120,16 +79,14 @@ impl Client {
                     })?;
 
                 let lease_id = if config.attach_lease {
-                    let lease = create_lease(connector.clone(), 10, token)
+                    create_lease(connector.clone(), 10, token)
                         .await
                         .with_context(|| {
                             format!(
                                 "Unable to create lease. Check etcd server status at {}",
                                 config.etcd_url.join(", ")
                             )
-                        })?;
-
-                    lease.id
+                        })?
                 } else {
                     0
                 };
@@ -157,30 +114,6 @@ impl Client {
     /// Get the primary lease ID.
     pub fn lease_id(&self) -> u64 {
         self.primary_lease
-    }
-
-    /// Primary [`Lease`]
-    pub fn primary_lease(&self) -> Lease {
-        Lease {
-            id: self.primary_lease,
-            cancel_token: self.runtime.primary_token(),
-        }
-    }
-
-    /// Create a [`Lease`] with a given time-to-live (TTL).
-    /// This [`Lease`] will be tied to the [`Runtime`], specifically a child [`CancellationToken`].
-    pub async fn create_lease(&self, ttl: u64) -> Result<Lease> {
-        let token = self.runtime.child_token();
-        self.rt
-            .spawn(create_lease(self.connector.clone(), ttl, token))
-            .await?
-    }
-
-    // Revoke an etcd lease given its lease id. A wrapper over etcd_client::LeaseClient::revoke
-    pub async fn revoke_lease(&self, lease_id: u64) -> Result<()> {
-        self.rt
-            .spawn(revoke_lease(self.connector.clone(), lease_id))
-            .await?
     }
 
     pub async fn kv_create(&self, key: &str, value: Vec<u8>, lease_id: Option<u64>) -> Result<()> {
@@ -284,7 +217,7 @@ impl Client {
     ) -> Result<PutResponse> {
         let options = options
             .unwrap_or_default()
-            .with_lease(self.primary_lease().id() as i64);
+            .with_lease(self.lease_id() as i64);
         self.connector
             .get_client()
             .kv_client()
@@ -702,10 +635,7 @@ mod tests {
         let value = b"test_value";
 
         let client = drt.etcd_client().expect("etcd client should be available");
-        let lease_id = drt
-            .primary_lease()
-            .expect("primary lease should be available")
-            .id();
+        let lease_id = drt.connection_id();
 
         // Create the key
         let result = client.kv_create(key, value.to_vec(), Some(lease_id)).await;

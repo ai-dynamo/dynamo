@@ -163,7 +163,7 @@ class VllmBaseWorker:
         ).replace("*", "127.0.0.1")
 
         zmq_config = ZmqKvEventPublisherConfig(
-            worker_id=endpoint.lease_id(),
+            worker_id=endpoint.connection_id(),
             kv_block_size=vllm_config.cache_config.block_size,
             zmq_endpoint=zmq_endpoint,
         )
