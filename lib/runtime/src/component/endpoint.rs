@@ -108,8 +108,9 @@ impl EndpointConfigBuilder {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to start endpoint: {e}"))?;
 
-        // Create a token that responds to both runtime shutdown and lease expiration
-        let runtime_shutdown_token = endpoint.drt().child_token();
+        // This creates a child token of the runtime's endpoint_shutdown_token. That token is
+        // cancelled first as part of graceful shutdown. See Runtime::shutdown.
+        let endpoint_shutdown_token = endpoint.drt().child_token();
 
         // Extract all values needed from endpoint before any spawns
         let namespace_name = endpoint.component.namespace.name.clone();
@@ -155,12 +156,11 @@ impl EndpointConfigBuilder {
 
         let push_endpoint = PushEndpoint::builder()
             .service_handler(handler)
-            .cancellation_token(runtime_shutdown_token.clone())
+            .cancellation_token(endpoint_shutdown_token.clone())
             .graceful_shutdown(graceful_shutdown)
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to build push endpoint: {e}"))?;
 
-        // launch in primary runtime
         let tracker_clone = if graceful_shutdown {
             Some(endpoint.drt().graceful_shutdown_tracker())
         } else {
@@ -217,7 +217,7 @@ impl EndpointConfigBuilder {
                 error = %e,
                 "Unable to register service for discovery"
             );
-            runtime_shutdown_token.cancel();
+            endpoint_shutdown_token.cancel();
             return Err(error!(
                 "Unable to register service for discovery. Check discovery service status"
             ));
