@@ -22,7 +22,6 @@ pub use config::RuntimeConfig;
 
 pub mod component;
 pub mod compute;
-pub mod discovery;
 pub mod engine;
 pub mod health_check;
 pub mod system_status_server;
