@@ -334,6 +334,7 @@ impl Scheduler {
                 }
 
                 let active_perc = kv_manager.get_active_perc();
+                // TODO: share the same logic with Planner
                 let decoding_time = -25.74 * active_perc.powi(2) + 54.01 * active_perc + 5.74;
                 total_time += Duration::from_secs_f64(decoding_time / 1000.0);
 
