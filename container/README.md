@@ -113,7 +113,7 @@ The Python venv ownership is also updated via rsync in local-dev to match the us
 ## Usage Guidelines
 
 - **Use dev + `run.sh`**: for command-line testing. Runs as root user
-- **Use local-dev + `run.sh`**: for command-line development and Docker mounted partitions using your local user ID
+- **Use local-dev + `run.sh`**: for command-line development and Docker mounted partitions using your local user ID. Add `-it` flag for interactive sessions
 - **Use local-dev + Dev Container**: VS Code/Cursor Dev Container Plugin, using your local user ID
 
 ## Example Commands
@@ -208,14 +208,15 @@ The `run.sh` script launches Docker containers with the appropriate configuratio
 - **User Management**: Root or user-based container execution
 - **Network Configuration**: Configurable networking modes (host, bridge, none, container sharing)
 - **Resource Limits**: Memory, file descriptors, and IPC configuration
+- **Interactive Mode**: Use `-it` flag for interactive terminal sessions (required for shells, debugging, and interactive development)
 
 **Common Usage Examples:**
 
 ```bash
-# Basic container launch (inference/production, runs as root user)
+# Basic container launch (inference/production, runs as root user, non-interactive)
 ./run.sh --image dynamo:latest-vllm -v $HOME/.cache:/home/ubuntu/.cache
 
-# Mount workspace for development (use local-dev image for local host user permissions)
+# Interactive development with workspace mounted (use -it for interactive terminal)
 ./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -it -v $HOME/.cache:/home/ubuntu/.cache
 
 # Use specific image and framework for development
@@ -254,8 +255,8 @@ The `run.sh` script supports different networking modes via the `--network` flag
 
 #### Bridge Networking (Isolated)
 ```bash
-# CI/testing with isolated bridge networking and host cache sharing
-./run.sh --image dynamo:latest-vllm --mount-workspace -it --network bridge -v $HOME/.cache:/home/ubuntu/.cache
+# CI/testing with isolated bridge networking and host cache sharing (no -it for automated CI)
+./run.sh --image dynamo:latest-vllm --mount-workspace --network bridge -v $HOME/.cache:/home/ubuntu/.cache
 ```
 **Use cases:**
 - Secure isolation from host network
@@ -345,8 +346,8 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 &
 # 1. Build image for CI
 ./build.sh --framework vllm --no-cache
 
-# 2. Run tests with network isolation for reproducible results
-./run.sh --image dynamo:latest-vllm --mount-workspace -it --network bridge -v $HOME/.cache:/home/ubuntu/.cache -- python -m pytest tests/
+# 2. Run tests with network isolation for reproducible results (no -it needed for CI)
+./run.sh --image dynamo:latest-vllm --mount-workspace --network bridge -v $HOME/.cache:/home/ubuntu/.cache -- python -m pytest tests/
 
 # 3. Inside the container with bridge networking, start services
 # Note: Services are only accessible from the same container - no port conflicts with host
