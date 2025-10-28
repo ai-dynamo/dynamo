@@ -143,7 +143,6 @@ impl ZmqKvEventPublisher {
     fn new(component: Component, config: ZmqKvEventPublisherConfig) -> PyResult<Self> {
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
             component.inner,
-            config.worker_id,
             config.kv_block_size as u32,
             Some(KvEventSourceConfig::Zmq {
                 endpoint: config.zmq_endpoint,
@@ -239,20 +238,14 @@ pub(crate) struct KvEventPublisher {
 #[pymethods]
 impl KvEventPublisher {
     #[new]
-    #[pyo3(signature = (component, worker_id, kv_block_size, dp_rank=0))]
-    fn new(
-        component: Component,
-        worker_id: WorkerId,
-        kv_block_size: usize,
-        dp_rank: DpRank,
-    ) -> PyResult<Self> {
+    #[pyo3(signature = (component, kv_block_size, dp_rank=0))]
+    fn new(component: Component, kv_block_size: usize, dp_rank: DpRank) -> PyResult<Self> {
         if kv_block_size == 0 {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
 
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
             component.inner,
-            worker_id,
             kv_block_size as u32,
             None,
         )
@@ -991,14 +984,7 @@ async fn create_kv_router_from_endpoint(
     // Get component from endpoint
     let component = endpoint.inner.component();
 
-    // Verify we're not in static mode
-    if component.drt().primary_lease().is_none() {
-        return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Failed to get primary lease: Cannot KV route static workers",
-        ));
-    }
-
-    // Create ModelManager and use it to create KvRouter (ensures etcd registration)
+    // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
     let kv_router = model_manager
         .kv_chooser_for(component, block_size as u32, kv_router_config)

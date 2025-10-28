@@ -17,12 +17,11 @@ pub use anyhow::{
 
 use async_once_cell::OnceCell;
 
-mod config;
+pub mod config;
 pub use config::RuntimeConfig;
 
 pub mod component;
 pub mod compute;
-pub mod discovery;
 pub mod engine;
 pub mod health_check;
 pub mod system_status_server;

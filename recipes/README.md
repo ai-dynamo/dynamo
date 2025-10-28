@@ -13,14 +13,14 @@ This repository contains production-ready recipes for deploying large language m
 
 ## Available Models
 
-| Model Family    | Framework | Deployment Mode      | GPU Requirements | Status | Benchmark |
-|-----------------|-----------|---------------------|------------------|--------|-----------|
-| llama-3-70b     | vllm      | agg                 | 4x H100/H200     | ✅     | ✅        |
-| llama-3-70b     | vllm      | disagg (1 node)      | 8x H100/H200    | ✅     | ✅        |
-| llama-3-70b     | vllm      | disagg (multi-node)     | 16x H100/H200    | ✅     | ✅        |
-| deepseek-r1     | sglang    | disagg (1 node, wide-ep)     | 8x H200          | ✅     | 🚧        |
-| deepseek-r1     | sglang    | disagg (multi-node, wide-ep)     | 16x H200        | ✅     | 🚧        |
-| gpt-oss-120b    | trtllm    | agg                 | 4x GB200         | ✅     | ✅        |
+| Model Family    | Framework | Deployment Mode      | GPU Requirements | Status | Benchmark |GAIE-integration |
+|-----------------|-----------|---------------------|------------------|--------|-----------|------------------|
+| llama-3-70b     | vllm      | agg                 | 4x H100/H200     | ✅     | ✅        |✅                |
+| llama-3-70b     | vllm      | disagg (1 node)      | 8x H100/H200    | ✅     | ✅        | 🚧               |
+| llama-3-70b     | vllm      | disagg (multi-node)     | 16x H100/H200    | ✅     | ✅        |🚧               |
+| deepseek-r1     | sglang    | disagg (1 node, wide-ep)     | 8x H200          | ✅     | 🚧        |🚧               |
+| deepseek-r1     | sglang    | disagg (multi-node, wide-ep)     | 16x H200        | ✅     | 🚧        |🚧               |
+| gpt-oss-120b    | trtllm    | agg                 | 4x GB200         | ✅     | ✅        |🚧               |
 
 **Legend:**
 - ✅ Functional
@@ -89,9 +89,7 @@ vim hf_hub_secret/hf_hub_secret.yaml
 kubectl apply -f hf_hub_secret/hf_hub_secret.yaml -n ${NAMESPACE}
 ```
 
-### 6. Configure Storage Class
-
-Configure persistent storage for model caching:
+6. Configure Storage Class
 
 ```bash
 # Check available storage classes
@@ -160,6 +158,20 @@ kubectl apply -f hf_hub_secret/hf_hub_secret.yaml -n ${NAMESPACE}
 ./run.sh --dry-run --model llama-3-70b --framework vllm --deployment agg
 ```
 
+## If deploying with Gateway API Inference extension GAIE
+
+1. Follow [Deploy Inference Gateway Section 2](../deploy/inference-gateway/README.md#2-deploy-inference-gateway) to install GAIE.
+
+2. Apply manifests by running a script.
+
+```bash
+# Match the block size to the cli value in your deployment file deploy.yaml: - "python3 -m dynamo.vllm ... --block-size 128"
+export DYNAMO_KV_BLOCK_SIZE=128
+export EPP_IMAGE=nvcr.io/you/epp:tag
+# Add --gaie argument to the script i.e.:
+./run.sh --model llama-3-70b --framework vllm --gaie agg
+```
+The script will perform gateway checks and apply the manifests.
 
 ## Option 2: Manual Deployment
 

@@ -185,10 +185,13 @@ struct WorkerMetadataHandler {
 #[async_trait]
 impl Handler for WorkerMetadataHandler {
     async fn handle(&self, mut message: MessageHandle) -> anyhow::Result<()> {
-        let payload = bincode::serialize(&WorkerMetadata {
-            num_device_blocks: self.num_device_blocks,
-            bytes_per_block: self.bytes_per_block,
-        })?;
+        let payload = bincode::serde::encode_to_vec(
+            &WorkerMetadata {
+                num_device_blocks: self.num_device_blocks,
+                bytes_per_block: self.bytes_per_block,
+            },
+            bincode::config::standard(),
+        )?;
         message
             .reply(ZMQ_WORKER_METADATA_MESSAGE, &[payload])
             .await?;
@@ -226,8 +229,11 @@ impl Handler for LeaderMetadataHandler {
             );
             return Ok(());
         }
-        let leader_meta: LeaderMetadata = match bincode::deserialize(&message.data[0]) {
-            Ok(m) => m,
+        let leader_meta: LeaderMetadata = match bincode::serde::decode_from_slice(
+            &message.data[0],
+            bincode::config::standard(),
+        ) {
+            Ok((m, _)) => m,
             Err(e) => {
                 tracing::error!("leader_metadata: bad payload: {e:#}");
                 return Ok(());
@@ -677,14 +683,7 @@ impl KvbmWorker {
         bytes_per_block: usize,
     ) -> anyhow::Result<()> {
         let drt = config.drt.clone();
-
-        let worker_id = drt
-            .primary_lease()
-            .ok_or(anyhow::anyhow!(
-                "unable to get primary lease; check that drt is not static"
-            ))?
-            .id() as usize;
-
+        let worker_id = drt.connection_id() as usize;
         // Readiness gating for ping
         let state = Arc::new(WorkerState::new());
 
