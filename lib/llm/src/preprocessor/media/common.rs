@@ -17,15 +17,16 @@ use nixl_sys::Agent as NixlAgent;
 
 // Raw encoded media data (.png, .mp4, ...), optionally b64-encoded
 pub struct EncodedMediaData {
-    bytes: Vec<u8>,
-    b64_encoded: bool,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) b64_encoded: bool,
 }
 
 // Decoded media data (image RGB, video frames pixels, ...)
+#[derive(Debug)]
 pub struct DecodedMediaData {
-    data: SystemStorage,
-    shape: Vec<usize>,
-    dtype: String,
+    pub(crate) data: SystemStorage,
+    pub(crate) shape: Vec<usize>,
+    pub(crate) dtype: String,
 }
 
 // Decoded media data NIXL descriptor (sent to the next step in the pipeline / NATS)
