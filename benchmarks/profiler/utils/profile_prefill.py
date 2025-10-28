@@ -90,7 +90,7 @@ def profile_prefill(
             base_url=url,
         )
         if aiperf_result is not None:
-            return aiperf_result["records"]["ttft"]["avg"]
+            return aiperf_result["time_to_first_token"]["avg"]
         return None
 
     return _profile_prefill_helper(

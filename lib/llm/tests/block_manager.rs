@@ -190,12 +190,12 @@ pub mod llm_kvbm {
             bytes: Vec<u8>,
         ) -> Result<()> {
             let subject = format!("{}.{}", self.subject(), event_name.as_ref());
-            self.drt()
-                .nats_client()
-                .client()
-                .publish(subject, bytes.into())
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to publish to NATS: {}", e))
+
+            let Some(nats_client) = self.drt().nats_client() else {
+                anyhow::bail!("KVBMDynamoRuntimeComponent EventPublisher requires NATS");
+            };
+            nats_client.client().publish(subject, bytes.into()).await?;
+            Ok(())
         }
     }
 
@@ -216,7 +216,7 @@ pub mod llm_kvbm {
     impl DynamoKvbmRuntimeConfigBuilder {
         pub fn build(self) -> Result<kvbm::config::KvManagerRuntimeConfig> {
             let (runtime, nixl) = self.build_internal()?.dissolve();
-            let worker_id = runtime.primary_lease().unwrap().id() as u64;
+            let worker_id = runtime.primary_lease().unwrap().id();
             Ok(kvbm::config::KvManagerRuntimeConfig::builder()
                 .worker_id(worker_id)
                 .cancellation_token(runtime.primary_token().child_token())
@@ -247,7 +247,7 @@ pub mod llm_kvbm {
     impl DynamoEventManager {
         pub fn new(component: Arc<KVBMDynamoRuntimeComponent>) -> Self {
             let (tx, rx) = mpsc::unbounded_channel();
-            let worker_id = component.drt().primary_lease().unwrap().id() as u64;
+            let worker_id = component.drt().primary_lease().unwrap().id();
             component.drt().runtime().secondary().spawn(async move {
                 worker_task(component, rx).await;
             });
@@ -294,8 +294,9 @@ pub mod llm_kvbm {
                     let event = KvCacheEvent {
                         data,
                         event_id: event_id_counter,
+                        dp_rank: 0,
                     };
-                    let router_event = RouterEvent::new(worker_identifier as i64, event);
+                    let router_event = RouterEvent::new(worker_identifier, event);
                     event_id_counter += 1;
                     if let Err(e) = component_clone
                         .batch_tx
@@ -313,8 +314,9 @@ pub mod llm_kvbm {
                             block_hashes: vec![ExternalSequenceBlockHash(sequence_hash)],
                         }),
                         event_id: event_id_counter,
+                        dp_rank: 0,
                     };
-                    let router_event = RouterEvent::new(worker_identifier as i64, event);
+                    let router_event = RouterEvent::new(worker_identifier, event);
                     event_id_counter += 1;
                     if let Err(e) = component_clone
                         .batch_tx
@@ -573,6 +575,7 @@ mod tests {
                     }],
                     parent_hash: None,
                 }),
+                dp_rank: 0,
             },
         );
 
@@ -587,6 +590,7 @@ mod tests {
                     }],
                     parent_hash: None,
                 }),
+                dp_rank: 0,
             },
         );
 
@@ -630,6 +634,7 @@ mod tests {
                     }],
                     parent_hash: None,
                 }),
+                dp_rank: 0,
             },
         );
 
@@ -678,6 +683,7 @@ mod tests {
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
                     block_hashes: vec![ExternalSequenceBlockHash(4)],
                 }),
+                dp_rank: 0,
             },
         );
 

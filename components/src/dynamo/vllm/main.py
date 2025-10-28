@@ -5,9 +5,9 @@ import asyncio
 import logging
 import os
 import signal
-from typing import Optional
 
 import uvloop
+from prometheus_client import REGISTRY
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -21,6 +21,7 @@ from dynamo.llm import (
     ModelType,
     ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
+    fetch_llm,
     register_llm,
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
@@ -82,6 +83,15 @@ async def worker(runtime: DistributedRuntime):
     logging.debug("Signal handlers set up for graceful shutdown")
 
     dump_config(config.dump_config_to, config)
+
+    # Download the model if necessary.
+    # register_llm would do this for us, but we want it on disk before we start vllm.
+    # Ensure the original HF name (e.g. "Qwen/Qwen3-0.6B") is used as the served_model_name.
+    if not config.served_model_name:
+        config.served_model_name = config.engine_args.served_model_name = config.model
+    if not os.path.exists(config.model):
+        config.model = config.engine_args.model = await fetch_llm(config.model)
+
     if config.is_prefill_worker:
         await init_prefill(runtime, config)
         logger.debug("init_prefill completed")
@@ -97,33 +107,46 @@ def setup_kv_event_publisher(
     component,
     generate_endpoint,
     vllm_config,
-) -> Optional[ZmqKvEventPublisher]:
+):
     """
-    Set up KV event publisher for prefix caching if enabled.
+    Set up KV event publishers for prefix caching if enabled.
+    Creates one publisher per dp_rank since each dp_rank publishes to a different port.
 
     Returns:
-        ZmqKvEventPublisher if prefix caching is enabled, None otherwise.
+        List of ZmqKvEventPublisher instances (one per dp_rank) if prefix caching is enabled, None otherwise.
     """
     if not config.engine_args.enable_prefix_caching:
         return None
 
-    # TODO: We start off with a valid endpoint, then we increment it by dp_rank
-    # May no longer be valid. Lets remove the increment behavior from vLLM and here
-    zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
-        config.engine_args.kv_events_config.endpoint,
-        data_parallel_rank=config.engine_args.data_parallel_rank or 0,
-    ).replace("*", "127.0.0.1")
+    # Skip KV event publishing for decode workers
+    if config.is_decode_worker:
+        logger.info("Skipping KV event publisher setup for decode worker")
+        return None
 
-    zmq_config = ZmqKvEventPublisherConfig(
-        worker_id=generate_endpoint.lease_id(),
-        kv_block_size=vllm_config.cache_config.block_size,
-        zmq_endpoint=zmq_endpoint,
-    )
-    kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
+    # Get data_parallel_size to create publishers for all dp_ranks
+    data_parallel_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
+    kv_publishers = []
 
-    logger.info(f"Worker reading KV events from {zmq_endpoint}")
+    for dp_rank in range(data_parallel_size):
+        # Each dp_rank publishes to a different port
+        zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
+            config.engine_args.kv_events_config.endpoint,
+            data_parallel_rank=dp_rank,
+        ).replace("*", "127.0.0.1")
 
-    return kv_publisher
+        zmq_config = ZmqKvEventPublisherConfig(
+            worker_id=generate_endpoint.lease_id(),
+            kv_block_size=vllm_config.cache_config.block_size,
+            zmq_endpoint=zmq_endpoint,
+        )
+        kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
+        kv_publishers.append(kv_publisher)
+
+        logger.info(
+            f"Worker reading KV events for dp_rank={dp_rank} from {zmq_endpoint}"
+        )
+
+    return kv_publishers if kv_publishers else None
 
 
 def setup_vllm_engine(config, stat_logger=None):
@@ -165,11 +188,67 @@ def setup_vllm_engine(config, stat_logger=None):
         disable_log_stats=engine_args.disable_log_stats,
     )
     if ENABLE_LMCACHE:
-        logger.info(f"VllmWorker for {config.model} has been initialized with LMCache")
+        logger.info(
+            f"VllmWorker for {config.served_model_name} has been initialized with LMCache"
+        )
     else:
-        logger.info(f"VllmWorker for {config.model} has been initialized")
+        logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
 
     return engine_client, vllm_config, default_sampling_params
+
+
+async def register_vllm_model(
+    model_input: ModelInput,
+    model_type: ModelType,
+    generate_endpoint,
+    config: Config,
+    engine_client: AsyncLLM,
+    vllm_config,
+    migration_limit: int,
+):
+    """
+    Helper function to register a vLLM model with runtime configuration.
+
+    Args:
+        model_input: Input type for the model (e.g., ModelInput.Tokens)
+        model_type: Type of model (e.g., ModelType.Chat, ModelType.Prefill)
+        generate_endpoint: Endpoint to register
+        config: Configuration object
+        engine_client: vLLM engine client
+        vllm_config: vLLM configuration
+        migration_limit: Migration limit for the model
+    """
+    runtime_config = ModelRuntimeConfig()
+
+    # Get runtime configuration from vLLM engine
+    logging.info(
+        f"Getting engine runtime configuration metadata from vLLM engine for {model_type}..."
+    )
+    runtime_values = get_engine_cache_info(engine_client)
+    runtime_config.total_kv_blocks = runtime_values["num_gpu_blocks"]
+    runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
+    runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
+
+    # Add tool/reasoning parsers for decode models
+    if model_type != ModelType.Prefill:
+        runtime_config.tool_call_parser = config.tool_call_parser
+        runtime_config.reasoning_parser = config.reasoning_parser
+
+    # Get data_parallel_size from vllm_config (defaults to 1)
+    data_parallel_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
+    runtime_config.data_parallel_size = data_parallel_size
+
+    await register_llm(
+        model_input,
+        model_type,
+        generate_endpoint,
+        config.model,
+        config.served_model_name,
+        kv_cache_block_size=config.engine_args.block_size,
+        migration_limit=migration_limit,
+        runtime_config=runtime_config,
+        custom_template_path=config.custom_jinja_template,
+    )
 
 
 async def init_prefill(runtime: DistributedRuntime, config: Config):
@@ -188,12 +267,24 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         runtime, component, engine_client, default_sampling_params
     )
 
-    # Set up KV event publisher for prefix caching if enabled
-    kv_publisher = setup_kv_event_publisher(
+    # Set up KV event publishers for prefix caching if enabled (one per dp_rank)
+    kv_publishers = setup_kv_event_publisher(
         config, component, generate_endpoint, vllm_config
     )
-    if kv_publisher:
-        handler.kv_publisher = kv_publisher
+    if kv_publishers:
+        handler.kv_publishers = kv_publishers
+
+    # Register prefill model with ModelType.Prefill
+    if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
+        await register_vllm_model(
+            ModelInput.Tokens,
+            ModelType.Prefill,
+            generate_endpoint,
+            config,
+            engine_client,
+            vllm_config,
+            migration_limit=0,  # Prefill doesn't support migration
+        )
 
     health_check_payload = VllmPrefillHealthCheckPayload(engine_client).to_dict()
 
@@ -207,11 +298,13 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
-                metrics_labels=[("model", config.model)],
+                # In practice config.served_model_name is always set, but mypy needs the "or" here.
+                metrics_labels=[("model", config.served_model_name or config.model)],
                 health_check_payload=health_check_payload,
             ),
             clear_endpoint.serve_endpoint(
-                handler.clear_kv_blocks, metrics_labels=[("model", config.model)]
+                handler.clear_kv_blocks,
+                metrics_labels=[("model", config.served_model_name)],
             ),
         )
         logger.debug("serve_endpoint completed for prefill worker")
@@ -234,24 +327,10 @@ async def init(runtime: DistributedRuntime, config: Config):
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
-    prefill_router_client = (
-        await runtime.namespace(config.namespace)
-        .component("router")  # Standalone router for prefill workers
-        .endpoint("generate")
-        .client()
-    )
-
-    prefill_worker_client = (
-        await runtime.namespace(config.namespace)
-        .component("prefill")  # TODO don't hardcode
-        .endpoint("generate")
-        .client()
-    )
-
     factory = StatLoggerFactory(
         component,
         config.engine_args.data_parallel_rank or 0,
-        metrics_labels=[("model", config.model)],
+        metrics_labels=[("model", config.served_model_name or config.model)],
     )
     engine_client, vllm_config, default_sampling_params = setup_vllm_engine(
         config, factory
@@ -262,53 +341,34 @@ async def init(runtime: DistributedRuntime, config: Config):
     factory.set_request_total_slots_all(vllm_config.scheduler_config.max_num_seqs)
     factory.init_publish()
 
-    logger.info(f"VllmWorker for {config.model} has been initialized")
-
     handler = DecodeWorkerHandler(
         runtime,
         component,
         engine_client,
         default_sampling_params,
-        prefill_worker_client,
-        prefill_router_client,
     )
 
-    # Set up KV event publisher for prefix caching if enabled
-    kv_publisher = setup_kv_event_publisher(
+    # Set up KV event publishers for prefix caching if enabled (one per dp_rank)
+    kv_publishers = setup_kv_event_publisher(
         config, component, generate_endpoint, vllm_config
     )
-    if kv_publisher:
-        handler.kv_publisher = kv_publisher
+    if kv_publishers:
+        handler.kv_publishers = kv_publishers
 
     if config.engine_args.disable_log_stats is False:
-        from prometheus_client import REGISTRY
-
-        register_engine_metrics_callback(generate_endpoint, REGISTRY, "vllm:", "vLLM")
+        register_engine_metrics_callback(
+            endpoint=generate_endpoint, registry=REGISTRY, metric_prefix_filter="vllm:"
+        )
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
-        runtime_config = ModelRuntimeConfig()
-
-        # make a `collective_rpc` call to get runtime configuration values
-        logging.info(
-            "Getting engine runtime configuration metadata from vLLM engine..."
-        )
-        runtime_values = get_engine_cache_info(engine_client)
-        runtime_config.total_kv_blocks = runtime_values["num_gpu_blocks"]
-        runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
-        runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
-        runtime_config.tool_call_parser = config.tool_call_parser
-        runtime_config.reasoning_parser = config.reasoning_parser
-
-        await register_llm(
+        await register_vllm_model(
             ModelInput.Tokens,
             ModelType.Chat | ModelType.Completions,
             generate_endpoint,
-            config.model,
-            config.served_model_name,
-            kv_cache_block_size=config.engine_args.block_size,
+            config,
+            engine_client,
+            vllm_config,
             migration_limit=config.migration_limit,
-            runtime_config=runtime_config,
-            custom_template_path=config.custom_jinja_template,
         )
 
     health_check_payload = VllmHealthCheckPayload(engine_client).to_dict()
@@ -321,11 +381,12 @@ async def init(runtime: DistributedRuntime, config: Config):
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=config.migration_limit <= 0,
-                metrics_labels=[("model", config.model)],
+                metrics_labels=[("model", config.served_model_name or config.model)],
                 health_check_payload=health_check_payload,
             ),
             clear_endpoint.serve_endpoint(
-                handler.clear_kv_blocks, metrics_labels=[("model", config.model)]
+                handler.clear_kv_blocks,
+                metrics_labels=[("model", config.served_model_name or config.model)],
             ),
         )
         logger.debug("serve_endpoint completed for decode worker")

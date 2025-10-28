@@ -22,7 +22,7 @@ limitations under the License.
 [![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/dynamo)
 
-| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[Support matrix](https://github.com/ai-dynamo/dynamo/blob/main/docs/support_matrix.md)** | **[Documentation](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** | **[Blogs](https://developer.nvidia.com/blog/tag/nvidia-dynamo)**
+| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/2486)** | **[Support matrix](https://github.com/ai-dynamo/dynamo/blob/main/docs/reference/support-matrix.md)** | **[Documentation](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** | **[Blogs](https://developer.nvidia.com/blog/tag/nvidia-dynamo)**
 
 # NVIDIA Dynamo
 
@@ -56,12 +56,12 @@ Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLa
 
 | Feature                                                                                           | vLLM | SGLang | TensorRT-LLM |
 | ------------------------------------------------------------------------------------------------- | ---- | ------ | ------------ |
-| [**Disaggregated Serving**](/docs/architecture/disagg_serving.md)                                 | ✅   | ✅     | ✅           |
-| [**Conditional Disaggregation**](/docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧   | 🚧     | 🚧           |
-| [**KV-Aware Routing**](/docs/architecture/kv_cache_routing.md)                                    | ✅   | ✅     | ✅           |
-| [**Load Based Planner**](/docs/architecture/load_planner.md)                                      | 🚧   | 🚧     | 🚧           |
-| [**SLA-Based Planner**](/docs/architecture/sla_planner.md)                                        | ✅   | ✅     | ✅           |
-| [**KVBM**](/docs/architecture/kvbm_architecture.md)                                               | ✅   | 🚧     | ✅           |
+| [**Disaggregated Serving**](/docs/design_docs/disagg_serving.md)                                 | ✅   | ✅     | ✅           |
+| [**Conditional Disaggregation**](/docs/design_docs/disagg_serving.md#conditional-disaggregation) | 🚧   | 🚧     | 🚧           |
+| [**KV-Aware Routing**](/docs/router/kv_cache_routing.md)                                    | ✅   | ✅     | ✅           |
+| [**Load Based Planner**](docs/planner/load_planner.md)                                      | 🚧   | 🚧     | 🚧           |
+| [**SLA-Based Planner**](docs/planner/sla_planner.md)                                        | ✅   | ✅     | ✅           |
+| [**KVBM**](docs/kvbm/kvbm_architecture.md)                                               | ✅   | 🚧     | ✅           |
 
 To learn more about each framework and their capabilities, check out each framework's README!
 
@@ -74,7 +74,7 @@ Built in Rust for performance and in Python for extensibility, Dynamo is fully o
 # Installation
 
 The following examples require a few system level packages.
-Recommended to use Ubuntu 24.04 with a x86_64 CPU. See [docs/support_matrix.md](docs/support_matrix.md)
+Recommended to use Ubuntu 24.04 with a x86_64 CPU. See [docs/reference/support-matrix.md](docs/reference/support-matrix.md)
 
 ## 1. Initial setup
 
@@ -179,7 +179,7 @@ Rerun with `curl -N` and change `stream` in the request to `true` to get the res
 Dynamo provides comprehensive benchmarking tools to evaluate and optimize your deployments:
 
 - **[Benchmarking Guide](docs/benchmarks/benchmarking.md)** – Compare deployment topologies (aggregated vs. disaggregated vs. vanilla vLLM) using AIPerf
-- **[Pre-Deployment Profiling](docs/benchmarks/pre_deployment_profiling.md)** – Optimize configurations before deployment to meet SLA requirements
+- **[SLA-Driven Dynamo Deployments](docs/planner/sla_planner_quickstart.md)** – Optimize your deployment to meet SLA requirements
 
 # Engines
 

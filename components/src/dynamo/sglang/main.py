@@ -45,8 +45,9 @@ async def worker(runtime: DistributedRuntime):
 
     logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
 
-    config = parse_args(sys.argv[1:])
+    config = await parse_args(sys.argv[1:])
     dump_config(config.dynamo_args.dump_config_to, config)
+
     if config.dynamo_args.embedding_worker:
         await init_embedding(runtime, config)
     elif config.dynamo_args.multimodal_processor:
@@ -93,6 +94,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         )
 
     # publisher instantiates the metrics and kv event publishers
+    # Note that when engine.server_args.enable_metrics is True, it'll also
+    # gather internal SGLang Prometheus metrics from all worker processes.
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
