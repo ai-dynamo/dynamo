@@ -1484,11 +1484,8 @@ dependencies = [
  "async_zmq",
  "axum",
  "axum-server",
-<<<<<<< HEAD
- "bincode",
-=======
  "base64 0.22.1",
->>>>>>> a0f0e5a18 (feat: Media processing in the frontend - 1st pass)
+ "bincode",
  "bitflags 2.9.3",
  "blake3",
  "bs62",
@@ -1507,6 +1504,7 @@ dependencies = [
  "either",
  "erased-serde",
  "etcd-client",
+ "flate2",
  "futures",
  "futures-util",
  "galil-seiferas",
