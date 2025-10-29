@@ -12,9 +12,10 @@ from dynamo.vllm.args import parse_args
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
-TEST_DIR = Path("tests") 
-JINJA_TEMPLATE_PATH = str(TEST_DIR / "serve" / "fixtures" / "custom_template.jinja")
-
+REPO_ROOT = Path(__file__).resolve().parents[5]
+TEST_DIR = REPO_ROOT / "tests"
+# Now construct the full path to the shared test fixture
+JINJA_TEMPLATE_PATH =  str(REPO_ROOT / "tests" / "serve" / "fixtures" / "custom_template.jinja")
 
 pytestmark = [
     pytest.mark.unit,
