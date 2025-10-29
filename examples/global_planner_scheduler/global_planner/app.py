@@ -429,7 +429,7 @@ class ScalerService:
                         try:
                             # Update replicas directly via Kubernetes API
                             for component_name, replicas in operations.items():
-                                await self.gpu_tracker.kube_api.update_graph_replicas(
+                                self.gpu_tracker.kube_api.update_graph_replicas(
                                     dgd_name, component_name, replicas
                                 )
                             logger.info(f"   ✅ Successfully applied scaling to DGD '{dgd_name}'")
