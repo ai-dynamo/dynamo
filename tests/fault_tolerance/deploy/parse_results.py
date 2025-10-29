@@ -573,6 +573,51 @@ def print_summary_table(
     sys.stdout.flush()  # Ensure output is flushed before any logging
 
 
+def _process_test_phase_results(
+    test_phase: str,
+    metrics: Dict[str, Any],
+    success_threshold: float,
+) -> None:
+    """Helper function to process and print results for a specific test phase."""
+    if test_phase == "overflow":
+        print(f"\n{'='*60}")
+        print("Processing OVERFLOW phase - Expecting rejections")
+        print(f"{'='*60}")
+
+        total_reqs = metrics.get("total_requests", 0)
+        failed_reqs = metrics.get("failed_requests", 0)
+        if total_reqs > 0:
+            failure_rate = (failed_reqs / total_reqs) * 100
+            print(
+                f"\nOverflow Results: {failed_reqs}/{total_reqs} requests rejected ({failure_rate:.1f}%)"
+            )
+            if failure_rate < success_threshold:
+                print(
+                    f"WARNING: Expected rejection rate >= {success_threshold}%, got {failure_rate:.1f}%"
+                )
+            else:
+                print("Overflow validation working correctly")
+
+    elif test_phase == "recovery":
+        print(f"\n{'='*60}")
+        print("Processing RECOVERY phase - Expecting success")
+        print(f"{'='*60}")
+
+        total_reqs = metrics.get("total_requests", 0)
+        success_reqs = metrics.get("successful_requests", 0)
+        if total_reqs > 0:
+            success_rate = (success_reqs / total_reqs) * 100
+            print(
+                f"\nRecovery Results: {success_reqs}/{total_reqs} requests succeeded ({success_rate:.1f}%)"
+            )
+            if success_rate < success_threshold:
+                print(
+                    f"WARNING: Expected success rate >= {success_threshold}%, got {success_rate:.1f}%"
+                )
+            else:
+                print("System recovered successfully")
+
+
 def process_single_test(
     log_dir: str,
     tablefmt: str = "grid",
@@ -598,16 +643,8 @@ def process_single_test(
 
     if log_dir.endswith("_overflow"):
         test_phase = "overflow"
-        if print_output:
-            print(f"\n{'='*60}")
-            print("Processing OVERFLOW phase - Expecting rejections")
-            print(f"{'='*60}")
     elif log_dir.endswith("_recovery"):
         test_phase = "recovery"
-        if print_output:
-            print(f"\n{'='*60}")
-            print("Processing RECOVERY phase - Expecting success")
-            print(f"{'='*60}")
 
     # Parse test configuration
     test_log = os.path.join(log_dir, "test.log.txt")
@@ -627,37 +664,9 @@ def process_single_test(
     # Add phase information to metrics
     metrics["test_phase"] = test_phase
 
-    # For overflow phase, we expect high failure rate
-    if test_phase == "overflow" and print_output:
-        total_reqs = metrics.get("total_requests", 0)
-        failed_reqs = metrics.get("failed_requests", 0)
-        if total_reqs > 0:
-            failure_rate = (failed_reqs / total_reqs) * 100
-            print(
-                f"\nOverflow Results: {failed_reqs}/{total_reqs} requests rejected ({failure_rate:.1f}%)"
-            )
-            if failure_rate < success_threshold:
-                print(
-                    f"WARNING: Expected rejection rate >= {success_threshold}%, got {failure_rate:.1f}%"
-                )
-            else:
-                print("Overflow validation working correctly")
-
-    # For recovery phase, we expect low failure rate
-    elif test_phase == "recovery" and print_output:
-        total_reqs = metrics.get("total_requests", 0)
-        success_reqs = metrics.get("successful_requests", 0)
-        if total_reqs > 0:
-            success_rate = (success_reqs / total_reqs) * 100
-            print(
-                f"\nRecovery Results: {success_reqs}/{total_reqs} requests succeeded ({success_rate:.1f}%)"
-            )
-            if success_rate < success_threshold:
-                print(
-                    f"WARNING: Expected success rate >= {success_threshold}%, got {success_rate:.1f}%"
-                )
-            else:
-                print("✓ System recovered successfully")
+    # Process and print phase-specific results
+    if print_output:
+        _process_test_phase_results(test_phase, metrics, success_threshold)
 
     # Print summary
     if print_output:
