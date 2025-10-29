@@ -392,6 +392,60 @@ async def list_frontends():
         "discovery_errors": discovery_error_count
     }
 
+@app.get("/frontends/{index}")
+async def get_frontend_info(index: int):
+    """Get information about a specific frontend by index.
+    
+    Args:
+        index: Frontend index (0-based)
+    
+    Returns:
+        Frontend information including URL and deployment name
+    """
+    frontends = cached_frontends
+    
+    if not frontends:
+        raise HTTPException(status_code=503, detail="No frontends available")
+    
+    if index < 0 or index >= len(frontends):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Frontend index {index} not found. Available indices: 0-{len(frontends)-1}"
+        )
+    
+    frontend_url = frontends[index]
+    
+    # Extract deployment name from service URL
+    # Format: http://llama-deployment-a-0-frontend.namespace.svc.cluster.local:8000
+    # We want to extract "llama-deployment-a"
+    deployment_name = "unknown"
+    try:
+        # Parse the hostname from the URL
+        from urllib.parse import urlparse
+        parsed = urlparse(frontend_url)
+        hostname = parsed.hostname or ""
+        
+        # Extract service name (first part before .)
+        service_name = hostname.split('.')[0] if '.' in hostname else hostname
+        
+        # Extract deployment name by removing "-0-frontend" suffix pattern
+        # Service names follow pattern: <deployment-name>-0-frontend
+        if '-0-frontend' in service_name:
+            deployment_name = service_name.rsplit('-0-frontend', 1)[0]
+        elif '-frontend' in service_name:
+            deployment_name = service_name.rsplit('-frontend', 1)[0]
+        else:
+            deployment_name = service_name
+    except Exception as e:
+        logger.warning(f"Failed to extract deployment name from {frontend_url}: {e}")
+    
+    return {
+        "index": index,
+        "url": frontend_url,
+        "deployment_name": deployment_name,
+        "total_frontends": len(frontends)
+    }
+
 @app.get("/debug/state")
 async def debug_state():
     """Comprehensive debug endpoint showing all internal state."""
