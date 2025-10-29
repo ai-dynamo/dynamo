@@ -295,6 +295,9 @@ func main() {
 		mgrOpts.Cache.DefaultNamespaces = map[string]cache.Config{
 			restrictedNamespace: {},
 		}
+		setupLog.Info("Restricted namespace configured, launching in restricted mode", "namespace", restrictedNamespace)
+	} else {
+		setupLog.Info("No restricted namespace configured, launching in cluster-wide mode")
 	}
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
 	if err != nil {
@@ -314,6 +317,12 @@ func main() {
 	setupLog.Info("Detecting Kai-scheduler availability...")
 	kaiSchedulerEnabled := commonController.DetectKaiSchedulerAvailability(mainCtx, mgr)
 	ctrlConfig.KaiScheduler.Enabled = kaiSchedulerEnabled
+
+	setupLog.Info("Detected orchestrators availability",
+		"grove", groveEnabled,
+		"lws", lwsEnabled,
+		"kai-scheduler", kaiSchedulerEnabled,
+	)
 
 	// Create etcd client
 	cli, err := clientv3.New(clientv3.Config{
