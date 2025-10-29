@@ -44,6 +44,10 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
 
         logger.info(f"Updating model in DGD config file to {args.model}")
         config = config_modifier.update_model(config, args.model)
+        if args.dgd_image:
+            logger.info(f"Updating DGD image to {args.dgd_image}")
+            config = config_modifier.update_image(config, args.dgd_image)
+
         config_fn = f"{args.output_dir}/disagg_config.yaml"
         logger.info(f"Saving generated disagg DGD config for profiling to {config_fn}")
         os.makedirs(args.output_dir, exist_ok=True)

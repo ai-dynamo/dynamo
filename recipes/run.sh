@@ -14,9 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set -euo pipefail
+IFS=$'\n\t'
+
 RECIPES_DIR="$( cd "$( dirname "$0" )" && pwd )"
 # Default values
 NAMESPACE="${NAMESPACE:-dynamo}"
+DEPLOY_TYPE=""
+GAIE="${GAIE:-false}"
 DEPLOYMENT=""
 MODEL=""
 FRAMEWORK=""
@@ -36,9 +41,10 @@ usage() {
     echo "  --deployment <type>   Deployment type (e.g., agg, disagg etc, please refer to the README.md for available deployment types)"
     echo ""
     echo "Optional:"
-    echo "  --namespace <ns>      Kubernetes namespace (default: dynamo)"
-    echo "  --dry-run             Print commands without executing them"
-    echo "  -h, --help            Show this help message"
+    echo "  --namespace <ns>   Kubernetes namespace (default: dynamo)"
+    echo "  --dry-run          Print commands without executing them"
+    echo "  --gaie[=true|false] Enable GAIE integration subfolder (applies GAIE manifests skips benchmark) (default: ${GAIE})"
+    echo "  -h, --help         Show this help message"
     echo ""
     echo "Environment Variables:"
     echo "  NAMESPACE             Kubernetes namespace (default: dynamo)"
@@ -98,6 +104,22 @@ while [[ $# -gt 0 ]]; do
                 missing_requirement "$1"
             fi
             ;;
+        --gaie)
+            GAIE=true
+            shift
+            ;;
+        --gaie=false)
+            GAIE=false
+            shift
+            ;;
+        --gaie=*)
+            GAIE="${1#*=}"
+            case "${GAIE,,}" in
+              true|false) GAIE="${GAIE,,}";;
+              *) echo "ERROR: --gaie must be true or false"; exit 1;;
+            esac
+            shift
+            ;;
         -h|--help)
             usage
             ;;
@@ -137,6 +159,7 @@ fi
 MODEL_DIR="$RECIPES_DIR/$MODEL"
 FRAMEWORK_DIR="$MODEL_DIR/${FRAMEWORK,,}"
 DEPLOY_PATH="$FRAMEWORK_DIR/$DEPLOYMENT"
+INTEGRATION="$([[ "${GAIE,,}" == "true" ]] && echo gaie || echo "")"
 
 # Check if model directory exists
 if [[ ! -d "$MODEL_DIR" ]]; then
@@ -188,6 +211,7 @@ echo "Model: $MODEL"
 echo "Framework: ${FRAMEWORK,,}"
 echo "Deployment Type: $DEPLOYMENT"
 echo "Namespace: $NAMESPACE"
+echo "GAIE integration: $GAIE"
 echo "======================================"
 
 # Handle model downloading
@@ -204,6 +228,15 @@ $DRY_RUN kubectl wait --for=condition=Complete job/$MODEL_DOWNLOAD_JOB_NAME -n $
 # Deploy the specified configuration
 echo "Deploying $MODEL ${FRAMEWORK,,} $DEPLOYMENT configuration..."
 $DRY_RUN kubectl apply -n $NAMESPACE -f $DEPLOY_FILE
+
+if [[ "$INTEGRATION" == "gaie" ]]; then
+    # run gaie checks.
+    SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    "${SCRIPT_DIR}/gaie_checks.sh"
+    kubectl apply -f "$DEPLOY_PATH/gaie/k8s-manifests" -n "$NAMESPACE"
+    # For now do not run the benchmark
+    exit
+ fi
 
 # Launch the benchmark job (if available)
 if [[ "$PERF_AVAILABLE" == "true" ]]; then

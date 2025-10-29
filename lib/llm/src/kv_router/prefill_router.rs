@@ -213,8 +213,12 @@ impl
         let (req, context) = request.into_parts();
         let request_id = context.id().to_string();
 
-        // Prepare prefill request with linked context for cancellation propagation
-        let prefill_req = req.clone();
+        // Save original max_tokens for decode
+        let original_max_tokens = req.stop_conditions.max_tokens;
+
+        // Prepare prefill request with max_tokens = 1
+        let mut prefill_req = req.clone();
+        prefill_req.stop_conditions.max_tokens = Some(1);
         let prefill_context = Context::with_id(prefill_req, request_id.clone());
 
         // Link the prefill context as a child so that kill signals propagate
@@ -230,6 +234,8 @@ impl
                 // Update request with disaggregated_params and router config
                 let mut decode_req = req;
                 decode_req.disaggregated_params = Some(disaggregated_params);
+                // Restore original max_tokens for decode
+                decode_req.stop_conditions.max_tokens = original_max_tokens;
 
                 // Set router_config_override for decode: overlap_score_weight = 0
                 let existing_override = decode_req.router_config_override.take();

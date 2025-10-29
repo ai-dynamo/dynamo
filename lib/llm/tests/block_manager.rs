@@ -216,7 +216,7 @@ pub mod llm_kvbm {
     impl DynamoKvbmRuntimeConfigBuilder {
         pub fn build(self) -> Result<kvbm::config::KvManagerRuntimeConfig> {
             let (runtime, nixl) = self.build_internal()?.dissolve();
-            let worker_id = runtime.primary_lease().unwrap().id();
+            let worker_id = runtime.connection_id();
             Ok(kvbm::config::KvManagerRuntimeConfig::builder()
                 .worker_id(worker_id)
                 .cancellation_token(runtime.primary_token().child_token())
@@ -247,7 +247,7 @@ pub mod llm_kvbm {
     impl DynamoEventManager {
         pub fn new(component: Arc<KVBMDynamoRuntimeComponent>) -> Self {
             let (tx, rx) = mpsc::unbounded_channel();
-            let worker_id = component.drt().primary_lease().unwrap().id();
+            let worker_id = component.drt().connection_id();
             component.drt().runtime().secondary().spawn(async move {
                 worker_task(component, rx).await;
             });

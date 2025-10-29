@@ -20,6 +20,7 @@ pub mod numa_allocator;
 pub mod offload;
 pub mod pool;
 pub mod storage;
+pub mod v2;
 
 // dynamo rt integration
 pub mod controller;
@@ -324,18 +325,6 @@ mod tests {
         ReferenceBlockManager::new(create_reference_block_manager_config())
             .await
             .unwrap()
-    }
-
-    pub async fn create_reference_block_manager_with_counts(
-        device: usize,
-        host: usize,
-        disk: usize,
-    ) -> ReferenceBlockManager {
-        ReferenceBlockManager::new(create_reference_block_manager_config_with_counts(
-            device, host, disk,
-        ))
-        .await
-        .unwrap()
     }
 
     #[tokio::test]
