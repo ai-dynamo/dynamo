@@ -174,8 +174,8 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let manager = http_service.model_manager();
             let checksum = model.card().mdcsum();
-            manager.add_completions_model(model.service_name(), checksum, engine.clone())?;
-            manager.add_chat_completions_model(model.service_name(), checksum, engine)?;
+            manager.add_completions_model(model.display_name(), checksum, engine.clone())?;
+            manager.add_chat_completions_model(model.display_name(), checksum, engine)?;
 
             // Enable all endpoints
             for endpoint_type in EndpointType::all() {
@@ -199,14 +199,14 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                     NvCreateChatCompletionStreamResponse,
                 >(model.card(), inner_engine.clone(), tokenizer_hf.clone())
                 .await?;
-            manager.add_chat_completions_model(model.service_name(), checksum, chat_pipeline)?;
+            manager.add_chat_completions_model(model.display_name(), checksum, chat_pipeline)?;
 
             let cmpl_pipeline = common::build_pipeline::<
                 NvCreateCompletionRequest,
                 NvCreateCompletionResponse,
             >(model.card(), inner_engine, tokenizer_hf)
             .await?;
-            manager.add_completions_model(model.service_name(), checksum, cmpl_pipeline)?;
+            manager.add_completions_model(model.display_name(), checksum, cmpl_pipeline)?;
             // Enable all endpoints
             for endpoint_type in EndpointType::all() {
                 http_service.enable_model_endpoint(endpoint_type, true);

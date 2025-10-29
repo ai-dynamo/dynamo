@@ -7,23 +7,19 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use uuid::Uuid;
 
-use crate::kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash,
-};
 use crate::tokens::blocks::UniqueBlock;
 use crate::tokens::{BlockHash, SequenceHash, Token};
 
 pub type NumBlocks = usize;
 
 /// Represents different block movement operations in the cache
-/// For Use and Promote variants, parent hash is the second field
+/// For Use and Promote variants, block hashes are included for KV event publishing
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MoveBlock {
-    Use(Vec<UniqueBlock>),
+    Use(Vec<UniqueBlock>, Vec<BlockHash>),
     Destroy(Vec<UniqueBlock>),
     Deref(Vec<UniqueBlock>),
-    Promote(Uuid, SequenceHash, Option<u64>),
+    Promote(Uuid, SequenceHash, Option<u64>, BlockHash),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -50,7 +46,7 @@ pub struct PrefillCost {
 impl PrefillCost {
     pub fn predict_prefill_compute(&self, new_tokens: Option<usize>) -> f64 {
         let tokens = new_tokens.unwrap_or(self.new_tokens);
-        1.25e-6 * (tokens as f64).powi(2) + 7.41e-2 * (tokens as f64) + 2.62e1
+        4.209989e-07 * (tokens as f64).powi(2) + 1.518344e-02 * (tokens as f64) + 1.650142e+01
     }
 }
 
@@ -257,49 +253,6 @@ impl MockEngineArgs {
         builder
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to build MockEngineArgs: {}", e))
-    }
-}
-
-/// Converts a MoveBlockResponse from the mocker backend into a KvCacheEventData.
-///
-/// This function assumes that the stored sequence hashes in the response always
-/// correspond to the tail part of the local hashes array. This is the expected
-/// behavior of KV block storage, where blocks are stored sequentially and the
-/// response contains the most recent blocks that were stored.
-///
-/// # Panics
-/// Panics if the number of blocks in the Store response exceeds the length
-/// of local_hashes.
-pub fn block_response_to_kv_event(
-    response: MoveBlockResponse,
-    local_hashes: &[BlockHash],
-) -> KvCacheEventData {
-    match response {
-        MoveBlockResponse::Store(full_blocks, parent_hash) => {
-            let num_blocks = full_blocks.len();
-            let local_hashes_slice = &local_hashes[local_hashes
-                .len()
-                .checked_sub(num_blocks)
-                .expect("local hashes fewer than block response signal")..];
-
-            KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: parent_hash.map(ExternalSequenceBlockHash),
-                blocks: full_blocks
-                    .into_iter()
-                    .zip(local_hashes_slice.iter())
-                    .map(|(global_hash, local_hash)| KvCacheStoredBlockData {
-                        block_hash: ExternalSequenceBlockHash(global_hash),
-                        tokens_hash: LocalBlockHash(*local_hash),
-                    })
-                    .collect(),
-            })
-        }
-        MoveBlockResponse::Remove(full_blocks) => KvCacheEventData::Removed(KvCacheRemoveData {
-            block_hashes: full_blocks
-                .into_iter()
-                .map(ExternalSequenceBlockHash)
-                .collect(),
-        }),
     }
 }
 
