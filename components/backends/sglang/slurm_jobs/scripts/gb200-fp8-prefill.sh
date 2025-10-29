@@ -120,7 +120,7 @@ if [ "$mode" = "prefill" ]; then
         --disable-shared-experts-fusion \
         --ep-num-redundant-experts 32 \
         --eplb-algorithm deepseek \
-        --attention-backend fa4 \
+        --prefill-attention-backend fa4 \
         --watchdog-timeout 1000000 \
         --disable-cuda-graph \
         --chunked-prefill-size 131072 \
