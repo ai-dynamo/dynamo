@@ -311,96 +311,138 @@ impl Client {
         prefix: impl AsRef<str> + std::fmt::Display,
         include_existing: bool,
     ) -> Result<PrefixWatcher> {
-        let client = self.connector.get_client();
-        let mut kv_client = client.kv_client();
-        let mut watch_client = client.watch_client();
-
+        // Get the start revision
+        let mut kv_client = self.connector.get_client().kv_client();
         let mut get_response = kv_client
             .get(prefix.as_ref(), Some(GetOptions::new().with_prefix()))
             .await?;
-
         let start_revision = get_response
             .header()
             .ok_or(error!("missing header; unable to get revision"))?
             .revision();
-
         tracing::trace!("{prefix}: start_revision: {start_revision}");
-        let start_revision = start_revision + 1;
+        let mut start_revision = start_revision + 1;
 
-        let (watcher, mut watch_stream) = watch_client
-            .watch(
-                prefix.as_ref(),
-                Some(
-                    WatchOptions::new()
-                        .with_prefix()
-                        .with_start_revision(start_revision)
-                        .with_prev_key(),
-                ),
-            )
-            .await?;
-
-        let kvs = if include_existing {
-            let kvs = get_response.take_kvs();
-            tracing::trace!("initial kv count: {:?}", kvs.len());
-            kvs
-        } else {
-            vec![]
+        // Fetch existing KVs from response if requested
+        let kvs = match include_existing {
+            true => {
+                let kvs = get_response.take_kvs();
+                tracing::trace!("initial kv count: {:?}", kvs.len());
+                kvs
+            }
+            _ => vec![],
         };
 
+        // Watch channel
         let (tx, rx) = mpsc::channel(32);
 
-        self.rt.spawn(async move {
-            if include_existing {
-                for kv in kvs {
-                    if tx.send(WatchEvent::Put(kv)).await.is_err() {
-                        // receiver is already closed
-                        return;
-                    }
+        // Background watch task
+        let connector = self.connector.clone();
+        let prefix_str = prefix.as_ref().to_string();
+        tokio::spawn(async move {
+            // Send existing KVs if any
+            for kv in kvs {
+                if tx.send(WatchEvent::Put(kv)).await.is_err() {
+                    return;
                 }
             }
 
+            // Resilience watch stream
             loop {
-                tokio::select! {
-                    maybe_resp = watch_stream.next() => {
-                        // Early return for None or Err cases
-                        let Some(Ok(response)) = maybe_resp else {
-                            tracing::info!("kv watch stream closed");
+                // Start a new watch stream
+                let mut watch_client = connector.get_client().watch_client();
+                let mut watch_stream = match watch_client
+                    .watch(
+                        prefix_str.as_str(),
+                        Some(
+                            WatchOptions::new()
+                                .with_prefix()
+                                .with_start_revision(start_revision)
+                                .with_prev_key(),
+                        ),
+                    )
+                    .await
+                {
+                    Ok((_, watch_stream)) => {
+                        tracing::debug!("Watch stream established for prefix '{}'", prefix_str);
+                        watch_stream
+                    }
+                    Err(err) => {
+                        tracing::debug!(error = %err, "Failed to establish watch stream for prefix '{}'", prefix_str);
+                        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                        if let Err(e) = connector.reconnect(deadline).await {
+                            tracing::error!(
+                                "Failed to reconnect to ETCD for watching prefix '{}': {}",
+                                prefix_str,
+                                e
+                            );
                             return;
-                        };
+                        }
+                        continue;
+                    }
+                };
 
-                        // Process events
-                        for event in response.events() {
-                            // Extract the KeyValue if it exists
-                            let Some(kv) = event.kv() else {
-                                continue; // Skip events with no KV
+                // Watch the stream
+                loop {
+                    tokio::select! {
+                        maybe_resp = watch_stream.next() => {
+                            // Handle the watch response
+                            let response = match maybe_resp {
+                                Some(Ok(res)) => res,
+                                Some(Err(err)) => {
+                                    tracing::warn!(error = %err, "Error watching stream for prefix '{}'", prefix_str);
+                                    break; // Exit to reconnect
+                                }
+                                None => {
+                                    tracing::info!("kv watch stream closed");
+                                    return;
+                                }
                             };
 
-                            // Handle based on event type
-                            match event.event_type() {
-                                etcd_client::EventType::Put => {
-                                    if let Err(err) = tx.send(WatchEvent::Put(kv.clone())).await {
-                                        tracing::error!("kv watcher error forwarding WatchEvent::Put: {err}");
-                                        return;
-                                    }
+                            // Update revision for reconnect
+                            start_revision = match response.header() {
+                                Some(header) => header.revision() + 1,
+                                None => {
+                                    tracing::error!("Missing header in watch response for prefix '{}'", prefix_str);
+                                    return;
                                 }
-                                etcd_client::EventType::Delete => {
-                                    if tx.send(WatchEvent::Delete(kv.clone())).await.is_err() {
-                                        return;
+                            };
+
+                            // Process events
+                            for event in response.events() {
+                                // Extract the KeyValue if it exists
+                                let Some(kv) = event.kv() else {
+                                    continue; // Skip events with no KV
+                                };
+
+                                // Handle based on event type
+                                match event.event_type() {
+                                    etcd_client::EventType::Put => {
+                                        if let Err(err) = tx.send(WatchEvent::Put(kv.clone())).await {
+                                            tracing::error!("kv watcher error forwarding WatchEvent::Put: {err}");
+                                            return;
+                                        }
+                                    }
+                                    etcd_client::EventType::Delete => {
+                                        if tx.send(WatchEvent::Delete(kv.clone())).await.is_err() {
+                                            return;
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    _ = tx.closed() => {
-                        tracing::debug!("no more receivers, stopping watcher");
-                        return;
+                        _ = tx.closed() => {
+                            tracing::debug!("no more receivers, stopping watcher");
+                            return;
+                        }
                     }
                 }
             }
         });
+
+        // Return the watch channel
         Ok(PrefixWatcher {
             prefix: prefix.as_ref().to_string(),
-            watcher,
             rx,
         })
     }
@@ -409,7 +451,6 @@ impl Client {
 #[derive(Dissolve)]
 pub struct PrefixWatcher {
     prefix: String,
-    watcher: Watcher,
     rx: mpsc::Receiver<WatchEvent>,
 }
 

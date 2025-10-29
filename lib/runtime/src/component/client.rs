@@ -213,7 +213,7 @@ impl Client {
             .kv_get_and_watch_prefix(endpoint.etcd_root())
             .await?;
 
-        let (prefix, _watcher, mut kv_event_rx) = prefix_watcher.dissolve();
+        let (prefix, mut kv_event_rx) = prefix_watcher.dissolve();
 
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(vec![]);
 
