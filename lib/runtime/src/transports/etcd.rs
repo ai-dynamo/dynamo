@@ -378,8 +378,8 @@ impl Client {
                                     break; // Exit to reconnect
                                 }
                                 None => {
-                                    tracing::info!("kv watch stream closed");
-                                    return;
+                                    tracing::warn!("Watch stream unexpectedly closed for prefix '{}'", prefix_str);
+                                    break; // Exit to reconnect
                                 }
                             };
 
