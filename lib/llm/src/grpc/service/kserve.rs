@@ -17,7 +17,6 @@ use crate::protocols::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
-use dynamo_runtime::transports::etcd;
 use futures::pin_mut;
 use tokio::task::JoinHandle;
 use tokio_stream::{Stream, StreamExt};
@@ -49,7 +48,6 @@ use prost::Message;
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
-    etcd_client: Option<etcd::Client>,
 }
 
 impl State {
@@ -57,15 +55,6 @@ impl State {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
-            etcd_client: None,
-        }
-    }
-
-    pub fn new_with_etcd(manager: Arc<ModelManager>, etcd_client: etcd::Client) -> Self {
-        Self {
-            manager,
-            metrics: Arc::new(Metrics::default()),
-            etcd_client: Some(etcd_client),
         }
     }
 
@@ -80,10 +69,6 @@ impl State {
 
     pub fn manager_clone(&self) -> Arc<ModelManager> {
         self.manager.clone()
-    }
-
-    pub fn etcd_client(&self) -> Option<&etcd::Client> {
-        self.etcd_client.as_ref()
     }
 
     fn is_tensor_model(&self, model: &String) -> bool {
@@ -112,9 +97,6 @@ pub struct KserveServiceConfig {
 
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
-
-    #[builder(default = "None")]
-    etcd_client: Option<etcd::Client>,
 }
 
 impl KserveService {
@@ -159,10 +141,7 @@ impl KserveServiceConfigBuilder {
         let config: KserveServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let state = match config.etcd_client {
-            Some(etcd_client) => Arc::new(State::new_with_etcd(model_manager, etcd_client)),
-            None => Arc::new(State::new(model_manager)),
-        };
+        let state = Arc::new(State::new(model_manager));
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
@@ -178,11 +157,6 @@ impl KserveServiceConfigBuilder {
 
     pub fn with_request_template(mut self, request_template: Option<RequestTemplate>) -> Self {
         self.request_template = Some(request_template);
-        self
-    }
-
-    pub fn with_etcd_client(mut self, etcd_client: Option<etcd::Client>) -> Self {
-        self.etcd_client = Some(etcd_client);
         self
     }
 }

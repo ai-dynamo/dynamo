@@ -3,7 +3,7 @@
 
 use crate::config::HealthStatus;
 use crate::logging::make_request_span;
-use crate::metrics::MetricsRegistry;
+use crate::metrics::MetricsHierarchy;
 use crate::metrics::prometheus_names::{nats_client, nats_service};
 use crate::traits::DistributedRuntimeProvider;
 use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
@@ -186,27 +186,12 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     // Update the uptime gauge with current value
     state.drt().system_health.lock().update_uptime_gauge();
 
-    // Execute all the callbacks for all registered hierarchies
-    let all_hierarchies: Vec<String> = {
-        let registries = state.drt().hierarchy_to_metricsregistry.read().unwrap();
-        registries.keys().cloned().collect()
-    };
-
-    for hierarchy in &all_hierarchies {
-        let callback_results = state.drt().execute_prometheus_update_callbacks(hierarchy);
-        for result in callback_results {
-            if let Err(e) = result {
-                tracing::error!(
-                    "Error executing metrics callback for hierarchy '{}': {}",
-                    hierarchy,
-                    e
-                );
-            }
-        }
-    }
-
-    // Get all metrics from DistributedRuntime (top-level)
-    let mut response = match state.drt().prometheus_expfmt() {
+    // Get all metrics from DistributedRuntime
+    // Note: In the new hierarchy-based architecture, metrics are automatically registered
+    // at all parent levels, so DRT's metrics include all metrics from children
+    // (Namespace, Component, Endpoint). The prometheus_expfmt() method also executes
+    // all update callbacks and expfmt callbacks before returning the metrics.
+    let response = match state.drt().metrics().prometheus_expfmt() {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Failed to get metrics from registry: {}", e);
@@ -216,25 +201,6 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
             );
         }
     };
-
-    // Collect and append Prometheus exposition text from all hierarchies
-    for hierarchy in &all_hierarchies {
-        let expfmt = {
-            let registries = state.drt().hierarchy_to_metricsregistry.read().unwrap();
-            if let Some(entry) = registries.get(hierarchy) {
-                entry.execute_prometheus_expfmt_callbacks()
-            } else {
-                String::new()
-            }
-        };
-
-        if !expfmt.is_empty() {
-            if !response.ends_with('\n') {
-                response.push('\n');
-            }
-            response.push_str(&expfmt);
-        }
-    }
 
     (StatusCode::OK, response)
 }
@@ -281,7 +247,7 @@ mod tests {
 mod integration_tests {
     use super::*;
     use crate::distributed::distributed_test_utils::create_test_drt_async;
-    use crate::metrics::MetricsRegistry;
+    use crate::metrics::MetricsHierarchy;
     use anyhow::Result;
     use rstest::rstest;
     use std::sync::Arc;
@@ -315,7 +281,7 @@ mod integration_tests {
             // so we don't need to create it again here
 
             // The uptime_seconds metric should already be registered and available
-            let response = drt.prometheus_expfmt().unwrap();
+            let response = drt.metrics().prometheus_expfmt().unwrap();
             println!("Full metrics response:\n{}", response);
 
             // Filter out NATS client metrics for comparison
