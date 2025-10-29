@@ -12,7 +12,7 @@ spec:
 
   # ProfilingConfig maps directly to the profile_sla.py config format
   profilingConfig:
-    profilerImage: "nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-540.5"
+    profilerImage: "nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-554.0"
     config:
       # Sweep/profiling configuration
       sweep:
@@ -31,8 +31,7 @@ spec:
 
   # Deployment overrides for the auto-created DGD
   deploymentOverrides:
-    workersImage: "nvcr.io/nvidian/dynamo-dev/trtllm-runtime:dep-540.5"
+    workersImage: "nvcr.io/nvidian/dynamo-dev/trtllm-runtime:dep-554.0"
 
   # Automatically create DynamoGraphDeployment after profiling
   autoApply: true
-

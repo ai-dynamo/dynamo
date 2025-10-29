@@ -101,6 +101,12 @@ func DetectLWSAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 	return detectAPIGroupAvailability(ctx, mgr, "leaderworkerset.x-k8s.io")
 }
 
+// detectVolcanoAvailability checks if Volcano is available by checking if the Volcano API group is registered
+// This approach uses the discovery client which is simpler and more reliable
+func DetectVolcanoAvailability(ctx context.Context, mgr ctrl.Manager) bool {
+	return detectAPIGroupAvailability(ctx, mgr, "scheduling.volcano.sh")
+}
+
 // DetectKaiSchedulerAvailability checks if Kai-scheduler is available by checking if the scheduling.run.ai API group is registered
 // This approach uses the discovery client which is simpler and more reliable
 func DetectKaiSchedulerAvailability(ctx context.Context, mgr ctrl.Manager) bool {

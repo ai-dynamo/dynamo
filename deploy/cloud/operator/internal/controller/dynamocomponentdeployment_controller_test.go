@@ -862,7 +862,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 													Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 												},
 											},
-											TimeoutSeconds:   30,
+											TimeoutSeconds:   4,
 											PeriodSeconds:    5,
 											SuccessThreshold: 0,
 											FailureThreshold: 1,
@@ -874,10 +874,10 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 													Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 												},
 											},
-											TimeoutSeconds:   30,
+											TimeoutSeconds:   4,
 											PeriodSeconds:    10,
 											SuccessThreshold: 0,
-											FailureThreshold: 60,
+											FailureThreshold: 3,
 										},
 										StartupProbe: &corev1.Probe{
 											ProbeHandler: corev1.ProbeHandler{
