@@ -102,6 +102,7 @@ class Load:
     sla: Optional[float] = None
     client_type: str = "aiperf"  # "aiperf" or "legacy"
     max_request_rate: float = 1.0  # Rate limiting for legacy client (requests/sec)
+    success_threshold: float = 90.0  # Success rate threshold for tests
 
     # For mixed token testing (overflow + recovery)
     mixed_token_test: bool = False
@@ -371,6 +372,7 @@ def create_aiperf_load(
     max_retries: int = 3,
     sla: Optional[float] = None,
     max_request_rate: float = 1.0,
+    success_threshold: float = 90.0,
 ) -> Load:
     """Create a Load configuration for AI-Perf client.
 
@@ -382,6 +384,7 @@ def create_aiperf_load(
         max_retries: Maximum retry attempts - AI-Perf retries entire test (default: 3)
         sla: Optional SLA threshold for latency (default: None)
         max_request_rate: Rate limiting for requests/sec (default: 1.0)
+        success_threshold: Success rate threshold for pass/fail (default: 90.0)
 
     Returns:
         Load instance configured for AI-Perf client
@@ -398,6 +401,7 @@ def create_aiperf_load(
         sla=sla,
         client_type="aiperf",
         max_request_rate=max_request_rate,
+        success_threshold=success_threshold,
     )
 
 
@@ -409,6 +413,7 @@ def create_legacy_load(
     max_retries: int = 1,
     sla: Optional[float] = None,
     max_request_rate: float = 1.0,
+    success_threshold: float = 90.0,
 ) -> Load:
     """Create a Load configuration for legacy custom client.
 
@@ -420,6 +425,7 @@ def create_legacy_load(
         max_retries: Maximum retry attempts - legacy retries per request (default: 1)
         sla: Optional SLA threshold for latency (default: None)
         max_request_rate: Rate limiting for requests/sec (default: 1.0)
+        success_threshold: Success rate threshold for pass/fail (default: 90.0)
 
     Returns:
         Load instance configured for legacy client
@@ -436,6 +442,7 @@ def create_legacy_load(
         sla=sla,
         client_type="legacy",
         max_request_rate=max_request_rate,
+        success_threshold=success_threshold,
     )
 
 

@@ -103,6 +103,7 @@ def parse_test_results(
     log_paths: Optional[List[str]] = None,
     tablefmt: str = "grid",
     sla: Optional[float] = None,
+    success_threshold: float = 90.0,
     force_parser: Optional[str] = None,
     print_output: bool = True,
 ) -> Any:
@@ -117,6 +118,7 @@ def parse_test_results(
         log_paths: List of log directories to process (for multiple directories)
         tablefmt: Table format for output (e.g., "fancy_grid", "pipe")
         sla: Optional SLA threshold for latency violations
+        success_threshold: Success rate threshold for pass/fail (default: 90.0)
         force_parser: Optional override to force using a specific parser
                      ("aiperf" or "legacy"). If not provided, auto-detection is used.
         print_output: If True, print tables and summaries. If False, only return results.
@@ -191,6 +193,7 @@ def parse_test_results(
                 log_paths=log_paths,
                 tablefmt=tablefmt,
                 sla=sla,
+                success_threshold=success_threshold,
                 print_output=print_output,
             )
         else:
@@ -199,6 +202,7 @@ def parse_test_results(
                 log_paths=None,
                 tablefmt=tablefmt,
                 sla=sla,
+                success_threshold=success_threshold,
                 print_output=print_output,
             )
 

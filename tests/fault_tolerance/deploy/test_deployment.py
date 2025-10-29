@@ -3,6 +3,7 @@
 
 import logging
 import multiprocessing
+import re
 import time
 from contextlib import contextmanager
 
@@ -248,6 +249,7 @@ def results_table(request, scenario):  # noqa: F811
             log_paths=log_paths,
             tablefmt="fancy_grid",
             sla=scenario.load.sla,
+            success_threshold=scenario.load.success_threshold,
             print_output=True,
             # force_parser can be set based on client_type if needed
             # force_parser=scenario.load.client_type,
@@ -294,13 +296,38 @@ def results_summary():
             print_output=False,  # Don't print anything
         )
 
-        for _, paths in test_groups.items():
+        for base_name, paths in test_groups.items():
             if "overflow" in paths and "recovery" in paths:
+                # Extract scenario from test name to pass configs
+                scenario_obj = None
+                match = re.search(r"\[(.*)\]", base_name)
+                if match:
+                    scenario_name = match.group(1)
+                    if scenario_name in scenarios:
+                        scenario_obj = scenarios[scenario_name]
+                        logging.info(
+                            f"Found scenario '{scenario_name}' for combined results."
+                        )
+
+                if not scenario_obj:
+                    logging.warning(
+                        f"Could not find scenario for '{base_name}'. Using default thresholds."
+                    )
+
+                success_threshold = (
+                    scenario_obj.load.success_threshold if scenario_obj else 90.0
+                )
+                logging.info(
+                    f"Using success_threshold: {success_threshold} for combined summary of '{base_name}'"
+                )
+
                 # This function will print the combined summary
                 process_overflow_recovery_test(
                     overflow_path=paths["overflow"],
                     recovery_path=paths["recovery"],
                     tablefmt="fancy_grid",
+                    sla=scenario_obj.load.sla if scenario_obj else None,
+                    success_threshold=success_threshold,
                 )
 
     except Exception as e:

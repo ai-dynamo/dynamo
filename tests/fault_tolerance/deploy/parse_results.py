@@ -577,6 +577,7 @@ def process_single_test(
     log_dir: str,
     tablefmt: str = "grid",
     sla: Optional[float] = None,
+    success_threshold: float = 90.0,
     print_output: bool = True,
 ) -> Dict[str, Any]:
     """
@@ -586,6 +587,7 @@ def process_single_test(
         log_dir: Directory containing test results
         tablefmt: Table format for output
         sla: Service level agreement for latency (optional)
+        success_threshold: Success rate threshold for pass/fail (default: 90.0)
         print_output: If True, print tables and phase headers. If False, only return results.
 
     Returns:
@@ -634,12 +636,12 @@ def process_single_test(
             print(
                 f"\nOverflow Results: {failed_reqs}/{total_reqs} requests rejected ({failure_rate:.1f}%)"
             )
-            if failure_rate < 90:
+            if failure_rate < success_threshold:
                 print(
-                    f"⚠️  WARNING: Expected high rejection rate for overflow, got {failure_rate:.1f}%"
+                    f"WARNING: Expected rejection rate >= {success_threshold}%, got {failure_rate:.1f}%"
                 )
             else:
-                print("✓ Overflow validation working correctly")
+                print("Overflow validation working correctly")
 
     # For recovery phase, we expect low failure rate
     elif test_phase == "recovery" and print_output:
@@ -650,9 +652,9 @@ def process_single_test(
             print(
                 f"\nRecovery Results: {success_reqs}/{total_reqs} requests succeeded ({success_rate:.1f}%)"
             )
-            if success_rate < 90:
+            if success_rate < success_threshold:
                 print(
-                    f"⚠️  WARNING: Expected high success rate for recovery, got {success_rate:.1f}%"
+                    f"WARNING: Expected success rate >= {success_threshold}%, got {success_rate:.1f}%"
                 )
             else:
                 print("✓ System recovered successfully")
@@ -677,6 +679,7 @@ def process_overflow_recovery_test(
     recovery_path: str,
     tablefmt: str = "fancy_grid",
     sla: Optional[float] = None,
+    success_threshold: float = 90.0,
 ) -> Dict[str, Any]:
     """
     Process paired overflow/recovery test and print combined summary.
@@ -686,15 +689,16 @@ def process_overflow_recovery_test(
         recovery_path: Path to recovery test directory
         tablefmt: Table format for output
         sla: Optional SLA threshold
+        success_threshold: Success rate threshold for pass/fail (default: 90.0)
 
     Returns:
         Combined results dictionary
     """
     overflow_results = process_single_test(
-        overflow_path, tablefmt, sla, print_output=False
+        overflow_path, tablefmt, sla, success_threshold, print_output=False
     )
     recovery_results = process_single_test(
-        recovery_path, tablefmt, sla, print_output=False
+        recovery_path, tablefmt, sla, success_threshold, print_output=False
     )
 
     combined_metrics = {
@@ -778,6 +782,7 @@ def main(
     log_paths: Optional[List[str]] = None,
     tablefmt: str = "grid",
     sla: Optional[float] = None,
+    success_threshold: float = 90.0,
     print_output: bool = True,
 ):
     """
@@ -788,6 +793,7 @@ def main(
         log_paths: List of log directories to process
         tablefmt: Table format for output
         sla: Service level agreement for latency (optional)
+        success_threshold: Success rate threshold for pass/fail (default: 90.0)
         print_output: If True, print tables and summaries. If False, only return results.
 
     Returns:
@@ -804,13 +810,13 @@ def main(
                 full_path = log_path
 
             if os.path.isdir(full_path):
-                if print_output:
-                    print(f"\nProcessing: {full_path}")
-                results = process_single_test(full_path, tablefmt, sla, print_output)
+                print(f"\nProcessing: {full_path}")
+                results = process_single_test(
+                    full_path, tablefmt, sla, success_threshold, print_output
+                )
                 all_results.append(results)
             else:
-                if print_output:
-                    print(f"Warning: {full_path} is not a valid directory, skipping...")
+                print(f"Warning: {full_path} is not a valid directory, skipping...")
 
         # If multiple tests, also print combined summary
         if len(all_results) > 1 and print_output:
@@ -859,10 +865,11 @@ def main(
 
     elif logs_dir:
         # Process single directory
-        return process_single_test(logs_dir, tablefmt, sla, print_output)
+        return process_single_test(
+            logs_dir, tablefmt, sla, success_threshold, print_output
+        )
     else:
-        if print_output:
-            print("Error: Must provide either logs_dir or log_paths")
+        print("Error: Must provide either logs_dir or log_paths")
         return None
 
 
