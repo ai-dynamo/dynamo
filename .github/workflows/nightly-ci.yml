@@ -36,7 +36,7 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          output_tag: nightly-vllm-${{ matrix.platform.arch }}
+          image_tag: nightly-vllm-${{ matrix.platform.arch }}
       - name: Tag and Push vLLM Nightly Image
         uses: ./.github/actions/docker-tag-push
         with:
