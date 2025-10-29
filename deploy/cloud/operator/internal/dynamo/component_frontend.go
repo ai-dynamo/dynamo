@@ -43,7 +43,7 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 	container.LivenessProbe = &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/health",
+				Path: "/live",
 				Port: intstr.FromString(commonconsts.DynamoContainerPortName),
 			},
 		},
@@ -55,12 +55,9 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 
 	container.ReadinessProbe = &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
-			Exec: &corev1.ExecAction{
-				Command: []string{
-					"/bin/sh",
-					"-c",
-					"curl -s http://localhost:${DYNAMO_PORT}/health | jq -e \".status == \\\"healthy\\\"\"",
-				},
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/health",
+				Port: intstr.FromString(commonconsts.DynamoContainerPortName),
 			},
 		},
 		InitialDelaySeconds: 60,
