@@ -9,7 +9,6 @@ import logging
 import os
 from typing import Optional, Tuple
 
-import zmq
 from vllm.distributed.kv_events import ZmqEventPublisher
 
 logger = logging.getLogger(__name__)
@@ -134,25 +133,33 @@ def get_consolidator_endpoints(vllm_config) -> Optional[Tuple[str, str, str]]:
         data_parallel_rank=data_parallel_rank,
     ).replace("*", "127.0.0.1")
 
-    # Allocate dynamic port for consolidator output using ZMQ's atomic bind_to_random_port
-    # This eliminates the TOCTOU race and ensures the port is actually reserved
-    context = zmq.Context.instance()
-    temp_socket = context.socket(zmq.PUB)
-    try:
-        # Atomically bind to a random port on all interfaces
-        # Returns the actual port number that was bound
-        output_port = temp_socket.bind_to_random_port("tcp://*")
-    finally:
-        temp_socket.close()
+    # Derive consolidator port deterministically from KVBM leader ZMQ pub port
+    # Default value (56001) aligns with Rust constant DEFAULT_LEADER_ZMQ_PUB_PORT defined in:
+    # dynamo/lib/bindings/python/rust/llm/block_manager/distributed/utils.rs
+    kvbm_pub_port_str = os.getenv("DYN_KVBM_LEADER_ZMQ_PUB_PORT", "56001")
+    kvbm_pub_port = int(kvbm_pub_port_str)
 
-    # Build a connect-friendly endpoint using localhost (not 0.0.0.0)
-    # Clients will connect to 127.0.0.1, while the consolidator binds to 0.0.0.0
+    # Use 1000 offset to keep ports close together
+    # Example: 56001 -> 57001
+    consolidator_port_offset = 1000
+    output_port = kvbm_pub_port + consolidator_port_offset
+
+    # Validate the derived port is within valid range
+    if output_port > 65535:
+        raise ValueError(
+            f"Derived consolidator port {output_port} exceeds maximum (65535). "
+            f"KVBM port {kvbm_pub_port} is too high. Use a lower base port."
+        )
+
+    # Build bind and connect endpoints
+    # Consolidator binds to 0.0.0.0 (all interfaces), clients connect to 127.0.0.1
     output_bind_endpoint = f"tcp://0.0.0.0:{output_port}"
     output_connect_endpoint = f"tcp://127.0.0.1:{output_port}"
 
     logger.info(
         f"Consolidator endpoints: vllm={vllm_endpoint}, "
-        f"output_bind={output_bind_endpoint}, output_connect={output_connect_endpoint} (port={output_port})"
+        f"output_bind={output_bind_endpoint}, output_connect={output_connect_endpoint} "
+        f"(derived from KVBM port {kvbm_pub_port})"
     )
 
     # Return both bind and connect endpoints as a tuple

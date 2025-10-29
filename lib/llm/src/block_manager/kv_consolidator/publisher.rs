@@ -148,7 +148,8 @@ impl KvEventConsolidatorPublisher {
         // Start the publisher task
         let handle = tokio::spawn(async move {
             if let Err(e) = Self::run_publisher_loop(endpoint, tracker, sequence).await {
-                tracing::error!("Publisher task failed: {}", e);
+                // Bind failures and other critical errors should crash the process
+                panic!("Publisher task failed: {}", e);
             }
         });
 
