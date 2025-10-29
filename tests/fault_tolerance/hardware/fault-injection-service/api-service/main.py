@@ -322,7 +322,7 @@ class GPUFaultInjectorClient:
     def __init__(self, k8s: KubernetesHelper, namespace: str = "fault-injection-system"):
         self.k8s = k8s
         self.namespace = namespace
-        self.agent_port = 8081
+        self.agent_port = 8083
 
     async def inject_fault(
         self,
@@ -372,6 +372,7 @@ class GPUFaultInjectorClient:
         fault_id: str,
     ) -> tuple[bool, str]:
         """Inject specific XID error via agent on target node"""
+        logger.info(f"[CLIENT-DEBUG] Step A: Looking for agent pod on node {node_name}")
 
         # Find agent pod on target node (use kernel agent label)
         pods = self.k8s.core_v1.list_namespaced_pod(
@@ -381,10 +382,13 @@ class GPUFaultInjectorClient:
         )
 
         if not pods.items:
+            logger.error(f"[CLIENT-DEBUG] No agent pod found on {node_name}")
             return False, f"No GPU fault injector found on node {node_name}"
 
         pod_ip = pods.items[0].status.pod_ip
+        pod_name = pods.items[0].metadata.name
         agent_url = f"http://{pod_ip}:{self.agent_port}"
+        logger.info(f"[CLIENT-DEBUG] Step B: Found agent pod {pod_name} at {pod_ip}")
 
         payload = {
             "fault_id": fault_id,
@@ -394,12 +398,16 @@ class GPUFaultInjectorClient:
         }
 
         try:
+            logger.info(f"[CLIENT-DEBUG] Step C: Sending POST to {agent_url}/inject-xid with payload: {payload}")
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(f"{agent_url}/inject-xid", json=payload)
+                logger.info(f"[CLIENT-DEBUG] Step D: Received response status {response.status_code}")
                 response.raise_for_status()
-                return True, response.json().get("message", f"XID {xid_type} injected on GPU {gpu_id}")
+                result = response.json().get("message", f"XID {xid_type} injected on GPU {gpu_id}")
+                logger.info(f"[CLIENT-DEBUG] Step E: Success - {result}")
+                return True, result
         except Exception as e:
-            logger.error(f"Failed to inject XID {xid_type}: {e}")
+            logger.error(f"[CLIENT-DEBUG] Step F: Exception occurred - {type(e).__name__}: {e}")
             return False, str(e)
 
     async def recover_fault(self, node_name: str, fault_id: str) -> tuple[bool, str]:
@@ -1428,6 +1436,7 @@ async def inject_xid_120(request: XIDFaultRequest):
 
 async def _inject_xid_error(request: XIDFaultRequest, xid_code: int, xid_name: str):
     """Helper function to inject XID errors"""
+    logger.info(f"[API-DEBUG] Step 1: Creating fault tracker entry for XID {xid_code} on {request.node_name}")
     fault_id = await app.state.fault_tracker.create_fault(
         fault_type=f"gpu_xid_{xid_code}",
         target=f"{request.node_name}/gpu{request.gpu_id}",
@@ -1438,8 +1447,10 @@ async def _inject_xid_error(request: XIDFaultRequest, xid_code: int, xid_name: s
             "duration": request.duration,
         },
     )
+    logger.info(f"[API-DEBUG] Step 2: Fault created with ID: {fault_id}")
 
     # Inject via GPU agent
+    logger.info(f"[API-DEBUG] Step 3: Calling GPU client inject_xid_error for node {request.node_name}")
     success, message = await app.state.gpu_client.inject_xid_error(
         node_name=request.node_name,
         xid_type=xid_code,
@@ -1447,11 +1458,13 @@ async def _inject_xid_error(request: XIDFaultRequest, xid_code: int, xid_name: s
         duration=request.duration,
         fault_id=fault_id,
     )
+    logger.info(f"[API-DEBUG] Step 4: GPU client returned - success={success}, message={message}")
 
     if not success:
         await app.state.fault_tracker.update_status(fault_id, FaultStatus.FAILED)
         raise HTTPException(status_code=500, detail=f"Failed to inject XID {xid_code}: {message}")
 
+    logger.info(f"[API-DEBUG] Step 5: Updating fault status to INJECTED")
     await app.state.fault_tracker.update_status(fault_id, FaultStatus.INJECTED)
 
     return FaultResponse(
