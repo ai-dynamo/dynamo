@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from dynamo.trtllm.utils.trtllm_utils import cmd_line_args
-from tests.unit.conftest import make_cli_args_fixture
+from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
 TEST_DIR = Path(__file__).parent.parent

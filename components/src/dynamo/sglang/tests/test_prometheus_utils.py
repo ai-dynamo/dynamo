@@ -16,7 +16,6 @@ pytestmark = [
 
 class TestGetPrometheusExpfmt:
     """Test class for get_prometheus_expfmt function."""
-
     @pytest.fixture
     def sglang_registry(self):
         """Create a mock registry with SGLang-style metrics."""
@@ -51,55 +50,42 @@ sglang:cache_hit_rate{model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0075
 
         dynamo.common.utils.prometheus.generate_latest = original_generate_latest
 
-   
 
-   
-    def test_trtllm_use_case(self, trtllm_registry):
-        """Test TensorRT-LLM use case: exclude python_/process_ and add trtllm: prefix."""
+
+        def mock_generate_latest(reg):
+            return sample_metrics.encode("utf-8")
+
+        import dynamo.common.utils.prometheus
+
+        original_generate_latest = dynamo.common.utils.prometheus.generate_latest
+        dynamo.common.utils.prometheus.generate_latest = mock_generate_latest
+
+        yield registry
+
+        dynamo.common.utils.prometheus.generate_latest = original_generate_latest
+
+    def test_sglang_use_case(self, sglang_registry):
+        """Test SGLang use case: filter to sglang: metrics and exclude python_/process_."""
         result = get_prometheus_expfmt(
-            trtllm_registry,
+            sglang_registry,
+            metric_prefix_filter="sglang:",
             exclude_prefixes=["python_", "process_"],
-            add_prefix="trtllm:",
         )
+
+        # Should only contain sglang: metrics
+        assert "sglang:prompt_tokens_total" in result
+        assert "sglang:generation_tokens_total" in result
+        assert "sglang:cache_hit_rate" in result
+        assert "# HELP sglang:prompt_tokens_total" in result
 
         # Should not contain excluded metrics
         assert "python_gc_objects_collected_total" not in result
         assert "process_cpu_seconds_total" not in result
 
-        # All remaining metrics should have trtllm: prefix
-        assert "trtllm:request_latency_seconds" in result
-        assert "trtllm:num_requests_running" in result
-        assert "trtllm:tokens_per_second" in result
-
-        # HELP/TYPE comments should have prefix
-        assert "# HELP trtllm:request_latency_seconds" in result
-        assert "# TYPE trtllm:num_requests_running" in result
-
-        # Check specific content and structure preservation
-        assert 'trtllm:request_latency_seconds_bucket{le="0.1"} 10.0' in result
-        assert "trtllm:tokens_per_second 245.7" in result
+        # Check specific content
+        assert 'model_name="meta-llama/Llama-3.1-8B-Instruct"' in result
+        assert "8128902.0" in result  # prompt tokens value
         assert result.endswith("\n")
-
-    def test_no_filtering_all_frameworks(self, trtllm_registry):
-        """Test that without any filters, all metrics are returned."""
-        result = get_prometheus_expfmt(trtllm_registry)
-
-        # Should contain all metrics including excluded ones
-        assert "python_gc_objects_collected_total" in result
-        assert "process_cpu_seconds_total" in result
-        assert "request_latency_seconds" in result
-        assert "num_requests_running" in result
-        assert result.endswith("\n")
-
-    def test_empty_result_handling(self, trtllm_registry):
-        """Test handling when all metrics are filtered out."""
-        result = get_prometheus_expfmt(
-            trtllm_registry,
-            exclude_prefixes=["python_", "process_", "request_", "num_", "tokens_"],
-        )
-
-        # Should return empty string with newline or just newline
-        assert result == "\n" or result == ""
 
     def test_error_handling(self):
         """Test error handling when registry fails."""

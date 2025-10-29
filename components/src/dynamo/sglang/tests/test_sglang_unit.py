@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from dynamo.sglang.args import parse_args
-from .conftest import make_cli_args_fixture
+from dynamo.sglang.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
 TEST_DIR = Path(__file__).parent.parent
