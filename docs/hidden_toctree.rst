@@ -36,6 +36,7 @@
    kvbm/vllm-setup.md
    kvbm/trtllm-setup.md
    agents/tool-calling.md
+   guides/jail_stream_readme.md
 
    router/kv_cache_routing.md
    planner/load_planner.md
