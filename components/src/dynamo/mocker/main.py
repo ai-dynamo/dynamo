@@ -56,7 +56,7 @@ async def launch_workers(runtime, args, extra_engine_args_path):
     a unique lease_id from the DistributedRuntime, making them discoverable
     as separate instances on the same endpoint.
     """
-    tasks = []
+    futures = []
 
     for worker_id in range(args.num_workers):
         logger.info(f"Creating mocker worker {worker_id + 1}/{args.num_workers}")
@@ -75,29 +75,16 @@ async def launch_workers(runtime, args, extra_engine_args_path):
         # Create the engine
         engine_config = await make_engine(runtime, entrypoint_args)
 
-        # Create the task for running this worker
-        # run_input returns an awaitable that runs until cancelled
-        task = asyncio.create_task(
-            run_input(runtime, args.endpoint, engine_config),
-            name=f"mocker-worker-{worker_id}",
-        )
-        tasks.append(task)
+        # run_input returns a Rust Future (not a Python coroutine)
+        # so we can't use asyncio.create_task on it
+        future = run_input(runtime, args.endpoint, engine_config)
+        futures.append(future)
 
     logger.info(f"All {args.num_workers} mocker worker(s) created and running")
 
-    # Wait for all tasks to complete (or until cancelled)
+    # Wait for all futures to complete
     # Using return_exceptions=True to handle individual worker failures gracefully
-    try:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    except Exception as e:
-        logger.error(f"Error in worker execution: {e}")
-        # Cancel any remaining tasks
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        # Wait for cancellation to complete
-        await asyncio.gather(*tasks, return_exceptions=True)
-        raise
+    await asyncio.gather(*futures, return_exceptions=True)
 
 
 def main():
