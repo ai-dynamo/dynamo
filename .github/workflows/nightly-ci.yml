@@ -54,7 +54,7 @@ jobs:
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          image_tag: nightly-vllm-${{ matrix.platform.arch }}
           pytest_marks: "nightly and vllm and unit"
           framework: "vllm"
           test_type: "unit"
@@ -63,7 +63,7 @@ jobs:
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          image_tag: nightly-vllm-${{ matrix.platform.arch }}
           pytest_marks: "nightly and vllm and gpu_1"
           framework: "vllm"
           test_type: "e2e"
