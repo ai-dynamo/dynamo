@@ -48,7 +48,6 @@ spec:
 
       # Sweep/profiling configuration
       sweep:
-        skip_existing_results: true  # Skip configurations that already have results
         prefill_interpolation_granularity: 16  # Samples for TTFT interpolation
         decode_interpolation_granularity: 6  # Samples for ITL interpolation
 
