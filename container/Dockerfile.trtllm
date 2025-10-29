@@ -190,7 +190,10 @@ ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 # Install Python, build-essential and python3-dev as apt dependencies
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        # Build tools (required for pip git url installations)
+        # Build tools
+        build-essential \
+        g++ \
+        ninja-build \
         git \
         git-lfs \
         # Python runtime - CRITICAL for virtual environment to work
@@ -249,6 +252,10 @@ COPY --from=pytorch_base /usr/local/cuda/lib64/libcusparseLt* /usr/local/cuda/li
 
 # Copy uv to system /bin
 COPY --from=framework /bin/uv /bin/uvx /bin/
+
+# Copy libgomp.so from framework image
+COPY --from=framework /usr/local/tensorrt /usr/local/tensorrt
+COPY --from=framework /usr/lib/${ARCH_ALT}-linux-gnu/libgomp.so* /usr/lib/${ARCH_ALT}-linux-gnu/
 
 # Create dynamo user
 RUN groupadd dynamo && \
