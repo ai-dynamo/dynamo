@@ -18,15 +18,38 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Build Container
+      - name: Build vLLM Docker Image
+        id: build-vllm
         uses: ./.github/actions/docker-build
         with:
           framework: vllm
-          ...
-      - name: Docker Tag and Push
+          target: runtime
+          platform: linux/${{ matrix.platform.arch }}
+          base_image_tag: ${{ matrix.platform.arch == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
+          runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
+          cuda_version: ${{ matrix.platform.arch == 'arm64' && '129' || '' }}
+          torch_backend: ${{ matrix.platform.arch == 'arm64' && 'cu129' || '' }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          output_tag: nightly-vllm-${{ matrix.platform.arch }}
+      - name: Tag and Push vLLM Nightly Image
         uses: ./.github/actions/docker-tag-push
         with:
-          ...
+          local_image: ${{ steps.build-vllm.outputs.image_tag }}
+          # Tag the image nightly
+          push_tag: ai-dynamo/dynamo:nightly-vllm-${{ matrix.platform.arch }}
+          aws_push: 'false'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run unit tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
