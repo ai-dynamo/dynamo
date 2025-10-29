@@ -91,7 +91,7 @@ class vLLMGenerateRequest(BaseModel):
 
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
-        json_encoders={SamplingParams: lambda v: msgspec.json.encode(v)},
+        json_encoders={SamplingParams: lambda v: json.loads(msgspec.json.encode(v))},
     )
 
 

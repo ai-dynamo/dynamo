@@ -102,7 +102,7 @@ class ProcessorHandler(ProcessMixIn):
         # in vLLMMultimodalRequest is not a Pydantic class and will
         # cause TypeError: unsupported type SamplingParams
         response_generator = await self.encode_worker_client.round_robin(
-            worker_request.model_dump_json(), context=context
+            worker_request.model_dump_json()
         )
 
         output = self._generate_responses(response_generator, request_type)
