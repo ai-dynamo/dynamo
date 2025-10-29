@@ -355,6 +355,16 @@ jobs:
     name: test
     steps:
     - uses: actions/checkout@v4
+    - name: check values
+      run: |
+        echo "${{ secrets.AZURE_GITHUB_ACTIONS_CLIENT_ID }}"
+        echo "${{ secrets.AZURE_GITHUB_ACTIONS_CLIENT_ID }}" | wc -c
+        echo "${{ secrets.AZURE_TENANT_ID }}"
+        echo "${{ secrets.AZURE_TENANT_ID }}"  | wc -c
+        echo "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+        echo "${{ secrets.AZURE_SUBSCRIPTION_ID }}"  | wc -c
+        echo "${{ secrets.AZURE_GITHUB_ACTIONS_CLIENT_ID }}"
+        echo "${{ secrets.AZURE_GITHUB_ACTIONS_CLIENT_ID }}"  | wc -c
     - name: 'Az CLI login using OIDC'
       uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
       with:
