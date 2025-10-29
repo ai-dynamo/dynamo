@@ -368,9 +368,9 @@ def test_router_decisions_vllm_multiple_workers(
 
 @pytest.mark.vllm
 @pytest.mark.gpu_2
-# @pytest.mark.skip(
-#     reason="faulty on L4 (passing on L40S); temporarily disabled until 2 GPUs on CI"
-# )
+@pytest.mark.skip(
+    reason="faulty on L4 (passing on L40S); temporarily disabled until 2 GPUs on CI"
+)
 @pytest.mark.model(MODEL_NAME)
 def test_router_decisions_vllm_dp(request, runtime_services, predownload_tokenizers):
     """Validate KV cache prefix reuse with vLLM by sending progressive requests with overlapping prefixes.
