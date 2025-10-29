@@ -381,11 +381,11 @@ async def async_request_dynamo_completions(
                             continue
 
                         chunk = chunk_bytes.decode("utf-8")
-                        
+
                         # Skip SSE event/comment lines (not data)
                         if chunk.startswith("event:") or chunk.startswith(":"):
                             continue
-                            
+
                         chunk = chunk.removeprefix("data: ")
                         if chunk != "[DONE]":
                             data = json.loads(chunk)
@@ -433,6 +433,7 @@ async def async_request_dynamo_completions(
     if pbar:
         pbar.update(1)
     return output
+
 
 async def async_request_openai_chat_completions(
     request_func_input: RequestFuncInput,
