@@ -36,6 +36,7 @@ class GlobalConnector(PlannerConnector):
         namespace: str,
         global_planner_service: Optional[str] = None,
         k8s_namespace: Optional[str] = None,
+        model_name: Optional[str] = None,
     ):
         """
         Initialize the GlobalConnector.
@@ -44,6 +45,7 @@ class GlobalConnector(PlannerConnector):
             namespace: Dynamo namespace
             global_planner_service: Global planner service name (defaults to "dynamo-global-planner")
             k8s_namespace: Kubernetes namespace (auto-detects if not provided)
+            model_name: Model name for Prometheus metrics filtering (optional)
             
         Environment Variables:
             PLANNER_PRIORITY: Priority level for this planner (higher = higher priority, default: 0)
@@ -53,6 +55,7 @@ class GlobalConnector(PlannerConnector):
             DYN_PARENT_DGD_K8S_NAME: Required - DGD name to scale
         """
         self.namespace = namespace
+        self.model_name = model_name or "unknown-model"
         self.priority = int(os.getenv("PLANNER_PRIORITY", "0"))
         self.planner_id = f"planner-{namespace}-{uuid.uuid4().hex[:8]}"
         self.dgd_name = os.getenv("DYN_PARENT_DGD_K8S_NAME")
@@ -167,11 +170,12 @@ class GlobalConnector(PlannerConnector):
 
     def get_model_name(self) -> str:
         """
-        Get model name (returns placeholder for GlobalConnector).
-        Model name is not used in global connector mode.
+        Get model name for Prometheus metrics filtering.
+        
+        Returns:
+            Model name if provided during initialization, otherwise "unknown-model"
         """
-        logger.warning("get_model_name() called on GlobalConnector - returning placeholder")
-        return "unknown-model"
+        return self.model_name
 
     async def wait_for_deployment_ready(self):
         """

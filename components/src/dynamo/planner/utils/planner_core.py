@@ -92,6 +92,7 @@ class Planner:
                     # Priority is configured via PLANNER_PRIORITY environment variable
                     self.connector = GlobalConnector(
                         namespace=self.namespace,
+                        model_name=args.model_name,
                     )
                 else:
                     raise ValueError(f"Invalid environment: {args.environment}")
