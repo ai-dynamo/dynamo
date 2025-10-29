@@ -1,161 +1,114 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# SPDX-License-Identifier: Apache-2.0
-#
-"""
-Pytest configuration for hardware fault injection tests.
-
-This conftest provides automatic setup of:
-- DCGM DaemonSet for GPU monitoring
-- Fault Injection API client
-- Cleanup handlers
-
-Simply import this file or place it in your test directory to enable auto-setup.
-"""
-
-import logging
+"""Pytest configuration for network partition tests."""
+import pytest
 import sys
 from pathlib import Path
 
-import pytest
-
-# Add client library to path
+# Add client directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "client"))
 
 from fault_injection_client import FaultInjectionClient
+from test_helpers import get_config_from_env
 
-logger = logging.getLogger(__name__)
 
-
-@pytest.fixture(scope="session")
-def dcgm_namespace():
-    """
-    DCGM namespace configuration.
-
-    Override this in your own conftest.py if you need a different namespace:
-
-        @pytest.fixture(scope="session")
-        def dcgm_namespace():
-            return "my-custom-namespace"
-    """
-    return "gpu-operator"
+def pytest_addoption(parser):
+    """Add custom command line options."""
+    parser.addoption(
+        "--verbose-tests",
+        action="store_true",
+        default=False,
+        help="Enable verbose output for partition tests (shows detailed diagnostics)",
+    )
 
 
 @pytest.fixture(scope="session")
-def dcgm_yaml_path():
-    """
-    Path to dcgm-daemonset.yaml file.
+def verbose_mode(request):
+    """Fixture to get verbose mode flag."""
+    return request.config.getoption("--verbose-tests")
 
-    Override this in your own conftest.py if you need a custom path:
 
-        @pytest.fixture(scope="session")
-        def dcgm_yaml_path():
-            return "/path/to/my/dcgm-daemonset.yaml"
+@pytest.fixture(scope="session")
+def fault_injection_client():
+    """Create a session-scoped fault injection client."""
+    config = get_config_from_env()
+    return FaultInjectionClient(api_url=config["api_url"])
+
+
+@pytest.fixture
+def cleanup_faults(fault_injection_client, verbose_mode):
     """
-    # Default: auto-detect
-    return None
+    Fixture to ensure network partitions are cleaned up after each test.
+    
+    Usage:
+        def test_something(cleanup_faults):
+            fault_id = cleanup_faults.track(client.inject_network_partition(...))
+            # Test code here
+            # Cleanup happens automatically even if test fails or is interrupted
+    """
+    fault_ids = []
+    
+    class FaultTracker:
+        def track(self, fault_info):
+            """Track a fault for cleanup. Returns the fault_info for convenience."""
+            if fault_info and hasattr(fault_info, 'fault_id'):
+                fault_ids.append(fault_info.fault_id)
+            return fault_info
+        
+        def track_id(self, fault_id):
+            """Track a fault ID directly."""
+            if fault_id:
+                fault_ids.append(fault_id)
+            return fault_id
+    
+    tracker = FaultTracker()
+    
+    # Let test run
+    yield tracker
+    
+    # Cleanup after test (even if it fails or is interrupted)
+    if fault_ids:
+        if verbose_mode:
+            print(f"\n[CLEANUP] Recovering {len(fault_ids)} fault(s)...")
+        
+        for fault_id in fault_ids:
+            try:
+                fault_injection_client.recover_fault(fault_id)
+                if verbose_mode:
+                    print(f"[CLEANUP] ✓ Recovered fault: {fault_id}")
+            except Exception as e:
+                # Don't fail the test due to cleanup errors
+                print(f"[CLEANUP WARNING] Failed to recover fault {fault_id}: {e}")
 
 
 @pytest.fixture(scope="session", autouse=True)
-def dcgm_infrastructure(dcgm_namespace, dcgm_yaml_path):
+def cleanup_on_interrupt(request, verbose_mode):
     """
-    Verify DCGM infrastructure for GPU tests.
-
-    This fixture automatically runs once per test session and:
-    1. Checks if DCGM is already deployed
-    2. Skips tests if DCGM is not present
-
-    With autouse=True, this runs automatically for all tests - no need to
-    explicitly request it in test signatures!
-
-    To disable auto-check, set autouse=False above or override in your conftest.py.
+    Session-level fixture to cleanup all faults on Ctrl+C or unexpected termination.
     """
-    import os
+    def cleanup_handler():
+        """Called on pytest exit/interrupt."""
+        try:
+            config = get_config_from_env()
+            client = FaultInjectionClient(api_url=config["api_url"])
+            
+            # List all active faults
+            try:
+                response = client._make_request("GET", "/faults")
+                active_faults = response.get("faults", [])
+                
+                if active_faults:
+                    print(f"\n[SESSION CLEANUP] Found {len(active_faults)} active fault(s)")
+                    for fault in active_faults:
+                        try:
+                            fault_id = fault.get("fault_id")
+                            client.recover_fault(fault_id)
+                            if verbose_mode:
+                                print(f"[SESSION CLEANUP] ✓ Recovered: {fault_id}")
+                        except Exception as e:
+                            print(f"[SESSION CLEANUP WARNING] Failed to recover {fault_id}: {e}")
+            except Exception as e:
+                print(f"[SESSION CLEANUP WARNING] Could not list faults: {e}")
+        except Exception as e:
+            print(f"[SESSION CLEANUP ERROR] {e}")
     
-    logger.info("=" * 80)
-    logger.info("Verifying DCGM Infrastructure")
-    logger.info("=" * 80)
-
-    # Support both in-cluster and local execution
-    api_url = os.environ.get("API_URL", "http://localhost:8080")
-    client = FaultInjectionClient(api_url=api_url)
-
-    # Check if DCGM is already deployed
-    status = client.check_dcgm_status(dcgm_namespace)
-
-    if status.get("deployed"):
-        logger.info(f"✓ DCGM deployed in namespace '{dcgm_namespace}'")
-        logger.info(f"  Ready pods: {status.get('ready_pods')}/{status.get('desired_pods')}")
-        logger.info("✓ DCGM infrastructure verified - ready for testing")
-    else:
-        logger.warning(f"⚠ DCGM not found in namespace '{dcgm_namespace}'")
-        logger.warning("  Install GPU Operator with: helm install gpu-operator nvidia/gpu-operator")
-        pytest.skip(f"DCGM not deployed in '{dcgm_namespace}' - required for GPU fault detection")
-
-    yield dcgm_namespace
-
-    logger.info("DCGM infrastructure check complete")
-
-
-@pytest.fixture(scope="session")
-def fault_client_with_dcgm(dcgm_infrastructure):
-    """
-    Fault injection client with DCGM infrastructure ready.
-
-    This combines the fault client with automatic DCGM setup.
-
-    Usage:
-        def test_gpu_fault(fault_client_with_dcgm):
-            client = fault_client_with_dcgm
-            # Test code here
-            pass
-    """
-    import os
-    
-    # Support both in-cluster and local execution
-    api_url = os.environ.get("API_URL", "http://localhost:8080")
-    client = FaultInjectionClient(api_url=api_url)
-
-    # Verify API is accessible
-    if not client.health_check():
-        pytest.skip("Fault Injection API not accessible at http://localhost:8080")
-
-    logger.info("Fault Injection Client ready")
-
-    yield client
-
-
-    logger.info("Test session complete")
-
-
-@pytest.fixture(scope="function")
-def fault_client():
-    """
-    Basic fault injection client without DCGM setup.
-
-    Use this if you want to control DCGM deployment manually or
-    if you don't need GPU monitoring.
-
-    Usage:
-        def test_network_fault(fault_client):
-            # Test code here
-            pass
-    """
-    import os
-    
-    # Support both in-cluster and local execution
-    api_url = os.environ.get("API_URL", "http://localhost:8080")
-    client = FaultInjectionClient(api_url=api_url)
-
-    if not client.health_check():
-        pytest.skip("Fault Injection API not accessible")
-
-    yield client
-
-
-# Pytest markers for categorizing tests
-def pytest_configure(config):
-    """Register custom markers"""
-    config.addinivalue_line("markers", "gpu_required: mark test as requiring GPU hardware")
-    config.addinivalue_line("markers", "dcgm_required: mark test as requiring DCGM infrastructure")
-    config.addinivalue_line("markers", "fault_tolerance: mark test as a fault tolerance test")
+    # Register cleanup on session finish
+    request.addfinalizer(cleanup_handler)
