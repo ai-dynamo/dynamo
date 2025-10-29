@@ -14,18 +14,15 @@ All GPU errors are simulated by injecting appropriate XID codes to syslog.
 NVSentinel detects the XID and handles cordon/drain/restart/uncordon automatically.
 """
 
-import asyncio
 import logging
 import os
 import subprocess
-import time
 from datetime import datetime, timezone
-from enum import Enum
 from typing import Any, Optional
 
+import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import uvicorn
 
 # Configure logging
 logging.basicConfig(
@@ -36,6 +33,7 @@ logger = logging.getLogger(__name__)
 # Import kernel-level XID injector (for XID 79 via nsenter+kmsg)
 try:
     from gpu_xid_injector import GPUXIDInjectorKernel
+
     KERNEL_XID_AVAILABLE = True
 except ImportError:
     logger.warning("Kernel-level XID injector not available")
@@ -50,6 +48,7 @@ except ImportError:
 
 class XIDInjectRequest(BaseModel):
     """Request model for XID error injection via nsenter+kmsg"""
+
     fault_id: str
     xid_type: int
     gpu_id: int = 0
@@ -69,7 +68,7 @@ class GPUFaultInjector:
         self.node_name = os.getenv("NODE_NAME", "unknown")
         self.dcgm_available = self._check_dcgm()
         self.gpu_count = self._get_gpu_count()
-        
+
         # Initialize kernel-level XID injector (XID 79 via nsenter+kmsg)
         self.kernel_xid_injector = None
         self.kernel_xid_available = False
@@ -77,7 +76,9 @@ class GPUFaultInjector:
             try:
                 self.kernel_xid_injector = GPUXIDInjectorKernel()
                 self.kernel_xid_available = self.kernel_xid_injector.privileged
-                logger.info(f"Kernel-level XID injector initialized (privileged: {self.kernel_xid_available})")
+                logger.info(
+                    f"Kernel-level XID injector initialized (privileged: {self.kernel_xid_available})"
+                )
             except Exception as e:
                 logger.warning(f"Kernel XID injector not available: {e}")
 
@@ -116,7 +117,9 @@ class GPUFaultInjector:
     def _run_command(self, command: list[str], timeout: int = 30) -> tuple[bool, str]:
         """Run shell command with timeout"""
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+            result = subprocess.run(
+                command, capture_output=True, text=True, timeout=timeout
+            )
             success = result.returncode == 0
             output = result.stdout if success else result.stderr
             return success, output.strip()
@@ -124,7 +127,6 @@ class GPUFaultInjector:
             return False, "Command timed out"
         except Exception as e:
             return False, str(e)
-
 
 
 # ============================================================================
@@ -150,22 +152,26 @@ async def health_check():
 @app.post("/inject-xid")
 async def inject_xid(request: XIDInjectRequest):
     """Inject XID 79 error via nsenter+kmsg (triggers NVSentinel detection)"""
-    logger.info(f"Received XID {request.xid_type} injection request for GPU {request.gpu_id}")
+    logger.info(
+        f"Received XID {request.xid_type} injection request for GPU {request.gpu_id}"
+    )
 
     # Only XID 79 is supported via nsenter+kmsg
     if request.xid_type != 79:
         raise HTTPException(
             status_code=400,
-            detail=f"XID {request.xid_type} not supported. Only XID 79 is implemented via nsenter+kmsg injection."
+            detail=f"XID {request.xid_type} not supported. Only XID 79 is implemented via nsenter+kmsg injection.",
         )
 
     if not injector.kernel_xid_available or not injector.kernel_xid_injector:
         raise HTTPException(
             status_code=503,
-            detail="Kernel-level XID injector not available. XID 79 requires privileged access to syslog/kmsg."
+            detail="Kernel-level XID injector not available. XID 79 requires privileged access to syslog/kmsg.",
         )
 
-    success, message = injector.kernel_xid_injector.inject_xid_79_gpu_fell_off_bus(gpu_id=request.gpu_id)
+    success, message = injector.kernel_xid_injector.inject_xid_79_gpu_fell_off_bus(
+        gpu_id=request.gpu_id
+    )
 
     if not success:
         raise HTTPException(status_code=500, detail=message)

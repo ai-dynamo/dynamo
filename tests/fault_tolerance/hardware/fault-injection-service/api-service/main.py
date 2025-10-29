@@ -59,7 +59,9 @@ class NetworkMode(str, Enum):
     """Network fault modes"""
 
     NETWORKPOLICY = "networkpolicy"  # Use Kubernetes NetworkPolicy (complete blocking)
-    CHAOS_MESH = "chaos_mesh"  # Use ChaosMesh for advanced faults (packet loss, delay, etc.)
+    CHAOS_MESH = (
+        "chaos_mesh"  # Use ChaosMesh for advanced faults (packet loss, delay, etc.)
+    )
 
 
 class FaultSeverity(str, Enum):
@@ -86,7 +88,9 @@ class GPUFaultRequest(BaseModel):
 
     node_name: str = Field(..., description="Target GPU node name")
     fault_type: GPUFaultType = Field(..., description="Type of GPU fault")
-    duration: Optional[int] = Field(None, description="Duration in seconds (None = permanent)")
+    duration: Optional[int] = Field(
+        None, description="Duration in seconds (None = permanent)"
+    )
     severity: FaultSeverity = Field(FaultSeverity.MEDIUM, description="Fault severity")
     parameters: Optional[dict[str, Any]] = Field(
         default_factory=dict, description="Additional parameters"
@@ -96,10 +100,14 @@ class GPUFaultRequest(BaseModel):
 class NetworkFaultRequest(BaseModel):
     """Request to inject network partition/fault"""
 
-    partition_type: NetworkPartitionType = Field(..., description="Type of network partition")
+    partition_type: NetworkPartitionType = Field(
+        ..., description="Type of network partition"
+    )
     source: str = Field(..., description="Source namespace or pod selector")
     target: str = Field(..., description="Target namespace or pod selector")
-    mode: NetworkMode = Field(NetworkMode.NETWORKPOLICY, description="Network fault mode")
+    mode: NetworkMode = Field(
+        NetworkMode.NETWORKPOLICY, description="Network fault mode"
+    )
     parameters: Optional[dict[str, Any]] = Field(
         default_factory=dict,
         description="Mode-specific parameters (delay_ms, packet_loss_pct, bandwidth_mbps)",
@@ -141,7 +149,9 @@ class FaultTracker:
         self.faults: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
 
-    async def create_fault(self, fault_type: str, target: str, details: dict[str, Any]) -> str:
+    async def create_fault(
+        self, fault_type: str, target: str, details: dict[str, Any]
+    ) -> str:
         """Create and track a new fault"""
         async with self._lock:
             fault_id = f"{fault_type}-{uuid.uuid4().hex[:8]}"
@@ -164,9 +174,13 @@ class FaultTracker:
                 raise ValueError(f"Fault {fault_id} not found")
             self.faults[fault_id]["status"] = status
             if status == FaultStatus.INJECTED:
-                self.faults[fault_id]["injected_at"] = datetime.now(timezone.utc).isoformat()
+                self.faults[fault_id]["injected_at"] = datetime.now(
+                    timezone.utc
+                ).isoformat()
             elif status == FaultStatus.RECOVERED:
-                self.faults[fault_id]["recovered_at"] = datetime.now(timezone.utc).isoformat()
+                self.faults[fault_id]["recovered_at"] = datetime.now(
+                    timezone.utc
+                ).isoformat()
 
     async def get_fault(self, fault_id: str) -> Optional[dict[str, Any]]:
         """Get fault details"""
@@ -179,7 +193,8 @@ class FaultTracker:
             return [
                 f
                 for f in self.faults.values()
-                if f["status"] in [FaultStatus.PENDING, FaultStatus.INJECTED, FaultStatus.ACTIVE]
+                if f["status"]
+                in [FaultStatus.PENDING, FaultStatus.INJECTED, FaultStatus.ACTIVE]
             ]
 
 
@@ -222,7 +237,9 @@ class KubernetesHelper:
 
             for policy in policies.items:
                 policy_name = policy.metadata.name
-                logger.info(f"Found orphaned NetworkPolicy: {policy_name} in namespace {namespace}")
+                logger.info(
+                    f"Found orphaned NetworkPolicy: {policy_name} in namespace {namespace}"
+                )
 
                 try:
                     # Delete the policy
@@ -234,7 +251,9 @@ class KubernetesHelper:
 
                 except ApiException as e:
                     if e.status != 404:  # Ignore if already deleted
-                        logger.error(f"Failed to delete NetworkPolicy {policy_name}: {e}")
+                        logger.error(
+                            f"Failed to delete NetworkPolicy {policy_name}: {e}"
+                        )
 
             return len(deleted_policies), deleted_policies
 
@@ -242,7 +261,9 @@ class KubernetesHelper:
             logger.error(f"Failed to list NetworkPolicies in {namespace}: {e}")
             return 0, []
 
-    async def get_daemonset_pod(self, namespace: str, label_selector: str) -> Optional[str]:
+    async def get_daemonset_pod(
+        self, namespace: str, label_selector: str
+    ) -> Optional[str]:
         """Get a pod from DaemonSet by label"""
         try:
             pods = self.core_v1.list_namespaced_pod(
@@ -277,7 +298,9 @@ class KubernetesHelper:
             logger.error(f"Failed to exec in pod {pod_name}: {e}")
             return False, str(e)
 
-    async def get_node_with_pod(self, namespace: str, pod_selector: str) -> Optional[str]:
+    async def get_node_with_pod(
+        self, namespace: str, pod_selector: str
+    ) -> Optional[str]:
         """Get node name where a pod is running"""
         try:
             pods = self.core_v1.list_namespaced_pod(
@@ -319,7 +342,9 @@ class KubernetesHelper:
 class GPUFaultInjectorClient:
     """Client for GPU Fault Injector DaemonSet"""
 
-    def __init__(self, k8s: KubernetesHelper, namespace: str = "fault-injection-system"):
+    def __init__(
+        self, k8s: KubernetesHelper, namespace: str = "fault-injection-system"
+    ):
         self.k8s = k8s
         self.namespace = namespace
         self.agent_port = 8083
@@ -398,16 +423,24 @@ class GPUFaultInjectorClient:
         }
 
         try:
-            logger.info(f"[CLIENT-DEBUG] Step C: Sending POST to {agent_url}/inject-xid with payload: {payload}")
+            logger.info(
+                f"[CLIENT-DEBUG] Step C: Sending POST to {agent_url}/inject-xid with payload: {payload}"
+            )
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(f"{agent_url}/inject-xid", json=payload)
-                logger.info(f"[CLIENT-DEBUG] Step D: Received response status {response.status_code}")
+                logger.info(
+                    f"[CLIENT-DEBUG] Step D: Received response status {response.status_code}"
+                )
                 response.raise_for_status()
-                result = response.json().get("message", f"XID {xid_type} injected on GPU {gpu_id}")
+                result = response.json().get(
+                    "message", f"XID {xid_type} injected on GPU {gpu_id}"
+                )
                 logger.info(f"[CLIENT-DEBUG] Step E: Success - {result}")
                 return True, result
         except Exception as e:
-            logger.error(f"[CLIENT-DEBUG] Step F: Exception occurred - {type(e).__name__}: {e}")
+            logger.error(
+                f"[CLIENT-DEBUG] Step F: Exception occurred - {type(e).__name__}: {e}"
+            )
             return False, str(e)
 
     async def recover_fault(self, node_name: str, fault_id: str) -> tuple[bool, str]:
@@ -427,7 +460,9 @@ class GPUFaultInjectorClient:
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(f"{agent_url}/recover", json={"fault_id": fault_id})
+                response = await client.post(
+                    f"{agent_url}/recover", json={"fault_id": fault_id}
+                )
                 response.raise_for_status()
                 return True, response.json().get("message", "Fault recovered")
         except Exception as e:
@@ -438,12 +473,14 @@ class GPUFaultInjectorClient:
 class NetworkFaultInjectorClient:
     """Client for managing network faults via NetworkPolicy and ChaosMesh (no agents required)"""
 
-    def __init__(self, k8s: KubernetesHelper, namespace: str = "fault-injection-system"):
+    def __init__(
+        self, k8s: KubernetesHelper, namespace: str = "fault-injection-system"
+    ):
         self.k8s = k8s
         self.namespace = namespace
         self.active_policies: dict[str, dict] = {}  # Track NetworkPolicies for cleanup
         self.active_chaos: dict[str, dict] = {}  # Track ChaosMesh resources for cleanup
-        
+
         # Initialize Custom Object API for ChaosMesh
         try:
             self.custom_api = client.CustomObjectsApi()
@@ -463,7 +500,9 @@ class NetworkFaultInjectorClient:
 
         if mode == NetworkMode.NETWORKPOLICY:
             # Create NetworkPolicy directly (no agent needed)
-            return await self._create_networkpolicy(partition_type, source, target, parameters)
+            return await self._create_networkpolicy(
+                partition_type, source, target, parameters
+            )
         elif mode == NetworkMode.CHAOS_MESH:
             # Create ChaosMesh NetworkChaos resource
             return await self._create_chaos_mesh_network_fault(
@@ -491,9 +530,13 @@ class NetworkFaultInjectorClient:
         block_nats = parameters.get("block_nats", True)
         block_all_egress = parameters.get("block_all_egress", False)
         block_ingress = parameters.get("block_ingress", False)
-        block_specific_pods = parameters.get("block_specific_pods", [])  # List of label selectors
+        block_specific_pods = parameters.get(
+            "block_specific_pods", []
+        )  # List of label selectors
         block_ports = parameters.get("block_ports", [])  # List of port numbers
-        allow_namespaces = parameters.get("allow_namespaces", [])  # List of namespace names
+        allow_namespaces = parameters.get(
+            "allow_namespaces", []
+        )  # List of namespace names
 
         # Replace underscores with hyphens for RFC 1123 compliance
         safe_partition_type = partition_type.value.replace("_", "-")
@@ -534,7 +577,9 @@ class NetworkFaultInjectorClient:
                     to=[
                         k8s_client.V1NetworkPolicyPeer(
                             namespace_selector=k8s_client.V1LabelSelector(
-                                match_labels={"kubernetes.io/metadata.name": "kube-system"}
+                                match_labels={
+                                    "kubernetes.io/metadata.name": "kube-system"
+                                }
                             )
                         )
                     ],
@@ -651,9 +696,14 @@ class NetworkFaultInjectorClient:
             )
 
             # Store for cleanup
-            self.active_policies[fault_id] = {"policy_name": policy_name, "namespace": namespace}
+            self.active_policies[fault_id] = {
+                "policy_name": policy_name,
+                "namespace": namespace,
+            }
 
-            logger.info(f"Created NetworkPolicy: {policy_name} in namespace {namespace}")
+            logger.info(
+                f"Created NetworkPolicy: {policy_name} in namespace {namespace}"
+            )
             return True, f"NetworkPolicy {policy_name} created in {namespace}"
 
         except Exception as e:
@@ -684,7 +734,9 @@ class NetworkFaultInjectorClient:
 
         # Target configuration
         target_nats = parameters.get("target_nats", True)  # Block NATS by default
-        target_specific_pods = parameters.get("target_specific_pods", [])  # Target specific pod labels
+        target_specific_pods = parameters.get(
+            "target_specific_pods", []
+        )  # Target specific pod labels
         target_ports = parameters.get("target_ports", [])  # Target specific ports
 
         if not target_pod_prefix:
@@ -727,29 +779,37 @@ class NetworkFaultInjectorClient:
                 if target_nats:
                     # Target NATS services
                     # We'll use externalTargets for NATS service IPs or target pods with NATS labels
-                    target_match_expressions.append({
-                        "key": "app.kubernetes.io/name",
-                        "operator": "In",
-                        "values": ["nats", "dynamo-platform-nats"],
-                    })
+                    target_match_expressions.append(
+                        {
+                            "key": "app.kubernetes.io/name",
+                            "operator": "In",
+                            "values": ["nats", "dynamo-platform-nats"],
+                        }
+                    )
 
                 # Add specific pod targets
                 for pod_selector in target_specific_pods:
                     for key, value in pod_selector.items():
                         if not isinstance(value, list):
                             value = [value]
-                        target_match_expressions.append({
-                            "key": key,
-                            "operator": "In",
-                            "values": value,
-                        })
+                        target_match_expressions.append(
+                            {
+                                "key": key,
+                                "operator": "In",
+                                "values": value,
+                            }
+                        )
 
                 if target_match_labels or target_match_expressions:
                     target_selector["labelSelectors"] = {}
                     if target_match_labels:
-                        target_selector["labelSelectors"]["matchLabels"] = target_match_labels
+                        target_selector["labelSelectors"][
+                            "matchLabels"
+                        ] = target_match_labels
                     if target_match_expressions:
-                        target_selector["labelSelectors"]["matchExpressions"] = target_match_expressions
+                        target_selector["labelSelectors"][
+                            "matchExpressions"
+                        ] = target_match_expressions
                     target_selector["namespaces"] = [namespace]
 
                 target_spec = target_selector
@@ -852,7 +912,7 @@ class NetworkFaultInjectorClient:
             }
 
             logger.info(f"Created NetworkChaos: {chaos_name} in namespace {namespace}")
-            
+
             message = f"NetworkChaos {chaos_name} created in {namespace}"
             if packet_loss_percent > 0:
                 message += f" (packet loss: {packet_loss_percent}%)"
@@ -861,12 +921,13 @@ class NetworkFaultInjectorClient:
                 if delay_jitter_ms > 0:
                     message += f" ± {delay_jitter_ms}ms"
                 message += ")"
-            
+
             return True, message
 
         except Exception as e:
             logger.error(f"Failed to create NetworkChaos: {e}")
             import traceback
+
             traceback.print_exc()
             return False, f"Failed to create NetworkChaos: {str(e)}"
 
@@ -900,7 +961,9 @@ class NetworkFaultInjectorClient:
             # Remove from tracking
             del self.active_policies[fault_id]
 
-            logger.info(f"Deleted NetworkPolicy: {policy_name} from namespace {namespace}")
+            logger.info(
+                f"Deleted NetworkPolicy: {policy_name} from namespace {namespace}"
+            )
             return True, f"NetworkPolicy {policy_name} deleted from {namespace}"
 
         except Exception as e:
@@ -929,7 +992,9 @@ class NetworkFaultInjectorClient:
             # Remove from tracking
             del self.active_chaos[fault_id]
 
-            logger.info(f"Deleted NetworkChaos: {chaos_name} from namespace {namespace}")
+            logger.info(
+                f"Deleted NetworkChaos: {chaos_name} from namespace {namespace}"
+            )
             return True, f"NetworkChaos {chaos_name} deleted from {namespace}"
 
         except Exception as e:
@@ -940,12 +1005,16 @@ class NetworkFaultInjectorClient:
 class MonitoringAgentClient:
     """Client for Monitoring Agent DaemonSet"""
 
-    def __init__(self, k8s: KubernetesHelper, namespace: str = "fault-injection-system"):
+    def __init__(
+        self, k8s: KubernetesHelper, namespace: str = "fault-injection-system"
+    ):
         self.k8s = k8s
         self.namespace = namespace
         self.agent_port = 8083
 
-    async def collect_metrics(self, target_namespace: str, duration: int = 60) -> dict[str, Any]:
+    async def collect_metrics(
+        self, target_namespace: str, duration: int = 60
+    ) -> dict[str, Any]:
         """Collect metrics from all monitoring agents"""
 
         pods = self.k8s.core_v1.list_namespaced_pod(
@@ -978,12 +1047,18 @@ class MonitoringAgentClient:
                     if "gpu_metrics" in metrics:
                         all_metrics["gpu_metrics"].append(metrics["gpu_metrics"])
                     if "network_metrics" in metrics:
-                        all_metrics["network_metrics"].append(metrics["network_metrics"])
+                        all_metrics["network_metrics"].append(
+                            metrics["network_metrics"]
+                        )
                     if "inference_metrics" in metrics:
-                        all_metrics["inference_metrics"].append(metrics["inference_metrics"])
+                        all_metrics["inference_metrics"].append(
+                            metrics["inference_metrics"]
+                        )
 
             except Exception as e:
-                logger.warning(f"Failed to collect metrics from {pod.metadata.name}: {e}")
+                logger.warning(
+                    f"Failed to collect metrics from {pod.metadata.name}: {e}"
+                )
 
         # Aggregate and average metrics
         return self._aggregate_metrics(all_metrics)
@@ -996,17 +1071,22 @@ class MonitoringAgentClient:
         if all_metrics["gpu_metrics"]:
             gpu_list = all_metrics["gpu_metrics"]
             aggregated["gpu_metrics"] = {
-                "utilization": sum(m.get("utilization", 0) for m in gpu_list) / len(gpu_list),
-                "memory_used_mb": sum(m.get("memory_used_mb", 0) for m in gpu_list) / len(gpu_list),
-                "temperature_c": sum(m.get("temperature_c", 0) for m in gpu_list) / len(gpu_list),
-                "power_watts": sum(m.get("power_watts", 0) for m in gpu_list) / len(gpu_list),
+                "utilization": sum(m.get("utilization", 0) for m in gpu_list)
+                / len(gpu_list),
+                "memory_used_mb": sum(m.get("memory_used_mb", 0) for m in gpu_list)
+                / len(gpu_list),
+                "temperature_c": sum(m.get("temperature_c", 0) for m in gpu_list)
+                / len(gpu_list),
+                "power_watts": sum(m.get("power_watts", 0) for m in gpu_list)
+                / len(gpu_list),
             }
 
         # Aggregate network metrics
         if all_metrics["network_metrics"]:
             net_list = all_metrics["network_metrics"]
             aggregated["network_metrics"] = {
-                "latency_ms": sum(m.get("latency_ms", 0) for m in net_list) / len(net_list),
+                "latency_ms": sum(m.get("latency_ms", 0) for m in net_list)
+                / len(net_list),
                 "packet_loss_pct": sum(m.get("packet_loss_pct", 0) for m in net_list)
                 / len(net_list),
                 "throughput_mbps": sum(m.get("throughput_mbps", 0) for m in net_list)
@@ -1136,7 +1216,9 @@ async def lifespan(app: FastAPI):
             if fault.get("type") == "network_partition":
                 await app.state.k8s.cleanup_orphaned_network_policies()
         except Exception as e:
-            logger.error(f"Failed to cleanup NetworkPolicy for fault {fault['id']}: {e}")
+            logger.error(
+                f"Failed to cleanup NetworkPolicy for fault {fault['id']}: {e}"
+            )
 
 
 app = FastAPI(
@@ -1189,7 +1271,9 @@ async def inject_gpu_fault(request: GPUFaultRequest):
 
     if not success:
         await app.state.fault_tracker.update_status(fault_id, FaultStatus.FAILED)
-        raise HTTPException(status_code=500, detail=f"Failed to inject GPU fault: {message}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to inject GPU fault: {message}"
+        )
 
     await app.state.fault_tracker.update_status(fault_id, FaultStatus.INJECTED)
 
@@ -1232,7 +1316,9 @@ async def inject_network_fault(request: NetworkFaultRequest):
 
     if not success:
         await app.state.fault_tracker.update_status(fault_id, FaultStatus.FAILED)
-        raise HTTPException(status_code=500, detail=f"Failed to inject network fault: {message}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to inject network fault: {message}"
+        )
 
     await app.state.fault_tracker.update_status(fault_id, FaultStatus.INJECTED)
 
@@ -1268,7 +1354,9 @@ async def recover_fault(fault_id: str):
 
     if not success:
         await app.state.fault_tracker.update_status(fault_id, FaultStatus.FAILED)
-        raise HTTPException(status_code=500, detail=f"Failed to recover fault: {message}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to recover fault: {message}"
+        )
 
     await app.state.fault_tracker.update_status(fault_id, FaultStatus.RECOVERED)
 
@@ -1373,17 +1461,20 @@ async def list_xid_types():
                 "name": "GSP Resource Manager Error",
                 "severity": "high",
                 "description": "GPU resource exhaustion",
-            }
+            },
         ]
     }
 
 
 class XIDFaultRequest(BaseModel):
     """Request to inject specific XID error"""
+
     node_name: str = Field(..., description="Target GPU node name")
     xid_type: int = Field(..., description="XID error code")
     gpu_id: int = Field(0, description="GPU device ID")
-    duration: Optional[int] = Field(None, description="Duration in seconds (None = permanent)")
+    duration: Optional[int] = Field(
+        None, description="Duration in seconds (None = permanent)"
+    )
 
 
 @app.post("/api/v1/faults/gpu/inject/xid-43")
@@ -1436,7 +1527,9 @@ async def inject_xid_120(request: XIDFaultRequest):
 
 async def _inject_xid_error(request: XIDFaultRequest, xid_code: int, xid_name: str):
     """Helper function to inject XID errors"""
-    logger.info(f"[API-DEBUG] Step 1: Creating fault tracker entry for XID {xid_code} on {request.node_name}")
+    logger.info(
+        f"[API-DEBUG] Step 1: Creating fault tracker entry for XID {xid_code} on {request.node_name}"
+    )
     fault_id = await app.state.fault_tracker.create_fault(
         fault_type=f"gpu_xid_{xid_code}",
         target=f"{request.node_name}/gpu{request.gpu_id}",
@@ -1450,7 +1543,9 @@ async def _inject_xid_error(request: XIDFaultRequest, xid_code: int, xid_name: s
     logger.info(f"[API-DEBUG] Step 2: Fault created with ID: {fault_id}")
 
     # Inject via GPU agent
-    logger.info(f"[API-DEBUG] Step 3: Calling GPU client inject_xid_error for node {request.node_name}")
+    logger.info(
+        f"[API-DEBUG] Step 3: Calling GPU client inject_xid_error for node {request.node_name}"
+    )
     success, message = await app.state.gpu_client.inject_xid_error(
         node_name=request.node_name,
         xid_type=xid_code,
@@ -1458,13 +1553,17 @@ async def _inject_xid_error(request: XIDFaultRequest, xid_code: int, xid_name: s
         duration=request.duration,
         fault_id=fault_id,
     )
-    logger.info(f"[API-DEBUG] Step 4: GPU client returned - success={success}, message={message}")
+    logger.info(
+        f"[API-DEBUG] Step 4: GPU client returned - success={success}, message={message}"
+    )
 
     if not success:
         await app.state.fault_tracker.update_status(fault_id, FaultStatus.FAILED)
-        raise HTTPException(status_code=500, detail=f"Failed to inject XID {xid_code}: {message}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to inject XID {xid_code}: {message}"
+        )
 
-    logger.info(f"[API-DEBUG] Step 5: Updating fault status to INJECTED")
+    logger.info("[API-DEBUG] Step 5: Updating fault status to INJECTED")
     await app.state.fault_tracker.update_status(fault_id, FaultStatus.INJECTED)
 
     return FaultResponse(
@@ -1488,7 +1587,9 @@ async def cleanup_network_policies(namespace: str = Query("dynamo-oviya")):
     logger.info(f"Manual cleanup requested for namespace: {namespace}")
 
     try:
-        count, deleted = await app.state.k8s.cleanup_orphaned_network_policies(namespace)
+        count, deleted = await app.state.k8s.cleanup_orphaned_network_policies(
+            namespace
+        )
 
         return {
             "status": "success",

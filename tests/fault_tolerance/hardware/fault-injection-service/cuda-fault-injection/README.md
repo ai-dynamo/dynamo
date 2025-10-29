@@ -73,16 +73,16 @@ def test_gpu_failure_xid79():
     deployment_name = "vllm-worker"
     namespace = "default"
     target_node = "node-with-gpu"
-    
+
     # Enable CUDA fault injection for XID 79 (default)
     create_cuda_fault_configmap(namespace)
-    patch_deployment_env(deployment_name, namespace, enable=True, 
+    patch_deployment_env(deployment_name, namespace, enable=True,
                         use_configmap=True, target_node=target_node,
                         xid_type=79)
-    
+
     # Pods will crash with CUDA_ERROR_NO_DEVICE
     # ... your test logic here ...
-    
+
     # Cleanup
     patch_deployment_env(deployment_name, namespace, enable=False, use_configmap=True)
     delete_cuda_fault_configmap(namespace)
@@ -92,10 +92,10 @@ def test_ecc_error_xid48():
     create_cuda_fault_configmap(namespace)
     patch_deployment_env(deployment_name, namespace, enable=True,
                         use_configmap=True, xid_type=48)
-    
+
     # Pods will crash with CUDA_ERROR_ECC_UNCORRECTABLE
     # ... your test logic here ...
-    
+
     # Cleanup
     patch_deployment_env(deployment_name, namespace, enable=False, use_configmap=True)
     delete_cuda_fault_configmap(namespace)

@@ -58,23 +58,23 @@ spec:
       hostPID: true
       hostNetwork: true
       hostIPC: true
-      
+
       # Node selector: Only run on GPU nodes
       nodeSelector:
         nvidia.com/gpu.present: "true"
-      
+
       tolerations:
       - effect: NoSchedule
         key: nvidia.com/gpu
         operator: Exists
-      
+
       containers:
       - name: gpu-fault-injector
         # UPDATE: Replace with your Azure Container Registry (ACR)
         # Example: yourregistry.azurecr.io/gpu-fault-injector:latest
         image: dynamoci.azurecr.io/gpu-fault-injector:latest
         imagePullPolicy: Always
-        
+
         # PRIVILEGED MODE - Required for kernel-level operations
         securityContext:
           privileged: true
@@ -90,7 +90,7 @@ spec:
             - SYS_MODULE     # Kernel module loading
             - DAC_OVERRIDE   # Bypass file permissions
             - CAP_PERFMON    # Performance monitoring
-        
+
         env:
         - name: NODE_NAME
           valueFrom:
@@ -110,7 +110,7 @@ spec:
           value: "true"
         - name: ENABLE_EBPF
           value: "true"
-        
+
         resources:
           requests:
             memory: "256Mi"
@@ -118,7 +118,7 @@ spec:
           limits:
             memory: "1Gi"
             cpu: "1000m"
-        
+
         volumeMounts:
         # Kernel access
         - name: sys-kernel-debug
@@ -130,7 +130,7 @@ spec:
         - name: lib-modules
           mountPath: /lib/modules
           readOnly: true
-        
+
         # System access
         - name: sys
           mountPath: /host/sys
@@ -138,30 +138,30 @@ spec:
           mountPath: /host/proc
         - name: dev
           mountPath: /host/dev
-        
+
         # PCI bus access for XID 79 injection
         - name: sys-bus-pci
           mountPath: /sys/bus/pci
-        
+
         # CUDA/NVML libraries
         - name: nvidia-driver
           mountPath: /usr/local/nvidia
           readOnly: true
-        
+
         # Configuration
         - name: config
           mountPath: /etc/gpu-fault-injector
           readOnly: true
-        
+
         # Logs
         - name: logs
           mountPath: /var/log/gpu-fault-injector
-        
+
         ports:
         - containerPort: 8083
           name: http
           protocol: TCP
-        
+
         livenessProbe:
           httpGet:
             path: /health
@@ -169,7 +169,7 @@ spec:
           initialDelaySeconds: 30
           periodSeconds: 30
           timeoutSeconds: 5
-        
+
         readinessProbe:
           httpGet:
             path: /health
@@ -177,7 +177,7 @@ spec:
           initialDelaySeconds: 10
           periodSeconds: 10
           timeoutSeconds: 5
-      
+
       volumes:
       # Kernel volumes
       - name: sys-kernel-debug
@@ -196,7 +196,7 @@ spec:
         hostPath:
           path: /lib/modules
           type: Directory
-      
+
       # System volumes
       - name: sys
         hostPath:
@@ -210,24 +210,24 @@ spec:
         hostPath:
           path: /dev
           type: Directory
-      
+
       # PCI bus
       - name: sys-bus-pci
         hostPath:
           path: /sys/bus/pci
           type: Directory
-      
+
       # NVIDIA driver
       - name: nvidia-driver
         hostPath:
           path: /usr/local/nvidia
           type: Directory
-      
+
       # Configuration
       - name: config
         configMap:
           name: gpu-fault-injector-config
-      
+
       # Logs
       - name: logs
         hostPath:
@@ -242,26 +242,26 @@ metadata:
 data:
   config.yaml: |
     # GPU Fault Injector Configuration
-    
+
     # Injection methods (in order of preference)
     methods:
       - kernel_level
       - chaos_mesh
       - nvidia_smi
-    
+
     # Safety settings
     safety:
       require_confirmation: false  # Set to true in production
       max_concurrent_faults: 3
       cooldown_seconds: 30
-    
+
     # Kernel-level injection settings
     kernel:
       enable_ebpf: true
       enable_pci_manipulation: true
       enable_cuda_interception: true
       nvcc_path: /usr/local/cuda/bin/nvcc
-    
+
     # Logging
     logging:
       level: info

@@ -53,7 +53,9 @@ class NetworkMode(str, Enum):
     """Network fault modes"""
 
     NETWORKPOLICY = "networkpolicy"  # Use Kubernetes NetworkPolicy (complete blocking)
-    CHAOS_MESH = "chaos_mesh"  # Use ChaosMesh for advanced faults (packet loss, delay, etc.)
+    CHAOS_MESH = (
+        "chaos_mesh"  # Use ChaosMesh for advanced faults (packet loss, delay, etc.)
+    )
 
 
 class FaultSeverity(str, Enum):
@@ -209,12 +211,16 @@ class FaultInjectionClient:
 
             try:
                 if kind == "DaemonSet":
-                    self.apps_v1.create_namespaced_daemon_set(namespace=namespace, body=doc)
+                    self.apps_v1.create_namespaced_daemon_set(
+                        namespace=namespace, body=doc
+                    )
                     deployed_resources.append(f"DaemonSet/{name}")
                     logger.info(f"Created DaemonSet: {name}")
 
                 elif kind == "Service":
-                    self.core_v1.create_namespaced_service(namespace=namespace, body=doc)
+                    self.core_v1.create_namespaced_service(
+                        namespace=namespace, body=doc
+                    )
                     deployed_resources.append(f"Service/{name}")
                     logger.info(f"Created Service: {name}")
 
@@ -284,7 +290,9 @@ class FaultInjectionClient:
 
         # Delete DaemonSet
         try:
-            self.apps_v1.delete_namespaced_daemon_set(name="nvidia-dcgm", namespace=namespace)
+            self.apps_v1.delete_namespaced_daemon_set(
+                name="nvidia-dcgm", namespace=namespace
+            )
             deleted_resources.append("DaemonSet/nvidia-dcgm")
             logger.info("Deleted DaemonSet: nvidia-dcgm")
         except ApiException as e:
@@ -293,7 +301,9 @@ class FaultInjectionClient:
 
         # Delete Service
         try:
-            self.core_v1.delete_namespaced_service(name="nvidia-dcgm", namespace=namespace)
+            self.core_v1.delete_namespaced_service(
+                name="nvidia-dcgm", namespace=namespace
+            )
             deleted_resources.append("Service/nvidia-dcgm")
             logger.info("Deleted Service: nvidia-dcgm")
         except ApiException as e:
@@ -318,10 +328,12 @@ class FaultInjectionClient:
         """
         # Try different DCGM DaemonSet names (varies by installation method)
         dcgm_names = ["nvidia-dcgm-exporter", "nvidia-dcgm", "dcgm-exporter"]
-        
+
         for dcgm_name in dcgm_names:
             try:
-                ds = self.apps_v1.read_namespaced_daemon_set(name=dcgm_name, namespace=namespace)
+                ds = self.apps_v1.read_namespaced_daemon_set(
+                    name=dcgm_name, namespace=namespace
+                )
 
                 return {
                     "deployed": True,
@@ -331,13 +343,14 @@ class FaultInjectionClient:
                     "ready_pods": ds.status.number_ready,
                     "available_pods": ds.status.number_available,
                     "unavailable_pods": ds.status.number_unavailable,
-                    "ready": ds.status.number_ready == ds.status.desired_number_scheduled,
+                    "ready": ds.status.number_ready
+                    == ds.status.desired_number_scheduled,
                 }
             except ApiException as e:
                 if e.status == 404:
                     continue  # Try next name
                 raise
-        
+
         # None of the DCGM names found
         return {
             "deployed": False,
@@ -422,7 +435,9 @@ class FaultInjectionClient:
             "parameters": parameters,
         }
 
-        response = self.http_client.post(f"{self.api_url}/api/v1/faults/gpu/inject", json=payload)
+        response = self.http_client.post(
+            f"{self.api_url}/api/v1/faults/gpu/inject", json=payload
+        )
         response.raise_for_status()
         data = response.json()
 
@@ -453,7 +468,9 @@ class FaultInjectionClient:
                 pass
             # Fault automatically recovered
         """
-        fault = self.inject_gpu_fault(node, fault_type, duration, severity, **parameters)
+        fault = self.inject_gpu_fault(
+            node, fault_type, duration, severity, **parameters
+        )
         logger.info(f"Injected GPU fault: {fault.fault_id}")
 
         try:
@@ -485,14 +502,14 @@ class FaultInjectionClient:
             mode: Network fault mode (NETWORKPOLICY or CHAOS_MESH)
             duration: Duration in seconds
             **parameters: Mode-specific parameters
-            
+
         NetworkPolicy Mode Parameters:
             - namespace: Kubernetes namespace
             - target_pod_prefix: Pod name prefix to target
             - block_nats: Block NATS traffic (default: True)
             - block_specific_pods: List of pod label selectors to block
             - block_all_egress: Block all egress traffic
-            
+
         ChaosMesh Mode Parameters:
             - namespace: Kubernetes namespace
             - target_pod_prefix: Pod name prefix to target
@@ -576,7 +593,9 @@ class FaultInjectionClient:
         Returns:
             Recovery status
         """
-        response = self.http_client.post(f"{self.api_url}/api/v1/faults/{fault_id}/recover")
+        response = self.http_client.post(
+            f"{self.api_url}/api/v1/faults/{fault_id}/recover"
+        )
         response.raise_for_status()
         return response.json()
 
@@ -596,7 +615,9 @@ class FaultInjectionClient:
         response.raise_for_status()
         return response.json()["faults"]
 
-    def cleanup_network_policies(self, namespace: str = "dynamo-oviya") -> dict[str, Any]:
+    def cleanup_network_policies(
+        self, namespace: str = "dynamo-oviya"
+    ) -> dict[str, Any]:
         """
         Clean up orphaned NetworkPolicies created by fault injection.
 
@@ -610,7 +631,8 @@ class FaultInjectionClient:
             Cleanup result with count and list of deleted policies
         """
         response = self.http_client.post(
-            f"{self.api_url}/api/v1/faults/network/cleanup", params={"namespace": namespace}
+            f"{self.api_url}/api/v1/faults/network/cleanup",
+            params={"namespace": namespace},
         )
         response.raise_for_status()
         result = response.json()
@@ -679,7 +701,11 @@ class FaultInjectionClient:
         return False
 
     def wait_for_pod_rescheduled(
-        self, namespace: str, original_pod_name: str, original_node: str, timeout: int = 120
+        self,
+        namespace: str,
+        original_pod_name: str,
+        original_node: str,
+        timeout: int = 120,
     ) -> Optional[str]:
         """
         Wait for a pod to be rescheduled to a different node.
