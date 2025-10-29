@@ -330,7 +330,7 @@ impl OpenAIPreprocessor {
             let _results = futures::future::join_all(
                 fetch_tasks
                     .iter()
-                    .map(|(_, content_part)| loader.fetch_media_part(content_part)),
+                    .map(|(_, content_part)| loader.fetch_and_decode_media_part(content_part)),
             )
             .await;
 
