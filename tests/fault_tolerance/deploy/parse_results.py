@@ -28,7 +28,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from tabulate import tabulate
 
-from tests.fault_tolerance.deploy.scenarios import WORKER_MAP
+from tests.fault_tolerance.deploy.scenarios import (
+    OVERFLOW_SUFFIX,
+    RECOVERY_SUFFIX,
+    WORKER_MAP,
+)
 
 
 def parse_test_log(
@@ -641,9 +645,9 @@ def process_single_test(
     # Detect test phase (overflow or recovery) - check suffix to avoid ambiguity
     test_phase = "standard"
 
-    if log_dir.endswith("_overflow"):
+    if log_dir.endswith(OVERFLOW_SUFFIX):
         test_phase = "overflow"
-    elif log_dir.endswith("_recovery"):
+    elif log_dir.endswith(RECOVERY_SUFFIX):
         test_phase = "recovery"
 
     # Parse test configuration
@@ -728,8 +732,8 @@ def process_overflow_recovery_test(
     }
 
     base_path = overflow_path
-    if overflow_path.endswith("_overflow"):
-        base_path = overflow_path[:-9]
+    if overflow_path.endswith(OVERFLOW_SUFFIX):
+        base_path = overflow_path[: -len(OVERFLOW_SUFFIX)]
     test_log_path = os.path.join(base_path, "test.log.txt")
     startup_time, _ = parse_test_log(test_log_path)
     recovery_time = calculate_recovery_time(failure_info=[], process_logs_dir=base_path)
@@ -850,19 +854,25 @@ def main(
                 )
 
             # Check if this is an overflow/recovery pair and show timing info
-            has_overflow = any("_overflow" in r["log_dir"] for r in all_results)
-            has_recovery = any("_recovery" in r["log_dir"] for r in all_results)
+            has_overflow = any(
+                r["log_dir"].endswith(OVERFLOW_SUFFIX) for r in all_results
+            )
+            has_recovery = any(
+                r["log_dir"].endswith(RECOVERY_SUFFIX) for r in all_results
+            )
 
             if has_overflow and has_recovery:
                 # Find startup time from overflow phase
                 for r in all_results:
-                    if "_overflow" in r["log_dir"] and r.get("startup_time"):
+                    if r["log_dir"].endswith(OVERFLOW_SUFFIX) and r.get("startup_time"):
                         print(f"Startup Time: {r['startup_time']}")
                         break
 
                 # Find recovery time stored in recovery phase
                 for r in all_results:
-                    if "_recovery" in r["log_dir"] and r.get("recovery_time"):
+                    if r["log_dir"].endswith(RECOVERY_SUFFIX) and r.get(
+                        "recovery_time"
+                    ):
                         print(
                             f"Recovery Time (gap between phases): {r['recovery_time']}"
                         )

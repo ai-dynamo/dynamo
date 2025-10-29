@@ -19,6 +19,9 @@ from typing import Dict, Optional, Pattern
 
 from tests.utils.managed_deployment import DeploymentSpec
 
+OVERFLOW_SUFFIX = "_overflow"
+RECOVERY_SUFFIX = "_recovery"
+
 # Worker name mapping for different backends
 WORKER_MAP = {
     "vllm": {

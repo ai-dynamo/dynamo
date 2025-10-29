@@ -12,7 +12,13 @@ import pytest
 from tests.fault_tolerance.deploy.client_factory import get_client_function
 from tests.fault_tolerance.deploy.parse_factory import parse_test_results
 from tests.fault_tolerance.deploy.parse_results import process_overflow_recovery_test
-from tests.fault_tolerance.deploy.scenarios import Load, TokenOverflowFailure, scenarios
+from tests.fault_tolerance.deploy.scenarios import (
+    OVERFLOW_SUFFIX,
+    RECOVERY_SUFFIX,
+    Load,
+    TokenOverflowFailure,
+    scenarios,
+)
 from tests.utils.managed_deployment import ManagedDeployment
 
 
@@ -100,7 +106,7 @@ def _clients(
                     deployment_spec,
                     namespace,
                     model,
-                    request.node.name + "_overflow",
+                    request.node.name + OVERFLOW_SUFFIX,
                     i,
                     load_config.overflow_request_count,  # 15 overflow requests
                     load_config.overflow_token_length,  # 2x max_seq_len tokens
@@ -128,7 +134,7 @@ def _clients(
                     deployment_spec,
                     namespace,
                     model,
-                    request.node.name + "_recovery",
+                    request.node.name + RECOVERY_SUFFIX,
                     i,
                     load_config.normal_request_count,  # 15 normal requests
                     load_config.input_token_length,  # Normal token count
@@ -231,8 +237,8 @@ def results_table(request, scenario):  # noqa: F811
     log_paths = []
     if hasattr(scenario.load, "mixed_token_test") and scenario.load.mixed_token_test:
         # For mixed token tests, we have separate overflow and recovery directories
-        overflow_dir = f"{request.node.name}_overflow"
-        recovery_dir = f"{request.node.name}_recovery"
+        overflow_dir = f"{request.node.name}{OVERFLOW_SUFFIX}"
+        recovery_dir = f"{request.node.name}{RECOVERY_SUFFIX}"
         log_paths = [overflow_dir, recovery_dir]
 
         logging.info("Mixed token test detected. Looking for results in:")
@@ -275,13 +281,13 @@ def results_summary():
     test_groups = {}
 
     for log_path in global_result_list:
-        if log_path.endswith("_overflow"):
-            base_name = log_path[:-9]
+        if log_path.endswith(OVERFLOW_SUFFIX):
+            base_name = log_path[: -len(OVERFLOW_SUFFIX)]
             if base_name not in test_groups:
                 test_groups[base_name] = {}
             test_groups[base_name]["overflow"] = log_path
-        elif log_path.endswith("_recovery"):
-            base_name = log_path[:-9]
+        elif log_path.endswith(RECOVERY_SUFFIX):
+            base_name = log_path[: -len(RECOVERY_SUFFIX)]
             if base_name not in test_groups:
                 test_groups[base_name] = {}
             test_groups[base_name]["recovery"] = log_path
