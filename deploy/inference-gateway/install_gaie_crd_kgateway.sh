@@ -32,9 +32,11 @@ INFERENCE_EXTENSION_VERSION=v0.5.1
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/$INFERENCE_EXTENSION_VERSION/manifests.yaml -n  $MODEL_NAMESPACE
 
 
-# Install the Kgateway CRDs and Kgateway
+# Install and upgrade Kgateway (includes CRDs)
 KGATEWAY_VERSION=v2.0.3
 KGATEWAY_SYSTEM_NAMESPACE=kgateway-system
+kubectl create namespace $KGATEWAY_SYSTEM_NAMESPACE || true
+
 helm upgrade -i --create-namespace --namespace $KGATEWAY_SYSTEM_NAMESPACE --version $KGATEWAY_VERSION kgateway-crds oci://cr.kgateway.dev/kgateway-dev/charts/kgateway-crds
 
 helm upgrade -i --namespace $KGATEWAY_SYSTEM_NAMESPACE --version $KGATEWAY_VERSION kgateway oci://cr.kgateway.dev/kgateway-dev/charts/kgateway --set inferenceExtension.enabled=true
