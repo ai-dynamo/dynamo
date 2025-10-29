@@ -278,7 +278,7 @@ def results_summary():
         return
 
     # Step 1: Group directories
-    test_groups = {}
+    test_groups: dict[str, dict[str, str]] = {}
 
     for log_path in global_result_list:
         if log_path.endswith(OVERFLOW_SUFFIX):
