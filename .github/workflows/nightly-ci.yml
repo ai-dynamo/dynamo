@@ -1,0 +1,47 @@
+name: Nightly CI
+
+on:
+  schedule:
+    - cron: '0 8 * * *'  # Every day at 12:00 AM PST (08:00 UTC)
+  workflow_dispatch:
+
+jobs:
+  vllm:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: gpu-l40-amd64 }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+    name: vllm (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Build Container
+        uses: ./.github/actions/docker-build
+        with:
+          framework: vllm
+          ...
+      - name: Docker Tag and Push
+        uses: ./.github/actions/docker-tag-push
+        with:
+          ...
+      - name: Run unit tests
+        if: ${{ matrix.platform.arch != 'arm64' }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          pytest_marks: "nightly and vllm and unit"
+          framework: "vllm"
+          test_type: "unit"
+          platform_arch: ${{ matrix.platform.arch }}
+      - name: Run e2e tests
+        if: ${{ matrix.platform.arch != 'arm64' }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          pytest_marks: "nightly and vllm and gpu_1"
+          framework: "vllm"
+          test_type: "e2e"
+          platform_arch: ${{ matrix.platform.arch }}
