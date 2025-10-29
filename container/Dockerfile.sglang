@@ -49,7 +49,7 @@ ARG DEEPEP_GB_COMMIT=1b14ad661c7640137fcfe93cccb2694ede1220b0
 ARG CMAKE_BUILD_PARALLEL_LEVEL=2
 ARG FLASHMLA_COMMIT=1408756a88e52a25196b759eaf8db89d2b51b5a1
 ARG SGL_KERNEL_VERSION=0.3.15
-ARG SGLANG_COMMIT=0.5.3.post2
+ARG SGLANG_COMMIT=0.5.4.post1
 ARG GDRCOPY_COMMIT=v2.4.4
 ARG NVSHMEM_VERSION=3.3.9
 ARG GRACE_BLACKWELL=false
@@ -400,6 +400,18 @@ CMD []
 FROM runtime AS dev
 
 ARG WORKSPACE_DIR=/sgl-workspace/dynamo
+ARG PYTHON_VERSION
+
+# NOTE: SGLang uses system Python (not a virtualenv in framework/runtime stages) to align with
+# upstream SGLang Dockerfile: https://github.com/sgl-project/sglang/blob/main/docker/Dockerfile
+# For dev stage, we create a lightweight venv with --system-site-packages to satisfy maturin develop
+# requirements while still accessing all system-installed packages (sglang, torch, deepep, etc.)
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+RUN mkdir -p /opt/dynamo/venv && \
+    uv venv /opt/dynamo/venv --python $PYTHON_VERSION --system-site-packages
+
+ENV VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH="/opt/dynamo/venv/bin:${PATH}"
 
 # Install development tools and utilities
 RUN apt-get update -y && \

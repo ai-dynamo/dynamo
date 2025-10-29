@@ -174,7 +174,7 @@ impl EtcdBucket {
         tracing::trace!("etcd create: {k}");
 
         // Use atomic transaction to check and create in one operation
-        let put_options = PutOptions::new().with_lease(self.client.primary_lease().id() as i64);
+        let put_options = PutOptions::new().with_lease(self.client.lease_id() as i64);
 
         // Build transaction that creates key only if it doesn't exist
         let txn = Txn::new()
@@ -243,7 +243,7 @@ impl EtcdBucket {
         }
 
         let put_options = PutOptions::new()
-            .with_lease(self.client.primary_lease().id() as i64)
+            .with_lease(self.client.lease_id() as i64)
             .with_prev_key();
         let mut put_resp = self
             .client

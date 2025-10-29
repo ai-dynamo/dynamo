@@ -1874,7 +1874,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 															Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 														},
 													},
-													TimeoutSeconds:   30,
+													TimeoutSeconds:   4,
 													PeriodSeconds:    5,
 													SuccessThreshold: 0,
 													FailureThreshold: 1,
@@ -1886,10 +1886,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 															Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 														},
 													},
-													TimeoutSeconds:   30,
+													TimeoutSeconds:   4,
 													PeriodSeconds:    10,
 													SuccessThreshold: 0,
-													FailureThreshold: 60,
+													FailureThreshold: 3,
 												},
 												StartupProbe: &corev1.Probe{
 													ProbeHandler: corev1.ProbeHandler{
@@ -4549,7 +4549,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 								},
 							},
 							PeriodSeconds:    5,
-							TimeoutSeconds:   30,
+							TimeoutSeconds:   4,
 							FailureThreshold: 1,
 						},
 						ReadinessProbe: &corev1.Probe{
@@ -4560,8 +4560,8 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 								},
 							},
 							PeriodSeconds:    10,
-							TimeoutSeconds:   30,
-							FailureThreshold: 60,
+							TimeoutSeconds:   4,
+							FailureThreshold: 3,
 						},
 						StartupProbe: &corev1.Probe{
 							ProbeHandler: corev1.ProbeHandler{
