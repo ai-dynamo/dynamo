@@ -441,7 +441,8 @@ impl ValidateRequest for NvCreateCompletionRequest {
         validate::validate_top_k(self.get_top_k())?;
         // Cross-field validation
         validate::validate_n_with_temperature(self.inner.n, self.inner.temperature)?;
-
+        // total choices validation for completions batch requests
+        validate::validate_total_choices(get_prompt_batch_size(&self.inner.prompt), self.inner.n.unwrap_or(1))?;
         Ok(())
     }
 }

@@ -319,7 +319,6 @@ async fn completions(
     stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
     use crate::protocols::openai::completions::get_prompt_batch_size;
-    use crate::protocols::openai::validate::validate_total_choices;
 
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -329,14 +328,6 @@ async fn completions(
     // Detect batch prompts
     let batch_size = get_prompt_batch_size(&request.inner.prompt);
     let n = request.inner.n.unwrap_or(1);
-
-    // Validate total choices doesn't exceed maximum
-    validate_total_choices(batch_size, n).map_err(|e| {
-        ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: e.to_string(),
-        })
-    })?;
 
     // If single prompt or single-element batch, use original flow
     if batch_size == 1 {
