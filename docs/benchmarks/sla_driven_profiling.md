@@ -345,7 +345,6 @@ spec:
 
       sweep:
         use_ai_configurator: false
-        skip_existing_results: false
 
   deploymentOverrides:
     workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
