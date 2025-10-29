@@ -35,10 +35,10 @@ kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extens
 # Install the Kgateway CRDs and Kgateway
 KGATEWAY_VERSION=v2.0.3
 KGATEWAY_SYSTEM_NAMESPACE=kgateway-system
-helm repo add kgateway-dev oci://cr.kgateway.dev/kgateway-dev || true
 helm upgrade -i --create-namespace --namespace $KGATEWAY_SYSTEM_NAMESPACE --version $KGATEWAY_VERSION kgateway-crds oci://cr.kgateway.dev/kgateway-dev/charts/kgateway-crds
+
 helm upgrade -i --namespace $KGATEWAY_SYSTEM_NAMESPACE --version $KGATEWAY_VERSION kgateway oci://cr.kgateway.dev/kgateway-dev/charts/kgateway --set inferenceExtension.enabled=true
 
 
 # Deploy the Gateway Instance
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/raw/main/config/manifests/gateway/kgateway/gateway.yaml -n $MODEL_NAMESPACE
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/raw/v1.0.0/config/manifests/gateway/kgateway/gateway.yaml -n $MODEL_NAMESPACE
