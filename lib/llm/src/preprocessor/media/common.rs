@@ -13,7 +13,6 @@ pub struct EncodedMediaData {
 
 impl EncodedMediaData {
     // Handles both web URLs (will download the bytes) and data URLs (will keep b64-encoded)
-    // This function is kept in tokio runtime so we do not want any expensive operations
     pub async fn from_url(url: &url::Url, client: &reqwest::Client) -> Result<Self> {
         let (bytes, b64_encoded) = match url.scheme() {
             "data" => {
