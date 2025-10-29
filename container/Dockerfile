@@ -125,8 +125,6 @@ RUN apt-get update -y \
         clang \
         libclang-dev \
         protobuf-compiler \
-        # For sudo support
-        sudo \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -360,9 +358,7 @@ WORKDIR /opt/dynamo
 RUN groupadd dynamo && \
     useradd -g dynamo -m -s /bin/bash dynamo && \
     mkdir -p /home/dynamo && \
-    chown -R dynamo:dynamo /opt/dynamo && \
-    echo dynamo ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/dynamo && \
-    chmod 0440 /etc/sudoers.d/dynamo
+    chown -R dynamo:dynamo /opt/dynamo
 
 # Switch to dynamo user
 USER dynamo
