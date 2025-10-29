@@ -47,10 +47,10 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 				Port: intstr.FromString(commonconsts.DynamoContainerPortName),
 			},
 		},
-		InitialDelaySeconds: 60,
-		PeriodSeconds:       60,
-		TimeoutSeconds:      30,
-		FailureThreshold:    10,
+		InitialDelaySeconds: 15, // Frontend ready to serve requests in ~5-10 seconds
+		PeriodSeconds:       10,
+		TimeoutSeconds:      1, // live endpoint performs no i/o
+		FailureThreshold:    3,
 	}
 
 	container.ReadinessProbe = &corev1.Probe{
@@ -60,10 +60,10 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 				Port: intstr.FromString(commonconsts.DynamoContainerPortName),
 			},
 		},
-		InitialDelaySeconds: 60,
-		PeriodSeconds:       60,
-		TimeoutSeconds:      30,
-		FailureThreshold:    10,
+		InitialDelaySeconds: 10, // Frontend ready to serve requests in ~5-10 seconds
+		PeriodSeconds:       10,
+		TimeoutSeconds:      3,
+		FailureThreshold:    3,
 	}
 
 	// Add standard environment variables
