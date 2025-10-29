@@ -132,7 +132,7 @@ Found existing namespace-restricted Dynamo operators in namespaces: ...
 
 > [!TIP]
 > For multinode deployments, you need to install multinode orchestration components:
-> 
+>
 > **Option 1 (Recommended): Grove + KAI Scheduler**
 > - Grove and KAI Scheduler can be installed manually or through the dynamo-platform helm install command.
 > - When using the dynamo-platform helm install command, Grove and KAI Scheduler are NOT installed by default. You can enable their installation by setting the following flags:
