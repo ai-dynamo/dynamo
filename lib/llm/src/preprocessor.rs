@@ -27,7 +27,7 @@ use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
-use crate::preprocessor::media::{MediaDecoder, MediaLoader};
+use crate::preprocessor::media::MediaLoader;
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder,
@@ -146,7 +146,7 @@ impl OpenAIPreprocessor {
         let runtime_config = mdc.runtime_config.clone();
         let media_loader = match mdc.media_decoder.clone() {
             Some(decoder) => Some(MediaLoader::new(decoder)?),
-            None => Some(MediaLoader::new(MediaDecoder::default())?),
+            None => None,
         };
 
         Ok(Arc::new(Self {
@@ -159,6 +159,7 @@ impl OpenAIPreprocessor {
             media_loader,
         }))
     }
+
     /// Encode a string to it's tokens
     pub fn tokenize(&self, s: &str) -> anyhow::Result<Encoding> {
         self.tokenizer.encode(s)
@@ -284,6 +285,7 @@ impl OpenAIPreprocessor {
         let messages = request.messages();
         let message_count = messages.len().unwrap_or(0);
         let mut media_map: MultimodalDataMap = HashMap::new();
+        let mut fetch_tasks = Vec::new();
 
         for idx in 0..message_count {
             let msg = messages
@@ -301,7 +303,6 @@ impl OpenAIPreprocessor {
                 _ => continue,
             };
 
-            // Iterate over content parts
             for content_part in content_parts {
                 let (type_str, url) = match content_part {
                     ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
@@ -316,16 +317,30 @@ impl OpenAIPreprocessor {
                     _ => continue,
                 };
 
-                let map_item = media_map.entry(type_str.clone()).or_default();
-
-                if let Some(loader) = &self.media_loader {
-                    let rdma_descriptor = loader.fetch_and_decode_media_part(content_part).await?;
-                    map_item.push(MultimodalData::Decoded(rdma_descriptor));
+                if self.media_loader.is_some() {
+                    // Store content part for parallel execution later
+                    fetch_tasks.push((type_str, content_part.clone()));
                 } else {
-                    map_item.push(MultimodalData::Url(url));
+                    // No loader, just store URL directly
+                    media_map.entry(type_str).or_default().push(MultimodalData::Url(url));
                 }
             }
         }
+
+        // Execute all fetch/decode tasks
+        if !fetch_tasks.is_empty() {
+            let loader = self.media_loader.as_ref().unwrap();
+            let results = futures::future::join_all(
+                fetch_tasks.iter().map(|(_, content_part)| loader.fetch_and_decode_media_part(content_part))
+            ).await;
+
+            for ((type_str, _), result) in fetch_tasks.into_iter().zip(results.into_iter()) {
+                // if one item fails, errors the whole request, other items will be cleaned up by Drop
+                let rdma_descriptor = result?;
+                media_map.entry(type_str).or_default().push(MultimodalData::Decoded(rdma_descriptor));
+            }
+        }
+
         if !media_map.is_empty() {
             builder.multi_modal_data(Some(media_map));
         }

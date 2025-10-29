@@ -502,8 +502,7 @@ fn build_message(text: &str, chunks: &[(&str, usize)]) -> String {
         for i in 1..=*count {
             let chunk = match *chunk_type {
                 "image_url" => format!(
-                    r#"{{"type": "image_url", "image_url": {{"url": "https://example.com/img{}.jpg"}}}}"#,
-                    i
+                    r#"{{"type": "image_url", "image_url": {{"url": "https://developer-blogs.nvidia.com/wp-content/uploads/2023/11/llm-optimize-deploy-graphic.png"}}}}"#
                 ),
                 "video_url" => format!(
                     r#"{{"type": "video_url", "video_url": {{"url": "https://example.com/vid{}.mp4"}}}}"#,
@@ -525,7 +524,7 @@ fn build_message(text: &str, chunks: &[(&str, usize)]) -> String {
     )
 }
 
-/// Test the preprocessor with multimodal data (single and mixed types) to verify gather_multi_modal_data code path
+/// Test the preprocessor with multimodal data URL passthrough (without media loader)
 #[rstest]
 // No media case
 #[case::no_media(&[])]
@@ -536,10 +535,10 @@ fn build_message(text: &str, chunks: &[(&str, usize)]) -> String {
 // Mixed media types
 #[case::mixed_multiple(&[("image_url", 2), ("video_url", 1), ("audio_url", 2)])]
 #[tokio::test]
-async fn test_media_url_passthrough(#[case] media_chunks: &[(&str, usize)]) {
+async fn test_media_url_passthrough(#[case] media_chunks: &[(&str, usize)]) -> anyhow::Result<()> {
     if let Err(e) = get_hf_token() {
         println!("HF_TOKEN is not set, skipping test: {}", e);
-        return;
+        return Ok(());
     }
 
     let mdcs = make_mdcs().await;
@@ -551,7 +550,7 @@ async fn test_media_url_passthrough(#[case] media_chunks: &[(&str, usize)]) {
         let message = build_message("Test multimodal content", media_chunks);
         let request = Request::from(&message, None, None, mdc.slug().to_string());
 
-        let (preprocessed, _annotations) = preprocessor.preprocess_request(&request).unwrap();
+        let (preprocessed, _annotations) = preprocessor.preprocess_request(&request).await?;
 
         // Verify multimodal data handling
         if media_chunks.is_empty() {
@@ -562,7 +561,7 @@ async fn test_media_url_passthrough(#[case] media_chunks: &[(&str, usize)]) {
                 "Multimodal data should be None or empty when no media is present"
             );
         } else {
-            // Media present - should be captured
+            // Media present - should be captured as URLs
             assert!(
                 preprocessed.multi_modal_data.is_some(),
                 "Multimodal data should be present"
@@ -586,4 +585,81 @@ async fn test_media_url_passthrough(#[case] media_chunks: &[(&str, usize)]) {
             }
         }
     }
+    Ok(())
+}
+
+/// Test the preprocessor with actual media decoding (with media loader)
+#[rstest]
+// Single image
+#[case::single_image(&[("image_url", 1)])]
+// Multiple images
+#[case::three_images(&[("image_url", 3)])]
+#[tokio::test]
+async fn test_media_decoding(#[case] media_chunks: &[(&str, usize)]) -> anyhow::Result<()> {
+    if let Err(e) = get_hf_token() {
+        println!("HF_TOKEN is not set, skipping test: {}", e);
+        return Ok(());
+    }
+
+    let mdcs = make_mdcs().await;
+
+    for mdc in mdcs.iter() {
+        // Configure MDC with media decoder
+        let mut mdc = mdc.clone();
+        mdc.media_decoder = Some(dynamo_llm::preprocessor::media::MediaDecoder::default());
+
+        let preprocessor = dynamo_llm::preprocessor::OpenAIPreprocessor::new(mdc.clone()).unwrap();
+
+        // Build the message with the specified media chunks
+        let message = build_message("Test multimodal content", media_chunks);
+        let request = Request::from(&message, None, None, mdc.slug().to_string());
+
+        let (preprocessed, _annotations) = preprocessor.preprocess_request(&request).await?;
+
+        // Verify multimodal data was decoded
+        assert!(
+            preprocessed.multi_modal_data.is_some(),
+            "Multimodal data should be present"
+        );
+        let media_map = preprocessed.multi_modal_data.as_ref().unwrap();
+
+        // Check each media type and count
+        for (media_type, expected_count) in media_chunks {
+            assert!(
+                media_map.contains_key(*media_type),
+                "Should contain {} key",
+                media_type
+            );
+            let items = media_map.get(*media_type).unwrap();
+            assert_eq!(
+                items.len(),
+                *expected_count,
+                "Should have {} {} item(s)",
+                expected_count,
+                media_type
+            );
+
+            // Verify items are decoded (not URLs)
+            for item in items {
+                match item {
+                    dynamo_llm::protocols::common::preprocessor::MultimodalData::Decoded(descriptor) => {
+                        // Verify it's actually decoded with expected properties
+                        assert_eq!(descriptor.dtype(), "uint8", "Should be uint8 dtype");
+                        assert!(!descriptor.shape().is_empty(), "Shape should not be empty");
+
+                        // For the NVIDIA image, verify dimensions
+                        if *media_type == "image_url" {
+                            assert_eq!(descriptor.shape()[0], 1125, "Height should be 1125");
+                            assert_eq!(descriptor.shape()[1], 1999, "Width should be 1999");
+                            assert_eq!(descriptor.shape()[2], 4, "RGBA channels should be 4");
+                        }
+                    }
+                    dynamo_llm::protocols::common::preprocessor::MultimodalData::Url(_) => {
+                        panic!("Expected decoded media, got URL");
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }

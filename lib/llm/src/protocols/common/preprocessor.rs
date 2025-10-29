@@ -16,7 +16,7 @@ pub enum MultimodalData {
     Decoded(RdmaMediaDataDescriptor),
 }
 
-// (type, data)
+// multimodal map containing {mm_part_type: [data...]}
 pub type MultimodalDataMap = std::collections::HashMap<String, Vec<MultimodalData>>;
 
 /// [`PreprocessedRequest`] is the internal representation of an LLM request. The [`dynamo.llm-preprocessor`]

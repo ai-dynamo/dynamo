@@ -227,6 +227,7 @@ impl LocalModelBuilder {
             self.runtime_config.max_num_batched_tokens =
                 mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
             self.runtime_config.data_parallel_size = mocker_engine_args.dp_size;
+            self.media_decoder = Some(MediaDecoder::default());
         }
 
         // frontend and echo engine don't need a path.
@@ -238,8 +239,7 @@ impl LocalModelBuilder {
             card.migration_limit = self.migration_limit;
             card.user_data = self.user_data.take();
             card.runtime_config = self.runtime_config.clone();
-            //card.media_decoder = self.media_decoder.clone();
-            card.media_decoder = Some(MediaDecoder::default());
+            card.media_decoder = self.media_decoder.clone();
 
             return Ok(LocalModel {
                 card,
@@ -290,7 +290,7 @@ impl LocalModelBuilder {
         card.migration_limit = self.migration_limit;
         card.user_data = self.user_data.take();
         card.runtime_config = self.runtime_config.clone();
-        card.media_decoder = Some(MediaDecoder::default());
+        card.media_decoder = self.media_decoder.clone();
 
         Ok(LocalModel {
             card,
