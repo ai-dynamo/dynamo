@@ -616,7 +616,6 @@ def add_token_overflow_scenarios():
             time=30,  # Start after 30 seconds
             max_seq_len=MAX_SEQ_LEN,
             overflow_multiplier=OVERFLOW_MULTIPLIER,
-            duration=30,  # Send overflow requests for 30 seconds
         )
 
         # Create mixed load configuration for overflow + recovery testing
