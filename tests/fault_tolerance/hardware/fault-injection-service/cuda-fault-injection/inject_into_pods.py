@@ -126,7 +126,7 @@ def delete_cuda_fault_configmap(namespace):
         return False
 
 
-def patch_deployment_env(deployment_name, namespace, enable=True, use_configmap=True, target_node=None):
+def patch_deployment_env(deployment_name, namespace, enable=True, use_configmap=True, target_node=None, xid_type=79):
     """Patch deployment to add/remove LD_PRELOAD environment variable.
     
     Args:
@@ -135,7 +135,8 @@ def patch_deployment_env(deployment_name, namespace, enable=True, use_configmap=
         enable: Whether to enable (True) or disable (False) CUDA fault injection
         use_configmap: Whether to use ConfigMap for library distribution
         target_node: If provided, adds node affinity to pin pods to this node
-                    (simulates real XID 79 where pods crash on the faulty node)
+                    (simulates real XID where pods crash on the faulty node)
+        xid_type: XID error type to simulate (79, 48, 94, 95, 43, 74). Default: 79
     """
     custom_api = client.CustomObjectsApi()
     apps_api = client.AppsV1Api()
@@ -180,7 +181,8 @@ def patch_deployment_env(deployment_name, namespace, enable=True, use_configmap=
             if enable:
                 new_envs = [
                     {"name": "LD_PRELOAD", "value": lib_path},
-                    {"name": "CUDA_FAULT_INJECTION_ENABLED", "value": "1"}
+                    {"name": "CUDA_FAULT_INJECTION_ENABLED", "value": "1"},
+                    {"name": "CUDA_XID_TYPE", "value": str(xid_type)}
                 ]
             
             # Patch worker services (VllmDecodeWorker and VllmPrefillWorker)
@@ -203,10 +205,10 @@ def patch_deployment_env(deployment_name, namespace, enable=True, use_configmap=
                     if "env" not in service["extraPodSpec"]["mainContainer"]:
                         service["extraPodSpec"]["mainContainer"]["env"] = []
                     
-                    # Remove existing LD_PRELOAD and CUDA_FAULT_INJECTION_ENABLED if present
+                    # Remove existing LD_PRELOAD, CUDA_FAULT_INJECTION_ENABLED, and CUDA_XID_TYPE if present
                     service["extraPodSpec"]["mainContainer"]["env"] = [
                         env for env in service["extraPodSpec"]["mainContainer"]["env"]
-                        if env.get("name") not in ["LD_PRELOAD", "CUDA_FAULT_INJECTION_ENABLED"]
+                        if env.get("name") not in ["LD_PRELOAD", "CUDA_FAULT_INJECTION_ENABLED", "CUDA_XID_TYPE"]
                     ]
                     
                     # Add new environment variables if enabling
@@ -366,14 +368,16 @@ def patch_deployment_env(deployment_name, namespace, enable=True, use_configmap=
                 
                 if json_patches:
                     try:
+                        # Note: Kubernetes Python client uses 'content_type' not '_content_type'
+                        import kubernetes.client.models as models
                         custom_api.patch_namespaced_custom_object(
                             group="nvidia.com",
                             version="v1alpha1",
                             namespace=namespace,
                             plural="dynamographdeployments",
                             name=deployment_name,
-                            body=json_patches,
-                            _content_type="application/json-patch+json"
+                            body=json_patches
+                            # content_type parameter not needed for json-patch, it's inferred from body type
                         )
                         print(f"      ✓ JSON patch applied for affinity removal")
                     except Exception as e:
@@ -411,10 +415,10 @@ def patch_deployment_env(deployment_name, namespace, enable=True, use_configmap=
         if container.env is None:
             container.env = []
         
-        # Remove existing LD_PRELOAD and CUDA_FAULT_INJECTION_ENABLED
+        # Remove existing LD_PRELOAD, CUDA_FAULT_INJECTION_ENABLED, and CUDA_XID_TYPE
         container.env = [
             e for e in container.env 
-            if e.name not in ["LD_PRELOAD", "CUDA_FAULT_INJECTION_ENABLED"]
+            if e.name not in ["LD_PRELOAD", "CUDA_FAULT_INJECTION_ENABLED", "CUDA_XID_TYPE"]
         ]
         
         if enable:
@@ -424,6 +428,9 @@ def patch_deployment_env(deployment_name, namespace, enable=True, use_configmap=
             )
             container.env.append(
                 client.V1EnvVar(name="CUDA_FAULT_INJECTION_ENABLED", value="1")
+            )
+            container.env.append(
+                client.V1EnvVar(name="CUDA_XID_TYPE", value=str(xid_type))
             )
     
     try:
