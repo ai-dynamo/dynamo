@@ -1,8 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
-import asyncio
-import json
 import logging
 import os
 import random
@@ -10,15 +7,25 @@ import string
 import tempfile
 from typing import Any, Dict, Optional
 
-import aiohttp
-import nats
 import pytest
 
-from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
+from tests.router.common import (  # utilities
+    KVRouterProcess,
+    _test_python_router_bindings,
+    _test_router_basic,
+    _test_router_decisions,
+    _test_router_indexers_sync,
+    _test_router_overload_503,
+    _test_router_query_instance_id,
+    _test_router_two_routers,
+    generate_random_suffix,
+    get_runtime,
+)
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 
 pytestmark = pytest.mark.pre_merge
+
 
 logger = logging.getLogger(__name__)
 
@@ -44,15 +51,10 @@ def file_storage_backend():
 
 MODEL_NAME = ROUTER_MODEL_NAME
 NUM_MOCKERS = 2
-BLOCK_SIZE = 16
 SPEEDUP_RATIO = 10.0
-NUM_REQUESTS = 100
 PORT = 8090  # Starting port for mocker instances
-
-
-def generate_random_suffix() -> str:
-    """Generate a 10-character random alphabetic suffix for namespace isolation."""
-    return "".join(random.choices(string.ascii_lowercase, k=10))
+NUM_REQUESTS = 100
+BLOCK_SIZE = 16
 
 
 # Shared test payload for all tests
@@ -82,8 +84,10 @@ class MockerProcess:
         # Generate a unique namespace suffix shared by all mockers
         namespace_suffix = generate_random_suffix()
         self.namespace = f"test-namespace-{namespace_suffix}"
-        self.endpoint = f"dyn://{self.namespace}.mocker.generate"
+        self.component_name = "mocker"
+        self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_mockers = num_mockers
+        self.num_workers = self.num_mockers  # for compatibility with common.py
         self.mocker_processes = []
 
         # Default mocker args if not provided
@@ -163,6 +167,7 @@ class MockerProcess:
             process.__exit__(exc_type, exc_val, exc_tb)
 
 
+<<<<<<< HEAD
 class KVRouterProcess(ManagedProcess):
     """Manages the KV router process using dynamo.frontend"""
 
@@ -510,6 +515,8 @@ async def wait_for_mockers_ready(
     return sorted(instance_ids)
 
 
+=======
+>>>>>>> 1612b2cbd (fixing bad rebase)
 @pytest.mark.pre_merge
 @pytest.mark.model(MODEL_NAME)
 def test_mocker_kv_router(request, runtime_services, predownload_tokenizers):
@@ -529,7 +536,7 @@ def test_mocker_kv_router(request, runtime_services, predownload_tokenizers):
         frontend_port = PORT
         logger.info(f"Starting KV router frontend on port {frontend_port}")
 
-        kv_router = KVRouterProcess(request, frontend_port)
+        kv_router = KVRouterProcess(request, BLOCK_SIZE, frontend_port)
         kv_router.__enter__()
 
         # Start mocker instances with the new CLI interface
@@ -540,18 +547,14 @@ def test_mocker_kv_router(request, runtime_services, predownload_tokenizers):
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
-        # Use async to send requests concurrently for better performance
-        asyncio.run(
-            send_inflight_requests(
-                [
-                    f"http://localhost:{frontend_port}/v1/chat/completions"
-                ],  # Pass as list
-                TEST_PAYLOAD,
-                NUM_REQUESTS,
-            )
+        # Run basic router test (mocker workers don't need frontend readiness check)
+        _test_router_basic(
+            frontend_port=frontend_port,
+            num_workers=NUM_MOCKERS,
+            test_payload=TEST_PAYLOAD,
+            num_requests=NUM_REQUESTS,
+            wait_for_frontend=False,  # Mocker workers are fast, no need to wait
         )
-
-        logger.info(f"Successfully completed {NUM_REQUESTS} requests")
 
     finally:
         # Clean up
@@ -564,6 +567,7 @@ def test_mocker_kv_router(request, runtime_services, predownload_tokenizers):
 
 @pytest.mark.pre_merge
 @pytest.mark.model(MODEL_NAME)
+<<<<<<< HEAD
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])
 def test_mocker_two_kv_router(
     request,
@@ -584,11 +588,15 @@ def test_mocker_two_kv_router(
     )
 
     # Create mocker args dictionary: FixtureRequest: tuple[NatsServer, EtcdServer]: NoneType
+=======
+def test_mocker_two_kv_router(request, runtime_services, predownload_tokenizers):
+    """Test two KV routers with mocker engines and consumer lifecycle verification."""
+    logger.info("Starting mocker two KV router test")
+>>>>>>> 1612b2cbd (fixing bad rebase)
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
 
-    kv_routers = []
-
     try:
+<<<<<<< HEAD
         # Start two KV routers (frontend) on ports 8091 and 8092
         router_ports = [PORT + 1, PORT + 2]  # 8091 and 8092
 
@@ -599,6 +607,9 @@ def test_mocker_two_kv_router(
             kv_routers.append(kv_router)
 
         # Start mocker instances with the new CLI interface
+=======
+        # Start mocker instances
+>>>>>>> 1612b2cbd (fixing bad rebase)
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
         mockers = MockerProcess(
             request,
@@ -609,20 +620,18 @@ def test_mocker_two_kv_router(
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
-        # Build URLs for both routers
-        router_urls = [
-            f"http://localhost:{port}/v1/chat/completions" for port in router_ports
-        ]
-
-        # Use async to send requests concurrently, alternating between routers
-        asyncio.run(
-            send_inflight_requests(
-                router_urls,
-                TEST_PAYLOAD,
-                NUM_REQUESTS,
-            )
+        # Run two-router test with consumer lifecycle verification
+        router_ports = [PORT + 1, PORT + 2]  # 8091 and 8092
+        _test_router_two_routers(
+            engine_workers=mockers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            router_ports=router_ports,
+            test_payload=TEST_PAYLOAD,
+            num_requests=NUM_REQUESTS,
         )
 
+<<<<<<< HEAD
         logger.info(
             f"Successfully completed {NUM_REQUESTS} requests across {len(router_ports)} routers"
         )
@@ -666,12 +675,9 @@ def test_mocker_two_kv_router(
         # Clear the kv_routers list since we've already cleaned them up
         kv_routers = []
 
+=======
+>>>>>>> 1612b2cbd (fixing bad rebase)
     finally:
-        # Clean up any remaining routers (in case of error before consumer verification)
-        for kv_router in kv_routers:
-            kv_router.__exit__(None, None, None)
-
-        # Clean up mockers
         if "mockers" in locals():
             mockers.__exit__(None, None, None)
 
@@ -682,12 +688,7 @@ def test_mocker_two_kv_router(
 def test_mocker_kv_router_overload_503(
     request, runtime_services, predownload_tokenizers
 ):
-    """
-    Test that KV router returns 503 when all workers are busy.
-    This test uses limited resources to intentionally trigger the overload condition.
-    """
-
-    # runtime_services starts etcd and nats
+    """Test that KV router returns 503 when mocker workers are overloaded."""
     logger.info("Starting mocker KV router overload test for 503 status")
     # Create mocker args dictionary with limited resources
     mocker_args = {
@@ -697,149 +698,24 @@ def test_mocker_kv_router_overload_503(
     }
 
     try:
-        # Start KV router (frontend) with limited block size
-        frontend_port = PORT + 10  # Use different port to avoid conflicts
-        logger.info(
-            f"Starting KV router frontend on port {frontend_port} with limited resources"
-        )
-
-        # Custom command for router with limited block size
-        command = [
-            "python",
-            "-m",
-            "dynamo.frontend",
-            "--busy-threshold",
-            "0.2",
-            "--kv-cache-block-size",
-            "4",  # Match the mocker's block size
-            "--router-mode",
-            "kv",
-            "--http-port",
-            str(frontend_port),
-        ]
-
-        kv_router = ManagedProcess(
-            command=command,
-            timeout=60,
-            display_output=True,
-            health_check_ports=[frontend_port],
-            health_check_urls=[
-                (
-                    f"http://localhost:{frontend_port}/v1/models",
-                    lambda r: r.status_code == 200,
-                )
-            ],
-            log_dir=request.node.name,
-            terminate_existing=False,
-        )
-        kv_router.__enter__()
-
-        # Start single mocker instance with limited resources using the new CLI interface
+        # Start single mocker instance with limited resources
         logger.info("Starting single mocker instance with limited resources")
         mockers = MockerProcess(request, mocker_args=mocker_args, num_mockers=1)
         logger.info(f"Mocker using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
-        url = f"http://localhost:{frontend_port}/v1/chat/completions"
-
-        # Custom payload for 503 test with more tokens to consume resources
-        test_payload_503 = {
-            **TEST_PAYLOAD,
-            "max_tokens": 50,  # Longer output to consume more blocks
-        }
-
-        # First, send one request with retry to ensure system is ready
-        logger.info("Sending initial request to ensure system is ready...")
-        asyncio.run(send_inflight_requests([url], test_payload_503, 1))
-
-        # Now send 50 concurrent requests to exhaust resources, then verify 503
-        logger.info("Sending 50 concurrent requests to exhaust resources...")
-
-        async def exhaust_resources_and_verify_503():
-            async with aiohttp.ClientSession() as session:
-                # Start 50 long-running requests concurrently
-                tasks = []
-                for i in range(50):
-                    # Create unique shuffled content for each request
-                    content_words = TEST_PAYLOAD["messages"][0]["content"].split()
-                    random.shuffle(content_words)
-                    shuffled_content = " ".join(content_words)
-
-                    # Create unique payload for this request
-                    unique_payload = {
-                        **TEST_PAYLOAD,
-                        "max_tokens": 50,
-                        "messages": [
-                            {**TEST_PAYLOAD["messages"][0], "content": shuffled_content}
-                        ],
-                    }
-
-                    async def send_long_request(req_id, payload):
-                        try:
-                            async with session.post(url, json=payload) as response:
-                                if response.status == 200:
-                                    # Don't read the response fully, just hold the connection
-                                    await asyncio.sleep(
-                                        10
-                                    )  # Hold connection for 10 seconds
-                                    return True
-                                else:
-                                    logger.info(
-                                        f"Request {req_id} got status {response.status}"
-                                    )
-                                    return False
-                        except Exception as e:
-                            logger.info(f"Request {req_id} failed: {e}")
-                            return False
-
-                    tasks.append(
-                        asyncio.create_task(send_long_request(i, unique_payload))
-                    )
-
-                # Wait briefly to ensure requests are in-flight
-                await asyncio.sleep(0.2)
-
-                # Now send one more request that should get 503
-                logger.info("Sending additional request that should receive 503...")
-                try:
-                    async with session.post(url, json=test_payload_503) as response:
-                        status_code = response.status
-                        if status_code == 503:
-                            body = await response.json()
-                            logger.info(f"Got expected 503 response: {body}")
-                            assert "Service temporarily unavailable" in body.get(
-                                "error", ""
-                            ) or "All workers are busy" in body.get(
-                                "error", ""
-                            ), f"Expected service overload error message, got: {body}"
-                            return True
-                        else:
-                            logger.error(f"Expected 503 but got {status_code}")
-                            if status_code == 200:
-                                logger.error(
-                                    "Request unexpectedly succeeded when it should have been rejected"
-                                )
-                            return False
-                except Exception as e:
-                    logger.error(f"Failed to send overload test request: {e}")
-                    return False
-                finally:
-                    # Cancel all background tasks
-                    for task in tasks:
-                        task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Run the test
-        success = asyncio.run(exhaust_resources_and_verify_503())
-        assert success, "Failed to verify 503 response when resources are exhausted"
-
-        logger.info("Successfully verified 503 response when all workers are busy")
+        # Run overload 503 test
+        frontend_port = PORT + 10  # Use different port to avoid conflicts
+        _test_router_overload_503(
+            engine_workers=mockers,
+            block_size=4,  # Match the mocker's block size
+            request=request,
+            frontend_port=frontend_port,
+            test_payload=TEST_PAYLOAD,
+            busy_threshold=0.2,
+        )
 
     finally:
-        # Clean up
-        if "kv_router" in locals():
-            kv_router.__exit__(None, None, None)
-
         if "mockers" in locals():
             mockers.__exit__(None, None, None)
 
@@ -847,20 +723,12 @@ def test_mocker_kv_router_overload_503(
 @pytest.mark.pre_merge
 @pytest.mark.model(MODEL_NAME)
 def test_kv_push_router_bindings(request, runtime_services, predownload_tokenizers):
-    """
-    Test KvPushRouter Python bindings with mocker engines.
-    This test creates KvPushRouter as a Python object and verifies
-    token streaming with ignore_eos=True and max_tokens=20.
-    """
-
-    # runtime_services starts etcd and nats
+    """Test KvPushRouter Python bindings with mocker engines."""
     logger.info("Starting KvPushRouter bindings test")
-
-    # Create mocker args dictionary
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
 
     try:
-        # Start mocker instances with the new CLI interface
+        # Start mocker instances
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
         mockers = MockerProcess(
             request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
@@ -870,114 +738,27 @@ def test_kv_push_router_bindings(request, runtime_services, predownload_tokenize
 
         # Get runtime and create endpoint
         runtime = get_runtime()
-        # Use the namespace from the mockers
         namespace = runtime.namespace(mockers.namespace)
-        component = namespace.component("mocker")
+        component = namespace.component(mockers.component_name)
         endpoint = component.endpoint("generate")
 
-        # Create KvRouterConfig with default settings
-        kv_router_config = KvRouterConfig()
-
-        # Create KvPushRouter Python object
-        kv_push_router = KvPushRouter(
+        # Run Python router bindings test
+        _test_python_router_bindings(
+            engine_workers=mockers,
             endpoint=endpoint,
             block_size=BLOCK_SIZE,
-            kv_router_config=kv_router_config,
+            model_name=MODEL_NAME,
+            num_workers=NUM_MOCKERS,
         )
-
-        logger.info("Created KvPushRouter Python object")
-
-        # Wait for mockers to be ready
-        asyncio.run(wait_for_mockers_ready(endpoint, kv_push_router))
-
-        # Generate random token IDs (100 to 200 tokens)
-        num_input_tokens = random.randint(100, 200)
-        token_ids = [random.randint(1, 10000) for _ in range(num_input_tokens)]
-
-        # Set up override parameters
-        router_config_override = {
-            "overlap_score_weight": 0.5,  # Override the default weight
-            "router_temperature": 0.5,  # Override the default temperature
-        }
-
-        logger.info(f"Generated {num_input_tokens} random token IDs")
-
-        # Test with full overrides
-        logger.info(
-            f"Testing with full router config overrides: {router_config_override}"
-        )
-        asyncio.run(
-            send_request_via_python_kv_router(
-                kv_python_router=kv_push_router,
-                token_ids=token_ids,
-                initial_wait=1.0,
-                max_retries=8,
-                stop_conditions={
-                    "ignore_eos": True,  # Don't stop on EOS token
-                    "max_tokens": 20,  # Generate exactly 20 tokens
-                },
-                sampling_options={"temperature": 0.7, "top_p": 0.9},
-                output_options={
-                    "include_input_tokens": False,
-                    "return_full_text": False,
-                },
-                router_config_override=router_config_override,
-            )
-        )
-
-        # Test without overrides
-        logger.info("Testing without router config overrides")
-        asyncio.run(
-            send_request_via_python_kv_router(
-                kv_python_router=kv_push_router,
-                token_ids=token_ids[:50],  # Use fewer tokens for second test,
-                initial_wait=1.0,
-                max_retries=8,
-                stop_conditions={
-                    "ignore_eos": True,  # Don't stop on EOS token
-                    "max_tokens": 10,  # Generate exactly 10 tokens for the second test
-                },
-                sampling_options={"temperature": 0.7, "top_p": 0.9},
-                output_options={
-                    "include_input_tokens": False,
-                    "return_full_text": False,
-                },
-                # No router_config_override this time
-            )
-        )
-
-        # Test with partial override (only temperature)
-        partial_override = {"router_temperature": 0.1}
-        logger.info(f"Testing with partial router config overrides: {partial_override}")
-        asyncio.run(
-            send_request_via_python_kv_router(
-                kv_python_router=kv_push_router,
-                token_ids=token_ids[:30],  # Use fewer tokens for third test,
-                initial_wait=1.0,
-                max_retries=8,
-                stop_conditions={
-                    "ignore_eos": True,  # Don't stop on EOS token
-                    "max_tokens": 5,  # Generate exactly 5 tokens for the third test
-                },
-                sampling_options={"temperature": 0.7, "top_p": 0.9},
-                output_options={
-                    "include_input_tokens": False,
-                    "return_full_text": False,
-                },
-                router_config_override=partial_override,
-            )
-        )
-
-        logger.info("KvPushRouter bindings test completed successfully")
 
     finally:
-        # Clean up mockers
         if "mockers" in locals():
             mockers.__exit__(None, None, None)
 
 
 @pytest.mark.pre_merge
 @pytest.mark.model(MODEL_NAME)
+<<<<<<< HEAD
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])
 def test_indexers_sync(
     request,
@@ -996,10 +777,15 @@ def test_indexers_sync(
     logger.info(f"Starting indexers sync test with {store_backend} storage backend")
 
     # Create mocker args dicti: FixtureRequestonary: tuple[NatsServer, EtcdServer]: NoneType
+=======
+def test_indexers_sync(request, runtime_services, predownload_tokenizers):
+    """Test that two KV routers synchronize their indexer states with mocker engines."""
+    logger.info("Starting indexers sync test")
+>>>>>>> 1612b2cbd (fixing bad rebase)
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
 
     try:
-        # Start mocker instances with the new CLI interface
+        # Start mocker instances
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
         mockers = MockerProcess(
             request,
@@ -1008,9 +794,9 @@ def test_indexers_sync(
             store_backend=store_backend,
         )
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
-        # Initialize mockers
         mockers.__enter__()
 
+<<<<<<< HEAD
         # Use async to manage the test flow
         async def test_sync():
             # Create SEPARATE runtimes for each router to ensure independence
@@ -1233,9 +1019,24 @@ def test_indexers_sync(
         asyncio.run(test_sync())
 
         logger.info("Indexers sync test completed successfully")
+=======
+        # Get runtime and create endpoint
+        runtime = get_runtime()
+        namespace = runtime.namespace(mockers.namespace)
+        component = namespace.component(mockers.component_name)
+        endpoint = component.endpoint("generate")
+
+        # Run indexers sync test
+        _test_router_indexers_sync(
+            engine_workers=mockers,
+            endpoint=endpoint,
+            block_size=BLOCK_SIZE,
+            model_name=MODEL_NAME,
+            num_workers=NUM_MOCKERS,
+        )
+>>>>>>> 1612b2cbd (fixing bad rebase)
 
     finally:
-        # Clean up mockers
         if "mockers" in locals():
             mockers.__exit__(None, None, None)
 
@@ -1245,38 +1046,13 @@ def test_indexers_sync(
 def test_query_instance_id_returns_worker_and_tokens(
     request, runtime_services, predownload_tokenizers
 ):
-    """
-    Test that the KV router correctly handles query_instance_id annotation.
-
-    When a request includes 'nvext.annotations': ['query_instance_id'], the router should:
-    1. NOT route the request to a worker immediately
-    2. Return worker_instance_id as an SSE event
-    3. Return token_data as an SSE event containing the request tokens
-    4. Term: FixtureRequestinate the stream w: tuple[NatsServer, EtcdServer]ith [DONE]: NoneType
-
-    This tests the specific code block:
-        if query_instance_id {
-            let instance_id_str = instance_id.to_string();
-            let response = Annotated::from_annotation("worker_instance_id", &instance_id_str)?;
-            let response_tokens = Annotated::from_annotation("token_data", &request.token_ids)?;
-            let stream = stream::iter(vec![response, response_tokens]);
-            return Ok(ResponseStream::new(Box::pin(stream), stream_context));
-        }
-    """
-
+    """Test query_instance_id annotation with mocker engines."""
     logger.info("Starting KV router query_instance_id annotation test")
-
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
     os.makedirs(request.node.name, exist_ok=True)
 
     try:
-        # Start KV router (frontend)
-        frontend_port = PORT + 30  # Use unique port to avoid conflicts
-        logger.info(f"Starting KV router frontend on port {frontend_port}")
-        kv_router = KVRouterProcess(request, frontend_port)
-        kv_router.__enter__()
-
-        # Start multiple mocker engines to ensure worker selection logic
+        # Start mocker instances
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
         mockers = MockerProcess(
             request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
@@ -1284,147 +1060,17 @@ def test_query_instance_id_returns_worker_and_tokens(
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
-        url = f"http://localhost:{frontend_port}/v1/chat/completions"
-
-        # Send a warming request first to ensure system is ready
-        logger.info("Sending warming request without annotations...")
-        asyncio.run(send_request_with_retry(url, TEST_PAYLOAD))
-
-        # Test payload with query_instance_id annotation
-        annotated_payload = {
-            **TEST_PAYLOAD,
-            "nvext": {"annotations": ["query_instance_id"]},
-        }
-
-        async def test_annotation_response():
-            """Send request with query_instance_id and validate response structure"""
-            async with aiohttp.ClientSession() as session:
-                logger.info("Sending request with query_instance_id annotation...")
-
-                async with session.post(url, json=annotated_payload) as response:
-                    assert (
-                        response.status == 200
-                    ), f"Expected 200 but got {response.status}"
-
-                    # Collect all response chunks
-                    response_chunks = []
-                    async for chunk in response.content:
-                        if chunk:
-                            chunk_str = chunk.decode("utf-8", errors="replace")
-                            response_chunks.append(chunk_str)
-
-                    full_response = "".join(response_chunks)
-                    logger.info(
-                        f"Full SSE response ({len(full_response)} bytes):\n{full_response}"
-                    )
-
-                    # Parse and validate the response structure
-                    events = []
-
-                    sse_parts = full_response.split("\n\n")
-
-                    for part in sse_parts:
-                        part = part.strip()
-                        if not part:
-                            continue
-
-                        if part.startswith("event:"):
-                            lines = part.split("\n")
-                            event_line = next(
-                                (line for line in lines if line.startswith("event:")),
-                                None,
-                            )
-                            data_line = next(
-                                (
-                                    line
-                                    for line in lines
-                                    if line.startswith("data:") or line.startswith(":")
-                                ),
-                                None,
-                            )
-
-                            if event_line and data_line:
-                                event_type = event_line.split(":", 1)[1].strip()
-                                if data_line.startswith("data:"):
-                                    data_value = data_line.split(":", 1)[1].strip()
-                                else:
-                                    data_value = data_line.split(":", 1)[1].strip()
-                                events.append((event_type, data_value))
-                        elif part.startswith("data:"):
-                            data_value = part.split(":", 1)[1].strip()
-
-                    logger.info(f"Parsed events: {events}")
-
-                    # Validate worker_instance_id event
-                    worker_event = next(
-                        (e for e in events if e[0] == "worker_instance_id"), None
-                    )
-                    assert (
-                        worker_event is not None
-                    ), f"Missing worker_instance_id event in: {events}"
-
-                    # Validate token_data event
-                    token_event = next(
-                        (e for e in events if e[0] == "token_data"), None
-                    )
-                    assert (
-                        token_event is not None
-                    ), f"Missing token_data event in: {events}"
-
-                    token_data_str = token_event[1].strip('"')
-                    try:
-                        token_list = json.loads(token_data_str)
-                    except json.JSONDecodeError as e:
-                        raise AssertionError(
-                            f"token_data is not valid JSON: {token_data_str}, error: {e}"
-                        )
-
-                    assert isinstance(
-                        token_list, list
-                    ), f"token_data should be a list, got: {type(token_list)}"
-                    assert (
-                        len(token_list) > 0
-                    ), f"token_data should not be empty: {token_list}"
-                    assert all(
-                        isinstance(token, int) for token in token_list
-                    ), f"All tokens should be integers: {token_list}"
-
-                    logger.info(
-                        f"Valid token_data with {len(token_list)} tokens: {token_list[:10]}{'...' if len(token_list) > 10 else ''}"
-                    )
-
-                    # Validate that no actual generation happened (should only be metadata)
-                    # This proves the early return worked correctly
-                    generation_indicators = [
-                        "choices",
-                        "content",
-                        "delta",
-                        "finish_reason",
-                    ]
-                    for indicator in generation_indicators:
-                        assert (
-                            indicator not in full_response.lower()
-                        ), f"Found generation indicator '{indicator}' - request should not have been routed to worker"
-
-                    logger.info(
-                        "No generation content found - early return worked correctly"
-                    )
-
-                    return {
-                        "worker_instance_id": worker_event[1].strip('"'),
-                        "token_count": len(token_list),
-                        "tokens": token_list,
-                    }
-
-        result = asyncio.run(test_annotation_response())
-
-        logger.info("Successfully validated query_instance_id annotation response:")
-        logger.info(f"Worker ID: {result['worker_instance_id']}")
-        logger.info(f"Token count: {result['token_count']}")
+        # Run query_instance_id annotation test
+        frontend_port = PORT + 30  # Use unique port to avoid conflicts
+        _test_router_query_instance_id(
+            engine_workers=mockers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=frontend_port,
+            test_payload=TEST_PAYLOAD,
+        )
 
     finally:
-        if "kv_router" in locals():
-            kv_router.__exit__(None, None, None)
         if "mockers" in locals():
             mockers.__exit__(None, None, None)
 
@@ -1432,21 +1078,7 @@ def test_query_instance_id_returns_worker_and_tokens(
 @pytest.mark.pre_merge
 @pytest.mark.model(MODEL_NAME)
 def test_router_decisions(request, runtime_services, predownload_tokenizers):
-    """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
-
-    Flow:
-      - Start two mocker workers, each with dp_size=4 (8 total dp ranks).
-      - Wait for workers to be ready.
-      - Send 4 progressive requests, each extending the previous tokens:
-        * Request 1: BLOCK_SIZE random tokens (forced to specific worker_id and dp_rank=1)
-        * Request 2: Request 1 tokens + BLOCK_SIZE new random tokens (naturally routed)
-        * Request 3: Request 2 tokens + BLOCK_SIZE new random tokens (naturally routed)
-        * Request 4: Request 3 tokens + BLOCK_SIZE new random tokens (naturally routed)
-      - Dump events from router and verify:
-        * All but one (worker_id, dp_rank) should have no events (due to prefix reuse)
-        * The (worker_id, dp_rank) with events should have exactly 4 events (one per request)
-        * All events should be on the forced (worker_id, dp_rank=1) (verifying forced routing and prefix reuse)
-    """
+    """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes."""
 
     # runtime_services starts etcd and nats
     logger.info("Starting test router prefix reuse and KV events synchronization")
@@ -1459,12 +1091,12 @@ def test_router_decisions(request, runtime_services, predownload_tokenizers):
     }
 
     try:
-        # Start 2 mocker instances, each with dp_size=4 (8 total dp ranks)
         logger.info(
             "Starting 2 mocker instances with dp_size=4 each (8 total dp ranks)"
         )
         mockers = MockerProcess(request, mocker_args=mocker_args, num_mockers=2)
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
+
         # Initialize mockers
         mockers.__enter__()
 
@@ -1475,131 +1107,10 @@ def test_router_decisions(request, runtime_services, predownload_tokenizers):
         component = namespace.component("mocker")
         endpoint = component.endpoint("generate")
 
-        # Create KvRouterConfig with lower snapshot threshold for testing
-        kv_router_config = KvRouterConfig(router_snapshot_threshold=20)
-        kv_push_router = KvPushRouter(
-            endpoint=endpoint,
-            block_size=BLOCK_SIZE,
-            kv_router_config=kv_router_config,
-        )
-
-        # Use async to manage the test flow
-        async def test_sync():
-            # Wait for workers to be ready and get their instance IDs
-            mocker_worker_ids = await wait_for_mockers_ready(
-                endpoint, kv_push_router, expected_num_workers=2
-            )
-            logger.info(f"Workers ready: {mocker_worker_ids}")
-
-            # Use the first worker_id for forced routing
-            forced_worker_id = mocker_worker_ids[0]
-            forced_dp_rank = 1
-
-            logger.info(
-                f"Will force first request to worker_id={forced_worker_id}, dp_rank={forced_dp_rank}"
-            )
-
-            # Send 4 progressive requests with overlapping prefixes
-            cumulative_tokens = []
-
-            for i in range(4):
-                # Add BLOCK_SIZE new random tokens
-                new_tokens = [random.randint(1, 10000) for _ in range(BLOCK_SIZE)]
-                cumulative_tokens.extend(new_tokens)
-
-                # Force first request to specific worker_id and dp_rank=1, let subsequent requests follow naturally
-                worker_id_override = forced_worker_id if i == 0 else None
-                dp_rank_override = forced_dp_rank if i == 0 else None
-
-                logger.info(
-                    f"Sending request {i + 1}/4 with {len(cumulative_tokens)} tokens "
-                    f"(added {len(new_tokens)} new tokens)"
-                    f"{f' - FORCING worker_id={worker_id_override}, dp_rank={dp_rank_override}' if worker_id_override is not None else ''}"
-                )
-
-                await send_request_via_python_kv_router(
-                    kv_python_router=kv_push_router,
-                    token_ids=cumulative_tokens.copy(),
-                    initial_wait=1.0,
-                    max_retries=8,
-                    stop_conditions={
-                        "ignore_eos": True,  # Don't stop on EOS token
-                        "max_tokens": 2,  # Generate exactly 2 tokens
-                    },
-                    worker_id=worker_id_override,
-                    dp_rank=dp_rank_override,
-                )
-
-                # Wait a bit between requests
-                await asyncio.sleep(0.5)
-
-            # Wait for final synchronization
-            await asyncio.sleep(1)
-
-            # Dump events from the router
-            events_json = await kv_push_router.dump_events()
-            return events_json, forced_worker_id, forced_dp_rank
-
-        # Run the async test
-        events_json, expected_worker_id, expected_dp_rank = asyncio.run(test_sync())
-
-        # Parse events and count by (worker_id, dp_rank)
-        events = json.loads(events_json)
-        events_by_worker_dp: dict[tuple[int, int], list[Any]] = {}
-
-        for event in events:
-            worker_id = event.get("worker_id")
-            # Extract dp_rank from the event's KvCacheEvent
-            dp_rank = event.get("event", {}).get("dp_rank", 0)
-            key = (worker_id, dp_rank)
-            if key not in events_by_worker_dp:
-                events_by_worker_dp[key] = []
-            events_by_worker_dp[key].append(event)
-
-        logger.info(
-            f"Events by (worker_id, dp_rank): {[(key, len(evts)) for key, evts in events_by_worker_dp.items()]}"
-        )
-
-        # Verify: All but one (worker_id, dp_rank) should have no events
-        workers_with_events = [
-            key for key, evts in events_by_worker_dp.items() if len(evts) > 0
-        ]
-
-        assert len(workers_with_events) == 1, (
-            f"Expected exactly 1 (worker_id, dp_rank) to have events (due to prefix reuse), "
-            f"but found {len(workers_with_events)} with events: {workers_with_events}"
-        )
-
-        # Verify: The (worker_id, dp_rank) with events should have exactly 4 events
-        active_worker_dp = workers_with_events[0]
-        num_events = len(events_by_worker_dp[active_worker_dp])
-
-        assert num_events == 4, (
-            f"Expected (worker_id, dp_rank) {active_worker_dp} to have exactly 4 events, "
-            f"but found {num_events} events"
-        )
-
-        # Verify: Both worker_id and dp_rank should match the forced values
-        active_worker_id = active_worker_dp[0]
-        active_dp_rank = active_worker_dp[1]
-
-        assert active_worker_id == expected_worker_id, (
-            f"Expected all events to have worker_id={expected_worker_id} (forced in first request), "
-            f"but found worker_id={active_worker_id}"
-        )
-
-        assert active_dp_rank == expected_dp_rank, (
-            f"Expected all events to have dp_rank={expected_dp_rank} (forced in first request), "
-            f"but found dp_rank={active_dp_rank}"
-        )
-
-        logger.info(
-            f"Successfully verified: Worker {active_worker_id} dp_rank {active_dp_rank} handled all 4 requests with prefix reuse. "
-            f"All events correctly routed to worker_id={expected_worker_id}, dp_rank={expected_dp_rank} as expected. "
-            f"KV events synchronized correctly."
+        _test_router_decisions(
+            mockers, endpoint, MODEL_NAME, request, test_dp_rank=True
         )
 
     finally:
-        # Clean up mockers
         if "mockers" in locals():
             mockers.__exit__(None, None, None)
