@@ -352,6 +352,7 @@ jobs:
     runs-on: cpu-amd-m5-2xlarge
     permissions:
       contents: read
+      id-token: write
     name: test
     steps:
     - uses: actions/checkout@v4
