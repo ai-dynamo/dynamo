@@ -311,7 +311,8 @@ async def _handle_request(request: Request, path: str, frontend_index: Optional[
     try:
         # Extract request details
         method = request.method
-        path_with_query = str(request.url.path)
+        # Use the path parameter (already stripped of /route/{index}/ prefix)
+        path_with_query = f"/{path}" if not path.startswith("/") else path
         if request.url.query:
             path_with_query += f"?{request.url.query}"
         
