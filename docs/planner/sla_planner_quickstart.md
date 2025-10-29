@@ -324,7 +324,6 @@ profilingConfig:
 
     # Profiling sweep settings (optional)
     sweep:
-      skip_existing_results: false
       force_rerun: false
 ```
 
