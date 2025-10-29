@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# DynamoGraphDeploymentRequest for standard online profiling
-# Converted from profile_sla_job.yaml
+# DynamoGraphDeploymentRequest for online profiling (actual deployment testing)
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeploymentRequest
 metadata:
@@ -13,12 +12,11 @@ spec:
 
   # ProfilingConfig maps directly to the profile_sla.py config format
   profilingConfig:
-    profilerImage: "nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-540.5"
+    profilerImage: "nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-554.0"
     config:
       # Sweep/profiling configuration
       sweep:
-        skip_existing_results: true
-        # Standard online profiling (not using AI Configurator)
+        # Online profiling mode (real deployment testing)
         use_ai_configurator: false
 
       # SLA targets for profiling
@@ -30,8 +28,7 @@ spec:
 
   # Deployment overrides for the auto-created DGD
   deploymentOverrides:
-    workersImage: "nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-540.5"
+    workersImage: "nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-554.0"
 
   # Automatically create DynamoGraphDeployment after profiling
   autoApply: true
-

@@ -29,6 +29,10 @@ pub async fn run(
         .model_path_pos
         .clone()
         .or_else(|| flags.model_path_flag.clone());
+
+    // Preserve the original model identifier before downloading (for default model name)
+    let original_model_identifier = maybe_remote_repo.as_ref().map(|p| p.display().to_string());
+
     let model_path = match maybe_remote_repo {
         None => None,
         Some(p) if p.exists() => {
@@ -49,7 +53,7 @@ pub async fn run(
 
     let mut builder = LocalModelBuilder::default();
     builder
-        .model_name(flags.model_name.clone())
+        .model_name(flags.model_name.clone().or(original_model_identifier))
         .kv_cache_block_size(flags.kv_cache_block_size)
         // Only set if user provides. Usually loaded from tokenizer_config.json
         .context_length(flags.context_length)

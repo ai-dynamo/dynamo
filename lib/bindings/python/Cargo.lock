@@ -516,6 +516,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "bincode"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
+dependencies = [
+ "bincode_derive",
+ "serde",
+ "unty",
+]
+
+[[package]]
+name = "bincode_derive"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf95709a440f45e986983918d0e8a1f30a9b1df04918fc828670606804ac3c09"
+dependencies = [
+ "virtue",
+]
+
+[[package]]
 name = "bindgen"
 version = "0.69.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1105,15 +1125,6 @@ dependencies = [
 
 [[package]]
 name = "cudarc"
-version = "0.16.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17200eb07e7d85a243aa1bf4569a7aa998385ba98d14833973a817a63cc86e92"
-dependencies = [
- "libloading",
-]
-
-[[package]]
-name = "cudarc"
 version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8147ca46109d41cc513fd629b52bbea9bd09b972034c2f32954ce84a92895a91"
@@ -1453,12 +1464,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-kvbm-kernels"
+version = "0.6.0"
+dependencies = [
+ "cc",
+ "cudarc",
+ "once_cell",
+]
+
+[[package]]
 name = "dynamo-llm"
 version = "0.6.1"
 dependencies = [
  "ahash",
  "aho-corasick",
  "akin",
+ "aligned-vec",
  "anyhow",
  "async-nats",
  "async-stream",
@@ -1466,7 +1487,7 @@ dependencies = [
  "async_zmq",
  "axum",
  "axum-server",
- "bincode",
+ "bincode 2.0.1",
  "bitflags 2.9.3",
  "blake3",
  "bs62",
@@ -1474,12 +1495,13 @@ dependencies = [
  "bytes",
  "candle-core",
  "chrono",
- "cudarc 0.17.2",
+ "cudarc",
  "dashmap",
  "derive-getters",
  "derive_builder",
  "dialoguer",
  "dynamo-async-openai",
+ "dynamo-kvbm-kernels",
  "dynamo-parsers",
  "dynamo-runtime",
  "either",
@@ -1560,7 +1582,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
- "cudarc 0.16.6",
+ "cudarc",
  "derive-getters",
  "dlpark",
  "dynamo-async-openai",
@@ -1602,7 +1624,7 @@ dependencies = [
  "async-trait",
  "async_zmq",
  "axum",
- "bincode",
+ "bincode 1.3.3",
  "blake3",
  "bytes",
  "chrono",
@@ -6826,6 +6848,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "unty"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
+
+[[package]]
 name = "ureq"
 version = "2.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6980,6 +7008,12 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "virtue"
+version = "0.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 
 [[package]]
 name = "walkdir"
