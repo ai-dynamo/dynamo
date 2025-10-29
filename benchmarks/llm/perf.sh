@@ -208,6 +208,33 @@ echo "ISL: $isl"
 echo "OSL: $osl"
 echo "Concurrency levels: ${concurrency_array[@]}"
 
+
+# The configuration is dumped to a JSON file which hold details of the OAI service
+# being benchmarked.
+deployment_config=$(cat << EOF
+{
+  "kind": "${deployment_kind}",
+  "model": "${model}",
+  "input_sequence_length": ${isl},
+  "output_sequence_length": ${osl},
+  "tensor_parallelism": ${tp},
+  "data_parallelism": ${dp},
+  "prefill_tensor_parallelism": ${prefill_tp},
+  "prefill_data_parallelism": ${prefill_dp},
+  "decode_tensor_parallelism": ${decode_tp},
+  "decode_data_parallelism": ${decode_dp},
+  "mode": "${mode}"
+}
+EOF
+)
+
+mkdir -p "${artifact_dir}"
+if [ -f "${artifact_dir}/deployment_config.json" ]; then
+  echo "Deployment configuration already exists. Overwriting..."
+  rm -f "${artifact_dir}/deployment_config.json"
+fi
+echo "${deployment_config}" > "${artifact_dir}/deployment_config.json"
+
 # Concurrency levels to test
 for concurrency in "${concurrency_array[@]}"; do
   echo "Run concurrency: $concurrency"
@@ -241,31 +268,5 @@ for concurrency in "${concurrency_array[@]}"; do
     -H 'Accept: text/event-stream'
 
 done
-
-# The configuration is dumped to a JSON file which hold details of the OAI service
-# being benchmarked.
-deployment_config=$(cat << EOF
-{
-  "kind": "${deployment_kind}",
-  "model": "${model}",
-  "input_sequence_length": ${isl},
-  "output_sequence_length": ${osl},
-  "tensor_parallelism": ${tp},
-  "data_parallelism": ${dp},
-  "prefill_tensor_parallelism": ${prefill_tp},
-  "prefill_data_parallelism": ${prefill_dp},
-  "decode_tensor_parallelism": ${decode_tp},
-  "decode_data_parallelism": ${decode_dp},
-  "mode": "${mode}"
-}
-EOF
-)
-
-mkdir -p "${artifact_dir}"
-if [ -f "${artifact_dir}/deployment_config.json" ]; then
-  echo "Deployment configuration already exists. Overwriting..."
-  rm -f "${artifact_dir}/deployment_config.json"
-fi
-echo "${deployment_config}" > "${artifact_dir}/deployment_config.json"
 
 echo "Benchmarking Successful!!!"

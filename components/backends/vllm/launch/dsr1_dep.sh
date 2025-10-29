@@ -11,7 +11,8 @@ GPUS_PER_NODE=""
 MASTER_ADDR="localhost"
 LOG_DIR="./logs"
 MODEL="deepseek-ai/DeepSeek-R1"
-
+SERVED_MODEL_NAME="deepseek-ai/DeepSeek-R1"
+IS_PREFILL_WORKER="false"
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -39,6 +40,14 @@ while [[ $# -gt 0 ]]; do
             MODEL="$2"
             shift 2
             ;;
+        --served-model-name)
+            SERVED_MODEL_NAME="$2"
+            shift 2
+            ;;
+        --is-prefill-worker)
+            IS_PREFILL_WORKER=true
+            shift 1
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
@@ -48,6 +57,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --master-addr ADDR    Master node address (default: localhost)"
             echo "  --log-dir DIR         Directory for log files (default: ./logs)"
             echo "  --model MODEL         Model name to use (default: ${MODEL})"
+            echo "  --served-model-name SERVED_MODEL_NAME         Served model name to use (default: ${SERVED_MODEL_NAME})"
+            echo "  --is-prefill-worker   Mark this worker as a prefill worker (flag)"
             echo "  -h, --help            Show this help message"
             exit 0
             ;;
@@ -78,34 +89,96 @@ echo "  Data parallel size: $DATA_PARALLEL_SIZE"
 echo "  Master address: $MASTER_ADDR"
 echo "  Log directory: $LOG_DIR"
 echo "  Model name: $MODEL"
+echo "  Served model name: $SERVED_MODEL_NAME"
+echo "  Is prefill worker: $IS_PREFILL_WORKER"
 
-trap 'echo Cleaning up...; kill 0' EXIT
+cleanup() {
+    echo "Cleaning up..."
+    set +e
+    # Terminate background jobs started by this script
+    jobs -p | xargs -r kill 2>/dev/null || true
+    # Also terminate any direct child processes of this script
+    pkill -P $$ 2>/dev/null || true
+    # Give processes a moment to exit gracefully, then force kill leftovers
+    sleep 1
+    jobs -p | xargs -r kill -9 2>/dev/null || true
+}
 
-# run ingress if it's node 0
-if [ $NODE_RANK -eq 0 ]; then
-    DYN_LOG=debug python -m dynamo.frontend --router-mode kv --http-port=8000 2>&1 | tee $LOG_DIR/dsr1_dep_ingress.log &
+trap 'cleanup' EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+
+# run ingress if it's node 0 and is not a prefill worker
+if [ "$NODE_RANK" -eq 0 ] && [ "$IS_PREFILL_WORKER" = "false" ]; then
+    python -m dynamo.frontend --router-mode kv --http-port=8000 2>&1 | tee $LOG_DIR/dsr1_dep_ingress.log &
 fi
 
 mkdir -p $LOG_DIR
+
+
+export GLOO_SOCKET_IFNAME=eth3 # this has to be non-IB network interface
+export NCCL_SOCKET_IFNAME=eth3
+export NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME=eth3
+export NVIDIA_GDRCOPY=enabled
+export NVSHMEM_REMOTE_TRANSPORT=ibgda
+export NVSHMEM_IB_ENABLE_IBGDA="true"
+export VLLM_USE_DEEP_GEMM=1
+export VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1
+export VLLM_SKIP_P2P_CHECK=1
 
 # Data Parallel Attention / Expert Parallelism
 # Routing to DP workers managed by Dynamo
 for ((i=0; i<GPUS_PER_NODE; i++)); do
     dp_rank=$((i + NODE_RANK * GPUS_PER_NODE))
-    CUDA_VISIBLE_DEVICES=$i \
-        VLLM_ALL2ALL_BACKEND="deepep_low_latency" \
-        VLLM_USE_DEEP_GEMM=1 \
-        VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1 \
-        python3 -m dynamo.vllm \
-        --model $MODEL \
-        --data_parallel_size $DATA_PARALLEL_SIZE \
-        --data-parallel-rank $dp_rank \
-        --enable-expert-parallel \
-        --max-model-len 4096 \
-        --data-parallel-address $MASTER_ADDR \
-        --data-parallel-rpc-port 13345 \
-        --gpu-memory-utilization 0.9 \
-        --enforce-eager 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_rank}.log &
+    if [ "$IS_PREFILL_WORKER" = "true" ]; then
+        CUDA_VISIBLE_DEVICES=$i \
+            VLLM_ALL2ALL_BACKEND=deepep_high_throughput \
+            python3 -m dynamo.vllm \
+            --model $MODEL \
+            --served-model-name $SERVED_MODEL_NAME \
+            --tensor-parallel-size 1 \
+            --data_parallel_size $DATA_PARALLEL_SIZE \
+            --data-parallel-address $MASTER_ADDR \
+            --data-parallel-rpc-port 13345 \
+            --data-parallel-rank $dp_rank \
+            --max-model-len 1048 \
+            --gpu-memory-utilization 0.8 \
+            --enable-expert-parallel \
+            --data-parallel-hybrid-lb \
+            --async-scheduling \
+            --enable-dbo \
+            --dbo-decode-token-threshold 32 \
+            --enable-eplb \
+            --eplb-config '{"window_size":"1000",
+                            "step_interval":"3000",
+                            "num_redundant_experts":"32",
+                            "log_balancedness":"False"}' \
+            --is-prefill-worker 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_rank}_prefill.log &
+    else
+        CUDA_VISIBLE_DEVICES=$i \
+            VLLM_ALL2ALL_BACKEND=deepep_low_latency \
+            python3 -m dynamo.vllm \
+            --model $MODEL \
+            --served-model-name $SERVED_MODEL_NAME \
+            --tensor-parallel-size 1 \
+            --data_parallel_size $DATA_PARALLEL_SIZE \
+            --data-parallel-address $MASTER_ADDR \
+            --data-parallel-rpc-port 13345 \
+            --data-parallel-rank $dp_rank \
+            --max-model-len 2560 \
+            --gpu-memory-utilization 0.85 \
+            --enable-expert-parallel \
+            --data-parallel-hybrid-lb \
+            --async-scheduling \
+            --enable-dbo \
+            --dbo-decode-token-threshold 32 \
+            --enable-eplb \
+            --eplb-config '{"window_size":"1000",
+                            "step_interval":"3000",
+                            "num_redundant_experts":"32",
+                            "log_balancedness":"False"}' \
+            --compilation_config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_rank}_decode.log &
+        fi
 done
 
 echo "All workers starting. (press Ctrl+C to stop)..."
