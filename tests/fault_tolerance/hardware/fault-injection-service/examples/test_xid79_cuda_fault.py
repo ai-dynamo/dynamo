@@ -226,7 +226,7 @@ class CUDAFaultInjector:
             
             # Use the DynamoGraphDeployment-aware patching function with ConfigMap
             # Pass target_node to add node affinity (simulates real XID 79 behavior)
-            return patch_deployment_env(deployment_name, namespace, enable=True, use_configmap=True, target_node=target_node)
+            return patch_deployment_env(deployment_name, namespace, enable=True, use_configmap=True, target_node=target_node, xid_type=79)
             
         except Exception as e:
             print(f"    ✗ Failed to patch: {e}")
@@ -772,9 +772,12 @@ def test_xid79_with_cuda_fault_injection(cleanup_on_exit):
     E2E test for XID 79 fault tolerance with REAL CUDA fault injection.
     
     This test simulates the MOST REALISTIC GPU failure scenario:
-    - Injects library that makes CUDA calls fail
+    - Injects library that makes CUDA calls fail (XID 79: GPU fell off bus)
     - Pods crash naturally with CUDA_ERROR_NO_DEVICE
     - Tests complete recovery flow
+    
+    Note: To test other XID types (48, 94, 95, 43, 74), copy this test and
+    change xid_type parameter in patch_deployment_env().
     """
     print("\n" + "="*80)
     print("XID 79 E2E TEST - REAL CUDA FAULT INJECTION")
