@@ -1264,7 +1264,7 @@ pub mod kserve_test {
         card.model_input = ModelInput::Tensor;
         card.runtime_config = ModelRuntimeConfig {
             tensor_model_config: Some(tensor::TensorModelConfig {
-                triton_model_config: Some(buf),
+                triton_model_config: Some(buf.clone()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -1298,6 +1298,101 @@ pub mod kserve_test {
         assert_eq!(
             config, expected_model_config,
             "Expected same model config to be returned",
+        );
+
+        // Pass config with both TensorModelConfig and triton_model_config,
+        // check if the Triton model config is used.
+        let _ = service_with_engines
+            .0
+            .model_manager()
+            .remove_model_card("key");
+        let mut card = ModelDeploymentCard::with_name_only(model_name);
+        card.model_type = ModelType::TensorBased;
+        card.model_input = ModelInput::Tensor;
+        let mut card = ModelDeploymentCard::with_name_only("tensor");
+        card.model_type = ModelType::TensorBased;
+        card.model_input = ModelInput::Tensor;
+        card.runtime_config = ModelRuntimeConfig {
+            tensor_model_config: Some(tensor::TensorModelConfig {
+                name: "tensor".to_string(),
+                inputs: vec![tensor::TensorMetadata {
+                    name: "input".to_string(),
+                    data_type: tensor::DataType::Int32,
+                    shape: vec![1],
+                    parameters: Default::default(),
+                }],
+                outputs: vec![tensor::TensorMetadata {
+                    name: "output".to_string(),
+                    data_type: tensor::DataType::Bool,
+                    shape: vec![-1],
+                    parameters: Default::default(),
+                }],
+                triton_model_config: Some(buf.clone()),
+            }),
+            ..Default::default()
+        };
+        let _ = service_with_engines
+            .0
+            .model_manager()
+            .save_model_card("key", card);
+        let request = tonic::Request::new(ModelConfigRequest {
+            name: model_name.into(),
+            version: "".into(),
+        });
+
+        let response = client
+            .model_config(request)
+            .await
+            .unwrap()
+            .into_inner()
+            .config;
+        let Some(config) = response else {
+            panic!("Expected Some(config), got None");
+        };
+        assert_eq!(
+            config, expected_model_config,
+            "Expected same model config to be returned",
+        );
+
+        // Test invalid triton model config
+        let _ = service_with_engines
+            .0
+            .model_manager()
+            .remove_model_card("key");
+        let mut card = ModelDeploymentCard::with_name_only(model_name);
+        card.model_type = ModelType::TensorBased;
+        card.model_input = ModelInput::Tensor;
+        card.runtime_config = ModelRuntimeConfig {
+            tensor_model_config: Some(tensor::TensorModelConfig {
+                triton_model_config: Some(vec![1, 2, 3, 4, 5]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let _ = service_with_engines
+            .0
+            .model_manager()
+            .save_model_card("key", card);
+
+        // success config
+        let request = tonic::Request::new(ModelConfigRequest {
+            name: model_name.into(),
+            version: "".into(),
+        });
+
+        let response = client.model_config(request).await;
+        assert!(response.is_err());
+        let err = response.unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::InvalidArgument,
+            "Expected InvalidArgument error, get {}",
+            err
+        );
+        assert!(
+            err.message().contains("failed to decode Protobuf message"),
+            "Expected error message to contain 'failed to decode Protobuf message', got: {}",
+            err.message()
         );
     }
 
