@@ -200,8 +200,17 @@ def setup_vllm_engine(config, stat_logger=None):
 
     # Set up consolidator endpoints if KVBM is enabled
     consolidator_endpoints = None
+    consolidator_reserved_socket = None  # Must be returned and kept alive by caller
     if config.has_connector("kvbm"):
-        consolidator_endpoints = get_consolidator_endpoints(vllm_config)
+        result = get_consolidator_endpoints(vllm_config)
+        if result:
+            # Unpack the 4-tuple: endpoints + reserved socket
+            vllm_endpoint, bind_endpoint, connect_endpoint, reserved_socket = result
+            consolidator_endpoints = (vllm_endpoint, bind_endpoint, connect_endpoint)
+            # Keep the reserved socket alive to prevent port reuse (TOCTOU race)
+            # DO NOT store in vllm_config - ZMQ sockets cannot be pickled for multiprocessing!
+            # Caller must hold onto this socket reference to keep port reserved
+            consolidator_reserved_socket = reserved_socket
     vllm_config.consolidator_endpoints = consolidator_endpoints
 
     factory = []
@@ -222,7 +231,12 @@ def setup_vllm_engine(config, stat_logger=None):
     else:
         logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
 
-    return engine_client, vllm_config, default_sampling_params
+    return (
+        engine_client,
+        vllm_config,
+        default_sampling_params,
+        consolidator_reserved_socket,
+    )
 
 
 async def register_vllm_model(
@@ -289,7 +303,13 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
-    engine_client, vllm_config, default_sampling_params = setup_vllm_engine(config)
+    (
+        engine_client,
+        vllm_config,
+        default_sampling_params,
+        _reserved_socket,
+    ) = setup_vllm_engine(config)
+    # Keep _reserved_socket alive for the lifetime of this function to prevent port reuse
 
     handler = PrefillWorkerHandler(
         runtime, component, engine_client, default_sampling_params
@@ -380,9 +400,13 @@ async def init(runtime: DistributedRuntime, config: Config):
         config.engine_args.data_parallel_rank or 0,
         metrics_labels=[("model", config.served_model_name or config.model)],
     )
-    engine_client, vllm_config, default_sampling_params = setup_vllm_engine(
-        config, factory
-    )
+    (
+        engine_client,
+        vllm_config,
+        default_sampling_params,
+        _reserved_socket,
+    ) = setup_vllm_engine(config, factory)
+    # Keep _reserved_socket alive for the lifetime of this function to prevent port reuse
 
     # TODO Hack to get data, move this to registering in TBD
     factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)

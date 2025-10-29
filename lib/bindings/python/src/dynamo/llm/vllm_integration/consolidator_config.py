@@ -96,7 +96,9 @@ def should_enable_consolidator(vllm_config) -> bool:
     return True
 
 
-def get_consolidator_endpoints(vllm_config) -> Optional[Tuple[str, str, str]]:
+def get_consolidator_endpoints(
+    vllm_config,
+) -> Optional[Tuple[str, str, str, "zmq.Socket"]]:
     """
     Get consolidator endpoints from vLLM config.
 
@@ -104,11 +106,12 @@ def get_consolidator_endpoints(vllm_config) -> Optional[Tuple[str, str, str]]:
         vllm_config: The vLLM VllmConfig object
 
     Returns:
-        Tuple of (vllm_endpoint, output_bind_endpoint, output_connect_endpoint) if consolidator should be enabled,
+        Tuple of (vllm_endpoint, output_bind_endpoint, output_connect_endpoint, reserved_socket) if consolidator should be enabled,
         where:
         - vllm_endpoint: ZMQ endpoint for consolidator to subscribe to vLLM events
         - output_bind_endpoint: ZMQ endpoint for consolidator to bind and publish (tcp://0.0.0.0:PORT)
         - output_connect_endpoint: ZMQ endpoint for clients to connect (tcp://127.0.0.1:PORT)
+        - reserved_socket: Socket that reserves the port (must be kept alive to prevent TOCTOU race)
         None if consolidator should not be enabled
     """
     if not should_enable_consolidator(vllm_config):
@@ -135,15 +138,13 @@ def get_consolidator_endpoints(vllm_config) -> Optional[Tuple[str, str, str]]:
     ).replace("*", "127.0.0.1")
 
     # Allocate dynamic port for consolidator output using ZMQ's atomic bind_to_random_port
-    # This eliminates the TOCTOU race and ensures the port is actually reserved
+    # The socket MUST be kept alive to prevent TOCTOU race - don't close it!
     context = zmq.Context.instance()
-    temp_socket = context.socket(zmq.PUB)
-    try:
-        # Atomically bind to a random port on all interfaces
-        # Returns the actual port number that was bound
-        output_port = temp_socket.bind_to_random_port("tcp://*")
-    finally:
-        temp_socket.close()
+    reserved_socket = context.socket(zmq.PUB)
+
+    # Atomically bind to a random port on all interfaces
+    # Returns the actual port number that was bound
+    output_port = reserved_socket.bind_to_random_port("tcp://*")
 
     # Build a connect-friendly endpoint using localhost (not 0.0.0.0)
     # Clients will connect to 127.0.0.1, while the consolidator binds to 0.0.0.0
@@ -155,8 +156,7 @@ def get_consolidator_endpoints(vllm_config) -> Optional[Tuple[str, str, str]]:
         f"output_bind={output_bind_endpoint}, output_connect={output_connect_endpoint} (port={output_port})"
     )
 
-    # Return both bind and connect endpoints as a tuple
-    # First element is vllm_endpoint (for consolidator to subscribe)
-    # Second element is output_bind_endpoint (for consolidator to bind/publish)
-    # Third element is output_connect_endpoint (for clients to connect)
-    return vllm_endpoint, output_bind_endpoint, output_connect_endpoint
+    # Return endpoints and the reserved socket
+    # The socket keeps the port reserved until the consolidator binds
+    # Caller must keep this socket alive (or store it somewhere)
+    return vllm_endpoint, output_bind_endpoint, output_connect_endpoint, reserved_socket
