@@ -274,6 +274,11 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     if kv_publishers:
         handler.kv_publishers = kv_publishers
 
+    if config.engine_args.disable_log_stats is False:
+        register_engine_metrics_callback(
+            endpoint=generate_endpoint, registry=REGISTRY, metric_prefix_filter="vllm:"
+        )
+
     # Register prefill model with ModelType.Prefill
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
         await register_vllm_model(

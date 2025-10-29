@@ -12,6 +12,7 @@ from vllm.inputs import TokensPrompt
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
+from dynamo.llm import ZmqKvEventPublisher
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
@@ -62,7 +63,7 @@ class BaseWorkerHandler(ABC):
         self.component = component
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
-        self.kv_publishers = None
+        self.kv_publishers: list[ZmqKvEventPublisher] | None = None
         self.engine_monitor = VllmEngineMonitor(runtime, engine)
 
     @abstractmethod
