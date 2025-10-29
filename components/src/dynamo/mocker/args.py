@@ -12,6 +12,7 @@ from . import __version__
 
 DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
 DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
+DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +86,8 @@ def parse_args():
     parser.add_argument(
         "--endpoint",
         type=str,
-        default=DEFAULT_ENDPOINT,
-        help=f"Dynamo endpoint string (default: {DEFAULT_ENDPOINT})",
+        default=None,
+        help=f"Dynamo endpoint string (default: {DEFAULT_ENDPOINT} for aggregated/decode, {DEFAULT_PREFILL_ENDPOINT} for prefill)",
     )
     parser.add_argument(
         "--model-name",
@@ -199,4 +200,14 @@ def parse_args():
 
     args = parser.parse_args()
     validate_worker_type_args(args)
+
+    # Set endpoint default based on worker type if not explicitly provided
+    if args.endpoint is None:
+        if args.is_prefill_worker:
+            args.endpoint = DEFAULT_PREFILL_ENDPOINT
+            logger.debug(f"Using default prefill endpoint: {args.endpoint}")
+        else:
+            args.endpoint = DEFAULT_ENDPOINT
+            logger.debug(f"Using default endpoint: {args.endpoint}")
+
     return args

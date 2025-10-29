@@ -2417,11 +2417,17 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									MainContainer: &corev1.Container{
 										Image: "worker-image",
 										Command: []string{
-											"/bin/sh",
-											"-c",
+											"python3",
+											"-m",
+											"dynamo.vllm",
 										},
 										Args: []string{
-											"python3 -m dynamo.vllm --custom-flag custom-value",
+											"--custom-flag",
+											"custom-value",
+											"--tensor-parallel-size",
+											"4",
+											"--pipeline-parallel-size",
+											"1",
 										},
 										StartupProbe: &corev1.Probe{
 											ProbeHandler: corev1.ProbeHandler{
@@ -2598,7 +2604,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													"-c",
 												},
 												Args: []string{
-													"ray start --head --port=6379 && python3 -m dynamo.vllm --custom-flag custom-value",
+													"ray start --head --port=6379 && python3 -m dynamo.vllm --custom-flag custom-value --tensor-parallel-size 4 --pipeline-parallel-size 1",
 												},
 												Ports: []corev1.ContainerPort{
 													{
@@ -3345,7 +3351,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 				ComponentType: commonconsts.ComponentTypeWorker,
 				ExtraPodSpec: &common.ExtraPodSpec{
 					MainContainer: &corev1.Container{
-						Args: []string{"python3", "-m", "dynamo.vllm"},
+						Args: []string{"python3", "-m", "dynamo.vllm", "--tensor-parallel-size", "4", "--pipeline-parallel-size", "1"},
 					},
 				},
 			},
@@ -3359,6 +3365,11 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 			name: "VLLM multinode worker",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: commonconsts.ComponentTypeWorker,
+				ExtraPodSpec: &common.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Args: []string{"python3", "-m", "dynamo.vllm", "--tensor-parallel-size", "4", "--pipeline-parallel-size", "1"},
+					},
+				},
 			},
 			backendFramework:  BackendFrameworkVLLM,
 			role:              RoleWorker,
@@ -4757,7 +4768,7 @@ func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 
 	tests := []struct {
 		name                   string
-		component              *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		component              *v1alpha1.DynamoComponentDeploymentSharedSpec
 		expectError            bool
 		expectedResourceClaims []corev1.ResourceClaim
 		expectedPodClaims      []corev1.PodResourceClaim
@@ -4765,55 +4776,53 @@ func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 	}{
 		{
 			name: "component with resource claims",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
-				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					ComponentType: commonconsts.ComponentTypeWorker,
-					Resources: &common.Resources{
-						Requests: &common.ResourceItem{
-							CPU:    "130",
-							Memory: "800Gi",
-						},
-						Limits: &common.ResourceItem{
-							CPU:    "130",
-							Memory: "800Gi",
-							GPU:    "4",
-						},
-						Claims: []corev1.ResourceClaim{
-							{
-								Name: "compute-domain-channel",
-							},
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Resources: &common.Resources{
+					Requests: &common.ResourceItem{
+						CPU:    "130",
+						Memory: "800Gi",
+					},
+					Limits: &common.ResourceItem{
+						CPU:    "130",
+						Memory: "800Gi",
+						GPU:    "4",
+					},
+					Claims: []corev1.ResourceClaim{
+						{
+							Name: "compute-domain-channel",
 						},
 					},
-					ExtraPodSpec: &common.ExtraPodSpec{
-						PodSpec: &corev1.PodSpec{
-							ResourceClaims: []corev1.PodResourceClaim{
-								{
-									Name:                      "compute-domain-channel",
-									ResourceClaimTemplateName: ptr.To("trtllm-test-compute-domain-channel"),
-								},
+				},
+				ExtraPodSpec: &common.ExtraPodSpec{
+					PodSpec: &corev1.PodSpec{
+						ResourceClaims: []corev1.PodResourceClaim{
+							{
+								Name:                      "compute-domain-channel",
+								ResourceClaimTemplateName: ptr.To("trtllm-test-compute-domain-channel"),
 							},
-							Volumes: []corev1.Volume{
-								{
-									Name: "model-storage",
-									VolumeSource: corev1.VolumeSource{
-										PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-											ClaimName: "dynamo-pvc",
-										},
+						},
+						Volumes: []corev1.Volume{
+							{
+								Name: "model-storage",
+								VolumeSource: corev1.VolumeSource{
+									PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+										ClaimName: "dynamo-pvc",
 									},
 								},
 							},
 						},
-						MainContainer: &corev1.Container{
-							Image: "rohanv672/dynamo:v0.5.1-trtllm",
-							Args: []string{
-								"python3 -m dynamo.trtllm --model-path /data/deepseek-r1 --served-model-name deepseek-ai/DeepSeek-R1 --extra-engine-args /data/engine_configs/wide_ep_agg.yaml",
-							},
-							Command: []string{"/bin/sh", "-c"},
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      "model-storage",
-									MountPath: "/data",
-								},
+					},
+					MainContainer: &corev1.Container{
+						Image: "rohanv672/dynamo:v0.5.1-trtllm",
+						Args: []string{
+							"python3 -m dynamo.trtllm --model-path /data/deepseek-r1 --served-model-name deepseek-ai/DeepSeek-R1 --extra-engine-args /data/engine_configs/wide_ep_agg.yaml",
+						},
+						Command: []string{"/bin/sh", "-c"},
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      "model-storage",
+								MountPath: "/data",
 							},
 						},
 					},
@@ -4853,37 +4862,35 @@ func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 		},
 		{
 			name: "component with multiple resource claims",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
-				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					ComponentType: commonconsts.ComponentTypeWorker,
-					Resources: &common.Resources{
-						Claims: []corev1.ResourceClaim{
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Resources: &common.Resources{
+					Claims: []corev1.ResourceClaim{
+						{
+							Name: "compute-domain-channel",
+						},
+						{
+							Name: "network-domain-channel",
+						},
+					},
+				},
+				ExtraPodSpec: &common.ExtraPodSpec{
+					PodSpec: &corev1.PodSpec{
+						ResourceClaims: []corev1.PodResourceClaim{
 							{
-								Name: "compute-domain-channel",
+								Name:                      "compute-domain-channel",
+								ResourceClaimTemplateName: ptr.To("compute-template"),
 							},
 							{
-								Name: "network-domain-channel",
+								Name:                      "network-domain-channel",
+								ResourceClaimTemplateName: ptr.To("network-template"),
 							},
 						},
 					},
-					ExtraPodSpec: &common.ExtraPodSpec{
-						PodSpec: &corev1.PodSpec{
-							ResourceClaims: []corev1.PodResourceClaim{
-								{
-									Name:                      "compute-domain-channel",
-									ResourceClaimTemplateName: ptr.To("compute-template"),
-								},
-								{
-									Name:                      "network-domain-channel",
-									ResourceClaimTemplateName: ptr.To("network-template"),
-								},
-							},
-						},
-						MainContainer: &corev1.Container{
-							Image:   "test-image",
-							Command: []string{"python3"},
-							Args:    []string{"-m", "dynamo.worker"},
-						},
+					MainContainer: &corev1.Container{
+						Image:   "test-image",
+						Command: []string{"python3"},
+						Args:    []string{"-m", "dynamo.worker"},
 					},
 				},
 			},
@@ -4909,14 +4916,12 @@ func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 		},
 		{
 			name: "component without resource claims",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
-				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					ComponentType: commonconsts.ComponentTypeFrontend,
-					Resources: &common.Resources{
-						Requests: &common.ResourceItem{
-							CPU:    "1",
-							Memory: "1Gi",
-						},
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+				Resources: &common.Resources{
+					Requests: &common.ResourceItem{
+						CPU:    "1",
+						Memory: "1Gi",
 					},
 				},
 			},

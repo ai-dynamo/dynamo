@@ -31,7 +31,7 @@ class VLLMConfig(EngineConfig):
 
 
 vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
-    WORKSPACE_DIR, "components", "backends", "vllm"
+    WORKSPACE_DIR, "components/backends/vllm"
 )
 
 # vLLM test configurations
@@ -156,7 +156,7 @@ vllm_configs = {
     # TODO: Update this test case when we have video multimodal support in vllm official components
     "multimodal_video_agg": VLLMConfig(
         name="multimodal_video_agg",
-        directory=os.path.join(WORKSPACE_DIR, "examples", "multimodal"),
+        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
         script_name="video_agg.sh",
         marks=[pytest.mark.gpu_2],
         model="llava-hf/LLaVA-NeXT-Video-7B-hf",
@@ -183,7 +183,7 @@ vllm_configs = {
     # TODO: Enable this test case when we have 4 GPUs runners.
     # "multimodal_disagg": VLLMConfig(
     #     name="multimodal_disagg",
-    #     directory="/workspace/examples/multimodal",
+    #     directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
     #     script_name="disagg.sh",
     #     marks=[pytest.mark.gpu_4, pytest.mark.vllm],
     #     model="llava-hf/llava-1.5-7b-hf",
