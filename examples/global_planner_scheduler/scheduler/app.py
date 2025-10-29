@@ -300,8 +300,14 @@ async def route_request_func(method: str, path: str, headers: Dict[str, str],
     """Wrapper function for route_request to avoid naming conflicts."""
     return await route_request(method, path, headers, content, frontend_index)
 
-async def _handle_request(request: Request, path: str) -> Response:
-    """Handle incoming HTTP requests by proxying them."""
+async def _handle_request(request: Request, path: str, frontend_index: Optional[int] = None) -> Response:
+    """Handle incoming HTTP requests by proxying them.
+    
+    Args:
+        request: The incoming FastAPI request
+        path: The path to proxy
+        frontend_index: Optional specific frontend index to route to. If None, uses round-robin.
+    """
     try:
         # Extract request details
         method = request.method
@@ -318,9 +324,9 @@ async def _handle_request(request: Request, path: str) -> Response:
         for header in headers_to_remove:
             headers.pop(header.lower(), None)
         
-        # Route the request (using round-robin)
+        # Route the request (using round-robin or specific index)
         result = await route_request(
-            method, path_with_query, headers, body, frontend_index=None
+            method, path_with_query, headers, body, frontend_index=frontend_index
         )
         status, response_headers, response_data = result
         
@@ -487,27 +493,21 @@ async def test_route(payload: Dict = None):
         "request_number": total_requests + 1
     }
 
-class RouteToIndexRequest(BaseModel):
-    """Request model for routing to a specific frontend by index."""
-    frontend_index: int
-    path: str = "/"
-    method: str = "GET"
-    headers: Optional[Dict[str, str]] = None
-    body: Optional[Dict] = None
-
-@app.post("/route-to-index")
-async def route_to_index(request: Request, route_request: RouteToIndexRequest):
+@app.api_route("/route/{frontend_index:int}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+async def route_to_specific_index(request: Request, frontend_index: int, path: str):
     """Route a request to a specific frontend by index.
+    
+    The request body should be in standard OpenAI format (or any other format the backend expects).
     
     Example:
     ```
-    curl -X POST http://localhost:8080/route-to-index \\
+    curl -X POST http://localhost:8080/route/0/v1/chat/completions \\
       -H "Content-Type: application/json" \\
       -d '{
-        "frontend_index": 0,
-        "path": "/v1/chat/completions",
-        "method": "POST",
-        "body": {"model": "test", "messages": [{"role": "user", "content": "hello"}]}
+        "model": "nvidia/Llama-3.1-8B-Instruct-FP8",
+        "messages": [{"role": "user", "content": "hello"}],
+        "stream": false,
+        "max_tokens": 100
       }'
     ```
     """
@@ -515,57 +515,24 @@ async def route_to_index(request: Request, route_request: RouteToIndexRequest):
     
     # Validate frontend index
     if not frontends:
-        logger.error("[RouteToIndex] No frontends available")
+        logger.error(f"[Route/{frontend_index}] No frontends available")
         raise HTTPException(status_code=503, detail="No frontend endpoints available")
     
-    if route_request.frontend_index < 0 or route_request.frontend_index >= len(frontends):
-        logger.error(f"[RouteToIndex] Invalid index {route_request.frontend_index}, must be 0-{len(frontends)-1}")
+    if frontend_index < 0 or frontend_index >= len(frontends):
+        logger.error(f"[Route/{frontend_index}] Invalid index {frontend_index}, must be 0-{len(frontends)-1}")
         raise HTTPException(
             status_code=400, 
-            detail=f"Invalid frontend index {route_request.frontend_index}, must be 0-{len(frontends)-1}"
+            detail=f"Invalid frontend index {frontend_index}, must be 0-{len(frontends)-1}"
         )
     
-    logger.info(f"[RouteToIndex] Routing to frontend index {route_request.frontend_index}: {frontends[route_request.frontend_index]}")
-    
-    # Prepare headers
-    headers = dict(route_request.headers) if route_request.headers else {}
-    if 'content-type' not in {k.lower() for k in headers.keys()}:
-        headers['content-type'] = 'application/json'
-    
-    # Prepare body
-    body = json.dumps(route_request.body).encode() if route_request.body else b''
+    logger.info(f"[Route/{frontend_index}] Routing {request.method} /{path} to frontend index {frontend_index}: {frontends[frontend_index]}")
     
     try:
-        # Route to the specified frontend index
-        result = await route_request_func(
-            method=route_request.method,
-            path=route_request.path,
-            headers=headers,
-            content=body,
-            frontend_index=route_request.frontend_index
-        )
-        status, response_headers, response_data = result
-        
-        # Check if streaming
-        is_streaming = hasattr(response_data, '__aiter__')
-        
-        if is_streaming:
-            logger.info(f"[RouteToIndex] Returning streaming response")
-            return StreamingResponse(
-                content=response_data,
-                status_code=status,
-                headers=response_headers
-            )
-        else:
-            logger.info(f"[RouteToIndex] Returning non-streaming response")
-            return Response(
-                content=response_data,
-                status_code=status,
-                headers=response_headers
-            )
+        # Use the existing _handle_request function which properly handles the request
+        return await _handle_request(request, path, frontend_index=frontend_index)
     
     except Exception as e:
-        logger.error(f"[RouteToIndex] Error routing to index {route_request.frontend_index}: {e}", exc_info=True)
+        logger.error(f"[Route/{frontend_index}] Error routing to index {frontend_index}: {e}", exc_info=True)
         raise HTTPException(status_code=502, detail=f"Backend error: {str(e)}")
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
