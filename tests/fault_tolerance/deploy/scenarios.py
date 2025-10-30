@@ -17,6 +17,7 @@ import re
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Dict, Optional, Pattern
+
 from typing_extensions import TypedDict
 
 from tests.utils.managed_deployment import DeploymentSpec
@@ -24,6 +25,7 @@ from tests.utils.managed_deployment import DeploymentSpec
 
 class TestPhase(Enum):
     """Enum representing different test phases in fault tolerance testing."""
+
     STANDARD = auto()
     OVERFLOW = auto()
     RECOVERY = auto()
@@ -31,17 +33,19 @@ class TestPhase(Enum):
 
 class DeploymentInfo(TypedDict, total=False):
     """Information about a deployment configuration.
-    
+
     Attributes:
         spec: DeploymentSpec object defining the deployment configuration
-        backend: Backend type - "vllm", "sglang", or "trtllm" 
+        backend: Backend type - "vllm", "sglang", or "trtllm"
         model: Optional model identifier (e.g., "deepseek-ai/DeepSeek-V2-Lite")
         is_moe: Optional flag indicating if this is a Mixture-of-Experts model
     """
+
     spec: DeploymentSpec
-    backend: str 
-    model: str 
-    is_moe: bool 
+    backend: str
+    model: str
+    is_moe: bool
+
 
 # Test phase suffixes derived from TestPhase enum
 OVERFLOW_SUFFIX = f"_{TestPhase.OVERFLOW.name.lower()}"
@@ -185,11 +189,11 @@ class Scenario:
 # Helper functions to create deployment specs
 def _create_deployment_spec(backend: str, yaml_path: str) -> DeploymentInfo:
     """Create a deployment spec with backend information.
-    
+
     Args:
         backend: Backend type ("vllm", "sglang", or "trtllm")
         yaml_path: Path to the deployment YAML file
-        
+
     Returns:
         DeploymentInfo dictionary with spec and backend
     """
@@ -241,10 +245,10 @@ def _set_tensor_parallel(deployment_spec, backend, deploy_type, tp_size):
 
 def _create_deployments_for_backend(backend: str) -> Dict[str, DeploymentInfo]:
     """Create all deployment specifications for a given backend.
-    
+
     Args:
         backend: Backend type ("vllm", "sglang", or "trtllm")
-        
+
     Returns:
         Dictionary mapping deployment names to DeploymentInfo objects
     """
@@ -296,12 +300,14 @@ def _create_deployments_for_backend(backend: str) -> Dict[str, DeploymentInfo]:
     return deployments
 
 
-def _create_moe_deployments_for_backend(backend: str = "vllm") -> Dict[str, DeploymentInfo]:
+def _create_moe_deployments_for_backend(
+    backend: str = "vllm",
+) -> Dict[str, DeploymentInfo]:
     """Create MoE-specific deployment configurations for DeepSeek-V2-Lite.
-    
+
     Args:
         backend: Backend type (default: "vllm")
-        
+
     Returns:
         Dictionary mapping deployment names to DeploymentInfo objects
     """

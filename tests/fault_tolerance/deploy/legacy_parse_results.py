@@ -546,7 +546,8 @@ def main(logs_dir, tablefmt, log_paths=None, sla=None, print_output=True):
         if print_output:
             logging.info(f"\nTest Group: {test_prefix}")
             logging.info(
-                "\n" + tabulate(
+                "\n"
+                + tabulate(
                     rows,
                     headers,
                     tablefmt=tablefmt,
