@@ -110,7 +110,7 @@ spec:
   services:
     Frontend:
       dynamoNamespace: trtllm-disagg-multinode
-      componentType: main
+      componentType: frontend
       replicas: 1
       extraPodSpec:
         tolerations: []
