@@ -62,7 +62,12 @@ impl DiskStorage {
 
         tracing::debug!("Allocating disk cache file at {}", file_path.display());
 
-        let path_str = file_path.to_str().unwrap();
+        let path_str = file_path.to_str().ok_or_else(|| {
+            StorageError::AllocationFailed(format!(
+                "disk cache path {} is not valid UTF-8",
+                file_path.display()
+            ))
+        })?;
         let is_template = path_str.contains("XXXXXX");
 
         let (raw_fd, actual_path) = if is_template {
