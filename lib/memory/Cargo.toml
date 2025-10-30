@@ -1,0 +1,28 @@
+[package]
+name = "dynamo-memory"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+
+# feature to enable unsafe slices of memory descriptors
+# for advanced testing in other crates
+unsafe-slices = []
+
+[dependencies]
+cudarc = { workspace = true }
+nixl-sys = { version = "0.7" }
+serde = { workspace = true}
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+libc = { version = "0.2" }
+nix = { version = "0.30", features = ["fs"] }
+offset-allocator = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
