@@ -55,7 +55,7 @@ export DYN_KVBM_CPU_CACHE_GB=4
 export DYN_KVBM_DISK_CACHE_GB=8
 
 # [Experimental] Option 3: Disk cache only (GPU -> Disk direct offloading, bypassing CPU)
-# NOTE: this option is only experimental and it might give out the best performance.
+# NOTE: this option is only experimental and it might not give out the best performance.
 # NOTE: disk offload filtering is not support when using this option.
 export DYN_KVBM_DISK_CACHE_GB=8
 

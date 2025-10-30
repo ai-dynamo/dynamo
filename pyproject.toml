@@ -54,7 +54,7 @@ trtllm =[
 
 vllm = [
     "uvloop",
-    "nixl<=0.6.0",
+    "nixl<=0.7.0",
     "vllm[flashinfer]==0.10.2",
 ]
 
