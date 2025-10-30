@@ -158,6 +158,11 @@ def parse_args() -> Config:
         help="Run as multimodal worker component for LLM inference with multimodal data",
     )
     parser.add_argument(
+        "--multimodal-encode-prefill-worker",
+        action="store_true",
+        help="Run as unified encode+prefill+decode worker for models requiring integrated image encoding (e.g., Llama 4)",
+    )
+    parser.add_argument(
         "--mm-prompt-template",
         type=str,
         default="USER: <image>\n<prompt> ASSISTANT:",
@@ -200,10 +205,11 @@ def parse_args() -> Config:
         int(bool(args.multimodal_processor))
         + int(bool(args.multimodal_encode_worker))
         + int(bool(args.multimodal_worker))
+        + int(bool(args.multimodal_encode_prefill_worker))
     )
     if mm_flags > 1:
         raise ValueError(
-            "Use only one of --multimodal-processor, --multimodal-encode-worker, or --multimodal-worker"
+            "Use only one of --multimodal-processor, --multimodal-encode-worker, --multimodal-worker, or --multimodal-encode-prefill-worker"
         )
 
     # Set component and endpoint based on worker type
@@ -211,6 +217,9 @@ def parse_args() -> Config:
         config.component = "processor"
         config.endpoint = "generate"
     elif args.multimodal_encode_worker:
+        config.component = "encoder"
+        config.endpoint = "generate"
+    elif args.multimodal_encode_prefill_worker:
         config.component = "encoder"
         config.endpoint = "generate"
     elif args.multimodal_worker and args.is_prefill_worker:
@@ -236,6 +245,7 @@ def parse_args() -> Config:
     config.multimodal_processor = args.multimodal_processor
     config.multimodal_encode_worker = args.multimodal_encode_worker
     config.multimodal_worker = args.multimodal_worker
+    config.multimodal_encode_prefill_worker = args.multimodal_encode_prefill_worker
     config.mm_prompt_template = args.mm_prompt_template
 
     # Validate custom Jinja template file exists if provided
