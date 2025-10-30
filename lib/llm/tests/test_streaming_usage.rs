@@ -9,7 +9,10 @@ use dynamo_async_openai::types::{
 };
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::llm_backend::{BackendOutput, FinishReason};
-use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_llm::protocols::openai::ParsingOptions;
+use dynamo_llm::protocols::openai::chat_completions::{
+    NvCreateChatCompletionRequest, aggregator::ChatCompletionAggregator,
+};
 use dynamo_runtime::engine::{AsyncEngineContext, AsyncEngineStream};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::StreamExt;
@@ -302,4 +305,100 @@ async fn test_streaming_with_usage_false() {
             );
         }
     }
+}
+
+/// Helper to create a non-streaming chat completion request
+fn create_nonstreaming_chat_request() -> NvCreateChatCompletionRequest {
+    let messages = vec![ChatCompletionRequestMessage::User(
+        ChatCompletionRequestUserMessage {
+            content: ChatCompletionRequestUserMessageContent::Text("Hello".to_string()),
+            name: None,
+        },
+    )];
+
+    let inner = CreateChatCompletionRequest {
+        model: "test-model".to_string(),
+        messages,
+        stream: Some(false),
+        stream_options: None,
+        ..Default::default()
+    };
+
+    NvCreateChatCompletionRequest {
+        inner,
+        common: Default::default(),
+        nvext: None,
+        chat_template_args: None,
+    }
+}
+
+#[tokio::test]
+async fn test_nonstreaming_has_usage_field() {
+    let mut request = create_nonstreaming_chat_request();
+    assert_eq!(
+        request.inner.stream,
+        Some(false),
+        "Request should be non-streaming"
+    );
+    assert!(
+        request.inner.stream_options.is_none(),
+        "stream_options should not be set initially"
+    );
+
+    // Simulate what the preprocessor does for non-streaming requests
+    let original_stream_flag = request.inner.stream.unwrap_or(false);
+
+    // Enable usage for non-streaming requests
+    request.enable_usage_for_nonstreaming(original_stream_flag);
+
+    let request_id = "test-nonstream-123".to_string();
+    let response_generator = Box::new(request.response_generator(request_id));
+
+    // Create mock backend stream
+    let ctx = Arc::new(MockContext::new());
+    let backend_stream = create_mock_backend_stream(ctx.clone());
+
+    // Transform the stream (this generates streaming chunks)
+    let transformed_stream = OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        response_generator,
+        ctx.clone(),
+    );
+
+    // Aggregate the streaming chunks into a single non-streaming response
+    // This simulates what the HTTP service does for non-streaming requests
+    let result = dynamo_async_openai::types::CreateChatCompletionResponse::from_annotated_stream(
+        transformed_stream,
+        ParsingOptions::default(),
+    )
+    .await;
+
+    assert!(result.is_ok(), "Aggregation should succeed");
+    let response = result.unwrap();
+
+    assert!(
+        response.usage.is_some(),
+        "Non-streaming chat completion response MUST have a usage field populated. \
+         This is required for OpenAI API compliance."
+    );
+
+    let usage = response.usage.unwrap();
+
+    // Verify usage contains valid token counts
+    // In our mock, we generated 3 tokens (from the 3 backend outputs)
+    assert_eq!(
+        usage.completion_tokens, 3,
+        "Completion tokens should match the number of tokens generated"
+    );
+
+    assert!(
+        usage.total_tokens > 0,
+        "Total tokens should be greater than 0"
+    );
+
+    assert_eq!(
+        usage.total_tokens,
+        usage.prompt_tokens + usage.completion_tokens,
+        "Total tokens should equal prompt_tokens + completion_tokens"
+    );
 }

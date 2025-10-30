@@ -10,6 +10,29 @@ use crate::{
 
 /// Provides a method for generating a [`DeltaGenerator`] from a chat completion request.
 impl NvCreateChatCompletionRequest {
+    /// Enables usage tracking for non-streaming requests to comply with OpenAI API specification.
+    ///
+    /// According to OpenAI API spec, non-streaming chat completion responses (stream=false)
+    /// must always include usage statistics. This method ensures `stream_options.include_usage`
+    /// is set to `true` for non-streaming requests.
+    ///
+    /// # Arguments
+    /// * `original_stream_flag` - The original value of the `stream` field before any internal processing
+    pub fn enable_usage_for_nonstreaming(&mut self, original_stream_flag: bool) {
+        if !original_stream_flag {
+            // For non-streaming requests (stream=false), enable usage by default
+            if self.inner.stream_options.is_none() {
+                self.inner.stream_options =
+                    Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
+                        include_usage: true,
+                    });
+            } else if let Some(ref mut opts) = self.inner.stream_options {
+                // If stream_options exists, ensure include_usage is true for non-streaming
+                opts.include_usage = true;
+            }
+        }
+    }
+
     /// Creates a [`DeltaGenerator`] instance based on the chat completion request.
     ///
     /// # Arguments
@@ -340,5 +363,68 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
     fn is_usage_enabled(&self) -> bool {
         DeltaGenerator::is_usage_enabled(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_async_openai::types::{
+        ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
+        ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
+    };
+
+    fn create_test_request() -> NvCreateChatCompletionRequest {
+        let messages = vec![ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Text("test".to_string()),
+                name: None,
+            },
+        )];
+
+        NvCreateChatCompletionRequest {
+            inner: CreateChatCompletionRequest {
+                model: "test-model".to_string(),
+                messages,
+                stream: Some(false),
+                stream_options: None,
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+            chat_template_args: None,
+        }
+    }
+
+    #[test]
+    fn test_enable_usage_for_nonstreaming_enables_usage() {
+        // Test that non-streaming requests get usage enabled
+        let mut request = create_test_request();
+        assert!(request.inner.stream_options.is_none());
+
+        request.enable_usage_for_nonstreaming(false); // false = non-streaming
+
+        assert!(
+            request.inner.stream_options.is_some(),
+            "Non-streaming request should have stream_options created"
+        );
+        assert!(
+            request.inner.stream_options.unwrap().include_usage,
+            "Non-streaming request should have include_usage=true for OpenAI compliance"
+        );
+    }
+
+    #[test]
+    fn test_enable_usage_for_nonstreaming_ignores_streaming() {
+        // Test that streaming requests are not modified
+        let mut request = create_test_request();
+        assert!(request.inner.stream_options.is_none());
+
+        request.enable_usage_for_nonstreaming(true); // true = streaming
+
+        assert!(
+            request.inner.stream_options.is_none(),
+            "Streaming request should not have stream_options modified"
+        );
     }
 }
