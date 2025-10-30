@@ -209,7 +209,7 @@ impl From<&[Token]> for Tokens {
 
 impl From<Vec<usize>> for Tokens {
     fn from(tokens: Vec<usize>) -> Self {
-        Tokens(tokens.into_iter().map(|t| t as u32).collect())
+        Tokens(tokens.into_iter().map(|t| t.try_into().expect("Token ID exceeds u32::MAX")).collect())
     }
 }
 
