@@ -198,7 +198,7 @@ def test_completion_multi_element_array_prompt() -> None:
         f"{response.status_code}: {response.text}"
     )
 
-    expected_choices = len(payload.get("prompt")) # type: ignore
+    expected_choices = len(payload.get("prompt"))  # type: ignore
     choices = len(response_data.get("choices", []))
 
     assert (
