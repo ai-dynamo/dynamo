@@ -66,9 +66,9 @@ jobs:
       - name: Install awscli (for docker-build caching/login)
         shell: bash
         run: |
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "awscliv2.zip"
-          unzip awscliv2.zip
-          sudo ./aws/install
+          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "awscliv2.zip"
+          unzip -q -o awscliv2.zip
+          sudo ./aws/install --update
 
       - name: Login to ECR (for docker-build action compatibility)
         shell: bash
@@ -248,8 +248,8 @@ jobs:
           set -euo pipefail
           cd ${DYNAMO_DIR}/deploy/inference-gateway
           ./build-epp-dynamo.sh
-          docker tag us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1-dirty gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/epp-inference-extension-dynamo:${{ github.run_id }}
-          docker push gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/epp-inference-extension-dynamo:${{ github.run_id }}
+          docker tag us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1-dirty ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo/epp-inference-extension-dynamo:${{ github.run_id }}
+          docker push ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo/epp-inference-extension-dynamo:${{ github.run_id }}
 
       - name: Deploy GAIE Helm chart with built EPP image
         shell: bash
