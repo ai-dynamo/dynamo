@@ -450,6 +450,12 @@ COPY --from=wheel_builder /usr/local/ucx/ /usr/local/ucx/
 COPY --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
 COPY --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
 
+ENV LD_LIBRARY_PATH=$NIXL_LIB_DIR:\
+$NIXL_PLUGIN_DIR:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+$LD_LIBRARY_PATH
+
 WORKDIR /opt/dynamo
 
 # Copy built artifacts
