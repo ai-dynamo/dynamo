@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import signal
+from typing import Optional
 
 import uvloop
 from prometheus_client import REGISTRY
@@ -24,8 +25,14 @@ from dynamo.llm import (
     fetch_llm,
     register_llm,
 )
+from dynamo.llm.vllm_integration.consolidator_config import get_consolidator_endpoints
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.multimodal_handlers import (
+    EncodeWorkerHandler,
+    MultimodalPDWorkerHandler,
+    ProcessorHandler,
+)
 
 from .args import ENABLE_LMCACHE, Config, configure_ports, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
@@ -92,7 +99,17 @@ async def worker(runtime: DistributedRuntime):
     if not os.path.exists(config.model):
         config.model = config.engine_args.model = await fetch_llm(config.model)
 
-    if config.is_prefill_worker:
+    # Route to appropriate initialization based on config flags
+    if config.multimodal_processor:
+        await init_multimodal_processor(runtime, config)
+        logger.debug("init_multimodal_processor completed")
+    elif config.multimodal_encode_worker:
+        await init_multimodal_encode_worker(runtime, config)
+        logger.debug("init_multimodal_encode_worker completed")
+    elif config.multimodal_worker:
+        await init_multimodal_worker(runtime, config)
+        logger.debug("init_multimodal_worker completed")
+    elif config.is_prefill_worker:
         await init_prefill(runtime, config)
         logger.debug("init_prefill completed")
     else:
@@ -107,10 +124,20 @@ def setup_kv_event_publisher(
     component,
     generate_endpoint,
     vllm_config,
-):
+    consolidator_enabled: bool = False,
+    consolidator_port: Optional[int] = 5558,
+) -> Optional[ZmqKvEventPublisher]:
     """
     Set up KV event publishers for prefix caching if enabled.
     Creates one publisher per dp_rank since each dp_rank publishes to a different port.
+
+    Args:
+        config: Worker configuration
+        component: Component for runtime integration
+        generate_endpoint: Endpoint for worker ID
+        vllm_config: vLLM configuration
+        consolidator_enabled: If True, subscribe to kv eventconsolidator's ZMQ endpoint
+        consolidator_port: Port where kv event consolidator publishes (default: 5558)
 
     Returns:
         List of ZmqKvEventPublisher instances (one per dp_rank) if prefix caching is enabled, None otherwise.
@@ -128,11 +155,21 @@ def setup_kv_event_publisher(
     kv_publishers = []
 
     for dp_rank in range(data_parallel_size):
-        # Each dp_rank publishes to a different port
-        zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
-            config.engine_args.kv_events_config.endpoint,
-            data_parallel_rank=dp_rank,
-        ).replace("*", "127.0.0.1")
+        if consolidator_enabled:
+            # TODO: Use different port for each dp_rank once KVBM supports DP
+            zmq_endpoint = f"tcp://127.0.0.1:{consolidator_port}"
+            logger.info(
+                f"KV event publisher for dp_rank={dp_rank} subscribing to consolidator at {zmq_endpoint}"
+            )
+        else:
+            # Each dp_rank publishes to a different port
+            zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
+                config.engine_args.kv_events_config.endpoint,
+                data_parallel_rank=dp_rank,
+            ).replace("*", "127.0.0.1")
+            logger.info(
+                f"KV event publisher for dp_rank={dp_rank} subscribing to vLLM at {zmq_endpoint}"
+            )
 
         zmq_config = ZmqKvEventPublisherConfig(
             worker_id=generate_endpoint.connection_id(),
@@ -175,6 +212,12 @@ def setup_vllm_engine(config, stat_logger=None):
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+
+    # Set up consolidator endpoints if KVBM is enabled
+    consolidator_endpoints = None
+    if config.has_connector("kvbm"):
+        consolidator_endpoints = get_consolidator_endpoints(vllm_config)
+    vllm_config.consolidator_endpoints = consolidator_endpoints
 
     factory = []
     if stat_logger:
@@ -267,12 +310,37 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         runtime, component, engine_client, default_sampling_params
     )
 
+    # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
+    consolidator_enabled = False
+    consolidator_port = None
+
+    if (
+        hasattr(vllm_config, "consolidator_endpoints")
+        and vllm_config.consolidator_endpoints
+    ):
+        # Extract connect endpoint (third element) for clients to subscribe
+        # consolidator_endpoints = (vllm_endpoint, bind_endpoint, connect_endpoint)
+        consolidator_output_endpoint = vllm_config.consolidator_endpoints[2]
+        consolidator_port = int(consolidator_output_endpoint.split(":")[-1])
+        consolidator_enabled = True
+
     # Set up KV event publishers for prefix caching if enabled (one per dp_rank)
+    # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
     kv_publishers = setup_kv_event_publisher(
-        config, component, generate_endpoint, vllm_config
+        config,
+        component,
+        generate_endpoint,
+        vllm_config,
+        consolidator_enabled=consolidator_enabled,
+        consolidator_port=consolidator_port,
     )
     if kv_publishers:
         handler.kv_publishers = kv_publishers
+
+    if config.engine_args.disable_log_stats is False:
+        register_engine_metrics_callback(
+            endpoint=generate_endpoint, registry=REGISTRY, metric_prefix_filter="vllm:"
+        )
 
     # Register prefill model with ModelType.Prefill
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
@@ -348,9 +416,29 @@ async def init(runtime: DistributedRuntime, config: Config):
         default_sampling_params,
     )
 
-    # Set up KV event publishers for prefix caching if enabled (one per dp_rank)
+    # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
+    consolidator_enabled = False
+    consolidator_port = None
+
+    if (
+        hasattr(vllm_config, "consolidator_endpoints")
+        and vllm_config.consolidator_endpoints
+    ):
+        # Extract connect endpoint (third element) for clients to subscribe
+        # consolidator_endpoints = (vllm_endpoint, bind_endpoint, connect_endpoint)
+        consolidator_output_endpoint = vllm_config.consolidator_endpoints[2]
+        consolidator_port = int(consolidator_output_endpoint.split(":")[-1])
+        consolidator_enabled = True
+
+    # Set up KV event publisher for prefix caching if enabled
+    # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
     kv_publishers = setup_kv_event_publisher(
-        config, component, generate_endpoint, vllm_config
+        config,
+        component,
+        generate_endpoint,
+        vllm_config,
+        consolidator_enabled=consolidator_enabled,
+        consolidator_port=consolidator_port,
     )
     if kv_publishers:
         handler.kv_publishers = kv_publishers
@@ -423,6 +511,147 @@ def get_engine_cache_info(engine: AsyncLLM):
     except Exception as e:
         logging.error(f"Failed to get configuration values from vLLM config: {e}")
         raise
+
+
+async def init_multimodal_processor(runtime: DistributedRuntime, config: Config):
+    """Initialize multimodal processor component"""
+    component = runtime.namespace(config.namespace).component(config.component)
+    await component.create_service()
+
+    generate_endpoint = component.endpoint(config.endpoint)
+
+    # Get encode worker client
+    encode_worker_client = (
+        await runtime.namespace(config.namespace)
+        .component("encoder")
+        .endpoint("generate")
+        .client()
+    )
+
+    # Get prompt template from args (must be passed via environment or command line)
+    mm_prompt_template = config.mm_prompt_template
+
+    handler = ProcessorHandler(
+        config.engine_args,
+        encode_worker_client,
+        mm_prompt_template,
+    )
+
+    logger.info("Waiting for Encoder Worker Instances ...")
+    await encode_worker_client.wait_for_instances()
+
+    # Register the endpoint as entrypoint to a model
+    await register_llm(
+        ModelInput.Text,  # Custom processor is used and this type bypasses SDK processor
+        ModelType.Chat,
+        generate_endpoint,
+        config.model,
+        config.served_model_name,
+        kv_cache_block_size=config.engine_args.block_size,
+    )
+
+    logger.info("Starting to serve the processor endpoint...")
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate, metrics_labels=[("model", config.model)]
+            ),
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve endpoints: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
+async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Config):
+    """Initialize multimodal encode worker component"""
+    component = runtime.namespace(config.namespace).component(config.component)
+    await component.create_service()
+
+    generate_endpoint = component.endpoint(config.endpoint)
+
+    # Get PD worker client
+    # In multimodal mode, the PD worker always registers as "backend"
+    # (even in disaggregated mode with prefill/decode split, we still connect to "backend")
+    pd_worker_client = (
+        await runtime.namespace(config.namespace)
+        .component("backend")
+        .endpoint("generate")
+        .client()
+    )
+
+    handler = EncodeWorkerHandler(
+        config.engine_args,
+        pd_worker_client,
+    )
+    await handler.async_init(runtime)
+    logger.info("Waiting for PD Worker Instances ...")
+    await pd_worker_client.wait_for_instances()
+    logger.info("Starting to serve the encode worker endpoint...")
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate, metrics_labels=[("model", config.model)]
+            ),
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve endpoints: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
+async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
+    """Initialize multimodal worker component for aggregated or disaggregated mode"""
+
+    component = runtime.namespace(config.namespace).component(config.component)
+    await component.create_service()
+
+    generate_endpoint = component.endpoint(config.endpoint)
+    clear_endpoint = component.endpoint("clear_kv_blocks")
+
+    engine_client, vllm_config, default_sampling_params = setup_vllm_engine(config)
+
+    # TODO: Support Disaggregated mode separately
+    client = (
+        await runtime.namespace(config.namespace)
+        .component("backend")
+        .endpoint("generate")
+        .client()
+    )
+
+    handler = MultimodalPDWorkerHandler(
+        runtime, component, engine_client, config, client
+    )
+
+    await handler.async_init(runtime)
+
+    # Set up KV event publisher for prefix caching if enabled
+    kv_publisher = setup_kv_event_publisher(
+        config, component, generate_endpoint, vllm_config
+    )
+    if kv_publisher:
+        handler.kv_publisher = kv_publisher
+
+    metrics_labels = [("model", config.model)]
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate, metrics_labels=metrics_labels
+            ),
+            clear_endpoint.serve_endpoint(
+                handler.clear_kv_blocks, metrics_labels=metrics_labels
+            ),
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve endpoints: {e}")
+        raise
+    finally:
+        handler.cleanup()
 
 
 def main():

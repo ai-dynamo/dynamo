@@ -85,7 +85,13 @@ pub struct KvConnectorLeaderRecorder {
 }
 
 impl KvConnectorLeaderRecorder {
-    pub fn new(worker_id: String, page_size: usize, leader_py: PyKvbmLeader) -> Self {
+    pub fn new(
+        worker_id: String,
+        page_size: usize,
+        leader_py: PyKvbmLeader,
+        consolidator_vllm_endpoint: Option<String>,
+        consolidator_output_endpoint: Option<String>,
+    ) -> Self {
         tracing::info!(
             "KvConnectorLeaderRecorder initialized with worker_id: {}",
             worker_id
@@ -121,7 +127,11 @@ impl KvConnectorLeaderRecorder {
 
         {
             let slot_manager_cell = slot_manager_cell.clone();
-            handle.clone().spawn(async move {
+            // Capture consolidator endpoints for the async block
+            let consolidator_vllm_ep = consolidator_vllm_endpoint.clone();
+            let consolidator_output_ep = consolidator_output_endpoint.clone();
+
+            handle.spawn(async move {
                 let ready = leader.wait_worker_sync_ready().await;
                 if !ready {
                     tracing::error!(
@@ -130,15 +140,22 @@ impl KvConnectorLeaderRecorder {
                     return;
                 }
 
-                let block_manager = match BlockManagerBuilder::new()
+                let mut block_manager_builder = BlockManagerBuilder::new()
                     .worker_id(0)
                     .leader(leader_py)
                     .page_size(page_size)
                     .disable_device_pool(false)
-                    .kvbm_metrics(kvbm_metrics_clone.clone())
-                    .build()
-                    .await
+                    .kvbm_metrics(kvbm_metrics_clone.clone());
+
+                // Add consolidator config if provided
+                if let (Some(vllm_ep), Some(output_ep)) =
+                    (consolidator_vllm_ep, consolidator_output_ep)
                 {
+                    block_manager_builder =
+                        block_manager_builder.consolidator_config(vllm_ep, output_ep);
+                }
+
+                let block_manager = match block_manager_builder.build().await {
                     Ok(bm) => bm,
                     Err(e) => {
                         tracing::error!("Failed to build BlockManager: {}", e);

@@ -190,6 +190,7 @@ ENV ENV=${ENV:-/etc/shinit_v2}
 ARG HAS_TRTLLM_CONTEXT
 ARG TENSORRTLLM_PIP_WHEEL
 ARG TENSORRTLLM_INDEX_URL
+ARG GITHUB_TRTLLM_COMMIT
 
 # Copy only wheel files and commit info from trtllm_wheel stage from build_context
 COPY --from=trtllm_wheel /*.whl /trtllm_wheel/
@@ -205,17 +206,16 @@ RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
     # Clean up any existing conflicting CUDA repository configurations and GPG keys
     rm -f /etc/apt/sources.list.d/cuda*.list && \
     rm -f /usr/share/keyrings/cuda-archive-keyring.gpg && \
-    rm -f /etc/apt/trusted.gpg.d/cuda*.gpg && \
-    if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
+    rm -f /etc/apt/trusted.gpg.d/cuda*.gpg
+
+RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         # Download and run install_tensorrt.sh from TensorRT-LLM GitHub before installing the wheel
-        TRTLLM_COMMIT=$(cat /trtllm_wheel/commit.txt | awk -F'_' '{print $2}') && \
-        (curl -fsSL --retry 5 --retry-delay 10 --max-time 1800 -o /tmp/install_tensorrt.sh "https://github.com/NVIDIA/TensorRT-LLM/raw/${TRTLLM_COMMIT}/docker/common/install_tensorrt.sh" || \
-         curl -fsSL --retry 5 --retry-delay 10 --max-time 1800 -o /tmp/install_tensorrt.sh "https://github.com/NVIDIA/TensorRT-LLM/raw/${GITHUB_TRTLLM_COMMIT}/docker/common/install_tensorrt.sh") && \
+        curl -fsSL --retry 5 --retry-delay 10 --max-time 1800 -o /tmp/install_tensorrt.sh "https://github.com/NVIDIA/TensorRT-LLM/raw/${GITHUB_TRTLLM_COMMIT}/docker/common/install_tensorrt.sh" && \
         # Modify the script to use virtual environment pip instead of system pip3
         sed -i 's/pip3 install/uv pip install/g' /tmp/install_tensorrt.sh && \
         bash /tmp/install_tensorrt.sh && \
         # Install from local wheel directory in build context
-        WHEEL_FILE=$(find /trtllm_wheel -name "*.whl" | head -n 1); \
+        WHEEL_FILE="$(find /trtllm_wheel -name "*.whl" | head -n 1)"; \
         if [ -n "$WHEEL_FILE" ]; then \
             uv pip install "$WHEEL_FILE"; \
         else \

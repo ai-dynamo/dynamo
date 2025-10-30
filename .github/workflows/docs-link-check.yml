@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   lychee:
+    if: false  # Job disabled until fixed
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository

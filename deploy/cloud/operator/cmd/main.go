@@ -295,6 +295,9 @@ func main() {
 		mgrOpts.Cache.DefaultNamespaces = map[string]cache.Config{
 			restrictedNamespace: {},
 		}
+		setupLog.Info("Restricted namespace configured, launching in restricted mode", "namespace", restrictedNamespace)
+	} else {
+		setupLog.Info("No restricted namespace configured, launching in cluster-wide mode")
 	}
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
 	if err != nil {
@@ -308,12 +311,21 @@ func main() {
 	ctrlConfig.Grove.Enabled = groveEnabled
 	setupLog.Info("Detecting LWS availability...")
 	lwsEnabled := commonController.DetectLWSAvailability(mainCtx, mgr)
-	ctrlConfig.LWS.Enabled = lwsEnabled
-
+	setupLog.Info("Detecting Volcano availability...")
+	volcanoEnabled := commonController.DetectVolcanoAvailability(mainCtx, mgr)
+	// LWS for multinode deployment usage depends on both LWS and Volcano availability
+	ctrlConfig.LWS.Enabled = lwsEnabled && volcanoEnabled
 	// Detect Kai-scheduler availability using discovery client
 	setupLog.Info("Detecting Kai-scheduler availability...")
 	kaiSchedulerEnabled := commonController.DetectKaiSchedulerAvailability(mainCtx, mgr)
 	ctrlConfig.KaiScheduler.Enabled = kaiSchedulerEnabled
+
+	setupLog.Info("Detected orchestrators availability",
+		"grove", groveEnabled,
+		"lws", lwsEnabled,
+		"volcano", volcanoEnabled,
+		"kai-scheduler", kaiSchedulerEnabled,
+	)
 
 	// Create etcd client
 	cli, err := clientv3.New(clientv3.Config{
