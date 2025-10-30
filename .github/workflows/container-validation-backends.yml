@@ -388,7 +388,7 @@ jobs:
         sudo ./get_helm.sh
         
         
-        helm fetch oci://registry-1.docker.io/bitnamicharts/etcd
+        helm fetch oci://docker.io/bitnamicharts/etcd
         helm fetch oci://dynamoci.azurecr.io/cached/bitnamicharts/etcd || true
         helm fetch oci://dynamoci.azurecr.io/bitnamicharts/etcd || true
 
