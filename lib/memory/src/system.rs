@@ -113,7 +113,10 @@ impl super::nixl::NixlCompatible for SystemStorage {
 
 impl actions::Memset for SystemStorage {
     fn memset(&mut self, value: u8, offset: usize, size: usize) -> Result<()> {
-        if offset + size > self.len {
+        let end = offset
+            .checked_add(size)
+            .ok_or_else(|| StorageError::OperationFailed("memset: offset overflow".into()))?;
+        if end > self.len {
             return Err(StorageError::OperationFailed(
                 "memset: offset + size > storage size".into(),
             ));
@@ -122,6 +125,7 @@ impl actions::Memset for SystemStorage {
             let ptr = self.ptr.as_ptr().add(offset);
             std::ptr::write_bytes(ptr, value, size);
         }
+    }
         Ok(())
     }
 }
