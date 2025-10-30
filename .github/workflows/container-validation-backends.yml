@@ -382,9 +382,28 @@ jobs:
     - name: 'Convert kubeconfig for Azure CLI'
       run: kubelogin convert-kubeconfig -l azurecli
 
-    - name: 'Get nodes' # todo: this is just a test
+    - name: testunf
       run: |
-        kubectl get nodes
+
+        set -x
+        
+        kubectl get nodes || true
+        helm fetch oci://dynamoci.azurecr.io/helm/etcd:12.0.18 || true 
+        # Install dependencies
+        sudo apt-get update && sudo apt-get install -y curl bash openssl gettext git jq
+
+        # Install Helm
+        echo "Installing Helm..."
+        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        sudo chmod 700 get_helm.sh
+        sudo ./get_helm.sh
+        helm fetch oci://dynamoci.azurecr.io/helm/etcd:12.0.18 
+
+#    - name: 'Get nodes' # todo: this is just a test
+#      run: |
+#
+#        helm fetch oci://dynamoci.azurecr.io/helm/etcd:12.0.18
+#        kubectl get nodes
 
 
 #  deploy-test-vllm:
