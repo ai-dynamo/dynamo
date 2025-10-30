@@ -28,7 +28,7 @@ impl<T> PositionalRadixTree<T> {
         self.map.entry(position).or_default()
     }
 
-    /// Provides the entry for the [`PositionalSequenceHash`] at the given position.
+    /// Provides the sub-map for all [`PositionalSequenceHash`] entries at the given position.
     pub fn position(
         &self,
         position: u64,
