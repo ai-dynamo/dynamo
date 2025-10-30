@@ -7,7 +7,7 @@ use tokio::sync::watch;
 use tracing;
 
 use dynamo_runtime::DistributedRuntime;
-use dynamo_runtime::transports::etcd::WatchEvent;
+use dynamo_runtime::storage::key_value_store::{Key, WatchEvent};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DisaggRouterConf {
@@ -23,61 +23,30 @@ impl Default for DisaggRouterConf {
 }
 
 impl DisaggRouterConf {
-    pub async fn from_etcd_with_watcher(
+    pub async fn from_store_with_watcher(
         drt: Arc<DistributedRuntime>,
         model_name: &str,
     ) -> anyhow::Result<(Self, watch::Receiver<Self>)> {
-        let etcd_key = format!("public/components/disagg_router/models/chat/{}", model_name);
+        let bucket_name = "public/components/disagg_router/models/chat";
+        let key = format!("{bucket_name}/{model_name}");
 
-        // Get the initial value if it exists
-        let Some(etcd_client) = drt.etcd_client() else {
-            anyhow::bail!("Static components don't have an etcd client");
-        };
-        let initial_config = match etcd_client.kv_get_prefix(&etcd_key).await {
-            Ok(kvs) => {
-                if let Some(kv) = kvs.first() {
-                    match serde_json::from_slice::<DisaggRouterConf>(kv.value()) {
-                        Ok(config) => {
-                            tracing::debug!(
-                                "Found initial config for key {}: {:?}",
-                                etcd_key,
-                                config
-                            );
-                            config
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to parse initial config for key {}: {}",
-                                etcd_key,
-                                e
-                            );
-                            DisaggRouterConf::default()
-                        }
-                    }
-                } else {
-                    tracing::debug!(
-                        "No initial config found for key {}, using default",
-                        etcd_key
-                    );
-                    DisaggRouterConf::default()
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Error fetching initial config for key {}: {}", etcd_key, e);
-                DisaggRouterConf::default()
-            }
-        };
+        let store = Arc::new(drt.store().clone());
 
-        // Create watch channel for config updates
+        let bucket = store.get_or_create_bucket(bucket_name, None).await?;
+        let initial_config = bucket
+            .get(&Key::from_raw(model_name.to_string()))
+            .await?
+            .and_then(|v| serde_json::from_slice::<DisaggRouterConf>(&v).ok())
+            .unwrap_or_default();
+
+        let (_, mut kv_event_rx) = store.watch(&key, None, drt.primary_token());
+
+        // Create watch channel for config updates, seeded with initial config
         let (watch_tx, watch_rx) = watch::channel(initial_config.clone());
 
-        // Set up the watcher after getting the initial value
-        let prefix_watcher = etcd_client.kv_get_and_watch_prefix(&etcd_key).await?;
-        let (key, _watcher, mut kv_event_rx) = prefix_watcher.dissolve();
-
-        // Spawn background task to watch for config changes
+        // Spawn background task to watch for config changes, including initial config
         drt.runtime().secondary().spawn(async move {
-            tracing::info!("Starting config watcher for disagg router key: {}", key);
+            tracing::info!("Starting config watcher for disagg router key: {key}");
 
             loop {
                 let kv_event = tokio::select! {
@@ -96,7 +65,7 @@ impl DisaggRouterConf {
                     }
                 };
 
-                tracing::debug!("Received watch event for key {}", key);
+                tracing::debug!("Received watch event for key {key}");
 
                 match kv_event {
                     WatchEvent::Put(kv) => {
@@ -147,13 +116,13 @@ impl DisaggregatedRouter {
         }
     }
 
-    pub async fn new_with_etcd_and_default(
+    pub async fn new_with_config_watcher(
         drt: Arc<DistributedRuntime>,
         model_name: String,
         default_max_local_prefill_length: i32,
     ) -> anyhow::Result<Self> {
         let (mut config, watcher) =
-            DisaggRouterConf::from_etcd_with_watcher(drt, &model_name).await?;
+            DisaggRouterConf::from_store_with_watcher(drt, &model_name).await?;
 
         // Use the provided default if no etcd value was found (when config is the default value)
         if config.max_local_prefill_length == DisaggRouterConf::default().max_local_prefill_length {
