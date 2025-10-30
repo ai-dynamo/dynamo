@@ -1,4 +1,4 @@
-#!/bin/bash -e
+#!/usr/bin/env bash
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -21,22 +21,16 @@
 set -euo pipefail
 
 OUTPUT_DIR="/tmp/kvbm_wheel"
-NIXL_REF="0.6.0"
-ARCH="amd64"
-TARGET="wheel"
 KVBM_WHEEL_IMAGE_REF="kvbm-wheel:tmp"
 
 # Flags:
-# -o output dir, -n nixl ref, -a arch, -t docker build target, -r image name:tag
-while getopts ":o:n:a:t:r:h" opt; do
+# -o output dir, -r image name:tag
+while getopts ":o:r:h" opt; do
   case "$opt" in
     o) OUTPUT_DIR="$OPTARG" ;;
-    n) NIXL_REF="$OPTARG" ;;
-    a) ARCH="$OPTARG" ;;
-    t) TARGET="$OPTARG" ;;
     r) KVBM_WHEEL_IMAGE_REF="$OPTARG" ;;
     h)
-      echo "Usage: $0 [-o OUTPUT_DIR] [-n NIXL_REF] [-a ARCH{amd64|arm64}] [-t TARGET] [-r IMAGE_NAME:TAG]"
+      echo "Usage: $0 [-o OUTPUT_DIR] [-r IMAGE:TAG]"
       exit 0
       ;;
     \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
@@ -45,47 +39,15 @@ while getopts ":o:n:a:t:r:h" opt; do
 done
 shift $((OPTIND-1))
 
-# Normalize ARCH and derive ARCH_ALT
-case "${ARCH}" in
-  amd64|x86_64) ARCH="amd64";  ARCH_ALT="x86_64" ;;
-  arm64|aarch64) ARCH="arm64"; ARCH_ALT="aarch64" ;;
-  *) echo "Unsupported ARCH: ${ARCH} (use amd64 or arm64)"; exit 1 ;;
-esac
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-BUILD_ARGS=(
-  "--build-arg" "NIXL_REF=${NIXL_REF}"
-  "--build-arg" "ARCH=${ARCH}"
-  "--build-arg" "ARCH_ALT=${ARCH_ALT}"
-)
+BUILD_ARGS=( --framework none --target dev --tag "$KVBM_WHEEL_IMAGE_REF" --enable-kvbm )
 
-USE_SCCACHE="${USE_SCCACHE:-false}"
-SCCACHE_BUCKET="${SCCACHE_BUCKET:-}"
-SCCACHE_REGION="${SCCACHE_REGION:-}"
+"$SCRIPT_DIR/build.sh" "${BUILD_ARGS[@]}"
 
-if [[ "${USE_SCCACHE}" == "true" ]]; then
-  BUILD_ARGS+=("--build-arg" "USE_SCCACHE=true")
-  BUILD_ARGS+=("--build-arg" "SCCACHE_BUCKET=${SCCACHE_BUCKET}")
-  BUILD_ARGS+=("--build-arg" "SCCACHE_REGION=${SCCACHE_REGION}")
-  BUILD_ARGS+=(
-    "--secret" "id=aws-key-id,env=AWS_ACCESS_KEY_ID"
-    "--secret" "id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY"
-  )
-fi
-
-cid=""
-cleanup() { [[ -n "${cid}" ]] && docker rm -v "$cid" >/dev/null 2>&1 || true; }
-trap cleanup EXIT
-
-docker build \
-    --target "${TARGET}" \
-    "${BUILD_ARGS[@]}" \
-    -t "${KVBM_WHEEL_IMAGE_REF}" \
-    -f container/Dockerfile.kvbm_wheel .
-
-# Only extract wheels if we built the "wheel" stage
-if [[ "${TARGET}" == "wheel" ]]; then
-  cid="$(docker create "${KVBM_WHEEL_IMAGE_REF}")"
-  mkdir -p "${OUTPUT_DIR}"
-  docker cp "${cid}":/opt/dynamo/wheelhouse/. "${OUTPUT_DIR}"/
-fi
-# trap will remove container
+mkdir -p "$OUTPUT_DIR"
+docker run --rm \
+  --entrypoint /bin/bash \
+  -v "$OUTPUT_DIR:/out" \
+  "$KVBM_WHEEL_IMAGE_REF" \
+  -lc 'cp /opt/dynamo/wheelhouse/kvbm-*.whl /out/'

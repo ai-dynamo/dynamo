@@ -3,16 +3,12 @@
 
 from typing import Optional
 
-from kvbm.utils import is_cuda_13, is_dyn_runtime_enabled, set_cu13_nixl_plugin_path
-
-if is_cuda_13():
-    set_cu13_nixl_plugin_path()
-
 # Keeping this import is important because it runs the code in nixl’s __init__.py
 # to set up the Nixl plugin path.
 import nixl  # noqa: F401
 import torch
 from kvbm.trtllm_integration.rust import KvConnectorWorker as RustKvConnectorWorker
+from kvbm.utils import is_dyn_runtime_enabled
 from tensorrt_llm import logger
 from tensorrt_llm._torch.pyexecutor.kv_cache_connector import KvCacheConnectorWorker
 from tensorrt_llm.llmapi.llm_args import TorchLlmArgs

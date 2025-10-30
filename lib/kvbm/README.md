@@ -47,6 +47,9 @@ To install the pip wheel, run:
 pip install /tmp/kvbm_wheel/kvbm*.whl
 ```
 
+Note that the default pip wheel built is not compatible with CUDA 13 at the moment.
+
+
 ## Integrations
 
 ### Environment Variables
@@ -58,7 +61,7 @@ pip install /tmp/kvbm_wheel/kvbm*.whl
 | `DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS` | Timeout (in seconds) for the KVBM leader and worker to synchronize and allocate the required memory and storage. Increase this value if allocating large amounts of memory or storage. | 120 |
 | `DYN_KVBM_METRICS` | Enable metrics endpoint | `false` |
 | `DYN_KVBM_METRICS_PORT` | Metrics port | `6880` |
-| `DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER` | Disable disk offload filtering to protect SSD life span | `false` |
+| `DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER` | Disable disk offload filtering to remove SSD lifespan protection | `false` |
 
 ### vLLM
 
