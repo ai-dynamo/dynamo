@@ -335,16 +335,16 @@ ARG ARCH_ALT
 ENV DYNAMO_HOME=/opt/dynamo \
     CARGO_TARGET_DIR=/opt/dynamo/target
 
-# Copy ucx and nixl libs
-COPY --from=wheel_builder /usr/local/ucx/ /usr/local/ucx/
-COPY --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
-COPY --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
-
 # NIXL environment variables
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins
 ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${LD_LIBRARY_PATH}
+
+# Copy ucx and nixl libs
+COPY --from=wheel_builder /usr/local/ucx/ /usr/local/ucx/
+COPY --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
+COPY --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
 
 # Copy built artifacts
 COPY --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
