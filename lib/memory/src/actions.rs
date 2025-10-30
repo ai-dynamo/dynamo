@@ -67,7 +67,11 @@ pub trait Slice {
     fn as_slice_typed<T: Sized>(&self) -> Result<&[T], StorageError> {
         let bytes = self.as_slice()?;
         let ptr = bytes.as_ptr() as *const T;
-        let len = bytes.len() / std::mem::size_of::<T>();
+        let elem_size = std::mem::size_of::<T>();
+        if elem_size == 0 {
+            return Err(StorageError::Unsupported("zero-sized types are not supported".into()));
+        }
+        let len = bytes.len() / elem_size;
 
         if !(bytes.as_ptr() as usize).is_multiple_of(std::mem::align_of::<T>()) {
             return Err(StorageError::Unsupported(format!(
@@ -76,11 +80,11 @@ pub trait Slice {
             )));
         }
 
-        if bytes.len() % std::mem::size_of::<T>() != 0 {
+        if bytes.len() % elem_size != 0 {
             return Err(StorageError::Unsupported(format!(
                 "size {} is not a multiple of type size {}",
                 bytes.len(),
-                std::mem::size_of::<T>()
+                elem_size
             )));
         }
 
