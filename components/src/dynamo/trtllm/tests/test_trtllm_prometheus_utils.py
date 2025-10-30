@@ -51,9 +51,7 @@ tokens_per_second 245.7
         yield registry
 
         dynamo.common.utils.prometheus.generate_latest = original_generate_latest
-   
 
-   
     def test_trtllm_use_case(self, trtllm_registry):
         """Test TensorRT-LLM use case: exclude python_/process_ and add trtllm: prefix."""
         result = get_prometheus_expfmt(

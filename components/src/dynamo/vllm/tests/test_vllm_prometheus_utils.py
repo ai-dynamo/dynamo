@@ -48,7 +48,6 @@ vllm:time_to_first_token_seconds_count{model_name="meta-llama/Llama-3.1-8B"} 165
         yield registry
 
         dynamo.common.utils.prometheus.generate_latest = original_generate_latest
-
    
     def test_vllm_use_case(self, vllm_registry):
         """Test vLLM use case: filter to vllm: metrics and exclude python_/process_."""

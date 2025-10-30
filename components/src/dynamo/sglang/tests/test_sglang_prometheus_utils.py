@@ -50,8 +50,6 @@ sglang:cache_hit_rate{model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0075
 
         dynamo.common.utils.prometheus.generate_latest = original_generate_latest
 
-
-
         def mock_generate_latest(reg):
             return sample_metrics.encode("utf-8")
 
