@@ -68,6 +68,12 @@ This approach is ideal for CI/CD pipelines or when you want complete isolation f
 - `docs/_extensions/` - Custom Sphinx extensions
 - `docs/build/` - Generated documentation output (not tracked in git)
 
+## Redirect Creation
+
+When moving or renaming files a redirect must be created.
+
+Redirect entries should be added to the `redirects` dictionary in `conf.py`. For detailed information on redirect syntax, see the [sphinx-reredirects usage documentation](https://documatt.com/sphinx-reredirects/usage/#introduction).
+
 ## Dependency Management
 
 Documentation dependencies are defined in `pyproject.toml` under the `[dependency-groups]` section:
