@@ -9,6 +9,7 @@ use anyhow::Result;
 use dynamo_async_openai::types::ChatCompletionRequestUserMessageContentPart;
 
 use super::common::EncodedMediaData;
+use super::decoders::{DecodedMediaData, Decoder, MediaDecoder};
 
 const DEFAULT_HTTP_USER_AGENT: &str = "dynamo-ai/dynamo";
 
@@ -34,13 +35,14 @@ impl Default for MediaFetcher {
 }
 
 pub struct MediaLoader {
+    media_decoder: MediaDecoder,
     http_client: reqwest::Client,
     media_fetcher: MediaFetcher,
-    // TODO: decoders, NIXL agent
+    // TODO: NIXL agent
 }
 
 impl MediaLoader {
-    pub fn new(media_fetcher: MediaFetcher) -> Result<Self> {
+    pub fn new(media_decoder: MediaDecoder, media_fetcher: MediaFetcher) -> Result<Self> {
         let mut http_client_builder =
             reqwest::Client::builder().user_agent(&media_fetcher.user_agent);
 
@@ -51,6 +53,7 @@ impl MediaLoader {
         let http_client = http_client_builder.build()?;
 
         Ok(Self {
+            media_decoder,
             http_client,
             media_fetcher,
         })
@@ -82,23 +85,25 @@ impl MediaLoader {
         Ok(())
     }
 
-    pub async fn fetch_media_part(
+    pub async fn fetch_and_decode_media_part(
         &self,
         oai_content_part: &ChatCompletionRequestUserMessageContentPart,
         // TODO: request-level options
-    ) -> Result<EncodedMediaData> {
+    ) -> Result<DecodedMediaData> {
         // fetch the media
         // TODO: decode and NIXL-register
-        let data = match oai_content_part {
+        let decoded = match oai_content_part {
             ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
                 let url = &image_part.image_url.url;
                 self.check_if_url_allowed(url)?;
-                EncodedMediaData::from_url(url, &self.http_client).await?
+                let data = EncodedMediaData::from_url(url, &self.http_client).await?;
+                self.media_decoder.image_decoder.decode_async(data).await?
             }
             ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
                 let url = &video_part.video_url.url;
                 self.check_if_url_allowed(url)?;
-                EncodedMediaData::from_url(url, &self.http_client).await?
+                EncodedMediaData::from_url(url, &self.http_client).await?;
+                anyhow::bail!("Video decoding is not supported yet");
             }
             ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => {
                 anyhow::bail!("Audio decoding is not supported yet");
@@ -106,13 +111,45 @@ impl MediaLoader {
             _ => anyhow::bail!("Unsupported media type"),
         };
 
-        Ok(data)
+        Ok(decoded)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_async_openai::types::{ChatCompletionRequestMessageContentPartImage, ImageUrl};
+
+    // warning: non-airgap test
+    #[tokio::test]
+    async fn test_fetch_and_decode() {
+        let media_decoder = MediaDecoder::default();
+        let loader = MediaLoader::new(media_decoder, MediaFetcher::default()).unwrap();
+
+        let image_url = ImageUrl::from(
+            "https://developer-blogs.nvidia.com/wp-content/uploads/2023/11/llm-optimize-deploy-graphic.png",
+        );
+        let content_part = ChatCompletionRequestUserMessageContentPart::ImageUrl(
+            ChatCompletionRequestMessageContentPartImage { image_url },
+        );
+
+        let result = loader.fetch_and_decode_media_part(&content_part).await;
+        assert!(
+            result.is_ok(),
+            "Failed to fetch and decode image: {:?}",
+            result.err()
+        );
+
+        let data = result.unwrap();
+        assert_eq!(data.dtype, "uint8");
+
+        // Verify image dimensions: 1,999px × 1,125px (width × height)
+        // Shape format is [height, width, channels]
+        assert!(!data.shape.is_empty(), "Shape should not be empty");
+        assert_eq!(data.shape[0], 1125, "Height should be 1125");
+        assert_eq!(data.shape[1], 1999, "Width should be 1999");
+        assert_eq!(data.shape[2], 4, "RGBA channels should be 4");
+    }
 
     #[test]
     fn test_direct_ip_blocked() {
@@ -120,7 +157,7 @@ mod tests {
             allow_direct_ip: false,
             ..Default::default()
         };
-        let loader = MediaLoader::new(fetcher).unwrap();
+        let loader = MediaLoader::new(MediaDecoder::default(), fetcher).unwrap();
 
         let url = url::Url::parse("http://192.168.1.1/image.jpg").unwrap();
         let result = loader.check_if_url_allowed(&url);
@@ -140,7 +177,7 @@ mod tests {
             allow_direct_port: false,
             ..Default::default()
         };
-        let loader = MediaLoader::new(fetcher).unwrap();
+        let loader = MediaLoader::new(MediaDecoder::default(), fetcher).unwrap();
 
         let url = url::Url::parse("http://example.com:8080/image.jpg").unwrap();
         let result = loader.check_if_url_allowed(&url);
@@ -164,7 +201,7 @@ mod tests {
             allowed_media_domains: Some(allowed_domains),
             ..Default::default()
         };
-        let loader = MediaLoader::new(fetcher).unwrap();
+        let loader = MediaLoader::new(MediaDecoder::default(), fetcher).unwrap();
 
         // Allowed domain should pass
         let url = url::Url::parse("https://trusted.com/image.jpg").unwrap();
