@@ -389,6 +389,8 @@ jobs:
         
         
         helm fetch oci://registry-1.docker.io/bitnamicharts/etcd
+        helm fetch oci://dynamoci.azurecr.io/cached/bitnamicharts/etcd || true
+        helm fetch oci://dynamoci.azurecr.io/bitnamicharts/etcd || true
 
 #        # Setup kubeconfig
 #        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
