@@ -16,8 +16,24 @@
 import re
 from dataclasses import dataclass
 from typing import Dict, Optional, Pattern
+from typing_extensions import TypedDict
 
 from tests.utils.managed_deployment import DeploymentSpec
+
+
+class DeploymentInfo(TypedDict, total=False):
+    """Information about a deployment configuration.
+    
+    Attributes:
+        spec: DeploymentSpec object defining the deployment configuration
+        backend: Backend type - "vllm", "sglang", or "trtllm" 
+        model: Optional model identifier (e.g., "deepseek-ai/DeepSeek-V2-Lite")
+        is_moe: Optional flag indicating if this is a Mixture-of-Experts model
+    """
+    spec: DeploymentSpec
+    backend: str 
+    model: str 
+    is_moe: bool 
 
 OVERFLOW_SUFFIX = "_overflow"
 RECOVERY_SUFFIX = "_recovery"
@@ -158,9 +174,17 @@ class Scenario:
 
 
 # Helper functions to create deployment specs
-def _create_deployment_spec(backend, deploy_type, yaml_path):
-    """Create a deployment spec with backend information."""
-    return {"spec": DeploymentSpec(yaml_path), "backend": backend}
+def _create_deployment_spec(backend: str, yaml_path: str) -> DeploymentInfo:
+    """Create a deployment spec with backend information.
+    
+    Args:
+        backend: Backend type ("vllm", "sglang", or "trtllm")
+        yaml_path: Path to the deployment YAML file
+        
+    Returns:
+        DeploymentInfo dictionary with spec and backend
+    """
+    return DeploymentInfo(spec=DeploymentSpec(yaml_path), backend=backend)
 
 
 def _set_replicas(deployment_spec, backend, deploy_type, replicas):
@@ -206,9 +230,16 @@ def _set_tensor_parallel(deployment_spec, backend, deploy_type, tp_size):
             spec[decode_worker].tensor_parallel_size = tp_size
 
 
-def _create_deployments_for_backend(backend):
-    """Create all deployment specifications for a given backend."""
-    deployments = {}
+def _create_deployments_for_backend(backend: str) -> Dict[str, DeploymentInfo]:
+    """Create all deployment specifications for a given backend.
+    
+    Args:
+        backend: Backend type ("vllm", "sglang", or "trtllm")
+        
+    Returns:
+        Dictionary mapping deployment names to DeploymentInfo objects
+    """
+    deployments: Dict[str, DeploymentInfo] = {}
 
     # Define the yaml files for agg and disagg deployments
     yaml_files = {
@@ -245,9 +276,7 @@ def _create_deployments_for_backend(backend):
             scenario_name = "-".join(name_parts)
 
             # Create and configure the deployment
-            deployment = _create_deployment_spec(
-                backend, deploy_type, yaml_files[deploy_type]
-            )
+            deployment = _create_deployment_spec(backend, yaml_files[deploy_type])
             if tp_size > 1:
                 _set_tensor_parallel(deployment, backend, deploy_type, tp_size)
             if dp_replicas > 1:
@@ -258,9 +287,16 @@ def _create_deployments_for_backend(backend):
     return deployments
 
 
-def _create_moe_deployments_for_backend(backend="vllm"):
-    """Create MoE-specific deployment configurations for DeepSeek-V2-Lite."""
-    deployments = {}
+def _create_moe_deployments_for_backend(backend: str = "vllm") -> Dict[str, DeploymentInfo]:
+    """Create MoE-specific deployment configurations for DeepSeek-V2-Lite.
+    
+    Args:
+        backend: Backend type (default: "vllm")
+        
+    Returns:
+        Dictionary mapping deployment names to DeploymentInfo objects
+    """
+    deployments: Dict[str, DeploymentInfo] = {}
 
     # Only test tp=1, dp=2 for now
     tp_size = 1
@@ -276,12 +312,12 @@ def _create_moe_deployments_for_backend(backend="vllm"):
 
     for deploy_type in ["agg", "disagg"]:
         scenario_name = f"{backend}-moe-{deploy_type}-tp-{tp_size}-dp-{dp_replicas}"
-        deployment = {
-            "spec": DeploymentSpec(yaml_files[deploy_type]),
-            "backend": backend,
-            "model": "deepseek-ai/DeepSeek-V2-Lite",
-            "is_moe": True,
-        }
+        deployment = DeploymentInfo(
+            spec=DeploymentSpec(yaml_files[deploy_type]),
+            backend=backend,
+            model="deepseek-ai/DeepSeek-V2-Lite",
+            is_moe=True,
+        )
 
         deployments[scenario_name] = deployment
 
@@ -289,13 +325,13 @@ def _create_moe_deployments_for_backend(backend="vllm"):
 
 
 # Create all deployment specifications
-deployment_specs = {}
-deployment_specs.update(_create_deployments_for_backend("vllm"))
-deployment_specs.update(_create_deployments_for_backend("sglang"))
-deployment_specs.update(_create_deployments_for_backend("trtllm"))
+DEPLOYMENT_SPECS: Dict[str, DeploymentInfo] = {}
+DEPLOYMENT_SPECS.update(_create_deployments_for_backend("vllm"))
+DEPLOYMENT_SPECS.update(_create_deployments_for_backend("sglang"))
+DEPLOYMENT_SPECS.update(_create_deployments_for_backend("trtllm"))
 
 # Add MoE deployments for vLLM only
-deployment_specs.update(_create_moe_deployments_for_backend("vllm"))
+DEPLOYMENT_SPECS.update(_create_moe_deployments_for_backend("vllm"))
 
 
 # Each failure scenaro contains a list of failure injections
@@ -480,7 +516,7 @@ for backend in ["vllm", "sglang", "trtllm"]:
         backend, "disagg"
     )
 
-for deployment_name, deployment_info in deployment_specs.items():
+for deployment_name, deployment_info in DEPLOYMENT_SPECS.items():
     backend = deployment_info["backend"]
 
     # Check if this is an MoE deployment
@@ -573,11 +609,11 @@ def add_token_overflow_scenarios():
 
     for config in overflow_test_configs:
         # Skip if deployment doesn't exist
-        if config["deployment_key"] not in deployment_specs:
+        if config["deployment_key"] not in DEPLOYMENT_SPECS:
             continue
 
         overflow_scenario_name = config["name"]
-        deployment_info = deployment_specs[config["deployment_key"]]
+        deployment_info = DEPLOYMENT_SPECS[config["deployment_key"]]
 
         scenario_model = deployment_info.get("model", model)
 
