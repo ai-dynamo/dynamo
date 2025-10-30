@@ -10,6 +10,7 @@ aggregated and disaggregated determinism tests.
 """
 
 import os
+import re
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -21,21 +22,40 @@ import pytest
 import requests
 
 
-class ServerType(str, Enum):
-    vllm = "vllm"
-    trtllm = "trtllm"
+def check_logs_for_patterns(
+    log_path: Path, patterns: List[str], process_name: str
+) -> List[str]:
+    """Check log file for specific patterns (errors, warnings, etc.)."""
+    findings = []
+
+    if not log_path.exists():
+        return [f"{process_name} log file not found at {log_path}"]
+
+    try:
+        with open(log_path, "r") as f:
+            content = f.read()
+
+            for pattern in patterns:
+                matches = re.findall(pattern, content, re.IGNORECASE | re.MULTILINE)
+                if matches:
+                    # Limit to first 3 matches and truncate each to 200 chars
+                    for match in matches[:3]:
+                        match_str = match if isinstance(match, str) else str(match)
+                        findings.append(f"{process_name}: {match_str[:200]}")
+    except Exception as e:
+        findings.append(f"Error reading {process_name} log: {e}")
+
+    return findings
 
 
-class DeterminismTester:
-    """Test class for model determinism validation."""
+class ApiTester:
+    """Base class for making API requests to LLM endpoints."""
 
     def __init__(
         self,
         base_url: Optional[str] = None,
         model_id: Optional[str] = None,
-        server_type: Optional[str] = ServerType.vllm,
     ):
-        # Allow environment override for flexibility in CI/local runs
         self.base_url = (
             base_url or os.environ.get("DYNAMO_API_BASE_URL") or "http://localhost:8000"
         )
@@ -44,6 +64,87 @@ class DeterminismTester:
             or os.environ.get("KVBM_MODEL_ID")
             or "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
         )
+
+    def make_request(
+        self,
+        content: str,
+        max_tokens: Optional[int] = None,
+        temperature: float = 0.0,
+        seed: int = 42,
+        **kwargs,
+    ) -> str:
+        """Make API request and return completion text."""
+        payload = {
+            "model": self.model_id,
+            "messages": [
+                {"role": "user", "content": content},
+            ],
+            "stream": False,
+            "temperature": temperature,
+            "seed": seed,
+        }
+
+        # Add max_tokens with appropriate key based on kwargs or defaults
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        elif "max_completion_tokens" in kwargs:
+            payload["max_completion_tokens"] = kwargs.pop("max_completion_tokens")
+        else:
+            payload["max_completion_tokens"] = int(
+                os.environ.get("KVBM_MAX_TOKENS", "48")
+            )
+
+        # Add any additional kwargs
+        payload.update(kwargs)
+
+        response = requests.post(
+            f"{self.base_url}/v1/chat/completions",
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            timeout=int(os.environ.get("KVBM_HTTP_TIMEOUT", "30")),
+        )
+        response.raise_for_status()
+
+        data = response.json()
+        return data["choices"][0]["message"]["content"]
+
+    def send_chat_request(
+        self,
+        messages: List[dict],
+        max_tokens: int = 50,
+        temperature: float = 0.0,
+        seed: int = 42,
+    ) -> dict:
+        """Send a chat request and return full response JSON."""
+        url = f"{self.base_url}/v1/chat/completions"
+        payload = {
+            "model": self.model_id,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "seed": seed,
+        }
+
+        response = requests.post(url, json=payload, timeout=30)
+        response.raise_for_status()
+        return response.json()
+
+
+class ServerType(str, Enum):
+    vllm = "vllm"
+    trtllm = "trtllm"
+
+
+class DeterminismTester(ApiTester):
+    """Test class for model determinism validation."""
+
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        model_id: Optional[str] = None,
+        server_type: Optional[str] = ServerType.vllm,
+    ):
+        super().__init__(base_url, model_id)
         self.server_type = server_type
 
         self.shakespeare_file = Path("t8.shakespeare.txt")
@@ -100,30 +201,30 @@ class DeterminismTester:
             with open(self.shakespeare_file, "w", encoding="utf-8") as f:
                 f.write(content)
 
-    def make_request(self, content: str) -> str:
-        """Make API request and return completion text."""
-        payload = {
-            "model": self.model_id,
-            "messages": [
-                {"role": "user", "content": content},
-            ],
-            "stream": False,
-            "max_completion_tokens": int(os.environ.get("KVBM_MAX_TOKENS", "48")),
-            "temperature": 0,
-            "top_p": 0.0001,
-            "seed": int(os.environ.get("KVBM_SEED", "42")),
-        }
+    # Inherited from ApiTester, but override to add top_p for determinism testing
+    def make_request(
+        self,
+        content: str,
+        max_tokens: Optional[int] = None,
+        temperature: float = 0.0,
+        seed: int = 42,
+        **kwargs,
+    ) -> str:
+        """Make API request and return completion text with determinism settings."""
+        # Use determinism-specific defaults
+        if max_tokens is None:
+            max_tokens = int(os.environ.get("KVBM_MAX_TOKENS", "48"))
+        if seed == 42:  # Default seed, use env override
+            seed = int(os.environ.get("KVBM_SEED", "42"))
 
-        response = requests.post(
-            f"{self.base_url}/v1/chat/completions",
-            headers={"Content-Type": "application/json"},
-            json=payload,
-            timeout=int(os.environ.get("KVBM_HTTP_TIMEOUT", "30")),
+        return super().make_request(
+            content,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            seed=seed,
+            top_p=0.0001,  # For determinism
+            **kwargs,
         )
-        response.raise_for_status()
-
-        data = response.json()
-        return data["choices"][0]["message"]["content"]
 
     def warmup_server(self):
         """Perform comprehensive server warmup with all test prompts."""
