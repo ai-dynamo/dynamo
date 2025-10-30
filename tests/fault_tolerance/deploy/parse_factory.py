@@ -304,18 +304,18 @@ def print_result_info(log_dir: str) -> None:
     """
     info = get_result_info(log_dir)
 
-    print(f"\nTest Results Information: {log_dir}")
-    print("=" * 60)
-    print(f"Result Type: {info['type'] or 'Unknown'}")
-    print(f"Client Count: {info['client_count']}")
-    print(f"Has Test Log: {info['has_test_log']}")
+    logging.info(f"\nTest Results Information: {log_dir}")
+    logging.info("=" * 60)
+    logging.info(f"Result Type: {info['type'] or 'Unknown'}")
+    logging.info(f"Client Count: {info['client_count']}")
+    logging.info(f"Has Test Log: {info['has_test_log']}")
 
     if info["details"]:
-        print("\nDetails:")
+        logging.info("\nDetails:")
         for key, value in info["details"].items():
-            print(f"  {key}: {value}")
+            logging.info(f"  {key}: {value}")
 
-    print("=" * 60)
+    logging.info("=" * 60)
 
 
 if __name__ == "__main__":
@@ -364,7 +364,7 @@ if __name__ == "__main__":
             for log_path in args.log_paths:
                 print_result_info(log_path)
         else:
-            print("Error: Must provide log_dir or --log-paths")
+            logging.error("Must provide log_dir or --log-paths")
     else:
         # Parse mode
         try:

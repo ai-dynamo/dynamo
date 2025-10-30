@@ -544,9 +544,9 @@ def main(logs_dir, tablefmt, log_paths=None, sla=None, print_output=True):
             rows.append(row)
 
         if print_output:
-            print(f"\nTest Group: {test_prefix}")
-            print(
-                tabulate(
+            logging.info(f"\nTest Group: {test_prefix}")
+            logging.info(
+                "\n" + tabulate(
                     rows,
                     headers,
                     tablefmt=tablefmt,
@@ -556,7 +556,7 @@ def main(logs_dir, tablefmt, log_paths=None, sla=None, print_output=True):
                     stralign="center",
                 )
             )
-            print("\n" + "=" * 80)
+            logging.info("\n" + "=" * 80)
 
 
 if __name__ == "__main__":

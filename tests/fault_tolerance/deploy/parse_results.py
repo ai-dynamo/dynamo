@@ -20,7 +20,6 @@ import json
 import logging
 import os
 import re
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -568,13 +567,12 @@ def print_summary_table(
             ["Avg Client Throughput", f"{np.mean(metrics['throughputs']):.2f} req/s"]
         )
 
-    # Print table
-    print("\n" + "=" * 60)
-    print("FAULT TOLERANCE TEST SUMMARY - AI-PERF")
-    print("=" * 60)
-    print(tabulate(rows, headers=headers, tablefmt=tablefmt))
-    print("=" * 60 + "\n")
-    sys.stdout.flush()  # Ensure output is flushed before any logging
+    # Log table
+    logging.info("\n" + "=" * 60)
+    logging.info("FAULT TOLERANCE TEST SUMMARY - AI-PERF")
+    logging.info("=" * 60)
+    logging.info("\n" + tabulate(rows, headers=headers, tablefmt=tablefmt))
+    logging.info("=" * 60 + "\n")
 
 
 def _process_test_phase_results(
@@ -582,44 +580,46 @@ def _process_test_phase_results(
     metrics: Dict[str, Any],
     success_threshold: float,
 ) -> None:
-    """Helper function to process and print results for a specific test phase."""
+    """Helper function to process and log results for a specific test phase."""
     if test_phase == "overflow":
-        print(f"\n{'='*60}")
-        print("Processing OVERFLOW phase - Expecting rejections")
-        print(f"{'='*60}")
+        logging.info("\n" + "=" * 60)
+        logging.info("Processing OVERFLOW phase - Expecting rejections")
+        logging.info("=" * 60)
 
         total_reqs = metrics.get("total_requests", 0)
         failed_reqs = metrics.get("failed_requests", 0)
         if total_reqs > 0:
             failure_rate = (failed_reqs / total_reqs) * 100
-            print(
+            logging.info(
                 f"\nOverflow Results: {failed_reqs}/{total_reqs} requests rejected ({failure_rate:.1f}%)"
             )
             if failure_rate < success_threshold:
-                print(
-                    f"WARNING: Expected rejection rate >= {success_threshold}%, got {failure_rate:.1f}%"
+                logging.warning(
+                    f"Expected rejection rate >= {success_threshold}%, got {failure_rate:.1f}%"
                 )
             else:
-                print("Overflow validation working correctly")
+                logging.info("Overflow validation working correctly")
 
     elif test_phase == "recovery":
-        print(f"\n{'='*60}")
-        print("Processing RECOVERY phase - Expecting success")
-        print(f"{'='*60}")
+        logging.info("\n" + "=" * 60)
+        logging.info("Processing RECOVERY phase - Expecting success")
+        logging.info("=" * 60)
 
         total_reqs = metrics.get("total_requests", 0)
         success_reqs = metrics.get("successful_requests", 0)
         if total_reqs > 0:
             success_rate = (success_reqs / total_reqs) * 100
-            print(
+            logging.info(
                 f"\nRecovery Results: {success_reqs}/{total_reqs} requests succeeded ({success_rate:.1f}%)"
             )
             if success_rate < success_threshold:
-                print(
-                    f"WARNING: Expected success rate >= {success_threshold}%, got {success_rate:.1f}%"
+                logging.warning(
+                    f"Expected success rate >= {success_threshold}%, got {success_rate:.1f}%"
                 )
             else:
-                print("System recovered successfully")
+                logging.info("System recovered successfully")
+    else:
+        raise ValueError(f"Unknown test phase: {test_phase}")
 
 
 def process_single_test(
@@ -738,10 +738,10 @@ def process_overflow_recovery_test(
     startup_time, _ = parse_test_log(test_log_path)
     recovery_time = calculate_recovery_time(failure_info=[], process_logs_dir=base_path)
 
-    print(f"\n{'='*60}")
-    print("SESSION SUMMARY - COMBINED OVERFLOW/RECOVERY TEST")
-    print(f"{'='*60}")
-    print("\nPhase Breakdown:")
+    logging.info("\n" + "=" * 60)
+    logging.info("SESSION SUMMARY - COMBINED OVERFLOW/RECOVERY TEST")
+    logging.info("=" * 60)
+    logging.info("\nPhase Breakdown:")
     if overflow_results["metrics"]["total_requests"] == 0:
         overflow_rate = 0
     else:
@@ -750,7 +750,7 @@ def process_overflow_recovery_test(
             / overflow_results["metrics"]["total_requests"]
             * 100
         )
-    print(
+    logging.info(
         f"  Overflow: {overflow_results['metrics']['failed_requests']}/"
         f"{overflow_results['metrics']['total_requests']} rejected ({overflow_rate:.1f}%)"
     )
@@ -763,7 +763,7 @@ def process_overflow_recovery_test(
             / recovery_results["metrics"]["total_requests"]
             * 100
         )
-    print(
+    logging.info(
         f"  Recovery: {recovery_results['metrics']['successful_requests']}/"
         f"{recovery_results['metrics']['total_requests']} succeeded ({recovery_rate:.1f}%)"
     )
@@ -777,7 +777,6 @@ def process_overflow_recovery_test(
         tablefmt=tablefmt,
         sla=sla,
     )
-    sys.stdout.flush()  # Ensure all output is flushed before returning
 
     return {
         "log_dir": base_path,
@@ -823,19 +822,19 @@ def main(
                 full_path = log_path
 
             if os.path.isdir(full_path):
-                print(f"\nProcessing: {full_path}")
+                logging.info(f"\nProcessing: {full_path}")
                 results = process_single_test(
                     full_path, tablefmt, sla, success_threshold, print_output
                 )
                 all_results.append(results)
             else:
-                print(f"Warning: {full_path} is not a valid directory, skipping...")
+                logging.warning(f"{full_path} is not a valid directory, skipping...")
 
-        # If multiple tests, also print combined summary
+        # If multiple tests, also log combined summary
         if len(all_results) > 1 and print_output:
-            print("\n" + "=" * 60)
-            print("COMBINED TEST SUMMARY")
-            print("=" * 60)
+            logging.info("\n" + "=" * 60)
+            logging.info("COMBINED TEST SUMMARY")
+            logging.info("=" * 60)
 
             total_requests = sum(r["metrics"]["total_requests"] for r in all_results)
             total_successful = sum(
@@ -843,13 +842,13 @@ def main(
             )
             total_failed = sum(r["metrics"]["failed_requests"] for r in all_results)
 
-            print(f"Total Tests: {len(all_results)}")
-            print(f"Total Requests: {total_requests}")
-            print(f"Total Successful: {total_successful}")
-            print(f"Total Failed: {total_failed}")
+            logging.info(f"Total Tests: {len(all_results)}")
+            logging.info(f"Total Requests: {total_requests}")
+            logging.info(f"Total Successful: {total_successful}")
+            logging.info(f"Total Failed: {total_failed}")
 
             if total_requests > 0:
-                print(
+                logging.info(
                     f"Overall Success Rate: {(total_successful/total_requests)*100:.2f}%"
                 )
 
@@ -865,7 +864,7 @@ def main(
                 # Find startup time from overflow phase
                 for r in all_results:
                     if r["log_dir"].endswith(OVERFLOW_SUFFIX) and r.get("startup_time"):
-                        print(f"Startup Time: {r['startup_time']}")
+                        logging.info(f"Startup Time: {r['startup_time']}")
                         break
 
                 # Find recovery time stored in recovery phase
@@ -873,12 +872,12 @@ def main(
                     if r["log_dir"].endswith(RECOVERY_SUFFIX) and r.get(
                         "recovery_time"
                     ):
-                        print(
+                        logging.info(
                             f"Recovery Time (gap between phases): {r['recovery_time']}"
                         )
                         break
 
-            print("=" * 60 + "\n")
+            logging.info("=" * 60 + "\n")
 
         return all_results
 
@@ -888,7 +887,7 @@ def main(
             logs_dir, tablefmt, sla, success_threshold, print_output
         )
     else:
-        print("Error: Must provide either logs_dir or log_paths")
+        logging.error("Must provide either logs_dir or log_paths")
         return None
 
 
