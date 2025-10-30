@@ -1,0 +1,109 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Backend Validation Helper
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  push:
+    branches:
+      - main
+      - "pull-request/[0-9]+"
+      - release/*.*.*
+
+jobs:
+  check-build-status:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      statuses: write
+    steps:
+      - name: "Check if Docker Build and Test workflow will run"
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const sha = context.payload.pull_request ? context.payload.pull_request.head.sha : context.sha;
+
+            console.log(`Checking workflows for commit: ${sha}`);
+
+            // Wait a bit for workflows to start
+            await new Promise(resolve => setTimeout(resolve, 10000));
+
+            // Get all workflow runs for this commit
+            const workflows = await github.rest.actions.listWorkflowRunsForRepo({
+              owner,
+              repo,
+              head_sha: sha,
+              per_page: 100
+            });
+
+            console.log(`Found ${workflows.data.workflow_runs.length} workflow runs`);
+
+            // Find the "Docker Build and Test" workflow
+            const buildWorkflow = workflows.data.workflow_runs.find(run =>
+              run.name === 'Docker Build and Test'
+            );
+
+            if (!buildWorkflow) {
+              console.log('Docker Build and Test workflow not found yet, posting helpful message');
+
+              await github.rest.repos.createCommitStatus({
+                owner,
+                repo,
+                sha,
+                state: 'success',
+                context: 'backend-status-check',
+                description: `Use /ok to test ${sha.substring(0, 7)} to run CI`
+              });
+              return;
+            }
+
+            console.log(`Build workflow status: ${buildWorkflow.status}`);
+
+            // Check if any backend jobs are running in that workflow
+            const jobs = await github.rest.actions.listJobsForWorkflowRun({
+              owner,
+              repo,
+              run_id: buildWorkflow.id
+            });
+
+            const backendJobNames = ['vllm', 'sglang', 'trtllm', 'operator'];
+            const backendJobs = jobs.data.jobs.filter(job =>
+              backendJobNames.some(name => job.name.includes(name))
+            );
+
+            console.log(`Found ${backendJobs.length} backend jobs`);
+
+            const anyRunning = backendJobs.some(job =>
+              job.status === 'queued' || job.status === 'in_progress'
+            );
+
+            if (backendJobs.length === 0 || !anyRunning) {
+              // No backend jobs running, post helpful message
+              console.log('No backend jobs running, posting helpful message');
+
+              await github.rest.repos.createCommitStatus({
+                owner,
+                repo,
+                sha,
+                state: 'success',
+                context: 'backend-status-check',
+                description: `Use /ok to test ${sha.substring(0, 7)} to run CI`
+              });
+            } else {
+              // Backend jobs are running
+              console.log('Backend jobs are running, posting pending status');
+
+              await github.rest.repos.createCommitStatus({
+                owner,
+                repo,
+                sha,
+                state: 'pending',
+                context: 'backend-status-check',
+                description: 'Waiting for build and test jobs to complete...'
+              });
+            }
+
