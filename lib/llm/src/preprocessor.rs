@@ -818,6 +818,7 @@ impl
 
         // Preserve original inbound streaming flag before any internal overrides
         let request_id = context.id().to_string();
+        let original_stream_flag = request.inner.stream.unwrap_or(false);
 
         // Build audit handle (None if DYN_AUDIT_ENABLED=0)
         let mut audit_handle = crate::audit::handle::create_handle(&request, &request_id);
@@ -825,6 +826,11 @@ impl
         if let Some(ref mut h) = audit_handle {
             h.set_request(std::sync::Arc::new(request.clone()));
         }
+
+        // For non-streaming requests (stream=false), enable usage by default
+        // This ensures compliance with OpenAI API spec where non-streaming responses
+        // always include usage statistics
+        request.enable_usage_for_nonstreaming(original_stream_flag);
 
         // Set stream=true for internal processing (after audit capture)
         request.inner.stream = Some(true);
@@ -951,6 +957,14 @@ impl
     ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         // unpack the request
         let (mut request, context) = request.into_parts();
+
+        // Preserve original streaming flag
+        let original_stream_flag = request.inner.stream.unwrap_or(false);
+
+        // For non-streaming requests (stream=false), enable usage by default
+        // This ensures compliance with OpenAI API spec where non-streaming responses
+        // always include usage statistics
+        request.enable_usage_for_nonstreaming(original_stream_flag);
 
         request.inner.stream = Some(true);
 

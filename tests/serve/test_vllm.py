@@ -106,8 +106,8 @@ vllm_configs = {
     ),
     "multimodal_agg_llava": VLLMConfig(
         name="multimodal_agg_llava",
-        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
-        script_name="agg.sh",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
         marks=[pytest.mark.gpu_2],
         model="llava-hf/llava-1.5-7b-hf",
         script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
@@ -130,8 +130,8 @@ vllm_configs = {
     ),
     "multimodal_agg_qwen": VLLMConfig(
         name="multimodal_agg_qwen",
-        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
-        script_name="agg.sh",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
         marks=[pytest.mark.gpu_2],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         delayed_start=0,
@@ -153,6 +153,7 @@ vllm_configs = {
             )
         ],
     ),
+    # TODO: Update this test case when we have video multimodal support in vllm official components
     "multimodal_video_agg": VLLMConfig(
         name="multimodal_video_agg",
         directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),

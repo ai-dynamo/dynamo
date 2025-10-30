@@ -8,7 +8,7 @@ This is an experimental feature that requires using a specific TensorRT-LLM comm
 To enable it build the dynamo container with the `--tensorrtllm-commit` flag, followed by the commit hash:
 
 ```bash
-./container/build.sh --framework trtllm --tensorrtllm-commit b4065d8ca64a64eee9fdc64b39cb66d73d4be47c
+./container/build.sh --framework trtllm --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM.git --tensorrtllm-commit main
 ```
 
 ## Key Features

@@ -94,7 +94,7 @@ apt-get update && apt-get -y install git git-lfs
 # Build the container with the default experimental TensorRT-LLM commit
 # WARNING: This is for experimental feature testing only.
 # The container should not be used in a production environment.
-./container/build.sh --framework trtllm --use-default-experimental-tensorrtllm-commit
+./container/build.sh --framework trtllm --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM.git --tensorrtllm-commit main
 ```
 
 ### Run container

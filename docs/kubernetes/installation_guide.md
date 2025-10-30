@@ -131,14 +131,24 @@ Found existing namespace-restricted Dynamo operators in namespaces: ...
 ```
 
 > [!TIP]
-> For multinode deployments, you need to enable Grove and KAI Scheduler.
-> You might chose to install them manually or through the dynamo-platform helm install command.
-> When using the dynamo-platform helm install command, Grove and KAI Scheduler are NOT installed by default. You can enable their installation by setting the following flags in the helm install command:
-
-```bash
---set "grove.enabled=true"
---set "kai-scheduler.enabled=true"
-```
+> For multinode deployments, you need to install multinode orchestration components:
+>
+> **Option 1 (Recommended): Grove + KAI Scheduler**
+> - Grove and KAI Scheduler can be installed manually or through the dynamo-platform helm install command.
+> - When using the dynamo-platform helm install command, Grove and KAI Scheduler are NOT installed by default. You can enable their installation by setting the following flags:
+>
+> ```bash
+> --set "grove.enabled=true"
+> --set "kai-scheduler.enabled=true"
+> ```
+>
+> **Option 2: LeaderWorkerSet (LWS) + Volcano**
+> - If using LWS for multinode deployments, you must also install Volcano (required dependency):
+>   - [LWS Installation](https://github.com/kubernetes-sigs/lws#installation)
+>   - [Volcano Installation](https://volcano.sh/en/docs/installation/) (required for gang scheduling with LWS)
+> - These must be installed manually before deploying multinode workloads with LWS.
+>
+> See the [Multinode Deployment Guide](./deployment/multinode-deployment.md) for details on orchestrator selection.
 
 > [!TIP]
 > By default, Model Express Server is not used.
