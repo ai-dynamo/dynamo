@@ -32,28 +32,33 @@ wait_for_model_report_interval=60 # wait_for_model report interval -> 60s
 wait_for_model $head_node $head_port $n_prefill $n_decode $wait_for_model_check_interval $wait_for_model_timeout $wait_for_model_report_interval
 
 set -e
-# Warmup the model
+# Warmup the model with a sweep of concurrencies
 warmup_isl=$chosen_isl
 warmup_osl=$chosen_osl
-warmup_prompts=10000
-warmup_concurrencies=10000
+warmup_prompts=10
 warmup_req_rate=250
-set -x
-python3 benchmark_serving.py \
-    --model ${model_name} --tokenizer ${model_path} \
-    --host $head_node --port $head_port \
-    --backend "dynamo" --endpoint /v1/completions \
-    --disable-tqdm \
-    --dataset-name random \
-    --num-prompts "$warmup_prompts" \
-    --random-input-len $warmup_isl \
-    --random-output-len $warmup_osl \
-    --random-range-ratio 0.8 \
-    --ignore-eos \
-    --request-rate ${warmup_req_rate} \
-    --percentile-metrics ttft,tpot,itl,e2el \
-    --max-concurrency "$warmup_concurrencies"
-set +x
+warmup_concurrency_list=(2 4 16 32 128)
+
+for warmup_concurrency in "${warmup_concurrency_list[@]}"
+do
+    echo "Warming up model with concurrency $warmup_concurrency"
+    set -x
+    python3 benchmark_serving.py \
+        --model ${model_name} --tokenizer ${model_path} \
+        --host $head_node --port $head_port \
+        --backend "dynamo" --endpoint /v1/completions \
+        --disable-tqdm \
+        --dataset-name random \
+        --num-prompts "$warmup_prompts" \
+        --random-input-len $warmup_isl \
+        --random-output-len $warmup_osl \
+        --random-range-ratio 0.8 \
+        --ignore-eos \
+        --request-rate ${warmup_req_rate} \
+        --percentile-metrics ttft,tpot,itl,e2el \
+        --max-concurrency "$warmup_concurrency"
+    set +x
+done
 set +e
 
 result_dir="/logs/vllm_isl_${chosen_isl}_osl_${chosen_osl}"

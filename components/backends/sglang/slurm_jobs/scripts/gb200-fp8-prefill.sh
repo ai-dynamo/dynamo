@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# This comes from https://github.com/sgl-project/sglang/issues/10903 and uses the high-prec prefill setup
+
 # Function to print usage
 print_usage() {
     echo "Usage: $0 <mode>"
@@ -73,6 +75,7 @@ if [ "$mode" = "prefill" ]; then
     if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix="--init-expert-location /configs/prefill_dsr1-0528_in1000out1000_num40000.json"; fi
 
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
+    SGLANG_PER_TOKEN_GROUP_QUANT_8BIT_V2=1 \
     MC_TE_METRIC=true \
     SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \
     SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=100000 \
@@ -85,6 +88,11 @@ if [ "$mode" = "prefill" ]; then
     SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
     PYTHONUNBUFFERED=1 \
     python3 -m dynamo.sglang \
+         --max-prefill-tokens 32768 \
+        --offload-mode cpu \
+        --offload-group-size 3 \
+        --offload-num-in-group 1 \
+        --offload-prefetch-step 1 \
         --served-model-name deepseek-ai/DeepSeek-R1 \
         --model-path /model/ \
         --skip-tokenizer-init \
@@ -96,10 +104,12 @@ if [ "$mode" = "prefill" ]; then
         --node-rank "$RANK" \
         --tp-size "$TOTAL_GPUS" \
         --dp-size "$TOTAL_GPUS" \
+        --ep-size "$TOTAL_GPUS" \
+        --page-size 64 \
         --enable-dp-attention \
         --host 0.0.0.0 \
-        --max-running-requests 30000 \
-        --context-length 2200 \
+        --max-running-requests 3072 \
+        --context-length 4224 \
         --disable-radix-cache \
         --moe-a2a-backend deepep \
         --load-balance-method round_robin \
@@ -110,14 +120,15 @@ if [ "$mode" = "prefill" ]; then
         --disable-shared-experts-fusion \
         --ep-num-redundant-experts 32 \
         --eplb-algorithm deepseek \
-        --attention-backend cutlass_mla \
+        --prefill-attention-backend fa4 \
         --watchdog-timeout 1000000 \
         --disable-cuda-graph \
         --chunked-prefill-size 131072 \
-        --max-total-tokens 524288 \
+        --max-total-tokens 131072 \
         --deepep-config /configs/deepep_config.json \
         --stream-interval 50 \
-        --mem-fraction-static 0.75 ${command_suffix}
+        --mem-fraction-static 0.80 ${command_suffix}
+
 
 elif [ "$mode" = "decode" ]; then
     set -x
@@ -128,7 +139,18 @@ elif [ "$mode" = "decode" ]; then
     command_suffix=""
     if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix="--init-expert-location /configs/decode_dsr1-0528_loadgen_in1024out1024_num2000_2p12d.json"; fi
 
+    # removing these in favor of the previous commands cause theres hang that i cant figure out
+    # we leave off single batch overlap because its not supported on main yet
+    # --max-total-tokens 3568435 \
+    # --disable-chunked-prefix-cache
+    # --num-reserved-decode-tokens 128 \
+    # --chunked-prefill-size 1572864
+
+    # even after removing above i hang at 1024...weird because warmup passes 
+    # warmup is much less prompts....
+
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
+    SGLANG_PER_TOKEN_GROUP_QUANT_8BIT_V2=1 \
     SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=768  \
     MC_TE_METRIC=true \
     SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \
@@ -158,7 +180,7 @@ elif [ "$mode" = "decode" ]; then
         --enable-dp-attention \
         --host 0.0.0.0 \
         --decode-log-interval 1000 \
-        --max-running-requests 45000 \
+        --max-running-requests 36864 \
         --context-length 2200 \
         --disable-radix-cache \
         --moe-a2a-backend deepep \
@@ -172,10 +194,10 @@ elif [ "$mode" = "decode" ]; then
         --ep-num-redundant-experts 32 \
         --ep-dispatch-algorithm static \
         --eplb-algorithm deepseek \
-        --attention-backend cutlass_mla \
+        --attention-backend trtllm_mla \
         --watchdog-timeout 1000000 \
-        --chunked-prefill-size 36864 \
+        --chunked-prefill-size 36864  \
         --stream-interval 50 \
         --deepep-config /configs/deepep_config.json \
-        --mem-fraction-static 0.82 ${command_suffix}
+        --mem-fraction-static 0.83 ${command_suffix}
 fi
