@@ -1,5 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+
 [package]
 name = "dynamo-tokens"
+description = "Token management tools"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

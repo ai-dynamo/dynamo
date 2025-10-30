@@ -48,3 +48,11 @@ impl<T> PositionalRadixTree<T> {
         self.len() == 0
     }
 }
+
+impl<T> Default for PositionalRadixTree<T> {
+    fn default() -> Self {
+        Self {
+            map: DashMap::new(),
+        }
+    }
+}
