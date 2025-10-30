@@ -111,20 +111,9 @@ spec:
       dynamoNamespace: trtllm-disagg-multinode
       componentType: main
       replicas: 1
-      pvc:
-        create: false
-        mountPoint: /data
-        name: modelcache-pvc
       extraPodSpec:
-        affinity:
-          nodeAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-              nodeSelectorTerms:
-                - matchExpressions:
-                    - key: nvidia.com/gpu.present
-                      operator: In
-                      values:
-                        - "true"
+        tolerations: []
+        affinity: {}
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.0
           args:
@@ -154,15 +143,8 @@ spec:
         claims:
           - name: compute-domain-channel
       extraPodSpec:
-        affinity:
-          nodeAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-              nodeSelectorTerms:
-                - matchExpressions:
-                    - key: nvidia.com/gpu.present
-                      operator: In
-                      values:
-                        - "true"
+        tolerations: []
+        affinity: {}
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.0
           workingDir: /workspace/components/backends/trtllm
@@ -173,7 +155,7 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 10
             timeoutSeconds: 5
-            failureThreshold: 3000
+            failureThreshold: 500
           volumeMounts:
             - name: prefill-config-volume
               mountPath: /config
@@ -217,15 +199,8 @@ spec:
         claims:
           - name: compute-domain-channel
       extraPodSpec:
-        affinity:
-          nodeAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-              nodeSelectorTerms:
-                - matchExpressions:
-                    - key: nvidia.com/gpu.present
-                      operator: In
-                      values:
-                        - "true"
+        tolerations: []
+        affinity: {}
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.0
           workingDir: /workspace/components/backends/trtllm
@@ -236,7 +211,7 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 10
             timeoutSeconds: 5
-            failureThreshold: 3000
+            failureThreshold: 500
           volumeMounts:
             - name: decode-config-volume
               mountPath: /config
