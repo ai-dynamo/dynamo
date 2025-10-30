@@ -28,7 +28,7 @@ default-members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 description = "Dynamo Inference Framework"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
@@ -39,14 +39,14 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime", version = "0.6.0" }
-dynamo-llm = { path = "lib/llm", version = "0.6.0" }
-dynamo-tokens = { path = "lib/tokens", version = "0.6.0" }
-dynamo-async-openai = { path = "lib/async-openai", version = "0.6.0", features = [
+dynamo-runtime = { path = "lib/runtime", version = "0.6.1" }
+dynamo-llm = { path = "lib/llm", version = "0.6.1" }
+dynamo-tokens = { path = "lib/tokens", version = "0.6.1" }
+dynamo-async-openai = { path = "lib/async-openai", version = "0.6.1", features = [
     "byot",
     "rustls",
 ] }
-dynamo-parsers = { path = "lib/parsers", version = "0.6.0" }
+dynamo-parsers = { path = "lib/parsers", version = "0.6.1" }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -63,6 +63,8 @@ chrono = { version = "0.4", default-features = false, features = [
     "now",
     "serde",
 ] }
+cudarc = { version = "0.17.1", features = ["cuda-12020"] }
+dashmap = { version = "6.1" }
 derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
 either = { version = "1.13", features = ["serde"] }
@@ -119,7 +121,7 @@ insta.opt-level = 3
 
 [profile.dev]
 # release level optimizations otherwise everything feels slow
-opt-level = 3
+# opt-level = 3
 
 [profile.release]
 # These make the build much slower but shrink the binary, and could help performance

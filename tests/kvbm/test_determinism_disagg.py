@@ -223,8 +223,10 @@ class LLMServerManager:
         )
         print(f"Decoder process started with PID: {self.process_decoder.pid}")
 
-        # Give decoder time to start up
-        time.sleep(5)
+        # The prefiller and decoder cannot download the model simultaneously,
+        # because the Hugging Face rust library (invoked by fetch_llm) needs to hold an exclusive lock on the model files.
+        print("Sleeping for 60 seconds to allow the decoder to download the model. ")
+        time.sleep(60)
 
         # Launch prefiller
         self.process_prefiller = subprocess.Popen(
@@ -407,7 +409,7 @@ def llm_server(request, runtime_services):
     if importlib.util.find_spec("vllm") is not None:
         server_type = ServerType.vllm
     else:
-        raise Exception("vllm module is not available in the current environment.")
+        pytest.skip("vllm module is not available in the current environment.")
 
     server_manager = LLMServerManager(
         port=port,

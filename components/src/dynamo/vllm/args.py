@@ -45,6 +45,7 @@ class Config:
     component: str
     endpoint: str
     is_prefill_worker: bool
+    is_decode_worker: bool
     migration_limit: int = 0
     kv_port: Optional[int] = None
     port_range: DynamoPortRange
@@ -64,8 +65,26 @@ class Config:
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
 
+    # multimodal options
+    multimodal_processor: bool = False
+    multimodal_encode_worker: bool = False
+    multimodal_worker: bool = False
+    multimodal_encode_prefill_worker: bool = False
+    mm_prompt_template: str = "USER: <image>\n<prompt> ASSISTANT:"
     # dump config to file
     dump_config_to: Optional[str] = None
+
+    def has_connector(self, connector_name: str) -> bool:
+        """
+        Check if a specific connector is enabled.
+
+        Args:
+            connector_name: Name of the connector to check (e.g., "kvbm", "nixl")
+
+        Returns:
+            True if the connector is in the connector list, False otherwise
+        """
+        return self.connector_list is not None and connector_name in self.connector_list
 
 
 @register_encoder(Config)
@@ -84,6 +103,11 @@ def parse_args() -> Config:
         "--is-prefill-worker",
         action="store_true",
         help="Enable prefill functionality for this worker. Uses the provided namespace to construct dyn://namespace.prefill.generate",
+    )
+    parser.add_argument(
+        "--is-decode-worker",
+        action="store_true",
+        help="Mark this as a decode worker which does not publish KV events.",
     )
     parser.add_argument(
         "--migration-limit",
@@ -131,6 +155,39 @@ def parse_args() -> Config:
         default=None,
         help="Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
     )
+    parser.add_argument(
+        "--multimodal-processor",
+        action="store_true",
+        help="Run as multimodal processor component for handling multimodal requests",
+    )
+    parser.add_argument(
+        "--multimodal-encode-worker",
+        action="store_true",
+        help="Run as multimodal encode worker component for processing images/videos",
+    )
+    parser.add_argument(
+        "--multimodal-worker",
+        action="store_true",
+        help="Run as multimodal worker component for LLM inference with multimodal data",
+    )
+    parser.add_argument(
+        "--multimodal-encode-prefill-worker",
+        action="store_true",
+        help="Run as unified encode+prefill+decode worker for models requiring integrated image encoding (e.g., Llama 4)",
+    )
+    parser.add_argument(
+        "--mm-prompt-template",
+        type=str,
+        default="USER: <image>\n<prompt> ASSISTANT:",
+        help=(
+            "Different multi-modal models expect the prompt to contain different special media prompts. "
+            "The processor will use this argument to construct the final prompt. "
+            "User prompt will replace '<prompt>' in the provided template. "
+            "For example, if the user prompt is 'please describe the image' and the prompt template is "
+            "'USER: <image> <prompt> ASSISTANT:', the resulting prompt is "
+            "'USER: <image> please describe the image ASSISTANT:'."
+        ),
+    )
     add_config_dump_args(parser)
 
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -155,10 +212,42 @@ def parse_args() -> Config:
         config.served_model_name = None
 
     config.namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
-    config.component = "prefill" if args.is_prefill_worker else "backend"
-    config.endpoint = "generate"
+
+    # Check multimodal role exclusivity
+    mm_flags = (
+        int(bool(args.multimodal_processor))
+        + int(bool(args.multimodal_encode_worker))
+        + int(bool(args.multimodal_worker))
+        + int(bool(args.multimodal_encode_prefill_worker))
+    )
+    if mm_flags > 1:
+        raise ValueError(
+            "Use only one of --multimodal-processor, --multimodal-encode-worker, --multimodal-worker, or --multimodal-encode-prefill-worker"
+        )
+
+    # Set component and endpoint based on worker type
+    if args.multimodal_processor:
+        config.component = "processor"
+        config.endpoint = "generate"
+    elif args.multimodal_encode_worker:
+        config.component = "encoder"
+        config.endpoint = "generate"
+    elif args.multimodal_encode_prefill_worker:
+        config.component = "encoder"
+        config.endpoint = "generate"
+    elif args.multimodal_worker and args.is_prefill_worker:
+        config.component = "prefill"
+        config.endpoint = "generate"
+    elif args.is_prefill_worker:
+        config.component = "prefill"
+        config.endpoint = "generate"
+    else:
+        config.component = "backend"
+        config.endpoint = "generate"
+
     config.engine_args = engine_args
     config.is_prefill_worker = args.is_prefill_worker
+    config.is_decode_worker = args.is_decode_worker
     config.migration_limit = args.migration_limit
     config.port_range = DynamoPortRange(
         min=args.dynamo_port_min, max=args.dynamo_port_max
@@ -166,6 +255,11 @@ def parse_args() -> Config:
     config.tool_call_parser = args.dyn_tool_call_parser
     config.reasoning_parser = args.dyn_reasoning_parser
     config.custom_jinja_template = args.custom_jinja_template
+    config.multimodal_processor = args.multimodal_processor
+    config.multimodal_encode_worker = args.multimodal_encode_worker
+    config.multimodal_worker = args.multimodal_worker
+    config.multimodal_encode_prefill_worker = args.multimodal_encode_prefill_worker
+    config.mm_prompt_template = args.mm_prompt_template
 
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:
@@ -240,7 +334,7 @@ async def configure_ports(runtime: DistributedRuntime, config: Config):
         logger.info(f"Allocated ZMQ KV events port: {kv_port} (worker_id={worker_id})")
 
         # Check if NIXL is needed based on connector list
-    needs_nixl = config.connector_list and "nixl" in config.connector_list
+    needs_nixl = config.has_connector("nixl")
 
     if needs_nixl:
         # Allocate side channel ports

@@ -39,7 +39,7 @@ pub struct NvExt {
     /// If not set, the request will be routed to the best matching instance.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backend_instance_id: Option<i64>,
+    pub backend_instance_id: Option<u64>,
 
     /// Pre-tokenized data to use instead of tokenizing the prompt
     /// If provided along with backend_instance_id, these tokens will be used directly

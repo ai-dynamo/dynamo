@@ -422,7 +422,10 @@ async fn completions(
                     request_id,
                     e
                 );
-                ErrorMessage::internal_server_error("Failed to fold completions stream")
+                ErrorMessage::internal_server_error(&format!(
+                    "Failed to fold completions stream for {}: {:?}",
+                    request_id, e
+                ))
             })?;
 
         inflight_guard.mark_ok();

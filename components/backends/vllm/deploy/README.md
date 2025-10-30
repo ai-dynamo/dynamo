@@ -99,7 +99,7 @@ We have public images available on [NGC Catalog](https://catalog.ngc.nvidia.com/
 
 ### Pre-Deployment Profiling (SLA Planner Only)
 
-If using the SLA Planner deployment (`disagg_planner.yaml`), follow the [pre-deployment profiling guide](../../../../docs/benchmarks/pre_deployment_profiling.md) to run pre-deployment profiling. The results will be saved to the `dynamo-pvc` PVC and queried by the SLA Planner.
+If using the SLA Planner deployment (`disagg_planner.yaml`), follow the [pre-deployment profiling guide](../../../../docs/benchmarks/sla_driven_profiling.md) to run pre-deployment profiling. The results will be saved to the `dynamo-pvc` PVC and queried by the SLA Planner.
 
 ## Usage
 
@@ -224,7 +224,7 @@ All templates use **Qwen/Qwen3-0.6B** as the default model, but you can use any 
 
 ## Request Migration
 
-You can enable [request migration](../../../../docs/architecture/request_migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
+You can enable [request migration](../../../../docs/fault_tolerance/request_migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
 
 ```yaml
 args:
@@ -234,12 +234,12 @@ args:
 
 ## Further Reading
 
-- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/create_deployment.md)
+- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create_deployment.md)
 - **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
 - **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/kubernetes/installation_guide.md)
 - **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/planner/sla_planner_quickstart.md)
 - **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
-- **Architecture Docs**: [Disaggregated Serving](../../../../docs/architecture/disagg_serving.md), [KV-Aware Routing](../../../../docs/architecture/kv_cache_routing.md)
+- **Architecture Docs**: [Disaggregated Serving](../../../../docs/design_docs/disagg_serving.md), [KV-Aware Routing](../../../../docs/router/kv_cache_routing.md)
 
 ## Troubleshooting
 

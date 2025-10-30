@@ -40,14 +40,5 @@ python -m dynamo.mocker \
 python -m dynamo.frontend --http-port 8000
 ```
 
-### Legacy JSON file support:
-For backward compatibility, you can still provide configuration via a JSON file:
-
-```bash
-echo '{"speedup_ratio": 10.0, "num_gpu_blocks": 8192}' > mocker_args.json
-python -m dynamo.mocker \
-  --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
-  --extra-engine-args mocker_args.json
-```
-
-Note: If `--extra-engine-args` is provided, it overrides all individual CLI arguments.
+> [!Note]
+> Each mocker instance runs as a single process, and each DP worker (specified by `--data-parallel-size`) is spawned as a lightweight async task within that process. For benchmarking (e.g., router testing), you would much prefer launching one mocker instance with a large `--data-parallel-size` rather than multiple separate mocker instances to reduce overhead.
