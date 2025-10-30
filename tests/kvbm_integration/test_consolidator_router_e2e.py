@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 import requests
 
-from tests.kvbm.common import ApiTester, check_logs_for_patterns
+from tests.kvbm_integration.common import ApiTester, check_logs_for_patterns
 from tests.utils.managed_process import ManagedProcess
 
 # Test markers
