@@ -1077,6 +1077,40 @@ mod tests {
     const HASH_9_12: BlockHash = 483935686894639516; // hash([9,10,11,12], 1337)
     const SEQ_HASH_9_12: SequenceHash = 12583592247330656132; // hash([SEQ_HASH_5_8, HASH_9_12], 1337)
 
+    impl PartialTokenBlock {
+        /// Attempts to push a single token onto the block.
+        ///
+        /// # Arguments
+        ///
+        /// * `token` - The [`Token`] to push.
+        ///
+        /// # Returns
+        ///
+        /// * `Ok(())` - If the token was successfully added.
+        /// * `Err(TokenBlockError::Full)` - If the block already contains `block_size` tokens.
+        pub fn push_token(&mut self, token: Token) -> Result<(), TokenBlockError> {
+            if self.tokens.0.len() >= self.block_size as usize {
+                return Err(TokenBlockError::Full);
+            }
+            self.tokens.0.push(token);
+            Ok(())
+        }
+
+        /// Attempts to remove the last token from the block.
+        ///
+        /// # Returns
+        ///
+        /// * `Ok(())` - If a token was successfully removed.
+        /// * `Err(TokenBlockError::Empty)` - If the block was already empty.
+        pub fn pop_token(&mut self) -> Result<(), TokenBlockError> {
+            if self.tokens.0.is_empty() {
+                return Err(TokenBlockError::Empty);
+            }
+            self.tokens.0.pop();
+            Ok(())
+        }
+    }
+
     #[test]
     fn test_validate_hash_constants() {
         let salt = TEST_SALT_HASH;
