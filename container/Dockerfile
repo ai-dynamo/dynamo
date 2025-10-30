@@ -414,10 +414,6 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
 # Build kvbm wheel
-# Copy CUDA 13–based Nixl plugins and required .so files into the kvbm wheel
-# so KVBM works with CUDA 13 Nixl even when Nixl isn’t installed on the system.
-# TODO: Remove this once the Nixl team releases a `nixl-cu13` pip wheel.
-#       That wheel will become a dependency of KVBM.
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     set -euo pipefail; \
