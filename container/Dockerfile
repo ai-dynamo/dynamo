@@ -355,7 +355,6 @@ COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 # Install rust build packages
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
-        # Rust build dependencies
         clang \
         libclang-dev \
         protobuf-compiler \
