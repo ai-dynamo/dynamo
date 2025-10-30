@@ -69,11 +69,15 @@ pub struct ActiveSequences {
 
     /// Set of request IDs to check for expiry
     expiry_requests: HashSet<RequestId>,
+
+    /// Whether to track KV reuse during decode (false = use random hashes)
+    #[getter(copy)]
+    active_kv_reuse: bool,
 }
 
 impl ActiveSequences {
     /// Create a new SharedSequenceManager instance
-    pub fn new(block_size: usize) -> Self {
+    pub fn new(block_size: usize, active_kv_reuse: bool) -> Self {
         // TODO: make this not a hard req
         assert!(block_size > 1, "block_size must be greater than 1");
 
@@ -85,6 +89,7 @@ impl ActiveSequences {
             active_tokens: 0,
             expiry_timer: Instant::now() + EXPIRY_DURATION,
             expiry_requests: HashSet::new(),
+            active_kv_reuse,
         }
     }
 
@@ -135,7 +140,18 @@ impl ActiveSequences {
         self.active_tokens += prefill_tokens;
 
         if let Some(sequence) = token_sequence {
-            let sequence_with_refs: Vec<(SequenceHash, Rc<()>)> = sequence
+            // When active_kv_reuse is false, replace each block hash with a random hash
+            let sequence_to_use: Vec<SequenceHash> = if self.active_kv_reuse {
+                sequence
+            } else {
+                // Generate random hashes for each block to prevent KV reuse tracking
+                sequence
+                    .iter()
+                    .map(|_| (Uuid::new_v4().as_u128() & 0xFFFFFFFFFFFFFFFF) as u64)
+                    .collect()
+            };
+
+            let sequence_with_refs: Vec<(SequenceHash, Rc<()>)> = sequence_to_use
                 .iter()
                 .map(|block| (*block, self.touch_block(block)))
                 .collect();
@@ -287,6 +303,7 @@ pub struct ActiveSequencesMultiWorker {
     component: Component,
     router_id: Uuid,
     replica_sync: bool,
+    active_kv_reuse: bool,
 }
 
 impl ActiveSequencesMultiWorker {
@@ -296,6 +313,7 @@ impl ActiveSequencesMultiWorker {
         workers_with_configs: HashMap<u64, Option<ModelRuntimeConfig>>,
         replica_sync: bool,
         router_uuid: String,
+        active_kv_reuse: bool,
     ) -> Self {
         assert!(block_size > 1, "block_size must be greater than 1");
 
@@ -319,7 +337,8 @@ impl ActiveSequencesMultiWorker {
                 let worker = WorkerWithDpRank::new(worker_id, dp_rank);
                 // Create a child cancellation token from the component's runtime
                 let cancel_token = component.drt().runtime().child_token();
-                let (sender, handle) = Self::start_worker(block_size, cancel_token);
+                let (sender, handle) =
+                    Self::start_worker(block_size, active_kv_reuse, cancel_token);
                 senders.insert(worker, sender);
                 handles.insert(worker, handle);
             }
@@ -333,6 +352,7 @@ impl ActiveSequencesMultiWorker {
             component: component.clone(),
             router_id,
             replica_sync,
+            active_kv_reuse,
         };
 
         // Start the subscription loop only if replica_sync is enabled
@@ -365,6 +385,7 @@ impl ActiveSequencesMultiWorker {
     /// Helper method to start a worker task
     fn start_worker(
         block_size: usize,
+        active_kv_reuse: bool,
         cancel_token: CancellationToken,
     ) -> (
         tokio::sync::mpsc::UnboundedSender<UpdateSequences>,
@@ -380,7 +401,7 @@ impl ActiveSequencesMultiWorker {
                 .unwrap();
 
             runtime.block_on(async move {
-                let mut active_sequences = ActiveSequences::new(block_size);
+                let mut active_sequences = ActiveSequences::new(block_size, active_kv_reuse);
                 let mut request_rx = request_rx;
 
                 loop {
@@ -598,6 +619,7 @@ impl ActiveSequencesMultiWorker {
 
             let (sender, handle) = Self::start_worker(
                 self.block_size,
+                self.active_kv_reuse,
                 self.component.drt().runtime().child_token(),
             );
             self.senders.insert(*worker, sender);
@@ -902,7 +924,7 @@ mod tests {
     #[test]
     fn test_active_sequences_shared_blocks() {
         let block_size = 4;
-        let mut seq_manager = ActiveSequences::new(block_size);
+        let mut seq_manager = ActiveSequences::new(block_size, true);
 
         seq_manager.add_request("request_1".to_string(), Some(vec![1, 2, 3]), 12, 0);
         assert_eq!(seq_manager.active_blocks(), 3);
@@ -968,6 +990,7 @@ mod tests {
             workers_with_configs.clone(),
             true,
             Uuid::new_v4().to_string(),
+            true,
         ));
         let seq_manager_2 = Arc::new(ActiveSequencesMultiWorker::new(
             component,
@@ -975,6 +998,7 @@ mod tests {
             workers_with_configs,
             true,
             Uuid::new_v4().to_string(),
+            true,
         ));
 
         // Give some time for the subscription loops to start
@@ -1125,6 +1149,7 @@ mod tests {
             workers_with_configs.clone(),
             true,
             Uuid::new_v4().to_string(),
+            true,
         ));
         let seq_manager_2 = Arc::new(ActiveSequencesMultiWorker::new(
             component,
@@ -1132,6 +1157,7 @@ mod tests {
             workers_with_configs,
             true,
             Uuid::new_v4().to_string(),
+            true,
         ));
 
         // Give some time for the subscription loops to start

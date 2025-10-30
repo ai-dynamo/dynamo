@@ -176,6 +176,13 @@ def parse_args():
         help="KV Router: Disable tracking of active blocks (blocks being used for ongoing generation). By default, active blocks are tracked for load balancing.",
     )
     parser.add_argument(
+        "--router-with-cascade-attention",
+        action="store_true",
+        dest="active_kv_reuse",
+        default=False,
+        help="KV Router: Enable KV reuse tracking for cascade attention backends. When enabled, tracks actual sequence hashes during decode for KV reuse optimization. By default, KV reuse tracking is disabled during decode.",
+    )
+    parser.add_argument(
         "--busy-threshold",
         type=float,
         default=None,
@@ -271,6 +278,7 @@ async def async_main():
             router_snapshot_threshold=flags.router_snapshot_threshold,
             router_reset_states=flags.router_reset_states,
             router_track_active_blocks=flags.router_track_active_blocks,
+            active_kv_reuse=flags.active_kv_reuse,
         )
     elif flags.router_mode == "random":
         router_mode = RouterMode.Random

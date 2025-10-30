@@ -455,6 +455,7 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
                 None,
                 None,
                 None,
+                Some(false),
             ))
         } else {
             None

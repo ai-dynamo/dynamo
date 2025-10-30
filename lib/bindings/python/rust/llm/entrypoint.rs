@@ -42,7 +42,7 @@ impl KvRouterConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, router_replica_sync=false, router_track_active_blocks=true, router_snapshot_threshold=1000000, router_reset_states=false))]
+    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, router_replica_sync=false, router_track_active_blocks=true, router_snapshot_threshold=1000000, router_reset_states=false, active_kv_reuse=false))]
     fn new(
         overlap_score_weight: f64,
         router_temperature: f64,
@@ -51,6 +51,7 @@ impl KvRouterConfig {
         router_track_active_blocks: bool,
         router_snapshot_threshold: Option<u32>,
         router_reset_states: bool,
+        active_kv_reuse: bool,
     ) -> Self {
         KvRouterConfig {
             inner: RsKvRouterConfig {
@@ -61,6 +62,7 @@ impl KvRouterConfig {
                 router_track_active_blocks,
                 router_snapshot_threshold,
                 router_reset_states,
+                active_kv_reuse,
             },
         }
     }
