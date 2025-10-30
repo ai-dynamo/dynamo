@@ -92,7 +92,7 @@ metadata:
   name: trtllm-disagg-multinode
 spec:
   pvcs:
-    - name: modelcache-pvc
+    - name: model-cache-pvc
       create: false
   envs:
     - name: NCCL_MNNVL_ENABLE
@@ -128,8 +128,8 @@ spec:
       replicas: 1
       pvc:
         create: false
-        mountPoint: /data
-        name: modelcache-pvc
+        mountPoint: /model-cache
+        name: model-cache-pvc
       sharedMemory:
         size: 800Gi
       resources:
@@ -165,7 +165,7 @@ spec:
           args:
           - >-
             python3 -m dynamo.trtllm
-            --model-path /data/deepseek-r1-fp4
+            --model-path /model-cache/deepseek-r1-fp4
             --served-model-name deepseek-ai/DeepSeek-R1
             --extra-engine-args /config/prefill_config.yaml
             --disaggregation-mode prefill
@@ -182,8 +182,8 @@ spec:
       replicas: 1
       pvc:
         create: false
-        mountPoint: /data
-        name: modelcache-pvc
+        mountPoint: /model-cache
+        name: model-cache-pvc
       multinode:
         nodeCount: 8
       sharedMemory:
@@ -221,7 +221,7 @@ spec:
           args:
           - >-
             python3 -m dynamo.trtllm
-            --model-path /data/deepseek-r1-fp4
+            --model-path /model-cache/deepseek-r1-fp4
             --served-model-name deepseek-ai/DeepSeek-R1
             --extra-engine-args /config/decode_config_dep32.yaml
             --disaggregation-mode decode
