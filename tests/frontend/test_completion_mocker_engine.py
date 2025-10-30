@@ -182,13 +182,13 @@ def test_completion_single_element_array_prompt() -> None:
 def test_completion_multi_element_array_prompt() -> None:
     payload: Dict[str, Any] = {
         "model": TEST_MODEL,
-        "prompt": ["Tell me about Mars", "Tell me about Ceres"],
+        "prompt": ["Tell me about Mars", "Tell me about Ceres", "Tell me about Jupiter"],
         "max_tokens": 2000,
     }
 
     response = _send_completion_request(payload)
 
-    # request should fail because we are sending multiple prompts
-    assert (
-        response.status_code == 500
-    ), f"Request should fail with code 500; response:{response.text}"
+    assert response.status_code == 200, (
+        f"Completion request failed with status "
+        f"{response.status_code}: {response.text}"
+    )
