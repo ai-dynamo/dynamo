@@ -44,8 +44,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: cpu-amd-m5-2xlarge }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+          - { arch: amd64, runner: cpu-amd-m5-2xlarge-test }
+          - { arch: arm64, runner: cpu-amd-m5-2xlarge-test }
     name: operator (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
@@ -55,12 +55,6 @@ jobs:
         uses: docker/setup-buildx-action@v3
         with:
           driver: docker
-      - name: Install awscli
-        shell: bash
-        run: |
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "awscliv2.zip"
-          unzip awscliv2.zip
-          sudo ./aws/install
       - name: Login to ECR
         shell: bash
         env:
@@ -113,8 +107,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: gpu-l40-amd64 }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+          - { arch: amd64, runner: gpu-l40-amd64-test }
+          - { arch: arm64, runner: cpu-amd-m5-2xlarge-test }
     name: vllm (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
@@ -178,8 +172,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: gpu-l40-amd64 }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+          - { arch: amd64, runner: gpu-l40-amd64-test }
+          - { arch: arm64, runner: cpu-amd-m5-2xlarge-test }
     name: sglang (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
@@ -241,8 +235,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: gpu-l40-amd64 }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+          - { arch: amd64, runner: gpu-l40-amd64-test }
+          - { arch: arm64, runner: cpu-amd-m5-2xlarge-test }
     name: trtllm (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
@@ -348,7 +342,7 @@ jobs:
           python3 .github/workflows/upload_complete_workflow_metrics.py
 
   deploy-test-vllm:
-    runs-on: cpu-amd-m5-2xlarge
+    runs-on: cpu-amd-m5-2xlarge-test
     if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, operator, vllm]
     permissions:
@@ -369,7 +363,7 @@ jobs:
       MODEL_NAME: "Qwen/Qwen3-0.6B"
     steps: &deploy-test-steps
     - uses: actions/checkout@v4
-    - name: Set namespace and install dependencies
+    - name: Set namespace
       run: |
         # Set namespace using FRAMEWORK env var
         PROFILE_SANITIZED="${{ matrix.profile }}"
@@ -377,24 +371,6 @@ jobs:
         echo "NAMESPACE=gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED}" >> $GITHUB_ENV
 
         set -x
-        # Install dependencies
-        sudo apt-get update && sudo apt-get install -y curl bash openssl gettext git jq
-
-        # Install yq
-        echo "Installing yq..."
-        curl -L https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
-        sudo chmod 755 yq
-        sudo mv yq /usr/local/bin/
-        # Install Helm
-        echo "Installing Helm..."
-        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
-        sudo chmod 700 get_helm.sh
-        sudo ./get_helm.sh
-        # Install kubectl
-        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-        sudo chmod 755 kubectl
-        sudo mv kubectl /usr/local/bin/
-
         # Setup kubeconfig
         echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
         chmod 600 .kubeconfig
@@ -568,7 +544,7 @@ jobs:
         echo "Namespace $NAMESPACE completed."
 
   deploy-test-sglang:
-    runs-on: cpu-amd-m5-2xlarge
+    runs-on: cpu-amd-m5-2xlarge-test
     if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, operator, sglang]
     permissions:
@@ -588,7 +564,7 @@ jobs:
     steps: *deploy-test-steps
 
   deploy-test-trtllm:
-    runs-on: cpu-amd-m5-2xlarge
+    runs-on: cpu-amd-m5-2xlarge-test
     if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, operator, trtllm]
     permissions:
