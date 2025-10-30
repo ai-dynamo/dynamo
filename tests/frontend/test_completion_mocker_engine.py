@@ -187,12 +187,20 @@ def test_completion_multi_element_array_prompt() -> None:
             "Tell me about Ceres",
             "Tell me about Jupiter",
         ],
-        "max_tokens": 2000,
+        "max_tokens": 300,
     }
 
     response = _send_completion_request(payload)
+    response_data = response.json()
 
     assert response.status_code == 200, (
         f"Completion request failed with status "
         f"{response.status_code}: {response.text}"
     )
+
+    expected_choices = len(payload.get("prompt")) # type: ignore
+    choices = len(response_data.get("choices", []))
+
+    assert (
+        expected_choices == choices
+    ), f"Expected {expected_choices} choices, got {choices}"
