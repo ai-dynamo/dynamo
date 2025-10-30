@@ -125,7 +125,6 @@ impl actions::Memset for SystemStorage {
             let ptr = self.ptr.as_ptr().add(offset);
             std::ptr::write_bytes(ptr, value, size);
         }
-    }
         Ok(())
     }
 }

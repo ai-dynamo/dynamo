@@ -69,7 +69,9 @@ pub trait Slice {
         let ptr = bytes.as_ptr() as *const T;
         let elem_size = std::mem::size_of::<T>();
         if elem_size == 0 {
-            return Err(StorageError::Unsupported("zero-sized types are not supported".into()));
+            return Err(StorageError::Unsupported(
+                "zero-sized types are not supported".into(),
+            ));
         }
         let len = bytes.len() / elem_size;
 

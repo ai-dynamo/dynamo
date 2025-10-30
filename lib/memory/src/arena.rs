@@ -178,7 +178,7 @@ impl<S: MemoryDescription + 'static> MemoryDescription for ArenaBuffer<S> {
     }
     fn nixl_descriptor(&self) -> Option<NixlDescriptor> {
         if let Some(mut descriptor) = self.storage.nixl_descriptor() {
-            descriptor.addr += self.addr() as u64;
+            descriptor.addr = self.addr() as u64;
             descriptor.size = self.size();
             Some(descriptor)
         } else {
