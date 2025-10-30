@@ -129,7 +129,7 @@ if [ "$mode" = "prefill" ]; then
         --stream-interval 50 \
         --mem-fraction-static 0.80 ${command_suffix}
 
- 
+
 elif [ "$mode" = "decode" ]; then
     set -x
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
@@ -138,6 +138,16 @@ elif [ "$mode" = "decode" ]; then
 
     command_suffix=""
     if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix="--init-expert-location /configs/decode_dsr1-0528_loadgen_in1024out1024_num2000_2p12d.json"; fi
+
+    # removing these in favor of the previous commands cause theres hang that i cant figure out
+    # we leave off single batch overlap because its not supported on main yet
+    # --max-total-tokens 3568435 \
+    # --disable-chunked-prefix-cache
+    # --num-reserved-decode-tokens 128 \
+    # --chunked-prefill-size 1572864
+
+    # even after removing above i hang at 1024...weird because warmup passes 
+    # warmup is much less prompts....
 
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
     SGLANG_PER_TOKEN_GROUP_QUANT_8BIT_V2=1 \
@@ -171,8 +181,7 @@ elif [ "$mode" = "decode" ]; then
         --host 0.0.0.0 \
         --decode-log-interval 1000 \
         --max-running-requests 36864 \
-        --max-total-tokens 3568435 \
-        --context-length 4224 \
+        --context-length 2200 \
         --disable-radix-cache \
         --moe-a2a-backend deepep \
         --prefill-round-robin-balance \
@@ -187,10 +196,7 @@ elif [ "$mode" = "decode" ]; then
         --eplb-algorithm deepseek \
         --attention-backend trtllm_mla \
         --watchdog-timeout 1000000 \
-        --enable-single-batch-overlap \
-        --chunked-prefill-size 1572864 \
-        --disable-chunked-prefix-cache \
-        --num-reserved-decode-tokens 128 \
+        --chunked-prefill-size 36864  \
         --stream-interval 50 \
         --deepep-config /configs/deepep_config.json \
         --mem-fraction-static 0.83 ${command_suffix}
