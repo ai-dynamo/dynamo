@@ -39,6 +39,7 @@ ARG SCCACHE_REGION=""
 # NIXL configuration
 ARG NIXL_UCX_REF=v1.19.0
 ARG NIXL_REF=0.7.0
+ARG NIXL_GDRCOPY_REF=v2.5.1
 
 # Python configuration
 ARG PYTHON_VERSION=3.12
@@ -58,6 +59,7 @@ ARG SCCACHE_BUCKET
 ARG SCCACHE_REGION
 ARG NIXL_UCX_REF
 ARG NIXL_REF
+ARG NIXL_GDRCOPY_REF
 
 USER root
 WORKDIR /opt/dynamo
@@ -104,31 +106,6 @@ RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.
     chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
 ##################################
-########## System Dependencies ###
-##################################
-
-# Install system packages
-RUN apt-get update -y \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        # NIXL build dependencies
-        autoconf \
-        automake \
-        cmake \
-        git \
-        git-lfs \
-        libtool \
-        meson \
-        net-tools \
-        ninja-build \
-        pybind11-dev \
-        # Rust build dependencies
-        clang \
-        libclang-dev \
-        protobuf-compiler \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-##################################
 ########## External Services #####
 ##################################
 
@@ -146,25 +123,6 @@ RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/downlo
     rm /tmp/etcd.tar.gz
 ENV PATH=/usr/local/bin/etcd/:$PATH
 
-##################################
-########## Python Environment ####
-##################################
-
-# Create and activate virtual environment
-ARG PYTHON_VERSION
-RUN mkdir -p /opt/dynamo/venv && \
-    uv venv /opt/dynamo/venv --python $PYTHON_VERSION
-
-ENV VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH="/opt/dynamo/venv/bin:${PATH}"
-
-# Install common and test dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    UV_GIT_LFS=1 uv pip install \
-        --no-cache \
-        --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt
 
 ##################################
 ##### Wheel Build Image ##########
@@ -179,62 +137,42 @@ FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
 ARG ARCH
 ARG ARCH_ALT
 ARG CARGO_BUILD_JOBS
+ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET
 ARG SCCACHE_REGION
 ARG NIXL_UCX_REF
 ARG NIXL_REF
+ARG NIXL_GDRCOPY_REF
 
-# Set environment variables
-ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
-    RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    CARGO_TARGET_DIR=/opt/dynamo/target \
-    VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH=/usr/local/cargo/bin:/opt/dynamo/venv/bin:$PATH
-
-COPY --from=base /usr/local/cuda /usr/local/cuda
-COPY --from=base /etc/ld.so.conf.d/hpcx.conf /etc/ld.so.conf.d/hpcx.conf
-
-ENV PATH=/usr/local/cuda/bin:$PATH \
-    LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH \
-    NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
+WORKDIR /workspace
 
 # Install system dependencies
 RUN yum groupinstall -y 'Development Tools' &&  \
     dnf install -y almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
     dnf install -y \
-        boost \
-        boost-devel \
-        clang-devel \
+        # Build tools
         cmake \
-        distribution-gpg-keys-copr \
-        dkms \
-        flex \
-        gflags \
-        glibc-headers \
-        gcc-c++ \
-        libaio \
-        libaio-devel \
-        libtool-ltdl \
         ninja-build \
-        openssl \
-        openssl-devel \
+        clang-devel \
+        gcc-c++ \
+        flex \
+        wget \
+        # Kernel module build dependencies
+        dkms \
+        # Protobuf support
         protobuf-compiler \
-        protobuf-c-devel \
-        protobuf-devel \
+        # RDMA/InfiniBand support (required for UCX build with --with-verbs)
         libibverbs \
         libibverbs-devel \
         rdma-core \
         rdma-core-devel \
         libibumad \
         libibumad-devel \
-        numactl-devel \
         librdmacm-devel \
-        wget \
-        zlib
+        numactl-devel
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
 RUN set -eux; \
@@ -254,6 +192,13 @@ RUN set -eux; \
 # Point build tools explicitly at the modern protoc
 ENV PROTOC=/usr/local/bin/protoc
 
+# Set environment variables first so they can be used in COPY commands
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    CARGO_TARGET_DIR=/opt/dynamo/target \
+    PATH=/usr/local/cargo/bin:$PATH
+
 # Copy artifacts from base stage
 COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=base $CARGO_HOME $CARGO_HOME
@@ -269,53 +214,27 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
     RUSTC_WRAPPER=${USE_SCCACHE:+sccache}
 
-WORKDIR /workspace
-ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH
+# Copy CUDA from base stage
+COPY --from=base /usr/local/cuda /usr/local/cuda
+COPY --from=base /etc/ld.so.conf.d/hpcx.conf /etc/ld.so.conf.d/hpcx.conf
 
-RUN wget https://www.mellanox.com/downloads/DOCA/DOCA_v3.1.0/host/doca-host-3.1.0-091000_25.07_rhel89.${ARCH_ALT}.rpm && \
-    rpm -i doca-host-3.1.0-091000_25.07_rhel89.${ARCH_ALT}.rpm && \
-    dnf install -y libnl3-devel && \
-    cd /usr/share/doca-host-3.1.0/repo/Packages/ && \
-    rpm -ivh --nodeps doca-sdk-common-*rpm && \
-    rpm -ivh --nodeps doca-sdk-rdma-*rpm && \
-    rpm -ivh --nodeps doca-sdk-verbs-*rpm && \
-    rpm -ivh --nodeps doca-sdk-gpunetio-*rpm && \
-    # Check that gpunetio development package is installed correctly
-    pkg-config --cflags --libs doca-gpunetio
+ENV CUDA_PATH=/usr/local/cuda \
+    PATH=/usr/local/cuda/bin:$PATH \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH \
+    NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 
-# Force reinstall of RDMA packages from DOCA repository
-# Reinstall needed to fix broken libibverbs-devel, which may lead to lack of Infiniband support.
-RUN dnf clean all && \
-    dnf makecache && \
-    dnf --refresh -y reinstall \
-    libibverbs \
-    libibverbs-devel \
-    rdma-core \
-    rdma-core-devel \
-    libibumad \
-    libibumad-devel \
-    numactl-devel \
-    librdmacm-devel
-
-ENV CUDA_PATH=/usr/local/cuda
-RUN rm -rf /usr/lib/ucx && rm -rf /opt/hpcx/ucx
+# Create virtual environment for building wheels
+ENV VIRTUAL_ENV=/workspace/.venv
+RUN uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
+    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf]        
 
 # Build and install gdrcopy
-RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
-    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
-    cd /workspace && \
-    git clone --depth 1 https://github.com/NVIDIA/gdrcopy.git && \
-    cd gdrcopy && \
-    git fetch --tags --depth=1 && \
-    latest_tag=$(git describe --tags "$(git rev-list --tags --max-count=1)") && \
-    git checkout "$latest_tag" && \
-    cd packages && \
+RUN git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/gdrcopy.git && \
+    cd gdrcopy/packages && \
     CUDA=/usr/local/cuda ./build-rpm-packages.sh && \
     rpm -Uvh gdrcopy-kmod-*.el8.noarch.rpm && \
-    rpm -Uvh gdrcopy-*.el8.$ARCH_ALT.rpm && \
+    rpm -Uvh gdrcopy-*.el8.${ARCH_ALT}.rpm && \
     rpm -Uvh gdrcopy-devel-*.el8.noarch.rpm
-
 
 # Build and install UCX
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
@@ -350,22 +269,15 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
      echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
      ldconfig
 
-RUN cd /workspace && \
-    git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git"
-
-ARG PYTHON_VERSION
-WORKDIR /workspace/nixl
-ENV VIRTUAL_ENV=/workspace/nixl/.venv
-RUN uv venv $VIRTUAL_ENV --python $PYTHON_VERSION && \
-    uv pip install --upgrade meson pybind11 patchelf
-
 # build and install nixl
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
-    rm -rf build && \
+    source ${VIRTUAL_ENV}/bin/activate && \
+    git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" && \
+    cd nixl && \
     mkdir build && \
-    uv run meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
+    meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
     -Dcudapath_lib="/usr/local/cuda/lib64" \
     -Dcudapath_inc="/usr/local/cuda/include" \
     -Ducx_path="/usr/local/ucx" && \
@@ -374,10 +286,13 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     ninja install && \
     /tmp/use-sccache.sh show-stats "NIXL"
 
-ENV LD_LIBRARY_PATH=/opt/nvidia/nvda_nixl/lib64/:$LD_LIBRARY_PATH
-ENV LD_LIBRARY_PATH=/opt/nvidia/nvda_nixl/lib64/plugins:$LD_LIBRARY_PATH
-ENV NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins \
+    NIXL_PREFIX=/opt/nvidia/nvda_nixl \
+    LD_LIBRARY_PATH=$NIXL_LIB_DIR:\
+    $NIXL_PLUGIN_DIR:\
+    /usr/local/ucx/lib:\
+    /usr/local/ucx/lib/ucx:\
+    $LD_LIBRARY_PATH
 
 RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
     echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf && \
@@ -386,16 +301,8 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
-    cd /workspace/nixl && uv build . --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
-
-ARG PYTHON_VERSION
-RUN mkdir -p /opt/dynamo/venv && \
-    uv venv /opt/dynamo/venv --python $PYTHON_VERSION
-
-ENV VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH="/opt/dynamo/venv/bin:${PATH}"
-
-WORKDIR /opt/dynamo
+    cd /workspace/nixl && \
+    uv build . --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
 
 # Copy source code (order matters for layer caching)
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
@@ -407,25 +314,16 @@ COPY components/ /opt/dynamo/components/
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    source ${VIRTUAL_ENV}/bin/activate && \
+    cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
-    uv pip install maturin[patchelf] && \
     maturin build --release --out /opt/dynamo/dist && \
+    if [ "$ENABLE_KVBM" = "true" ]; then \
+        cd /opt/dynamo/lib/kvbm && \
+        maturin build --release --out /opt/dynamo/dist; \
+    fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
-
-# Build kvbm wheel
-RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
-    set -euo pipefail; \
-    if [ "${ENABLE_KVBM:-}" = "true" ]; then \
-      export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}"; \
-      cd /opt/dynamo/lib/kvbm; \
-      uv pip install --upgrade 'maturin[patchelf]'; \
-      maturin build --release --out /opt/dynamo/dist; \
-      /tmp/use-sccache.sh show-stats "KVBM"; \
-    else \
-      echo "ENABLE_KVBM=${ENABLE_KVBM:-} -> skipping KVBM build steps"; \
-    fi
 
 ##############################################
 ########## Dev entrypoint image ##############
@@ -450,39 +348,41 @@ COPY --from=wheel_builder /usr/local/ucx/ /usr/local/ucx/
 COPY --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
 COPY --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
 
-ENV LD_LIBRARY_PATH=$NIXL_LIB_DIR:\
-$NIXL_PLUGIN_DIR:\
-/usr/local/ucx/lib:\
-/usr/local/ucx/lib/ucx:\
-$LD_LIBRARY_PATH
-
-WORKDIR /opt/dynamo
-
 # Copy built artifacts
 COPY --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 COPY --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
-# Install Python packages
-COPY benchmarks/ /opt/dynamo/benchmarks/
+# Create and activate virtual environment
+ARG PYTHON_VERSION
+RUN mkdir -p /opt/dynamo/venv && \
+    uv venv /opt/dynamo/venv --python $PYTHON_VERSION
+
+ENV VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH="/opt/dynamo/venv/bin:${PATH}"
+
+# Install common and test dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    UV_GIT_LFS=1 uv pip install \
+        --no-cache \
+        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.test.txt
+
 RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-    && cd /opt/dynamo/benchmarks \
-    && UV_GIT_LFS=1 uv pip install --no-cache . \
-    && cd - \
-    && rm -rf /opt/dynamo/benchmarks
-
-RUN if [ "${ENABLE_KVBM}" = "true" ]; then \
-      uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
+    /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    if [ "$ENABLE_KVBM" = "true" ]; then \
+        uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
     fi
 
 # Setup launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > ~/.launch_screen && \
-    echo "cat ~/.launch_screen" >> ~/.bashrc
+    echo "cat ~/.launch_screen" >> ~/.bashrc && \
+    echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

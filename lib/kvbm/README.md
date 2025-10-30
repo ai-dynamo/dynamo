@@ -31,20 +31,33 @@ The Dynamo KVBM is a distributed KV-cache block management system designed for s
 
 ## Build and Installation
 
-Build the KVBM pip wheel by running the `./container/build_kvbm_wheel.sh` script.
-The pip wheel is built through a Docker build process.
+The pip wheel is built through a Docker build process:
 
 ```bash
-# run this command in the top level dynamo repo
-./container/build_kvbm_wheel.sh -o /tmp/kvbm_wheel
+# Build the Docker image with KVBM enabled (from the dynamo repo root)
+./container/build.sh --framework none --enable-kvbm --tag local-kvbm
 ```
 
-The resulting KVBM pip wheel will be located in the `/tmp/kvbm_wheel` directory.
-You can either copy the wheel file into a Docker container or mount the directory when launching the container.
+Once built, you can either:
 
-To install the pip wheel, run:
+**Option 1: Run and use the container directly**
 ```bash
-pip install /tmp/kvbm_wheel/kvbm*.whl
+./container/run.sh --framework none -it
+```
+
+**Option 2: Extract the wheel file to your local filesystem**
+```bash
+# Create a temporary container from the built image
+docker create --name temp-kvbm-container local-kvbm:latest
+
+# Copy the KVBM wheel to your current directory
+docker cp temp-kvbm-container:/opt/dynamo/wheelhouse/ ./dynamo_wheelhouse
+
+# Clean up the temporary container
+docker rm temp-kvbm-container
+
+# Install the wheel locally
+pip install ./kvbm*.whl
 ```
 
 Note that the default pip wheel built is not compatible with CUDA 13 at the moment.

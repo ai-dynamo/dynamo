@@ -119,8 +119,6 @@ NIXL_REF=0.7.0
 NIXL_UCX_REF=v1.19.0
 NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
 
-KVBM_PIP_WHEEL_DIR="/tmp/kvbm_wheel/"
-
 NO_CACHE=""
 
 # sccache configuration for S3
@@ -186,14 +184,6 @@ get_options() {
         --tensorrtllm-git-url)
             if [ "$2" ]; then
                 TRTLLM_GIT_URL=$2
-                shift
-            else
-                missing_requirement "$1"
-            fi
-            ;;
-        --kvbm-pip-wheel-dir)
-            if [ "$2" ]; then
-                KVBM_PIP_WHEEL_DIR=$2
                 shift
             else
                 missing_requirement "$1"
@@ -459,7 +449,6 @@ show_help() {
     echo "  [--tensorrtllm-pip-wheel tensorrtllm pip wheel on artifactory]"
     echo "  [--tensorrtllm-index-url tensorrtllm PyPI index URL if providing the wheel from artifactory]"
     echo "  [--tensorrtllm-git-url tensorrtllm git repository URL for cloning]"
-    echo "  [--kvbm-pip-wheel-dir path to kvbm pip wheel directory]"
     echo "  [--build-arg additional build args to pass to docker build]"
     echo "  [--cache-from cache location to start from]"
     echo "  [--cache-to location where to cache the build output]"

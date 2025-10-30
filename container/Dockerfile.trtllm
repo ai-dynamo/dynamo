@@ -29,6 +29,7 @@ ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 # Python configuration
 ARG PYTHON_VERSION=3.12
+ARG ENABLE_KVBM=false
 
 ARG DYNAMO_BASE_IMAGE="dynamo:latest-none"
 FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
@@ -64,6 +65,7 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv
 
 ARG ARCH_ALT
 ARG PYTHON_VERSION
+ARG ENABLE_KVBM
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
@@ -244,11 +246,9 @@ RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-    && if ls /opt/dynamo/wheelhouse/kvbm*.whl >/dev/null 2>&1; then \
-         uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
-       else \
-         echo "No kvbm*.whl found, skipping"; \
-       fi \
+    && if [ "$ENABLE_KVBM" = "true" ]; then \
+        uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
+    fi && \
     && cd /opt/dynamo/benchmarks \
     && UV_GIT_LFS=1 uv pip install --no-cache . \
     && cd - \
