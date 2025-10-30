@@ -43,7 +43,7 @@ jobs:
             console.log(`Checking build jobs for commit: ${sha}`);
 
             const backendJobNames = ['vllm', 'sglang', 'trtllm', 'operator'];
-            let buildJobsFound = false;
+            let errorMessagePosted = false;
 
             // Poll for 5 minutes (30 attempts * 10 seconds)
             for (let attempt = 0; attempt < 30; attempt++) {
@@ -83,7 +83,6 @@ jobs:
 
                   if (anyRunning) {
                     console.log(`Backend jobs are running!`);
-                    buildJobsFound = true;
 
                     await github.rest.repos.createCommitStatus({
                       owner,
@@ -97,17 +96,34 @@ jobs:
                   }
                 }
               }
+
+              // After 1 minute (6 attempts), post error message but keep checking
+              if (attempt === 5 && !errorMessagePosted) {
+                console.log(`No jobs detected after 1 minute, posting error message`);
+                errorMessagePosted = true;
+
+                await github.rest.repos.createCommitStatus({
+                  owner,
+                  repo,
+                  sha,
+                  state: 'error',
+                  context: 'backend-status-check',
+                  description: `/ok to test ${sha.substring(0, 7)} to run CI`
+                });
+              }
             }
 
-            // No build jobs found after 5 minutes
-            console.log(`No backend jobs detected after 5 minutes`);
+            // If we didn't post error message yet, post it now
+            if (!errorMessagePosted) {
+              console.log(`No backend jobs detected after 5 minutes`);
 
-            await github.rest.repos.createCommitStatus({
-              owner,
-              repo,
-              sha,
-              state: 'error',
-              context: 'backend-status-check',
-              description: `/ok to test ${sha.substring(0, 7)} to run CI`
-            });
+              await github.rest.repos.createCommitStatus({
+                owner,
+                repo,
+                sha,
+                state: 'error',
+                context: 'backend-status-check',
+                description: `/ok to test ${sha.substring(0, 7)} to run CI`
+              });
+            }
 
