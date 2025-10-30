@@ -60,7 +60,6 @@ data:
       - 768
       - 1024
       - 2048
-      - 32
     print_iter_log: true
     kv_cache_config:
       enable_block_reuse: false
@@ -131,10 +130,9 @@ spec:
       replicas: 1
       # NOTE: Prefill uses 1 node (no multinode section = single node)
       #       and contributes to ComputeDomain.numNodes (see above)
-      pvc:
-        create: false
-        mountPoint: /model-cache
-        name: model-cache-pvc
+      volumeMounts:
+        - name: model-cache-pvc
+          mountPoint: /model-cache
       sharedMemory:
         size: 800Gi
       resources:
@@ -187,10 +185,9 @@ spec:
       dynamoNamespace: trtllm-disagg-multinode
       componentType: worker
       replicas: 1
-      pvc:
-        create: false
-        mountPoint: /model-cache
-        name: model-cache-pvc
+      volumeMounts:
+        - name: model-cache-pvc
+          mountPoint: /model-cache
       multinode:
         # NOTE: This nodeCount contributes to ComputeDomain.numNodes (see above)
         nodeCount: 8
