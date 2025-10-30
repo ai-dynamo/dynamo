@@ -51,18 +51,6 @@ sglang:cache_hit_rate{model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0075
 
         dynamo.common.utils.prometheus.generate_latest = original_generate_latest
 
-        def mock_generate_latest(reg):
-            return sample_metrics.encode("utf-8")
-
-        import dynamo.common.utils.prometheus
-
-        original_generate_latest = dynamo.common.utils.prometheus.generate_latest
-        dynamo.common.utils.prometheus.generate_latest = mock_generate_latest
-
-        yield registry
-
-        dynamo.common.utils.prometheus.generate_latest = original_generate_latest
-
     def test_sglang_use_case(self, sglang_registry):
         """Test SGLang use case: filter to sglang: metrics and exclude python_/process_."""
         result = get_prometheus_expfmt(
