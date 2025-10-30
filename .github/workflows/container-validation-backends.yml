@@ -45,7 +45,7 @@ jobs:
       matrix:
         platform:
           - { arch: amd64, runner: cpu-amd-m5-2xlarge-test }
-          - { arch: arm64, runner: cpu-amd-m5-2xlarge-test }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge-test }
     name: operator (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
@@ -108,7 +108,7 @@ jobs:
       matrix:
         platform:
           - { arch: amd64, runner: gpu-l40-amd64-test }
-          - { arch: arm64, runner: cpu-amd-m5-2xlarge-test }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge-test }
     name: vllm (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
@@ -173,7 +173,7 @@ jobs:
       matrix:
         platform:
           - { arch: amd64, runner: gpu-l40-amd64-test }
-          - { arch: arm64, runner: cpu-amd-m5-2xlarge-test }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge-test }
     name: sglang (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
@@ -236,7 +236,7 @@ jobs:
       matrix:
         platform:
           - { arch: amd64, runner: gpu-l40-amd64-test }
-          - { arch: arm64, runner: cpu-amd-m5-2xlarge-test }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge-test }
     name: trtllm (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
