@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#![allow(dead_code)]
+#![deny(missing_docs)]
 
 //! Types and utilities for handling sequences of tokens, including block creation and hashing.
 
@@ -1021,7 +1021,6 @@ impl TokenBlockSequence {
         salt_hash: u64,
     ) -> (Vec<TokenBlock>, PartialTokenBlock) {
         assert!(block_size > 0, "block_size must be greater than 0");
-        // Use Rayon for parallel computation of block chunks (hashes)
         let chunks: Vec<TokenBlockChunk> = tokens
             .as_ref()
             .chunks_exact(block_size as usize)
@@ -1058,6 +1057,16 @@ impl TokenBlockSequence {
         (result_blocks, current_block)
     }
 
+    /// Creates a new [`TokenBlockSequence`] from a slice of tokens.
+    ///
+    /// The tokens are split into blocks of `block_size`. Any remaining tokens
+    /// form the initial `current_block`.
+    ///
+    /// # Arguments
+    ///
+    /// * `tokens` - The slice of tokens to create the sequence from.
+    /// * `block_size` - The size of each block.
+    /// * `salt_hash` - The [`SaltHash`] to use for hashing.
     pub fn from_slice(tokens: &[Token], block_size: u32, salt_hash: Option<SaltHash>) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
         let salt_hash = salt_hash.unwrap_or(0);

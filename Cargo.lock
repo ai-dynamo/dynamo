@@ -2369,7 +2369,6 @@ dependencies = [
  "derive-getters",
  "serde",
  "thiserror 2.0.16",
- "uuid 1.18.1",
  "xxhash-rust",
 ]
 

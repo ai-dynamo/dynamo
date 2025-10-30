@@ -44,6 +44,7 @@ impl<T> PositionalRadixTree<T> {
         self.map.iter().map(|level| level.len()).sum()
     }
 
+    /// Returns true if the [`PositionalRadixTree`] is empty of [`PositionalSequenceHashes`][`crate::PositionalSequenceHash`]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
