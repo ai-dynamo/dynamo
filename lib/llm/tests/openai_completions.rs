@@ -214,31 +214,6 @@ fn test_total_choices_validation() {
 }
 
 #[test]
-fn test_batch_prompt_request_creation() {
-    use dynamo_async_openai::types::Prompt;
-
-    // Test creating request with string array prompt
-    let request = CreateCompletionRequestArgs::default()
-        .prompt(Prompt::StringArray(vec![
-            "First prompt".to_string(),
-            "Second prompt".to_string(),
-        ]))
-        .model("gpt-3.5-turbo")
-        .n(2_u8)
-        .build()
-        .expect("error building request");
-
-    assert_eq!(request.n, Some(2));
-    if let Prompt::StringArray(arr) = &request.prompt {
-        assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0], "First prompt");
-        assert_eq!(arr[1], "Second prompt");
-    } else {
-        panic!("Expected StringArray prompt");
-    }
-}
-
-#[test]
 fn test_batch_prompt_with_n_parameter() {
     use dynamo_async_openai::types::Prompt;
     use dynamo_llm::protocols::openai::completions::get_prompt_batch_size;

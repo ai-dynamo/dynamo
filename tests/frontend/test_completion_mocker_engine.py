@@ -182,7 +182,11 @@ def test_completion_single_element_array_prompt() -> None:
 def test_completion_multi_element_array_prompt() -> None:
     payload: Dict[str, Any] = {
         "model": TEST_MODEL,
-        "prompt": ["Tell me about Mars", "Tell me about Ceres", "Tell me about Jupiter"],
+        "prompt": [
+            "Tell me about Mars",
+            "Tell me about Ceres",
+            "Tell me about Jupiter",
+        ],
         "max_tokens": 2000,
     }
 
