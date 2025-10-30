@@ -714,17 +714,7 @@ fi
 if [  ! -z ${ENABLE_KVBM} ]; then
     echo "Enabling the KVBM in the dynamo image"
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
-
-    echo "Building the KVBM wheel"
-    if ! "${SOURCE_DIR}/build_kvbm_wheel.sh" -o ${KVBM_PIP_WHEEL_DIR} -n ${NIXL_REF} -a ${ARCH} -t wheel; then
-        error "ERROR: Failed to build KVBM wheel"
-    fi
 fi
-
-# Create a kvbm wheel directory to satisfy the build context requirement
-# There is no way to conditionally copy the build context in dockerfile.
-mkdir -p ${KVBM_PIP_WHEEL_DIR}
-BUILD_CONTEXT_ARG+=" --build-context kvbm_wheel=${KVBM_PIP_WHEEL_DIR}"
 
 # NIXL_UCX_REF: Used in base Dockerfile only.
 #               Passed to framework Dockerfile.{vllm,sglang,...} where it's NOT used.

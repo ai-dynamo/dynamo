@@ -48,9 +48,6 @@ module-name = "kvbm._core"
 manifest-path = "Cargo.toml"
 python-packages = ["kvbm"]
 python-source = "python"
-include = [
-  { path = "kvbm/nixl-cu13/**/*", format = "wheel" }
-]
 
 [build-system]
 requires = ["maturin>=1.0,<2.0", "patchelf"]
