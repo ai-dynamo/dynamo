@@ -15,10 +15,18 @@
 
 import re
 from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Dict, Optional, Pattern
 from typing_extensions import TypedDict
 
 from tests.utils.managed_deployment import DeploymentSpec
+
+
+class TestPhase(Enum):
+    """Enum representing different test phases in fault tolerance testing."""
+    STANDARD = auto()
+    OVERFLOW = auto()
+    RECOVERY = auto()
 
 
 class DeploymentInfo(TypedDict, total=False):
@@ -35,8 +43,9 @@ class DeploymentInfo(TypedDict, total=False):
     model: str 
     is_moe: bool 
 
-OVERFLOW_SUFFIX = "_overflow"
-RECOVERY_SUFFIX = "_recovery"
+# Test phase suffixes derived from TestPhase enum
+OVERFLOW_SUFFIX = f"_{TestPhase.OVERFLOW.name.lower()}"
+RECOVERY_SUFFIX = f"_{TestPhase.RECOVERY.name.lower()}"
 
 # Worker name mapping for different backends
 WORKER_MAP = {

@@ -21,7 +21,6 @@ import logging
 import os
 import re
 from datetime import datetime
-from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -31,15 +30,9 @@ from tabulate import tabulate
 from tests.fault_tolerance.deploy.scenarios import (
     OVERFLOW_SUFFIX,
     RECOVERY_SUFFIX,
+    TestPhase,
     WORKER_MAP,
 )
-
-
-class TestPhase(Enum):
-    """Enum representing different test phases in fault tolerance testing."""
-    STANDARD = 0
-    OVERFLOW = 1
-    RECOVERY = 2
 
 
 def parse_test_log(
