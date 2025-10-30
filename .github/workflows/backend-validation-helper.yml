@@ -52,7 +52,7 @@ jobs:
                 owner,
                 repo,
                 sha,
-                state: 'success',
+                state: 'pending',
                 context: 'backend-status-check',
                 description: `Use /ok to test ${sha.substring(0, 7)} to run CI`
               });
@@ -87,9 +87,9 @@ jobs:
                 owner,
                 repo,
                 sha,
-                state: 'success',
+                state: 'pending',
                 context: 'backend-status-check',
-                description: `Use /ok to test ${sha.substring(0, 7)} to run CI`
+                description: `User not validated. Use /ok to test ${sha.substring(0, 7)} to run CI`
               });
             } else {
               // Backend jobs are running
