@@ -352,6 +352,16 @@ COPY --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 COPY --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
+# Install rust build packages
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        # Rust build dependencies
+        clang \
+        libclang-dev \
+        protobuf-compiler \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 # Create and activate virtual environment
 ARG PYTHON_VERSION
 RUN mkdir -p /opt/dynamo/venv && \
