@@ -52,9 +52,9 @@ jobs:
                 owner,
                 repo,
                 sha,
-                state: 'pending',
+                state: 'error',
                 context: 'backend-status-check',
-                description: `Use /ok to test ${sha.substring(0, 7)} to run CI`
+                description: `/ok to test ${sha.substring(0, 7)} to run NV CI for non-validated PR`
               });
               return;
             }
@@ -87,9 +87,9 @@ jobs:
                 owner,
                 repo,
                 sha,
-                state: 'pending',
+                state: 'error',
                 context: 'backend-status-check',
-                description: `User not validated. Use /ok to test ${sha.substring(0, 7)} to run CI`
+                description: `/ok to test ${sha.substring(0, 7)} to run NV CI for non-validated PR`
               });
             } else {
               // Backend jobs are running
