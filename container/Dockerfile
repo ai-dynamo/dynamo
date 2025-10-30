@@ -226,7 +226,7 @@ ENV CUDA_PATH=/usr/local/cuda \
 # Create virtual environment for building wheels
 ENV VIRTUAL_ENV=/workspace/.venv
 RUN uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
-    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf]        
+    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf]
 
 # Build and install gdrcopy
 RUN git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/gdrcopy.git && \
