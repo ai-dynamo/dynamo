@@ -286,13 +286,10 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     ninja install && \
     /tmp/use-sccache.sh show-stats "NIXL"
 
-ENV NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins \
+ENV NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu  \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins \
     NIXL_PREFIX=/opt/nvidia/nvda_nixl \
-    LD_LIBRARY_PATH=$NIXL_LIB_DIR:\
-    $NIXL_PLUGIN_DIR:\
-    /usr/local/ucx/lib:\
-    /usr/local/ucx/lib/ucx:\
-    $LD_LIBRARY_PATH
+    LD_LIBRARY_PATH=$NIXL_LIB_DIR:$NIXL_PLUGIN_DIR:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:$LD_LIBRARY_PATH
 
 RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
     echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf && \
@@ -342,6 +339,7 @@ ENV DYNAMO_HOME=/opt/dynamo \
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins
+    LD_LIBRARY_PATH=$NIXL_LIB_DIR:$NIXL_PLUGIN_DIR:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:$LD_LIBRARY_PATH
 
 # Copy ucx and nixl libs
 COPY --from=wheel_builder /usr/local/ucx/ /usr/local/ucx/
