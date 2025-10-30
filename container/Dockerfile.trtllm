@@ -29,7 +29,6 @@ ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 # Python configuration
 ARG PYTHON_VERSION=3.12
-ARG ENABLE_KVBM=false
 
 ARG DYNAMO_BASE_IMAGE="dynamo:latest-none"
 FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
@@ -248,7 +247,7 @@ RUN uv pip install \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
     && if [ "$ENABLE_KVBM" = "true" ]; then \
         uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
-    fi && \
+    fi; \
     && cd /opt/dynamo/benchmarks \
     && UV_GIT_LFS=1 uv pip install --no-cache . \
     && cd - \
