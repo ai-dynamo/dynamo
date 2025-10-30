@@ -45,9 +45,10 @@ def build_sampling_params(
     # Apply stop_conditions
     for key, value in request["stop_conditions"].items():
         if value is not None and hasattr(sampling_params, key):
-            # Do not add stop key to sampling params - dynamo handles stop conditions directly
             if key == "stop":
-                continue
+                sampling_params.detokenize = True
+                request["stop_conditions"]['stop'] = None
+
             setattr(sampling_params, key, value)
 
     return sampling_params
