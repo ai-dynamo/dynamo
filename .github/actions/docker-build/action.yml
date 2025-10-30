@@ -94,7 +94,6 @@ runs:
         AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
         PLATFORM: ${{ inputs.platform }}
-        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
         # Determine image tag
         if [ -n "${{ inputs.image_tag }}" ]; then
@@ -130,8 +129,7 @@ runs:
           --platform ${{ inputs.platform }} \
           --use-sccache \
           --sccache-bucket "$SCCACHE_S3_BUCKET" \
-          --sccache-region "$AWS_DEFAULT_REGION" \
-          --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ $EXTRA_ARGS
+          --sccache-region "$AWS_DEFAULT_REGION" $EXTRA_ARGS
 
         BUILD_END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         echo "🕐 Build ended at: ${BUILD_END_TIME}"
