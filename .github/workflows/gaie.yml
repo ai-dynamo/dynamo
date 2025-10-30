@@ -191,40 +191,13 @@ jobs:
           sleep 20
           kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}" -n ${KUBE_NS} --timeout=1000s
 
-      - name: Install Gateway API (standard)
+      - name: Install GAIE CRDs and Kgateway
         shell: bash
         env:
           KUBECONFIG: ${{ github.workspace }}/.kubeconfig
         run: |
           set -euo pipefail
-          kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml
-
-      - name: Install Inference Extension CRDs
-        shell: bash
-        env:
-          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
-        run: |
-          set -euo pipefail
-          # Note: manifests are cluster-scoped
-          kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${INFERENCE_EXTENSION_VERSION}/manifests.yaml
-
-      - name: Install Kgateway CRDs and controller
-        shell: bash
-        env:
-          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
-        run: |
-          set -euo pipefail
-          helm upgrade -i --create-namespace --namespace kgateway-system --version ${KGATEWAY_VERSION} kgateway-crds oci://cr.kgateway.dev/kgateway-dev/charts/kgateway-crds
-          helm upgrade -i --namespace kgateway-system --version ${KGATEWAY_VERSION} kgateway oci://cr.kgateway.dev/kgateway-dev/charts/kgateway --set inferenceExtension.enabled=true
-
-      - name: Deploy Gateway Instance
-        shell: bash
-        env:
-          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
-        run: |
-          set -euo pipefail
-          kubectl create namespace ${NAMESPACE} || true
-          kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/raw/main/config/manifests/gateway/kgateway/gateway.yaml -n ${NAMESPACE}
+          ${{ github.workspace }}/deploy/inference-gateway/install_gaie_crd_kgateway.sh
 
       - name: Clone GAIE repo into separate folder and set environment
         shell: bash
