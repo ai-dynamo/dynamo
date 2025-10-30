@@ -348,6 +348,51 @@ jobs:
 #          # Upload complete workflow metrics including container metrics
 #          python3 .github/workflows/upload_complete_workflow_metrics.py
 
+  velonix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: 'Az CLI login using OIDC'
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ secrets.AZ_GHA_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZ_TENANT_ID }}
+          subscription-id: ${{ secrets.AZ_SUBSCRIPTION_ID }}
+
+      - name: 'Set up kubectl'
+        uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4.0.1
+
+      - name: 'Install kubelogin'
+        uses: azure/use-kubelogin@76597ae0fcbaace21b05e13a2cbf8daee2c6e820 # v1.2
+        with:
+          kubelogin-version: 'v0.1.5'
+
+      - name: 'Set AKS context'
+        uses: azure/aks-set-context@c7eb093e5a5d47caa333f64974d5fd1cd4bf069d # v4.0.3
+        with:
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+          admin: 'false'
+          use-kubelogin: 'true'
+
+      - name: 'Convert kubeconfig for Azure CLI'
+        run: kubelogin convert-kubeconfig -l azurecli
+
+      - name: 'Login to ACR via OIDC'
+        run: az acr login --name dynamoci
+
+      - name: 'Get nodes'
+        run: |
+          set -x
+          helm version
+
+          docker pull dynamoci.azurecr.io/docker.io/library/busybox:latest
+
+          # Fetch Helm chart from ACR
+          helm fetch oci://dynamoci.azurecr.io/helm/etcd --version 12.0.18
+
+
   test:
     runs-on: cpu-amd-m5-2xlarge
     permissions:
@@ -381,6 +426,9 @@ jobs:
 
     - name: 'Convert kubeconfig for Azure CLI'
       run: kubelogin convert-kubeconfig -l azurecli
+
+    - name: 'Login to ACR via OIDC'
+      run: az acr login --name dynamoci
 
     - name: testunf
       run: |
