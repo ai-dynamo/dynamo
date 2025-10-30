@@ -9,30 +9,105 @@ on:
   pull_request_target:
     types: [opened, synchronize, reopened]
   push:
+  issue_comment:
+    types: [created]
 
 jobs:
   check-build-status:
     runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'issue_comment' || contains(github.event.comment.body, '/ok to test') }}
     permissions:
       actions: read
       statuses: write
     steps:
-      - name: "Post helpful CI trigger message"
+      - name: "Check for backend build jobs"
         uses: actions/github-script@v7
         with:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const sha = context.payload.pull_request ? context.payload.pull_request.head.sha : context.sha;
 
-            console.log(`Posting status for commit: ${sha}`);
+            // Get SHA from different event types
+            let sha;
+            if (context.eventName === 'issue_comment') {
+              const pr = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: context.issue.number
+              });
+              sha = pr.data.head.sha;
+            } else {
+              sha = context.payload.pull_request ? context.payload.pull_request.head.sha : context.sha;
+            }
+
+            console.log(`Checking build jobs for commit: ${sha}`);
+
+            const backendJobNames = ['vllm', 'sglang', 'trtllm', 'operator'];
+            let buildJobsFound = false;
+
+            // Poll for 5 minutes (30 attempts * 10 seconds)
+            for (let attempt = 0; attempt < 30; attempt++) {
+              await new Promise(resolve => setTimeout(resolve, 10000));
+
+              console.log(`Attempt ${attempt + 1}/30: Checking for Docker Build and Test workflow...`);
+
+              // Get workflow runs for this commit
+              const workflows = await github.rest.actions.listWorkflowRunsForRepo({
+                owner,
+                repo,
+                head_sha: sha,
+                per_page: 100
+              });
+
+              const buildWorkflow = workflows.data.workflow_runs.find(run =>
+                run.name === 'Docker Build and Test'
+              );
+
+              if (buildWorkflow) {
+                console.log(`Found workflow, checking for backend jobs...`);
+
+                const jobs = await github.rest.actions.listJobsForWorkflowRun({
+                  owner,
+                  repo,
+                  run_id: buildWorkflow.id
+                });
+
+                const backendJobs = jobs.data.jobs.filter(job =>
+                  backendJobNames.some(name => job.name.includes(name))
+                );
+
+                if (backendJobs.length > 0) {
+                  const anyRunning = backendJobs.some(job =>
+                    job.status === 'queued' || job.status === 'in_progress'
+                  );
+
+                  if (anyRunning) {
+                    console.log(`Backend jobs are running!`);
+                    buildJobsFound = true;
+
+                    await github.rest.repos.createCommitStatus({
+                      owner,
+                      repo,
+                      sha,
+                      state: 'pending',
+                      context: 'backend-status-check',
+                      description: 'Waiting for Docker Build and Test jobs...'
+                    });
+                    return;
+                  }
+                }
+              }
+            }
+
+            // No build jobs found after 5 minutes
+            console.log(`No backend jobs detected after 5 minutes`);
 
             await github.rest.repos.createCommitStatus({
               owner,
               repo,
               sha,
-              state: 'pending',
+              state: 'error',
               context: 'backend-status-check',
-              description: `/ok to test ${sha.substring(0, 7)} to run NV CI for non-validated PR`
+              description: `/ok to test ${sha.substring(0, 7)} to run CI`
             });
 
