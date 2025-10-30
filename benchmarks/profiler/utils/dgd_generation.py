@@ -160,7 +160,9 @@ def generate_dgd_config_with_planner(
                 max_kv_tokens_val = max_kv_tokens.tolist()
                 # Handle [value] vs value
                 if isinstance(max_kv_tokens_val, list):
-                    max_kv_tokens_val = int(max_kv_tokens_val[0]) if max_kv_tokens_val else 0
+                    max_kv_tokens_val = (
+                        int(max_kv_tokens_val[0]) if max_kv_tokens_val else 0
+                    )
                 else:
                     max_kv_tokens_val = int(max_kv_tokens_val)
             else:
@@ -188,16 +190,25 @@ def generate_dgd_config_with_planner(
         }
 
         # Attach the ConfigMap as a volume in the Planner service
-        planner_volumes = (
-            planner_dict.setdefault("extraPodSpec", {}).setdefault("volumes", [])
+        planner_volumes = planner_dict.setdefault("extraPodSpec", {}).setdefault(
+            "volumes", []
         )
         planner_volumes.append(
-            {"name": "planner-profile-data", "configMap": {"name": "planner-profile-data"}}
+            {
+                "name": "planner-profile-data",
+                "configMap": {"name": "planner-profile-data"},
+            }
         )
-        mc_dict = planner_dict.setdefault("extraPodSpec", {}).setdefault("mainContainer", {})
+        mc_dict = planner_dict.setdefault("extraPodSpec", {}).setdefault(
+            "mainContainer", {}
+        )
         mc_mounts = mc_dict.setdefault("volumeMounts", [])
         mc_mounts.append(
-            {"name": "planner-profile-data", "mountPath": cm_mount_path, "readOnly": True}
+            {
+                "name": "planner-profile-data",
+                "mountPath": cm_mount_path,
+                "readOnly": True,
+            }
         )
 
     # Finalize DGD services
@@ -207,5 +218,3 @@ def generate_dgd_config_with_planner(
     if config_map_obj is not None:
         return [config_map_obj, config_dict]
     return config_dict
-
-
