@@ -32,7 +32,7 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
     ]  # args.backend is already validated in argparse
 
     # first check if config file exists
-    if args.model is not None:
+    if args.model:
         if not args.config:
             # modify config file from default config file
             logger.info("DGD config file not provided, using default config file")
@@ -56,7 +56,7 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
         args.config = config_fn
 
     # now determine the search space
-    if args.model is not None:
+    if args.model:
         model_info = get_model_info(args.model)
         gpu_info = get_gpu_summary()
 
