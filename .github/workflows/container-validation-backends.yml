@@ -381,24 +381,14 @@ jobs:
         # Install dependencies
         sudo apt-get update && sudo apt-get install -y curl bash openssl gettext git jq
 
-        # Install yq
-        echo "Installing yq..."
-        curl -L https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
-        sudo chmod 755 yq
-        sudo mv yq /usr/local/bin/
         # Install Helm
         echo "Installing Helm..."
         curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
         sudo chmod 700 get_helm.sh
         sudo ./get_helm.sh
-        # Install kubectl
-        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-        sudo chmod 755 kubectl
-        sudo mv kubectl /usr/local/bin/
         
-        helm repo add bitnami https://charts.bitnami.com/bitnami
-        cd deploy/cloud/helm/platform/
-        helm dep build .
+        
+        helm fetch oci://registry-1.docker.io/bitnamicharts/etcd
 
 #        # Setup kubeconfig
 #        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
