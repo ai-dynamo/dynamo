@@ -16,6 +16,7 @@ pytestmark = [
 
 class TestGetPrometheusExpfmt:
     """Test class for get_prometheus_expfmt function."""
+
     @pytest.fixture
     def sglang_registry(self):
         """Create a mock registry with SGLang-style metrics."""
