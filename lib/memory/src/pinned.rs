@@ -129,7 +129,10 @@ impl super::nixl::NixlCompatible for PinnedStorage {
 
 impl actions::Memset for PinnedStorage {
     fn memset(&mut self, value: u8, offset: usize, size: usize) -> Result<()> {
-        if offset + size > self.len {
+        let end = offset
+            .checked_add(size)
+            .ok_or_else(|| StorageError::OperationFailed("memset: offset overflow".into()))?;
+        if end > self.len {
             return Err(StorageError::OperationFailed(
                 "memset: offset + size > storage size".into(),
             ));
