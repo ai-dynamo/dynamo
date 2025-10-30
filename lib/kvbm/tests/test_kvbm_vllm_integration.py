@@ -819,7 +819,7 @@ def test_kvbm_wrong_blocks_provided():
 
 @pytest.mark.skipif(KVBM_NOT_AVAILABLE, reason="KVBM not available")
 @pytest.mark.skipif(VLLM_NOT_AVAILABLE, reason="VLLM not available")
-@patch("dynamo.llm.vllm_integration.kv_cache_manager.KvbmCacheManager")
+@patch("kvbm.vllm_integration.kv_cache_manager.KvbmCacheManager")
 def test_kvbm_new_matched_tokens_edge_case(MockCacheManager):
     PAGE_SIZE = 4
     NUM_BLOCKS = 3
