@@ -570,7 +570,7 @@ jobs:
 
 
   deploy-test-sglang:
-    runs-on: cpu-amd-m5-2xlarge
+    runs-on: ubuntu-latest
     if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, operator, sglang]
     permissions:
@@ -590,7 +590,7 @@ jobs:
     steps: *deploy-test-steps
 
   deploy-test-trtllm:
-    runs-on: cpu-amd-m5-2xlarge
+    runs-on: ubuntu-latest
     if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, operator, trtllm]
     permissions:
