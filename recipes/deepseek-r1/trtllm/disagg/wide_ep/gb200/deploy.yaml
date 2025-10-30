@@ -73,7 +73,7 @@ data:
     stream_interval: 20
 ---
 
-# NOTE: The numNodes value should equal the total number of nodes across prefill and decode 
+# NOTE: The numNodes value should equal the total number of nodes across prefill and decode
 #       as specified in their respective sections below (prefill.multinode.nodeCount + decode.multinode.nodeCount).
 #       For autoscaling deployments, the compute domain will automatically adjust as needed.
 apiVersion: resource.nvidia.com/v1beta1
