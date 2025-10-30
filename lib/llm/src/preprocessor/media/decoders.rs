@@ -4,32 +4,10 @@
 use anyhow::Result;
 
 use super::common::EncodedMediaData;
-use ndarray::{ArrayBase, Dimension, OwnedRepr};
+use super::rdma::DecodedMediaData;
 mod image;
 
 pub use image::ImageDecoder;
-
-// Decoded media data (image RGB, video frames pixels, ...)
-#[derive(Debug)]
-pub struct DecodedMediaData {
-    pub(crate) data: Vec<u8>,
-    pub(crate) shape: Vec<usize>,
-    pub(crate) dtype: String,
-}
-
-// convert Array{N}<u8> to DecodedMediaData
-// TODO: Array1<f32> for audio
-impl<D: Dimension> From<ArrayBase<OwnedRepr<u8>, D>> for DecodedMediaData {
-    fn from(array: ArrayBase<OwnedRepr<u8>, D>) -> Self {
-        let shape = array.shape().to_vec();
-        let (data, _) = array.into_raw_vec_and_offset();
-        Self {
-            data,
-            shape,
-            dtype: "uint8".to_string(),
-        }
-    }
-}
 
 #[async_trait::async_trait]
 pub trait Decoder: Clone + Send + 'static {
