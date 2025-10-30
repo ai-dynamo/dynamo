@@ -39,7 +39,6 @@ FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
 # - Develop or debug framework-level components
 # - Create custom builds with specific optimization flags
 #
-ARG DOCKER_PROXY
 FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS framework
 
 # Declare all ARGs
