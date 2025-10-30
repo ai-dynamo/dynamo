@@ -73,6 +73,18 @@ class Config:
     # dump config to file
     dump_config_to: Optional[str] = None
 
+    def has_connector(self, connector_name: str) -> bool:
+        """
+        Check if a specific connector is enabled.
+
+        Args:
+            connector_name: Name of the connector to check (e.g., "kvbm", "nixl")
+
+        Returns:
+            True if the connector is in the connector list, False otherwise
+        """
+        return self.connector_list is not None and connector_name in self.connector_list
+
 
 @register_encoder(Config)
 def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
@@ -311,7 +323,7 @@ async def configure_ports(runtime: DistributedRuntime, config: Config):
         logger.info(f"Allocated ZMQ KV events port: {kv_port} (worker_id={worker_id})")
 
         # Check if NIXL is needed based on connector list
-    needs_nixl = config.connector_list and "nixl" in config.connector_list
+    needs_nixl = config.has_connector("nixl")
 
     if needs_nixl:
         # Allocate side channel ports
