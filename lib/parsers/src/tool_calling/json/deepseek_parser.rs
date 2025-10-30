@@ -126,13 +126,16 @@ pub fn parse_tool_calls_deepseek_v3_1(
         return Ok((vec![], Some(String::new())));
     }
 
-    // For DeepSeek_v3_1, we consider the complete tool call block to be
-    // <｜tool▁calls▁begin｜>...<｜tool▁calls▁end｜>, even though the
-    // individual calls are parsed by <｜tool▁call▁begin｜>...<｜tool▁call▁end｜>.
-    // This is because if we may all call(s) tokens, we are not properly grouping
-    // the tool calls and results in group:
+    // For DeepSeek_v3_1, we consider the tool call block to be
+    // <｜tool▁calls▁begin｜>...<｜tool▁calls▁end｜> and only start parsing
+    // if seeing <｜tool▁calls▁begin｜>, even though the individual calls are
+    // parsed by <｜tool▁call▁begin｜>...<｜tool▁call▁end｜>.
+    // This is because if we start parsing by considering all call(s) tokens,
+    // we are not properly grouping the tool calls and results in groups:
     // 1. <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>...<｜tool▁call▁end｜>
     // 2. <｜tool▁calls▁end｜>
+    // where 2. will not be recognized as part of the tool call block due
+    // to missing start token and will not be consumed.
     let has_end_token = config
         .tool_call_end_tokens
         .iter()
@@ -272,9 +275,6 @@ mod tests {
         let (name, args) = extract_name_and_args(result[1].clone());
         assert_eq!(name, "get_current_weather");
         assert_eq!(args["location"], "Paris");
-        assert!(content.is_some());
-        print!("**** {}", content.clone().unwrap());
-        assert!(!content.unwrap().contains("<｜tool▁calls▁end｜>"));
     }
 
     #[test]

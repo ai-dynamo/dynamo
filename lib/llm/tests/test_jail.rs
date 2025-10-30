@@ -1810,10 +1810,6 @@ mod tests {
         // Should have at least one output containing both analysis text and parsed tool call
         assert!(!results.is_empty());
 
-        for result in results.iter() {
-            println!("Result chunk: {:?}", result);
-        }
-
         // Verify a tool call was parsed with expected name and args
         let tool_call_idx = results
             .iter()
@@ -1887,10 +1883,6 @@ mod tests {
 
         // Should have at least one output containing both analysis text and parsed tool call
         assert!(!results.is_empty());
-
-        for result in results.iter() {
-            println!("Result chunk: {:?}", result);
-        }
 
         // Verify a tool call was parsed with expected name and args
         let tool_call_idx = results
