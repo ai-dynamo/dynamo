@@ -46,7 +46,18 @@ impl DiskStorage {
         let file_path = path.as_ref().to_path_buf();
 
         if !file_path.exists() {
-            std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+            let parent = file_path.parent().ok_or_else(|| {
+                StorageError::AllocationFailed(format!(
+                    "disk cache path {} has no parent directory",
+                    file_path.display()
+                ))
+            })?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                StorageError::AllocationFailed(format!(
+                    "failed to create disk cache directory {}: {e}",
+                    parent.display()
+                ))
+            })?;
         }
 
         tracing::debug!("Allocating disk cache file at {}", file_path.display());
