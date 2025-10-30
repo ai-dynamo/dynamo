@@ -515,11 +515,6 @@ if [[ $FRAMEWORK == "VLLM" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]]; then
         echo "INFO: Automatically setting TORCH_BACKEND=cu129 for vLLM ARM64"
     fi
 
-    # Set VLLM_MAX_JOBS if not already specified
-    if [ -z "$MAX_JOBS" ]; then
-        MAX_JOBS=128
-        echo "INFO: Automatically setting VLLM_MAX_JOBS=128 for vLLM ARM64"
-    fi
 fi
 
 # Update DOCKERFILE if framework is VLLM
