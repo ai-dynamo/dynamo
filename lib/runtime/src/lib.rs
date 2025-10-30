@@ -17,7 +17,7 @@ pub use anyhow::{
 
 use async_once_cell::OnceCell;
 
-mod config;
+pub mod config;
 pub use config::RuntimeConfig;
 
 pub mod component;
@@ -95,6 +95,9 @@ pub struct DistributedRuntime {
     store: KeyValueStoreManager,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
+
+    // Service discovery client
+    discovery_client: Arc<dyn discovery::DiscoveryClient>,
 
     // local registry for components
     // the registry allows us to use share runtime resources across instances of the same component object.

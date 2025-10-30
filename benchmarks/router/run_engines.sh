@@ -196,14 +196,20 @@ for i in $(seq 1 $NUM_WORKERS); do
             # Run mocker engine (no GPU assignment needed)
             MOCKER_ARGS=()
             MOCKER_ARGS+=("--model-path" "$MODEL_PATH")
-            MOCKER_ARGS+=("--endpoint" "dyn://test.mocker.generate")
-            if [ "$DATA_PARALLEL_SIZE" -gt 1 ]; then
-                MOCKER_ARGS+=("--data-parallel-size" "$DATA_PARALLEL_SIZE")
-            fi
+
+            # Set endpoint based on worker mode
             if [ "$MODE" = "prefill" ]; then
+                MOCKER_ARGS+=("--endpoint" "dyn://test.prefill.generate")
                 MOCKER_ARGS+=("--is-prefill-worker")
             elif [ "$MODE" = "decode" ]; then
+                MOCKER_ARGS+=("--endpoint" "dyn://test.mocker.generate")
                 MOCKER_ARGS+=("--is-decode-worker")
+            else
+                MOCKER_ARGS+=("--endpoint" "dyn://test.mocker.generate")
+            fi
+
+            if [ "$DATA_PARALLEL_SIZE" -gt 1 ]; then
+                MOCKER_ARGS+=("--data-parallel-size" "$DATA_PARALLEL_SIZE")
             fi
             MOCKER_ARGS+=("${EXTRA_ARGS[@]}")
 

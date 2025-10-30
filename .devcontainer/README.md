@@ -211,7 +211,7 @@ This setup allows you to use Git commands normally within the container without 
 ### Step 5: Wait for Initialization
 
 The container will automatically:
-- Mount your local code to `/home/ubuntu/dynamo`
+- Mount your local code to `/workspace`
 - Run `post-create.sh` to build the project and configure the environment
 
 If `post-create.sh` fails, you can try to debug or [submit](https://github.com/ai-dynamo/dynamo/issues) an issue on GitHub.
@@ -223,13 +223,13 @@ If `post-create.sh` fails, you can try to debug or [submit](https://github.com/a
 If you make changes to Rust code and want to compile, use [cargo build](https://doc.rust-lang.org/cargo/commands/cargo-build.html). This will update Rust binaries such as dynamo-run.
 
 ```bash
-cd /home/ubuntu/dynamo && cargo build --locked --profile dev
+cd /workspace && cargo build --locked --profile dev
 ```
 
-Verify that builds are in the pre-defined `dynamo/.build/target` and not `dynamo/workspace`:
+Verify that builds are in the pre-defined `target` directory:
 ```bash
 $ cargo metadata --format-version=1 | jq -r '.target_directory'
-/home/ubuntu/dynamo/.build/target  <-- this is the target path
+/workspace/target  <-- this is the target path
 ```
 
 If cargo is not installed and configured properly, you will see one or more errors, such as the following:
@@ -244,7 +244,7 @@ Lastly, before pushing code to GitHub, remember to run `cargo fmt` and `cargo cl
 If you make changes to Rust code and want to propagate to Python bindings then can use [maturin](https://www.maturin.rs/#usage) (pre-installed). This will update the Python bindings with your new Rust changes.
 
 ```bash
-cd /home/ubuntu/dynamo/lib/bindings/python && maturin develop
+cd /workspace/lib/bindings/python && maturin develop
 ```
 
 ## What's Inside
@@ -252,14 +252,14 @@ Development Environment:
 - Rust and Python toolchains
 - GPU acceleration
 - VS Code or Cursor extensions for Rust and Python
-- Persistent build cache in `.build/` directory enables fast incremental builds (only changed files are recompiled) via `cargo build --locked --profile dev`
+- Persistent build cache in `target/` directory enables fast incremental builds (only changed files are recompiled) via `cargo build --locked --profile dev`
 - Edits to files are propagated to local repo due to the volume mount
 - SSH and GPG agent passthrough orchestrated by devcontainer
 
 File Structure:
-- Local dynamo repo mounts to `/home/ubuntu/dynamo`
+- Local dynamo repo mounts to `/workspace`
 - Python venv in `/opt/dynamo/venv`
-- Build artifacts in `dynamo/.build/target`
+- Build artifacts in `/workspace/target`
 - Hugging Face cache preserved between sessions (either mounting your host .cache to the container, or your `HF_HOME` to `/home/ubuntu/.cache/huggingface`)
 - Bash memory preserved between sessions at `/home/ubuntu/.commandhistory` using docker volume `dynamo-bashhistory`
 - Precommit preserved between sessions at `/home/ubuntu/.cache/precommit` using docker volume `dynamo-precommit-cache`
@@ -268,7 +268,7 @@ File Structure:
 
 To look at the docs run:
 ```bash
-cd ~/dynamo/.build/target/doc && python3 -m http.server 8000
+cd /workspace/target/doc && python3 -m http.server 8000
 ```
 
 VSCode will automatically port-forward and you can check them out in your browser.
@@ -376,7 +376,7 @@ If you encounter build errors or strange compilation issues, try running `cargo 
 If `cargo clean` doesn't resolve the issue, it is possible that some of the files were created by root (using the `run.sh` script). You can manually remove the build target by going to your host (outside the container), and remove the target:
 
 ```bash
-sudo rm -rf <your dynamo path on the host machine>/.build/target
+sudo rm -rf <your dynamo path on the host machine>/target
 ```
 
 ### Volume Corruption Issues
