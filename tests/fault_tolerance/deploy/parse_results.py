@@ -21,6 +21,7 @@ import logging
 import os
 import re
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -32,6 +33,13 @@ from tests.fault_tolerance.deploy.scenarios import (
     RECOVERY_SUFFIX,
     WORKER_MAP,
 )
+
+
+class TestPhase(Enum):
+    """Enum representing different test phases in fault tolerance testing."""
+    STANDARD = 0
+    OVERFLOW = 1
+    RECOVERY = 2
 
 
 def parse_test_log(
@@ -576,12 +584,12 @@ def print_summary_table(
 
 
 def _process_test_phase_results(
-    test_phase: str,
+    test_phase: TestPhase,
     metrics: Dict[str, Any],
     success_threshold: float,
 ) -> None:
     """Helper function to process and log results for a specific test phase."""
-    if test_phase == "overflow":
+    if test_phase == TestPhase.OVERFLOW:
         logging.info("\n" + "=" * 60)
         logging.info("Processing OVERFLOW phase - Expecting rejections")
         logging.info("=" * 60)
@@ -600,7 +608,7 @@ def _process_test_phase_results(
             else:
                 logging.info("Overflow validation working correctly")
 
-    elif test_phase == "recovery":
+    elif test_phase == TestPhase.RECOVERY:
         logging.info("\n" + "=" * 60)
         logging.info("Processing RECOVERY phase - Expecting success")
         logging.info("=" * 60)
@@ -618,6 +626,9 @@ def _process_test_phase_results(
                 )
             else:
                 logging.info("System recovered successfully")
+    elif test_phase == TestPhase.STANDARD:
+        # Standard test phase doesn't need special processing
+        pass
     else:
         raise ValueError(f"Unknown test phase: {test_phase}")
 
@@ -643,12 +654,12 @@ def process_single_test(
         Dictionary with test results
     """
     # Detect test phase (overflow or recovery) - check suffix to avoid ambiguity
-    test_phase = "standard"
+    test_phase = TestPhase.STANDARD
 
     if log_dir.endswith(OVERFLOW_SUFFIX):
-        test_phase = "overflow"
+        test_phase = TestPhase.OVERFLOW
     elif log_dir.endswith(RECOVERY_SUFFIX):
-        test_phase = "recovery"
+        test_phase = TestPhase.RECOVERY
 
     # Parse test configuration
     test_log = os.path.join(log_dir, "test.log.txt")
@@ -665,8 +676,8 @@ def process_single_test(
     # Extract client count from metrics
     num_clients = metrics.get("num_clients", 0)
 
-    # Add phase information to metrics
-    metrics["test_phase"] = test_phase
+    # Add phase information to metrics (store as string for JSON serialization)
+    metrics["test_phase"] = test_phase.name.lower()
 
     # Process and print phase-specific results
     if print_output:
