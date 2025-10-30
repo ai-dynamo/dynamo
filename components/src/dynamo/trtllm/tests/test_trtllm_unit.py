@@ -8,14 +8,16 @@ from pathlib import Path
 
 import pytest
 
-from dynamo.trtllm.utils.trtllm_utils import cmd_line_args
 from dynamo.trtllm.tests.conftest import make_cli_args_fixture
+from dynamo.trtllm.utils.trtllm_utils import cmd_line_args
 
 # Get path relative to this test file
 REPO_ROOT = Path(__file__).resolve().parents[5]
 TEST_DIR = REPO_ROOT / "tests"
 # Now construct the full path to the shared test fixture
-JINJA_TEMPLATE_PATH =  str(REPO_ROOT / "tests" / "serve" / "fixtures" / "custom_template.jinja")
+JINJA_TEMPLATE_PATH = str(
+    REPO_ROOT / "tests" / "serve" / "fixtures" / "custom_template.jinja"
+)
 
 pytestmark = [
     pytest.mark.unit,
