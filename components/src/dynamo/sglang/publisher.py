@@ -58,6 +58,8 @@ class DynamoSglangPublisher:
         # Set default values (can be overridden later if needed)
         self.request_total_slots = 1024
         self.dp_rank = 0
+        # TODO: Get actual GPU blocks from SGLang engine instead of hardcoded value
+        # This hardcoded value causes dynamo_component_kvstats_total_blocks to be incorrect.
         self.num_gpu_block = 1024
 
         # ZMQ setup for receiving scheduler metrics
@@ -96,6 +98,7 @@ class DynamoSglangPublisher:
         )
         kv_stats = KvStats(
             kv_active_blocks=0,
+            # TODO: num_gpu_block to get actual GPU blocks from SGLang engine instead of hardcoded value
             kv_total_blocks=self.num_gpu_block,
             gpu_cache_usage_perc=0.0,
             gpu_prefix_cache_hit_rate=0.0,
@@ -120,10 +123,8 @@ class DynamoSglangPublisher:
             ep = kv_events.get("endpoint")
             zmq_ep = ep.replace("*", get_local_ip_auto()) if ep else None
 
-            lease_id = self.generate_endpoint.lease_id()
-
             zmq_config = ZmqKvEventPublisherConfig(
-                worker_id=lease_id,
+                worker_id=self.generate_endpoint.connection_id(),
                 kv_block_size=self.server_args.page_size,
                 zmq_endpoint=zmq_ep,
             )

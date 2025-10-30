@@ -23,7 +23,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ### Components
 
-- workers: For aggregated serving, we have two workers, [MultimodalEncodeWorker](src/dynamo/sglang/request_handlers/multimodal_encode_worker_handler.py) for encoding and [MultimodalWorker](src/dynamo/sglang/request_handlers/multimodal_worker_handler.py) for prefilling and decoding.
+- workers: For aggregated serving, we have two workers, [MultimodalEncodeWorkerHandler](../../../components/src/dynamo/sglang/request_handlers/multimodal/encode_worker_handler.py) for encoding and [MultimodalWorkerHandler](../../../components/src/dynamo/sglang/request_handlers/multimodal/worker_handler.py) for prefilling and decoding.
 - processor: Tokenizes the prompt and passes it to the MultimodalEncodeWorker.
 
 ### Workflow
@@ -109,7 +109,7 @@ You should see a response similar to this:
 
 ### Components
 
-- workers: For disaggregated serving, we have three workers, [MultimodalEncodeWorker](src/dynamo/sglang/request_handlers/multimodal_encode_worker_handler.py) for encoding, [MultimodalWorker](src/dynamo/sglang/request_handlers/multimodal_worker_handler.py) for decoding, and [MultimodalPrefillWorker](src/dynamo/sglang/request_handlers/multimodal_worker_handler.py) for prefilling.
+- workers: For disaggregated serving, we have three workers, [MultimodalEncodeWorkerHandler](../../../components/src/dynamo/sglang/request_handlers/multimodal/encode_worker_handler.py) for encoding, [MultimodalWorkerHandler](../../../components/src/dynamo/sglang/request_handlers/multimodal/worker_handler.py) for decoding, and [MultimodalPrefillWorkerHandler](../../../components/src/dynamo/sglang/request_handlers/multimodal/worker_handler.py) for prefilling.
 - processor: Tokenizes the prompt and passes it to the MultimodalEncodeWorker.
 
 ### Workflow

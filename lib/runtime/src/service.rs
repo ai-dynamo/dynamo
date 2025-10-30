@@ -11,7 +11,7 @@ use crate::{
     DistributedRuntime, Result,
     component::Component,
     error,
-    metrics::{MetricsRegistry, prometheus_names, prometheus_names::nats_service},
+    metrics::{MetricsHierarchy, prometheus_names, prometheus_names::nats_service},
     traits::*,
     transports::nats,
     utils::stream,
@@ -339,37 +339,37 @@ impl ComponentNatsServerPrometheusMetrics {
 
         let labels: &[(&str, &str)] = &labels_vec;
 
-        let service_processing_ms_avg = component.create_gauge(
+        let service_processing_ms_avg = component.metrics().create_gauge(
             nats_service::PROCESSING_MS_AVG,
             "Average processing time across all component endpoints in milliseconds",
             labels,
         )?;
 
-        let service_errors_total = component.create_intgauge(
+        let service_errors_total = component.metrics().create_intgauge(
             nats_service::ERRORS_TOTAL,
             "Total number of errors across all component endpoints",
             labels,
         )?;
 
-        let service_requests_total = component.create_intgauge(
+        let service_requests_total = component.metrics().create_intgauge(
             nats_service::REQUESTS_TOTAL,
             "Total number of requests across all component endpoints",
             labels,
         )?;
 
-        let service_processing_ms_total = component.create_intgauge(
+        let service_processing_ms_total = component.metrics().create_intgauge(
             nats_service::PROCESSING_MS_TOTAL,
             "Total processing time across all component endpoints in milliseconds",
             labels,
         )?;
 
-        let service_active_services = component.create_intgauge(
+        let service_active_services = component.metrics().create_intgauge(
             nats_service::ACTIVE_SERVICES,
             "Number of active services in this component",
             labels,
         )?;
 
-        let service_active_endpoints = component.create_intgauge(
+        let service_active_endpoints = component.metrics().create_intgauge(
             nats_service::ACTIVE_ENDPOINTS,
             "Number of active endpoints across all services",
             labels,

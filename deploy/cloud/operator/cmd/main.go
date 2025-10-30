@@ -140,7 +140,6 @@ func main() {
 	var mpiRunSecretName string
 	var mpiRunSecretNamespace string
 	var plannerClusterRoleName string
-	var profilerImage string
 	var dgdrProfilingClusterRoleName string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -182,8 +181,6 @@ func main() {
 		"Namespace where the MPI SSH secret is located (required)")
 	flag.StringVar(&plannerClusterRoleName, "planner-cluster-role-name", "",
 		"Name of the ClusterRole for planner (cluster-wide mode only)")
-	flag.StringVar(&profilerImage, "profiler-image", "",
-		"Container image to use for profiling jobs (both online and offline/AIC) (for DynamoGraphDeploymentRequest)")
 	flag.StringVar(&dgdrProfilingClusterRoleName, "dgdr-profiling-cluster-role-name", "",
 		"Name of the ClusterRole for DGDR profiling jobs (cluster-wide mode only)")
 	opts := zap.Options{
@@ -298,6 +295,9 @@ func main() {
 		mgrOpts.Cache.DefaultNamespaces = map[string]cache.Config{
 			restrictedNamespace: {},
 		}
+		setupLog.Info("Restricted namespace configured, launching in restricted mode", "namespace", restrictedNamespace)
+	} else {
+		setupLog.Info("No restricted namespace configured, launching in cluster-wide mode")
 	}
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
 	if err != nil {
@@ -311,12 +311,21 @@ func main() {
 	ctrlConfig.Grove.Enabled = groveEnabled
 	setupLog.Info("Detecting LWS availability...")
 	lwsEnabled := commonController.DetectLWSAvailability(mainCtx, mgr)
-	ctrlConfig.LWS.Enabled = lwsEnabled
-
+	setupLog.Info("Detecting Volcano availability...")
+	volcanoEnabled := commonController.DetectVolcanoAvailability(mainCtx, mgr)
+	// LWS for multinode deployment usage depends on both LWS and Volcano availability
+	ctrlConfig.LWS.Enabled = lwsEnabled && volcanoEnabled
 	// Detect Kai-scheduler availability using discovery client
 	setupLog.Info("Detecting Kai-scheduler availability...")
 	kaiSchedulerEnabled := commonController.DetectKaiSchedulerAvailability(mainCtx, mgr)
 	ctrlConfig.KaiScheduler.Enabled = kaiSchedulerEnabled
+
+	setupLog.Info("Detected orchestrators availability",
+		"grove", groveEnabled,
+		"lws", lwsEnabled,
+		"volcano", volcanoEnabled,
+		"kai-scheduler", kaiSchedulerEnabled,
+	)
 
 	// Create etcd client
 	cli, err := clientv3.New(clientv3.Config{
@@ -458,11 +467,10 @@ func main() {
 	}
 
 	if err = (&controller.DynamoGraphDeploymentRequestReconciler{
-		Client:        mgr.GetClient(),
-		Recorder:      mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
-		ProfilerImage: profilerImage,
-		Config:        ctrlConfig,
-		RBACManager:   rbacManager,
+		Client:      mgr.GetClient(),
+		Recorder:    mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
+		Config:      ctrlConfig,
+		RBACManager: rbacManager,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeploymentRequest")
 		os.Exit(1)

@@ -208,8 +208,8 @@ pub mod key_extractors {
     use etcd_client::KeyValue;
 
     /// Extract the lease ID as the key
-    pub fn lease_id(kv: &KeyValue) -> Option<i64> {
-        Some(kv.lease())
+    pub fn lease_id(kv: &KeyValue) -> Option<u64> {
+        Some(kv.lease() as u64)
     }
 
     /// Extract the key as a string (without prefix)
