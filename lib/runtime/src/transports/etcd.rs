@@ -30,12 +30,18 @@ use lease::*;
 pub use lock::*;
 pub use path::*;
 
+use super::utils::build_in_runtime;
+
 /// ETCD Client
 #[derive(Clone)]
 pub struct Client {
     connector: Arc<Connector>,
     primary_lease: u64,
     runtime: Runtime,
+    // Exclusive runtime for etcd lease keep-alive and watch tasks
+    // Avoid those tasks from being starved when the main runtime is busy
+    // WARNING: Do not await on main runtime from this runtime or deadlocks may occur
+    rt: Arc<tokio::runtime::Runtime>,
 }
 
 impl std::fmt::Debug for Client {
@@ -58,33 +64,46 @@ impl Client {
     /// If the lease expires, the [`Runtime`] will be shutdown.
     /// If the [`Runtime`] is shutdown, the lease will be revoked.
     pub async fn new(config: ClientOptions, runtime: Runtime) -> Result<Self> {
-        // Create the connector
-        let connector =
-            Connector::new(config.etcd_url.clone(), config.etcd_connect_options.clone())
-                .await
-                .with_context(|| {
-                    format!(
-                        "Unable to connect to etcd server at {}. Check etcd server status",
-                        config.etcd_url.join(", ")
-                    )
-                })?;
+        let token = runtime.primary_token();
 
-        let lease_id = if config.attach_lease {
-            create_lease(connector.clone(), 10, runtime.primary_token())
-                .await
-                .with_context(|| {
-                    format!(
-                        "Unable to create lease. Check etcd server status at {}",
-                        config.etcd_url.join(", ")
-                    )
-                })?
-        } else {
-            0
-        };
+        let ((connector, lease_id), rt) = build_in_runtime(
+            async move {
+                let etcd_urls = config.etcd_url.clone();
+                let connect_options = config.etcd_connect_options.clone();
+
+                // Create the connector
+                let connector = Connector::new(etcd_urls, connect_options)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Unable to connect to etcd server at {}. Check etcd server status",
+                            config.etcd_url.join(", ")
+                        )
+                    })?;
+
+                let lease_id = if config.attach_lease {
+                    create_lease(connector.clone(), 10, token)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "Unable to create lease. Check etcd server status at {}",
+                                config.etcd_url.join(", ")
+                            )
+                        })?
+                } else {
+                    0
+                };
+
+                Ok((connector, lease_id))
+            },
+            1,
+        )
+        .await?;
 
         Ok(Client {
             connector,
             primary_lease: lease_id,
+            rt,
             runtime,
         })
     }
@@ -323,7 +342,7 @@ impl Client {
         // Background watch task
         let connector = self.connector.clone();
         let prefix_str = prefix.as_ref().to_string();
-        tokio::spawn(async move {
+        self.rt.spawn(async move {
             // Send existing KVs if any
             for kv in kvs {
                 if tx.send(WatchEvent::Put(kv)).await.is_err() {
