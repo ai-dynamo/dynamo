@@ -406,9 +406,6 @@ jobs:
 
       - name: Deploy Operator
         run: |
-          set -x
-          export KUBECONFIG=$(pwd)/.kubeconfig
-
           # Create a namespace for this job
           echo "Creating an ephemeral namespace..."
           kubectl delete namespace $NAMESPACE || true
