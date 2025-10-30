@@ -126,7 +126,7 @@ spec:
                       values:
                         - "true"
         mainContainer:
-          image: rohanv672/dynamo:0.5.1-trtllm-ssh
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.0
           args:
           - |
             python3 -m dynamo.frontend --http-port 8000
@@ -164,7 +164,7 @@ spec:
                       values:
                         - "true"
         mainContainer:
-          image: rohanv672/dynamo:0.5.1-trtllm-ssh
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.0
           workingDir: /workspace/components/backends/trtllm
           startupProbe:
             httpGet:
@@ -227,7 +227,7 @@ spec:
                       values:
                         - "true"
         mainContainer:
-          image: rohanv672/dynamo:0.5.1-trtllm-ssh
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.0
           workingDir: /workspace/components/backends/trtllm
           startupProbe:
             httpGet:

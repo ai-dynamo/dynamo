@@ -113,13 +113,13 @@ spec:
         - name: ENDPOINT
           value: trtllm-disagg-multinode-frontend:8000
         - name: CONCURRENCY_PER_GPU
-          value: "900"
+          value: "30"
         - name: DEPLOYMENT_GPU_COUNT
-          value: "32"
+          value: "36"
         - name: ISL
-          value: "128"
+          value: "1024"
         - name: OSL
-          value: "1000"
+          value: "1024"
         - name: DEPLOYMENT_MODE
           value: disagg
         - name: AIPERF_HTTP_CONNECTION_LIMIT
