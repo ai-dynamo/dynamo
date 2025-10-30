@@ -1464,15 +1464,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-kvbm-kernels"
-version = "0.6.0"
-dependencies = [
- "cc",
- "cudarc",
- "once_cell",
-]
-
-[[package]]
 name = "dynamo-llm"
 version = "0.6.1"
 dependencies = [
@@ -1501,7 +1492,6 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-async-openai",
- "dynamo-kvbm-kernels",
  "dynamo-parsers",
  "dynamo-runtime",
  "either",
