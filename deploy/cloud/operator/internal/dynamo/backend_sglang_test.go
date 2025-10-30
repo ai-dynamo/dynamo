@@ -61,6 +61,7 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 		expectedCommand   []string
 		expectedArgs      []string
 		description       string
+		multinodeSpec     *v1alpha1.MultinodeSpec
 	}{
 		{
 			name:              "single node python command no changes",
@@ -71,7 +72,20 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 			initialArgs:       []string{"-m", "dynamo.sglang"},
 			expectedCommand:   []string{"python3"},
 			expectedArgs:      []string{"-m", "dynamo.sglang"},
-			description:       "Single node should not modify python commands",
+			description:       "Single node without multinode spec should not modify python commands",
+			multinodeSpec:     nil,
+		},
+		{
+			name:              "single node with multinode spec adds flags",
+			numberOfNodes:     1,
+			role:              RoleMain,
+			multinodeDeployer: &MockSimpleDeployer{},
+			initialCommand:    []string{"python3"},
+			initialArgs:       []string{"-m", "dynamo.sglang"},
+			expectedCommand:   []string{"python3"},
+			expectedArgs:      []string{"-m", "dynamo.sglang", "--dist-init-addr", "leader.example.com:29500", "--nnodes", "1", "--node-rank", "1"},
+			description:       "Single node with explicit multinode spec should add multinode flags (for disaggregated serving)",
+			multinodeSpec:     &v1alpha1.MultinodeSpec{NodeCount: 1},
 		},
 		{
 			name:              "python command simple deployer - direct append",
@@ -83,6 +97,7 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 			expectedCommand:   []string{"python3"},
 			expectedArgs:      []string{"-m", "dynamo.sglang", "--model", "llama", "--dist-init-addr", "leader.example.com:29500", "--nnodes", "2", "--node-rank", "1"},
 			description:       "Direct python command with simple deployer should append flags",
+			multinodeSpec:     &v1alpha1.MultinodeSpec{NodeCount: 2},
 		},
 		{
 			name:              "python command shell deployer - shell wrapping",
@@ -94,6 +109,7 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 			expectedCommand:   []string{"sh", "-c"},
 			expectedArgs:      []string{"exec python3 -m dynamo.sglang --model llama --dist-init-addr $(LEADER_HOST):29500 --nnodes 2 --node-rank $(WORKER_INDEX)"},
 			description:       "Direct python command with shell deployer should wrap with sh -c exec",
+			multinodeSpec:     &v1alpha1.MultinodeSpec{NodeCount: 2},
 		},
 		{
 			name:              "python command leader role - always simple",
@@ -105,6 +121,7 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 			expectedCommand:   []string{"python"},
 			expectedArgs:      []string{"-m", "dynamo.sglang", "--dist-init-addr", "$(LEADER_HOST):29500", "--nnodes", "3", "--node-rank", "0"},
 			description:       "Leader role should never use shell wrapping",
+			multinodeSpec:     &v1alpha1.MultinodeSpec{NodeCount: 3},
 		},
 		{
 			name:              "python3.11 variant supported",
@@ -116,6 +133,7 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 			expectedCommand:   []string{"python3.11"},
 			expectedArgs:      []string{"-m", "dynamo.sglang", "--dist-init-addr", "leader.example.com:29500", "--nnodes", "2", "--node-rank", "1"},
 			description:       "Python version variants should be recognized",
+			multinodeSpec:     &v1alpha1.MultinodeSpec{NodeCount: 2},
 		},
 		{
 			name:              "absolute path python command supported",
@@ -127,6 +145,7 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 			expectedCommand:   []string{"/usr/bin/python3.8"},
 			expectedArgs:      []string{"-m", "dynamo.sglang", "--model", "llama", "--dist-init-addr", "leader.example.com:29500", "--nnodes", "2", "--node-rank", "1"},
 			description:       "Absolute path Python commands should be recognized",
+			multinodeSpec:     &v1alpha1.MultinodeSpec{NodeCount: 2},
 		},
 		{
 			name:              "pyenv shims python command supported",
@@ -138,6 +157,7 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 			expectedCommand:   []string{"sh", "-c"},
 			expectedArgs:      []string{"exec /home/user/.pyenv/shims/python3.9 -m dynamo.sglang --dist-init-addr $(LEADER_HOST):29500 --nnodes 2 --node-rank $(WORKER_INDEX)"},
 			description:       "Pyenv shims Python paths should be recognized and wrapped with shell",
+			multinodeSpec:     &v1alpha1.MultinodeSpec{NodeCount: 2},
 		},
 		{
 			name:              "python command with module in command array - simple deployer",
@@ -149,6 +169,7 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 			expectedCommand:   []string{"python3", "-m", "dynamo.sglang"},
 			expectedArgs:      []string{"--model-path", "Qwen/Qwen3-0.6B", "--tp-size", "8", "--dist-init-addr", "leader.example.com:29500", "--nnodes", "2", "--node-rank", "1"},
 			description:       "Multi-element python command should have flags appended to args",
+			multinodeSpec:     &v1alpha1.MultinodeSpec{NodeCount: 2},
 		},
 		{
 			name:              "python command with module in command array - shell deployer",
@@ -160,6 +181,7 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 			expectedCommand:   []string{"sh", "-c"},
 			expectedArgs:      []string{"exec python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --dist-init-addr $(LEADER_HOST):29500 --nnodes 2 --node-rank $(WORKER_INDEX)"},
 			description:       "Multi-element python command with shell deployer should wrap entire command",
+			multinodeSpec:     &v1alpha1.MultinodeSpec{NodeCount: 2},
 		},
 		{
 			name:              "python command with no args - shell deployer",
@@ -171,6 +193,7 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 			expectedCommand:   []string{"sh", "-c"},
 			expectedArgs:      []string{"exec python3 -m dynamo.sglang --dist-init-addr $(LEADER_HOST):29500 --nnodes 2 --node-rank $(WORKER_INDEX)"},
 			description:       "Multi-element python command with no args should still work with shell wrapper",
+			multinodeSpec:     &v1alpha1.MultinodeSpec{NodeCount: 2},
 		},
 		{
 			name:              "non-python command multinode unchanged",
@@ -182,6 +205,7 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 			expectedCommand:   []string{"java"},
 			expectedArgs:      []string{"-jar", "app.jar"}, // Args remain separate, no python found, no changes
 			description:       "Non-python commands should remain unchanged (no flattening)",
+			multinodeSpec:     &v1alpha1.MultinodeSpec{NodeCount: 2},
 		},
 	}
 
@@ -192,7 +216,10 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 				Args:    append([]string{}, tt.initialArgs...),
 			}
 
-			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, &v1alpha1.DynamoComponentDeploymentSharedSpec{}, "test-service", tt.multinodeDeployer)
+			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Multinode: tt.multinodeSpec,
+			}
+			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, component, "test-service", tt.multinodeDeployer)
 
 			if !reflect.DeepEqual(container.Command, tt.expectedCommand) {
 				t.Errorf("UpdateContainer() command = %v, want %v", container.Command, tt.expectedCommand)
@@ -217,6 +244,7 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 		initialArgs       []string
 		expectedArgs      []string
 		description       string
+		multinodeSpec     *v1alpha1.MultinodeSpec
 	}{
 		{
 			name:              "single node shell command not modified",
@@ -227,6 +255,7 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 			initialArgs:       []string{"python -m dynamo.sglang"},
 			expectedArgs:      []string{"python -m dynamo.sglang"},
 			description:       "Single node should not modify shell commands",
+			multinodeSpec:     nil,
 		},
 		{
 			name:              "multinode shell command with regex injection",
@@ -237,6 +266,7 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 			initialArgs:       []string{"python -m dynamo.sglang"},
 			expectedArgs:      []string{"python -m dynamo.sglang --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 2 --node-rank 0"},
 			description:       "Shell commands should use regex injection for python commands",
+			multinodeSpec:     &v1alpha1.MultinodeSpec{NodeCount: 2},
 		},
 		{
 			name:              "multinode shell command with complex pipeline",
@@ -247,6 +277,7 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 			initialArgs:       []string{"echo blah | wc -l && python -m dynamo.sglang && ls -al"},
 			expectedArgs:      []string{"echo blah | wc -l && python -m dynamo.sglang --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 2 --node-rank 0 && ls -al"},
 			description:       "Complex shell commands should inject flags only into python part",
+			multinodeSpec:     &v1alpha1.MultinodeSpec{NodeCount: 2},
 		},
 		{
 			name:              "shell command worker with grove env vars",
@@ -257,6 +288,7 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 			initialArgs:       []string{"python -m dynamo.sglang"},
 			expectedArgs:      []string{"python -m dynamo.sglang --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 3 --node-rank $((GROVE_PCLQ_POD_INDEX + 1))"},
 			description:       "Shell command worker should get grove env vars in node rank",
+			multinodeSpec:     &v1alpha1.MultinodeSpec{NodeCount: 3},
 		},
 		{
 			name:              "shell command with LWS deployer",
@@ -267,6 +299,7 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 			initialArgs:       []string{"python -m dynamo.sglang"},
 			expectedArgs:      []string{"python -m dynamo.sglang --dist-init-addr $(LWS_LEADER_ADDRESS):29500 --nnodes 2 --node-rank 0"},
 			description:       "LWS shell commands should use LWS variables",
+			multinodeSpec:     &v1alpha1.MultinodeSpec{NodeCount: 2},
 		},
 		{
 			name:              "shell command with pipes",
@@ -277,6 +310,7 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 			initialArgs:       []string{"python -m dynamo.sglang | tee /tmp/log"},
 			expectedArgs:      []string{"python -m dynamo.sglang --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 2 --node-rank 0 | tee /tmp/log"},
 			description:       "Shell commands with pipes should inject flags before pipe",
+			multinodeSpec:     &v1alpha1.MultinodeSpec{NodeCount: 2},
 		},
 		{
 			name:              "shell command multiple args individual processing",
@@ -287,6 +321,7 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 			initialArgs:       []string{"echo start", "python -m dynamo.sglang", "echo done"},
 			expectedArgs:      []string{"echo start", "python -m dynamo.sglang --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 2 --node-rank 0", "echo done"},
 			description:       "Shell commands with multiple args should process each individually, modify only the python arg",
+			multinodeSpec:     &v1alpha1.MultinodeSpec{NodeCount: 2},
 		},
 		{
 			name:              "shell command no sglang modules unchanged",
@@ -297,6 +332,7 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 			initialArgs:       []string{"echo hello", "python -m some.other.module"},
 			expectedArgs:      []string{"echo hello", "python -m some.other.module"},
 			description:       "Shell commands without sglang modules should remain unchanged (args stay separate)",
+			multinodeSpec:     &v1alpha1.MultinodeSpec{NodeCount: 2},
 		},
 		{
 			name:              "shell command stops after first python injection",
@@ -307,6 +343,7 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 			initialArgs:       []string{"python -m dynamo.sglang", "python -m dynamo.sglang --other-flags"},
 			expectedArgs:      []string{"python -m dynamo.sglang --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 2 --node-rank 0", "python -m dynamo.sglang --other-flags"},
 			description:       "Should stop processing after first successful python flag injection",
+			multinodeSpec:     &v1alpha1.MultinodeSpec{NodeCount: 2},
 		},
 	}
 
@@ -317,7 +354,10 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 				Args:    append([]string{}, tt.initialArgs...),
 			}
 
-			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, &v1alpha1.DynamoComponentDeploymentSharedSpec{}, "test-service", tt.multinodeDeployer)
+			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Multinode: tt.multinodeSpec,
+			}
+			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, component, "test-service", tt.multinodeDeployer)
 
 			if !reflect.DeepEqual(container.Args, tt.expectedArgs) {
 				t.Errorf("UpdateContainer() args = %v, want %v", container.Args, tt.expectedArgs)
@@ -447,6 +487,7 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 		role                Role
 		multinodeDeployer   MultinodeDeployer
 		expectProbesRemoved bool
+		multinodeSpec       *v1alpha1.MultinodeSpec
 	}{
 		{
 			name:                "single node does not remove probes",
@@ -454,6 +495,7 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 			role:                RoleMain,
 			multinodeDeployer:   &GroveMultinodeDeployer{},
 			expectProbesRemoved: false,
+			multinodeSpec:       nil,
 		},
 		{
 			name:                "multinode leader does not remove probes",
@@ -461,6 +503,7 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 			role:                RoleLeader,
 			multinodeDeployer:   &GroveMultinodeDeployer{},
 			expectProbesRemoved: false,
+			multinodeSpec:       &v1alpha1.MultinodeSpec{NodeCount: 2},
 		},
 		{
 			name:                "multinode worker removes probes",
@@ -468,6 +511,7 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 			role:                RoleWorker,
 			multinodeDeployer:   &GroveMultinodeDeployer{},
 			expectProbesRemoved: true,
+			multinodeSpec:       &v1alpha1.MultinodeSpec{NodeCount: 2},
 		},
 		{
 			name:                "multinode main role does not remove probes",
@@ -475,6 +519,7 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 			role:                RoleMain,
 			multinodeDeployer:   &GroveMultinodeDeployer{},
 			expectProbesRemoved: false,
+			multinodeSpec:       &v1alpha1.MultinodeSpec{NodeCount: 2},
 		},
 	}
 
@@ -491,7 +536,10 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 				StartupProbe:   startupProbe,
 			}
 
-			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, &v1alpha1.DynamoComponentDeploymentSharedSpec{}, "test-service", tt.multinodeDeployer)
+			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Multinode: tt.multinodeSpec,
+			}
+			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, component, "test-service", tt.multinodeDeployer)
 
 			if tt.expectProbesRemoved {
 				if container.LivenessProbe != nil {
