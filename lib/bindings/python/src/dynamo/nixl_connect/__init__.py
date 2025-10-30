@@ -1482,7 +1482,7 @@ class Remote:
         if isinstance(nixl_metadata, str):
             if nixl_metadata.startswith("b64:"):
                 # Decode the b64-encoded string into bytes.
-                nixl_metadata = base64.b64decode(nixl_metadata.lstrip("b64:"))
+                nixl_metadata = base64.b64decode(nixl_metadata[4:])
             else:
                 # fallback for earlier versions of nixl connect
                 nixl_metadata = bytes.fromhex(nixl_metadata)

@@ -17,7 +17,7 @@ use super::{KeyValueBucket, KeyValueStore, StoreError, StoreOutcome};
 
 #[derive(Clone, Debug)]
 enum MemoryEvent {
-    Put { key: String, value: String },
+    Put { key: String, value: bytes::Bytes },
     Delete { key: String },
 }
 
@@ -45,7 +45,7 @@ pub struct MemoryBucketRef {
 }
 
 struct MemoryBucket {
-    data: HashMap<String, (u64, String)>,
+    data: HashMap<String, (u64, bytes::Bytes)>,
 }
 
 impl MemoryBucket {
@@ -114,7 +114,7 @@ impl KeyValueBucket for MemoryBucketRef {
     async fn insert(
         &self,
         key: &Key,
-        value: &str,
+        value: bytes::Bytes,
         revision: u64,
     ) -> Result<StoreOutcome, StoreError> {
         let mut locked_data = self.inner.data.lock();
@@ -124,10 +124,10 @@ impl KeyValueBucket for MemoryBucketRef {
         };
         let outcome = match bucket.data.entry(key.to_string()) {
             Entry::Vacant(e) => {
-                e.insert((revision, value.to_string()));
+                e.insert((revision, value.clone()));
                 let _ = self.inner.change_sender.send(MemoryEvent::Put {
                     key: key.to_string(),
-                    value: value.to_string(),
+                    value,
                 });
                 StoreOutcome::Created(revision)
             }
@@ -136,7 +136,7 @@ impl KeyValueBucket for MemoryBucketRef {
                 if *rev == revision {
                     StoreOutcome::Exists(revision)
                 } else {
-                    entry.insert((revision, value.to_string()));
+                    entry.insert((revision, value));
                     StoreOutcome::Created(revision)
                 }
             }
@@ -149,10 +149,7 @@ impl KeyValueBucket for MemoryBucketRef {
         let Some(bucket) = locked_data.get(&self.name) else {
             return Ok(None);
         };
-        Ok(bucket
-            .data
-            .get(&key.0)
-            .map(|(_, v)| bytes::Bytes::from(v.clone())))
+        Ok(bucket.data.get(&key.0).map(|(_, v)| v.clone()))
     }
 
     async fn delete(&self, key: &Key) -> Result<(), StoreError> {
@@ -183,7 +180,7 @@ impl KeyValueBucket for MemoryBucketRef {
         };
         for (key, (_rev, v)) in &bucket.data {
             seen_keys.insert(key.clone());
-            let item = KeyValue::new(key.clone(), bytes::Bytes::from(v.clone().into_bytes()));
+            let item = KeyValue::new(key.clone(), v.clone());
             existing_items.push(WatchEvent::Put(item));
         }
         drop(data_lock);
@@ -204,7 +201,7 @@ impl KeyValueBucket for MemoryBucketRef {
                         if seen_keys.contains(&key) {
                             continue;
                         }
-                        let item = KeyValue::new(key, bytes::Bytes::from(value));
+                        let item = KeyValue::new(key, value);
                         yield WatchEvent::Put(item);
                     },
                     Some(MemoryEvent::Delete { key }) => {
@@ -222,7 +219,7 @@ impl KeyValueBucket for MemoryBucketRef {
             Some(bucket) => Ok(bucket
                 .data
                 .iter()
-                .map(|(k, (_rev, v))| (k.to_string(), bytes::Bytes::from(v.clone())))
+                .map(|(k, (_rev, v))| (k.to_string(), v.clone()))
                 .collect()),
             None => Err(StoreError::MissingBucket(self.name.clone())),
         }
