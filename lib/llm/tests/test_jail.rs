@@ -1794,7 +1794,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_deepseek_v3_1() {
-        // Harmony format with analysis text and a tool call encoded in special tags
+        // DeepSeek v3.1 format with two tool calls encoded in special tags
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Berlin", "units": "metric"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_weather_forecast<｜tool▁sep｜>{"location": "Berlin", "days": 7, "units": "imperial"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_air_quality<｜tool▁sep｜>{"location": "Berlin", "radius": 50}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
 
         let chunks = vec![create_mock_response_chunk(text.to_string(), 0)];
@@ -1837,7 +1837,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_deepseek_v3_1_chunk() {
-        // Harmony format with analysis text and a tool call encoded in special tags
+        // DeepSeek v3.1 format with two tool calls encoded in special tags
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Berlin", "units": "metric"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_weather_forecast<｜tool▁sep｜>{"location": "Berlin", "days": 7, "units": "imperial"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_air_quality<｜tool▁sep｜>{"location": "Berlin", "radius": 50}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
 
         // Split text into words, treating angle-bracketed tokens as one word
