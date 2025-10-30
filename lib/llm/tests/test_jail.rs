@@ -1825,7 +1825,9 @@ mod tests {
             json!({"location": "Berlin", "units": "metric"}),
         );
         for result in results {
-            let Some(data) = result.data else { continue;  };
+            let Some(data) = result.data else {
+                continue;
+            };
             for choice in data.choices {
                 if let Some(content) = choice.delta.content {
                     assert!(
@@ -1848,25 +1850,25 @@ mod tests {
         let chars: Vec<char> = text.chars().collect();
         while i < chars.len() {
             if chars[i] == '<' {
-            // Find the next '>'
-            if let Some(end) = chars[i..].iter().position(|&c| c == '>') {
-                let word: String = chars[i..=i+end].iter().collect();
-                words.push(word);
-                i += end + 1;
-            } else {
-                // Malformed, just push the rest
-                words.push(chars[i..].iter().collect());
-                break;
-            }
+                // Find the next '>'
+                if let Some(end) = chars[i..].iter().position(|&c| c == '>') {
+                    let word: String = chars[i..=i + end].iter().collect();
+                    words.push(word);
+                    i += end + 1;
+                } else {
+                    // Malformed, just push the rest
+                    words.push(chars[i..].iter().collect());
+                    break;
+                }
             } else if chars[i].is_whitespace() {
-            i += 1;
-            } else {
-            // Collect until next whitespace or '<'
-            let start = i;
-            while i < chars.len() && !chars[i].is_whitespace() && chars[i] != '<' {
                 i += 1;
-            }
-            words.push(chars[start..i].iter().collect());
+            } else {
+                // Collect until next whitespace or '<'
+                let start = i;
+                while i < chars.len() && !chars[i].is_whitespace() && chars[i] != '<' {
+                    i += 1;
+                }
+                words.push(chars[start..i].iter().collect());
             }
         }
 
@@ -1901,7 +1903,9 @@ mod tests {
             json!({"location": "Berlin", "units": "metric"}),
         );
         for result in results {
-            let Some(data) = result.data else { continue;  };
+            let Some(data) = result.data else {
+                continue;
+            };
             for choice in data.choices {
                 if let Some(content) = choice.delta.content {
                     assert!(
