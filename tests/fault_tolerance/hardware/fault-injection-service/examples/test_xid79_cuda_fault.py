@@ -694,7 +694,7 @@ def restart_gpu_driver_on_node(node_name: str, wait_timeout: int = 300) -> bool:
 
                             print("[✓] GPU driver restarted successfully")
                             return True
-            except:
+            except Exception:
                 # Pod might not exist yet during deletion
                 pass
 
@@ -1219,9 +1219,7 @@ def test_xid79_with_cuda_fault_injection(cleanup_on_exit):
             print("[⚠] Cleanup reported failure, but continuing test...")
 
         print("[✓] Test artifact removed from deployment spec")
-        print(
-            "[✓] All pods deleted - will recreate with clean spec (no node affinity)"
-        )
+        print("[✓] All pods deleted - will recreate with clean spec (no node affinity)")
 
         # NOTE: The cleanup step above already deleted all pods (including Pending ones)
         # This is necessary because the test adds node affinity as an artifact
@@ -1560,12 +1558,12 @@ def test_xid79_with_cuda_fault_injection(cleanup_on_exit):
         # Cleanup on failure
         try:
             load_tester.stop()
-        except:
+        except Exception:
             pass
 
         try:
             cuda_injector.cleanup(TARGET_DEPLOYMENT, NAMESPACE)
-        except:
+        except Exception:
             pass
 
         if target_node:
@@ -1582,13 +1580,13 @@ def test_xid79_with_cuda_fault_injection(cleanup_on_exit):
                         },
                     },
                 )
-            except:
+            except Exception:
                 pass
 
         if fault_id:
             try:
                 requests.delete(f"{API_BASE_URL}/api/v1/faults/{fault_id}", timeout=10)
-            except:
+            except Exception:
                 pass
 
         raise

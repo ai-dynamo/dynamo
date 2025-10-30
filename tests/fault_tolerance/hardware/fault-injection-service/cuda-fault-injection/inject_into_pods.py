@@ -103,9 +103,7 @@ def create_cuda_fault_configmap(namespace, lib_path=None):
         # Create new
         core_api.create_namespaced_config_map(namespace, configmap)
         print("[✓] ConfigMap created: cuda-fault-injection-lib")
-        print(
-            "    → Source code will be compiled in init container (Linux-compatible)"
-        )
+        print("    → Source code will be compiled in init container (Linux-compatible)")
         return True
 
     except Exception as e:
@@ -123,7 +121,7 @@ def delete_cuda_fault_configmap(namespace):
         core_api.delete_namespaced_config_map("cuda-fault-injection-lib", namespace)
         print("[✓] ConfigMap deleted: cuda-fault-injection-lib")
         return True
-    except:
+    except Exception:
         return False
 
 
@@ -784,7 +782,7 @@ Examples:
     # Load kubeconfig
     try:
         config.load_kube_config()
-    except:
+    except Exception:
         print("❌ Failed to load kubeconfig")
         sys.exit(1)
 

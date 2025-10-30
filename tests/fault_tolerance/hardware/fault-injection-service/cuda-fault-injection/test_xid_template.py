@@ -17,7 +17,7 @@ from kubernetes import client, config
 cuda_injection_dir = Path(__file__).parent
 sys.path.insert(0, str(cuda_injection_dir))
 
-from inject_into_pods import (
+from inject_into_pods import (  # noqa: E402
     create_cuda_fault_configmap,
     delete_cuda_fault_configmap,
     patch_deployment_env,

@@ -180,7 +180,7 @@ class NodeOperations:
 
                                 print("[✓] GPU driver restarted successfully")
                                 return True
-                except:
+                except Exception:
                     pass
 
                 time.sleep(5)

@@ -26,7 +26,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "helpers"))
 
 from cuda_fault_injection import CUDAFaultInjector
 from inference_testing import InferenceLoadTester
-from k8s_operations import PodOperations
 from nvsentinel_workflow import NVSentinelWorkflowSimulator
 
 # Configuration
@@ -124,7 +123,6 @@ def test_xid79_with_cuda_fault_injection(cleanup_on_exit):
     cuda_injector = CUDAFaultInjector()
     load_tester = InferenceLoadTester(INFERENCE_ENDPOINT, MODEL_NAME)
     workflow = NVSentinelWorkflowSimulator(k8s_core, NAMESPACE, TARGET_DEPLOYMENT)
-    pod_ops = PodOperations(k8s_core)
 
     # Register for cleanup
     cleanup_on_exit["cuda_injector"] = cuda_injector
