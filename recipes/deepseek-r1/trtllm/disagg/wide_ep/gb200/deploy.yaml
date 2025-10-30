@@ -75,6 +75,9 @@ data:
     stream_interval: 20
 ---
 
+# NOTE: The numNodes value should equal the total number of nodes across prefill and decode 
+#       as specified in their respective sections below (prefill.multinode.nodeCount + decode.multinode.nodeCount).
+#       For autoscaling deployments, the compute domain will automatically adjust as needed.
 apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain
 metadata:
@@ -126,6 +129,8 @@ spec:
       dynamoNamespace: trtllm-disagg-multinode
       componentType: worker
       replicas: 1
+      # NOTE: Prefill uses 1 node (no multinode section = single node)
+      #       and contributes to ComputeDomain.numNodes (see above)
       pvc:
         create: false
         mountPoint: /model-cache
@@ -148,6 +153,8 @@ spec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.0
           workingDir: /workspace/components/backends/trtllm
+          # NOTE: If your PVCs (Persistent Volume Claims) are really slow,
+          #       you might need to increase 'failureThreshold' below to allow more time for startup
           startupProbe:
             httpGet:
               path: /live
@@ -185,6 +192,7 @@ spec:
         mountPoint: /model-cache
         name: model-cache-pvc
       multinode:
+        # NOTE: This nodeCount contributes to ComputeDomain.numNodes (see above)
         nodeCount: 8
       sharedMemory:
         size: 800Gi
@@ -204,6 +212,8 @@ spec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.0
           workingDir: /workspace/components/backends/trtllm
+          # NOTE: If your PVCs (Persistent Volume Claims) are really slow,
+          #       you might need to increase 'failureThreshold' below to allow more time for startup
           startupProbe:
             httpGet:
               path: /live
