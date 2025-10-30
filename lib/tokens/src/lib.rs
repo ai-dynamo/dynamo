@@ -343,24 +343,6 @@ impl PartialTokenBlock {
         }
     }
 
-    /// Attempts to push a single token onto the block.
-    ///
-    /// # Arguments
-    ///
-    /// * `token` - The [`Token`] to push.
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(())` - If the token was successfully added.
-    /// * `Err(TokenBlockError::Full)` - If the block already contains `block_size` tokens.
-    pub(crate) fn push_token(&mut self, token: Token) -> Result<(), TokenBlockError> {
-        if self.tokens.0.len() >= self.block_size as usize {
-            return Err(TokenBlockError::Full);
-        }
-        self.tokens.0.push(token);
-        Ok(())
-    }
-
     /// Attempts to push multiple tokens onto the block from a [`Tokens`] object.
     ///
     /// Tokens are added until the block is full or all input tokens are consumed.
@@ -390,20 +372,6 @@ impl PartialTokenBlock {
             self.tokens.0.extend_from_slice(to_add);
             Tokens(remaining.to_vec()) // Return the leftover tokens
         }
-    }
-
-    /// Attempts to remove the last token from the block.
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(())` - If a token was successfully removed.
-    /// * `Err(TokenBlockError::Empty)` - If the block was already empty.
-    pub(crate) fn pop_token(&mut self) -> Result<(), TokenBlockError> {
-        if self.tokens.0.is_empty() {
-            return Err(TokenBlockError::Empty);
-        }
-        self.tokens.0.pop();
-        Ok(())
     }
 
     /// Attempts to remove the last `count` tokens from the block.
