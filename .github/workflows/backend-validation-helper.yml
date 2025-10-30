@@ -9,6 +9,9 @@ on:
   pull_request_target:
     types: [opened, synchronize, reopened]
   push:
+  workflow_run:
+    workflows: ["Docker Build and Test"]
+    types: [requested, in_progress]
 
 jobs:
   check-build-status:
@@ -23,7 +26,26 @@ jobs:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const sha = context.payload.pull_request ? context.payload.pull_request.head.sha : context.sha;
+
+            // Handle different event types
+            let sha;
+            if (context.eventName === 'workflow_run') {
+              sha = context.payload.workflow_run.head_sha;
+              console.log(`Triggered by workflow_run for commit: ${sha}`);
+
+              // Builds are starting/running, update to pending
+              await github.rest.repos.createCommitStatus({
+                owner,
+                repo,
+                sha,
+                state: 'pending',
+                context: 'backend-status-check',
+                description: 'Docker Build and Test jobs are running...'
+              });
+              return;
+            } else {
+              sha = context.payload.pull_request ? context.payload.pull_request.head.sha : context.sha;
+            }
 
             console.log(`Checking workflows for commit: ${sha}`);
 
