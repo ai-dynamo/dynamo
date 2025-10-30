@@ -14,6 +14,7 @@ spec:
         app: model-download
     spec:
       restartPolicy: Never
+      tolerations: []
       containers:
         - name: model-download
           image: python:3.10-slim
