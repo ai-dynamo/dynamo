@@ -13,7 +13,7 @@ readme.workspace = true
 description = "Dynamo LLM Library"
 
 [features]
-default = []
+default = ["block-manager"]
 # todo(ops): get this working in CI as a default.
 # default = ["block-manager", "testing-full"]
 

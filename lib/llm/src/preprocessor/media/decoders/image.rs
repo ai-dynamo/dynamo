@@ -6,7 +6,7 @@ use image::GenericImageView;
 use ndarray::Array3;
 
 use super::super::common::EncodedMediaData;
-use super::super::decoders::DecodedMediaData;
+use super::super::rdma::DecodedMediaData;
 use super::Decoder;
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -38,7 +38,7 @@ impl Decoder for ImageDecoder {
         };
         let shape = (height as usize, width as usize, n_channels as usize);
         let array = Array3::from_shape_vec(shape, data)?;
-        Ok(array.into())
+        Ok(array.try_into()?)
     }
 }
 
