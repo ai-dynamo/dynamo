@@ -42,7 +42,22 @@ jobs:
             console.log(`Checking build jobs for commit: ${sha}`);
 
             const backendJobNames = ['vllm', 'sglang', 'trtllm', 'operator'];
+            const isCommentTrigger = context.eventName === 'issue_comment';
             let errorMessagePosted = false;
+
+            // If triggered by /ok to test comment, immediately post pending
+            if (isCommentTrigger) {
+              console.log('Triggered by /ok to test comment, posting pending status immediately');
+
+              await github.rest.repos.createCommitStatus({
+                owner,
+                repo,
+                sha,
+                state: 'pending',
+                context: 'backend-status-check',
+                description: 'Waiting for Docker Build and Test jobs to start...'
+              });
+            }
 
             // Poll for 5 minutes (30 attempts * 10 seconds)
             for (let attempt = 0; attempt < 30; attempt++) {
@@ -96,8 +111,8 @@ jobs:
                 }
               }
 
-              // After 1 minute (6 attempts), post error message but keep checking
-              if (attempt === 5 && !errorMessagePosted) {
+              // For initial PR (not comment), post error after 1 minute but keep checking
+              if (!isCommentTrigger && attempt === 5 && !errorMessagePosted) {
                 console.log(`No jobs detected after 1 minute, posting error message`);
                 errorMessagePosted = true;
 
@@ -112,7 +127,7 @@ jobs:
               }
             }
 
-            // If we didn't post error message yet, post it now
+            // After 5 minutes, no builds started
             if (!errorMessagePosted) {
               console.log(`No backend jobs detected after 5 minutes`);
 
