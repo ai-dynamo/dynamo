@@ -63,6 +63,8 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         scheduler_stats: SchedulerStats,
         iteration_stats: Optional[IterationStats],
         engine_idx: int = 0,
+        *args,
+        **kwargs,
     ):
         # request_total_slots and kv_total_blocks are properties of model + gpu
         # we should only publish them once, not every metric update
