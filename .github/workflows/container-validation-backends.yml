@@ -429,7 +429,7 @@ jobs:
         export KUBECONFIG=$(pwd)/.kubeconfig
         kubectl config set-context --current --namespace=$NAMESPACE
 
-        cd components/backends/$FRAMEWORK
+        cd examples/backends/$FRAMEWORK
         export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
         export KUBE_NS=$NAMESPACE
         export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)

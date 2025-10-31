@@ -128,13 +128,13 @@ This figure shows an overview of the major components to deploy:
 
 ### Aggregated
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 ./launch/agg.sh
 ```
 
 ### Aggregated with KV Routing
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 ./launch/agg_router.sh
 ```
 
@@ -144,7 +144,7 @@ cd $DYNAMO_HOME/components/backends/trtllm
 > Disaggregated serving supports two strategies for request flow: `"prefill_first"` and `"decode_first"`. By default, the script below uses the `"decode_first"` strategy, which can reduce response latency by minimizing extra hops in the return path. You can switch strategies by setting the `DISAGGREGATION_STRATEGY` environment variable.
 
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 ./launch/disagg.sh
 ```
 
@@ -154,13 +154,13 @@ cd $DYNAMO_HOME/components/backends/trtllm
 > Disaggregated serving with KV routing uses a "prefill first" workflow by default. Currently, Dynamo supports KV routing to only one endpoint per model. In disaggregated workflow, it is generally more effective to route requests to the prefill worker. If you wish to use a "decode first" workflow instead, you can simply set the `DISAGGREGATION_STRATEGY` environment variable accordingly.
 
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 ./launch/disagg_router.sh
 ```
 
 ### Aggregated with Multi-Token Prediction (MTP) and DeepSeek R1
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 
 export AGG_ENGINE_ARGS=./recipes/deepseek-r1/trtllm/mtp/mtp_agg.yaml
 export SERVED_MODEL_NAME="nvidia/DeepSeek-R1-FP4"
@@ -186,7 +186,7 @@ For comprehensive instructions on multinode serving, see the [multinode-examples
 
 ### Kubernetes Deployment
 
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](../../../components/backends/trtllm/deploy/README.md).
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](../../../examples/backends/trtllm/deploy/README.md).
 
 ### Client
 
@@ -270,7 +270,7 @@ Logits processors let you modify the next-token logits at every decoding step (e
 You can enable a test-only processor that forces the model to respond with "Hello world!". This is useful to verify the wiring without modifying your model or engine code.
 
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 export DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1
 ./launch/agg.sh
 ```
@@ -316,7 +316,7 @@ sampling_params.logits_processor = create_trtllm_adapters(processors)
 
 ## Performance Sweep
 
-For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](../../../components/backends/trtllm/performance_sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
+For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](../../../examples/backends/trtllm/performance_sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
 
 ## Dynamo KV Block Manager Integration
 
