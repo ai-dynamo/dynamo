@@ -491,6 +491,32 @@ if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
     BUILD_ARGS+=" --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64 "
 fi
 
+# Special handling for vLLM on ARM64 - set required defaults if not already specified by user
+if [[ $FRAMEWORK == "VLLM" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]]; then
+    # Set base image tag to CUDA 12.9 if using the default value (user didn't override)
+    if [ "$BASE_IMAGE_TAG" == "$VLLM_BASE_IMAGE_TAG" ]; then
+        BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
+        echo "INFO: Automatically setting base-image-tag to $BASE_IMAGE_TAG for vLLM ARM64"
+    fi
+
+    # Add required build args if not already present
+    if [[ "$BUILD_ARGS" != *"RUNTIME_IMAGE_TAG"* ]]; then
+        BUILD_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=12.9.0-runtime-ubuntu24.04 "
+        echo "INFO: Automatically setting RUNTIME_IMAGE_TAG=12.9.0-runtime-ubuntu24.04 for vLLM ARM64"
+    fi
+
+    if [[ "$BUILD_ARGS" != *"CUDA_VERSION"* ]]; then
+        BUILD_ARGS+=" --build-arg CUDA_VERSION=129 "
+        echo "INFO: Automatically setting CUDA_VERSION=129 for vLLM ARM64"
+    fi
+
+    if [[ "$BUILD_ARGS" != *"TORCH_BACKEND"* ]]; then
+        BUILD_ARGS+=" --build-arg TORCH_BACKEND=cu129 "
+        echo "INFO: Automatically setting TORCH_BACKEND=cu129 for vLLM ARM64"
+    fi
+
+fi
+
 # Update DOCKERFILE if framework is VLLM
 if [[ $FRAMEWORK == "VLLM" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
