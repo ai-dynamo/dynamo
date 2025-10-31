@@ -39,6 +39,7 @@ ARG SCCACHE_REGION=""
 # NIXL configuration
 ARG NIXL_UCX_REF=v1.19.0
 ARG NIXL_REF=0.7.0
+ARG NIXL_GDRCOPY_REF=v2.5.1
 
 # Python configuration
 ARG PYTHON_VERSION=3.12
@@ -58,6 +59,7 @@ ARG SCCACHE_BUCKET
 ARG SCCACHE_REGION
 ARG NIXL_UCX_REF
 ARG NIXL_REF
+ARG NIXL_GDRCOPY_REF
 
 USER root
 WORKDIR /opt/dynamo
@@ -104,46 +106,6 @@ RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.
     chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
 ##################################
-########## System Dependencies ###
-##################################
-
-# Install system packages
-RUN apt-get update -y \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        # NIXL build dependencies
-        autoconf \
-        automake \
-        cmake \
-        git \
-        git-lfs \
-        libtool \
-        meson \
-        net-tools \
-        ninja-build \
-        pybind11-dev \
-        # Rust build dependencies
-        clang \
-        libclang-dev \
-        protobuf-compiler \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# These headers are missing with the hpcx installer, required
-# by UCX to build and use RDMA devices. Reinstall to make sure to recreate
-# symlink .so to .so.1 in case some packages are already found.
-RUN apt-get update -y \
-    && DEBIAN_FRONTEND=noninteractive apt-get -y install --reinstall --no-install-recommends \
-        libibverbs-dev \
-        rdma-core \
-        ibverbs-utils \
-        libibumad-dev \
-        libnuma-dev \
-        librdmacm-dev \
-        ibverbs-providers \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-##################################
 ########## External Services #####
 ##################################
 
@@ -161,110 +123,6 @@ RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/downlo
     rm /tmp/etcd.tar.gz
 ENV PATH=/usr/local/bin/etcd/:$PATH
 
-##################################
-########## UCX Build #############
-##################################
-
-# Build and install UCX
-RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
-    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
-    rm -rf /opt/hpcx/ucx && \
-    rm -rf /usr/local/ucx && \
-    echo "Building UCX with reference $NIXL_UCX_REF" && \
-    cd /usr/local/src && \
-    git clone https://github.com/openucx/ucx.git && \
-    cd ucx && git checkout $NIXL_UCX_REF && \
-    CC=${USE_SCCACHE:+sccache gcc} && \
-    CXX=${USE_SCCACHE:+sccache g++} && \
-    export CC=${CC} && \
-    export CXX=${CXX} && \
-    ./autogen.sh && \
-    ./configure \
-      --prefix=/usr/local/ucx \
-      --enable-shared \
-      --disable-static \
-      --disable-doxygen-doc \
-      --enable-optimizations \
-      --enable-cma \
-      --enable-devel-headers \
-      --with-cuda=/usr/local/cuda \
-      --with-verbs \
-      --with-efa \
-      --with-dm \
-      --with-gdrcopy=/usr/local \
-      --enable-mt && \
-    make -j$(nproc) &&                              \
-    make -j$(nproc) install-strip &&                \
-    /tmp/use-sccache.sh show-stats "UCX" && \
-    echo "/usr/local/ucx/lib" > /etc/ld.so.conf.d/ucx.conf && \
-    echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
-    ldconfig && \
-    cd /usr/local/src && \
-    rm -rf ucx
-
-# UCX environment variables
-ENV CPATH=/usr/include \
-    PATH=/usr/bin:/usr/local/ucx/bin:$PATH \
-    PKG_CONFIG_PATH=/usr/lib/pkgconfig
-
-##################################
-########## NIXL Setup ############
-##################################
-
-# NIXL environment setup
-ENV NIXL_SRC_DIR=/opt/nixl \
-    NIXL_PREFIX=/opt/nvidia/nvda_nixl \
-    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
-    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins
-
-# Build and install NIXL
-RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
-    git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
-    cd ${NIXL_SRC_DIR} && \
-    if [ "$ARCH" = "arm64" ]; then \
-        nixl_build_args="-Ddisable_gds_backend=true"; \
-    else \
-        nixl_build_args=""; \
-    fi && \
-    meson setup build/ --buildtype=release --prefix=$NIXL_PREFIX $nixl_build_args && \
-    ninja -C build/ -j$(nproc) && ninja -C build/ install && \
-    /tmp/use-sccache.sh show-stats "NIXL" && \
-    echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
-    echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf && \
-    ldconfig
-
-# Build NIXL Python module
-# TODO OPS-590: Move gds_path selection based on arch into NIXL build and re-enable gds backend for arm64
-RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
-    if [ "$ARCH" = "arm64" ]; then \
-        cd ${NIXL_SRC_DIR} && uv build . --out-dir /opt/dynamo/wheelhouse/nixl --python $PYTHON_VERSION \
-        --config-settings=setup-args="-Ddisable_gds_backend=true"; \
-    else \
-        cd ${NIXL_SRC_DIR} && uv build . --out-dir /opt/dynamo/wheelhouse/nixl --python $PYTHON_VERSION; \
-    fi
-
-##################################
-########## Python Environment ####
-##################################
-
-# Create and activate virtual environment
-ARG PYTHON_VERSION
-RUN mkdir -p /opt/dynamo/venv && \
-    uv venv /opt/dynamo/venv --python $PYTHON_VERSION
-
-ENV VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH="/opt/dynamo/venv/bin:${PATH}"
-
-# Install common and test dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    UV_GIT_LFS=1 uv pip install \
-        --no-cache \
-        --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt
 
 ##################################
 ##### Wheel Build Image ##########
@@ -279,27 +137,42 @@ FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
 ARG ARCH
 ARG ARCH_ALT
 ARG CARGO_BUILD_JOBS
+ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET
 ARG SCCACHE_REGION
+ARG NIXL_UCX_REF
+ARG NIXL_REF
+ARG NIXL_GDRCOPY_REF
 
-WORKDIR /opt/dynamo
-
-# Set environment variables
-ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
-    RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    CARGO_TARGET_DIR=/opt/dynamo/target \
-    VIRTUAL_ENV=/opt/dynamo/venv \
-    NIXL_PREFIX=/opt/nvidia/nvda_nixl \
-    PATH=/usr/local/cargo/bin:/opt/dynamo/venv/bin:$PATH
+WORKDIR /workspace
 
 # Install system dependencies
-RUN dnf update -y \
-    && dnf install -y llvm-toolset protobuf-compiler wget unzip \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
+RUN yum groupinstall -y 'Development Tools' &&  \
+    dnf install -y almalinux-release-synergy && \
+    dnf config-manager --set-enabled powertools && \
+    dnf install -y \
+        # Build tools
+        cmake \
+        ninja-build \
+        clang-devel \
+        gcc-c++ \
+        flex \
+        wget \
+        # Kernel module build dependencies
+        dkms \
+        # Protobuf support
+        protobuf-compiler \
+        # RDMA/InfiniBand support (required for UCX build with --with-verbs)
+        libibverbs \
+        libibverbs-devel \
+        rdma-core \
+        rdma-core-devel \
+        libibumad \
+        libibumad-devel \
+        librdmacm-devel \
+        numactl-devel
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
 RUN set -eux; \
@@ -319,18 +192,16 @@ RUN set -eux; \
 # Point build tools explicitly at the modern protoc
 ENV PROTOC=/usr/local/bin/protoc
 
+# Set environment variables first so they can be used in COPY commands
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    CARGO_TARGET_DIR=/opt/dynamo/target \
+    PATH=/usr/local/cargo/bin:$PATH
+
 # Copy artifacts from base stage
 COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=base $CARGO_HOME $CARGO_HOME
-COPY --from=base $NIXL_PREFIX $NIXL_PREFIX
-
-ARG PYTHON_VERSION
-RUN mkdir -p /opt/dynamo/venv && \
-    uv venv /opt/dynamo/venv --python $PYTHON_VERSION
-
-ENV VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH="/opt/dynamo/venv/bin:${PATH}"
-
 
 # Install SCCACHE if requested
 COPY container/use-sccache.sh /tmp/use-sccache.sh
@@ -343,21 +214,110 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
     RUSTC_WRAPPER=${USE_SCCACHE:+sccache}
 
+# Copy CUDA from base stage
+COPY --from=base /usr/local/cuda /usr/local/cuda
+COPY --from=base /etc/ld.so.conf.d/hpcx.conf /etc/ld.so.conf.d/hpcx.conf
+
+ENV CUDA_PATH=/usr/local/cuda \
+    PATH=/usr/local/cuda/bin:$PATH \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH \
+    NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
+
+# Create virtual environment for building wheels
+ENV VIRTUAL_ENV=/workspace/.venv
+RUN uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
+    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf]
+
+# Build and install gdrcopy
+RUN git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/gdrcopy.git && \
+    cd gdrcopy/packages && \
+    CUDA=/usr/local/cuda ./build-rpm-packages.sh && \
+    rpm -Uvh gdrcopy-kmod-*.el8.noarch.rpm && \
+    rpm -Uvh gdrcopy-*.el8.${ARCH_ALT}.rpm && \
+    rpm -Uvh gdrcopy-devel-*.el8.noarch.rpm
+
+# Build and install UCX
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    CC=${USE_SCCACHE:+sccache gcc} && \
+    CXX=${USE_SCCACHE:+sccache g++} && \
+    export CC=${CC} && \
+    export CXX=${CXX} && \
+    cd /usr/local/src && \
+     git clone https://github.com/openucx/ucx.git && \
+     cd ucx && 			     \
+     git checkout $NIXL_UCX_REF &&	 \
+     ./autogen.sh && ./configure     \
+         --prefix=/usr/local/ucx     \
+         --enable-shared             \
+         --disable-static            \
+         --disable-doxygen-doc       \
+         --enable-optimizations      \
+         --enable-cma                \
+         --enable-devel-headers      \
+         --with-cuda=/usr/local/cuda \
+         --with-verbs                \
+         --with-dm                   \
+         --with-gdrcopy=/usr/local   \
+         --with-efa                  \
+         --enable-mt &&              \
+     make -j &&                      \
+     make -j install-strip &&        \
+     /tmp/use-sccache.sh show-stats "UCX" && \
+     echo "/usr/local/ucx/lib" > /etc/ld.so.conf.d/ucx.conf && \
+     echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
+     ldconfig
+
+# build and install nixl
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    source ${VIRTUAL_ENV}/bin/activate && \
+    git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" && \
+    cd nixl && \
+    mkdir build && \
+    meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
+    -Dcudapath_lib="/usr/local/cuda/lib64" \
+    -Dcudapath_inc="/usr/local/cuda/include" \
+    -Ducx_path="/usr/local/ucx" && \
+    cd build && \
+    ninja && \
+    ninja install && \
+    /tmp/use-sccache.sh show-stats "NIXL"
+
+ENV NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64  \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins \
+    NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${LD_LIBRARY_PATH}
+
+RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
+    echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf && \
+    ldconfig
+
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    cd /workspace/nixl && \
+    uv build . --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
+
 # Copy source code (order matters for layer caching)
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
+COPY launch/ /opt/dynamo/launch/
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
-# Build wheels
+# Build dynamo wheels
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    source ${VIRTUAL_ENV}/bin/activate && \
+    cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
-    uv pip install maturin[patchelf] && \
+    maturin build --release --out /opt/dynamo/dist && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
-        maturin build --release --features block-manager --out /opt/dynamo/dist; \
-    else \
+        cd /opt/dynamo/lib/kvbm && \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
@@ -368,23 +328,66 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 
 FROM base AS dev
 
+ARG ENABLE_KVBM
+ARG ARCH_ALT
+
 # Application environment variables
 ENV DYNAMO_HOME=/opt/dynamo \
     CARGO_TARGET_DIR=/opt/dynamo/target
 
-WORKDIR /opt/dynamo
+# NIXL environment variables
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins
+ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${LD_LIBRARY_PATH}
+
+# Copy ucx and nixl libs
+COPY --from=wheel_builder /usr/local/ucx/ /usr/local/ucx/
+COPY --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
+COPY --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
 
 # Copy built artifacts
+COPY --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 COPY --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
-# Install Python packages
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        # required for AIC perf files
+        git \
+        git-lfs \
+        # rust build packages
+        clang \
+        libclang-dev \
+        protobuf-compiler \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create and activate virtual environment
+ARG PYTHON_VERSION
+RUN mkdir -p /opt/dynamo/venv && \
+    uv venv /opt/dynamo/venv --python $PYTHON_VERSION
+
+ENV VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH="/opt/dynamo/venv/bin:${PATH}"
+
+# Install common and test dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    UV_GIT_LFS=1 uv pip install \
+        --no-cache \
+        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.test.txt
+
 COPY benchmarks/ /opt/dynamo/benchmarks/
 RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+    /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    if [ "$ENABLE_KVBM" = "true" ]; then \
+        uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
+    fi \
     && cd /opt/dynamo/benchmarks \
     && UV_GIT_LFS=1 uv pip install --no-cache . \
     && cd - \
@@ -393,7 +396,8 @@ RUN uv pip install \
 # Setup launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > ~/.launch_screen && \
-    echo "cat ~/.launch_screen" >> ~/.bashrc
+    echo "cat ~/.launch_screen" >> ~/.bashrc && \
+    echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

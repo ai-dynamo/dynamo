@@ -139,7 +139,7 @@ spec:
             - --served-model-name
             - Qwen/Qwen3-0.6B
             - --extra-engine-args
-            - ./recipes/qwen3/trtllm/prefill.yaml
+            - /workspace/prefill.yaml
             - --disaggregation-mode
             - prefill
             - --disaggregation-strategy
@@ -179,7 +179,7 @@ spec:
             - --served-model-name
             - Qwen/Qwen3-0.6B
             - --extra-engine-args
-            - ./recipes/qwen3/trtllm/decode.yaml
+            - /workspace/decode.yaml
             - --disaggregation-mode
             - decode
             - --disaggregation-strategy
