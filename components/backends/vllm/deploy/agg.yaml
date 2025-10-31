@@ -7,14 +7,7 @@ metadata:
   name: vllm-agg
 spec:
   services:
-    Frontend:
-      dynamoNamespace: vllm-agg
-      componentType: frontend
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
-          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:vllm-1029
-    VllmDecodeWorker:
+    vllm-decodeWorker-1:
       envFromSecret: hf-token-secret
       dynamoNamespace: vllm-agg
       componentType: worker
@@ -33,3 +26,48 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
+          ports:
+            - containerPort: 9090
+              name: worker
+        containers:
+          - name: Frontend
+            image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:vllm-1029
+            args: []
+            env:
+              - name: BACKEND_URL
+                value: "http://localhost:9090" # talk to worker in same Pod
+            ports:
+              - containerPort: 8000
+                name: frontend
+    vllm-decodeWorker-2:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: vllm-agg
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:vllm-1029
+          workingDir: /workspace/components/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+          ports:
+            - containerPort: 9090
+              name: worker
+        containers:
+          - name: Frontend
+            image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:vllm-1029
+            args: []
+            ports:
+              - containerPort: 8000
+                name: frontend
+            env:
+              - name: BACKEND_URL
+                value: "http://localhost:9090" # talk to worker in same Pod
