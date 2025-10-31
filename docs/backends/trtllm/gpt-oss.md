@@ -156,9 +156,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
   --max-batch-size 32 \
   --free-gpu-memory-fraction 0.9 \
   --tensor-parallel-size 4 \
-  --expert-parallel-size 4 \
-  --dyn-reasoning-parser gpt_oss \
-  --dyn-tool-call-parser harmony &
+  --expert-parallel-size 4 &
 ```
 
 3. **Launch decode worker**:
@@ -174,9 +172,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --max-num-tokens 16384 \
   --free-gpu-memory-fraction 0.9 \
   --tensor-parallel-size 4 \
-  --expert-parallel-size 4 \
-  --dyn-reasoning-parser gpt_oss \
-  --dyn-tool-call-parser harmony
+  --expert-parallel-size 4
 ```
 
 ### 6. Verify the Deployment is Ready
