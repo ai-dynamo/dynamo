@@ -582,7 +582,7 @@ jobs:
 
   cleanup:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: always()
     needs: [changed-files, operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
     steps:
     - uses: actions/checkout@v4
@@ -595,7 +595,6 @@ jobs:
         kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
         kubectl config current-context
     - name: Cleanup
-      if: always()
       timeout-minutes: 5
       run: |
         echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
