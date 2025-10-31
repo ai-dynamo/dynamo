@@ -542,6 +542,21 @@ jobs:
           echo "Test passed: Response matches expected format and content"
         fi
         exit $TEST_RESULT
+    - name: Cleanup
+      if: always()
+      timeout-minutes: 5
+      env:
+        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+      run: |
+        set -x
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE
+
+        # For debugging purposes, list all the resources before we delete
+        kubectl get all
+
+        echo "Deleting DynamoGraphDeployments for this job in namespace $NAMESPACE..."
+        kubectl delete dynamographdeployments $FRAMEWORK-${{ matrix.profile }} -n $NAMESPACE
 
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
@@ -588,7 +603,7 @@ jobs:
   cleanup:
     runs-on: cpu-amd-m5-2xlarge
     if: always()
-    needs: [changed-files, operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
+    needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
     steps:
     - uses: actions/checkout@v4
     - name: Setup Kubeconfig
