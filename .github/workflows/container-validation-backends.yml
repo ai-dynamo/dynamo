@@ -44,8 +44,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: cpu-amd-m5-2xlarge-test }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge-test }
+          - { arch: amd64, runner: cpu-amd-m5-2xlarge }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
     name: operator (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
