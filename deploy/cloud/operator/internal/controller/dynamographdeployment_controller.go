@@ -105,6 +105,8 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	reason := Reason("undefined")
 	message := Message("")
 	state := PendingState
+	isDeleted := false
+
 	// retrieve the CRD
 	dynamoDeployment := &nvidiacomv1alpha1.DynamoGraphDeployment{}
 	if err = r.Get(ctx, req.NamespacedName, dynamoDeployment); err != nil {
@@ -112,6 +114,12 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	}
 
 	defer func() {
+		// Skip status update if the object was deleted
+		if isDeleted {
+			logger.V(1).Info("Skipping status update for deleted object")
+			return
+		}
+
 		if err != nil {
 			state = FailedState
 			message = Message(err.Error())
@@ -137,6 +145,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 	if deleted {
+		isDeleted = true
 		return ctrl.Result{}, nil
 	}
 	state, reason, message, err = r.reconcileResources(ctx, dynamoDeployment)
