@@ -120,12 +120,13 @@ jobs:
         ci_variables["ENABLE_SECURITY_SCAN"]="false"
         ci_variables["RELEASE_BUILD"]="false"
 
-        ci_args=""
+        ci_args=()
         for key in "${!ci_variables[@]}"; do
-          ci_args+="--form variables[$key]=${ci_variables[$key]} "
+          value="${ci_variables[$key]}"
+          ci_args+=(--form "variables[$key]=${value}")
         done
 
-        echo "Running Pipeline with Variables: $ci_args"
+        echo "Running Pipeline with Variables: ${ci_args[*]}"
 
         if [ "${{ github.event_name }}" = "pull_request" ]; then
           REF="${{ github.event.pull_request.head.ref }}"
@@ -136,5 +137,5 @@ jobs:
           --request POST \
           --form token=${{ secrets.PIPELINE_TOKEN }} \
           --form ref=${REF} \
-          $ci_args \
+          "${ci_args[@]}" \
           "${{ secrets.PIPELINE_URL }}"
