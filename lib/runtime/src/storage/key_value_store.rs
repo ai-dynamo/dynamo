@@ -22,10 +22,15 @@ mod nats;
 pub use nats::NATSStore;
 mod etcd;
 pub use etcd::EtcdStore;
+mod file;
+pub use file::FileStore;
 
 const WATCH_SEND_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// A key that is safe to use directly in the KV store.
+///
+/// TODO: Need to re-think this. etcd uses slash separators, so we often use from_raw
+/// to avoid the slug. But other impl's, particularly file, need a real slug.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Key(String);
 
@@ -366,6 +371,9 @@ pub enum StoreError {
 
     #[error("Internal etcd error: {0}")]
     EtcdError(String),
+
+    #[error("Internal filesystem error: {0}")]
+    FilesystemError(String),
 
     #[error("Key Value Error: {0} for bucket '{1}'")]
     KeyValueError(String, String),
