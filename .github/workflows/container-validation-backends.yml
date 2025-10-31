@@ -356,7 +356,7 @@ jobs:
         set -x
 
         # Set namespace using branch
-        BRANCH_SANITIZED="${BRANCH_NAME/\//\-}"
+        BRANCH_SANITIZED="${BRANCH/\//-}"
         NAMESPACE="gh-job-id-${{ github.run_id }}-${BRANCH_SANITIZED}-deploy-tests"
         echo "${NAMESPACE}" >> $GITHUB_ENV
 
