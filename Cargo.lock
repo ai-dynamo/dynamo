@@ -1789,6 +1789,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dashmap"
+version = "6.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
+dependencies = [
+ "cfg-if 1.0.3",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "data-encoding"
 version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2166,7 +2180,7 @@ dependencies = [
  "chrono",
  "criterion 0.3.6",
  "cudarc 0.17.3",
- "dashmap",
+ "dashmap 5.5.3",
  "derive-getters",
  "derive_builder",
  "dialoguer",
@@ -2351,8 +2365,10 @@ name = "dynamo-tokens"
 version = "0.6.1"
 dependencies = [
  "bytemuck",
+ "dashmap 6.1.0",
  "derive-getters",
- "rayon",
+ "serde",
+ "thiserror 2.0.16",
  "xxhash-rust",
 ]
 
@@ -10322,7 +10338,7 @@ dependencies = [
  "asynchronous-codec",
  "bytes",
  "crossbeam-queue",
- "dashmap",
+ "dashmap 5.5.3",
  "futures-channel",
  "futures-io",
  "futures-task",

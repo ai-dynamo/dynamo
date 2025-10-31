@@ -13,6 +13,7 @@ This test validates that:
 """
 
 import concurrent.futures
+import importlib.util
 import logging
 import os
 import re
@@ -25,12 +26,16 @@ import requests
 from tests.kvbm.common import ApiTester, check_logs_for_patterns
 from tests.utils.managed_process import ManagedProcess
 
+# Check if vLLM is available
+HAS_VLLM = importlib.util.find_spec("vllm") is not None
+
 # Test markers
 pytestmark = [
     pytest.mark.kvbm,
     pytest.mark.e2e,
     pytest.mark.slow,
     pytest.mark.gpu_1,
+    pytest.mark.skipif(not HAS_VLLM, reason="requires vllm"),
 ]
 
 logger = logging.getLogger(__name__)
