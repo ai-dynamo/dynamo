@@ -54,11 +54,8 @@ def build_sampling_params(
             and value is not None
             and hasattr(sampling_params, "stop_token_ids")
         ):
-            if sampling_params.stop_token_ids is None:
-                sampling_params.stop_token_ids = []
-            sampling_params.stop_token_ids = list(
-                set(sampling_params.stop_token_ids) | set(value)
-            )
+            existing = sampling_params.stop_token_ids or []
+            sampling_params.stop_token_ids = list(set(existing).union(value))
 
     return sampling_params
 
