@@ -175,10 +175,3 @@ impl MemoryRegion {
         self.size
     }
 }
-
-#[cfg(feature = "unsafe-slices")]
-impl actions::Slice for MemoryRegion {
-    fn as_slice(&self) -> Result<&[u8]> {
-        Ok(unsafe { std::slice::from_raw_parts(self.addr as *const u8, self.size) })
-    }
-}

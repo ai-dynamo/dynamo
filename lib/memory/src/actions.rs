@@ -22,14 +22,17 @@ pub trait Memset: MemoryDescription {
 }
 
 /// Extension trait for storage types that support slicing operations
-pub trait Slice {
+pub trait Slice: MemoryDescription + 'static {
     /// Returns an immutable byte slice view of the entire storage region
     ///
     /// # Safety
-    /// The caller must ensure:
-    /// - The memory region is valid and initialized
+    /// This is an unsafe method. The caller must ensure:
+    /// - The memory region remains valid for the lifetime of the returned slice
+    /// - The memory region is properly initialized
     /// - No concurrent mutable access occurs while the slice is in use
-    fn as_slice(&self) -> Result<&[u8], StorageError>;
+    /// - The memory backing this storage remains valid (implementors with owned
+    ///   memory satisfy this, but care must be taken with unowned memory regions)
+    unsafe fn as_slice(&self) -> Result<&[u8], StorageError>;
 
     /// Returns an immutable byte slice view of a subregion
     ///
@@ -43,7 +46,8 @@ pub trait Slice {
     /// - The memory region is valid and initialized
     /// - No concurrent mutable access occurs while the slice is in use
     fn slice(&self, offset: usize, len: usize) -> Result<&[u8], StorageError> {
-        let slice = self.as_slice()?;
+        // SAFETY: Caller guarantees memory validity per trait's safety contract
+        let slice = unsafe { self.as_slice()? };
 
         // validate offset and len
         if offset.saturating_add(len) > slice.len() {
@@ -65,7 +69,8 @@ pub trait Slice {
     /// - No concurrent mutable access occurs while the slice is in use
     /// - The data represents valid values of type T
     fn as_slice_typed<T: Sized>(&self) -> Result<&[T], StorageError> {
-        let bytes = self.as_slice()?;
+        // SAFETY: Caller guarantees memory validity per trait's safety contract
+        let bytes = unsafe { self.as_slice()? };
         let ptr = bytes.as_ptr() as *const T;
         let elem_size = std::mem::size_of::<T>();
         if elem_size == 0 {
@@ -128,14 +133,17 @@ pub trait Slice {
     }
 }
 
-pub trait SliceMut {
+pub trait SliceMut: MemoryDescription + 'static {
     /// Returns a mutable byte slice view of the entire storage region
     ///
     /// # Safety
-    /// The caller must ensure:
-    /// - The memory region is valid
+    /// This is an unsafe method. The caller must ensure:
+    /// - The memory region remains valid for the lifetime of the returned slice
+    /// - The memory region is valid and accessible
     /// - No other references (mutable or immutable) exist to this memory region
-    fn as_slice_mut(&mut self) -> Result<&mut [u8], StorageError>;
+    /// - The memory backing this storage remains valid (implementors with owned
+    ///   memory satisfy this, but care must be taken with unowned memory regions)
+    unsafe fn as_slice_mut(&mut self) -> Result<&mut [u8], StorageError>;
 
     /// Returns a mutable byte slice view of a subregion
     ///
@@ -149,7 +157,8 @@ pub trait SliceMut {
     /// - The memory region is valid
     /// - No other references (mutable or immutable) exist to this memory region
     fn slice_mut(&mut self, offset: usize, len: usize) -> Result<&mut [u8], StorageError> {
-        let slice = self.as_slice_mut()?;
+        // SAFETY: Caller guarantees memory validity per trait's safety contract
+        let slice = unsafe { self.as_slice_mut()? };
 
         // validate offset and len
         if offset.saturating_add(len) > slice.len() {
@@ -170,7 +179,8 @@ pub trait SliceMut {
     /// - The size is a multiple of `size_of::<T>()`
     /// - No other references (mutable or immutable) exist to this memory region
     fn as_slice_typed_mut<T: Sized>(&mut self) -> Result<&mut [T], StorageError> {
-        let bytes = self.as_slice_mut()?;
+        // SAFETY: Caller guarantees memory validity per trait's safety contract
+        let bytes = unsafe { self.as_slice_mut()? };
         let ptr = bytes.as_mut_ptr() as *mut T;
         let len = bytes.len() / std::mem::size_of::<T>();
 

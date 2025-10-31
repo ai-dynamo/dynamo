@@ -171,6 +171,9 @@ impl DiskStorage {
 impl Drop for DiskStorage {
     fn drop(&mut self) {
         let _ = self.unlink();
+        if let Err(e) = nix::unistd::close(self.fd as std::os::fd::RawFd) {
+            tracing::debug!("failed to close disk cache fd {}: {e}", self.fd);
+        }
     }
 }
 

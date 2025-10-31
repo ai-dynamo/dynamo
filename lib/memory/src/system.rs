@@ -130,7 +130,12 @@ impl actions::Memset for SystemStorage {
 }
 
 impl actions::Slice for SystemStorage {
-    fn as_slice(&self) -> Result<&[u8]> {
+    unsafe fn as_slice(&self) -> Result<&[u8]> {
+        // SAFETY: SystemStorage owns the memory allocated via the global allocator.
+        // The memory remains valid as long as this SystemStorage instance exists.
+        // The ptr is guaranteed to be valid for `self.len` bytes.
+        // Caller must ensure no concurrent mutable access per trait contract.
+        // SAFETY: The pointer is valid, properly aligned, and points to `self.len` bytes.
         Ok(unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) })
     }
 }
