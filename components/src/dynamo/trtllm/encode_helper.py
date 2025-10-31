@@ -211,11 +211,10 @@ class EncodeHelper:
         # Load embeddings first to get the actual shape
         messages = request.get("messages", [])
         (
-            text_prompts,
+            text_prompt,
             image_urls,
             embedding_paths,
         ) = multimodal_processor.extract_prompt_and_media(messages)
-        logging.info(f"ENCODE WORKER: text_prompts: {text_prompts}")
         if embedding_paths:
             # Load the embeddings data
             loaded_data = multimodal_processor.load_tensor_from_path_or_url(
@@ -266,7 +265,7 @@ class EncodeHelper:
                 model_dir=model_dir,
                 model_type=model_type,
                 modality="image",
-                prompts=text_prompts[0],
+                prompts=text_prompt,
                 media=image_urls[0],
             )
             # engine.llm is the MultimodalEncoder instance
