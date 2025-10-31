@@ -53,7 +53,7 @@ spec:
           memory: "16Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/modelexpress-server:0.2.0
+          image: nvcr.io/nvidia/ai-dynamo/modelexpress-server:my-tag
           imagePullPolicy: IfNotPresent
           env:
             - name: MODEL_EXPRESS_SERVER_PORT
@@ -72,13 +72,8 @@ spec:
           args:
             - |
               echo "Setting up Model Express configuration..."
-              # mkdir -p $MODEL_EXPRESS_CACHE_DIRECTORY
-              # cat > /model/.model-express/config.yaml << EOF
-              # local_path: $MODEL_EXPRESS_CACHE_DIRECTORY
-              # server_endpoint: http://localhost:8000
-              # timeout_secs: null
-              # EOF
 
+              mkdir -p $MODEL_EXPRESS_CACHE_DIRECTORY
               cat > $MODEL_EXPRESS_CACHE_DIRECTORY/config.yaml << EOF
               local_path: $MODEL_EXPRESS_CACHE_DIRECTORY
               server_endpoint: http://localhost:8000

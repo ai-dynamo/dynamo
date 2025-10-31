@@ -1,11 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 256Gi
+    limits:
+      storage: 256Gi
+
+---
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-agg-router
 spec:
+  pvcs:
+    - name: model-cache-pvc
+      create: false
   services:
     Frontend:
       dynamoNamespace: vllm-agg-router
@@ -17,6 +35,62 @@ spec:
       envs:
         - name: DYN_ROUTER_MODE
           value: kv
+    ModelExpress:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: vllm-agg-router
+      componentType: frontend
+      readinessProbe:
+        tcpSocket:
+          port: 8000
+        initialDelaySeconds: 10
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 3
+      replicas: 1
+      resources:
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+        limits:
+          cpu: "4"
+          memory: "16Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/modelexpress-server:my-tag
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODEL_EXPRESS_SERVER_PORT
+              value: "8000"
+            - name: MODEL_EXPRESS_LOGGING_LEVEL
+              value: "info"
+            - name: MODEL_EXPRESS_DATABASE_PATH
+              value: "/model/models.db"
+            - name: MODEL_EXPRESS_CACHE_DIRECTORY
+              value: "/model/.model-express/cache"
+            - name: HF_HUB_CACHE
+              value: "/model/.model-express/cache"
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              echo "Setting up Model Express configuration..."
+
+              mkdir -p $MODEL_EXPRESS_CACHE_DIRECTORY
+              cat > $MODEL_EXPRESS_CACHE_DIRECTORY/config.yaml << EOF
+              local_path: $MODEL_EXPRESS_CACHE_DIRECTORY
+              server_endpoint: http://localhost:8000
+              timeout_secs: null
+              EOF
+
+              ./modelexpress-server &
+
+              SERVER_PID=$!
+              echo "Server started with PID: $SERVER_PID"
+              wait $SERVER_PID
+      volumeMounts:
+        - name: model-cache-pvc
+          mountPoint: /model
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: vllm-agg-router
@@ -25,10 +99,18 @@ spec:
       resources:
         limits:
           gpu: "1"
+      envs:
+        - name: MODEL_EXPRESS_URL
+          value: http://vllm-agg-router-modelexpress:8000
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/examples/backends/vllm
+          workingDir: /workspace/components/backends/vllm
+          env:
+            - name: MODEL_EXPRESS_CACHE_DIRECTORY
+              value: "/model/.model-express/cache"
+            - name: HF_HUB_CACHE
+              value: "/model/.model-express/cache"
           command:
           - python3
           - -m
@@ -36,3 +118,6 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
+      volumeMounts:
+        - name: model-cache-pvc
+          mountPoint: /model
