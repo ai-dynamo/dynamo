@@ -8,6 +8,7 @@ import signal
 from typing import Optional
 
 import uvloop
+from kvbm.vllm_integration.consolidator_config import get_consolidator_endpoints
 from prometheus_client import REGISTRY
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
@@ -25,7 +26,6 @@ from dynamo.llm import (
     fetch_llm,
     register_llm,
 )
-from dynamo.llm.vllm_integration.consolidator_config import get_consolidator_endpoints
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.multimodal_handlers import (

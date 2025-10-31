@@ -6,15 +6,20 @@ use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyStopAsyncIteration;
+use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
 use rand::seq::IteratorRandom as _;
 use rs::pipeline::network::Ingress;
+use std::ffi::CString;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::time::Duration;
-use std::{fmt::Display, sync::Arc};
+use std::{
+    fmt::Display,
+    sync::{Arc, Weak},
+};
 use tokio::sync::Mutex;
 use tracing::Instrument;
 
@@ -190,9 +195,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let prometheus_metrics = PyModule::new(m.py(), "prometheus_metrics")?;
     prometheus_metrics::add_to_module(&prometheus_metrics)?;
     m.add_submodule(&prometheus_metrics)?;
-
-    #[cfg(feature = "block-manager")]
-    llm::block_manager::add_to_module(m)?;
 
     Ok(())
 }
@@ -628,6 +630,21 @@ impl DistributedRuntime {
     fn child_token(&self) -> CancellationToken {
         let inner = self.inner.runtime().child_token();
         CancellationToken { inner }
+    }
+
+    // This is used to pass the DistributedRuntime from the dynamo-runtime bindings
+    // to the KVBM bindings, since KVBM cannot directly use the struct from this cdylib.
+    // TODO: Create a separate crate "dynamo-python" so that all binding crates can import
+    // from it and share the same crate path. This will allow PyO3 to automatically
+    // recognize that both bindings use the same PyClass.
+    #[pyo3(name = "to_capsule")]
+    fn to_capsule<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
+        let arc: Arc<rs::DistributedRuntime> = Arc::new(self.inner.clone());
+        let weak: Weak<rs::DistributedRuntime> = Arc::downgrade(&arc);
+
+        let name = CString::new("dynamo.runtime.weak").expect("valid capsule name");
+
+        PyCapsule::new(py, weak, Some(name))
     }
 }
 

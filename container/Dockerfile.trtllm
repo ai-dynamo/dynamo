@@ -64,6 +64,7 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv
 
 ARG ARCH_ALT
 ARG PYTHON_VERSION
+ARG ENABLE_KVBM
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
@@ -241,9 +242,12 @@ ENV LD_LIBRARY_PATH=${TENSORRT_LIB_DIR}:${LD_LIBRARY_PATH}
 COPY benchmarks/ /opt/dynamo/benchmarks/
 COPY --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
 RUN uv pip install \
-    /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-    /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+      /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+      /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+      /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+    && if [ "${ENABLE_KVBM}" = "true" ]; then \
+        uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
+       fi \
     && cd /opt/dynamo/benchmarks \
     && UV_GIT_LFS=1 uv pip install --no-cache . \
     && cd - \

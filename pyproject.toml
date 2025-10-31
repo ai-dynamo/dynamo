@@ -147,6 +147,7 @@ addopts = [
     "--ignore-glob=*model.py",
     "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*trtllm_integration*",
+    "--ignore-glob=*kvbm/python/kvbm*",
     "--ignore-glob=*_inc.py",
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
