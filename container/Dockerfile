@@ -384,6 +384,9 @@ COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 # Install Python packages
 COPY benchmarks/ /opt/dynamo/benchmarks/
 RUN uv pip list
+RUN uv pip install --dry-run /opt/dynamo/wheelhouse/ai_dynamo_runtime*cp312*.whl &&\
+    uv pip install --dry-run /opt/dynamo/wheelhouse/ai_dynamo*any.whl &&\
+    uv pip install --dry-run /opt/dynamo/wheelhouse/nixl/nixl*.whl
 RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
