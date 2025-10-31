@@ -179,12 +179,14 @@ func (r *DynamoGraphDeploymentReconciler) setStatusConditions(ctx context.Contex
 		}
 
 		// Update Ready condition
+		// Note: LastTransitionTime is intentionally omitted - meta.SetStatusCondition
+		// will automatically set it only when the Status field changes, which is the
+		// correct Kubernetes behavior for tracking actual state transitions
 		condition := metav1.Condition{
-			Type:               "Ready",
-			Status:             readyStatus,
-			Reason:             string(reason),
-			Message:            string(message),
-			LastTransitionTime: metav1.Now(),
+			Type:    "Ready",
+			Status:  readyStatus,
+			Reason:  string(reason),
+			Message: string(message),
 		}
 		meta.SetStatusCondition(&dynamoDeployment.Status.Conditions, condition)
 
