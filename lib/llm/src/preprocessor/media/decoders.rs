@@ -12,8 +12,11 @@ pub use image::ImageDecoder;
 // Decoded media data (image RGB, video frames pixels, ...)
 #[derive(Debug)]
 pub struct DecodedMediaData {
+    #[allow(dead_code)] // used in followup MR
     pub(crate) data: Vec<u8>,
+    #[allow(dead_code)] // used in followup MR
     pub(crate) shape: Vec<usize>,
+    #[allow(dead_code)] // used in followup MR
     pub(crate) dtype: String,
 }
 
