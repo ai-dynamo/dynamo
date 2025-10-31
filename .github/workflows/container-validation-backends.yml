@@ -383,8 +383,6 @@ jobs:
         kubectl get storageclass
 
         # Install Helm chart
-        export IMAGE_TAG=$(cat build.env)
-        echo $IMAGE_TAG
         export VIRTUAL_ENV=/opt/dynamo/venv
         export KUBE_NS=$NAMESPACE
         export ISTIO_ENABLED=true
@@ -409,7 +407,6 @@ jobs:
           --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
         # Wait for all deployments to be ready
         timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
-        cd -
 
   deploy-test-vllm:
     runs-on: cpu-amd-m5-2xlarge
