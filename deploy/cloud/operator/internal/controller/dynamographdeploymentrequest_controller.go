@@ -626,6 +626,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	// If a DGDR is deleted, the DGD may be serving traffic and should persist independently.
 	// We use labels (LabelDGDRName) to track the relationship.
 
+	// Deploy additional resources (e.g., ConfigMaps) from the profiling output first
+	if err := r.createAdditionalResources(ctx, dgdr, dgdNamespace); err != nil {
+		logger.Error(err, "Failed to create additional resources")
+		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageDeploymentCreationFailed,
+			fmt.Sprintf("Failed to create additional resources: %v", err))
+		return ctrl.Result{}, err
+	}
+
 	logger.Info("Creating DynamoGraphDeployment", "name", dgdName, "namespace", dgdNamespace)
 
 	if err := r.Create(ctx, dgd); err != nil {
@@ -665,6 +673,78 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	logger.Info("DynamoGraphDeployment created successfully", "name", dgdName)
 
 	return ctrl.Result{}, r.Status().Update(ctx, dgdr)
+}
+
+// createAdditionalResources creates ConfigMaps from the profiling output that should be deployed alongside the DGD
+func (r *DynamoGraphDeploymentRequestReconciler) createAdditionalResources(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, targetNamespace string) error {
+	logger := log.FromContext(ctx)
+
+	// Check if there are additional resources stored in annotations
+	if dgdr.Annotations == nil {
+		return nil
+	}
+
+	resourcesYAML, exists := dgdr.Annotations["dgdr.nvidia.com/additional-resources"]
+	if !exists || resourcesYAML == "" {
+		return nil
+	}
+
+	// Parse the additional resources YAML
+	documents := splitYAMLDocuments([]byte(resourcesYAML))
+	if len(documents) == 0 {
+		return nil
+	}
+
+	logger.Info("Deploying additional resources from profiling output", "count", len(documents))
+
+	for i, doc := range documents {
+		doc = bytes.TrimSpace(doc)
+		if len(doc) == 0 {
+			continue
+		}
+
+		// Parse to check kind
+		var obj map[string]interface{}
+		if err := yaml.Unmarshal(doc, &obj); err != nil {
+			logger.Error(err, "Failed to parse resource document", "index", i)
+			continue
+		}
+
+		kind, _ := obj["kind"].(string)
+		if kind != "ConfigMap" {
+			logger.Info("Skipping non-ConfigMap resource from profiling output", "kind", kind)
+			continue
+		}
+
+		// Parse as ConfigMap and update metadata
+		cm := &corev1.ConfigMap{}
+		if err := yaml.Unmarshal(doc, cm); err != nil {
+			logger.Error(err, "Failed to parse ConfigMap", "index", i)
+			continue
+		}
+
+		// Override namespace and add tracking labels
+		cm.Namespace = targetNamespace
+		if cm.Labels == nil {
+			cm.Labels = make(map[string]string)
+		}
+		cm.Labels[LabelDGDRName] = dgdr.Name
+		cm.Labels[LabelDGDRNamespace] = dgdr.Namespace
+		cm.Labels[LabelManagedBy] = LabelValueDynamoOperator
+
+		// Create the ConfigMap
+		if err := r.Create(ctx, cm); err != nil {
+			if apierrors.IsAlreadyExists(err) {
+				logger.Info("ConfigMap already exists, skipping", "name", cm.Name)
+			} else {
+				return fmt.Errorf("failed to create ConfigMap %s: %w", cm.Name, err)
+			}
+		} else {
+			logger.Info("Created ConfigMap from profiling output", "name", cm.Name, "namespace", targetNamespace)
+		}
+	}
+
+	return nil
 }
 
 // handleFailedState handles DGDR in Failed state
@@ -1175,26 +1255,138 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 
 	logger.Info("Found profiling output in ConfigMap", "configMap", outputConfigMapName, "size", len(yamlContent))
 
-	// Parse YAML into full DynamoGraphDeployment object first to validate and get name
-	dgd := &nvidiacomv1alpha1.DynamoGraphDeployment{}
-	if err := yaml.Unmarshal([]byte(yamlContent), dgd); err != nil {
-		return fmt.Errorf("failed to parse %s: %w", ProfilingOutputFile, err)
+	// Extract DGD and any supporting resources from potentially multi-document YAML (ConfigMap + DGD)
+	dgd, additionalResources, err := r.extractResourcesFromYAML([]byte(yamlContent))
+	if err != nil {
+		return fmt.Errorf("failed to extract DGD from %s: %w", ProfilingOutputFile, err)
 	}
 
-	logger.Info("Parsed DGD from ConfigMap", "dgdName", dgd.Name)
+	logger.Info("Parsed profiling output", "dgdName", dgd.Name, "additionalResources", len(additionalResources))
 
-	// Store as RawExtension (need to marshal to JSON as RawExtension expects JSON)
-	// This preserves all fields including metadata
+	// Store additional resources (ConfigMaps) in annotations first
+	if len(additionalResources) > 0 {
+		if err := r.storeAdditionalResources(ctx, dgdr, additionalResources); err != nil {
+			logger.Error(err, "Failed to store additional resources")
+			return err
+		}
+		// Refetch the DGDR after updating annotations to get the latest resourceVersion
+		if err := r.Get(ctx, types.NamespacedName{Name: dgdr.Name, Namespace: dgdr.Namespace}, dgdr); err != nil {
+			return fmt.Errorf("failed to refetch DGDR after storing annotations: %w", err)
+		}
+	}
+
+	// Store the generated DGD in status
 	dgdr.Status.GeneratedDeployment = &runtime.RawExtension{
 		Object: dgd,
 	}
-
-	// Set profiling results reference
 	dgdr.Status.ProfilingResults = fmt.Sprintf("configmap/%s", outputConfigMapName)
 
-	logger.Info("Successfully generated DGD from profiling output", "dgdName", dgd.Name)
-
 	return r.Status().Update(ctx, dgdr)
+}
+
+// storeAdditionalResources marshals additional resources to YAML and stores them in DGDR annotations
+func (r *DynamoGraphDeploymentRequestReconciler) storeAdditionalResources(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, resources []map[string]interface{}) error {
+	var resourcesYAML []byte
+
+	for i, res := range resources {
+		resYAML, err := yaml.Marshal(res)
+		if err != nil {
+			return fmt.Errorf("failed to marshal resource %d: %w", i, err)
+		}
+		if i > 0 {
+			resourcesYAML = append(resourcesYAML, []byte("\n---\n")...)
+		}
+		resourcesYAML = append(resourcesYAML, resYAML...)
+	}
+
+	if dgdr.Annotations == nil {
+		dgdr.Annotations = make(map[string]string)
+	}
+	dgdr.Annotations["dgdr.nvidia.com/additional-resources"] = string(resourcesYAML)
+
+	return r.Update(ctx, dgdr)
+}
+
+// extractResourcesFromYAML parses multi-document YAML from profiling output,
+// extracting the DynamoGraphDeployment and any ConfigMaps that should be deployed with it.
+func (r *DynamoGraphDeploymentRequestReconciler) extractResourcesFromYAML(yamlContent []byte) (*nvidiacomv1alpha1.DynamoGraphDeployment, []map[string]interface{}, error) {
+	documents := splitYAMLDocuments(yamlContent)
+
+	var dgd *nvidiacomv1alpha1.DynamoGraphDeployment
+	var additionalResources []map[string]interface{}
+
+	for i, doc := range documents {
+		doc = bytes.TrimSpace(doc)
+		if len(doc) == 0 {
+			continue
+		}
+
+		var obj map[string]interface{}
+		if err := yaml.Unmarshal(doc, &obj); err != nil {
+			continue
+		}
+
+		kind, hasKind := obj["kind"].(string)
+		if !hasKind {
+			continue
+		}
+
+		if kind == "DynamoGraphDeployment" {
+			dgd = &nvidiacomv1alpha1.DynamoGraphDeployment{}
+			if err := yaml.Unmarshal(doc, dgd); err != nil {
+				return nil, nil, fmt.Errorf("failed to parse DynamoGraphDeployment in document %d: %w", i, err)
+			}
+		} else {
+			// Store ConfigMaps or other resources for deployment
+			additionalResources = append(additionalResources, obj)
+		}
+	}
+
+	if dgd == nil {
+		return nil, nil, fmt.Errorf("no DynamoGraphDeployment found in YAML content (%d documents)", len(documents))
+	}
+
+	return dgd, additionalResources, nil
+}
+
+// extractDGDFromYAML is a convenience wrapper that extracts only the DGD (used by tests)
+func (r *DynamoGraphDeploymentRequestReconciler) extractDGDFromYAML(yamlContent []byte) (*nvidiacomv1alpha1.DynamoGraphDeployment, error) {
+	dgd, _, err := r.extractResourcesFromYAML(yamlContent)
+	return dgd, err
+}
+
+// splitYAMLDocuments splits multi-document YAML by the "---" separator
+func splitYAMLDocuments(yamlContent []byte) [][]byte {
+	var documents [][]byte
+	var currentDoc []byte
+
+	lines := bytes.Split(yamlContent, []byte("\n"))
+	for _, line := range lines {
+		trimmed := bytes.TrimSpace(line)
+
+		// Check if this line is a document separator
+		if bytes.Equal(trimmed, []byte("---")) {
+			// Save current document if not empty
+			if len(bytes.TrimSpace(currentDoc)) > 0 {
+				documents = append(documents, currentDoc)
+			}
+			// Start new document
+			currentDoc = []byte{}
+		} else {
+			// Add line to current document
+			if len(currentDoc) > 0 {
+				currentDoc = append(currentDoc, '\n')
+			}
+			currentDoc = append(currentDoc, line...)
+		}
+	}
+
+	// Add the last document if not empty
+	if len(bytes.TrimSpace(currentDoc)) > 0 {
+		documents = append(documents, currentDoc)
+	}
+
+	return documents
 }
 
 // updateStateAndRequeue updates the DGDR state and requeues
