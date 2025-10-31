@@ -107,8 +107,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: gpu-l40-amd64-test }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge-test }
+          - { arch: amd64, runner: gpu-l40-amd64 }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
     name: vllm (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
@@ -172,8 +172,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: gpu-l40-amd64-test }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge-test }
+          - { arch: amd64, runner: gpu-l40-amd64 }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
     name: sglang (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
@@ -235,8 +235,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: gpu-l40-amd64-test }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge-test }
+          - { arch: amd64, runner: gpu-l40-amd64 }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
     name: trtllm (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
@@ -342,7 +342,7 @@ jobs:
           python3 .github/workflows/upload_complete_workflow_metrics.py
 
   deploy-test-vllm:
-    runs-on: cpu-amd-m5-2xlarge-test
+    runs-on: cpu-amd-m5-2xlarge
     if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, operator, vllm]
     permissions:
@@ -544,7 +544,7 @@ jobs:
         echo "Namespace $NAMESPACE completed."
 
   deploy-test-sglang:
-    runs-on: cpu-amd-m5-2xlarge-test
+    runs-on: cpu-amd-m5-2xlarge
     if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, operator, sglang]
     permissions:
@@ -564,7 +564,7 @@ jobs:
     steps: *deploy-test-steps
 
   deploy-test-trtllm:
-    runs-on: cpu-amd-m5-2xlarge-test
+    runs-on: cpu-amd-m5-2xlarge
     if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, operator, trtllm]
     permissions:
