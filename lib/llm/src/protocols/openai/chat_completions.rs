@@ -67,21 +67,6 @@ pub type NvCreateChatCompletionResponse = dynamo_async_openai::types::CreateChat
 pub type NvCreateChatCompletionStreamResponse =
     dynamo_async_openai::types::CreateChatCompletionStreamResponse;
 
-impl NvCreateChatCompletionRequest {
-    /// Validates that no unknown fields are present in the request.
-    pub fn validate_no_unknown_fields(&self) -> Result<(), String> {
-        if !self.unsupported_fields.is_empty() {
-            let fields: Vec<_> = self
-                .unsupported_fields
-                .keys()
-                .map(|s| format!("`{}`", s))
-                .collect();
-            return Err(format!("Unsupported parameter(s): {}", fields.join(", ")));
-        }
-        Ok(())
-    }
-}
-
 /// Implements `NvExtProvider` for `NvCreateChatCompletionRequest`,
 /// providing access to NVIDIA-specific extensions.
 impl NvExtProvider for NvCreateChatCompletionRequest {
@@ -290,6 +275,7 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 /// allowing us to validate the data.
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
+        validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
         validate::validate_messages(&self.inner.messages)?;
         validate::validate_model(&self.inner.model)?;
         // none for store

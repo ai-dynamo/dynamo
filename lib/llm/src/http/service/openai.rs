@@ -714,14 +714,6 @@ pub fn validate_chat_completion_unsupported_fields(
         ));
     }
 
-    // Reject any unknown fields
-    request.validate_no_unknown_fields().map_err(|msg| {
-        ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: msg,
-        })
-    })?;
-
     Ok(())
 }
 
@@ -1832,7 +1824,7 @@ mod tests {
                 .contains_key("chat_template_kwargs")
         );
 
-        let result = validate_chat_completion_unsupported_fields(&request);
+        let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
