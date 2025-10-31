@@ -3,8 +3,12 @@
 
 //! CUDA device memory storage.
 
+use crate::block_manager::DeviceStorage as V1DeviceStorage;
+use crate::block_manager::Storage as V1Storage;
+
 use super::{MemoryRegion, Result, StorageError, StorageKind};
 use cudarc::driver::CudaContext;
+use nixl_sys::NixlDescriptor;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -68,6 +72,24 @@ impl DeviceStorage {
     /// Get the CUDA device ID this memory is allocated on.
     pub fn device_id(&self) -> u32 {
         self.device_id
+    }
+
+    pub fn from_v1(v1_storage: &V1DeviceStorage) -> Result<Self> {
+        let device_id = v1_storage.device_id() as u32;
+        let ctx = cuda_context(device_id)?;
+        let ptr;
+        unsafe {
+            ptr = v1_storage.as_ptr() as u64;
+        }
+
+        let len = v1_storage.size();
+
+        Ok(Self {
+            ctx,
+            ptr,
+            device_id,
+            len,
+        })
     }
 }
 
