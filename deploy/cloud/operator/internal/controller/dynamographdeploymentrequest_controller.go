@@ -159,7 +159,24 @@ const (
 const sidecarScriptTemplate = `
 set -e
 set -o pipefail
+# Wait for the profiler container to complete, not just for the file to exist
+# This ensures we capture the final config, not intermediate results
+echo "Waiting for profiler to complete..."
+while true; do
+  # Check if profiler container has finished (either Completed or Error state)
+  # Use kubectl to check the pod's container status
+  STATUS=$(kubectl get pod $HOSTNAME -n {{.Namespace}} -o jsonpath='{.status.containerStatuses[?(@.name=="profiler")].state}' 2>/dev/null || echo "")
+  if echo "$STATUS" | grep -q "terminated"; then
+    echo "Profiler container has terminated"
+    break
+  fi
+  sleep 5
+done
+
+# Now wait for the output file to exist
+echo "Waiting for output file {{.OutputPath}}/{{.OutputFile}}..."
 while [ ! -f {{.OutputPath}}/{{.OutputFile}} ]; do sleep 2; done
+echo "Output file found, creating ConfigMap..."
 
 # Start building ConfigMap YAML with DGD spec
 cat >/tmp/cm.yaml <<EOF
@@ -703,6 +720,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 		return errors.New("profilingConfig.config is required and must not be empty")
 	}
 
+	// Validate enableGpuDiscovery is only true for cluster-wide operators
+	if dgdr.Spec.EnableGpuDiscovery && r.Config.RestrictedNamespace != "" {
+		return errors.New("enableGpuDiscovery can only be set to true for cluster-wide operators. Namespace-restricted operators cannot access cluster nodes for GPU discovery. Please set enableGpuDiscovery to false and provide hardware configuration (hardware.min_num_gpus_per_engine, hardware.max_num_gpus_per_engine, hardware.num_gpus_per_node) in profilingConfig.config")
+	}
+
 	// Validate ConfigMap if provided (for the DGD base config)
 	if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
 		cm := &corev1.ConfigMap{}
@@ -918,6 +940,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		// Profiler args: pass the config as an inline YAML string via --profile-config
 		profilerArgs := []string{
 			"--profile-config", string(configYAML),
+		}
+
+		// Add --enable-gpu-discovery flag based on DGDR spec
+		// GPU discovery requires cluster-wide node access
+		if dgdr.Spec.EnableGpuDiscovery {
+			profilerArgs = append(profilerArgs, "--enable-gpu-discovery")
 		}
 
 		// Use profiler image from profilingConfig

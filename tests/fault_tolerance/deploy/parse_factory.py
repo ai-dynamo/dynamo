@@ -103,7 +103,9 @@ def parse_test_results(
     log_paths: Optional[List[str]] = None,
     tablefmt: str = "grid",
     sla: Optional[float] = None,
+    success_threshold: float = 90.0,
     force_parser: Optional[str] = None,
+    print_output: bool = True,
 ) -> Any:
     """Auto-detect and parse test results using the appropriate parser.
 
@@ -116,8 +118,10 @@ def parse_test_results(
         log_paths: List of log directories to process (for multiple directories)
         tablefmt: Table format for output (e.g., "fancy_grid", "pipe")
         sla: Optional SLA threshold for latency violations
+        success_threshold: Success rate threshold for pass/fail (default: 90.0)
         force_parser: Optional override to force using a specific parser
                      ("aiperf" or "legacy"). If not provided, auto-detection is used.
+        print_output: If True, print tables and summaries. If False, only return results.
 
     Returns:
         Results from the appropriate parser
@@ -189,6 +193,8 @@ def parse_test_results(
                 log_paths=log_paths,
                 tablefmt=tablefmt,
                 sla=sla,
+                success_threshold=success_threshold,
+                print_output=print_output,
             )
         else:
             return parse_aiperf(
@@ -196,6 +202,8 @@ def parse_test_results(
                 log_paths=None,
                 tablefmt=tablefmt,
                 sla=sla,
+                success_threshold=success_threshold,
+                print_output=print_output,
             )
 
     elif parser_type == "legacy":
@@ -209,6 +217,7 @@ def parse_test_results(
                 log_paths=log_paths,
                 tablefmt=tablefmt,
                 sla=sla,
+                print_output=print_output,
             )
         else:
             return parse_legacy(
@@ -216,6 +225,7 @@ def parse_test_results(
                 log_paths=None,
                 tablefmt=tablefmt,
                 sla=sla,
+                print_output=print_output,
             )
 
     else:
@@ -294,18 +304,18 @@ def print_result_info(log_dir: str) -> None:
     """
     info = get_result_info(log_dir)
 
-    print(f"\nTest Results Information: {log_dir}")
-    print("=" * 60)
-    print(f"Result Type: {info['type'] or 'Unknown'}")
-    print(f"Client Count: {info['client_count']}")
-    print(f"Has Test Log: {info['has_test_log']}")
+    logging.info(f"\nTest Results Information: {log_dir}")
+    logging.info("=" * 60)
+    logging.info(f"Result Type: {info['type'] or 'Unknown'}")
+    logging.info(f"Client Count: {info['client_count']}")
+    logging.info(f"Has Test Log: {info['has_test_log']}")
 
     if info["details"]:
-        print("\nDetails:")
+        logging.info("\nDetails:")
         for key, value in info["details"].items():
-            print(f"  {key}: {value}")
+            logging.info(f"  {key}: {value}")
 
-    print("=" * 60)
+    logging.info("=" * 60)
 
 
 if __name__ == "__main__":
@@ -354,7 +364,7 @@ if __name__ == "__main__":
             for log_path in args.log_paths:
                 print_result_info(log_path)
         else:
-            print("Error: Must provide log_dir or --log-paths")
+            logging.error("Must provide log_dir or --log-paths")
     else:
         # Parse mode
         try:

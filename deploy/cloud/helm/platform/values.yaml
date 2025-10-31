@@ -167,7 +167,7 @@ etcd:
     size: 1Gi
 
   # Pre-upgrade job configuration
-  preUpgrade:
+  preUpgradeJob:
     # Whether to run pre-upgrade validation jobs
     enabled: false
 
