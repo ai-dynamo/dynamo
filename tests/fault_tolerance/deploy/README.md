@@ -501,7 +501,7 @@ Then run the development container mounting the workspace and your kube config.
 By default, tests requiring custom builds (e.g., MoE models) are **automatically excluded**:
 
 ```bash
-# Standard tests only - no special flags needed
+# Standard tests only
 pytest tests/fault_tolerance/deploy/test_deployment.py -s -v \
   --namespace ${NAMESPACE} \
   --image ${IMAGE}
@@ -526,8 +526,7 @@ To run ONLY tests that require custom builds:
 pytest tests/fault_tolerance/deploy/test_deployment.py -s -v \
   --namespace ${NAMESPACE} \
   --image ${IMAGE} \
-  -m "custom_build" \
-  --include-custom-build
+  -m "custom_build"
 ```
 
 #### List Available Tests

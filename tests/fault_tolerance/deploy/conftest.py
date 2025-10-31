@@ -15,9 +15,7 @@
 
 import pytest
 
-from tests.fault_tolerance.deploy.scenarios import (
-    scenarios,  # Used by pytest_generate_tests
-)
+from tests.fault_tolerance.deploy.scenarios import scenarios
 
 
 def pytest_addoption(parser):
