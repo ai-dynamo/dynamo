@@ -9,6 +9,7 @@ Basic deployment pattern with frontend and a single decode worker.
 
 **Architecture:**
 - `Frontend`: OpenAI-compatible API server (with kv router mode disabled)
+- `ModelExpress`: Shared model caching service across workers
 - `VLLMDecodeWorker`: Single worker handling both prefill and decode
 
 ### 2. **Aggregated Router Deployment** (`agg_router.yaml`)
@@ -16,6 +17,7 @@ Enhanced aggregated deployment with KV cache routing capabilities.
 
 **Architecture:**
 - `Frontend`: OpenAI-compatible API server (with kv router mode enabled)
+- `ModelExpress`: Shared model caching service across workers
 - `VLLMDecodeWorker`: Single worker handling both prefill and decode
 
 ### 3. **Disaggregated Deployment** (`disagg.yaml`)
@@ -23,6 +25,7 @@ High-performance deployment with separated prefill and decode workers.
 
 **Architecture:**
 - `Frontend`: HTTP API server coordinating between workers
+- `ModelExpress`: Shared model caching service across workers
 - `VLLMDecodeWorker`: Specialized decode-only worker
 - `VLLMPrefillWorker`: Specialized prefill-only worker (`--is-prefill-worker`)
 - Communication via NIXL transfer backend
@@ -32,6 +35,7 @@ Advanced disaggregated deployment with KV cache routing capabilities.
 
 **Architecture:**
 - `Frontend`: HTTP API server with KV-aware routing
+- `ModelExpress`: Shared model caching service across workers
 - `VLLMDecodeWorker`: Specialized decode-only worker
 - `VLLMPrefillWorker`: Specialized prefill-only worker (`--is-prefill-worker`)
 
@@ -86,6 +90,18 @@ Before using these templates, ensure you have:
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for vLLM runtime images
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
+
+### Persistent Volume Claim (PVC)
+
+All templates expect a pre-created PVC named `model-cache-pvc` for the shared model cache used by ModelExpress and vLLM workers.
+
+Apply the shared PVC once per namespace before deploying any graph:
+
+```bash
+kubectl apply -f model_cache_pvc.yaml -n $NAMESPACE
+```
+
+Note: If your cluster requires a specific storage class, edit `model_cache_pvc.yaml` to set `storageClassName` accordingly.
 
 ### Container Images
 
@@ -143,6 +159,9 @@ Export the NAMESPACE you used in your Dynamo Cloud Installation.
 ```bash
 cd <dynamo-source-root>/examples/backends/vllm/deploy
 export DEPLOYMENT_FILE=agg.yaml
+
+# Create the shared model cache PVC (run once per namespace)
+kubectl apply -f model_cache_pvc.yaml -n $NAMESPACE
 
 kubectl apply -f $DEPLOYMENT_FILE -n $NAMESPACE
 ```
