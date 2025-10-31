@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # ConfigMap for prefill engine configuration
+# This configuration sets up a DEP 4 prefill worker
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -29,6 +30,7 @@ data:
 ---
 
 # ConfigMap for decode engine configuration
+# This configuration sets up a DEP 32 decode worker
 apiVersion: v1
 kind: ConfigMap
 metadata:
