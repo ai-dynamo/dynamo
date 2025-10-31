@@ -44,6 +44,10 @@ pub struct NvCreateChatCompletionRequest {
     /// Extra args to pass to the chat template rendering context
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template_args: Option<std::collections::HashMap<String, serde_json::Value>>,
+
+    /// Catch-all for unsupported fields - checked during validation
+    #[serde(flatten, default, skip_serializing)]
+    pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// A response structure for unary chat completion responses, embedding OpenAI's
@@ -62,6 +66,21 @@ pub type NvCreateChatCompletionResponse = dynamo_async_openai::types::CreateChat
 ///   using `serde(flatten)`.
 pub type NvCreateChatCompletionStreamResponse =
     dynamo_async_openai::types::CreateChatCompletionStreamResponse;
+
+impl NvCreateChatCompletionRequest {
+    /// Validates that no unknown fields are present in the request.
+    pub fn validate_no_unknown_fields(&self) -> Result<(), String> {
+        if !self.unsupported_fields.is_empty() {
+            let fields: Vec<_> = self
+                .unsupported_fields
+                .keys()
+                .map(|s| format!("`{}`", s))
+                .collect();
+            return Err(format!("Unsupported parameter(s): {}", fields.join(", ")));
+        }
+        Ok(())
+    }
+}
 
 /// Implements `NvExtProvider` for `NvCreateChatCompletionRequest`,
 /// providing access to NVIDIA-specific extensions.
