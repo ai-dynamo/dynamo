@@ -229,32 +229,23 @@ sweep:
 # Offline Profiling (AI Configurator - TensorRT-LLM only)
 sweep:
   use_ai_configurator: true
-aic:
-  system: h200_sxm
-  model_name: QWEN3_32B
-  backend_version: "0.20.0"
+  aic_system: h200_sxm
+  aic_model_name: QWEN3_32B
+  aic_backend_version: "0.20.0"
 ```
 
 > [!NOTE]
 > For detailed comparison, supported configurations, and limitations, see [SLA-Driven Profiling Documentation](/docs/benchmarks/sla_driven_profiling.md#profiling-methods).
 
-### GPU Discovery
+### Hardware Configuration
 
-By default, the DGDR controller automatically discovers available GPU resources. Optionally specify preferences:
-
-```yaml
-spec:
-  gpu:
-    type: h200           # GPU type (e.g., h100, h200)
-    count: 8             # Number of GPUs to use
-    memoryGB: 141        # GPU memory in GB
-```
+For details on hardware configuration and GPU discovery options, see [Hardware Configuration in SLA-Driven Profiling](/docs/benchmarks/sla_driven_profiling.md#hardware-configuration).
 
 ### Advanced Configuration
 
 #### Using Existing DGD Configs (Recommended for Custom Setups)
 
-If you have an existing DynamoGraphDeployment config (e.g., from `components/backends/*/deploy/disagg.yaml` or custom recipes), you can reference it via ConfigMap:
+If you have an existing DynamoGraphDeployment config (e.g., from `examples/backends/*/deploy/disagg.yaml` or custom recipes), you can reference it via ConfigMap:
 
 **Step 1: Create ConfigMap from your DGD config file:**
 

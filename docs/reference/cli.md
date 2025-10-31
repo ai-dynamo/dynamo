@@ -293,7 +293,7 @@ The default delay is 10ms, which produces approximately 100 tokens per second.
 
 ### Other engines, multi-node, production
 
-`vllm`, `sglang` and `trtllm` production grade engines are available in `components/backends`. They run as Python components, using the Rust bindings. See the main README.
+`vllm`, `sglang` and `trtllm` production grade engines are available in `examples/backends`. They run as Python components, using the Rust bindings. See the main README.
 
 `dynamo-run` is an exploration, development and prototyping tool, as well as an example of using the Rust API. Multi-node and production setups should be using the main engine components.
 
@@ -320,7 +320,7 @@ The output looks like this:
 
 ## Writing your own engine in Python
 
-The [dynamo](https://pypi.org/project/ai-dynamo/) Python library allows you to build your own engine and attach it to Dynamo. All of the main backend components in `components/backends/` work like this.
+The [dynamo](https://pypi.org/project/ai-dynamo/) Python library allows you to build your own engine and attach it to Dynamo. All of the main backend components in `examples/backends/` work like this.
 
 The Python file must do three things:
 1. Decorate a function to get the runtime
@@ -396,7 +396,7 @@ Here are some example engines:
 - Chat:
     * [sglang](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_sglang_tok.py)
 
-More fully-featured Python engines are in `components/backends`.
+More fully-featured Python engines are in `examples/backends`.
 
 ## Debugging
 

@@ -27,6 +27,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from tabulate import tabulate
 
+from tests.fault_tolerance.deploy.scenarios import (
+    OVERFLOW_SUFFIX,
+    RECOVERY_SUFFIX,
+    WORKER_MAP,
+    TestPhase,
+)
+
 
 def parse_test_log(
     file_path: str,
@@ -169,6 +176,67 @@ def extract_timestamp_from_log(
     return None
 
 
+def extract_test_info_from_dir(
+    process_logs_dir: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Extract backend and deployment type from process_logs_dir.
+
+    Args:
+        process_logs_dir: Path like test_fault_scenario[trtllm_agg_token_overflow_2x]
+
+    Returns:
+        Tuple of (backend, deploy_type) or (None, None) if not a token overflow test
+    """
+    test_name = os.path.basename(process_logs_dir)
+
+    # Check if this is a token overflow test
+    if "token_overflow" not in test_name:
+        return None, None
+
+    # Extract the content between brackets
+    match = re.search(r"\[([^\]]+)\]", test_name)
+    if not match:
+        return None, None
+
+    test_config = match.group(1)
+
+    # Parse backend and deployment type
+    # Format: {backend}_{deploy_type}_token_overflow_{multiplier}
+    parts = test_config.split("_")
+
+    if len(parts) < 4:
+        return None, None
+
+    backend = parts[0]  # vllm, trtllm, sglang
+    deploy_type = parts[1]  # agg or disagg
+
+    return backend, deploy_type
+
+
+def get_decode_worker_dir(backend: str, deploy_type: str) -> Optional[str]:
+    """
+    Get decode worker directory name from WORKER_MAP.
+    Reuses the exact logic from scenarios.py.
+
+    Args:
+        backend: Backend type (vllm, trtllm, sglang)
+        deploy_type: Deployment type (agg or disagg)
+
+    Returns:
+        Worker directory name
+    """
+    if backend not in WORKER_MAP:
+        return None
+
+    # For trtllm agg deployments, use different worker name
+    if backend == "trtllm" and deploy_type == "agg":
+        return WORKER_MAP[backend]["decode_agg"]  # "TRTLLMWorker"
+    else:
+        return WORKER_MAP[backend]["decode"]
+        # "TRTLLMDecodeWorker", "VllmDecodeWorker", or "decode"
+
+
 def calculate_recovery_time(
     failure_info: Optional[List[str]],
     process_logs_dir: str,
@@ -184,12 +252,33 @@ def calculate_recovery_time(
     Returns:
         Recovery time in seconds or None if not found
     """
-    if not failure_info:
-        return None
 
-    # Determine component type from failure info (strip any quotes)
-    component_type = failure_info[0].strip("'\"")  # e.g., "Frontend" or "decode"
-    component_dir = os.path.join(process_logs_dir, component_type)
+    if failure_info:
+        # Regular test - use failure info
+        component_type = failure_info[0].strip("'\"")  # e.g., "Frontend" or "decode"
+        component_dir = os.path.join(process_logs_dir, component_type)
+    else:
+        # Check if this is a mixed token test
+        backend, deploy_type = extract_test_info_from_dir(process_logs_dir)
+        if not backend or not deploy_type:
+            logging.warning(
+                f"Could not determine backend or deploy type for {process_logs_dir}"
+            )
+            return None
+
+        # Mixed token test - get decode worker directory
+        decode_worker_dir = get_decode_worker_dir(backend, deploy_type)
+        if not decode_worker_dir:
+            logging.warning(
+                f"Could not determine decode worker for {backend} {deploy_type}"
+            )
+            return None
+
+        component_dir = os.path.join(process_logs_dir, decode_worker_dir)
+        logging.info(
+            f"Mixed token test - using decode worker directory: {component_dir}"
+        )
+
     logging.info(f"Component directory: {component_dir}")
 
     if not os.path.exists(component_dir):
@@ -318,8 +407,9 @@ def parse_aiperf_client_results(log_dir: str) -> Dict[str, Any]:
 
                 # Fall back to input config if no requests were recorded
                 if request_count == 0 and "input_config" in client_metrics:
-                    loadgen_config = client_metrics.get("input_config", {}).get(
-                        "loadgen", {}
+                    input_config = client_metrics.get("input_config", {})
+                    loadgen_config = (
+                        input_config.get("loadgen", {}) if input_config else {}
                     )
                     request_count = loadgen_config.get("request_count", 0)
 
@@ -352,18 +442,21 @@ def parse_aiperf_client_results(log_dir: str) -> Dict[str, Any]:
                     all_metrics["p99_latencies"].append(request_latency["p99"] / 1000.0)
 
                 # Time to first token
-                ttft = client_metrics.get("time_to_first_token", {}).get("avg", None)
+                ttft_record = client_metrics.get("time_to_first_token", {})
+                ttft = ttft_record.get("avg", None) if ttft_record else None
                 if ttft:
                     all_metrics["ttft"].append(ttft / 1000.0)  # Convert ms to s
 
                 # Inter-token latency
-                itl = client_metrics.get("inter_token_latency", {}).get("avg", None)
+                itl_record = client_metrics.get("inter_token_latency", {})
+                itl = itl_record.get("avg", None) if itl_record else None
                 if itl:
                     all_metrics["itl"].append(itl / 1000.0)  # Convert ms to s
 
                 # Throughput from request_throughput record
-                req_throughput = client_metrics.get("request_throughput", {}).get(
-                    "avg", 0
+                throughput_record = client_metrics.get("request_throughput", {})
+                req_throughput = (
+                    throughput_record.get("avg", 0) if throughput_record else 0
                 )
                 if req_throughput:
                     all_metrics["throughputs"].append(req_throughput)
@@ -475,16 +568,75 @@ def print_summary_table(
             ["Avg Client Throughput", f"{np.mean(metrics['throughputs']):.2f} req/s"]
         )
 
-    # Print table
-    print("\n" + "=" * 60)
-    print("FAULT TOLERANCE TEST SUMMARY - AI-PERF")
-    print("=" * 60)
-    print(tabulate(rows, headers=headers, tablefmt=tablefmt))
-    print("=" * 60 + "\n")
+    # Log table
+    logging.info(
+        "\n" + "=" * 60 + "\n"
+        "FAULT TOLERANCE TEST SUMMARY - AI-PERF\n"
+        + "=" * 60
+        + "\n"
+        + tabulate(rows, headers=headers, tablefmt=tablefmt)
+        + "\n"
+        + "=" * 60
+        + "\n"
+    )
+
+
+def _process_test_phase_results(
+    test_phase: TestPhase,
+    metrics: Dict[str, Any],
+    success_threshold: float,
+) -> None:
+    """Helper function to process and log results for a specific test phase."""
+    if test_phase == TestPhase.OVERFLOW:
+        total_reqs = metrics.get("total_requests", 0)
+        failed_reqs = metrics.get("failed_requests", 0)
+        if total_reqs > 0:
+            failure_rate = (failed_reqs / total_reqs) * 100
+            logging.info(
+                "\n" + "=" * 60 + "\n"
+                "Processing OVERFLOW phase - Expecting rejections\n" + "=" * 60 + "\n"
+                f"\nOverflow Results: {failed_reqs}/{total_reqs} requests rejected ({failure_rate:.1f}%)"
+            )
+            if failure_rate < success_threshold:
+                logging.warning(
+                    f"Expected rejection rate >= {success_threshold}%, got {failure_rate:.1f}%"
+                )
+            else:
+                logging.info("Overflow validation working correctly")
+        else:
+            logging.warning("No requests to process, total_requests is 0.")
+
+    elif test_phase == TestPhase.RECOVERY:
+        total_reqs = metrics.get("total_requests", 0)
+        success_reqs = metrics.get("successful_requests", 0)
+        if total_reqs > 0:
+            success_rate = (success_reqs / total_reqs) * 100
+            logging.info(
+                "\n" + "=" * 60 + "\n"
+                "Processing RECOVERY phase - Expecting success\n" + "=" * 60 + "\n"
+                f"\nRecovery Results: {success_reqs}/{total_reqs} requests succeeded ({success_rate:.1f}%)"
+            )
+            if success_rate < success_threshold:
+                logging.warning(
+                    f"Expected success rate >= {success_threshold}%, got {success_rate:.1f}%"
+                )
+            else:
+                logging.info("System recovered successfully")
+        else:
+            logging.warning("No requests to process, total_requests is 0.")
+    elif test_phase == TestPhase.STANDARD:
+        # Standard test phase doesn't need special processing
+        pass
+    else:
+        raise ValueError(f"Unknown test phase: {test_phase}")
 
 
 def process_single_test(
-    log_dir: str, tablefmt: str = "grid", sla: Optional[float] = None
+    log_dir: str,
+    tablefmt: str = "grid",
+    sla: Optional[float] = None,
+    success_threshold: float = 90.0,
+    print_output: bool = True,
 ) -> Dict[str, Any]:
     """
     Process a single test log directory.
@@ -493,10 +645,20 @@ def process_single_test(
         log_dir: Directory containing test results
         tablefmt: Table format for output
         sla: Service level agreement for latency (optional)
+        success_threshold: Success rate threshold for pass/fail (default: 90.0)
+        print_output: If True, print tables and phase headers. If False, only return results.
 
     Returns:
         Dictionary with test results
     """
+    # Detect test phase (overflow or recovery) - check suffix to avoid ambiguity
+    test_phase = TestPhase.STANDARD
+
+    if log_dir.endswith(OVERFLOW_SUFFIX):
+        test_phase = TestPhase.OVERFLOW
+    elif log_dir.endswith(RECOVERY_SUFFIX):
+        test_phase = TestPhase.RECOVERY
+
     # Parse test configuration
     test_log = os.path.join(log_dir, "test.log.txt")
     startup_time, failure_info = parse_test_log(test_log)
@@ -512,10 +674,18 @@ def process_single_test(
     # Extract client count from metrics
     num_clients = metrics.get("num_clients", 0)
 
+    # Add phase information to metrics (store as string for JSON serialization)
+    metrics["test_phase"] = test_phase.name.lower()
+
+    # Process and print phase-specific results
+    if print_output:
+        _process_test_phase_results(test_phase, metrics, success_threshold)
+
     # Print summary
-    print_summary_table(
-        log_dir, num_clients, startup_time, recovery_time, metrics, tablefmt, sla
-    )
+    if print_output:
+        print_summary_table(
+            log_dir, num_clients, startup_time, recovery_time, metrics, tablefmt, sla
+        )
 
     return {
         "log_dir": log_dir,
@@ -526,11 +696,113 @@ def process_single_test(
     }
 
 
+def process_overflow_recovery_test(
+    overflow_path: str,
+    recovery_path: str,
+    tablefmt: str = "fancy_grid",
+    sla: Optional[float] = None,
+    success_threshold: float = 90.0,
+) -> Dict[str, Any]:
+    """
+    Process paired overflow/recovery test and print combined summary.
+
+    Args:
+        overflow_path: Path to overflow test directory
+        recovery_path: Path to recovery test directory
+        tablefmt: Table format for output
+        sla: Optional SLA threshold
+        success_threshold: Success rate threshold for pass/fail (default: 90.0)
+
+    Returns:
+        Combined results dictionary
+    """
+    overflow_results = process_single_test(
+        overflow_path, tablefmt, sla, success_threshold, print_output=False
+    )
+    recovery_results = process_single_test(
+        recovery_path, tablefmt, sla, success_threshold, print_output=False
+    )
+
+    combined_metrics = {
+        "total_requests": overflow_results["metrics"]["total_requests"]
+        + recovery_results["metrics"]["total_requests"],
+        "successful_requests": overflow_results["metrics"]["successful_requests"]
+        + recovery_results["metrics"]["successful_requests"],
+        "failed_requests": overflow_results["metrics"]["failed_requests"]
+        + recovery_results["metrics"]["failed_requests"],
+        # Performance metrics from recovery phase
+        "latencies": recovery_results["metrics"].get("latencies", []),
+        "ttft": recovery_results["metrics"].get("ttft", []),
+        "itl": recovery_results["metrics"].get("itl", []),
+        "throughputs": recovery_results["metrics"].get("throughputs", []),
+        "p50_latencies": recovery_results["metrics"].get("p50_latencies", []),
+        "p90_latencies": recovery_results["metrics"].get("p90_latencies", []),
+        "p99_latencies": recovery_results["metrics"].get("p99_latencies", []),
+    }
+
+    base_path = overflow_path
+    if overflow_path.endswith(OVERFLOW_SUFFIX):
+        base_path = overflow_path[: -len(OVERFLOW_SUFFIX)]
+    test_log_path = os.path.join(base_path, "test.log.txt")
+    startup_time, _ = parse_test_log(test_log_path)
+    recovery_time = calculate_recovery_time(failure_info=[], process_logs_dir=base_path)
+
+    if overflow_results["metrics"]["total_requests"] == 0:
+        overflow_rate = 0
+    else:
+        overflow_rate = (
+            overflow_results["metrics"]["failed_requests"]
+            / overflow_results["metrics"]["total_requests"]
+            * 100
+        )
+
+    if recovery_results["metrics"]["total_requests"] == 0:
+        recovery_rate = 0
+    else:
+        recovery_rate = (
+            recovery_results["metrics"]["successful_requests"]
+            / recovery_results["metrics"]["total_requests"]
+            * 100
+        )
+
+    logging.info(
+        "\n" + "=" * 60 + "\n"
+        "SESSION SUMMARY - COMBINED OVERFLOW/RECOVERY TEST\n" + "=" * 60 + "\n"
+        "\nPhase Breakdown:\n"
+        f"  Overflow: {overflow_results['metrics']['failed_requests']}/"
+        f"{overflow_results['metrics']['total_requests']} rejected ({overflow_rate:.1f}%)\n"
+        f"  Recovery: {recovery_results['metrics']['successful_requests']}/"
+        f"{recovery_results['metrics']['total_requests']} succeeded ({recovery_rate:.1f}%)"
+    )
+
+    print_summary_table(
+        log_dir=base_path,
+        num_clients=overflow_results["num_clients"],
+        startup_time=startup_time,
+        recovery_time=recovery_time,
+        metrics=combined_metrics,
+        tablefmt=tablefmt,
+        sla=sla,
+    )
+
+    return {
+        "log_dir": base_path,
+        "num_clients": overflow_results["num_clients"],
+        "startup_time": startup_time,
+        "recovery_time": recovery_time,
+        "metrics": combined_metrics,
+        "overflow_results": overflow_results,
+        "recovery_results": recovery_results,
+    }
+
+
 def main(
     logs_dir: Optional[str] = None,
     log_paths: Optional[List[str]] = None,
     tablefmt: str = "grid",
     sla: Optional[float] = None,
+    success_threshold: float = 90.0,
+    print_output: bool = True,
 ):
     """
     Main parser entry point with support for multiple log paths.
@@ -540,6 +812,8 @@ def main(
         log_paths: List of log directories to process
         tablefmt: Table format for output
         sla: Service level agreement for latency (optional)
+        success_threshold: Success rate threshold for pass/fail (default: 90.0)
+        print_output: If True, print tables and summaries. If False, only return results.
 
     Returns:
         Combined results from all processed tests
@@ -555,43 +829,75 @@ def main(
                 full_path = log_path
 
             if os.path.isdir(full_path):
-                print(f"\nProcessing: {full_path}")
-                results = process_single_test(full_path, tablefmt, sla)
+                logging.info(f"\nProcessing: {full_path}")
+                results = process_single_test(
+                    full_path, tablefmt, sla, success_threshold, print_output
+                )
                 all_results.append(results)
             else:
-                print(f"Warning: {full_path} is not a valid directory, skipping...")
+                logging.warning(f"{full_path} is not a valid directory, skipping...")
 
-        # If multiple tests, also print combined summary
-        if len(all_results) > 1:
-            print("\n" + "=" * 60)
-            print("COMBINED TEST SUMMARY")
-            print("=" * 60)
-
+        # If multiple tests, also log combined summary
+        if len(all_results) > 1 and print_output:
             total_requests = sum(r["metrics"]["total_requests"] for r in all_results)
             total_successful = sum(
                 r["metrics"]["successful_requests"] for r in all_results
             )
             total_failed = sum(r["metrics"]["failed_requests"] for r in all_results)
 
-            print(f"Total Tests: {len(all_results)}")
-            print(f"Total Requests: {total_requests}")
-            print(f"Total Successful: {total_successful}")
-            print(f"Total Failed: {total_failed}")
+            # Build summary message
+            summary_lines = [
+                "\n" + "=" * 60,
+                "COMBINED TEST SUMMARY",
+                "=" * 60,
+                f"Total Tests: {len(all_results)}",
+                f"Total Requests: {total_requests}",
+                f"Total Successful: {total_successful}",
+                f"Total Failed: {total_failed}",
+            ]
 
             if total_requests > 0:
-                print(
+                summary_lines.append(
                     f"Overall Success Rate: {(total_successful/total_requests)*100:.2f}%"
                 )
 
-            print("=" * 60 + "\n")
+            # Check if this is an overflow/recovery pair and show timing info
+            has_overflow = any(
+                r["log_dir"].endswith(OVERFLOW_SUFFIX) for r in all_results
+            )
+            has_recovery = any(
+                r["log_dir"].endswith(RECOVERY_SUFFIX) for r in all_results
+            )
+
+            if has_overflow and has_recovery:
+                # Find startup time from overflow phase
+                for r in all_results:
+                    if r["log_dir"].endswith(OVERFLOW_SUFFIX) and r.get("startup_time"):
+                        summary_lines.append(f"Startup Time: {r['startup_time']}")
+                        break
+
+                # Find recovery time stored in recovery phase
+                for r in all_results:
+                    if r["log_dir"].endswith(RECOVERY_SUFFIX) and r.get(
+                        "recovery_time"
+                    ):
+                        summary_lines.append(
+                            f"Recovery Time (gap between phases): {r['recovery_time']}"
+                        )
+                        break
+
+            summary_lines.append("=" * 60 + "\n")
+            logging.info("\n".join(summary_lines))
 
         return all_results
 
     elif logs_dir:
         # Process single directory
-        return process_single_test(logs_dir, tablefmt, sla)
+        return process_single_test(
+            logs_dir, tablefmt, sla, success_threshold, print_output
+        )
     else:
-        print("Error: Must provide either logs_dir or log_paths")
+        logging.error("Must provide either logs_dir or log_paths")
         return None
 
 

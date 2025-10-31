@@ -34,7 +34,7 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-DEFAULT_VLLM_CONFIG_PATH = "components/backends/vllm/deploy/disagg.yaml"
+DEFAULT_VLLM_CONFIG_PATH = "examples/backends/vllm/deploy/disagg.yaml"
 
 
 class VllmV1ConfigModifier:

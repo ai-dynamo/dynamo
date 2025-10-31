@@ -720,6 +720,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 		return errors.New("profilingConfig.config is required and must not be empty")
 	}
 
+	// Validate enableGpuDiscovery is only true for cluster-wide operators
+	if dgdr.Spec.EnableGpuDiscovery && r.Config.RestrictedNamespace != "" {
+		return errors.New("enableGpuDiscovery can only be set to true for cluster-wide operators. Namespace-restricted operators cannot access cluster nodes for GPU discovery. Please set enableGpuDiscovery to false and provide hardware configuration (hardware.min_num_gpus_per_engine, hardware.max_num_gpus_per_engine, hardware.num_gpus_per_node) in profilingConfig.config")
+	}
+
 	// Validate ConfigMap if provided (for the DGD base config)
 	if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
 		cm := &corev1.ConfigMap{}
@@ -935,6 +940,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		// Profiler args: pass the config as an inline YAML string via --profile-config
 		profilerArgs := []string{
 			"--profile-config", string(configYAML),
+		}
+
+		// Add --enable-gpu-discovery flag based on DGDR spec
+		// GPU discovery requires cluster-wide node access
+		if dgdr.Spec.EnableGpuDiscovery {
+			profilerArgs = append(profilerArgs, "--enable-gpu-discovery")
 		}
 
 		// Use profiler image from profilingConfig

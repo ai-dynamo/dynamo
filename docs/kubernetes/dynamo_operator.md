@@ -19,6 +19,85 @@ Dynamo operator is a Kubernetes operator that simplifies the deployment, configu
   3. Kubernetes resources (Deployments, Services, etc.) are created or updated to match the CR spec.
   4. Status fields are updated to reflect the current state.
 
+## Deployment Modes
+
+The Dynamo operator supports three deployment modes to accommodate different cluster environments and use cases:
+
+### 1. Cluster-Wide Mode (Default)
+
+The operator monitors and manages DynamoGraph resources across **all namespaces** in the cluster.
+
+**When to Use:**
+- You have full cluster admin access
+- You want centralized management of all Dynamo workloads
+- Standard production deployment on a dedicated cluster
+
+---
+
+### 2. Namespace-Scoped Mode
+
+The operator monitors and manages DynamoGraph resources **only in a specific namespace**. A lease marker is created to signal the operator's presence to any cluster-wide operators.
+
+**When to Use:**
+- You're on a shared/multi-tenant cluster
+- You only have namespace-level permissions
+- You want to test a new operator version in isolation
+- You need to avoid conflicts with other operators
+
+**Installation:**
+```bash
+helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz \
+  --namespace my-namespace \
+  --create-namespace \
+  --set dynamo-operator.namespaceRestriction.enabled=true
+```
+
+---
+
+### 3. Hybrid Mode
+
+A **cluster-wide operator** manages most namespaces, while **one or more namespace-scoped operators** run in specific namespaces (e.g., for testing new versions). The cluster-wide operator automatically detects and excludes namespaces with namespace-scoped operators using lease markers.
+
+**When to Use:**
+- Running production workloads with a stable operator version
+- Testing new operator versions in isolated namespaces without affecting production
+- Gradual rollout of operator updates
+- Development/staging environments on production clusters
+
+**How It Works:**
+1. Namespace-scoped operator creates a lease named `dynamo-operator-namespace-scope` in its namespace
+2. Cluster-wide operator watches for these lease markers across all namespaces
+3. Cluster-wide operator automatically excludes any namespace with a lease marker
+4. If namespace-scoped operator stops, its lease expires (TTL: 30s by default)
+5. Cluster-wide operator automatically resumes managing that namespace
+
+**Setup Example:**
+
+```bash
+# 1. Install cluster-wide operator (production, v1.0.0)
+helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz \
+  --namespace dynamo-system \
+  --create-namespace
+
+# 2. Install namespace-scoped operator (testing, v2.0.0-beta)
+helm install dynamo-test dynamo-platform-${RELEASE_VERSION}.tgz \
+  --namespace test-namespace \
+  --create-namespace \
+  --set dynamo-operator.namespaceRestriction.enabled=true \
+  --set dynamo-operator.controllerManager.manager.image.tag=v2.0.0-beta
+
+**Observability:**
+
+```bash
+# List all namespaces with local operators
+kubectl get lease -A --field-selector metadata.name=dynamo-operator-namespace-scope
+
+# Check which operator version is running in a namespace
+kubectl get lease -n my-namespace dynamo-operator-namespace-scope \
+  -o jsonpath='{.spec.holderIdentity}'
+```
+
+
 ## Custom Resource Definitions (CRDs)
 
 For the complete technical API reference for Dynamo Custom Resource Definitions, see:
@@ -39,14 +118,7 @@ helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
 ```
 
-For namespace-restricted installations (shared clusters), you'll need to install the Dynamo platform in each namespace you want to deploy to.
-Namespace restriction is enabled by setting the `dynamo-operator.namespaceRestriction.enabled` flag to `true`.
-```bash
-helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz \
-  --namespace ${NAMESPACE} \
-  --create-namespace \
-  --set dynamo-operator.namespaceRestriction.enabled=true
-```
+> **Note:** For shared/multi-tenant clusters or testing scenarios, see [Deployment Modes](#deployment-modes) above for namespace-scoped and hybrid configurations.
 
 ### Building from Source
 

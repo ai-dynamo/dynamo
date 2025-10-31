@@ -138,6 +138,15 @@ spec:
                         Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
                       type: string
                   type: object
+                enableGpuDiscovery:
+                  default: false
+                  description: |-
+                    EnableGpuDiscovery controls whether the profiler should automatically discover GPU
+                    resources from the Kubernetes cluster nodes. When enabled, the profiler will override
+                    any manually specified hardware configuration (min_num_gpus_per_engine, max_num_gpus_per_engine,
+                    num_gpus_per_node) with values detected from the cluster.
+                    Requires cluster-wide node access permissions - only available with cluster-scoped operators.
+                  type: boolean
                 model:
                   description: |-
                     Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").

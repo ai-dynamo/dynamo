@@ -30,7 +30,7 @@ class TestProfileSlaAiconfigurator:
                 self.model = ""
                 self.dgd_image = ""
                 self.backend = "trtllm"
-                self.config = "components/backends/trtllm/deploy/disagg.yaml"
+                self.config = "examples/backends/trtllm/deploy/disagg.yaml"
                 self.output_dir = "/tmp/test_profiling_results"
                 self.namespace = "test-namespace"
                 self.min_num_gpus_per_engine = 1

@@ -60,9 +60,9 @@ spec:
 - No worker-side configuration changes needed
 
 **Complete K8s Examples:**
-- [TRT-LLM aggregated router example](../../components/backends/trtllm/deploy/agg_router.yaml)
-- [vLLM aggregated router example](../../components/backends/vllm/deploy/agg_router.yaml)
-- [SGLang aggregated router example](../../components/backends/sglang/deploy/agg_router.yaml)
+- [TRT-LLM aggregated router example](../../examples/backends/trtllm/deploy/agg_router.yaml)
+- [vLLM aggregated router example](../../examples/backends/vllm/deploy/agg_router.yaml)
+- [SGLang aggregated router example](../../examples/backends/sglang/deploy/agg_router.yaml)
 - [Distributed inference tutorial](../../examples/basics/kubernetes/Distributed_Inference/agg_router.yaml)
 
 **For A/B Testing and Advanced K8s Setup:**

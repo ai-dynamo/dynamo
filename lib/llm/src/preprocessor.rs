@@ -11,6 +11,7 @@
 //!
 //! The Preprocessor will accept any IngressRequest and transform it to a BackendRequest.
 
+pub mod media;
 pub mod prompt;
 pub mod tools;
 use anyhow::Context;
@@ -26,11 +27,11 @@ use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
+use crate::preprocessor::media::MediaLoader;
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder,
 };
-
 use crate::tokenizers::Encoding;
 
 use dynamo_parsers::{ReasoningParser, ReasoningParserType};
@@ -113,6 +114,7 @@ pub struct OpenAIPreprocessor {
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
     tool_call_parser: Option<String>,
+    media_loader: Option<MediaLoader>,
 }
 
 impl OpenAIPreprocessor {
@@ -141,7 +143,7 @@ impl OpenAIPreprocessor {
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
-
+        let media_loader = None; // TODO: enable with decoder config from MDC
         Ok(Arc::new(Self {
             formatter,
             tokenizer,
@@ -149,6 +151,7 @@ impl OpenAIPreprocessor {
             mdcsum,
             runtime_config,
             tool_call_parser,
+            media_loader,
         }))
     }
     /// Encode a string to it's tokens
@@ -162,7 +165,7 @@ impl OpenAIPreprocessor {
     /// Annotations evaluated by this method include:
     /// - `formatted_prompt`
     /// - `token_ids`
-    pub fn preprocess_request<
+    pub async fn preprocess_request<
         R: OAIChatLikeRequest
             + AnnotationsProvider
             + SamplingOptionsProvider
@@ -181,6 +184,7 @@ impl OpenAIPreprocessor {
             .gather_tokens(request, &mut builder, formatted_prompt)
             .with_context(|| "Failed to gather tokens")?;
         self.gather_multi_modal_data(request, &mut builder)
+            .await
             .with_context(|| "Failed to gather multimodal data")?;
 
         Ok((builder.build()?, annotations))
@@ -267,7 +271,7 @@ impl OpenAIPreprocessor {
         }
     }
 
-    pub fn gather_multi_modal_data<R: OAIChatLikeRequest>(
+    pub async fn gather_multi_modal_data<R: OAIChatLikeRequest>(
         &self,
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
@@ -275,6 +279,7 @@ impl OpenAIPreprocessor {
         let messages = request.messages();
         let message_count = messages.len().unwrap_or(0);
         let mut media_map: MultimodalDataMap = HashMap::new();
+        let mut fetch_tasks = Vec::new();
 
         for idx in 0..message_count {
             let msg = messages
@@ -307,10 +312,31 @@ impl OpenAIPreprocessor {
                     _ => continue,
                 };
 
-                let map_item = media_map.entry(type_str.clone()).or_default();
-                map_item.push(MultimodalData::Url(url));
+                if self.media_loader.is_some() {
+                    fetch_tasks.push((type_str, content_part.clone()));
+                } else {
+                    // No loader, just pass the URL through
+                    media_map
+                        .entry(type_str)
+                        .or_default()
+                        .push(MultimodalData::Url(url));
+                }
             }
         }
+
+        // Execute all fetch tasks
+        if !fetch_tasks.is_empty() {
+            let loader = self.media_loader.as_ref().unwrap();
+            let _results = futures::future::join_all(
+                fetch_tasks
+                    .iter()
+                    .map(|(_, content_part)| loader.fetch_media_part(content_part)),
+            )
+            .await;
+
+            // TODO: decode and pass NIXL descriptors to the media map
+        }
+
         if !media_map.is_empty() {
             builder.multi_modal_data(Some(media_map));
         }
@@ -839,7 +865,7 @@ impl
         let response_generator = request.response_generator(context.id().to_string());
 
         // convert the chat completion request to a common completion request
-        let (common_request, annotations) = self.preprocess_request(&request)?;
+        let (common_request, annotations) = self.preprocess_request(&request).await?;
 
         let mut response_generator = Box::new(response_generator);
 
@@ -974,7 +1000,7 @@ impl
         // convert the chat completion request to a common completion request
         let mut builder = self.builder(&request)?;
         let annotations = self.gather_tokens(&request, &mut builder, None)?;
-        self.gather_multi_modal_data(&request, &mut builder)?;
+        self.gather_multi_modal_data(&request, &mut builder).await?;
 
         let common_request = builder.build()?;
 

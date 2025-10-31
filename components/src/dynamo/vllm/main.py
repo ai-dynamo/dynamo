@@ -106,7 +106,7 @@ async def worker(runtime: DistributedRuntime):
     elif config.multimodal_encode_worker:
         await init_multimodal_encode_worker(runtime, config)
         logger.debug("init_multimodal_encode_worker completed")
-    elif config.multimodal_worker:
+    elif config.multimodal_worker or config.multimodal_encode_prefill_worker:
         await init_multimodal_worker(runtime, config)
         logger.debug("init_multimodal_worker completed")
     elif config.is_prefill_worker:
@@ -605,8 +605,15 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
 
 
 async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
-    """Initialize multimodal worker component for aggregated or disaggregated mode"""
+    """
+    Initialize multimodal worker component.
 
+    Supports two modes:
+    1. --multimodal-worker: Receives embeddings from separate encoder
+    2. --multimodal-encode-prefill-worker: Handles inline encoding (e.g., Llama 4)
+
+    Both can operate in aggregated (P+D) or disaggregated (P→D) mode.
+    """
     component = runtime.namespace(config.namespace).component(config.component)
     await component.create_service()
 
@@ -615,16 +622,12 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
 
     engine_client, vllm_config, default_sampling_params = setup_vllm_engine(config)
 
-    # TODO: Support Disaggregated mode separately
-    client = (
-        await runtime.namespace(config.namespace)
-        .component("backend")
-        .endpoint("generate")
-        .client()
-    )
+    # For aggregated mode, no downstream client is needed
+    # TODO: Implement disaggregated mode with proper decode worker client
+    downstream_client = None
 
     handler = MultimodalPDWorkerHandler(
-        runtime, component, engine_client, config, client
+        runtime, component, engine_client, config, downstream_client
     )
 
     await handler.async_init(runtime)
@@ -637,14 +640,15 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
         handler.kv_publisher = kv_publisher
 
     metrics_labels = [("model", config.model)]
-
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
-                handler.generate, metrics_labels=metrics_labels
+                handler.generate,
+                metrics_labels=metrics_labels,
             ),
             clear_endpoint.serve_endpoint(
-                handler.clear_kv_blocks, metrics_labels=metrics_labels
+                handler.clear_kv_blocks,
+                metrics_labels=metrics_labels,
             ),
         )
     except Exception as e:

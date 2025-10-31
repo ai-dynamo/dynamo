@@ -31,7 +31,7 @@ class VLLMConfig(EngineConfig):
 
 
 vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
-    WORKSPACE_DIR, "components/backends/vllm"
+    WORKSPACE_DIR, "examples/backends/vllm"
 )
 
 # vLLM test configurations
