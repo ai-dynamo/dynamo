@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-ARG SGLANG_IMAGE_TAG="v0.5.4.post1"
+ARG SGLANG_IMAGE_TAG="v0.5.3.post2"
 ARG BRANCH_TYPE
 ARG CARGO_BUILD_JOBS
 

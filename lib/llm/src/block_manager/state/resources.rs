@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use crate::block_manager::events::DynamoEventManager;
 
 impl Resources {
     /// Create a new [`Resources`] instance
-    pub fn new(config: KvBlockManagerConfig) -> Result<Self> {
+    pub async fn new(config: KvBlockManagerConfig) -> Result<Self> {
         config
             .runtime
             .validate()
@@ -18,13 +19,34 @@ impl Resources {
 
         let global_registry = GlobalRegistry::default();
 
-        let event_manager = config
-            .event_manager
-            .clone()
-            .unwrap_or_else(|| NullEventManager::new());
-
-        // Create a NIXL agent if NIXL is enabled and instantiate requested backends
-        // TODO: Build a map of NIXL backends to block pools/sets
+        // Create event manager based on configuration:
+        // 1. If explicit event_manager provided, use it
+        // 2. Else if consolidator_config provided, create DynamoEventManager with consolidator
+        // 3. Else use NullEventManager (no event reporting)
+        let event_manager = if let Some(ref event_mgr) = config.event_manager {
+            tracing::info!("Using explicit event_manager from config");
+            event_mgr.clone()
+        } else if let Some(consolidator_config) = config.consolidator_config.clone() {
+            tracing::info!(
+                "Creating DynamoEventManager with kv event consolidator config: vllm={}, output={}",
+                consolidator_config.vllm_event_endpoint,
+                consolidator_config.consolidated_event_endpoint
+            );
+            // Create DynamoEventManager with consolidator config (async)
+            match DynamoEventManager::new_with_config(consolidator_config).await {
+                Ok(manager) => manager as Arc<dyn EventManager>,
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to create DynamoEventManager with consolidator: {}, fallback to NullEventManager",
+                        e
+                    );
+                    NullEventManager::new()
+                }
+            }
+        } else {
+            tracing::info!("Using NullEventManager");
+            NullEventManager::new()
+        };
 
         let mut nixl_backends: HashMap<String, Arc<nixl_sys::Backend>> = HashMap::new();
 
