@@ -6,6 +6,7 @@ use anyhow::Result;
 use dynamo_llm::block_manager::block::{
     data::logical::distributed_leader_worker::DistributedLeaderWorkerResources, locality::Logical,
 };
+use dynamo_llm::block_manager::kv_consolidator::KvEventConsolidatorConfig;
 use dynamo_llm::block_manager::offload::filter::FrequencyFilter;
 use dynamo_llm::block_manager::{BasicMetadata, BlockParallelismStrategy};
 
@@ -252,6 +253,7 @@ pub struct BlockManagerBuilder {
     page_size: usize,
     disable_device_pool: bool,
     kvbm_metrics: Option<dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics>,
+    consolidator_config: Option<(String, String)>, // (vllm_endpoint, output_endpoint)
 }
 
 impl BlockManagerBuilder {
@@ -283,6 +285,11 @@ impl BlockManagerBuilder {
         metrics: dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics,
     ) -> Self {
         self.kvbm_metrics = Some(metrics);
+        self
+    }
+
+    pub fn consolidator_config(mut self, vllm_endpoint: String, output_endpoint: String) -> Self {
+        self.consolidator_config = Some((vllm_endpoint, output_endpoint));
         self
     }
 
@@ -356,6 +363,12 @@ impl BlockManagerBuilder {
         if let Some(kvbm_metrics) = self.kvbm_metrics {
             config_builder = config_builder.kvbm_metrics(Some(kvbm_metrics));
         }
+
+        if let Some((vllm_ep, output_ep)) = self.consolidator_config {
+            let consolidator_config = KvEventConsolidatorConfig::new(vllm_ep, output_ep);
+            config_builder = config_builder.consolidator_config(consolidator_config);
+        }
+
         let config = config_builder.build()?;
 
         let resources =

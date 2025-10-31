@@ -119,7 +119,7 @@ impl KeyValueBucket for NATSBucket {
     async fn insert(
         &self,
         key: &Key,
-        value: &str,
+        value: bytes::Bytes,
         revision: u64,
     ) -> Result<StoreOutcome, StoreError> {
         if revision == 0 {
@@ -195,8 +195,8 @@ impl KeyValueBucket for NATSBucket {
 }
 
 impl NATSBucket {
-    async fn create(&self, key: &Key, value: &str) -> Result<StoreOutcome, StoreError> {
-        match self.nats_store.create(&key, value.to_string().into()).await {
+    async fn create(&self, key: &Key, value: bytes::Bytes) -> Result<StoreOutcome, StoreError> {
+        match self.nats_store.create(&key, value).await {
             Ok(revision) => Ok(StoreOutcome::Created(revision)),
             Err(err) if err.kind() == async_nats::jetstream::kv::CreateErrorKind::AlreadyExists => {
                 // key exists, get the revsion
@@ -219,14 +219,10 @@ impl NATSBucket {
     async fn update(
         &self,
         key: &Key,
-        value: &str,
+        value: bytes::Bytes,
         revision: u64,
     ) -> Result<StoreOutcome, StoreError> {
-        match self
-            .nats_store
-            .update(key, value.to_string().into(), revision)
-            .await
-        {
+        match self.nats_store.update(key, value.clone(), revision).await {
             Ok(revision) => Ok(StoreOutcome::Created(revision)),
             Err(err)
                 if err.kind() == async_nats::jetstream::kv::UpdateErrorKind::WrongLastRevision =>
@@ -240,16 +236,16 @@ impl NATSBucket {
 
     /// We have the wrong revision for a key. Fetch it's entry to get the correct revision,
     /// and try the update again.
-    async fn resync_update(&self, key: &Key, value: &str) -> Result<StoreOutcome, StoreError> {
+    async fn resync_update(
+        &self,
+        key: &Key,
+        value: bytes::Bytes,
+    ) -> Result<StoreOutcome, StoreError> {
         match self.nats_store.entry(key).await {
             Ok(Some(entry)) => {
                 // Re-try the update with new version number
                 let next_rev = entry.revision + 1;
-                match self
-                    .nats_store
-                    .update(key, value.to_string().into(), next_rev)
-                    .await
-                {
+                match self.nats_store.update(key, value, next_rev).await {
                     Ok(correct_revision) => Ok(StoreOutcome::Created(correct_revision)),
                     Err(err) => Err(StoreError::NATSError(format!(
                         "Error during update of key {key} after resync: {err}"

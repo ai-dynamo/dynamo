@@ -63,9 +63,47 @@ class KvConnectorLeader:
         leader = KvbmLeader(world_size, drt=self.drt)
 
         print(f"KvConnectorLeader initialized with engine_id: {engine_id}")
-        self._connector = RustKvConnectorLeader(
-            engine_id, self.drt, vllm_config.cache_config.block_size, leader
-        )
+        # Get kv event consolidator endpoints from vllm_config (pre-computed in main.py)
+        consolidator_vllm_endpoint = None
+        consolidator_output_endpoint = None
+        self._consolidator_output_port = None
+
+        if (
+            hasattr(vllm_config, "consolidator_endpoints")
+            and vllm_config.consolidator_endpoints
+        ):
+            # Unpack all three endpoints
+            # [0]: vllm_endpoint (for consolidator to subscribe to vLLM)
+            # [1]: output_bind_endpoint (for consolidator to bind/publish)
+            # [2]: output_connect_endpoint (for clients to connect)
+            (
+                consolidator_vllm_endpoint,
+                consolidator_output_endpoint,
+                _consolidator_output_connect_endpoint,  # Not needed here
+            ) = vllm_config.consolidator_endpoints
+            self._consolidator_output_port = int(
+                consolidator_output_endpoint.split(":")[-1]
+            )
+
+            # Pass endpoints to Rust
+            self._connector = RustKvConnectorLeader(
+                engine_id,
+                self.drt,
+                vllm_config.cache_config.block_size,
+                leader,
+                consolidator_vllm_endpoint=consolidator_vllm_endpoint,
+                consolidator_output_endpoint=consolidator_output_endpoint,
+            )
+        else:
+            # No kv event consolidator - pass None to Rust
+            self._connector = RustKvConnectorLeader(
+                engine_id,
+                self.drt,
+                vllm_config.cache_config.block_size,
+                leader,
+                consolidator_vllm_endpoint=None,
+                consolidator_output_endpoint=None,
+            )
 
     # KV Connector
 

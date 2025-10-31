@@ -19,25 +19,17 @@ limitations under the License.
 
 This directory contains the core components that make up the Dynamo inference framework. Each component serves a specific role in the distributed LLM serving architecture, enabling high-throughput, low-latency inference across multiple nodes and GPUs.
 
-## Supported Inference Engines
-
-Dynamo supports multiple inference engines (with a focus on SGLang, vLLM, and TensorRT-LLM), each with their own deployment configurations and capabilities:
-
-- **[vLLM](/docs/backends/vllm/README.md)** - High-performance LLM inference with native KV cache events and NIXL-based transfer mechanisms
-- **[SGLang](/docs/backends/sglang/README.md)** - Structured generation language framework with ZMQ-based communication
-- **[TensorRT-LLM](/docs/backends/trtllm/README.md)** - NVIDIA's optimized LLM inference engine with TensorRT acceleration
-
-Each engine provides launch scripts for different deployment patterns in their respective `/launch` & `/deploy` directories.
-
 ## Core Components
 
-### [Backends](backends/)
+### Backends
 
-The backends directory contains inference engine integrations and implementations, with a key focus on:
+Dynamo supports multiple inference engines, each with their own deployment configurations and capabilities:
 
-- **vLLM** - Full-featured vLLM integration with disaggregated serving, KV-aware routing, and SLA-based planning
-- **SGLang** - SGLang engine integration supporting disaggregated serving and KV-aware routing
-- **TensorRT-LLM** - TensorRT-LLM integration with disaggregated serving capabilities
+- **[vLLM](/docs/backends/vllm/README.md)** - Full-featured vLLM integration with disaggregated serving, KV-aware routing, SLA-based planning, native KV cache events, and NIXL-based transfer mechanisms
+- **[SGLang](/docs/backends/sglang/README.md)** - SGLang engine integration with ZMQ-based communication, supporting disaggregated serving and KV-aware routing
+- **[TensorRT-LLM](/docs/backends/trtllm/README.md)** - TensorRT-LLM integration with disaggregated serving capabilities and TensorRT acceleration
+
+Each engine provides launch and deploy scripts for different deployment patterns in the [examples](../examples/backends/) folder.
 
 
 ### [Frontend](src/dynamo/frontend/)

@@ -35,6 +35,7 @@ extensions = [
 
 # Redirects configuration
 redirects = {
+    # PR  #3802
     "guides/tool-calling": "../agents/tool-calling.html",  # key format corrected
     "architecture/architecture": "../design_docs/architecture.html",
     "architecture/disagg_serving": "../design_docs/disagg_serving.html",
@@ -48,6 +49,40 @@ redirects = {
     "kubernetes/logging": "../kubernetes/observability/logging.html",
     "kubernetes/metrics": "../kubernetes/observability/metrics.html",
     "architecture/kv_cache_routing": "../router/kv_cache_routing.html",
+    # PR #3658
+    "API/nixl_connect/README": "../../api/nixl_connect/README.html",
+    "API/nixl_connect/connector": "../../api/nixl_connect/connector.html",
+    "API/nixl_connect/descriptor": "../../api/nixl_connect/descriptor.html",
+    "API/nixl_connect/device": "../../api/nixl_connect/device.html",
+    "API/nixl_connect/device_kind": "../../api/nixl_connect/device_kind.html",
+    "API/nixl_connect/operation_status": "../../api/nixl_connect/operation_status.html",
+    "API/nixl_connect/rdma_metadata": "../../api/nixl_connect/rdma_metadata.html",
+    "API/nixl_connect/read_operation": "../../api/nixl_connect/read_operation.html",
+    "API/nixl_connect/readable_operation": "../../api/nixl_connect/readable_operation.html",
+    "API/nixl_connect/writable_operation": "../../api/nixl_connect/writable_operation.html",
+    "API/nixl_connect/write_operation": "../../api/nixl_connect/write_operation.html",
+    "guides/backend": "../development/backend-guide.html",
+    "runtime/README": "../development/runtime-guide.html",
+    "guides/tool_calling": "../agents/tool-calling.html",
+    "architecture/kvbm_architecture": "../kvbm/kvbm_architecture.html",
+    "architecture/kvbm_components": "../kvbm/kvbm_components.html",
+    "architecture/kvbm_intro": "../kvbm/kvbm_intro.html",
+    "architecture/kvbm_motivation": "../kvbm/kvbm_motivation.html",
+    "architecture/kvbm_reading": "../kvbm/kvbm_reading.html",
+    "guides/run_kvbm_in_trtllm": "../kvbm/trtllm-setup.html",
+    "guides/run_kvbm_in_vllm": "../kvbm/vllm-setup.html",
+    "guides/health_check": "../observability/health-checks.html",
+    "guides/logging": "../observability/logging.html",
+    "guides/metrics": "../observability/metrics.html",
+    "guides/disagg_perf_tuning": "../performance/tuning.html",
+    "architecture/load_planner": "../planner/load_planner.html",
+    "architecture/planner_intro": "../planner/planner_intro.html",
+    "architecture/sla_planner": "../planner/sla_planner.html",
+    "kubernetes/sla_planner_quickstart": "../planner/sla_planner_quickstart.html",
+    "guides/dynamo_run": "../reference/cli.html",
+    "dynamo_glossary": "../reference/glossary.html",
+    "support_matrix": "../reference/support-matrix.html",
+    "components/router/README": "../router/README.html",
 }
 
 # Custom extensions

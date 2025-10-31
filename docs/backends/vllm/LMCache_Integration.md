@@ -43,7 +43,7 @@ For advanced configurations, LMCache supports multiple [storage backends](https:
 Use the provided launch script for quick setup:
 
 ```bash
-./components/backends/vllm/launch/agg_lmcache.sh
+./examples/backends/vllm/launch/agg_lmcache.sh
 ```
 
 This will:
@@ -69,7 +69,7 @@ The same `ENABLE_LMCACHE=1` environment variable enables LMCache, but the system
 Use the provided disaggregated launch script(the script requires at least 2 GPUs):
 
 ```bash
-./components/backends/vllm/launch/disagg_lmcache.sh
+./examples/backends/vllm/launch/disagg_lmcache.sh
 ```
 
 This will:

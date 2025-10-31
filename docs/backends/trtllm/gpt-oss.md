@@ -128,7 +128,7 @@ You can use the provided launch script or run the components manually:
 #### Option A: Using the Launch Script
 
 ```bash
-cd /workspace/components/backends/trtllm
+cd /workspace/examples/backends/trtllm
 ./launch/gpt_oss_disagg.sh
 ```
 
@@ -136,8 +136,6 @@ cd /workspace/components/backends/trtllm
 
 1. **Start frontend**:
 ```bash
-cd /workspace/dynamo/components/backends/trtllm
-
 # Start frontend with round-robin routing
 python3 -m dynamo.frontend --router-mode round-robin --http-port 8000 &
 ```

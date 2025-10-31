@@ -409,7 +409,7 @@ def llm_server(request, runtime_services):
     if importlib.util.find_spec("vllm") is not None:
         server_type = ServerType.vllm
     else:
-        raise Exception("vllm module is not available in the current environment.")
+        pytest.skip("vllm module is not available in the current environment.")
 
     server_manager = LLMServerManager(
         port=port,

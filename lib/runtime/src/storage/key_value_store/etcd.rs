@@ -66,7 +66,7 @@ impl KeyValueBucket for EtcdBucket {
     async fn insert(
         &self,
         key: &Key,
-        value: &str,
+        value: bytes::Bytes,
         // "version" in etcd speak. revision is a global cluster-wide value
         revision: u64,
     ) -> Result<StoreOutcome, StoreError> {
@@ -169,7 +169,11 @@ impl KeyValueBucket for EtcdBucket {
 }
 
 impl EtcdBucket {
-    async fn create(&self, key: &Key, value: &str) -> Result<StoreOutcome, StoreError> {
+    async fn create(
+        &self,
+        key: &Key,
+        value: impl Into<Vec<u8>>,
+    ) -> Result<StoreOutcome, StoreError> {
         let k = make_key(&self.bucket_name, key);
         tracing::trace!("etcd create: {k}");
 
@@ -215,7 +219,7 @@ impl EtcdBucket {
     async fn update(
         &self,
         key: &Key,
-        value: &str,
+        value: impl AsRef<[u8]>,
         revision: u64,
     ) -> Result<StoreOutcome, StoreError> {
         let version = revision;
@@ -328,7 +332,7 @@ mod concurrent_create_tests {
                 let result = bucket_clone
                     .lock()
                     .await
-                    .insert(&key_clone, &value_clone, 0)
+                    .insert(&key_clone, value_clone.into(), 0)
                     .await;
 
                 match result {

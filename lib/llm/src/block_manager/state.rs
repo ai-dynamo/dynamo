@@ -100,7 +100,7 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
 {
     pub async fn new(config: KvBlockManagerConfig, logical_resources: R) -> Result<Arc<Self>> {
         let model_config = config.model.clone();
-        let mut resources = Resources::new(config)?;
+        let mut resources = Resources::new(config).await?;
         let block_data_factories =
             logical::LogicalBlockFactories::new(&mut resources, logical_resources)?;
 
@@ -220,7 +220,7 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
 impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
     pub async fn new(config: KvBlockManagerConfig) -> Result<Arc<Self>> {
         let model_config = config.model.clone();
-        let mut resources = Resources::new(config)?;
+        let mut resources = Resources::new(config).await?;
         let block_data_factories = local::LocalBlockDataFactories::new(&mut resources)?;
 
         let (mut local_block_set, disk_factory, host_factory, device_factory) =

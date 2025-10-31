@@ -46,7 +46,7 @@ class TestProfileSLADryRun:
         class Args:
             def __init__(self):
                 self.backend = "vllm"
-                self.config = "components/backends/vllm/deploy/disagg.yaml"
+                self.config = "examples/backends/vllm/deploy/disagg.yaml"
                 self.output_dir = "/tmp/test_profiling_results"
                 self.namespace = "test-namespace"
                 self.model = ""
@@ -82,7 +82,7 @@ class TestProfileSLADryRun:
         class Args:
             def __init__(self):
                 self.backend = "sglang"
-                self.config = "components/backends/sglang/deploy/disagg.yaml"
+                self.config = "examples/backends/sglang/deploy/disagg.yaml"
                 self.output_dir = "/tmp/test_profiling_results"
                 self.namespace = "test-namespace"
                 self.model = ""
@@ -132,7 +132,7 @@ class TestProfileSLADryRun:
         class Args:
             def __init__(self):
                 self.backend = "trtllm"
-                self.config = "components/backends/trtllm/deploy/disagg.yaml"
+                self.config = "examples/backends/trtllm/deploy/disagg.yaml"
                 self.output_dir = "/tmp/test_profiling_results"
                 self.namespace = "test-namespace"
                 self.model = ""
@@ -242,8 +242,12 @@ class TestProfileSLADryRun:
                 self.namespace = "test-namespace"
                 self.model = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"  # Specify model for autogen
                 self.dgd_image = ""
-                self.min_num_gpus_per_engine = 0  # Will be auto-generated
-                self.max_num_gpus_per_engine = 0  # Will be auto-generated
+                self.min_num_gpus_per_engine = (
+                    1  # Will be overridden by auto-generation
+                )
+                self.max_num_gpus_per_engine = (
+                    8  # Will be overridden by auto-generation
+                )
                 self.skip_existing_results = False
                 self.force_rerun = False
                 self.isl = 3000
@@ -261,7 +265,7 @@ class TestProfileSLADryRun:
                 self.aic_model_name = None
                 self.aic_backend = ""
                 self.aic_backend_version = None
-                self.num_gpus_per_node = None  # Will be auto-generated
+                self.num_gpus_per_node = 8  # Will be overridden by auto-generation
                 self.deploy_after_profile = False
 
         return Args()
@@ -304,8 +308,12 @@ class TestProfileSLADryRun:
                 self.namespace = "test-namespace"
                 self.model = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"  # Specify model for autogen
                 self.dgd_image = ""
-                self.min_num_gpus_per_engine = 0  # Will be auto-generated
-                self.max_num_gpus_per_engine = 0  # Will be auto-generated
+                self.min_num_gpus_per_engine = (
+                    1  # Will be overridden by auto-generation
+                )
+                self.max_num_gpus_per_engine = (
+                    8  # Will be overridden by auto-generation
+                )
                 self.skip_existing_results = False
                 self.force_rerun = False
                 self.isl = 3000
@@ -323,7 +331,7 @@ class TestProfileSLADryRun:
                 self.aic_model_name = None
                 self.aic_backend = ""
                 self.aic_backend_version = None
-                self.num_gpus_per_node = None  # Will be auto-generated
+                self.num_gpus_per_node = 8  # Will be overridden by auto-generation
                 self.deploy_after_profile = False
 
         return Args()
@@ -366,8 +374,12 @@ class TestProfileSLADryRun:
                 self.namespace = "test-namespace"
                 self.model = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"  # Specify model for autogen
                 self.dgd_image = ""
-                self.min_num_gpus_per_engine = 0  # Will be auto-generated
-                self.max_num_gpus_per_engine = 0  # Will be auto-generated
+                self.min_num_gpus_per_engine = (
+                    1  # Will be overridden by auto-generation
+                )
+                self.max_num_gpus_per_engine = (
+                    8  # Will be overridden by auto-generation
+                )
                 self.skip_existing_results = False
                 self.force_rerun = False
                 self.isl = 3000
@@ -385,7 +397,7 @@ class TestProfileSLADryRun:
                 self.aic_model_name = None
                 self.aic_backend = ""
                 self.aic_backend_version = None
-                self.num_gpus_per_node = None  # Will be auto-generated
+                self.num_gpus_per_node = 8  # Will be overridden by auto-generation
                 self.deploy_after_profile = False
 
         return Args()

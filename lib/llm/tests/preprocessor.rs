@@ -551,7 +551,7 @@ async fn test_media_url_passthrough(#[case] media_chunks: &[(&str, usize)]) {
         let message = build_message("Test multimodal content", media_chunks);
         let request = Request::from(&message, None, None, mdc.slug().to_string());
 
-        let (preprocessed, _annotations) = preprocessor.preprocess_request(&request).unwrap();
+        let (preprocessed, _annotations) = preprocessor.preprocess_request(&request).await.unwrap();
 
         // Verify multimodal data handling
         if media_chunks.is_empty() {

@@ -91,7 +91,7 @@ Run the vLLM disaggregated script with tracing enabled:
 
 ```bash
 # Navigate to vLLM launch directory
-cd components/backends/vllm/launch
+cd examples/backends/vllm/launch
 
 # Run disaggregated deployment (modify the script to export env vars first)
 ./disagg.sh
@@ -179,7 +179,7 @@ For Kubernetes deployments, ensure you have a Tempo instance deployed and access
 
 ### Modify DynamoGraphDeployment for Tracing
 
-Add common tracing environment variables at the top level and service-specific names in each component in your `DynamoGraphDeployment` (e.g., `components/backends/vllm/deploy/disagg.yaml`):
+Add common tracing environment variables at the top level and service-specific names in each component in your `DynamoGraphDeployment` (e.g., `examples/backends/vllm/deploy/disagg.yaml`):
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -228,7 +228,7 @@ spec:
 Apply the updated DynamoGraphDeployment:
 
 ```bash
-kubectl apply -f components/backends/vllm/deploy/disagg.yaml
+kubectl apply -f examples/backends/vllm/deploy/disagg.yaml
 ```
 
 Traces will now be exported to Tempo and can be viewed in Grafana.

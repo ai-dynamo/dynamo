@@ -73,6 +73,11 @@ runs:
       shell: bash
       run: |
 
+        # Sanitize test_type for filenames (always set this for artifact upload)
+        # Remove commas and spaces from test_type for use in filenames
+        STR_TEST_TYPE=$(echo "${{ inputs.test_type }}" | tr ', ' '_')
+        echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> $GITHUB_ENV
+
         # Check for JUnit XML file and determine test status
         JUNIT_FILE="test-results/pytest_test_report.xml"
 
@@ -84,17 +89,24 @@ runs:
           ERROR_TESTS=$(grep -o 'errors="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
           echo "📊 ${TOTAL_TESTS} tests completed (${FAILED_TESTS} failed, ${ERROR_TESTS} errors)"
 
-          # Create metadata file with step context information
-          METADATA_FILE="test-results/test_metadata.json"
+          # Create uniquely named metadata file with step context information
+          # Use framework-testtype-arch to make it unique per test run
+          METADATA_FILE="test-results/test_metadata_${{ inputs.framework }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}.json"
+          JUNIT_NAME="pytest_test_report_${{ inputs.framework }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}.xml"
+
+          # Rename XML file to unique name
+          mv "$JUNIT_FILE" "test-results/$JUNIT_NAME"
+
           echo '{' > "$METADATA_FILE"
           echo '  "job_name": "${{ github.job }}",' >> "$METADATA_FILE"
           echo '  "framework": "${{ inputs.framework }}",' >> "$METADATA_FILE"
           echo '  "test_type": "${{ inputs.test_type }}",' >> "$METADATA_FILE"
           echo '  "platform_arch": "${{ inputs.platform_arch }}",' >> "$METADATA_FILE"
-          echo '  "junit_xml_file": "pytest_test_report.xml",' >> "$METADATA_FILE"
+          echo '  "junit_xml_file": "'"$JUNIT_NAME"'",' >> "$METADATA_FILE"
           echo '  "step_name": "Run ${{ inputs.test_type }} tests"' >> "$METADATA_FILE"
           echo '}' >> "$METADATA_FILE"
-          echo "📝 Created test metadata file"
+          echo "📝 Created test metadata file: $METADATA_FILE"
+          echo "📝 Renamed XML file to: $JUNIT_NAME"
         else
           echo "⚠️  JUnit XML file not found - test results may not be available for upload"
           TOTAL_TESTS=0
@@ -109,6 +121,8 @@ runs:
       uses: actions/upload-artifact@v4
       if: always()  # Always upload test results, even if tests failed
       with:
-        name: test-results-${{ inputs.framework }}-${{ inputs.test_type }}-${{ env.PLATFORM_ARCH }}
-        path: test-results/${{ env.PYTEST_XML_FILE }}
+        name: test-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}
+        path: |
+          test-results/pytest_test_report_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}.xml
+          test-results/test_metadata_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}.json
         retention-days: 7
