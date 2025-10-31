@@ -149,11 +149,13 @@ impl<S: MemoryDescription + NixlCompatible> NixlRegistered<S> {
     /// This will deregister the storage from NIXL.
     pub fn into_storage(mut self) -> S {
         drop(self.handle.take());
+        let mut this = std::mem::ManuallyDrop::new(self);
         unsafe {
-            let storage = std::ptr::read(&self.storage);
-            std::mem::forget(self);
+            let storage = std::ptr::read(&this.storage);
+            std::ptr::drop_in_place(&mut this.agent_name);
             storage
         }
+    }
     }
 }
 
