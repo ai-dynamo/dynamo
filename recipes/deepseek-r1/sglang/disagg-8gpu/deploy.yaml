@@ -46,7 +46,7 @@ spec:
             timeoutSeconds: 10
             failureThreshold: 600
           image: my-registry/sglang-wideep-runtime:my-tag
-          workingDir: /workspace/components/backends/sglang
+          workingDir: /workspace/examples/backends/sglang
           command:
             - python3
             - -m
@@ -95,7 +95,7 @@ spec:
             timeoutSeconds: 10
             failureThreshold: 600
           image: my-registry/sglang-wideep-runtime:my-tag
-          workingDir: /workspace/components/backends/sglang
+          workingDir: /workspace/examples/backends/sglang
           command:
             - python3
             - -m
