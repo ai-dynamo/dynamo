@@ -377,13 +377,18 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --requirement /tmp/requirements.txt \
         --requirement /tmp/requirements.test.txt
 
+COPY benchmarks/ /opt/dynamo/benchmarks/
 RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
-    fi
+    fi \
+    && cd /opt/dynamo/benchmarks \
+    && UV_GIT_LFS=1 uv pip install --no-cache . \
+    && cd - \
+    && rm -rf /opt/dynamo/benchmarks
 
 # Setup launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
