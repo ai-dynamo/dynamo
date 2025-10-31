@@ -347,9 +347,12 @@ jobs:
     needs: [changed-files, operator]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+    outputs:
+      NAMESPACE: ${{ steps.deploy-operator-step.outputs.NAMESPACE }}
     steps:
     - uses: actions/checkout@v4
     - name: Deploy Operator
+      id: deploy-operator-step
       env:
         BRANCH: ${{ github.ref_name }}
       run: |
@@ -359,6 +362,7 @@ jobs:
         BRANCH_SANITIZED="${BRANCH/\//-}"
         NAMESPACE="gh-job-id-${{ github.run_id }}-${BRANCH_SANITIZED}-deploy-tests"
         echo "${NAMESPACE}" >> $GITHUB_ENV
+        echo "NAMESPACE=${NAMESPACE}" >> "$GITHUB_OUTPUT"
 
         # Setup kubeconfig
         echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
@@ -428,6 +432,7 @@ jobs:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
       DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
       MODEL_NAME: "Qwen/Qwen3-0.6B"
+      NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
     steps: &deploy-test-steps
     - uses: actions/checkout@v4
     - name: Setup Kubeconfig
@@ -553,6 +558,7 @@ jobs:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
       DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
       MODEL_NAME: "Qwen/Qwen3-0.6B"
+      NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
     steps: *deploy-test-steps
 
   deploy-test-trtllm:
@@ -575,12 +581,15 @@ jobs:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
       DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
       MODEL_NAME: "Qwen/Qwen3-0.6B"
+      NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
     steps: *deploy-test-steps
 
   cleanup:
     runs-on: cpu-amd-m5-2xlarge
     if: always()
     needs: [changed-files, operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
+    env:
+      NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
     steps:
     - uses: actions/checkout@v4
     - name: Setup Kubeconfig
