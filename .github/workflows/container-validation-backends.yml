@@ -361,7 +361,6 @@ jobs:
         # Set namespace using branch
         BRANCH_SANITIZED="${BRANCH/\//-}"
         NAMESPACE="gh-job-id-${{ github.run_id }}-${BRANCH_SANITIZED}-deploy-tests"
-        echo "${NAMESPACE}" >> $GITHUB_ENV
         echo "NAMESPACE=${NAMESPACE}" >> "$GITHUB_OUTPUT"
 
         # Setup kubeconfig
