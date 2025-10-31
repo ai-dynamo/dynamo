@@ -38,6 +38,7 @@ from dynamo.common.config_dump import dump_config
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine import TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
@@ -203,6 +204,11 @@ async def init(runtime: DistributedRuntime, config: Config):
         dynamic_batch_config=dynamic_batch_config,
     )
     modality = getattr(config, "modality", None) or "text"
+    # Prefill worker needs overlap scheduler disabled for disaggregation
+    disable_overlap_scheduler = False
+    if config.disaggregation_mode == DisaggregationMode.PREFILL:
+        disable_overlap_scheduler = True
+    
     arg_map = {
         "model": model_path,
         "scheduler_config": scheduler_config,
@@ -213,6 +219,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         "skip_tokenizer_init": True,
         "build_config": build_config,
         "kv_cache_config": kv_cache_config,
+        "disable_overlap_scheduler": disable_overlap_scheduler,
         "gpus_per_node": gpus_per_node,
         "max_num_tokens": config.max_num_tokens,
         "max_seq_len": config.max_seq_len,

@@ -177,18 +177,11 @@ class HandlerBase:
                 disaggregated_params = ep_disaggregated_params
             else:
                 # Decode from request dict (normal decode flow)
-                logging.debug(f"DECODE WORKER: Raw disaggregated_params from request: {request['disaggregated_params']}")
                 disaggregated_params = DisaggregatedParamsCodec.decode(
                     DisaggregatedParams(**request["disaggregated_params"])
                 )
                 # For full EPD flow, make decoded params available to multimodal processor
                 ep_disaggregated_params = disaggregated_params
-                logging.debug(f"DECODE WORKER: After decode - multimodal_embedding_handles: {getattr(ep_disaggregated_params, 'multimodal_embedding_handles', 'NOT FOUND')}")
-                has_handles = hasattr(ep_disaggregated_params, 'multimodal_embedding_handles') and ep_disaggregated_params.multimodal_embedding_handles is not None
-                if has_handles:
-                    logging.info(f"========== DECODE WORKER: Full EPD - using {len(ep_disaggregated_params.multimodal_embedding_handles)} pre-computed embedding(s) ==========")
-                else:
-                    logging.info("DECODE WORKER: Text-only request")
             disaggregated_params.request_type = "generation_only"
 
         # Default to text-based input. This will be overwritten if multimodal
@@ -199,17 +192,20 @@ class HandlerBase:
         # Now ep_disaggregated_params is properly set for both prefill and decode modes
         if self.disaggregation_mode == DisaggregationMode.DECODE:
             # Decode worker with generation_only mode
-            # For EPD multimodal flow, provide both prompt and prompt_token_ids
-            # (TensorRT-LLM's input processor still needs the prompt field for multimodal models)
+            # Pass the same inputs format as prefill
             if "_epd_processed_prompt" in request:
                 processed_prompt = request["_epd_processed_prompt"]
-                # Tokenize the prompt to get token IDs for generation_only mode
-                prompt_token_ids = self.engine.llm.tokenizer.encode(processed_prompt, add_special_tokens=False)
+                # Use pre-computed token IDs from encoder for consistency
+                if "_epd_prompt_token_ids" in request and request["_epd_prompt_token_ids"]:
+                    prompt_token_ids = request["_epd_prompt_token_ids"]
+                else:
+                    # Fallback: tokenize if token IDs not provided
+                    prompt_token_ids = self.engine.llm.tokenizer.encode(processed_prompt, add_special_tokens=False)
+                
                 processed_input = {
                     "prompt": processed_prompt,
                     "prompt_token_ids": prompt_token_ids
                 }
-                logging.info(f"DECODE WORKER: Using prompt and prompt_token_ids (length={len(prompt_token_ids)}) for generation_only mode")
             else:
                 # Fallback for text-only requests
                 processed_input = request.get("token_ids")
@@ -276,9 +272,8 @@ class HandlerBase:
             adapters = create_trtllm_adapters(processors)
             sampling_params.logits_processor = adapters
 
-        # NEW: Updated engine call to include multimodal data
         generation_result = self.engine.llm.generate_async(
-            inputs=processed_input,  # Use the correctly extracted inputs
+            inputs=processed_input,
             sampling_params=sampling_params,
             disaggregated_params=disaggregated_params,
             streaming=streaming,
@@ -325,23 +320,15 @@ class HandlerBase:
                 if output.stop_reason:
                     out["stop_reason"] = output.stop_reason
                 if self.disaggregation_mode == DisaggregationMode.PREFILL:
-                    # Return the disaggregated params only when operating in prefill mode.
-                    logging.info(f"PREFILL WORKER: Before encode - multimodal_embedding_handles: {getattr(output.disaggregated_params, 'multimodal_embedding_handles', 'NOT FOUND')}")
-                    
-                    # For full EPD flow, preserve multimodal handles from input
-                    # TensorRT-LLM doesn't automatically propagate these to output.disaggregated_params
-                    if ep_disaggregated_params and hasattr(ep_disaggregated_params, 'multimodal_embedding_handles'):
-                        if ep_disaggregated_params.multimodal_embedding_handles is not None:
-                            output.disaggregated_params.multimodal_embedding_handles = ep_disaggregated_params.multimodal_embedding_handles
-                            output.disaggregated_params.multimodal_hashes = ep_disaggregated_params.multimodal_hashes
-                            logging.info(f"PREFILL WORKER: Preserved {len(ep_disaggregated_params.multimodal_embedding_handles)} multimodal handle(s) from input")
-                    
+                    # Return the disaggregated params only when operating in prefill mode
                     encoded_params = DisaggregatedParamsCodec.encode(output.disaggregated_params)
-                    logging.info(f"PREFILL WORKER: After encode - multimodal_embedding_handles: {getattr(encoded_params, 'multimodal_embedding_handles', 'NOT FOUND')}")
                     out["disaggregated_params"] = asdict(encoded_params)
-                    # Also pass the processed prompt for full EPD flow
+                    
+                    # Pass the processed prompt and token IDs for decode worker
                     if "_epd_processed_prompt" in request:
                         out["_epd_processed_prompt"] = request["_epd_processed_prompt"]
+                    if "_epd_prompt_token_ids" in request and request["_epd_prompt_token_ids"]:
+                        out["_epd_prompt_token_ids"] = request["_epd_prompt_token_ids"]
 
                 if res.finished and not out.get("finish_reason"):
                     out["finish_reason"] = "unknown"

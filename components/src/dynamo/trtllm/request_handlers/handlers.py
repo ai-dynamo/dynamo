@@ -168,7 +168,6 @@ class PrefillHandler(HandlerBase):
             # Handle image URLs (full E-PD flow with MultimodalEncoder)
             elif image_urls:
                 if self.encode_client and self.connector:
-                    logging.info("========== PREFILL WORKER: Full EPD - Requesting from Encode Worker ==========")
                     encode_response = await self.remote_encode_full_epd(request)
                     
                     # Check if encode worker returned disaggregated params (full EPD flow)
@@ -177,28 +176,16 @@ class PrefillHandler(HandlerBase):
                         if params_dict is not None:
                             # Reconstruct DisaggregatedParams object from dict
                             ep_disaggregated_params = DisaggregatedParams(**params_dict)
-                            logging.info("PREFILL WORKER: Received ep_disaggregated_params with multimodal handles")
-                            logging.info(f"PREFILL WORKER: Input ep_disaggregated_params.multimodal_embedding_handles = {getattr(ep_disaggregated_params, 'multimodal_embedding_handles', 'NOT FOUND')}")
                             ep_disaggregated_params.request_type = "context_only"
                             
                             # Get the processed prompt from encoder (includes <image> tokens)
                             # Store it in the request so multimodal_processor can access it
                             if "processed_prompt" in encode_response:
                                 request["_epd_processed_prompt"] = encode_response["processed_prompt"]
-                                logging.info(f"PREFILL WORKER: Stored processed prompt from encoder: {request['_epd_processed_prompt']}")
-                            else:
-                                logging.warning("PREFILL WORKER: No processed_prompt in encode_response")
                             
                             # Store prompt_token_ids from encoder for consistency with decode worker
                             if "prompt_token_ids" in encode_response and encode_response["prompt_token_ids"]:
                                 request["_epd_prompt_token_ids"] = encode_response["prompt_token_ids"]
-                                logging.info(f"PREFILL WORKER: Stored prompt_token_ids from encoder (length={len(encode_response['prompt_token_ids'])})")
-                            else:
-                                logging.warning("PREFILL WORKER: No prompt_token_ids in encode_response")
-                        else:
-                            logging.warning("PREFILL WORKER: Received None ep_disaggregated_params from encode worker")
-                    else:
-                        logging.info("PREFILL WORKER: Did not receive ep_disaggregated_params from encode worker")
         # Normal flow: Generate the prefill response locally with embeddings
         prefill_request = copy.deepcopy(request)
         prefill_response = None
@@ -308,7 +295,9 @@ class DecodeHandler(HandlerBase):
                 # Also extract the processed prompt for full EPD flow
                 if "_epd_processed_prompt" in response_data:
                     request["_epd_processed_prompt"] = response_data["_epd_processed_prompt"]
-                    logging.info(f"DECODE WORKER: Received processed prompt from prefill: {request['_epd_processed_prompt']}")
+                # Extract pre-computed token IDs from encoder for consistency
+                if "_epd_prompt_token_ids" in response_data and response_data["_epd_prompt_token_ids"]:
+                    request["_epd_prompt_token_ids"] = response_data["_epd_prompt_token_ids"]
 
         async for res in self.generate_locally(request, context):
             yield res

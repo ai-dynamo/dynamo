@@ -50,7 +50,6 @@ class DisaggregatedParamsCodec:
     @staticmethod
     def encode(
         disaggregated_params: DisaggregatedParams,
-        strip_multimodal: bool = False,
     ) -> DisaggregatedParams:
         if disaggregated_params is None:
             return None
@@ -61,15 +60,10 @@ class DisaggregatedParamsCodec:
             else None
         )
         
-        # For decode worker, strip multimodal fields (only send KV cache state)
-        # Multimodal embeddings are consumed during prefill
-        if strip_multimodal:
-            mm_handles = None
-            mm_hashes = None
-        else:
-            # Preserve multimodal fields for encoder -> prefill transfer
-            mm_handles = getattr(disaggregated_params, 'multimodal_embedding_handles', None)
-            mm_hashes = getattr(disaggregated_params, 'multimodal_hashes', None)
+        # Strip multimodal handles when sending from prefill to decode
+        # (matching the test behavior where handles are null in prefill output)
+        mm_handles = getattr(disaggregated_params, 'multimodal_embedding_handles', None)
+        mm_hashes = getattr(disaggregated_params, 'multimodal_hashes', None)
         
         return DisaggregatedParams(
             request_type=disaggregated_params.request_type,

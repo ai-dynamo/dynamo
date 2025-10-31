@@ -215,6 +215,7 @@ class EncodeHelper:
             image_urls,
             embedding_paths,
         ) = multimodal_processor.extract_prompt_and_media(messages)
+        logging.info(f"ENCODE WORKER: text_prompts: {text_prompts}")
         if embedding_paths:
             # Load the embeddings data
             loaded_data = multimodal_processor.load_tensor_from_path_or_url(
