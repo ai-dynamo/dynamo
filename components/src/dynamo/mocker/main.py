@@ -6,8 +6,11 @@
 
 import asyncio
 import logging
+import os
 
 import uvloop
+
+os.environ.setdefault("DYN_COMPUTE_THREADS", "0")
 
 from dynamo.llm import EngineType, EntrypointArgs, make_engine, run_input
 from dynamo.runtime import DistributedRuntime
