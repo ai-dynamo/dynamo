@@ -588,16 +588,13 @@ def _process_test_phase_results(
 ) -> None:
     """Helper function to process and log results for a specific test phase."""
     if test_phase == TestPhase.OVERFLOW:
-        logging.info(
-            "\n" + "=" * 60 + "\n"
-            "Processing OVERFLOW phase - Expecting rejections\n" + "=" * 60
-        )
-
         total_reqs = metrics.get("total_requests", 0)
         failed_reqs = metrics.get("failed_requests", 0)
         if total_reqs > 0:
             failure_rate = (failed_reqs / total_reqs) * 100
             logging.info(
+                "\n" + "=" * 60 + "\n"
+                "Processing OVERFLOW phase - Expecting rejections\n" + "=" * 60 + "\n"
                 f"\nOverflow Results: {failed_reqs}/{total_reqs} requests rejected ({failure_rate:.1f}%)"
             )
             if failure_rate < success_threshold:
@@ -606,18 +603,17 @@ def _process_test_phase_results(
                 )
             else:
                 logging.info("Overflow validation working correctly")
+        else:
+            logging.warning("No requests to process, total_requests is 0.")
 
     elif test_phase == TestPhase.RECOVERY:
-        logging.info(
-            "\n" + "=" * 60 + "\n"
-            "Processing RECOVERY phase - Expecting success\n" + "=" * 60
-        )
-
         total_reqs = metrics.get("total_requests", 0)
         success_reqs = metrics.get("successful_requests", 0)
         if total_reqs > 0:
             success_rate = (success_reqs / total_reqs) * 100
             logging.info(
+                "\n" + "=" * 60 + "\n"
+                "Processing RECOVERY phase - Expecting success\n" + "=" * 60 + "\n"
                 f"\nRecovery Results: {success_reqs}/{total_reqs} requests succeeded ({success_rate:.1f}%)"
             )
             if success_rate < success_threshold:
@@ -626,6 +622,8 @@ def _process_test_phase_results(
                 )
             else:
                 logging.info("System recovered successfully")
+        else:
+            logging.warning("No requests to process, total_requests is 0.")
     elif test_phase == TestPhase.STANDARD:
         # Standard test phase doesn't need special processing
         pass
