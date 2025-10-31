@@ -22,13 +22,13 @@ from tests.fault_tolerance.deploy.scenarios import (
 from tests.utils.managed_deployment import ManagedDeployment
 
 
-@pytest.fixture(params=scenarios.keys())
-def scenario(request, client_type):
+@pytest.fixture
+def scenario(scenario_name, client_type):
     """Get scenario and optionally override client type from command line.
 
     If --client-type is specified, it overrides the scenario's default client type.
     """
-    scenario_obj = scenarios[request.param]
+    scenario_obj = scenarios[scenario_name]
 
     # Override client type if specified on command line
     if client_type is not None:

@@ -184,6 +184,9 @@ class Scenario:
     failures: list[Failure]
     model: Optional[str] = None
     backend: str = "vllm"  # Backend type for tracking
+    # When set to True, the test will be automatically marked with @pytest.mark.custom_build
+    # and excluded from default test runs unless --include-custom-build flag is used
+    requires_custom_build: bool = False  # Flag for tests needing custom builds/setup
 
 
 # Helper functions to create deployment specs
@@ -572,6 +575,7 @@ for deployment_name, deployment_info in DEPLOYMENT_SPECS.items():
             failures=failure,
             model=scenario_model,
             backend=backend,
+            requires_custom_build=is_moe,  # MoE models require custom builds
         )
 
 
