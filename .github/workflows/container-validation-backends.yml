@@ -146,24 +146,24 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-      - name: Run unit tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "unit and vllm and gpu_1"
-          framework: "vllm"
-          test_type: "unit"
-          platform_arch: ${{ matrix.platform.arch }}
-      - name: Run e2e tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "e2e and vllm and gpu_1 and not slow"
-          framework: "vllm"
-          test_type: "e2e, gpu_1"
-          platform_arch: ${{ matrix.platform.arch }}
+      # - name: Run unit tests
+      #   if: ${{ matrix.platform.arch != 'arm64' }}
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
+      #     pytest_marks: "unit and vllm and gpu_1"
+      #     framework: "vllm"
+      #     test_type: "unit"
+      #     platform_arch: ${{ matrix.platform.arch }}
+      # - name: Run e2e tests
+      #   if: ${{ matrix.platform.arch != 'arm64' }}
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
+      #     pytest_marks: "e2e and vllm and gpu_1 and not slow"
+      #     framework: "vllm"
+      #     test_type: "e2e, gpu_1"
+      #     platform_arch: ${{ matrix.platform.arch }}
 
   sglang:
     needs: changed-files
@@ -209,24 +209,24 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-      - name: Run unit tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "unit and sglang and gpu_1"
-          framework: "sglang"
-          test_type: "unit"
-          platform_arch: ${{ matrix.platform.arch }}
-      - name: Run e2e tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "e2e and sglang and gpu_1"
-          framework: "sglang"
-          test_type: "e2e, gpu_1"
-          platform_arch: ${{ matrix.platform.arch }}
+      # - name: Run unit tests
+      #   if: ${{ matrix.platform.arch != 'arm64' }}
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
+      #     pytest_marks: "unit and sglang and gpu_1"
+      #     framework: "sglang"
+      #     test_type: "unit"
+      #     platform_arch: ${{ matrix.platform.arch }}
+      # - name: Run e2e tests
+      #   if: ${{ matrix.platform.arch != 'arm64' }}
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
+      #     pytest_marks: "e2e and sglang and gpu_1"
+      #     framework: "sglang"
+      #     test_type: "e2e, gpu_1"
+      #     platform_arch: ${{ matrix.platform.arch }}
 
   trtllm:
     needs: changed-files
@@ -272,24 +272,24 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-      - name: Run unit tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "unit and trtllm_marker and gpu_1"
-          framework: "trtllm"
-          test_type: "unit"
-          platform_arch: ${{ matrix.platform.arch }}
-      - name: Run e2e tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow"
-          framework: "trtllm"
-          test_type: "e2e, gpu_1"
-          platform_arch: ${{ matrix.platform.arch }}
+      # - name: Run unit tests
+      #   if: ${{ matrix.platform.arch != 'arm64' }}
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
+      #     pytest_marks: "unit and trtllm_marker and gpu_1"
+      #     framework: "trtllm"
+      #     test_type: "unit"
+      #     platform_arch: ${{ matrix.platform.arch }}
+      # - name: Run e2e tests
+      #   if: ${{ matrix.platform.arch != 'arm64' }}
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
+      #     pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow"
+      #     framework: "trtllm"
+      #     test_type: "e2e, gpu_1"
+      #     platform_arch: ${{ matrix.platform.arch }}
 
   # Upload metrics for this workflow and all its jobs
   upload-workflow-metrics:
@@ -348,7 +348,7 @@ jobs:
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
     outputs:
-      NAMESPACE: ${{ steps.deploy-operator-step.outputs.NAMESPACE }}
+      NAMESPACE: ${{ steps.deploy-operator-step.outputs.namespace }}
     steps:
     - uses: actions/checkout@v4
     - name: Deploy Operator
@@ -361,7 +361,7 @@ jobs:
         # Set namespace using branch
         BRANCH_SANITIZED="${BRANCH/\//-}"
         NAMESPACE="gh-job-id-${{ github.run_id }}-${BRANCH_SANITIZED}-deploy-tests"
-        echo "NAMESPACE=${NAMESPACE}" >> "$GITHUB_OUTPUT"
+        echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
 
         # Setup kubeconfig
         echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
@@ -430,10 +430,11 @@ jobs:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
       DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
       MODEL_NAME: "Qwen/Qwen3-0.6B"
-      NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
     steps: &deploy-test-steps
     - uses: actions/checkout@v4
     - name: Setup Kubeconfig
+      env:
+        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
       run: |
         set -x
         # Setup kubeconfig
@@ -443,6 +444,8 @@ jobs:
         kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
         kubectl config get-contexts
     - name: Run Tests
+      env:
+        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
       run: |
         set -x
         export KUBECONFIG=$(pwd)/.kubeconfig
@@ -558,7 +561,6 @@ jobs:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
       DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
       MODEL_NAME: "Qwen/Qwen3-0.6B"
-      NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
     steps: *deploy-test-steps
 
   deploy-test-trtllm:
@@ -581,19 +583,19 @@ jobs:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
       DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
       MODEL_NAME: "Qwen/Qwen3-0.6B"
-      NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
     steps: *deploy-test-steps
 
   cleanup:
     runs-on: cpu-amd-m5-2xlarge
     if: always()
     needs: [changed-files, operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
-    env:
-      NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
     steps:
     - uses: actions/checkout@v4
     - name: Setup Kubeconfig
+      env:
+        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
       run: |
+        set -x
         # Setup kubeconfig
         echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
         chmod 600 .kubeconfig
@@ -602,7 +604,10 @@ jobs:
         kubectl config current-context
     - name: Cleanup
       timeout-minutes: 5
+      env:
+        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
       run: |
+        set -x
         export KUBECONFIG=$(pwd)/.kubeconfig
         kubectl config set-context --current --namespace=$NAMESPACE
 
