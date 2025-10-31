@@ -265,7 +265,7 @@ class EncodeHelper:
                 model_dir=model_dir,
                 model_type=model_type,
                 modality="image",
-                prompts=text_prompt,
+                prompts=[text_prompt],
                 media=image_urls[0],
             )
             # engine.llm is the MultimodalEncoder instance
