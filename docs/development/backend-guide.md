@@ -77,7 +77,7 @@ The `model_type` can be:
 - `migration_limit`: Maximum number of times a request may be [migrated to another Instance](../fault_tolerance/request_migration.md). Defaults to 0.
 - `user_data`: Optional dictionary containing custom metadata for worker behavior (e.g., LoRA configuration). Defaults to None.
 
-See `components/backends` for full code examples.
+See `examples/backends` for full code examples.
 
 ## Component names
 

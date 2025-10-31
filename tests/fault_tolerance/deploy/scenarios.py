@@ -184,6 +184,9 @@ class Scenario:
     failures: list[Failure]
     model: Optional[str] = None
     backend: str = "vllm"  # Backend type for tracking
+    # When set to True, the test will be automatically marked with @pytest.mark.custom_build
+    # and excluded from default test runs unless --include-custom-build flag is used
+    requires_custom_build: bool = False  # Flag for tests needing custom builds/setup
 
 
 # Helper functions to create deployment specs
@@ -256,8 +259,8 @@ def _create_deployments_for_backend(backend: str) -> Dict[str, DeploymentInfo]:
 
     # Define the yaml files for agg and disagg deployments
     yaml_files = {
-        "agg": f"components/backends/{backend}/deploy/agg.yaml",
-        "disagg": f"components/backends/{backend}/deploy/disagg.yaml",
+        "agg": f"examples/backends/{backend}/deploy/agg.yaml",
+        "disagg": f"examples/backends/{backend}/deploy/disagg.yaml",
     }
 
     # Define the different configurations to test
@@ -572,6 +575,7 @@ for deployment_name, deployment_info in DEPLOYMENT_SPECS.items():
             failures=failure,
             model=scenario_model,
             backend=backend,
+            requires_custom_build=is_moe,  # MoE models require custom builds
         )
 
 
