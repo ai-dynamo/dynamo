@@ -120,15 +120,30 @@ mod tests {
     use super::*;
     use dynamo_async_openai::types::{ChatCompletionRequestMessageContentPartImage, ImageUrl};
 
-    // warning: non-airgap test
     #[tokio::test]
     async fn test_fetch_and_decode() {
-        let media_decoder = MediaDecoder::default();
-        let loader = MediaLoader::new(media_decoder, MediaFetcher::default()).unwrap();
+        let test_image_bytes =
+            include_bytes!("../../../tests/data/media/llm-optimize-deploy-graphic.png");
 
-        let image_url = ImageUrl::from(
-            "https://developer-blogs.nvidia.com/wp-content/uploads/2023/11/llm-optimize-deploy-graphic.png",
-        );
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/llm-optimize-deploy-graphic.png")
+            .with_status(200)
+            .with_header("content-type", "image/png")
+            .with_body(&test_image_bytes[..])
+            .create_async()
+            .await;
+
+        let media_decoder = MediaDecoder::default();
+        let fetcher = MediaFetcher {
+            allow_direct_ip: true,
+            allow_direct_port: true,
+            ..Default::default()
+        };
+
+        let loader = MediaLoader::new(media_decoder, fetcher).unwrap();
+
+        let image_url = ImageUrl::from(format!("{}/llm-optimize-deploy-graphic.png", server.url()));
         let content_part = ChatCompletionRequestUserMessageContentPart::ImageUrl(
             ChatCompletionRequestMessageContentPartImage { image_url },
         );
@@ -145,10 +160,12 @@ mod tests {
 
         // Verify image dimensions: 1,999px × 1,125px (width × height)
         // Shape format is [height, width, channels]
-        assert!(!data.shape.is_empty(), "Shape should not be empty");
+        assert_eq!(data.shape.len(), 3);
         assert_eq!(data.shape[0], 1125, "Height should be 1125");
         assert_eq!(data.shape[1], 1999, "Width should be 1999");
         assert_eq!(data.shape[2], 4, "RGBA channels should be 4");
+
+        mock.assert_async().await;
     }
 
     #[test]

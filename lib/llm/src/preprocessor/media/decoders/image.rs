@@ -25,8 +25,11 @@ impl Decoder for ImageDecoder {
         let n_channels = img.color().channel_count();
 
         let max_pixels = self.max_pixels.unwrap_or(usize::MAX);
+        let pixel_count = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or_else(|| anyhow::anyhow!("Image dimensions {width}x{height} overflow usize"))?;
         anyhow::ensure!(
-            (width as usize) * (height as usize) <= max_pixels,
+            pixel_count <= max_pixels,
             "Image dimensions {width}x{height} exceed max pixels {max_pixels}"
         );
         let data = match n_channels {
