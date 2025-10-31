@@ -156,7 +156,6 @@ impl<S: MemoryDescription + NixlCompatible> NixlRegistered<S> {
             storage
         }
     }
-    }
 }
 
 /// Register storage with a NIXL agent.
