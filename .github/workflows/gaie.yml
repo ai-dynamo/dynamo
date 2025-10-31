@@ -1,0 +1,338 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: GAIE Deployment with Dynamo (vllm)
+
+on:
+  # workflow_dispatch:
+  push:
+    branches:
+      - dep-423-test
+  # pull_request:
+  #   paths:
+  #     - lib/bindings/c/src/**
+  #     - lib/runtime/src/**
+  #     - lib/llm/src/**
+  schedule:
+    # Run at 03:00 UTC on the 1st and 15th of each month (approx every 2 weeks)
+    - cron: "0 3 1,15 * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name || github.run_id }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  gaie:
+    name: Build Images, Deploy Dynamo, Install GAIE, create EPP image and make sure it works.
+    runs-on: cpu-amd-m5-2xlarge
+    env:
+      FRAMEWORK: vllm
+      PROFILE: agg
+      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+      MODEL_NAME: Qwen/Qwen3-0.6B
+      OPERATOR_IMAGE_TAG: ${{ github.sha }}-operator-amd64
+      VLLM_IMAGE_TAG: ${{ github.sha }}-vllm-amd64
+      GATEWAY_API_VERSION: v1.3.0
+      INFERENCE_EXTENSION_VERSION: v0.5.1
+      KGATEWAY_VERSION: v2.0.3
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
+
+      - name: Install tooling (curl, jq, yq, helm, kubectl)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y curl bash openssl gettext git jq
+          curl -L https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          sudo install -m 0755 yq /usr/local/bin/yq
+          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          sudo chmod 700 get_helm.sh
+          sudo ./get_helm.sh
+          KUBECTL_VER=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+          curl -LO "https://dl.k8s.io/release/${KUBECTL_VER}/bin/linux/amd64/kubectl"
+          sudo install -m 0755 kubectl /usr/local/bin/kubectl
+
+      - name: Login to NGC
+        if: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
+        run: |
+          echo "${{ secrets.NGC_CI_ACCESS_TOKEN }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+
+      - name: Install awscli (for docker-build caching/login)
+        shell: bash
+        run: |
+          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "awscliv2.zip"
+          unzip -q -o awscliv2.zip
+          sudo ./aws/install --update
+
+      - name: Login to ECR (for docker-build action compatibility)
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
+      - name: Build Operator image (amd64)
+        id: build-operator
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          set -euo pipefail
+          cd deploy/cloud/operator
+          docker buildx build --load \
+            --platform linux/amd64 \
+            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+            -f Dockerfile \
+            -t dynamo-operator:latest .
+
+      - name: Tag and Push Operator image to ACR
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: dynamo-operator:latest
+          push_tag: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ env.OPERATOR_IMAGE_TAG }}
+          aws_push: "false"
+          azure_push: "true"
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
+      - name: Build vllm runtime image (amd64)
+        id: build-vllm
+        uses: ./.github/actions/docker-build
+        with:
+          framework: vllm
+          target: runtime
+          platform: linux/amd64
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Tag and Push vllm image to ACR
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build-vllm.outputs.image_tag }}
+          push_tag: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ env.VLLM_IMAGE_TAG }}
+          aws_push: "false"
+          azure_push: "true"
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
+      - name: Configure kubeconfig and namespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > "${{ github.workspace }}/.kubeconfig"
+          chmod 600 "${{ github.workspace }}/.kubeconfig"
+          # Persist KUBECONFIG for subsequent steps
+          echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig" >> $GITHUB_ENV
+          # Also export for use within this step
+          export KUBECONFIG="${{ github.workspace }}/.kubeconfig"
+          # Create ephemeral namespace for Dynamo
+          PROFILE_SANITIZED="${PROFILE//_/-}"
+          echo "NAMESPACE=gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED}" >> $GITHUB_ENV
+          echo "DEPLOYMENT_FILE=deploy/${PROFILE}.yaml" >> $GITHUB_ENV
+          kubectl delete namespace gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED} || true
+          kubectl create namespace gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED}
+          kubectl label namespaces gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED} \
+            nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
+          kubectl config set-context --current --namespace=gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED} --kubeconfig "$KUBECONFIG"
+
+      - name: Install Dynamo Operator Helm chart
+        shell: bash
+        env:
+          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
+        run: |
+          set -euo pipefail
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          cd deploy/cloud/helm/platform/
+          helm dep build .
+          helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
+            --set dynamo-operator.namespaceRestriction.enabled=true \
+            --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
+            --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
+            --set dynamo-operator.controllerManager.manager.image.tag=${{ env.OPERATOR_IMAGE_TAG }} \
+            --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
+          timeout 300s kubectl rollout status deployment -n ${NAMESPACE} --watch
+
+      - name: Configure image pull secrets and deploy vllm graph
+        shell: bash
+        env:
+          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
+        run: |
+          set -euo pipefail
+          export KUBE_NS=${NAMESPACE}
+          export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${VLLM_IMAGE_TAG}"
+          # Secrets
+          kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n ${KUBE_NS} || true
+          kubectl create secret docker-registry docker-imagepullsecret \
+            --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} \
+            --docker-username=${{ secrets.AZURE_ACR_USER }} \
+            --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} \
+            --namespace=${KUBE_NS} || true
+          # Deploy vllm backend graph
+          cd $GITHUB_WORKSPACE/components/backends/${FRAMEWORK}
+          export GRAPH_NAME=$(yq e '.metadata.name' ${DEPLOYMENT_FILE})
+          yq -i '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' ${DEPLOYMENT_FILE}
+          kubectl apply -n ${KUBE_NS} -f ${DEPLOYMENT_FILE}
+          sleep 20
+          kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}" -n ${KUBE_NS} --timeout=1000s
+
+      - name: Install GAIE CRDs and Kgateway
+        shell: bash
+        env:
+          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
+        run: |
+          set -euo pipefail
+          ${{ github.workspace }}/deploy/inference-gateway/install_gaie_crd_kgateway.sh
+
+      - name: Clone GAIE repo into separate folder and set environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          GAIE_CLONE_DIR="${{ github.workspace }}/external/gateway-api-inference-extension"
+          rm -rf "${GAIE_CLONE_DIR}"
+          mkdir -p "$(dirname "${GAIE_CLONE_DIR}")"
+          git clone https://github.com/kubernetes-sigs/gateway-api-inference-extension.git "${GAIE_CLONE_DIR}"
+          cd "${GAIE_CLONE_DIR}"
+          git checkout ${INFERENCE_EXTENSION_VERSION}
+          echo "GAIE_DIR=${GAIE_CLONE_DIR}" >> $GITHUB_ENV
+          echo "DYNAMO_DIR=${{ github.workspace }}" >> $GITHUB_ENV
+
+      - name: Run build-epp-dynamo.sh
+        shell: bash
+        env:
+          GAIE_DIR: ${{ env.GAIE_DIR }}
+          DYNAMO_DIR: ${{ env.DYNAMO_DIR }}
+        run: |
+          set -euo pipefail
+          cd ${DYNAMO_DIR}/deploy/inference-gateway
+          ./build-epp-dynamo.sh
+          docker tag us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1-dirty ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo/epp-inference-extension-dynamo:${{ github.run_id }}
+          docker push ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo/epp-inference-extension-dynamo:${{ github.run_id }}
+
+      - name: Deploy GAIE Helm chart with built EPP image
+        shell: bash
+        env:
+          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
+          GAIE_DIR: ${{ env.GAIE_DIR }}
+          DYNAMO_DIR: ${{ env.DYNAMO_DIR }}
+        run: |
+          set -euo pipefail
+          # Use the pushed EPP image from the previous step
+          EPP_IMAGE="gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/epp-inference-extension-dynamo:${{ github.run_id }}"
+          echo "Using EPP_IMAGE=${EPP_IMAGE}"
+          export EPP_IMAGE
+
+          # Deploy Helm chart in the Dynamo repo pointing to the EPP image
+          cd "${DYNAMO_DIR}/deploy/inference-gateway"
+          helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n ${NAMESPACE} -f ./vllm_agg_qwen.yaml --set-string extension.image=${EPP_IMAGE}
+
+      - name: Verify qwen-epp deployment readiness
+        shell: bash
+        env:
+          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
+        run: |
+          set -euo pipefail
+          NS=${NAMESPACE}
+          echo "Waiting for Deployment/qwen-epp to appear in namespace ${NS}..."
+          ATTEMPTS=60
+          SLEEP=10
+          FOUND=0
+          for i in $(seq 1 ${ATTEMPTS}); do
+            if kubectl get deploy qwen-epp -n ${NS} >/dev/null 2>&1; then
+              FOUND=1
+              break
+            fi
+            sleep ${SLEEP}
+          done
+          if [[ ${FOUND} -ne 1 ]]; then
+            echo "Deployment qwen-epp not found in ${NS} after $((ATTEMPTS*SLEEP)) seconds" >&2
+            kubectl get deploy -n ${NS} || true
+            exit 1
+          fi
+          echo "Deployment qwen-epp found. Waiting for rollout to complete..."
+          echo "Deployment image:"
+          kubectl get deploy/qwen-epp -n ${NS} -o jsonpath='{.spec.template.spec.containers[*].image}{"\n"}' || true
+
+          echo "Deriving pod selector from Deployment..."
+          SELECTOR=$(kubectl get deploy/qwen-epp -n ${NS} -o json | jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')
+          if [[ -n "${SELECTOR}" ]]; then
+            echo "Using selector: ${SELECTOR}"
+            echo "Current pods (name, image, ready, waitingReason, restartCount):"
+            kubectl get pods -n ${NS} -l "${SELECTOR}" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[*].image}{"\t"}{range .status.containerStatuses[*]}{.ready}{"\t"}{.state.waiting.reason}{"\t"}{.restartCount}{"\n"}{end}{end}' || true
+
+            # Fail fast on common crash conditions
+            if kubectl get pods -n ${NS} -l "${SELECTOR}" -o json | jq -e '.items[] | select(.status.containerStatuses != null) | .status.containerStatuses[] | select(.state.waiting.reason=="CrashLoopBackOff" or .state.waiting.reason=="ImagePullBackOff" or .state.waiting.reason=="ErrImagePull")' >/dev/null; then
+              echo "Detected CrashLoopBackOff/ImagePullBackOff/ErrImagePull in qwen-epp pods" >&2
+              exit 1
+            fi
+          else
+            echo "Could not derive a label selector from Deployment; skipping pod checks."
+          fi
+          kubectl rollout status deploy/qwen-epp -n ${NS} --timeout=600s
+          kubectl get deploy qwen-epp -n ${NS} -o wide
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        env:
+          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
+        run: |
+          set -euo pipefail
+          NS="${NAMESPACE:-}"
+          if [[ -n "${NS}" ]]; then
+            kubectl get all -n ${NS} || true
+            helm uninstall dynamo-platform -n ${NS} || true
+            kubectl delete dynamographdeployments --all -n ${NS} || true
+            kubectl delete namespace ${NS} || true
+          else
+            echo "NAMESPACE is unset; skipping namespace-scoped cleanup." >&2
+          fi
+          # Uninstall Kgateway controller and CRDs (cluster-scoped)
+          helm uninstall kgateway -n kgateway-system || true
+          helm uninstall kgateway-crds -n kgateway-system || true
+          kubectl delete namespace kgateway-system || true
+
+          # Remove Inference Extension CRDs (cluster-scoped)
+          kubectl delete -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${INFERENCE_EXTENSION_VERSION}/manifests.yaml || true
+
+          # Remove Gateway API (cluster-scoped)
+          kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml || true
+
+      - name: Remove kubeconfig file
+        if: always()
+        shell: bash
+        run: |
+          rm -f "${{ github.workspace }}/.kubeconfig"
+
+      # - name: Email on failure
+      # TODO
+      #   if: failure()
+      #   continue-on-error: true
+      #   uses: dawidd6/action-send-mail@v3
+      #   with:
+      #     server_address: ${{ secrets.SMTP_SERVER }}
+      #     server_port: ${{ secrets.SMTP_PORT }}
+      #     username: ${{ secrets.SMTP_USER }}
+      #     password: ${{ secrets.SMTP_PASS }}
+      #     subject: GAIE scheduled run failed
+      #     to: atchernych@nvidia.com
+      #     from: ${{ secrets.SMTP_FROM }}
+      #     secure: true
+      #     html_body: |
+      #       <p>GAIE scheduled run failed.</p>
+      #       <p>Run: <a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}">details</a></p>
