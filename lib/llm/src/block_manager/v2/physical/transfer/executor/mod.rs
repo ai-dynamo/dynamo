@@ -10,7 +10,9 @@ mod nixl;
 use super::strategy::select_strategy;
 use super::validation::validate_block_transfer;
 use super::{PhysicalLayout, TransferContext, TransferOptions, TransferPlan, TransferStrategy};
-use crate::block_manager::v2::physical::transfer::{StorageKind, context::TransferCompleteNotification};
+use crate::block_manager::v2::physical::transfer::{
+    StorageKind, context::TransferCompleteNotification,
+};
 use anyhow::Result;
 use std::ops::Range;
 use std::sync::Arc;
@@ -181,6 +183,7 @@ struct TwoHopTransferParams<'a> {
 
 type TransferGroup = (Vec<usize>, bool);
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_buffered_transfer(
     src: &PhysicalLayout,
     bounce_layout: &PhysicalLayout,
@@ -193,8 +196,8 @@ async fn handle_buffered_transfer(
     layer_range: &Option<Range<usize>>,
     ctx: &TransferContext,
 ) -> Result<()> {
-    let bounce_groups = &bounce_block_ids
-        [0..std::cmp::min(src_block_ids.len(), bounce_block_ids.len())];
+    let bounce_groups =
+        &bounce_block_ids[0..std::cmp::min(src_block_ids.len(), bounce_block_ids.len())];
     let bounce_groups = bounce_groups.split_at(bounce_groups.len() / 2);
     let bounce_groups = [bounce_groups.0, bounce_groups.1];
 
