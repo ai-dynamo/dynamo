@@ -5,12 +5,12 @@ use std::pin::Pin;
 
 use crate::{
     backend::{Backend, ExecutionContext},
-    discovery::{MODEL_ROOT_PATH, ModelManager, ModelWatcher},
+    discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::{self, EngineConfig},
-    kv_router::{KvPushRouter, KvRouter},
+    kv_router::{KvPushRouter, KvRouter, PrefillRouter},
     migration::Migration,
-    model_card::ModelDeploymentCard,
+    model_card::{self, ModelDeploymentCard},
     preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
@@ -62,9 +62,7 @@ pub async fn prepare_engine(
         EngineConfig::Dynamic(local_model) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
 
-            let Some(etcd_client) = distributed_runtime.etcd_client() else {
-                anyhow::bail!("Cannot be both static mode and run with dynamic discovery.");
-            };
+            let store = Arc::new(distributed_runtime.store().clone());
             let model_manager = Arc::new(ModelManager::new());
             let watch_obj = Arc::new(ModelWatcher::new(
                 distributed_runtime,
@@ -73,9 +71,7 @@ pub async fn prepare_engine(
                 None,
                 None,
             ));
-            let models_watcher = etcd_client.kv_get_and_watch_prefix(MODEL_ROOT_PATH).await?;
-            let (_prefix, _watcher, receiver) = models_watcher.dissolve();
-
+            let (_, receiver) = store.watch(model_card::ROOT_PATH, None, runtime.primary_token());
             let inner_watch_obj = watch_obj.clone();
             let _watcher_task = tokio::spawn(async move {
                 inner_watch_obj.watch(receiver, None).await;
@@ -98,9 +94,6 @@ pub async fn prepare_engine(
             })
         }
         EngineConfig::StaticRemote(local_model) => {
-            // For now we only do ModelType.Backend
-            // For batch/text we only do Chat Completions
-
             // The card should have been loaded at 'build' phase earlier
             let card = local_model.card();
             let router_mode = local_model.router_config().router_mode;
@@ -120,7 +113,6 @@ pub async fn prepare_engine(
                 Some(
                     model_manager
                         .kv_chooser_for(
-                            local_model.display_name(),
                             &component,
                             card.kv_cache_block_size,
                             Some(local_model.router_config().kv_router_config),
@@ -142,6 +134,7 @@ pub async fn prepare_engine(
                 None,
                 kv_chooser.clone(),
                 hf_tokenizer,
+                None, // No prefill chooser in static mode
             )
             .await?;
 
@@ -230,6 +223,7 @@ pub async fn build_routed_pipeline<Req, Resp>(
     busy_threshold: Option<f64>,
     chooser: Option<Arc<KvRouter>>,
     hf_tokenizer: tokenizers::Tokenizer,
+    prefill_chooser: Option<Arc<PrefillRouter>>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
     Req: Data,
@@ -252,10 +246,12 @@ where
         chooser,
         preprocessor,
         hf_tokenizer,
+        prefill_chooser,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     card: &ModelDeploymentCard,
     client: &Client,
@@ -264,6 +260,7 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     chooser: Option<Arc<KvRouter>>,
     preprocessor: Arc<OpenAIPreprocessor>,
     hf_tokenizer: tokenizers::Tokenizer,
+    prefill_chooser: Option<Arc<PrefillRouter>>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
     Req: Data,
@@ -279,13 +276,24 @@ where
     let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
     let migration = Migration::from_mdc(card).into_operator();
+
+    // Create worker monitor only if busy_threshold is set
+    let worker_monitor = busy_threshold.map(|threshold| {
+        Arc::new(crate::discovery::KvWorkerMonitor::new(
+            Arc::new(client.clone()),
+            threshold,
+        )) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>
+    });
+
     let router =
         PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
             client.clone(),
             router_mode,
             busy_threshold,
+            worker_monitor,
         )
         .await?;
+
     let service_backend = match router_mode {
         RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
             ServiceBackend::from_engine(Arc::new(router))
@@ -299,14 +307,22 @@ where
         }
     };
 
+    // Use the provided prefill chooser, or create a disabled one if not provided
+    let prefill_chooser = prefill_chooser.unwrap_or_else(|| PrefillRouter::disabled(router_mode));
+    let prefill_op = prefill_chooser.into_operator();
+
+    // Link with prefill chooser including backward edge for response flow
     let engine = frontend
         .link(preprocessor_op.forward_edge())?
         .link(backend.forward_edge())?
         .link(migration.forward_edge())?
+        .link(prefill_op.forward_edge())?
         .link(service_backend)?
+        .link(prefill_op.backward_edge())?
         .link(migration.backward_edge())?
         .link(backend.backward_edge())?
         .link(preprocessor_op.backward_edge())?
         .link(frontend)?;
+
     Ok(engine)
 }

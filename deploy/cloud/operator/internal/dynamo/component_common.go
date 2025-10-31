@@ -63,7 +63,7 @@ func (b *BaseComponentDefaults) getCommonPodSpec() corev1.PodSpec {
 
 func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) corev1.Container {
 	container := corev1.Container{
-		Name: "main",
+		Name: commonconsts.MainContainerName,
 		Command: []string{
 			"/bin/sh",
 			"-c",

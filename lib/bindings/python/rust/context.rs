@@ -3,6 +3,7 @@
 
 // Context is a wrapper around the AsyncEngineContext to allow for Python bindings.
 
+use dynamo_runtime::logging::DistributedTraceContext;
 pub use dynamo_runtime::pipeline::AsyncEngineContext;
 use dynamo_runtime::pipeline::context::Controller;
 use pyo3::prelude::*;
@@ -15,11 +16,23 @@ use std::sync::Arc;
 #[pyclass]
 pub struct Context {
     inner: Arc<dyn AsyncEngineContext>,
+    trace_context: Option<DistributedTraceContext>,
 }
 
 impl Context {
-    pub fn new(inner: Arc<dyn AsyncEngineContext>) -> Self {
-        Self { inner }
+    pub fn new(
+        inner: Arc<dyn AsyncEngineContext>,
+        trace_context: Option<DistributedTraceContext>,
+    ) -> Self {
+        Self {
+            inner,
+            trace_context,
+        }
+    }
+
+    // Get trace context for Rust-side usage
+    pub fn trace_context(&self) -> Option<&DistributedTraceContext> {
+        self.trace_context.as_ref()
     }
 
     pub fn inner(&self) -> Arc<dyn AsyncEngineContext> {
@@ -38,6 +51,7 @@ impl Context {
         };
         Self {
             inner: Arc::new(controller),
+            trace_context: None,
         }
     }
 
@@ -73,6 +87,24 @@ impl Context {
                 }
             }
         })
+    }
+
+    // Expose trace information to Python for debugging
+    #[getter]
+    fn trace_id(&self) -> Option<String> {
+        self.trace_context.as_ref().map(|ctx| ctx.trace_id.clone())
+    }
+
+    #[getter]
+    fn span_id(&self) -> Option<String> {
+        self.trace_context.as_ref().map(|ctx| ctx.span_id.clone())
+    }
+
+    #[getter]
+    fn parent_span_id(&self) -> Option<String> {
+        self.trace_context
+            .as_ref()
+            .and_then(|ctx| ctx.parent_id.clone())
     }
 }
 

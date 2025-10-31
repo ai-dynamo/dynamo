@@ -19,6 +19,51 @@ limitations under the License.
 
 > Warning: Dev Containers (aka `devcontainers`) is an evolving feature and we are not testing in CI. Please submit any problem/feedback using the issues on GitHub.
 
+## Framework-Specific Devcontainers
+
+This directory contains framework-specific devcontainer configurations generated from a Jinja2 template:
+
+- **`vllm/`** - Development environment for vLLM framework
+- **`sglang/`** - Development environment for SGLang framework
+- **`trtllm/`** - Development environment for TensorRT-LLM framework
+
+### Template System
+
+The devcontainer configurations are generated from:
+- **`devcontainer.json.j2`** - Jinja2 template with framework variables
+- **`gen_devcontainer_json.py`** - Python script to generate configs
+
+To regenerate the framework-specific configurations after making changes:
+```bash
+cd .devcontainer
+python3 gen_devcontainer_json.py
+```
+
+**Important**: Do not edit the generated `devcontainer.json` files directly. They contain auto-generated warnings and will be overwritten. Instead, edit the `devcontainer.json.j2` template and regenerate.
+
+#### Why We Use Templates Instead of a Single devcontainer.json
+
+The Dev Container Extension requires that each `devcontainer.json` file follow a specific directory convention, which results in significant duplication across framework-specific configurations. See https://code.visualstudio.com/remote/advancedcontainers/connect-multiple-containers
+
+```
+📁 project-root
+    📁 .git
+    📁 .devcontainer
+      📁 python-container
+        📄 devcontainer.json
+      📁 node-container
+        📄 devcontainer.json
+    📁 python-src
+        📄 hello.py
+    📁 node-src
+        📄 hello.js
+    📄 docker-compose.yml
+```
+
+Alternative approaches using undocumented methods (e.g., changing devcontainer.json name, custom configurations) were explored but proved unsuccessful. The template system was developed to minimize duplication while maintaining compatibility with the Dev Container Extension's directory requirements.
+
+Until the Microsoft Dev Container Extension adds new functionalities, this remains the recommended approach for managing multiple Dev Container configurations.
+
 ```mermaid
 graph TB
     subgraph "Developer Laptop"
@@ -41,7 +86,7 @@ graph TB
             TOOLS["rust-analyzer<br/>cargo<br/>etc."]
         end
 
-        IMAGE["Docker Image<br/>dynamo:latest-vllm-local-dev"]
+        IMAGE["Docker Image<br/>dynamo:latest-{framework}-local-dev<br/>(vllm/sglang/trtllm)"]
 
         IMAGE -->|"docker run<br/>as ubuntu user"| CONTAINER
     end
@@ -89,23 +134,40 @@ You must have the following path on your host.
 
 Follow these steps to get your NVIDIA Dynamo development environment up and running:
 
-### Step 1: Build the Development Container Image
+### Step 0: Build the Development Container Image
 
-Build `dynamo:latest-vllm-local-dev` from scratch from the source:
+Build the appropriate framework image (e.g., `dynamo:latest-vllm-local-dev`) from scratch from the source:
 
 ```bash
 # Single command approach (recommended)
-./container/build.sh --framework VLLM --target local-dev
-# Creates both dynamo:latest-vllm and dynamo:latest-vllm-local-dev
+export FRAMEWORK=VLLM         # Note: any of VLLM, SGLANG, TRTLLM can be used
+./container/build.sh --framework $FRAMEWORK --target local-dev
 
-# Alternatively, you can build a development container then local-dev
-./container/build.sh --framework VLLM
+# Now you've created both dynamo:latest-vllm and dynamo:latest-vllm-local-dev
+```
+
+Alternatively, you can build a development container, then build local-dev:
+
+```bash
+export FRAMEWORK=VLLM
+
+./container/build.sh --framework $FRAMEWORK
 # Now you have a development image dynamo:latest-vllm
-./container/build.sh --dev-image dynamo:latest-vllm --framework VLLM
+
+./container/build.sh --dev-image dynamo:latest-${FRAMEWORK,,}
 # Now you have a local-dev image dynamo:latest-vllm-local-dev
 ```
 
 The local-dev image will give you local user permissions matching your host user and includes extra developer utilities (debugging tools, text editors, system monitors, etc.).
+
+### Step 1: Choose Your Framework
+
+Select the appropriate devcontainer based on your framework:
+- Use `vllm/devcontainer.json` for vLLM development
+- Use `sglang/devcontainer.json` for SGLang development
+- Use `trtllm/devcontainer.json` for TensorRT-LLM development
+
+When opening the devcontainer in VS Code/Cursor, navigate to the specific framework directory (e.g., `.devcontainer/vllm/`) and open that devcontainer.json.
 
 ### Step 2: Install Dev Containers Extension
 
@@ -149,7 +211,7 @@ This setup allows you to use Git commands normally within the container without 
 ### Step 5: Wait for Initialization
 
 The container will automatically:
-- Mount your local code to `/home/ubuntu/dynamo`
+- Mount your local code to `/workspace`
 - Run `post-create.sh` to build the project and configure the environment
 
 If `post-create.sh` fails, you can try to debug or [submit](https://github.com/ai-dynamo/dynamo/issues) an issue on GitHub.
@@ -161,13 +223,13 @@ If `post-create.sh` fails, you can try to debug or [submit](https://github.com/a
 If you make changes to Rust code and want to compile, use [cargo build](https://doc.rust-lang.org/cargo/commands/cargo-build.html). This will update Rust binaries such as dynamo-run.
 
 ```bash
-cd /home/ubuntu/dynamo && cargo build --locked --profile dev
+cd /workspace && cargo build --locked --profile dev
 ```
 
-Verify that builds are in the pre-defined `dynamo/.build/target` and not `dynamo/workspace`:
+Verify that builds are in the pre-defined `target` directory:
 ```bash
 $ cargo metadata --format-version=1 | jq -r '.target_directory'
-/home/ubuntu/dynamo/.build/target  <-- this is the target path
+/workspace/target  <-- this is the target path
 ```
 
 If cargo is not installed and configured properly, you will see one or more errors, such as the following:
@@ -182,7 +244,7 @@ Lastly, before pushing code to GitHub, remember to run `cargo fmt` and `cargo cl
 If you make changes to Rust code and want to propagate to Python bindings then can use [maturin](https://www.maturin.rs/#usage) (pre-installed). This will update the Python bindings with your new Rust changes.
 
 ```bash
-cd /home/ubuntu/dynamo/lib/bindings/python && maturin develop
+cd /workspace/lib/bindings/python && maturin develop
 ```
 
 ## What's Inside
@@ -190,14 +252,14 @@ Development Environment:
 - Rust and Python toolchains
 - GPU acceleration
 - VS Code or Cursor extensions for Rust and Python
-- Persistent build cache in `.build/` directory enables fast incremental builds (only changed files are recompiled) via `cargo build --locked --profile dev`
+- Persistent build cache in `target/` directory enables fast incremental builds (only changed files are recompiled) via `cargo build --locked --profile dev`
 - Edits to files are propagated to local repo due to the volume mount
 - SSH and GPG agent passthrough orchestrated by devcontainer
 
 File Structure:
-- Local dynamo repo mounts to `/home/ubuntu/dynamo`
+- Local dynamo repo mounts to `/workspace`
 - Python venv in `/opt/dynamo/venv`
-- Build artifacts in `dynamo/.build/target`
+- Build artifacts in `/workspace/target`
 - Hugging Face cache preserved between sessions (either mounting your host .cache to the container, or your `HF_HOME` to `/home/ubuntu/.cache/huggingface`)
 - Bash memory preserved between sessions at `/home/ubuntu/.commandhistory` using docker volume `dynamo-bashhistory`
 - Precommit preserved between sessions at `/home/ubuntu/.cache/precommit` using docker volume `dynamo-precommit-cache`
@@ -206,7 +268,7 @@ File Structure:
 
 To look at the docs run:
 ```bash
-cd ~/dynamo/.build/target/doc && python3 -m http.server 8000
+cd /workspace/target/doc && python3 -m http.server 8000
 ```
 
 VSCode will automatically port-forward and you can check them out in your browser.
@@ -314,7 +376,7 @@ If you encounter build errors or strange compilation issues, try running `cargo 
 If `cargo clean` doesn't resolve the issue, it is possible that some of the files were created by root (using the `run.sh` script). You can manually remove the build target by going to your host (outside the container), and remove the target:
 
 ```bash
-sudo rm -rf <your dynamo path on the host machine>/.build/target
+sudo rm -rf <your dynamo path on the host machine>/target
 ```
 
 ### Volume Corruption Issues
@@ -362,9 +424,11 @@ If you see errors like "container is not running" or "An error occurred setting 
    docker images | grep dynamo
 
    # If missing, build the dev image first, then build local-dev
-   ./container/build.sh --framework vllm
-   ./container/build.sh --dev-image dynamo:latest-vllm --framework vllm
-   # Output: dynamo:latest-vllm-local-dev
+   export FRAMEWORK=VLLM  # Replace with VLLM, SGLANG, or TRTLLM
+   ./container/build.sh --framework $FRAMEWORK
+   # change to lower case portable way across shells
+   ./container/build.sh --dev-image dynamo:latest-$(echo "$FRAMEWORK" | tr '[:upper:]' '[:lower:]') --framework "$FRAMEWORK"
+   # Now you have dynamo:latest-vllm-local-dev
    ```
 
 2. **Container startup failure:**

@@ -11,7 +11,7 @@ use crate::{
     DistributedRuntime, Result,
     component::Component,
     error,
-    metrics::{MetricsRegistry, prometheus_names, prometheus_names::nats_service},
+    metrics::{MetricsHierarchy, prometheus_names, prometheus_names::nats_service},
     traits::*,
     transports::nats,
     utils::stream,
@@ -304,17 +304,20 @@ mod tests {
 /// 3. Prometheus scrapes these Gauge values (snapshots, not live data)
 ///
 /// Flow: NATS Service → NatsStatsMetrics (Counters) → Metrics Callback → Prometheus Gauge
-/// Note: These are snapshots updated when execute_metrics_callbacks() is called.
+/// Note: These are snapshots updated when execute_prometheus_update_callbacks() is called.
 #[derive(Debug, Clone)]
+/// Prometheus metrics for NATS server components.
+/// Note: Metrics with `_total` names use IntGauge because we copy counter values
+/// from underlying services rather than incrementing directly.
 pub struct ComponentNatsServerPrometheusMetrics {
     /// Average processing time in milliseconds (maps to: average_processing_time)
-    pub service_avg_processing_ms: prometheus::Gauge,
+    pub service_processing_ms_avg: prometheus::Gauge,
     /// Total errors across all endpoints (maps to: num_errors)
-    pub service_total_errors: prometheus::IntGauge,
+    pub service_errors_total: prometheus::IntGauge,
     /// Total requests across all endpoints (maps to: num_requests)
-    pub service_total_requests: prometheus::IntGauge,
+    pub service_requests_total: prometheus::IntGauge,
     /// Total processing time in milliseconds (maps to: processing_time)
-    pub service_total_processing_ms: prometheus::IntGauge,
+    pub service_processing_ms_total: prometheus::IntGauge,
     /// Number of active services (derived from ServiceSet.services)
     pub service_active_services: prometheus::IntGauge,
     /// Number of active endpoints (derived from ServiceInfo.endpoints)
@@ -336,47 +339,47 @@ impl ComponentNatsServerPrometheusMetrics {
 
         let labels: &[(&str, &str)] = &labels_vec;
 
-        let service_avg_processing_ms = component.create_gauge(
-            nats_service::AVG_PROCESSING_MS,
+        let service_processing_ms_avg = component.metrics().create_gauge(
+            nats_service::PROCESSING_MS_AVG,
             "Average processing time across all component endpoints in milliseconds",
             labels,
         )?;
 
-        let service_total_errors = component.create_intgauge(
-            nats_service::TOTAL_ERRORS,
+        let service_errors_total = component.metrics().create_intgauge(
+            nats_service::ERRORS_TOTAL,
             "Total number of errors across all component endpoints",
             labels,
         )?;
 
-        let service_total_requests = component.create_intgauge(
-            nats_service::TOTAL_REQUESTS,
+        let service_requests_total = component.metrics().create_intgauge(
+            nats_service::REQUESTS_TOTAL,
             "Total number of requests across all component endpoints",
             labels,
         )?;
 
-        let service_total_processing_ms = component.create_intgauge(
-            nats_service::TOTAL_PROCESSING_MS,
+        let service_processing_ms_total = component.metrics().create_intgauge(
+            nats_service::PROCESSING_MS_TOTAL,
             "Total processing time across all component endpoints in milliseconds",
             labels,
         )?;
 
-        let service_active_services = component.create_intgauge(
+        let service_active_services = component.metrics().create_intgauge(
             nats_service::ACTIVE_SERVICES,
             "Number of active services in this component",
             labels,
         )?;
 
-        let service_active_endpoints = component.create_intgauge(
+        let service_active_endpoints = component.metrics().create_intgauge(
             nats_service::ACTIVE_ENDPOINTS,
             "Number of active endpoints across all services",
             labels,
         )?;
 
         Ok(Self {
-            service_avg_processing_ms,
-            service_total_errors,
-            service_total_requests,
-            service_total_processing_ms,
+            service_processing_ms_avg,
+            service_errors_total,
+            service_requests_total,
+            service_processing_ms_total,
             service_active_services,
             service_active_endpoints,
         })
@@ -414,14 +417,14 @@ impl ComponentNatsServerPrometheusMetrics {
         if processing_time_samples > 0 && total_requests > 0 {
             let avg_time_nanos = total_processing_time_nanos as f64 / total_requests as f64;
             let avg_time_ms = avg_time_nanos / 1_000_000.0; // Convert nanoseconds to milliseconds
-            self.service_avg_processing_ms.set(avg_time_ms);
+            self.service_processing_ms_avg.set(avg_time_ms);
         } else {
-            self.service_avg_processing_ms.set(0.0);
+            self.service_processing_ms_avg.set(0.0);
         }
 
-        self.service_total_errors.set(total_errors as i64); // maps to: num_errors
-        self.service_total_requests.set(total_requests as i64); // maps to: num_requests
-        self.service_total_processing_ms
+        self.service_errors_total.set(total_errors as i64); // maps to: num_errors
+        self.service_requests_total.set(total_requests as i64); // maps to: num_requests
+        self.service_processing_ms_total
             .set((total_processing_time_nanos / 1_000_000) as i64); // maps to: processing_time (converted to milliseconds)
         self.service_active_services.set(service_count); // derived from ServiceSet.services
         self.service_active_endpoints.set(endpoint_count as i64); // derived from ServiceInfo.endpoints
@@ -429,10 +432,10 @@ impl ComponentNatsServerPrometheusMetrics {
 
     /// Reset all metrics to zero. Useful when no data is available or to clear stale values.
     pub fn reset_to_zeros(&self) {
-        self.service_avg_processing_ms.set(0.0);
-        self.service_total_errors.set(0);
-        self.service_total_requests.set(0);
-        self.service_total_processing_ms.set(0);
+        self.service_processing_ms_avg.set(0.0);
+        self.service_errors_total.set(0);
+        self.service_requests_total.set(0);
+        self.service_processing_ms_total.set(0);
         self.service_active_services.set(0);
         self.service_active_endpoints.set(0);
     }

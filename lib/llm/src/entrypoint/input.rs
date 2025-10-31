@@ -115,6 +115,23 @@ pub async fn run_input(
         Either::Left(rt) => rt.clone(),
         Either::Right(drt) => drt.runtime().clone(),
     };
+
+    // Initialize audit bus + sink workers (off hot path; fan-out supported)
+    if crate::audit::config::policy().enabled {
+        let cap: usize = std::env::var("DYN_AUDIT_CAPACITY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1024);
+        crate::audit::bus::init(cap);
+        // Pass DistributedRuntime if available for shared NATS client
+        let drt_ref = match &rt {
+            Either::Right(drt) => Some(drt),
+            Either::Left(_) => None,
+        };
+        crate::audit::sink::spawn_workers_from_env(drt_ref);
+        tracing::info!("Audit initialized: bus cap={}", cap);
+    }
+
     match in_opt {
         Input::Http => {
             http::run(runtime, engine_config).await?;

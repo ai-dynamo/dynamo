@@ -5,45 +5,54 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::time::Duration;
 
-use crate::{slug::Slug, transports::etcd::Client};
+use crate::{
+    storage::key_value_store::{Key, KeyValue, WatchEvent},
+    transports::etcd::Client,
+};
 use async_stream::stream;
 use async_trait::async_trait;
 use etcd_client::{Compare, CompareOp, EventType, PutOptions, Txn, TxnOp, WatchOptions};
 
-use super::{KeyValueBucket, KeyValueStore, StorageError, StorageOutcome};
+use super::{KeyValueBucket, KeyValueStore, StoreError, StoreOutcome};
 
 #[derive(Clone)]
-pub struct EtcdStorage {
+pub struct EtcdStore {
     client: Client,
 }
 
-impl EtcdStorage {
+impl EtcdStore {
     pub fn new(client: Client) -> Self {
         Self { client }
     }
 }
 
 #[async_trait]
-impl KeyValueStore for EtcdStorage {
+impl KeyValueStore for EtcdStore {
+    type Bucket = EtcdBucket;
+
     /// A "bucket" in etcd is a path prefix
     async fn get_or_create_bucket(
         &self,
         bucket_name: &str,
         _ttl: Option<Duration>, // TODO ttl not used yet
-    ) -> Result<Box<dyn KeyValueBucket>, StorageError> {
-        Ok(self.get_bucket(bucket_name).await?.unwrap())
+    ) -> Result<Self::Bucket, StoreError> {
+        Ok(EtcdBucket {
+            client: self.client.clone(),
+            bucket_name: bucket_name.to_string(),
+        })
     }
 
     /// A "bucket" in etcd is a path prefix. This creates an EtcdBucket object without doing
     /// any network calls.
-    async fn get_bucket(
-        &self,
-        bucket_name: &str,
-    ) -> Result<Option<Box<dyn KeyValueBucket>>, StorageError> {
-        Ok(Some(Box::new(EtcdBucket {
+    async fn get_bucket(&self, bucket_name: &str) -> Result<Option<Self::Bucket>, StoreError> {
+        Ok(Some(EtcdBucket {
             client: self.client.clone(),
             bucket_name: bucket_name.to_string(),
-        })))
+        }))
+    }
+
+    fn connection_id(&self) -> u64 {
+        self.client.lease_id()
     }
 }
 
@@ -56,20 +65,20 @@ pub struct EtcdBucket {
 impl KeyValueBucket for EtcdBucket {
     async fn insert(
         &self,
-        key: String,
-        value: String,
+        key: &Key,
+        value: bytes::Bytes,
         // "version" in etcd speak. revision is a global cluster-wide value
         revision: u64,
-    ) -> Result<StorageOutcome, StorageError> {
+    ) -> Result<StoreOutcome, StoreError> {
         let version = revision;
         if version == 0 {
-            self.create(&key, &value).await
+            self.create(key, value).await
         } else {
-            self.update(&key, &value, version).await
+            self.update(key, value, version).await
         }
     }
 
-    async fn get(&self, key: &str) -> Result<Option<bytes::Bytes>, StorageError> {
+    async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StoreError> {
         let k = make_key(&self.bucket_name, key);
         tracing::trace!("etcd get: {k}");
 
@@ -77,7 +86,7 @@ impl KeyValueBucket for EtcdBucket {
             .client
             .kv_get(k, None)
             .await
-            .map_err(|e| StorageError::EtcdError(e.to_string()))?;
+            .map_err(|e| StoreError::EtcdError(e.to_string()))?;
         if kvs.is_empty() {
             return Ok(None);
         }
@@ -85,34 +94,52 @@ impl KeyValueBucket for EtcdBucket {
         Ok(Some(val.into()))
     }
 
-    async fn delete(&self, key: &str) -> Result<(), StorageError> {
+    async fn delete(&self, key: &Key) -> Result<(), StoreError> {
+        let k = make_key(&self.bucket_name, key);
+        tracing::trace!("etcd delete: {k}");
         let _ = self
             .client
-            .kv_delete(key, None)
+            .kv_delete(k, None)
             .await
-            .map_err(|e| StorageError::EtcdError(e.to_string()))?;
+            .map_err(|e| StoreError::EtcdError(e.to_string()))?;
         Ok(())
     }
 
     async fn watch(
         &self,
-    ) -> Result<Pin<Box<dyn futures::Stream<Item = bytes::Bytes> + Send + 'life0>>, StorageError>
-    {
-        let k = make_key(&self.bucket_name, "");
-        tracing::trace!("etcd watch: {k}");
-        let (_watcher, mut watch_stream) = self
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + 'life0>>, StoreError> {
+        let prefix = make_key(&self.bucket_name, &"".into());
+        tracing::trace!("etcd watch: {prefix}");
+        let (watcher, mut watch_stream) = self
             .client
             .etcd_client()
             .clone()
-            .watch(k.as_bytes(), Some(WatchOptions::new().with_prefix()))
+            .watch(prefix.as_bytes(), Some(WatchOptions::new().with_prefix()))
             .await
-            .map_err(|e| StorageError::EtcdError(e.to_string()))?;
+            .map_err(|e| StoreError::EtcdError(e.to_string()))?;
         let output = stream! {
+            let _watcher = watcher; // Keep it alive. Not sure if necessary.
             while let Ok(Some(resp)) = watch_stream.message().await {
                 for e in resp.events() {
-                    if matches!(e.event_type(), EventType::Put) && e.kv().is_some() {
-                        let b: bytes::Bytes = e.kv().unwrap().value().to_vec().into();
-                        yield b;
+                    let Some(kv) = e.kv() else {
+                        continue;
+                    };
+                    let (k_bytes, v_bytes) = kv.clone().into_key_value();
+                    let key = match String::from_utf8(k_bytes) {
+                        Ok(k) => k,
+                        Err(err) => {
+                            tracing::error!(%err, prefix, "Invalid UTF8 in etcd key");
+                            continue;
+                        }
+                    };
+                    let item = KeyValue::new(key, v_bytes.into());
+                    match e.event_type() {
+                        EventType::Put => {
+                            yield WatchEvent::Put(item);
+                        }
+                        EventType::Delete => {
+                            yield WatchEvent::Delete(item);
+                        }
                     }
                 }
             }
@@ -120,15 +147,15 @@ impl KeyValueBucket for EtcdBucket {
         Ok(Box::pin(output))
     }
 
-    async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StorageError> {
-        let k = make_key(&self.bucket_name, "");
+    async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StoreError> {
+        let k = make_key(&self.bucket_name, &"".into());
         tracing::trace!("etcd entries: {k}");
 
         let resp = self
             .client
             .kv_get_prefix(k)
             .await
-            .map_err(|e| StorageError::EtcdError(e.to_string()))?;
+            .map_err(|e| StoreError::EtcdError(e.to_string()))?;
         let out: HashMap<String, bytes::Bytes> = resp
             .into_iter()
             .map(|kv| {
@@ -142,12 +169,16 @@ impl KeyValueBucket for EtcdBucket {
 }
 
 impl EtcdBucket {
-    async fn create(&self, key: &str, value: &str) -> Result<StorageOutcome, StorageError> {
+    async fn create(
+        &self,
+        key: &Key,
+        value: impl Into<Vec<u8>>,
+    ) -> Result<StoreOutcome, StoreError> {
         let k = make_key(&self.bucket_name, key);
         tracing::trace!("etcd create: {k}");
 
         // Use atomic transaction to check and create in one operation
-        let put_options = PutOptions::new();
+        let put_options = PutOptions::new().with_lease(self.client.lease_id() as i64);
 
         // Build transaction that creates key only if it doesn't exist
         let txn = Txn::new()
@@ -164,11 +195,11 @@ impl EtcdBucket {
             .kv_client()
             .txn(txn)
             .await
-            .map_err(|e| StorageError::EtcdError(e.to_string()))?;
+            .map_err(|e| StoreError::EtcdError(e.to_string()))?;
 
         if result.succeeded() {
             // Key was created successfully
-            return Ok(StorageOutcome::Created(1)); // version of new key is always 1
+            return Ok(StoreOutcome::Created(1)); // version of new key is always 1
         }
 
         // Key already existed, get its version
@@ -177,20 +208,20 @@ impl EtcdBucket {
             && let Some(kv) = get_resp.kvs().first()
         {
             let version = kv.version() as u64;
-            return Ok(StorageOutcome::Exists(version));
+            return Ok(StoreOutcome::Exists(version));
         }
         // Shouldn't happen, but handle edge case
-        Err(StorageError::EtcdError(
+        Err(StoreError::EtcdError(
             "Unexpected transaction response".to_string(),
         ))
     }
 
     async fn update(
         &self,
-        key: &str,
-        value: &str,
+        key: &Key,
+        value: impl AsRef<[u8]>,
         revision: u64,
-    ) -> Result<StorageOutcome, StorageError> {
+    ) -> Result<StoreOutcome, StoreError> {
         let version = revision;
         let k = make_key(&self.bucket_name, key);
         tracing::trace!("etcd update: {k}");
@@ -199,47 +230,46 @@ impl EtcdBucket {
             .client
             .kv_get(k.clone(), None)
             .await
-            .map_err(|e| StorageError::EtcdError(e.to_string()))?;
+            .map_err(|e| StoreError::EtcdError(e.to_string()))?;
         if kvs.is_empty() {
-            return Err(StorageError::MissingKey(key.to_string()));
+            return Err(StoreError::MissingKey(key.to_string()));
         }
         let current_version = kvs.first().unwrap().version() as u64;
         if current_version != version + 1 {
             tracing::warn!(
                 current_version,
                 attempted_next_version = version,
-                key,
+                %key,
                 "update: Wrong revision"
             );
             // NATS does a resync_update, overwriting the key anyway and getting the new revision.
             // So we do too in etcd.
         }
 
+        let put_options = PutOptions::new()
+            .with_lease(self.client.lease_id() as i64)
+            .with_prev_key();
         let mut put_resp = self
             .client
-            .kv_put_with_options(k, value, Some(PutOptions::new().with_prev_key()))
+            .kv_put_with_options(k, value, Some(put_options))
             .await
-            .map_err(|e| StorageError::EtcdError(e.to_string()))?;
+            .map_err(|e| StoreError::EtcdError(e.to_string()))?;
         Ok(match put_resp.take_prev_key() {
             // Should this be an error?
             // The key was deleted between our get and put. We re-created it.
             // Version of new key is always 1.
             // <https://etcd.io/docs/v3.5/learning/data_model/>
-            None => StorageOutcome::Created(1),
+            None => StoreOutcome::Created(1),
             // Expected case, success
-            Some(kv) if kv.version() as u64 == version + 1 => StorageOutcome::Created(version),
+            Some(kv) if kv.version() as u64 == version + 1 => StoreOutcome::Created(version),
             // Should this be an error? Something updated the version between our get and put
-            Some(kv) => StorageOutcome::Created(kv.version() as u64 + 1),
+            Some(kv) => StoreOutcome::Created(kv.version() as u64 + 1),
         })
     }
 }
 
-fn make_key(bucket_name: &str, key: &str) -> String {
-    [
-        Slug::slugify(bucket_name).to_string(),
-        Slug::slugify(key).to_string(),
-    ]
-    .join("/")
+fn make_key(bucket_name: &str, key: &Key) -> String {
+    [bucket_name.to_string(), key.to_string()].join("/")
 }
 
 #[cfg(feature = "integration")]
@@ -262,9 +292,9 @@ mod concurrent_create_tests {
         });
     }
 
-    async fn test_concurrent_create(drt: DistributedRuntime) -> Result<(), StorageError> {
+    async fn test_concurrent_create(drt: DistributedRuntime) -> Result<(), StoreError> {
         let etcd_client = drt.etcd_client().expect("etcd client should be available");
-        let storage = EtcdStorage::new(etcd_client);
+        let storage = EtcdStore::new(etcd_client);
 
         // Create a bucket for testing
         let bucket = Arc::new(tokio::sync::Mutex::new(
@@ -278,7 +308,7 @@ mod concurrent_create_tests {
         let barrier = Arc::new(Barrier::new(num_workers));
 
         // Shared test data
-        let test_key = format!("concurrent_test_key_{}", uuid::Uuid::new_v4());
+        let test_key: Key = Key::new(&format!("concurrent_test_key_{}", uuid::Uuid::new_v4()));
         let test_value = "test_value";
 
         // Spawn multiple tasks that will all try to create the same key simultaneously
@@ -302,11 +332,11 @@ mod concurrent_create_tests {
                 let result = bucket_clone
                     .lock()
                     .await
-                    .insert(key_clone, value_clone, 0)
+                    .insert(&key_clone, value_clone.into(), 0)
                     .await;
 
                 match result {
-                    Ok(StorageOutcome::Created(version)) => {
+                    Ok(StoreOutcome::Created(version)) => {
                         println!(
                             "Worker {} successfully created key with version {}",
                             worker_id, version
@@ -315,7 +345,7 @@ mod concurrent_create_tests {
                         *count += 1;
                         Ok(version)
                     }
-                    Ok(StorageOutcome::Exists(version)) => {
+                    Ok(StoreOutcome::Exists(version)) => {
                         println!(
                             "Worker {} found key already exists with version {}",
                             worker_id, version

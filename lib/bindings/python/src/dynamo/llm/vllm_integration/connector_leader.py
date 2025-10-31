@@ -29,9 +29,6 @@ if TYPE_CHECKING:
 # from dynamo.llm.vllm_integration.rust import SchedulerOutput as RustSchedulerOutput
 
 from dynamo.llm import KvbmLeader
-from dynamo.llm.vllm_integration.kv_cache_utils import (
-    find_and_set_available_port_from_env,
-)
 from dynamo.llm.vllm_integration.rust import KvbmRequest
 from dynamo.llm.vllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
 from dynamo.llm.vllm_integration.rust import SchedulerOutput as RustSchedulerOutput
@@ -56,7 +53,6 @@ class KvConnectorLeader:
     def __init__(self, vllm_config: "VllmConfig", engine_id: str, **kwargs):
         drt = kwargs.get("drt", None)
         if drt is None:
-            find_and_set_available_port_from_env("DYN_SYSTEM_PORT")
             self.drt = DistributedRuntime.detached()
         else:
             self.drt = drt
@@ -67,9 +63,47 @@ class KvConnectorLeader:
         leader = KvbmLeader(world_size, drt=self.drt)
 
         print(f"KvConnectorLeader initialized with engine_id: {engine_id}")
-        self._connector = RustKvConnectorLeader(
-            engine_id, self.drt, vllm_config.cache_config.block_size, leader
-        )
+        # Get kv event consolidator endpoints from vllm_config (pre-computed in main.py)
+        consolidator_vllm_endpoint = None
+        consolidator_output_endpoint = None
+        self._consolidator_output_port = None
+
+        if (
+            hasattr(vllm_config, "consolidator_endpoints")
+            and vllm_config.consolidator_endpoints
+        ):
+            # Unpack all three endpoints
+            # [0]: vllm_endpoint (for consolidator to subscribe to vLLM)
+            # [1]: output_bind_endpoint (for consolidator to bind/publish)
+            # [2]: output_connect_endpoint (for clients to connect)
+            (
+                consolidator_vllm_endpoint,
+                consolidator_output_endpoint,
+                _consolidator_output_connect_endpoint,  # Not needed here
+            ) = vllm_config.consolidator_endpoints
+            self._consolidator_output_port = int(
+                consolidator_output_endpoint.split(":")[-1]
+            )
+
+            # Pass endpoints to Rust
+            self._connector = RustKvConnectorLeader(
+                engine_id,
+                self.drt,
+                vllm_config.cache_config.block_size,
+                leader,
+                consolidator_vllm_endpoint=consolidator_vllm_endpoint,
+                consolidator_output_endpoint=consolidator_output_endpoint,
+            )
+        else:
+            # No kv event consolidator - pass None to Rust
+            self._connector = RustKvConnectorLeader(
+                engine_id,
+                self.drt,
+                vllm_config.cache_config.block_size,
+                leader,
+                consolidator_vllm_endpoint=None,
+                consolidator_output_endpoint=None,
+            )
 
     # KV Connector
 
@@ -196,7 +230,9 @@ class KvConnectorLeader:
         if self._connector.has_slot(request.request_id):
             return None
 
-        if bool(request.mm_positions):
+        if bool(getattr(request, "mm_features", None)) or bool(
+            getattr(request, "mm_positions", None)
+        ):
             raise ValueError("Unsupported request - requires mm extra keys")
 
         all_token_ids = request.all_token_ids

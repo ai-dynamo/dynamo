@@ -5,21 +5,21 @@ use dynamo_llm::block_manager::connector::protocol::TransferType;
 use dynamo_llm::block_manager::connector::scheduler::{
     Scheduler, TransferSchedulerClient, WorkerSchedulerClient,
 };
-use dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics;
 
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use super::*;
-use crate::llm::block_manager::distributed::get_barrier_id_prefix;
+use crate::llm::block_manager::distributed::{get_leader_zmq_ack_url, get_leader_zmq_pub_url};
 use crate::{
     DistributedRuntime as PyDistributedRuntime, llm::block_manager::distributed::VllmTensor,
     to_pyerr,
 };
-use dynamo_runtime::metrics::prometheus_names::kvbm_connector;
 
+use crate::llm::block_manager::distributed::PyLayoutType;
 use anyhow;
 use dynamo_llm::block_manager::distributed::{KvbmWorker, KvbmWorkerConfig};
+use dynamo_llm::block_manager::layout::LayoutType;
 use dynamo_llm::block_manager::storage::torch::TorchTensor;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
@@ -33,6 +33,9 @@ pub trait Worker: Send + Sync {
         dtype_width_bytes: usize,
         kv_caches: Vec<(String, Arc<VllmTensor>)>,
         raw_event_handles: Vec<u64>,
+        device_layout_type: Option<LayoutType>,
+        host_layout_type: Option<LayoutType>,
+        disk_layout_type: Option<LayoutType>,
     ) -> anyhow::Result<()>;
 
     fn bind_connector_metadata(&mut self, metadata: Vec<u8>) -> anyhow::Result<()>;
@@ -70,8 +73,6 @@ pub struct KvConnectorWorker {
 
     /// cuda events created by the python side
     layer_events: Vec<u64>,
-
-    kvbm_metrics: KvbmMetrics,
 }
 
 impl KvConnectorWorker {
@@ -92,11 +93,6 @@ impl KvConnectorWorker {
         )?
         .detach();
 
-        let kvbm_metrics = KvbmMetrics::new(
-            &drt.namespace(kvbm_connector::KVBM_CONNECTOR_WORKER)
-                .unwrap(),
-        );
-
         tracing::info!(
             "KvConnectorWorker initialized with worker_id: {}",
             vllm_worker_id
@@ -115,7 +111,6 @@ impl KvConnectorWorker {
             layers_complete: 0,
             kv_cache_layers: Vec::new(),
             layer_events: Vec::new(),
-            kvbm_metrics,
         })
     }
 }
@@ -133,6 +128,9 @@ impl Worker for KvConnectorWorker {
         dtype_width_bytes: usize,
         kv_caches: Vec<(String, Arc<VllmTensor>)>,
         raw_event_handles: Vec<u64>,
+        device_layout_type: Option<LayoutType>,
+        host_layout_type: Option<LayoutType>,
+        disk_layout_type: Option<LayoutType>,
     ) -> anyhow::Result<()> {
         if self.kvbm_worker.get().is_some() {
             tracing::warn!("kvbm worker already registered");
@@ -147,8 +145,15 @@ impl Worker for KvConnectorWorker {
 
         // Process kv_caches in layer execution order (already sorted by layer index)
         let mut vllm_tensors = Vec::new();
+        let mut first_tensor_shape: Option<Vec<usize>> = None;
+
         for (layer_name, vllm_tensor) in kv_caches {
             tracing::trace!("Registering KV cache layer: {layer_name}, tensor: {vllm_tensor:?}");
+
+            // Capture the shape of the first tensor for layout detection
+            if first_tensor_shape.is_none() {
+                first_tensor_shape = Some(vllm_tensor.shape());
+            }
 
             // Store for later lookup by name
             self.kv_cache_layers.push((layer_name, vllm_tensor.clone()));
@@ -159,6 +164,35 @@ impl Worker for KvConnectorWorker {
 
         self.layer_events = raw_event_handles;
 
+        // Auto-detect device layout type if not explicitly provided
+        let detected_device_layout_type = match device_layout_type {
+            Some(layout) => layout,
+            None => {
+                if let Some(ref shape) = first_tensor_shape {
+                    match LayoutType::layer_separate_auto(shape, num_device_blocks) {
+                        Ok(detected) => {
+                            tracing::info!(
+                                "Auto-detected device layout from tensor shape: {:?}",
+                                detected
+                            );
+                            detected
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to auto-detect layout from shape {:?}: {}. Using default.",
+                                shape,
+                                e
+                            );
+                            LayoutType::layer_separate_auto_default()
+                        }
+                    }
+                } else {
+                    tracing::warn!("No tensors available for layout detection. Using default.");
+                    LayoutType::layer_separate_auto_default()
+                }
+            }
+        };
+
         let config = KvbmWorkerConfig::builder()
             .drt(self.drt.clone())
             .num_device_blocks(num_device_blocks)
@@ -166,8 +200,12 @@ impl Worker for KvConnectorWorker {
             .tensors(vllm_tensors)
             .device_id(device_id)
             .dtype_width_bytes(dtype_width_bytes)
-            .barrier_id_prefix(get_barrier_id_prefix())
+            .leader_pub_url(get_leader_zmq_pub_url())
+            .leader_ack_url(get_leader_zmq_ack_url())
             .scheduler_client(Some(self.transfer_client.clone()))
+            .device_layout_type(detected_device_layout_type)
+            .host_layout_type(host_layout_type.unwrap_or(LayoutType::FullyContiguous))
+            .disk_layout_type(disk_layout_type.unwrap_or(LayoutType::FullyContiguous))
             .build()?;
 
         let worker = self.drt.runtime().primary().block_on(async move {
@@ -277,7 +315,6 @@ impl Worker for KvConnectorWorker {
                 self.connector.enqueue_request(operation);
             }
         }
-        self.kvbm_metrics.save_kv_layer_requests.inc();
         Ok(())
     }
 
@@ -416,6 +453,7 @@ impl PyKvConnectorWorker {
         Ok(Self { connector_worker })
     }
 
+    #[pyo3(signature = (num_device_blocks, page_size, device_id, dtype_width_bytes, kv_caches, raw_event_handles, device_layout_type=None, host_layout_type=None, disk_layout_type=None))]
     pub fn register_kv_caches(
         &mut self,
         num_device_blocks: usize,
@@ -424,6 +462,9 @@ impl PyKvConnectorWorker {
         dtype_width_bytes: usize,
         kv_caches: Vec<(String, Py<PyAny>)>,
         raw_event_handles: Vec<u64>,
+        device_layout_type: Option<PyLayoutType>,
+        host_layout_type: Option<PyLayoutType>,
+        disk_layout_type: Option<PyLayoutType>,
     ) -> PyResult<()> {
         // Convert Python tensors to Rust VllmTensor objects
         let mut rust_kv_caches = Vec::new();
@@ -440,6 +481,9 @@ impl PyKvConnectorWorker {
                 dtype_width_bytes,
                 rust_kv_caches,
                 raw_event_handles,
+                device_layout_type.map(|py_layout| py_layout.into()),
+                host_layout_type.map(|py_layout| py_layout.into()),
+                disk_layout_type.map(|py_layout| py_layout.into()),
             )
             .map_err(to_pyerr)
     }

@@ -6,22 +6,26 @@ wait_for_model() {
 
     local model_host=$1
     local model_port=$2
-    local poll=${3:-1}
-    local timeout=${4:-600}
-    local report_every=${5:-60}
+    local n_prefill=${3:-1}
+    local n_decode=${4:-1}
+    local poll=${5:-1}
+    local timeout=${6:-600}
+    local report_every=${7:-60}
 
     local health_addr="http://${model_host}:${model_port}/health"
-    echo "Polling ${health_addr} every ${poll} seconds"
+    echo "Polling ${health_addr} every ${poll} seconds to check whether ${n_prefill} prefills and ${n_decode} decodes are alive"
 
     local start_ts=$(date +%s)
     local report_ts=$(date +%s)
 
     while :; do
+        # Curl timeout - our primary use case here is to launch it at the first node (localhost), so no timeout is needed.
         curl_result=$(curl ${health_addr} 2>/dev/null)
-        health=$(grep '"status":"healthy"' <<< $curl_result)
-        if [[ -n $health ]]; then
-            echo "Model is alive. Health response: ${curl_result}; "
-            return 0;
+        # Python path - Use of `check_server_health.py` is self-constrained outside of any packaging.
+        check_result=$(python3 /scripts/check_server_health.py $n_prefill $n_decode <<< $curl_result)
+        if [[ $check_result == *"Model is ready."* ]]; then
+            echo $check_result
+            return 0
         fi
 
         time_now=$(date +%s)
@@ -31,7 +35,7 @@ wait_for_model() {
         fi
 
         if [[ $((time_now - report_ts)) -ge $report_every ]]; then
-            echo "Waiting for model to come alive. Current result: ${curl_result}"
+            echo $check_result
             report_ts=$time_now
         fi
 
@@ -46,24 +50,30 @@ warmup_model() {
     model_path=$4
     config=$5
 
-    IFS='x' read -r -a config_list <<< "$config"
-    isl=${config_list[0]}
-    osl=${config_list[1]}
-    num_prompts=${config_list[2]}
-    concurrency=${config_list[3]}
-    request_rate=${config_list[4]}
+    model_name="deepseek-ai/DeepSeek-R1"
+    model_path="deepseek-ai/DeepSeek-R1-0528"
+    head_node="localhost"
+    head_port="8000"
+    chosen_isl=1024
+    chosen_osl=1024
+    chosen_req_rate="inf"
+    chosen_concurrencies=(1 2 4 8 16 32 64 128)
 
-    command=(
-        python3 -m sglang.bench_serving
-        --base-url "http://${service_host}:${service_port}"
-        --model ${served_model_name} --tokenizer ${model_path}
-        --backend sglang-oai
-        --dataset-name random --random-input ${isl} --random-output ${osl}
-        --random-range-ratio 1
-        --num-prompts ${num_prompts} --request-rate ${request_rate} --max-concurrency ${concurrency}
-    )
+	for concurrency in ${chosen_concurrencies[@]}
+	do
+	    num_prompts=$((concurrency * 5))
 
-    echo "Config ${config}. Running command ${command[@]}"
+	    command=(
+		python3 -m sglang.bench_serving
+		--base-url "http://${head_node}:${head_port}"
+		--model ${model_name} --tokenizer ${model_path}
+		--backend sglang-oai
+		--dataset-name random --random-input ${chosen_isl} --random-output ${chosen_osl}
+		--random-range-ratio 1
+		--num-prompts ${num_prompts} --request-rate ${chosen_req_rate} --max-concurrency ${concurrency}
+	    )
 
-    ${command[@]}
+	    echo "Running with concurrency: ${concurrency}, num_prompts: ${num_prompts}"
+	    "${command[@]}"
+	done
 }

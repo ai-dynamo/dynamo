@@ -15,6 +15,7 @@ bitflags! {
     /// - `ModelType::Chat`
     /// - `ModelType::Completions`
     /// - `ModelType::Embedding`
+    /// - `ModelType::TensorBased`
     ///
     /// For example, a model that supports both chat and completions can be
     /// expressed as:
@@ -29,11 +30,13 @@ bitflags! {
     /// Using bitflags avoids deep branching on a single enum variant,
     /// simplifies checks like `supports_chat()`, and enables efficient,
     /// type-safe combinations of multiple endpoint types within a single byte.
-    #[derive(Copy, Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+    #[derive(Copy, Debug, Default, Clone, Serialize, Deserialize, Eq, PartialEq)]
     pub struct ModelType: u8 {
         const Chat = 1 << 0;
         const Completions = 1 << 1;
         const Embedding = 1 << 2;
+        const TensorBased = 1 << 3;
+        const Prefill = 1 << 4;
     }
 }
 
@@ -51,6 +54,12 @@ impl ModelType {
     pub fn supports_embedding(&self) -> bool {
         self.contains(ModelType::Embedding)
     }
+    pub fn supports_tensor(&self) -> bool {
+        self.contains(ModelType::TensorBased)
+    }
+    pub fn supports_prefill(&self) -> bool {
+        self.contains(ModelType::Prefill)
+    }
 
     pub fn as_vec(&self) -> Vec<&'static str> {
         let mut result = Vec::new();
@@ -62,6 +71,34 @@ impl ModelType {
         }
         if self.supports_embedding() {
             result.push("embedding");
+        }
+        if self.supports_tensor() {
+            result.push("tensor");
+        }
+        if self.supports_prefill() {
+            result.push("prefill");
+        }
+        result
+    }
+
+    /// Decompose the bitflag into it's component units:
+    /// Chat | Completion -> [Chat, Completion]
+    pub fn units(&self) -> Vec<ModelType> {
+        let mut result = Vec::new();
+        if self.supports_chat() {
+            result.push(ModelType::Chat);
+        }
+        if self.supports_completions() {
+            result.push(ModelType::Completions);
+        }
+        if self.supports_embedding() {
+            result.push(ModelType::Embedding);
+        }
+        if self.supports_tensor() {
+            result.push(ModelType::TensorBased);
+        }
+        if self.supports_prefill() {
+            result.push(ModelType::Prefill);
         }
         result
     }
@@ -79,6 +116,9 @@ impl ModelType {
         if self.contains(Self::Embedding) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Embedding);
         }
+        // [gluo NOTE] ModelType::Tensor doesn't map to any endpoint type,
+        // current use of endpoint type is LLM specific and so does the HTTP
+        // server that uses it.
         endpoint_types
     }
 }
@@ -89,12 +129,15 @@ impl fmt::Display for ModelType {
     }
 }
 
-#[derive(Copy, Debug, Clone, Display, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Copy, Debug, Default, Clone, Display, Serialize, Deserialize, Eq, PartialEq)]
 pub enum ModelInput {
     /// Raw text input
+    #[default]
     Text,
     /// Pre-processed input
     Tokens,
+    /// Tensor input
+    Tensor,
 }
 
 impl ModelInput {
@@ -102,6 +145,7 @@ impl ModelInput {
         match self {
             Self::Text => "text",
             Self::Tokens => "tokens",
+            Self::Tensor => "tensor",
         }
     }
 }

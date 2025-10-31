@@ -20,13 +20,12 @@ Verbosity:
 Example:
 - cargo build --features cuda -p dynamo-run
 - cd target/debug
-- ./dynamo-run Qwen/Qwen3-0.6B
-- OR: ./dynamo-run /data/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+- ./dynamo-run Qwen/Qwen3-0.6B (OR ./dynamo-run /data/hf-checkouts/Qwen3-0.6B)
 
 See `docs/guides/dynamo_run.md` in the repo for full details.
 "#;
 
-const USAGE: &str = "USAGE: dynamo-run in=[http|grpc|text|dyn://<path>|batch:<folder>] out=ENGINE_LIST|auto|dyn://<path> [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--context-length=N] [--kv-cache-block-size=16] [--extra-engine-args=args.json] [--static-worker] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=2.0] [--router-temperature=0.0] [--use-kv-events] [--max-num-batched-tokens=1.0] [--migration-limit=0] [--verbosity (-v|-vv)]";
+const USAGE: &str = "USAGE: dynamo-run in=[http|grpc|text|dyn://<path>|batch:<folder>] out=ENGINE_LIST|auto|dyn://<path> [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--context-length=N] [--kv-cache-block-size=16] [--extra-engine-args=args.json] [--static-worker] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=2.0] [--router-temperature=0.0] [--use-kv-events] [--max-num-batched-tokens=1.0] [--migration-limit=0] [--verbosity (-v|-vv)]";
 
 fn main() -> anyhow::Result<()> {
     // Set log level based on verbosity flag

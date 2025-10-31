@@ -8,10 +8,12 @@ use crate::llm::block_manager::BlockManagerBuilder;
 use crate::llm::block_manager::vllm::connector::leader::slot::{
     ConnectorSlotManager, SlotManager, SlotState,
 };
+use crate::llm::block_manager::vllm::connector::leader::{
+    kvbm_metrics_endpoint_enabled, parse_kvbm_metrics_port,
+};
 use crate::llm::block_manager::{distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest};
 use anyhow;
-use dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics;
-use dynamo_runtime::metrics::prometheus_names::kvbm_connector;
+use dynamo_llm::block_manager::metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry};
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Handle;
@@ -76,11 +78,12 @@ impl KvConnectorLeader {
         let drt = drt.inner().clone();
         let handle: Handle = drt.runtime().primary();
 
-        let ns = drt
-            .namespace(kvbm_connector::KVBM_CONNECTOR_LEADER)
-            .unwrap();
+        let kvbm_metrics = KvbmMetrics::new(
+            &KvbmMetricsRegistry::default(),
+            kvbm_metrics_endpoint_enabled(),
+            parse_kvbm_metrics_port(),
+        );
 
-        let kvbm_metrics = KvbmMetrics::new(&ns);
         let kvbm_metrics_clone = kvbm_metrics.clone();
 
         let slot_manager_cell = Arc::new(OnceLock::new());
@@ -102,6 +105,7 @@ impl KvConnectorLeader {
                     .leader(leader_py)
                     .page_size(page_size)
                     .disable_device_pool(false)
+                    .kvbm_metrics(kvbm_metrics_clone.clone())
                     .build()
                     .await
                 {
@@ -121,9 +125,6 @@ impl KvConnectorLeader {
                 );
 
                 let _ = slot_manager_cell.set(sm);
-
-                // another barrier sync to make sure worker init won't return before leader is ready
-                leader.spawn_leader_readiness_barrier(drt);
 
                 tracing::info!("KvConnectorLeader init complete.");
             });
@@ -334,6 +335,7 @@ impl Leader for KvConnectorLeader {
                 &new_req.prompt_token_ids,
                 &new_req.block_ids,
                 new_req.num_computed_tokens,
+                true,
             )?;
 
             if let Some(pending_ops) = slot.take_pending_operations() {
@@ -364,6 +366,7 @@ impl Leader for KvConnectorLeader {
                 &cached_req.new_token_ids,
                 &cached_req.new_block_ids,
                 cached_req.num_computed_tokens,
+                false,
             )?;
 
             if let Some(pending_ops) = slot.take_pending_operations() {

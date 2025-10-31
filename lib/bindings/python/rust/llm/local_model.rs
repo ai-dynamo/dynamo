@@ -44,12 +44,38 @@ impl ModelRuntimeConfig {
         self.inner.reasoning_parser = reasoning_parser;
     }
 
+    #[setter]
+    fn set_data_parallel_size(&mut self, data_parallel_size: u32) {
+        self.inner.data_parallel_size = data_parallel_size;
+    }
+
     fn set_engine_specific(&mut self, key: &str, value: String) -> PyResult<()> {
         let value: serde_json::Value = serde_json::from_str(&value).map_err(to_pyerr)?;
         self.inner
             .set_engine_specific(key, value)
             .map_err(to_pyerr)?;
         Ok(())
+    }
+
+    fn set_tensor_model_config(
+        &mut self,
+        _py: Python<'_>,
+        tensor_model_config: &Bound<'_, PyDict>,
+    ) -> PyResult<()> {
+        let tensor_model_config = pythonize::depythonize(tensor_model_config).map_err(|err| {
+            PyErr::new::<PyException, _>(format!("Failed to convert tensor_model_config: {}", err))
+        })?;
+        self.inner.tensor_model_config = Some(tensor_model_config);
+        Ok(())
+    }
+
+    fn get_tensor_model_config(&self, _py: Python<'_>) -> PyResult<Option<PyObject>> {
+        if let Some(tensor_model_config) = &self.inner.tensor_model_config {
+            let py_obj = pythonize::pythonize(_py, tensor_model_config).map_err(to_pyerr)?;
+            Ok(Some(py_obj.unbind()))
+        } else {
+            Ok(None)
+        }
     }
 
     #[getter]

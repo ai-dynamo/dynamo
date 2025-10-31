@@ -30,17 +30,24 @@ Learn fundamental Dynamo concepts through these introductory examples:
 - **[Disaggregated Serving](basics/disaggregated_serving/README.md)** - Prefill/decode separation for enhanced performance and scalability
 - **[Multi-node](basics/multinode/README.md)** - Distributed inference across multiple nodes and GPUs
 
+## Framework Support
+
+These examples show how Dynamo broadly works using major inference engines.
+
+If you want to see advanced, framework-specific deployment patterns and best practices, check out the [Components Workflows](../components/backends/) directory:
+- **[vLLM](../components/backends/vllm/)** – vLLM-specific deployment and configuration
+- **[SGLang](../components/backends/sglang/)** – SGLang integration examples and workflows
+- **[TensorRT-LLM](../components/backends/trtllm/)** – TensorRT-LLM workflows and optimizations
+
 ## Deployment Examples
 
 Platform-specific deployment guides for production environments:
 
 - **[Amazon EKS](deployments/EKS/)** - Deploy Dynamo on Amazon Elastic Kubernetes Service
 - **[Azure AKS](deployments/AKS/)** - Deploy Dynamo on Azure Kubernetes Service
+- **[Amazon ECS](deployments/ECS/)** - Deploy Dynamo on Amazon Elastic Container Service
 - **[Router Standalone](deployments/router_standalone/)** - Standalone router deployment patterns
-- **Amazon ECS** - _Coming soon_
 - **Google GKE** - _Coming soon_
-- **Ray** - _Coming soon_
-- **NVIDIA Cloud Functions (NVCF)** - _Coming soon_
 
 ## Runtime Examples
 
@@ -54,7 +61,7 @@ Low-level runtime examples for developers using Python<>Rust bindings:
 
 2. **Set up prerequisites**: Most examples require etcd and NATS services. You can start them using:
    ```bash
-   docker compose -f deploy/metrics/docker-compose.yml up -d
+   docker compose -f deploy/docker-compose.yml up -d
    ```
 
 3. **Follow the example**: Each directory contains detailed setup instructions and configuration files specific to that deployment pattern.
@@ -68,11 +75,4 @@ Before running any examples, ensure you have:
 - **Python 3.9++** - For client scripts and utilities
 - **Kubernetes cluster** - For any cloud deployment/K8s examples
 
-## Framework Support
 
-These examples show how Dynamo broadly works using major inference engines.
-
-If you want to see advanced, framework-specific deployment patterns and best practices, check out the [Components Workflows](../components/backends/) directory:
-- **[vLLM](../components/backends/vllm/)** – vLLM-specific deployment and configuration
-- **[SGLang](../components/backends/sglang/)** – SGLang integration examples and workflows
-- **[TensorRT-LLM](../components/backends/trtllm/)** – TensorRT-LLM workflows and optimizations

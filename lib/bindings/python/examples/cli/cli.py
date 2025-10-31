@@ -16,9 +16,6 @@
 # - "sglang", "vllm", "trtllm", "echo": An LLM worker.
 #
 # Must be in a virtualenv with the Dynamo bindings (or wheel) installed.
-#
-# There is no provided llama.cpp engine here, but there is one in components/llama_cpp/. It would be
-# easy enough to copy the few Python lines from there to here and add an `out=llama_cpp`.
 
 import argparse
 import asyncio
@@ -65,10 +62,6 @@ def parse_args():
 
     # model_name: Option<String>
     parser.add_argument("--model-name", type=str, help="Name of the model to load.")
-    # model_config: Option<PathBuf>
-    parser.add_argument(
-        "--model-config", type=Path, help="Path to the model configuration file."
-    )
     # context_length: Option<u32>
     parser.add_argument(
         "--context-length", type=int, help="Maximum context length for the model (u32)."
@@ -92,7 +85,7 @@ def parse_args():
     parser.add_argument(
         "model",
         nargs="?",  # Make it optional for argparse, we'll validate manually
-        help="Path to the model (e.g., Qwen/Qwen3-0.6B).\n" "Required unless out=dyn.",
+        help="Path to the model (e.g., Qwen/Qwen3-0.6B).\nRequired unless out=dyn.",
     )
 
     # Parse the arguments that were not 'in=' or 'out='
@@ -142,8 +135,6 @@ async def run():
     flags = args["flags"]
     if flags.model_name is not None:
         entrypoint_kwargs["model_name"] = flags.model_name
-    if flags.model_config is not None:
-        entrypoint_kwargs["model_config"] = flags.model_config
     if flags.context_length is not None:
         entrypoint_kwargs["context_length"] = flags.context_length
     if flags.template_file is not None:

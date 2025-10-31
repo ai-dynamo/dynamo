@@ -17,7 +17,7 @@
 //!
 //! Note: `NATS_AUTH_USERNAME` and `NATS_AUTH_PASSWORD` must be used together.
 use crate::traits::events::EventPublisher;
-use crate::{Result, metrics::MetricsRegistry};
+use crate::{Result, metrics::MetricsHierarchy};
 
 use async_nats::connection::State;
 use async_nats::{Subscriber, client, jetstream};
@@ -257,6 +257,7 @@ impl Client {
         tokio::io::copy(&mut obj_reader, &mut buffer)
             .await
             .map_err(|e| anyhow::anyhow!("Failed reading object data: {e}"))?;
+        tracing::debug!("Downloaded {} bytes from {bucket_name}/{key}", buffer.len());
 
         // Deserialize from bincode
         let data = bincode::deserialize(&buffer)
@@ -325,7 +326,7 @@ impl ClientOptions {
                 client
                     .connect(self.server)
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}"))
+                    .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}. Verify NATS server is running and accessible."))
             },
             NATS_WORKER_THREADS,
         )
@@ -438,6 +439,8 @@ pub struct NatsQueue {
     subscriber: Option<jetstream::consumer::PullConsumer>,
     /// Optional consumer name for broadcast pattern (if None, uses "worker-group")
     consumer_name: Option<String>,
+    /// Message stream for efficient message consumption
+    message_stream: Option<jetstream::consumer::pull::Stream>,
 }
 
 impl NatsQueue {
@@ -456,6 +459,7 @@ impl NatsQueue {
             subject,
             subscriber: None,
             consumer_name: Some("worker-group".to_string()),
+            message_stream: None,
         }
     }
 
@@ -476,6 +480,7 @@ impl NatsQueue {
             subject,
             subscriber: None,
             consumer_name: None,
+            message_stream: None,
         }
     }
 
@@ -498,6 +503,7 @@ impl NatsQueue {
             subject,
             subscriber: None,
             consumer_name: Some(consumer_name),
+            message_stream: None,
         }
     }
 
@@ -520,7 +526,7 @@ impl NatsQueue {
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(time::Duration::from_secs)
                 .unwrap_or_else(|| time::Duration::from_secs(60 * 60));
-            // Always try to create the stream (removes the race condition)
+
             let stream_config = jetstream::stream::Config {
                 name: self.stream_name.clone(),
                 subjects: vec![self.subject.clone()],
@@ -528,40 +534,26 @@ impl NatsQueue {
                 ..Default::default()
             };
 
-            match client.jetstream().create_stream(stream_config).await {
-                Ok(_) => {
-                    log::debug!("Successfully created NATS stream {}", self.stream_name);
-                }
-                Err(e) => {
-                    // Log warning but continue - stream likely already exists
-                    log::debug!(
-                        "Failed to create NATS stream '{}': {e}. Stream likely already exists, continuing...",
-                        self.stream_name
-                    );
+            // Get or create the stream
+            let stream = client
+                .jetstream()
+                .get_or_create_stream(stream_config)
+                .await?;
 
-                    // If reset_stream is true, purge all messages from the newly created stream
-                    if reset_stream {
-                        match client
-                            .jetstream()
-                            .get_stream(&self.stream_name)
-                            .await?
-                            .purge()
-                            .await
-                        {
-                            Ok(purge_info) => {
-                                log::debug!(
-                                    "Successfully purged {} messages from NATS stream {}",
-                                    purge_info.purged,
-                                    self.stream_name
-                                );
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "Failed to purge NATS stream '{}': {e}",
-                                    self.stream_name
-                                );
-                            }
-                        }
+            log::debug!("Stream {} is ready", self.stream_name);
+
+            // If reset_stream is true, purge all messages from the stream
+            if reset_stream {
+                match stream.purge().await {
+                    Ok(purge_info) => {
+                        log::info!(
+                            "Successfully purged {} messages from NATS stream {}",
+                            purge_info.purged,
+                            self.stream_name
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to purge NATS stream '{}': {e}", self.stream_name);
                     }
                 }
             }
@@ -574,9 +566,13 @@ impl NatsQueue {
                     ..Default::default()
                 };
 
-                let stream = client.jetstream().get_stream(&self.stream_name).await?;
                 let subscriber = stream.create_consumer(consumer_config).await?;
+
+                // Create the message stream for efficient consumption
+                let message_stream = subscriber.messages().await?;
+
                 self.subscriber = Some(subscriber);
+                self.message_stream = Some(message_stream);
             }
 
             self.client = Some(client);
@@ -595,6 +591,7 @@ impl NatsQueue {
 
     /// Close the connection when done
     pub async fn close(&mut self) -> Result<()> {
+        self.message_stream = None;
         self.subscriber = None;
         self.client = None;
         Ok(())
@@ -663,6 +660,17 @@ impl NatsQueue {
         }
     }
 
+    /// List all consumer names for the stream
+    pub async fn list_consumers(&mut self) -> Result<Vec<String>> {
+        self.ensure_connection().await?;
+
+        if let Some(client) = &self.client {
+            client.list_consumers(&self.stream_name).await
+        } else {
+            Err(anyhow::anyhow!("Client not connected"))
+        }
+    }
+
     /// Enqueue a task using the provided data
     pub async fn enqueue_task(&mut self, task_data: Bytes) -> Result<()> {
         self.ensure_connection().await?;
@@ -680,28 +688,29 @@ impl NatsQueue {
     pub async fn dequeue_task(&mut self, timeout: Option<time::Duration>) -> Result<Option<Bytes>> {
         self.ensure_connection().await?;
 
-        if let Some(subscriber) = &self.subscriber {
-            let timeout_duration = timeout.unwrap_or(self.dequeue_timeout);
-            let mut batch = subscriber
-                .fetch()
-                .expires(timeout_duration)
-                .max_messages(1)
-                .messages()
-                .await?;
+        let Some(ref mut stream) = self.message_stream else {
+            return Err(anyhow::anyhow!("Message stream not initialized"));
+        };
 
-            if let Some(message) = batch.next().await {
-                let message =
-                    message.map_err(|e| anyhow::anyhow!("Failed to get message: {}", e))?;
-                message
-                    .ack()
+        let timeout_duration = timeout.unwrap_or(self.dequeue_timeout);
+
+        // Try to get next message from the stream with timeout
+        let message = tokio::time::timeout(timeout_duration, stream.next()).await;
+
+        match message {
+            Ok(Some(Ok(msg))) => {
+                msg.ack()
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to ack message: {}", e))?;
-                Ok(Some(message.payload.clone()))
-            } else {
-                Ok(None)
+                Ok(Some(msg.payload.clone()))
             }
-        } else {
-            Err(anyhow::anyhow!("Subscriber not initialized"))
+
+            Ok(Some(Err(e))) => Err(anyhow::anyhow!("Failed to get message from stream: {}", e)),
+
+            Ok(None) => Err(anyhow::anyhow!("Message stream ended unexpectedly")),
+
+            // Timeout - no messages available
+            Err(_) => Ok(None),
         }
     }
 
@@ -913,32 +922,33 @@ pub struct DRTNatsClientPrometheusMetrics {
 impl DRTNatsClientPrometheusMetrics {
     /// Create a new instance of NATS client metrics using a DistributedRuntime's Prometheus constructors
     pub fn new(drt: &crate::DistributedRuntime, nats_client: client::Client) -> Result<Self> {
-        let in_bytes = drt.create_intgauge(
+        let metrics = drt.metrics();
+        let in_bytes = metrics.create_intgauge(
             nats_metrics::IN_TOTAL_BYTES,
             "Total number of bytes received by NATS client",
             &[],
         )?;
-        let out_bytes = drt.create_intgauge(
+        let out_bytes = metrics.create_intgauge(
             nats_metrics::OUT_OVERHEAD_BYTES,
             "Total number of bytes sent by NATS client",
             &[],
         )?;
-        let in_messages = drt.create_intgauge(
+        let in_messages = metrics.create_intgauge(
             nats_metrics::IN_MESSAGES,
             "Total number of messages received by NATS client",
             &[],
         )?;
-        let out_messages = drt.create_intgauge(
+        let out_messages = metrics.create_intgauge(
             nats_metrics::OUT_MESSAGES,
             "Total number of messages sent by NATS client",
             &[],
         )?;
-        let connects = drt.create_intgauge(
-            nats_metrics::CONNECTS,
-            "Total number of connections established by NATS client",
+        let connects = metrics.create_intgauge(
+            nats_metrics::CURRENT_CONNECTIONS,
+            "Current number of active connections for NATS client",
             &[],
         )?;
-        let connection_state = drt.create_intgauge(
+        let connection_state = metrics.create_intgauge(
             nats_metrics::CONNECTION_STATE,
             "Current connection state of NATS client (0=disconnected, 1=connected, 2=reconnecting)",
             &[],

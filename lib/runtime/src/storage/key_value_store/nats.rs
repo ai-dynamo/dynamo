@@ -3,14 +3,20 @@
 
 use std::{collections::HashMap, pin::Pin, time::Duration};
 
-use crate::{protocols::EndpointId, slug::Slug, transports::nats::Client};
+use crate::{
+    protocols::EndpointId,
+    slug::Slug,
+    storage::key_value_store::{Key, KeyValue, WatchEvent},
+    transports::nats::Client,
+};
+use async_nats::jetstream::kv::Operation;
 use async_trait::async_trait;
 use futures::StreamExt;
 
-use super::{KeyValueBucket, KeyValueStore, StorageError, StorageOutcome};
+use super::{KeyValueBucket, KeyValueStore, StoreError, StoreOutcome};
 
 #[derive(Clone)]
-pub struct NATSStorage {
+pub struct NATSStore {
     client: Client,
     endpoint: EndpointId,
 }
@@ -20,34 +26,37 @@ pub struct NATSBucket {
 }
 
 #[async_trait]
-impl KeyValueStore for NATSStorage {
+impl KeyValueStore for NATSStore {
+    type Bucket = NATSBucket;
+
     async fn get_or_create_bucket(
         &self,
         bucket_name: &str,
         ttl: Option<Duration>,
-    ) -> Result<Box<dyn KeyValueBucket>, StorageError> {
+    ) -> Result<Self::Bucket, StoreError> {
         let name = Slug::slugify(bucket_name);
         let nats_store = self
             .get_or_create_key_value(&self.endpoint.namespace, &name, ttl)
             .await?;
-        Ok(Box::new(NATSBucket { nats_store }))
+        Ok(NATSBucket { nats_store })
     }
 
-    async fn get_bucket(
-        &self,
-        bucket_name: &str,
-    ) -> Result<Option<Box<dyn KeyValueBucket>>, StorageError> {
+    async fn get_bucket(&self, bucket_name: &str) -> Result<Option<Self::Bucket>, StoreError> {
         let name = Slug::slugify(bucket_name);
         match self.get_key_value(&self.endpoint.namespace, &name).await? {
-            Some(nats_store) => Ok(Some(Box::new(NATSBucket { nats_store }))),
+            Some(nats_store) => Ok(Some(NATSBucket { nats_store })),
             None => Ok(None),
         }
     }
+
+    fn connection_id(&self) -> u64 {
+        self.client.client().server_info().client_id
+    }
 }
 
-impl NATSStorage {
+impl NATSStore {
     pub fn new(client: Client, endpoint: EndpointId) -> Self {
-        NATSStorage { client, endpoint }
+        NATSStore { client, endpoint }
     }
 
     /// Get or create a key-value store (aka bucket) in NATS.
@@ -60,7 +69,7 @@ impl NATSStorage {
         bucket_name: &Slug,
         // Delete entries older than this
         ttl: Option<Duration>,
-    ) -> Result<async_nats::jetstream::kv::Store, StorageError> {
+    ) -> Result<async_nats::jetstream::kv::Store, StoreError> {
         if let Ok(Some(kv)) = self.get_key_value(namespace, bucket_name).await {
             return Ok(kv);
         }
@@ -80,7 +89,7 @@ impl NATSStorage {
             )
             .await;
         let nats_store = create_result
-            .map_err(|err| StorageError::KeyValueError(err.to_string(), bucket_name.clone()))?;
+            .map_err(|err| StoreError::KeyValueError(err.to_string(), bucket_name.clone()))?;
         tracing::debug!("Created bucket {bucket_name}");
         Ok(nats_store)
     }
@@ -89,7 +98,7 @@ impl NATSStorage {
         &self,
         namespace: &str,
         bucket_name: &Slug,
-    ) -> Result<Option<async_nats::jetstream::kv::Store>, StorageError> {
+    ) -> Result<Option<async_nats::jetstream::kv::Store>, StoreError> {
         let bucket_name = single_name(namespace, bucket_name);
         let js = self.client.jetstream();
 
@@ -100,7 +109,7 @@ impl NATSStorage {
                 // bucket doesn't exist
                 Ok(None)
             }
-            Err(err) => Err(StorageError::KeyValueError(err.to_string(), bucket_name)),
+            Err(err) => Err(StoreError::KeyValueError(err.to_string(), bucket_name)),
         }
     }
 }
@@ -109,10 +118,10 @@ impl NATSStorage {
 impl KeyValueBucket for NATSBucket {
     async fn insert(
         &self,
-        key: String,
-        value: String,
+        key: &Key,
+        value: bytes::Bytes,
         revision: u64,
-    ) -> Result<StorageOutcome, StorageError> {
+    ) -> Result<StoreOutcome, StoreError> {
         if revision == 0 {
             self.create(key, value).await
         } else {
@@ -120,29 +129,28 @@ impl KeyValueBucket for NATSBucket {
         }
     }
 
-    async fn get(&self, key: &str) -> Result<Option<bytes::Bytes>, StorageError> {
+    async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StoreError> {
         self.nats_store
             .get(key)
             .await
-            .map_err(|e| StorageError::NATSError(e.to_string()))
+            .map_err(|e| StoreError::NATSError(e.to_string()))
     }
 
-    async fn delete(&self, key: &str) -> Result<(), StorageError> {
+    async fn delete(&self, key: &Key) -> Result<(), StoreError> {
         self.nats_store
             .delete(key)
             .await
-            .map_err(|e| StorageError::NATSError(e.to_string()))
+            .map_err(|e| StoreError::NATSError(e.to_string()))
     }
 
     async fn watch(
         &self,
-    ) -> Result<Pin<Box<dyn futures::Stream<Item = bytes::Bytes> + Send + 'life0>>, StorageError>
-    {
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + 'life0>>, StoreError> {
         let watch_stream = self
             .nats_store
             .watch_all()
             .await
-            .map_err(|e| StorageError::NATSError(e.to_string()))?;
+            .map_err(|e| StoreError::NATSError(e.to_string()))?;
         // Map the `Entry` to `Entry.value` which is Bytes of the stored value.
         Ok(Box::pin(
             watch_stream.filter_map(
@@ -151,7 +159,15 @@ impl KeyValueBucket for NATSBucket {
                     async_nats::error::Error<_>,
                 >| async move {
                     match maybe_entry {
-                        Ok(entry) => Some(entry.value),
+                        Ok(entry) => {
+                            let item = KeyValue::new(entry.key, entry.value);
+                            Some(match entry.operation {
+                                Operation::Put => WatchEvent::Put(item),
+                                Operation::Delete => WatchEvent::Delete(item),
+                                // TODO: What is Purge? Not urgent, NATS impl not used
+                                Operation::Purge => WatchEvent::Delete(item),
+                            })
+                        }
                         Err(e) => {
                             tracing::error!(error=%e, "watch fatal err");
                             None
@@ -162,12 +178,12 @@ impl KeyValueBucket for NATSBucket {
         ))
     }
 
-    async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StorageError> {
+    async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StoreError> {
         let mut key_stream = self
             .nats_store
             .keys()
             .await
-            .map_err(|e| StorageError::NATSError(e.to_string()))?;
+            .map_err(|e| StoreError::NATSError(e.to_string()))?;
         let mut out = HashMap::new();
         while let Some(Ok(key)) = key_stream.next().await {
             if let Ok(Some(entry)) = self.nats_store.entry(&key).await {
@@ -179,46 +195,42 @@ impl KeyValueBucket for NATSBucket {
 }
 
 impl NATSBucket {
-    async fn create(&self, key: String, value: String) -> Result<StorageOutcome, StorageError> {
-        match self.nats_store.create(&key, value.into()).await {
-            Ok(revision) => Ok(StorageOutcome::Created(revision)),
+    async fn create(&self, key: &Key, value: bytes::Bytes) -> Result<StoreOutcome, StoreError> {
+        match self.nats_store.create(&key, value).await {
+            Ok(revision) => Ok(StoreOutcome::Created(revision)),
             Err(err) if err.kind() == async_nats::jetstream::kv::CreateErrorKind::AlreadyExists => {
                 // key exists, get the revsion
-                match self.nats_store.entry(&key).await {
-                    Ok(Some(entry)) => Ok(StorageOutcome::Exists(entry.revision)),
+                match self.nats_store.entry(key).await {
+                    Ok(Some(entry)) => Ok(StoreOutcome::Exists(entry.revision)),
                     Ok(None) => {
                         tracing::error!(
-                            key,
+                            %key,
                             "Race condition, key deleted between create and fetch. Retry."
                         );
-                        Err(StorageError::Retry)
+                        Err(StoreError::Retry)
                     }
-                    Err(err) => Err(StorageError::NATSError(err.to_string())),
+                    Err(err) => Err(StoreError::NATSError(err.to_string())),
                 }
             }
-            Err(err) => Err(StorageError::NATSError(err.to_string())),
+            Err(err) => Err(StoreError::NATSError(err.to_string())),
         }
     }
 
     async fn update(
         &self,
-        key: String,
-        value: String,
+        key: &Key,
+        value: bytes::Bytes,
         revision: u64,
-    ) -> Result<StorageOutcome, StorageError> {
-        match self
-            .nats_store
-            .update(key.clone(), value.clone().into(), revision)
-            .await
-        {
-            Ok(revision) => Ok(StorageOutcome::Created(revision)),
+    ) -> Result<StoreOutcome, StoreError> {
+        match self.nats_store.update(key, value.clone(), revision).await {
+            Ok(revision) => Ok(StoreOutcome::Created(revision)),
             Err(err)
                 if err.kind() == async_nats::jetstream::kv::UpdateErrorKind::WrongLastRevision =>
             {
-                tracing::warn!(revision, key, "Update WrongLastRevision, resync");
+                tracing::warn!(revision, %key, "Update WrongLastRevision, resync");
                 self.resync_update(key, value).await
             }
-            Err(err) => Err(StorageError::NATSError(err.to_string())),
+            Err(err) => Err(StoreError::NATSError(err.to_string())),
         }
     }
 
@@ -226,31 +238,27 @@ impl NATSBucket {
     /// and try the update again.
     async fn resync_update(
         &self,
-        key: String,
-        value: String,
-    ) -> Result<StorageOutcome, StorageError> {
-        match self.nats_store.entry(&key).await {
+        key: &Key,
+        value: bytes::Bytes,
+    ) -> Result<StoreOutcome, StoreError> {
+        match self.nats_store.entry(key).await {
             Ok(Some(entry)) => {
                 // Re-try the update with new version number
                 let next_rev = entry.revision + 1;
-                match self
-                    .nats_store
-                    .update(key.clone(), value.into(), next_rev)
-                    .await
-                {
-                    Ok(correct_revision) => Ok(StorageOutcome::Created(correct_revision)),
-                    Err(err) => Err(StorageError::NATSError(format!(
+                match self.nats_store.update(key, value, next_rev).await {
+                    Ok(correct_revision) => Ok(StoreOutcome::Created(correct_revision)),
+                    Err(err) => Err(StoreError::NATSError(format!(
                         "Error during update of key {key} after resync: {err}"
                     ))),
                 }
             }
             Ok(None) => {
-                tracing::warn!(key, "Entry does not exist during resync, creating.");
+                tracing::warn!(%key, "Entry does not exist during resync, creating.");
                 self.create(key, value).await
             }
             Err(err) => {
-                tracing::error!(key, %err, "Failed fetching entry during resync");
-                Err(StorageError::NATSError(err.to_string()))
+                tracing::error!(%key, %err, "Failed fetching entry during resync");
+                Err(StoreError::NATSError(err.to_string()))
             }
         }
     }

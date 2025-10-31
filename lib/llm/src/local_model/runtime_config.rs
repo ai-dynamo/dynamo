@@ -5,7 +5,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize, Eq, PartialEq)]
+use crate::protocols::tensor;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelRuntimeConfig {
     pub total_kv_blocks: Option<u64>,
 
@@ -17,9 +19,42 @@ pub struct ModelRuntimeConfig {
 
     pub reasoning_parser: Option<String>,
 
+    /// Total number of data parallel ranks for this worker (1 if DP not enabled)
+    #[serde(default = "default_data_parallel_size")]
+    pub data_parallel_size: u32,
+
     /// Mapping of engine-specific runtime configs
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub runtime_data: HashMap<String, serde_json::Value>,
+
+    // Provide tensor model config in the case where the model type is Tensor.
+    // Currently use JSON object for convinence, the programmatic way is to
+    // define the model config struct as part of the tensor protocol and
+    // import it here.
+    // [gluo TODO] switch to ModelConfig if desired and workout a way to
+    // prepare it in a convinent way, the protobuf library used by tonic
+    // doesn't provide JSON parsing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tensor_model_config: Option<tensor::TensorModelConfig>,
+}
+
+const fn default_data_parallel_size() -> u32 {
+    1
+}
+
+impl Default for ModelRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            total_kv_blocks: None,
+            max_num_seqs: None,
+            max_num_batched_tokens: None,
+            tool_call_parser: None,
+            reasoning_parser: None,
+            data_parallel_size: default_data_parallel_size(),
+            runtime_data: HashMap::new(),
+            tensor_model_config: None,
+        }
+    }
 }
 
 impl ModelRuntimeConfig {

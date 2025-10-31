@@ -3,10 +3,10 @@ package dynamo
 import (
 	"fmt"
 	"regexp"
-	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -15,7 +15,32 @@ const (
 
 type SGLangBackend struct{}
 
-func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+// isPythonCommand checks if the command is a Python interpreter
+func isPythonCommand(cmd string) bool {
+	if cmd == "python" || cmd == "python3" {
+		return true
+	}
+	// Match python with version numbers like python3.11, python2.7, etc.
+	// Also support absolute paths like /usr/bin/python3.8, /opt/python/bin/python3.11
+	matched, _ := regexp.MatchString(`^(.*/)?(python\d*(\.\d+)*)$`, cmd)
+	return matched
+}
+
+func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+	// Check for volumeMounts with useAsCompilationCache=true
+	for _, volumeMount := range component.VolumeMounts {
+		if volumeMount.UseAsCompilationCache {
+			logger := log.Log.WithName("sglang-backend")
+			logger.Info("Compilation cache configured for SGLang but not yet fully supported",
+				"backend", "sglang",
+				"status", "partial-support",
+				"cache-dir", volumeMount.MountPoint,
+				"use-as-compilation-cache", true,
+				"env-vars-set", false,
+				"next-steps", "upstream SGLang changes needed")
+		}
+	}
+
 	// For single node, nothing to do
 	if numberOfNodes <= 1 {
 		return
@@ -29,53 +54,32 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	}
 
 	// Generate the flags to add
-	flags := b.getMultinodeFlags(numberOfNodes, role, serviceName, multinodeDeployer)
+	flags, needsShell := b.getMultinodeFlags(numberOfNodes, role, serviceName, multinodeDeployer)
 	if flags == "" {
 		return
 	}
 
-	// Flatten all args into a single command and inject flags
-	if len(container.Args) > 0 {
-		fullCommand := strings.Join(container.Args, " ")
-		modifiedCommand := b.injectFlagsIntoPythonCommand(fullCommand, flags)
-		container.Args = []string{modifiedCommand}
-	}
+	injectFlagsIntoContainerCommand(container, flags, needsShell, "sglang")
 }
 
-func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string) {
+func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string) {
 	// do nothing
 }
 
-// getMultinodeFlags returns the multinode flags as a single string
-func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, serviceName string, multinodeDeployer MultinodeDeployer) string {
+// getMultinodeFlags returns the multinode flags and whether shell interpretation is needed
+func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, serviceName string, multinodeDeployer MultinodeDeployer) (string, bool) {
 	distInitAddr := fmt.Sprintf("%s:%s", multinodeDeployer.GetLeaderHostname(serviceName), SglangPort)
-	nodeRank := multinodeDeployer.GetNodeRank()
-	// Determine node-rank
+
+	var nodeRank string
+	var needsShell bool
+
 	if role == RoleLeader {
 		nodeRank = "0"
+		needsShell = false
+	} else {
+		nodeRank, needsShell = multinodeDeployer.GetNodeRank()
 	}
-	return fmt.Sprintf("--dist-init-addr %s --nnodes %d --node-rank %s", distInitAddr, numberOfNodes, nodeRank)
-}
 
-// injectFlagsIntoPythonCommand finds python sglang commands and adds flags after them
-func (b *SGLangBackend) injectFlagsIntoPythonCommand(arg, flags string) string {
-	// Regex to match python commands that contain sglang
-	// Matches: python, python3, python3.11, etc. followed by sglang-related modules
-	pattern := `(python[0-9.]*\s+[^|&;]*sglang[^|&;]*?)(\s|$|[|&;])`
-
-	re := regexp.MustCompile(pattern)
-
-	// Replace with the command + flags + whatever comes after
-	result := re.ReplaceAllStringFunc(arg, func(match string) string {
-		// Extract the python command part and the delimiter
-		submatches := re.FindStringSubmatch(match)
-		if len(submatches) >= 3 {
-			pythonCmd := submatches[1]
-			delimiter := submatches[2]
-			return pythonCmd + " " + flags + delimiter
-		}
-		return match
-	})
-
-	return result
+	flags := fmt.Sprintf("--dist-init-addr %s --nnodes %d --node-rank %s", distInitAddr, numberOfNodes, nodeRank)
+	return flags, needsShell
 }

@@ -30,7 +30,7 @@ Usage:
   NAMESPACE=<ns> [HF_TOKEN=<token>] deploy/utils/setup_benchmarking_resources.sh
 
 Sets up benchmarking and profiling resources in an existing Dynamo namespace:
-  - Applies common manifests (ServiceAccount, Role, RoleBinding, PVC)
+  - Applies common manifests (PVC)
   - Creates HuggingFace token secret if HF_TOKEN provided
   - Installs benchmark dependencies if requirements.txt exists
 
@@ -56,7 +56,7 @@ fi
 if ! kubectl get pods -n "$NAMESPACE" | grep -q "dynamo-platform"; then
   warn "Dynamo platform pods not found in namespace $NAMESPACE"
   warn "Please ensure Dynamo Cloud platform is installed first:"
-  warn "  See: docs/guides/dynamo_deploy/installation_guide.md"
+  warn "  See: docs/kubernetes/installation_guide.md"
   if [[ -z "${FORCE:-}" && -z "${YES:-}" ]]; then
     read -p "Continue anyway? [y/N]: " -r ans
     [[ "$ans" =~ ^[Yy]$ ]] || exit 1
@@ -100,7 +100,6 @@ ok "Benchmarking resource setup complete"
 
 # Verify installation
 log "Verifying installation..."
-kubectl get serviceaccount dynamo-sa -n "$NAMESPACE" >/dev/null && ok "ServiceAccount dynamo-sa exists" || err "ServiceAccount dynamo-sa not found"
 kubectl get pvc dynamo-pvc -n "$NAMESPACE" >/dev/null && ok "PVC dynamo-pvc exists" || err "PVC dynamo-pvc not found"
 
 if [[ -n "$HF_TOKEN" ]]; then

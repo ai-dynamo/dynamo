@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use super::*;
-use crate::llm::block_manager::distributed::get_barrier_id_prefix;
+use crate::llm::block_manager::distributed::{get_leader_zmq_ack_url, get_leader_zmq_pub_url};
 use crate::llm::block_manager::vllm::connector::worker::event_sync_blocking;
 use crate::{
     DistributedRuntime as PyDistributedRuntime, llm::block_manager::distributed::VllmTensor,
@@ -19,6 +19,7 @@ use crate::{
 
 use anyhow;
 use dynamo_llm::block_manager::distributed::{KvbmWorker, KvbmWorkerConfig};
+use dynamo_llm::block_manager::layout::LayoutType;
 use dynamo_llm::block_manager::storage::torch::TorchTensor;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
@@ -37,6 +38,8 @@ pub trait Worker: Send + Sync {
     fn bind_connector_meta(&mut self, metadata: Vec<u8>) -> anyhow::Result<()>;
 
     fn start_load_kv(&mut self) -> anyhow::Result<()>;
+
+    fn execute_offload_operations(&mut self) -> anyhow::Result<()>;
 
     fn save_kv_layer(&mut self, layer_idx: usize) -> anyhow::Result<()>;
 
@@ -134,8 +137,11 @@ impl Worker for KvConnectorWorker {
             .tensors(kv_cache_tensors)
             .device_id(device_id)
             .dtype_width_bytes(dtype_width_bytes)
-            .is_fully_contiguous_layout(true)
-            .barrier_id_prefix(get_barrier_id_prefix())
+            .device_layout_type(LayoutType::FullyContiguous)
+            .host_layout_type(LayoutType::FullyContiguous)
+            .disk_layout_type(LayoutType::FullyContiguous)
+            .leader_pub_url(get_leader_zmq_pub_url())
+            .leader_ack_url(get_leader_zmq_ack_url())
             .scheduler_client(Some(self.transfer_client.clone()))
             .build()?;
 
@@ -211,16 +217,24 @@ impl Worker for KvConnectorWorker {
         Ok(())
     }
 
+    // Assumes the operations are in a valid state for offloading.
+    fn execute_offload_operations(&mut self) -> anyhow::Result<()> {
+        let offloading_operations = std::mem::take(&mut self.offloading_operations);
+        for operation in offloading_operations {
+            self.connector.enqueue_request(operation);
+        }
+        Ok(())
+    }
+
     fn save_kv_layer(&mut self, _layer_idx: usize) -> anyhow::Result<()> {
         self.layers_complete += 1;
         if self.layers_complete == self.layer_events.len() {
-            let offloading_operations = std::mem::take(&mut self.offloading_operations);
             // block on the the completion of the last layer
             // todo(ryan): capture the context, pass this to the scheduler to do the await on another thread
             // or put the event on a stream and use stream waits to keep it all on device.
             event_sync_blocking(self.layer_events[self.layers_complete - 1]);
-            for operation in offloading_operations {
-                self.connector.enqueue_request(operation);
+            if let Err(e) = self.execute_offload_operations() {
+                tracing::error!("Failed to execute offload operations: {}", e);
             }
         }
         Ok(())
@@ -424,6 +438,12 @@ impl PyTrtllmKvConnectorWorker {
     pub fn bind_connector_meta(&mut self, metadata: Vec<u8>) -> PyResult<()> {
         self.connector_worker
             .bind_connector_meta(metadata)
+            .map_err(to_pyerr)
+    }
+
+    pub fn execute_offload_operations(&mut self) -> PyResult<()> {
+        self.connector_worker
+            .execute_offload_operations()
             .map_err(to_pyerr)
     }
 

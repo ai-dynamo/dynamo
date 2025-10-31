@@ -254,7 +254,8 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         let mixins = Value::from_dyn_object(self.mixins.clone());
 
         let tools = req.tools();
-        let has_tools = tools.is_some();
+        // has_tools should be true if tools is a non-empty array
+        let has_tools = tools.as_ref().and_then(|v| v.len()).is_some_and(|l| l > 0);
         let add_generation_prompt = req.should_add_generation_prompt();
 
         tracing::trace!(
@@ -583,6 +584,71 @@ mod tests {
         assert_eq!(content_array.len(), 2);
         assert_eq!(content_array[0]["type"], "image_url");
         assert_eq!(content_array[1]["type"], "image_url");
+    }
+
+    #[test]
+    fn test_none_tools_safe_for_all_templates() {
+        use super::tokcfg::ChatTemplate;
+        use super::{ContextMixins, HfTokenizerConfigJsonFormatter};
+
+        // Due to minijinja limitations the expressions in conditional statements may not be short-circuited
+        // This checks that our custom length filter works to avoid errors in this scenario
+        // length should return 0 if tools is None and 'if tools is iterable and tools | length > 0' should evaluate to false
+        let length_template = r#"
+{%- if tools is iterable and tools | length > 0 %}
+Tools available: {{ tools | length }}
+{%- else %}
+No tools
+{%- endif %}
+"#;
+
+        // Because we return None for tools when there are no tools this scenario should also be evaluate to false
+        // This is similar to the default jinja template behavior seen with llama models which check if tools is not none to activate tool mode
+        let no_tool_template = r#"
+{%- if tools is not none %}
+TOOL MODE
+{%- else %}
+NORMAL MODE
+{%- endif %}
+"#;
+
+        let chat_template: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": [
+                {"safe_length": length_template},
+                {"no_tool": no_tool_template}
+            ]
+        }))
+        .unwrap();
+
+        let formatter =
+            HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap();
+
+        let ctx = context! { tools => Option::<Value>::None };
+
+        let result1 = formatter
+            .env
+            .get_template("safe_length")
+            .unwrap()
+            .render(&ctx);
+        println!("Safe length template with no tools => None: {:?}", result1);
+        assert!(
+            result1.is_ok(),
+            "Jinja template with and conditional and length filter should handle None: {:?}",
+            result1
+        );
+        assert!(
+            result1.unwrap().contains("No tools"),
+            "Should show 'No tools'"
+        );
+
+        let result2 = formatter.env.get_template("no_tool").unwrap().render(&ctx);
+        println!("Default template with no tools => None: {:?}", result2);
+        assert!(
+            result2.is_ok(),
+            "Jinja template with if tools is not none conditional should handle None: {:?}",
+            result2
+        );
+        assert!(result2.unwrap().contains("NORMAL MODE"));
     }
 
     /// Tests mixed content type scenarios.

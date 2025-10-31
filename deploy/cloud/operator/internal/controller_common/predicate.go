@@ -47,6 +47,11 @@ type KaiSchedulerConfig struct {
 	Enabled bool
 }
 
+type MpiRunConfig struct {
+	// SecretName is the name of the secret containing the SSH key for MPI Run
+	SecretName string
+}
+
 type Config struct {
 	// Enable resources filtering, only the resources belonging to the given namespace will be handled.
 	RestrictedNamespace string
@@ -60,6 +65,17 @@ type Config struct {
 	ModelExpressURL string
 	// PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics
 	PrometheusEndpoint string
+	MpiRun             MpiRunConfig
+	// RBAC configuration for cross-namespace resource management
+	RBAC RBACConfig
+}
+
+// RBACConfig holds configuration for RBAC management
+type RBACConfig struct {
+	// PlannerClusterRoleName is the name of the ClusterRole for planner (cluster-wide mode only)
+	PlannerClusterRoleName string
+	// DGDRProfilingClusterRoleName is the name of the ClusterRole for DGDR profiling jobs (cluster-wide mode only)
+	DGDRProfilingClusterRoleName string
 }
 
 type IngressConfig struct {
@@ -83,6 +99,12 @@ func DetectGroveAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 // This approach uses the discovery client which is simpler and more reliable
 func DetectLWSAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 	return detectAPIGroupAvailability(ctx, mgr, "leaderworkerset.x-k8s.io")
+}
+
+// detectVolcanoAvailability checks if Volcano is available by checking if the Volcano API group is registered
+// This approach uses the discovery client which is simpler and more reliable
+func DetectVolcanoAvailability(ctx context.Context, mgr ctrl.Manager) bool {
+	return detectAPIGroupAvailability(ctx, mgr, "scheduling.volcano.sh")
 }
 
 // DetectKaiSchedulerAvailability checks if Kai-scheduler is available by checking if the scheduling.run.ai API group is registered

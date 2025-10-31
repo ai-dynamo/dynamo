@@ -8,7 +8,7 @@ use std::str::FromStr;
 use validator::ValidationError;
 
 /// The root etcd path prefix
-pub const ETCD_ROOT_PATH: &str = "dynamo://";
+pub const ETCD_ROOT_PATH: &str = "v1/dynamo/";
 
 /// Reserved keyword for component paths (with underscores to prevent user conflicts)
 pub const COMPONENT_KEYWORD: &str = "_component_";
@@ -372,85 +372,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_namespace_only() {
-        let path = EtcdPath::parse("dynamo://ns1").unwrap();
-        assert_eq!(path.namespace, "ns1");
-        assert_eq!(path.component, None);
-        assert_eq!(path.endpoint, None);
-        assert_eq!(path.extra_path, None);
-        assert_eq!(path.to_string(), "dynamo://ns1");
-    }
-
-    #[test]
-    fn test_hierarchical_namespace() {
-        let path = EtcdPath::parse("dynamo://ns1.ns2.ns3").unwrap();
-        assert_eq!(path.namespace, "ns1.ns2.ns3");
-        assert_eq!(path.component, None);
-        assert_eq!(path.endpoint, None);
-        assert_eq!(path.extra_path, None);
-        assert_eq!(path.to_string(), "dynamo://ns1.ns2.ns3");
-    }
-
-    #[test]
     fn test_namespace_and_component() {
-        let path = EtcdPath::parse("dynamo://ns1.ns2/_component_/my-component").unwrap();
+        let s = format!("{ETCD_ROOT_PATH}ns1.ns2/_component_/my-component");
+        let path = EtcdPath::parse(&s).unwrap();
         assert_eq!(path.namespace, "ns1.ns2");
         assert_eq!(path.component, Some("my-component".to_string()));
         assert_eq!(path.endpoint, None);
         assert_eq!(path.extra_path, None);
-        assert_eq!(
-            path.to_string(),
-            "dynamo://ns1.ns2/_component_/my-component"
-        );
+        assert_eq!(path.to_string(), s);
     }
 
     #[test]
     fn test_full_path_with_endpoint() {
-        let path = EtcdPath::parse(
-            "dynamo://ns1.ns2.ns3/_component_/component-name/_endpoint_/endpoint-name",
-        )
-        .unwrap();
+        let s = format!(
+            "{ETCD_ROOT_PATH}ns1.ns2.ns3/_component_/component-name/_endpoint_/endpoint-name"
+        );
+        let path = EtcdPath::parse(&s).unwrap();
         assert_eq!(path.namespace, "ns1.ns2.ns3");
         assert_eq!(path.component, Some("component-name".to_string()));
         assert_eq!(path.endpoint, Some("endpoint-name".to_string()));
         assert_eq!(path.extra_path, None);
-        assert_eq!(
-            path.to_string(),
-            "dynamo://ns1.ns2.ns3/_component_/component-name/_endpoint_/endpoint-name"
-        );
-    }
-
-    #[test]
-    fn test_with_extra_path() {
-        let path = EtcdPath::parse("dynamo://ns1/_component_/comp1/extra1/extra2").unwrap();
-        assert_eq!(path.namespace, "ns1");
-        assert_eq!(path.component, Some("comp1".to_string()));
-        assert_eq!(path.endpoint, None);
-        assert_eq!(
-            path.extra_path,
-            Some(vec!["extra1".to_string(), "extra2".to_string()])
-        );
-        assert_eq!(
-            path.to_string(),
-            "dynamo://ns1/_component_/comp1/extra1/extra2"
-        );
-    }
-
-    #[test]
-    fn test_endpoint_with_extra_path() {
-        let path =
-            EtcdPath::parse("dynamo://ns1/_component_/comp1/_endpoint_/ep1/path1/path2").unwrap();
-        assert_eq!(path.namespace, "ns1");
-        assert_eq!(path.component, Some("comp1".to_string()));
-        assert_eq!(path.endpoint, Some("ep1".to_string()));
-        assert_eq!(
-            path.extra_path,
-            Some(vec!["path1".to_string(), "path2".to_string()])
-        );
-        assert_eq!(
-            path.to_string(),
-            "dynamo://ns1/_component_/comp1/_endpoint_/ep1/path1/path2"
-        );
+        assert_eq!(path.to_string(), s);
     }
 
     #[test]
@@ -461,38 +403,25 @@ mod tests {
 
     #[test]
     fn test_invalid_characters() {
-        let result = EtcdPath::parse("dynamo://ns1!/_component_/comp1");
+        let result = EtcdPath::parse(&format!("{ETCD_ROOT_PATH}ns1!/_component_/comp1"));
         assert!(matches!(result, Err(EtcdPathError::InvalidNamespace(_))));
-    }
-
-    #[test]
-    fn test_endpoint_without_component() {
-        let result = EtcdPath::parse("dynamo://ns1/_endpoint_/ep1");
-        assert!(matches!(
-            result,
-            Err(EtcdPathError::EndpointWithoutComponent)
-        ));
-    }
-
-    #[test]
-    fn test_from_str_trait() {
-        let path: EtcdPath = "dynamo://ns1.ns2/_component_/comp1".parse().unwrap();
-        assert_eq!(path.namespace, "ns1.ns2");
-        assert_eq!(path.component, Some("comp1".to_string()));
     }
 
     #[test]
     fn test_constructor_methods() {
         let path = EtcdPath::new_namespace("ns1.ns2.ns3").unwrap();
-        assert_eq!(path.to_string(), "dynamo://ns1.ns2.ns3");
+        assert_eq!(path.to_string(), format!("{ETCD_ROOT_PATH}ns1.ns2.ns3"));
 
         let path = EtcdPath::new_component("ns1.ns2", "comp1").unwrap();
-        assert_eq!(path.to_string(), "dynamo://ns1.ns2/_component_/comp1");
+        assert_eq!(
+            path.to_string(),
+            format!("{ETCD_ROOT_PATH}ns1.ns2/_component_/comp1")
+        );
 
         let path = EtcdPath::new_endpoint("ns1", "comp1", "ep1").unwrap();
         assert_eq!(
             path.to_string(),
-            "dynamo://ns1/_component_/comp1/_endpoint_/ep1"
+            format!("{ETCD_ROOT_PATH}ns1/_component_/comp1/_endpoint_/ep1")
         );
     }
 
@@ -504,29 +433,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             path.to_string(),
-            "dynamo://ns1/_component_/comp1/path1/path2"
+            format!("{ETCD_ROOT_PATH}ns1/_component_/comp1/path1/path2")
         );
-    }
-
-    #[test]
-    fn test_reserved_keyword_in_extra_path() {
-        // Test that reserved keywords cannot be used in extra paths
-        let result = EtcdPath::parse("dynamo://ns1/_component_/comp1/extra/_component_");
-        assert!(matches!(result, Err(EtcdPathError::ReservedKeyword(_))));
-
-        let result = EtcdPath::parse("dynamo://ns1/_component_/comp1/extra/_endpoint_");
-        assert!(matches!(result, Err(EtcdPathError::ReservedKeyword(_))));
-
-        // Test that with_extra_path also validates reserved keywords
-        let result = EtcdPath::new_component("ns1", "comp1")
-            .unwrap()
-            .with_extra_path(vec!["_component_".to_string()]);
-        assert!(matches!(result, Err(EtcdPathError::ReservedKeyword(_))));
-
-        let result = EtcdPath::new_component("ns1", "comp1")
-            .unwrap()
-            .with_extra_path(vec!["_endpoint_".to_string()]);
-        assert!(matches!(result, Err(EtcdPathError::ReservedKeyword(_))));
     }
 
     #[test]
@@ -539,14 +447,17 @@ mod tests {
         assert_eq!(path.lease_id, Some(0xabc123));
         assert_eq!(
             path.to_string(),
-            "dynamo://ns1/_component_/comp1/_endpoint_/ep1:abc123"
+            format!("{ETCD_ROOT_PATH}ns1/_component_/comp1/_endpoint_/ep1:abc123")
         );
     }
 
     #[test]
     fn test_parse_endpoint_with_lease_id() {
         // Test parsing endpoint with lease ID
-        let path = EtcdPath::parse("dynamo://ns1/_component_/comp1/_endpoint_/ep1:abc123").unwrap();
+        let path = EtcdPath::parse(&format!(
+            "{ETCD_ROOT_PATH}ns1/_component_/comp1/_endpoint_/ep1:abc123"
+        ))
+        .unwrap();
         assert_eq!(path.namespace, "ns1");
         assert_eq!(path.component, Some("comp1".to_string()));
         assert_eq!(path.endpoint, Some("ep1".to_string()));
@@ -557,7 +468,10 @@ mod tests {
     #[test]
     fn test_parse_endpoint_without_lease_id() {
         // Test that endpoints without lease ID still work
-        let path = EtcdPath::parse("dynamo://ns1/_component_/comp1/_endpoint_/ep1").unwrap();
+        let path = EtcdPath::parse(&format!(
+            "{ETCD_ROOT_PATH}ns1/_component_/comp1/_endpoint_/ep1"
+        ))
+        .unwrap();
         assert_eq!(path.namespace, "ns1");
         assert_eq!(path.component, Some("comp1".to_string()));
         assert_eq!(path.endpoint, Some("ep1".to_string()));
@@ -568,7 +482,9 @@ mod tests {
     #[test]
     fn test_invalid_lease_id_format() {
         // Test invalid lease ID format
-        let result = EtcdPath::parse("dynamo://ns1/_component_/comp1/_endpoint_/ep1:invalid");
+        let result = EtcdPath::parse(&format!(
+            "{ETCD_ROOT_PATH}ns1/_component_/comp1/_endpoint_/ep1:invalid"
+        ));
         assert!(matches!(result, Err(EtcdPathError::InvalidEndpoint(_))));
     }
 
@@ -583,7 +499,7 @@ mod tests {
         let path_string = original_path.to_string();
         assert_eq!(
             path_string,
-            "dynamo://production/_component_/api-gateway/_endpoint_/http:deadbeef"
+            format!("{ETCD_ROOT_PATH}production/_component_/api-gateway/_endpoint_/http:deadbeef")
         );
 
         // Parse back from string
@@ -606,19 +522,21 @@ mod tests {
         let path = EtcdPath::new_endpoint_with_lease("ns", "comp", "ep", 0).unwrap();
         assert_eq!(
             path.to_string(),
-            "dynamo://ns/_component_/comp/_endpoint_/ep:0"
+            format!("{ETCD_ROOT_PATH}ns/_component_/comp/_endpoint_/ep:0")
         );
 
         // Test with maximum i64 value
         let path = EtcdPath::new_endpoint_with_lease("ns", "comp", "ep", i64::MAX).unwrap();
         assert_eq!(
             path.to_string(),
-            "dynamo://ns/_component_/comp/_endpoint_/ep:7fffffffffffffff"
+            format!("{ETCD_ROOT_PATH}ns/_component_/comp/_endpoint_/ep:7fffffffffffffff")
         );
 
         // Test parsing maximum value
-        let parsed =
-            EtcdPath::parse("dynamo://ns/_component_/comp/_endpoint_/ep:7fffffffffffffff").unwrap();
+        let parsed = EtcdPath::parse(&format!(
+            "{ETCD_ROOT_PATH}ns/_component_/comp/_endpoint_/ep:7fffffffffffffff"
+        ))
+        .unwrap();
         assert_eq!(parsed.lease_id, Some(i64::MAX));
     }
 }

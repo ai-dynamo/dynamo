@@ -5,7 +5,7 @@ pub mod recorder;
 pub mod slot;
 
 use super::*;
-use dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics;
+use dynamo_llm::block_manager::metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry};
 use dynamo_runtime::DistributedRuntime;
 use slot::{ConnectorSlotManager, SlotError, SlotManager, SlotState};
 
@@ -15,7 +15,6 @@ use crate::llm::block_manager::{
     VllmBlockManager, distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest,
     vllm::connector::leader::slot::VllmConnectorSlot,
 };
-use dynamo_runtime::metrics::prometheus_names::kvbm_connector;
 
 use dynamo_llm::block_manager::{
     BasicMetadata, DiskStorage, ImmutableBlock, PinnedStorage,
@@ -93,6 +92,8 @@ impl KvConnectorLeader {
         drt: PyDistributedRuntime,
         page_size: usize,
         leader_py: PyKvbmLeader,
+        consolidator_vllm_endpoint: Option<String>,
+        consolidator_output_endpoint: Option<String>,
     ) -> Self {
         tracing::info!(
             "KvConnectorLeader initialized with worker_id: {}",
@@ -103,11 +104,11 @@ impl KvConnectorLeader {
         let drt = drt.inner().clone();
         let handle: Handle = drt.runtime().primary();
 
-        let ns = drt
-            .namespace(kvbm_connector::KVBM_CONNECTOR_LEADER)
-            .unwrap();
-
-        let kvbm_metrics = KvbmMetrics::new(&ns);
+        let kvbm_metrics = KvbmMetrics::new(
+            &KvbmMetricsRegistry::default(),
+            kvbm_metrics_endpoint_enabled(),
+            parse_kvbm_metrics_port(),
+        );
         let kvbm_metrics_clone = kvbm_metrics.clone();
 
         let slot_manager_cell = Arc::new(OnceLock::new());
@@ -115,6 +116,9 @@ impl KvConnectorLeader {
 
         {
             let slot_manager_cell = slot_manager_cell.clone();
+            // Capture consolidator endpoints for the async block
+            let consolidator_vllm_ep = consolidator_vllm_endpoint.clone();
+            let consolidator_output_ep = consolidator_output_endpoint.clone();
 
             handle.spawn(async move {
                 let ready = leader.wait_worker_sync_ready().await;
@@ -125,14 +129,27 @@ impl KvConnectorLeader {
                     return;
                 }
 
-                let block_manager = match BlockManagerBuilder::new()
+                let mut block_manager_builder = BlockManagerBuilder::new()
                     .worker_id(0)
                     .leader(leader_py)
                     .page_size(page_size)
                     .disable_device_pool(false)
-                    .build()
-                    .await
+                    .kvbm_metrics(kvbm_metrics_clone.clone());
+
+                // Add consolidator config if provided
+                if let (Some(vllm_ep), Some(output_ep)) =
+                    (consolidator_vllm_ep, consolidator_output_ep)
                 {
+                    tracing::debug!(
+                        "Adding consolidator config to BlockManager: vllm={}, output={}",
+                        vllm_ep,
+                        output_ep
+                    );
+                    block_manager_builder =
+                        block_manager_builder.consolidator_config(vllm_ep, output_ep);
+                }
+
+                let block_manager = match block_manager_builder.build().await {
                     Ok(bm) => bm,
                     Err(e) => {
                         tracing::error!("Failed to build BlockManager: {}", e);
@@ -149,9 +166,6 @@ impl KvConnectorLeader {
                 );
 
                 let _ = slot_manager_cell.set(sm);
-
-                // another barrier sync to make sure worker init won't return before leader is ready
-                let _ = leader.run_leader_readiness_barrier_blocking(drt);
 
                 if leader_ready_tx.send("finished".to_string()).is_err() {
                     tracing::error!("main routine receiver dropped before result was sent");
@@ -550,23 +564,40 @@ pub struct PyKvConnectorLeader {
 #[pymethods]
 impl PyKvConnectorLeader {
     #[new]
-    #[pyo3(signature = (worker_id, drt, page_size, leader))]
+    #[pyo3(signature = (worker_id, drt, page_size, leader, consolidator_vllm_endpoint=None, consolidator_output_endpoint=None))]
     pub fn new(
         worker_id: String,
         drt: PyDistributedRuntime,
         page_size: usize,
         leader: PyKvbmLeader,
+        consolidator_vllm_endpoint: Option<String>,
+        consolidator_output_endpoint: Option<String>,
     ) -> Self {
+        // Initialize logging for the vLLM connector
+        dynamo_runtime::logging::init();
+
         let enable_kvbm_record = std::env::var("ENABLE_KVBM_RECORD")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
         let connector_leader: Box<dyn Leader> = if enable_kvbm_record {
             Box::new(recorder::KvConnectorLeaderRecorder::new(
-                worker_id, drt, page_size, leader,
+                worker_id,
+                drt,
+                page_size,
+                leader,
+                consolidator_vllm_endpoint,
+                consolidator_output_endpoint,
             ))
         } else {
-            Box::new(KvConnectorLeader::new(worker_id, drt, page_size, leader))
+            Box::new(KvConnectorLeader::new(
+                worker_id,
+                drt,
+                page_size,
+                leader,
+                consolidator_vllm_endpoint,
+                consolidator_output_endpoint,
+            ))
         };
         Self { connector_leader }
     }
@@ -613,5 +644,32 @@ impl PyKvConnectorLeader {
         self.connector_leader
             .create_slot(request, tokens)
             .map_err(to_pyerr)
+    }
+}
+
+pub fn kvbm_metrics_endpoint_enabled() -> bool {
+    std::env::var("DYN_KVBM_METRICS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+pub fn parse_kvbm_metrics_port() -> u16 {
+    match std::env::var("DYN_KVBM_METRICS_PORT") {
+        Ok(val) => match val.trim().parse::<u16>() {
+            Ok(port) => port,
+            Err(_) => {
+                tracing::warn!(
+                    "[kvbm] Invalid DYN_KVBM_METRICS_PORT='{}', falling back to 6880",
+                    val
+                );
+                6880
+            }
+        },
+        Err(_) => {
+            tracing::warn!(
+                "DYN_KVBM_METRICS_PORT not present or couldn’t be interpreted, falling back to 6880"
+            );
+            6880
+        }
     }
 }

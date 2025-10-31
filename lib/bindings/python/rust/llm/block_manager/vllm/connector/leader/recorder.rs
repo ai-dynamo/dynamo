@@ -90,6 +90,8 @@ impl KvConnectorLeaderRecorder {
         drt: PyDistributedRuntime,
         page_size: usize,
         leader_py: PyKvbmLeader,
+        consolidator_vllm_endpoint: Option<String>,
+        consolidator_output_endpoint: Option<String>,
     ) -> Self {
         tracing::info!(
             "KvConnectorLeaderRecorder initialized with worker_id: {}",
@@ -100,11 +102,11 @@ impl KvConnectorLeaderRecorder {
         let drt = drt.inner().clone();
         let handle: Handle = drt.runtime().primary();
 
-        let ns = drt
-            .namespace(kvbm_connector::KVBM_CONNECTOR_LEADER)
-            .unwrap();
-
-        let kvbm_metrics = KvbmMetrics::new(&ns);
+        let kvbm_metrics = KvbmMetrics::new(
+            &KvbmMetricsRegistry::default(),
+            kvbm_metrics_endpoint_enabled(),
+            parse_kvbm_metrics_port(),
+        );
         let kvbm_metrics_clone = kvbm_metrics.clone();
 
         let token = CancellationToken::new();
@@ -130,6 +132,9 @@ impl KvConnectorLeaderRecorder {
 
         {
             let slot_manager_cell = slot_manager_cell.clone();
+            // Capture consolidator endpoints for the async block
+            let consolidator_vllm_ep = consolidator_vllm_endpoint.clone();
+            let consolidator_output_ep = consolidator_output_endpoint.clone();
 
             handle.spawn(async move {
                 let ready = leader.wait_worker_sync_ready().await;
@@ -140,14 +145,22 @@ impl KvConnectorLeaderRecorder {
                     return;
                 }
 
-                let block_manager = match BlockManagerBuilder::new()
+                let mut block_manager_builder = BlockManagerBuilder::new()
                     .worker_id(0)
                     .leader(leader_py)
                     .page_size(page_size)
                     .disable_device_pool(false)
-                    .build()
-                    .await
+                    .kvbm_metrics(kvbm_metrics_clone.clone());
+
+                // Add consolidator config if provided
+                if let (Some(vllm_ep), Some(output_ep)) =
+                    (consolidator_vllm_ep, consolidator_output_ep)
                 {
+                    block_manager_builder =
+                        block_manager_builder.consolidator_config(vllm_ep, output_ep);
+                }
+
+                let block_manager = match block_manager_builder.build().await {
                     Ok(bm) => bm,
                     Err(e) => {
                         tracing::error!("Failed to build BlockManager: {}", e);
@@ -164,9 +177,6 @@ impl KvConnectorLeaderRecorder {
                 );
 
                 let _ = slot_manager_cell.set(sm);
-
-                // another barrier sync to make sure worker init won't return before leader is ready
-                leader.spawn_leader_readiness_barrier(drt);
 
                 if leader_ready_tx.send("finished".to_string()).is_err() {
                     tracing::error!("main routine receiver dropped before result was sent");

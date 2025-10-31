@@ -8,7 +8,7 @@ use super::{
     ContentProvider,
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
 };
-use crate::protocols::openai::common_ext::{CommonExtProvider, choose_with_deprecation};
+use crate::protocols::openai::common_ext::CommonExtProvider;
 
 pub mod chat_completions;
 pub mod common_ext;
@@ -65,14 +65,9 @@ trait OpenAIStopConditionsProvider {
         None
     }
 
-    /// Get the effective ignore_eos value, considering both CommonExt and NvExt.
-    /// CommonExt (root-level) takes precedence over NvExt.
+    /// Get the effective ignore_eos value from CommonExt.
     fn get_ignore_eos(&self) -> Option<bool> {
-        choose_with_deprecation(
-            "ignore_eos",
-            self.get_common_ignore_eos().as_ref(),
-            self.nvext().and_then(|nv| nv.ignore_eos.as_ref()),
-        )
+        self.get_common_ignore_eos()
     }
 
     /// Get max_thinking_tokens from nvext
@@ -133,6 +128,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
         let guided_regex = self.get_guided_regex();
         let guided_grammar = self.get_guided_grammar();
         let guided_choice = self.get_guided_choice();
+        let guided_whitespace_pattern = self.get_guided_whitespace_pattern();
 
         let guided_decoding = match common::GuidedDecodingOptions::from_optional(
             guided_json.cloned(),
@@ -140,6 +136,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             guided_choice,
             guided_grammar,
             guided_decoding_backend,
+            guided_whitespace_pattern,
         ) {
             Ok(options) => options,
             Err(e) => {
