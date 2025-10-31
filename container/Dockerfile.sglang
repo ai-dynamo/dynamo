@@ -143,8 +143,6 @@ RUN apt-get update \
         libczmq4 \
         libczmq-dev \
         libfabric-dev \
-        # NVIDIA dependencies
-        nvidia-dkms-550
         # Package building tools
         devscripts \
         debhelper \
