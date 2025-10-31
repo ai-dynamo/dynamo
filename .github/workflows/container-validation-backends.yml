@@ -435,6 +435,7 @@ jobs:
     - uses: actions/checkout@v4
     - name: Setup Kubeconfig
       run: |
+        set -x
         # Setup kubeconfig
         echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
         chmod 600 .kubeconfig
@@ -443,6 +444,7 @@ jobs:
         kubectl config get-contexts
     - name: Run Tests
       run: |
+        set -x
         export KUBECONFIG=$(pwd)/.kubeconfig
         kubectl config set-context --current --namespace=$NAMESPACE
 
