@@ -1,6 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+
+# Instructions:
+# 1. First, create the model cache PersistentVolumeClaim:
+#    kubectl apply -f model-cache.yaml -n <namespace>
+# 2. Download the model to the model cache:
+#    kubectl apply -f model-download.yaml -n <namespace>
+# 3. Once the above steps are complete, deploy the prefill and decode workers via this yaml:
+#    kubectl apply -f deploy.yaml -n <namespace>
+# 4. To benchmark the service, run:
+#    kubectl apply -f perf.yaml -n <namespace>
+
 # ConfigMap for prefill engine configuration
 # This configuration sets up a DEP 4 prefill worker
 apiVersion: v1
