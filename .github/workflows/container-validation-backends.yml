@@ -372,8 +372,7 @@ jobs:
 
         # Create a namespace for this job
         echo "Creating an ephemeral namespace..."
-        kubectl delete namespace $NAMESPACE || true
-        kubectl create namespace $NAMESPACE || true
+        kubectl create namespace $NAMESPACE
         echo "Attaching the labels for secrets and cleanup"
         kubectl label namespaces ${NAMESPACE} nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
 
@@ -441,7 +440,7 @@ jobs:
         chmod 600 .kubeconfig
         export KUBECONFIG=$(pwd)/.kubeconfig
         kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-        kubectl config current-context
+        kubectl config get-contexts
     - name: Run Tests
       run: |
         export KUBECONFIG=$(pwd)/.kubeconfig
@@ -602,6 +601,9 @@ jobs:
     - name: Cleanup
       timeout-minutes: 5
       run: |
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE
+
         echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
         chmod 600 .kubeconfig
         export KUBECONFIG=$(pwd)/.kubeconfig
@@ -615,7 +617,7 @@ jobs:
 
         # Uninstall the helm chart
         helm ls
-        helm uninstall dynamo-platform || true
+        helm uninstall dynamo-platform --namespace $NAMESPACE || true
 
         echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
         kubectl delete namespace $NAMESPACE || true
