@@ -55,12 +55,8 @@ def pytest_generate_tests(metafunc):
             if getattr(scenario_obj, "requires_custom_build", False):
                 marks.append(pytest.mark.custom_build)
 
-            if marks:
-                param = pytest.param(scenario_name, marks=marks)
-            else:
-                param = scenario_name
-
-            argvalues.append(param)
+            # Always use pytest.param for type consistency (even with empty marks)
+            argvalues.append(pytest.param(scenario_name, marks=marks))
             ids.append(scenario_name)
 
         metafunc.parametrize("scenario_name", argvalues, ids=ids)
