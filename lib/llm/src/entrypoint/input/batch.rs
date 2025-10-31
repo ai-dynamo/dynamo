@@ -8,7 +8,7 @@ use crate::types::openai::chat_completions::{
 };
 use anyhow::Context as _;
 use dynamo_async_openai::types::FinishReason;
-use dynamo_runtime::{Runtime, pipeline::Context, runtime::CancellationToken};
+use dynamo_runtime::{DistributedRuntime, pipeline::Context, runtime::CancellationToken};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::cmp;
@@ -51,11 +51,11 @@ struct Entry {
 }
 
 pub async fn run(
-    runtime: Runtime,
+    distributed_runtime: DistributedRuntime,
     input_jsonl: PathBuf,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
-    let cancel_token = runtime.primary_token();
+    let cancel_token = distributed_runtime.primary_token();
     // Check if the path exists and is a directory
     if !input_jsonl.exists() || !input_jsonl.is_file() {
         anyhow::bail!(
@@ -64,7 +64,7 @@ pub async fn run(
         );
     }
 
-    let mut prepared_engine = common::prepare_engine(runtime, engine_config).await?;
+    let mut prepared_engine = common::prepare_engine(distributed_runtime, engine_config).await?;
 
     let pre_processor = if prepared_engine.has_tokenizer() {
         Some(OpenAIPreprocessor::new(
