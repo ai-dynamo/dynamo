@@ -352,9 +352,12 @@ COPY --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 COPY --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
-# Install rust build packages
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
+        # required for AIC perf files
+        git \
+        git-lfs \
+        # rust build packages
         clang \
         libclang-dev \
         protobuf-compiler \
