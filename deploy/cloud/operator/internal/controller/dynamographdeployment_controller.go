@@ -24,6 +24,8 @@ import (
 
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secret"
 
@@ -115,27 +117,17 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			message = Message(err.Error())
 			logger.Error(err, "Reconciliation failed")
 		}
-		dynamoDeployment.SetState(string(state))
 
-		readyStatus := metav1.ConditionFalse
-		if state == ReadyState {
-			readyStatus = metav1.ConditionTrue
+		// Update status using retry logic for conflict resolution
+		_, statusErr := r.setStatusConditions(ctx, req, state, reason, message)
+		if statusErr != nil {
+			logger.Error(statusErr, "Unable to update the CRD status", "crd", req.NamespacedName, "state", state, "reason", reason, "message", message)
+			// Don't overwrite the original error if there was one
+			if err == nil {
+				err = statusErr
+			}
 		}
-
-		// Update Ready condition
-		dynamoDeployment.AddStatusCondition(metav1.Condition{
-			Type:               "Ready",
-			Status:             readyStatus,
-			Reason:             string(reason),
-			Message:            string(message),
-			LastTransitionTime: metav1.Now(),
-		})
-
-		err = r.Status().Update(ctx, dynamoDeployment)
-		if err != nil {
-			logger.Error(err, "Unable to update the CRD status", "crd", req.NamespacedName, "state", state, "reason", reason, "message", message)
-		}
-		logger.Info("Reconciliation done")
+		logger.Info("Reconciliation done", "state", state, "reason", reason)
 	}()
 
 	deleted, err := commonController.HandleFinalizer(ctx, dynamoDeployment, r.Client, r)
@@ -154,6 +146,53 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+// setStatusConditions updates the status conditions of a DynamoGraphDeployment with retry logic for conflicts.
+// It uses retry.RetryOnConflict to automatically handle optimistic concurrency conflicts by re-fetching
+// and retrying the update operation. Returns the updated DynamoGraphDeployment object or an error.
+func (r *DynamoGraphDeploymentReconciler) setStatusConditions(ctx context.Context, req ctrl.Request, state State, reason Reason, message Message) (*nvidiacomv1alpha1.DynamoGraphDeployment, error) {
+	dynamoDeployment := &nvidiacomv1alpha1.DynamoGraphDeployment{}
+
+	// Use the standard Kubernetes retry utility for handling conflicts
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Re-fetch the object to get the latest version
+		if err := r.Get(ctx, req.NamespacedName, dynamoDeployment); err != nil {
+			return err
+		}
+
+		// Update state
+		dynamoDeployment.SetState(string(state))
+
+		readyStatus := metav1.ConditionFalse
+		if state == ReadyState {
+			readyStatus = metav1.ConditionTrue
+		}
+
+		// Update Ready condition
+		condition := metav1.Condition{
+			Type:               "Ready",
+			Status:             readyStatus,
+			Reason:             string(reason),
+			Message:            string(message),
+			LastTransitionTime: metav1.Now(),
+		}
+		meta.SetStatusCondition(&dynamoDeployment.Status.Conditions, condition)
+
+		// Attempt to update status
+		return r.Status().Update(ctx, dynamoDeployment)
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to update DynamoGraphDeployment status: %w", err)
+	}
+
+	// Re-fetch to get the updated object with latest ResourceVersion
+	if err := r.Get(ctx, req.NamespacedName, dynamoDeployment); err != nil {
+		return nil, fmt.Errorf("failed to re-fetch DynamoGraphDeployment after status update: %w", err)
+	}
+
+	return dynamoDeployment, nil
 }
 
 type Resource interface {
