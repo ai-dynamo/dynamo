@@ -37,7 +37,7 @@ Prevents all conflict scenarios:
   {{- end -}}
 
   {{- if $namespaceRestrictedOperators -}}
-    {{- fail (printf "VALIDATION ERROR: Cannot install cluster-wide Dynamo operator. Found existing namespace-restricted Dynamo operators in namespaces: %s. This would create resource conflicts as both the cluster-wide operator and namespace-restricted operators would manage the same DGDs/DCDs. Either:\n1. Use one of the existing namespace-restricted operators for your specific namespace, or\n2. Uninstall all existing namespace-restricted operators first, or\n3. Install this operator in namespace-restricted mode: --set namespaceRestriction.enabled=true" (join ", " ($namespaceRestrictedOperators | uniq))) -}}
+    {{- fail (printf "VALIDATION ERROR: Cannot install cluster-wide Dynamo operator. Found existing namespace-restricted Dynamo operators in namespaces: %s. This would create resource conflicts as both the cluster-wide operator and namespace-restricted operators would manage the same DGDs/DCDs. Either:\n1. Use one of the existing namespace-restricted operators for your specific namespace, or\n2. Uninstall all existing namespace-restricted operators first, or\n3. Install this operator in namespace-restricted mode: --set dynamo-operator.namespaceRestriction.enabled=true" (join ", " ($namespaceRestrictedOperators | uniq))) -}}
   {{- end -}}
 {{- end -}}
 

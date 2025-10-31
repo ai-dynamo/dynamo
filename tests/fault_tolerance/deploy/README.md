@@ -119,6 +119,17 @@ The following failure types are defined in `scenarios.py`:
 | `sglang_prefill_scheduler`    | Terminate SGLang prefill scheduler process.        | `SIGKILL` to `sglang::scheduler`| sglang only         |
 | `sglang_prefill_detokenizer`  | Terminate SGLang prefill detokenizer process.      | `SIGKILL` to `sglang::detokenizer`| sglang only         |
 
+#### Token Overflow Tests
+
+In addition to process and pod failures, the suite includes tests for **token overflow**, where the model receives an input prompt larger than its configured `max_seq_len`. These tests are crucial for verifying that the system can gracefully reject invalid requests without crashing.
+
+- **Failure Injection**: Unlike other tests, this failure is injected from the **client side**. The `aiperf` client is configured to send a batch of requests with oversized token lengths.
+- **Two-Phase Execution**: These tests run in two distinct phases, creating separate log directories for each:
+  1.  **`overflow` Phase**: Sends oversized requests. The expected outcome is a high rate of failed requests (rejections) as the server correctly identifies and blocks them.
+  2.  **`recovery` Phase**: Immediately after the overflow phase, sends valid, normal-sized requests. The expected outcome is a high success rate, confirming that the system has recovered and remains operational.
+
+The combined results of these two phases demonstrate both the system's ability to reject invalid inputs and its stability after handling them.
+
 #### Example Scenario Breakdown
 
 **Scenario**: `sglang-agg-tp-2-dp-1-decode_worker`
@@ -392,7 +403,6 @@ graph LR
     style DecodePool stroke:#000,stroke-width:2px
 ```
 
-
 #### Summary:
 
 
@@ -596,3 +606,5 @@ Test Group: vllm-agg-tp-1-dp-2
 ╘═══════════════════╧═══════════╧═══════════╧══════════╧═══════════╧══════════╧═══════════╧═══════════╧════════════╛
 
 ```
+
+
