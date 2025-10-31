@@ -8,21 +8,6 @@
 //!
 //! The [`ArenaAllocator`] allocates memory contiguous regions using the [`offset_allocator`] crate,
 //! which builds on [Sebastian Aaltonen's ArenaAllocator](https://github.com/sebbbi/ArenaAllocator)
-//!
-//! ## Usage
-//!
-//! ```rust,ignore
-//! use dynamo_memory::{SystemStorage, ArenaAllocator};
-//!
-//! // Create a storage backend
-//! let storage = SystemStorage::new(1024 * 1024)?; // 1MB
-//!
-//! // Create an arena allocator with 4KB pages
-//! let allocator = ArenaAllocator::new(storage, 4096)?;
-//!
-//! // Allocate buffers from the arena
-//! let buffer = allocator.allocate(8192)?; // Allocates 8KB
-//! ```
 
 use crate::StorageKind;
 

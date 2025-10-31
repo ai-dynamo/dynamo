@@ -3,11 +3,17 @@
 
 //! NIXL registration wrapper for storage types.
 
+mod agent;
+mod config;
+
 use super::{MemoryDescription, StorageKind};
 use std::any::Any;
 use std::fmt;
 
-pub use nixl_sys::{Agent as NixlAgent, MemType, OptArgs, RegistrationHandle};
+pub use agent::NixlAgent;
+pub use config::NixlBackendConfig;
+
+pub use nixl_sys::{MemType, OptArgs, RegistrationHandle};
 
 /// Trait for storage types that can be registered with NIXL.
 pub trait NixlCompatible {
