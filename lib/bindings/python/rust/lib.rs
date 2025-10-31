@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::local_model::LocalModel;
+use dynamo_runtime::distributed::DistributedConfig;
+use dynamo_runtime::storage::key_value_store::KeyValueStoreSelect;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
@@ -426,7 +428,9 @@ enum ModelInput {
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    fn new(event_loop: PyObject, is_static: bool) -> PyResult<Self> {
+    fn new(event_loop: PyObject, store_kv: String, is_static: bool) -> PyResult<Self> {
+        let selected_kv_store: KeyValueStoreSelect = store_kv.parse().map_err(to_pyerr)?;
+
         // Try to get existing runtime first, create new Worker only if needed
         // This allows multiple DistributedRuntime instances to share the same tokio runtime
         let runtime = rs::Worker::runtime_from_existing()
@@ -464,9 +468,14 @@ impl DistributedRuntime {
                     rs::DistributedRuntime::from_settings_without_discovery(runtime),
                 )
             } else {
+                let config = DistributedConfig {
+                    store_backend: selected_kv_store,
+                    is_static: false,
+                    nats_config: dynamo_runtime::transports::nats::ClientOptions::default(),
+                };
                 runtime
                     .secondary()
-                    .block_on(rs::DistributedRuntime::from_settings(runtime))
+                    .block_on(rs::DistributedRuntime::new(runtime, config))
             };
         let inner = inner.map_err(to_pyerr)?;
 
@@ -628,7 +637,7 @@ impl DistributedRuntime {
     }
 
     fn shutdown(&self) {
-        self.inner.runtime().shutdown();
+        self.inner.shutdown();
     }
 
     fn event_loop(&self) -> PyObject {

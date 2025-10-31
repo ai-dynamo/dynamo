@@ -1,19 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::pipeline::{
-    AddressedPushRouter, AddressedRequest, AsyncEngine, Data, ManyOut, PushRouter, RouterMode,
-    SingleIn,
+use crate::{
+    pipeline::{
+        AddressedPushRouter, AddressedRequest, AsyncEngine, Data, ManyOut, PushRouter, RouterMode,
+        SingleIn,
+    },
+    storage::key_value_store::{KeyValueStoreManager, WatchEvent},
 };
 use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::unix::pipe::Receiver;
 
-use crate::{
-    pipeline::async_trait,
-    transports::etcd::{Client as EtcdClient, WatchEvent},
-};
+use crate::{pipeline::async_trait, transports::etcd::Client as EtcdClient};
 
 use super::*;
 
@@ -70,12 +70,7 @@ impl Client {
         const INSTANCE_REFRESH_PERIOD: Duration = Duration::from_secs(1);
 
         // create live endpoint watcher
-        let Some(etcd_client) = &endpoint.component.drt.etcd_client else {
-            anyhow::bail!("Attempt to create a dynamic client on a static endpoint");
-        };
-
-        let instance_source =
-            Self::get_or_create_dynamic_instance_source(etcd_client, &endpoint).await?;
+        let instance_source = Self::get_or_create_dynamic_instance_source(&endpoint).await?;
 
         let client = Client {
             endpoint,
@@ -194,7 +189,6 @@ impl Client {
     }
 
     async fn get_or_create_dynamic_instance_source(
-        etcd_client: &EtcdClient,
         endpoint: &Endpoint,
     ) -> Result<Arc<InstanceSource>> {
         let drt = endpoint.drt();
@@ -209,12 +203,10 @@ impl Client {
             }
         }
 
-        let prefix_watcher = etcd_client
-            .kv_get_and_watch_prefix(endpoint.etcd_root())
-            .await?;
-
-        let (prefix, mut kv_event_rx) = prefix_watcher.dissolve();
-
+        let prefix = endpoint.etcd_root();
+        let store = Arc::new(drt.store().clone());
+        let (_, mut kv_event_rx) =
+            store.watch(super::INSTANCE_ROOT_PATH, None, drt.primary_token());
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(vec![]);
 
         let secondary = endpoint.component.drt.runtime.secondary().clone();
@@ -223,7 +215,7 @@ impl Client {
         // currently this is created once per client, but this object/task should only be instantiated
         // once per worker/instance
         secondary.spawn(async move {
-            tracing::debug!("Starting endpoint watcher for prefix: {}", prefix);
+            tracing::debug!("Starting endpoint watcher for prefix: {prefix}");
             let mut map = HashMap::new();
 
             loop {
@@ -245,23 +237,40 @@ impl Client {
 
                 match kv_event {
                     WatchEvent::Put(kv) => {
-                        let key = String::from_utf8(kv.key().to_vec());
-                        let val = serde_json::from_slice::<Instance>(kv.value());
-                        if let (Ok(key), Ok(val)) = (key, val) {
-                            map.insert(key.clone(), val);
-                        } else {
-                            tracing::error!("Unable to parse put endpoint event; shutting down endpoint watcher for prefix: {prefix}");
-                            break;
+                        let key = kv.key_str();
+                        if !key.starts_with(&prefix) {
+                            continue;
                         }
-                    }
-                    WatchEvent::Delete(kv) => {
-                        match String::from_utf8(kv.key().to_vec()) {
-                            Ok(key) => { map.remove(&key); }
-                            Err(_) => {
-                                tracing::error!("Unable to parse delete endpoint event; shutting down endpoint watcher for prefix: {}", prefix);
+                        let Some(mut key) = key.strip_prefix(super::INSTANCE_ROOT_PATH) else {
+                            tracing::error!("WatchEvent::Put Key not in INSTANCE_ROOT_PATH. Should be impossible.");
+                            continue;
+                        };
+                        if key.starts_with("/") {
+                            key = &key[1..];
+                        }
+
+                        match serde_json::from_slice::<Instance>(kv.value()) {
+                            Ok(val) => map.insert(key.to_string(), val),
+                            Err(err) => {
+                                tracing::error!(error = %err, prefix,
+                                    "Unable to parse put endpoint event; shutting down endpoint watcher");
                                 break;
                             }
+                        };
+                    }
+                    WatchEvent::Delete(key) => {
+                        let key = key.as_ref();
+                        if !key.starts_with(&prefix) {
+                            continue;
                         }
+                        let Some(mut key) = key.strip_prefix(super::INSTANCE_ROOT_PATH) else {
+                            tracing::error!("WatchEvent::Delete Key not in INSTANCE_ROOT_PATH. Should be impossible.");
+                            continue;
+                        };
+                        if key.starts_with("/") {
+                            key = &key[1..];
+                        }
+                        map.remove(key);
                     }
                 }
 

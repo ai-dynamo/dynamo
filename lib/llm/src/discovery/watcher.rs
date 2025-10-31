@@ -183,8 +183,8 @@ impl ModelWatcher {
                         }
                     }
                 }
-                WatchEvent::Delete(kv) => {
-                    let deleted_key = kv.key_str();
+                WatchEvent::Delete(key) => {
+                    let deleted_key = key.as_ref();
                     match self
                         .handle_delete(deleted_key, target_namespace, global_namespace)
                         .await
