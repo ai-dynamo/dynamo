@@ -263,7 +263,7 @@ impl KvEventPublisher {
     #[pyo3(signature = (event_id, token_ids, num_block_tokens, block_hashes, lora_id, parent_hash=None))]
     fn publish_stored(
         &mut self,
-        _py: Python,
+        py: Python,
         event_id: u64,
         token_ids: Vec<u32>,
         num_block_tokens: Vec<u64>,
@@ -271,38 +271,50 @@ impl KvEventPublisher {
         lora_id: u64,
         parent_hash: Option<i64>,
     ) -> PyResult<()> {
-        let block_hashes_u64: Vec<u64> = block_hashes.iter().map(|&h| h as u64).collect();
-        let event = KvCacheEvent {
-            event_id,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
-                blocks: create_stored_blocks(
-                    self.kv_block_size as u32,
-                    &token_ids,
-                    &num_block_tokens,
-                    &block_hashes_u64,
-                    lora_id,
-                    &self.warning_count,
-                ),
-            }),
-            dp_rank: self.dp_rank,
-        };
+        let kv_block_size = self.kv_block_size as u32;
+        let dp_rank = self.dp_rank;
+        let warning_count = self.warning_count.clone();
+        let inner = self.inner.clone();
 
-        self.inner.publish(event).map_err(to_pyerr)
+        py.allow_threads(|| {
+            let block_hashes_u64: Vec<u64> = block_hashes.iter().map(|&h| h as u64).collect();
+            let event = KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
+                    blocks: create_stored_blocks(
+                        kv_block_size,
+                        &token_ids,
+                        &num_block_tokens,
+                        &block_hashes_u64,
+                        lora_id,
+                        &warning_count,
+                    ),
+                }),
+                dp_rank,
+            };
+
+            inner.publish(event).map_err(to_pyerr)
+        })
     }
 
-    fn publish_removed(&self, _py: Python, event_id: u64, block_hashes: Vec<i64>) -> PyResult<()> {
-        let block_hashes: Vec<ExternalSequenceBlockHash> = block_hashes
-            .into_iter()
-            .map(ExternalSequenceBlockHash::from)
-            .collect();
-        let event = KvCacheEvent {
-            event_id,
-            data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
-            dp_rank: self.dp_rank,
-        };
+    fn publish_removed(&self, py: Python, event_id: u64, block_hashes: Vec<i64>) -> PyResult<()> {
+        let dp_rank = self.dp_rank;
+        let inner = self.inner.clone();
 
-        self.inner.publish(event).map_err(to_pyerr)
+        py.allow_threads(|| {
+            let block_hashes: Vec<ExternalSequenceBlockHash> = block_hashes
+                .into_iter()
+                .map(ExternalSequenceBlockHash::from)
+                .collect();
+            let event = KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
+                dp_rank,
+            };
+
+            inner.publish(event).map_err(to_pyerr)
+        })
     }
 }
 
