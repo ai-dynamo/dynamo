@@ -30,7 +30,7 @@ from jinja2 import Template
 def print_welcome_message(job_ids: list[str], log_dir_name: str):
     """Print a clean welcome message with job information."""
 
-    job_id = f"<{', '.join(job_ids)}>"
+    job_id = f"{', '.join(job_ids)}"
     print(
         f"""
 🚀 Welcome! We hope you enjoy your time on our GB200 NVL72.
