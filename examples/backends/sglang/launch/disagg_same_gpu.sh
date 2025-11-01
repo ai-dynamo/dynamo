@@ -6,8 +6,8 @@
 #   GPU_MEM_FRACTION: Fraction of GPU memory to use per worker (default: 0.24)
 #   Example: ./disagg_same_gpu.sh 0.24
 
-# GPU memory fraction to use per worker (default: 0.24 = 24% each = 48% total for both workers)
-GPU_MEM_FRACTION="${1:-0.24}"
+# GPU memory fraction to use per worker (default: 0.47 = 47% each = 94% total for both workers)
+GPU_MEM_FRACTION="${1:-0.47}"
 
 # Check GPU memory before starting disaggregated mode on single GPU
 FREE_GPU_GB=$(python3 -c "import torch; print(torch.cuda.mem_get_info()[0]/1024**3)" 2>/dev/null)
@@ -16,7 +16,7 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-REQUIRED_GB=24
+REQUIRED_GB=16
 # Use Python for floating-point comparison to avoid bc dependency
 if python3 -c "import sys; sys.exit(0 if float('$FREE_GPU_GB') >= $REQUIRED_GB else 1)"; then
   echo "GPU memory check passed: ${FREE_GPU_GB}GB available (required: ${REQUIRED_GB}GB)"
