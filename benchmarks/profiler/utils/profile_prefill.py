@@ -31,6 +31,13 @@ def _profile_prefill_helper(
     prefill_isl = []
     prefill_ttft = []
     prefill_thpt_per_gpu = []
+    max_context_length -= 512  # leave some room for chat template and system prompt
+    if max_context_length <= 100:
+        error_message = (
+            f"max_context_length {max_context_length} is too small to profile prefill"
+        )
+        logger.error(error_message)
+        raise ValueError(error_message)
     for isl in range(
         100,
         max_context_length,
