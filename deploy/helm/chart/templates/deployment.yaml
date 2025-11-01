@@ -69,15 +69,27 @@ spec:
         {{ if $serviceSpec.resources }}
         resources:
           requests:
-            {{ if $serviceSpec.resources.cpu }}
-            cpu: "{{ $serviceSpec.resources.cpu }}"
-            {{ end }}
-            {{ if $serviceSpec.resources.memory }}
-            memory: "{{ $serviceSpec.resources.memory }}"
-            {{ end }}
-            {{ if $serviceSpec.resources.gpu }}
-            nvidia.com/gpu: "{{ $serviceSpec.resources.gpu }}"
-            {{ end }}
+              {{- if $serviceSpec.resources.cpu }}
+              cpu: "{{ $serviceSpec.resources.cpu }}"
+              {{- end }}
+              {{- if $serviceSpec.resources.memory }}
+              memory: "{{ $serviceSpec.resources.memory }}"
+              {{- end }}
+              {{- $_ := set $ "hasCustomGPU" false }}
+              {{- if $serviceSpec.resources.custom }}
+              {{- $customGPUList := default (list) $.Values.CustomGPUList }}
+              {{- range $k, $v := $serviceSpec.resources.custom }}
+              {{- if and (not $.hasCustomGPU) (has $k $customGPUList) }}
+              {{ $k }}: "{{ $v }}"
+              {{- $_ := set $ "hasCustomGPU" true }}
+              {{- end }}
+              {{- end }}
+              {{- end }}
+              {{- if not $.hasCustomGPU }}
+              {{- if $serviceSpec.resources.gpu }}
+              nvidia.com/gpu: "{{ $serviceSpec.resources.gpu }}"
+              {{- end }}
+              {{- end }}
           limits:
             {{ if $serviceSpec.resources.cpu }}
             cpu: "{{ $serviceSpec.resources.cpu }}"
@@ -85,9 +97,21 @@ spec:
             {{ if $serviceSpec.resources.memory }}
             memory: "{{ $serviceSpec.resources.memory }}"
             {{ end }}
-            {{ if $serviceSpec.resources.gpu }}
+            {{- $_ := set $ "hasCustomGPU" false }}
+            {{- if $serviceSpec.resources.custom }}
+            {{- $customGPUList := default (list) $.Values.CustomGPUList }}
+            {{- range $k, $v := $serviceSpec.resources.custom }}
+            {{- if and (not $.hasCustomGPU) (has $k $customGPUList) }}
+            {{ $k }}: "{{ $v }}"
+            {{- $_ := set $ "hasCustomGPU" true }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- if not $.hasCustomGPU }}
+            {{- if $serviceSpec.resources.gpu }}
             nvidia.com/gpu: "{{ $serviceSpec.resources.gpu }}"
-            {{ end }}
+            {{- end }}
+            {{- end }}
         {{ end }}
         {{- if $serviceSpec.envFromSecret }}
         envFrom:
