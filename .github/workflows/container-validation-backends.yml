@@ -558,7 +558,7 @@ jobs:
 
         echo "Deleting DynamoGraphDeployments for this job in namespace $NAMESPACE..."
         PROFILE_SANITIZED="${PROFILE/_/-}"
-        kubectl delete dynamographdeployments $FRAMEWORK-$PROFILE_SANITIZED -n $NAMESPACE
+        kubectl delete dynamographdeployments $FRAMEWORK-$PROFILE_SANITIZED -n $NAMESPACE || true
 
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
