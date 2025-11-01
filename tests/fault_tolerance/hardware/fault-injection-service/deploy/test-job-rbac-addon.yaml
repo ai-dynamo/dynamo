@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# Additional RBAC permissions for test jobs to exec into agent pods
+# Apply this to enable Phase 2 dmesg verification in E2E tests
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fault-injection-test-exec
+rules:
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fault-injection-test-exec
+subjects:
+- kind: ServiceAccount
+  name: fault-injection-api
+  namespace: fault-injection-system
+roleRef:
+  kind: ClusterRole
+  name: fault-injection-test-exec
+  apiGroup: rbac.authorization.k8s.io
