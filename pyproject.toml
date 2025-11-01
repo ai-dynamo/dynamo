@@ -200,7 +200,9 @@ markers = [
     "h100: marks tests to run on H100",
     "kvbm: marks tests for KV behavior and model determinism",
     "model: model id used by a test or parameter",
-    "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)"
+    "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
+    "k8s: marks tests as requiring Kubernetes",
+    "fault_tolerance: marks tests as fault tolerance tests"
 ]
 
 # Linting/formatting
