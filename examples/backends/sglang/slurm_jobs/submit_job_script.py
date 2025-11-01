@@ -19,13 +19,15 @@ Script to generate SLURM job scripts from Jinja2 templates.
 
 import argparse
 import logging
+import os
 import subprocess
 import tempfile
+from datetime import datetime
 
 from jinja2 import Template
 
 
-def print_welcome_message(job_ids: list[str]):
+def print_welcome_message(job_ids: list[str], log_dir_name: str):
     """Print a clean welcome message with job information."""
 
     job_id = f"<{', '.join(job_ids)}>"
@@ -33,10 +35,10 @@ def print_welcome_message(job_ids: list[str]):
         f"""
 🚀 Welcome! We hope you enjoy your time on our GB200 NVL72.
 
-Your logs for this submitted job will be available in logs/{job_id}
+Your logs for this submitted job will be available in logs/{log_dir_name}
 You can access them by running:
 
-    cd logs/{job_id}
+    cd logs/{log_dir_name}
 
 You can view all of the prefill/decode worker logs by running:
 
@@ -71,7 +73,7 @@ def generate_job_script(template_path, output_path, **kwargs):
     with open(output_path, "w") as f:
         f.write(rendered_script)
 
-    return output_path
+    return output_path, rendered_script
 
 
 def submit_job(job_script_path, extra_slurm_args=[]):
@@ -196,6 +198,14 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
         help="Tries to launch the job multiple times to catch transient errors",
     )
 
+    parser.add_argument(
+        "--disable-config-dump",
+        action="store_false",
+        dest="enable_config_dump",
+        default=True,
+        help="Disable dumping config to file on each node (default: config dump is enabled)",
+    )
+
     return parser.parse_args(args)
 
 
@@ -253,6 +263,9 @@ def main(input_args: list[str] | None = None):
     else:
         assert False, profiler_config["type"]
 
+    # Generate timestamp for log directory naming
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     template_vars = {
         "job_name": args.job_name,
         "total_nodes": total_nodes,
@@ -275,27 +288,62 @@ def main(input_args: list[str] | None = None):
         "do_profile": profiler_config["type"] != "manual",
         "profiler_type": profiler_config["type"],
         "profiler_arg": parsable_config,
+        "timestamp": timestamp,
+        "enable_config_dump": args.enable_config_dump,
     }
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".sh") as temp_file:
-        generate_job_script(args.template, temp_file.name, **template_vars)
+    # Create temporary file for sbatch script
+    temp_file = tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False)
+    temp_path = temp_file.name
+    temp_file.close()
+
+    try:
+        _, rendered_script = generate_job_script(args.template, temp_path, **template_vars)
 
         submitted_job_ids = []
-        job_id = submit_job(temp_file.name, args.extra_slurm_args)
+        job_id = submit_job(temp_path, args.extra_slurm_args)
         submitted_job_ids.append(job_id)
-        # retries logic
-        extra_slurm_args_without_dependencies = [
-            x for x in args.extra_slurm_args if "dependency" not in x
-        ]
-        for _ in range(args.retries):
-            dependencies = ",".join([f"afternotok:{job}" for job in submitted_job_ids])
-            slurm_args = extra_slurm_args_without_dependencies + [
-                f"dependency={dependencies}"
-            ]
-            job_id = submit_job(temp_file.name, slurm_args)
-            submitted_job_ids.append(job_id)
 
-        print_welcome_message(submitted_job_ids)
+        # Create log directory with new naming format
+        log_dir_name = f"{job_id}_{args.prefill_workers}P_{args.decode_workers}D_{timestamp}"
+        log_dir_path = os.path.join("logs", log_dir_name)
+        os.makedirs(log_dir_path, exist_ok=True)
+
+        # Save rendered sbatch script
+        sbatch_script_path = os.path.join(log_dir_path, "sbatch_script.sh")
+        with open(sbatch_script_path, "w") as f:
+            f.write(rendered_script)
+        logging.info(f"Saved rendered sbatch script to {sbatch_script_path}")
+
+        # retries logic
+        if args.retries > 0:
+            extra_slurm_args_without_dependencies = [
+                x for x in args.extra_slurm_args if "dependency" not in x
+            ]
+            for _ in range(args.retries):
+                dependencies = ",".join([f"afternotok:{job}" for job in submitted_job_ids])
+                slurm_args = extra_slurm_args_without_dependencies + [
+                    f"dependency={dependencies}"
+                ]
+                job_id = submit_job(temp_path, slurm_args)
+                submitted_job_ids.append(job_id)
+
+                # Save script for retry job as well
+                retry_log_dir_name = f"{job_id}_{args.prefill_workers}P_{args.decode_workers}D_{timestamp}"
+                retry_log_dir_path = os.path.join("logs", retry_log_dir_name)
+                os.makedirs(retry_log_dir_path, exist_ok=True)
+                retry_sbatch_script_path = os.path.join(retry_log_dir_path, "sbatch_script.sh")
+                with open(retry_sbatch_script_path, "w") as f:
+                    f.write(rendered_script)
+                logging.info(f"Saved rendered sbatch script to {retry_sbatch_script_path}")
+
+        print_welcome_message(submitted_job_ids, log_dir_name)
+    finally:
+        # Clean up temporary file
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

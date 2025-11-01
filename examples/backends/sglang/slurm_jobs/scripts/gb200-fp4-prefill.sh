@@ -75,7 +75,9 @@ if [ "$mode" = "prefill" ]; then
     python3 -m pip install --no-cache-dir --upgrade --pre nvidia-cutlass-dsl
 
     # no expert locations collected for fp4 yet
+    command_suffix=""
     if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix=" "; fi
+    if [[ -n "${DUMP_CONFIG_PATH}" ]]; then command_suffix="${command_suffix} --dump-config-to ${DUMP_CONFIG_PATH}"; fi
 
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
     SGLANG_NVFP4_CKPT_FP8_GEMM_IN_ATTN=1 \

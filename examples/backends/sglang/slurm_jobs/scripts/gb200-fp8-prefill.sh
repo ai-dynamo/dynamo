@@ -73,6 +73,7 @@ if [ "$mode" = "prefill" ]; then
 
     command_suffix=""
     if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix="--init-expert-location /configs/prefill_dsr1-0528_in1000out1000_num40000.json"; fi
+    if [[ -n "${DUMP_CONFIG_PATH}" ]]; then command_suffix="${command_suffix} --dump-config-to ${DUMP_CONFIG_PATH}"; fi
 
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
     SGLANG_PER_TOKEN_GROUP_QUANT_8BIT_V2=1 \

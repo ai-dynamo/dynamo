@@ -20,7 +20,7 @@ GPUS_PER_NODE={{ gpus_per_node }}
 TOTAL_GPUS=$((TOTAL_NODES * GPUS_PER_NODE))
 PREFILL_NODES_PER_WORKER=$((PREFILL_NODES / PREFILL_WORKERS))
 DECODE_NODES_PER_WORKER=$((DECODE_NODES / DECODE_WORKERS))
-LOG_DIR="${SLURM_SUBMIT_DIR}/logs/${SLURM_JOB_ID}"
+LOG_DIR="${SLURM_SUBMIT_DIR}/logs/${SLURM_JOB_ID}_{{ prefill_workers }}P_{{ decode_workers }}D_{{ timestamp }}"
 SCRIPT_DIR="${SLURM_SUBMIT_DIR}/scripts"
 OUTPUT_DIR="${SLURM_SUBMIT_DIR}/outputs"
 MODEL_DIR="{{ model_dir }}"
@@ -237,8 +237,18 @@ for worker_idx in $(seq 0 $((PREFILL_WORKERS - 1))); do
         local_rank=$node_idx
 
         echo "Launching prefill worker $worker_idx, node $global_node_idx (local_rank $local_rank): $node"
-
-        cmd="srun --overlap $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$node --output=${LOG_DIR}/${node}_prefill_w${worker_idx}.out --error=${LOG_DIR}/${node}_prefill_w${worker_idx}.err python /scripts/worker_setup.py --leader_ip ${LEADER_IP} --worker_idx ${worker_idx} --local_rank ${local_rank} --nodes_per_worker ${PREFILL_NODES_PER_WORKER} --worker_type prefill --gpu_utilization_log /logs/${node}_prefill_w${worker_idx}_gpu_utilization.log ${WORKER_ARGS}"
+{% endraw %}
+{% if enable_config_dump %}
+{% raw %}
+        CONFIG_DUMP_ARG="--dump-config-path /logs/${node}_config.json"
+{% endraw %}
+{% else %}
+{% raw %}
+        CONFIG_DUMP_ARG=""
+{% endraw %}
+{% endif %}
+{% raw %}
+        cmd="srun --overlap $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$node --output=${LOG_DIR}/${node}_prefill_w${worker_idx}.out --error=${LOG_DIR}/${node}_prefill_w${worker_idx}.err python /scripts/worker_setup.py --leader_ip ${LEADER_IP} --worker_idx ${worker_idx} --local_rank ${local_rank} --nodes_per_worker ${PREFILL_NODES_PER_WORKER} --worker_type prefill --gpu_utilization_log /logs/${node}_prefill_w${worker_idx}_gpu_utilization.log ${WORKER_ARGS} ${CONFIG_DUMP_ARG}"
         echo "$cmd"
         $cmd &
     done
@@ -260,8 +270,18 @@ for worker_idx in $(seq 0 $((DECODE_WORKERS - 1))); do
         local_rank=$node_idx
 
         echo "Launching decode worker $worker_idx, node $global_node_idx (local_rank $local_rank): $node"
-
-        cmd="srun --overlap $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$node --output=${LOG_DIR}/${node}_decode_w${worker_idx}.out --error=${LOG_DIR}/${node}_decode_w${worker_idx}.err python /scripts/worker_setup.py --leader_ip ${LEADER_IP} --worker_idx ${worker_idx} --local_rank ${local_rank} --nodes_per_worker ${DECODE_NODES_PER_WORKER} --worker_type decode --gpu_utilization_log /logs/${node}_decode_w${worker_idx}_gpu_utilization.log ${WORKER_ARGS}"
+{% endraw %}
+{% if enable_config_dump %}
+{% raw %}
+        CONFIG_DUMP_ARG="--dump-config-path /logs/${node}_config.json"
+{% endraw %}
+{% else %}
+{% raw %}
+        CONFIG_DUMP_ARG=""
+{% endraw %}
+{% endif %}
+{% raw %}
+        cmd="srun --overlap $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$node --output=${LOG_DIR}/${node}_decode_w${worker_idx}.out --error=${LOG_DIR}/${node}_decode_w${worker_idx}.err python /scripts/worker_setup.py --leader_ip ${LEADER_IP} --worker_idx ${worker_idx} --local_rank ${local_rank} --nodes_per_worker ${DECODE_NODES_PER_WORKER} --worker_type decode --gpu_utilization_log /logs/${node}_decode_w${worker_idx}_gpu_utilization.log ${CONFIG_DUMP_ARG} ${WORKER_ARGS}"
         echo "$cmd"
         $cmd &
     done

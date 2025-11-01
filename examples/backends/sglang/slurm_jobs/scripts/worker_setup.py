@@ -203,6 +203,13 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
         help="Whether we add --init-expert-locations to launch commands",
     )
 
+    parser.add_argument(
+        "--dump-config-path",
+        type=str,
+        default=None,
+        help="Path to dump config file (e.g., /logs/node_config.json)",
+    )
+
     return parser.parse_args(args)
 
 
@@ -241,6 +248,7 @@ def setup_env_vars_for_gpu_script(
     total_nodes: int,
     port: int = DIST_INIT_PORT,
     use_init_locations: bool = True,
+    dump_config_path: str | None = None,
 ):
     """Setup environment variables required by GPU scripts (gb200-fp8.sh)"""
     os.environ["HOST_IP_MACHINE"] = host_ip
@@ -249,6 +257,10 @@ def setup_env_vars_for_gpu_script(
     os.environ["RANK"] = str(local_rank)
     os.environ["TOTAL_NODES"] = str(total_nodes)
     os.environ["USE_INIT_LOCATIONS"] = str(use_init_locations)
+    if dump_config_path:
+        os.environ["DUMP_CONFIG_PATH"] = dump_config_path
+    else:
+        os.environ.pop("DUMP_CONFIG_PATH", None)
 
     logging.info(f"Set HOST_IP: {host_ip}")
     logging.info(f"Set PORT: {port}")
@@ -256,6 +268,8 @@ def setup_env_vars_for_gpu_script(
     logging.info(f"Set RANK: {local_rank}")
     logging.info(f"Set TOTAL_NODES: {total_nodes}")
     logging.info(f"Set USE_INIT_LOCATIONS: {use_init_locations}")
+    if dump_config_path:
+        logging.info(f"Set DUMP_CONFIG_PATH: {dump_config_path}")
 
 
 def get_gpu_command(worker_type: str, gpu_type: str) -> str:
@@ -328,6 +342,7 @@ def setup_prefill_worker(
     gpu_type: str,
     multiple_frontends_enabled: bool = False,
     use_init_locations: bool = True,
+    dump_config_path: str | None = None,
 ) -> int:
     """
     Setup the prefill worker.
@@ -348,6 +363,7 @@ def setup_prefill_worker(
         total_gpus,
         nodes_per_worker,
         use_init_locations=use_init_locations,
+        dump_config_path=dump_config_path,
     )
 
     # Use appropriate GPU script instead of generating command directly
@@ -364,6 +380,7 @@ def setup_decode_worker(
     gpus_per_node: int,
     gpu_type: str,
     use_init_locations: bool = True,
+    dump_config_path: str | None = None,
 ) -> int:
     """
     Setup the decode worker.
@@ -381,6 +398,7 @@ def setup_decode_worker(
         total_gpus,
         nodes_per_worker,
         use_init_locations=use_init_locations,
+        dump_config_path=dump_config_path,
     )
 
     # Use appropriate GPU script instead of generating command directly
@@ -436,6 +454,7 @@ def main(input_args: list[str] | None = None):
             args.gpu_type,
             args.multiple_frontends_enabled,
             args.use_init_locations,
+            args.dump_config_path,
         )
     elif args.worker_type == "decode":
         setup_decode_worker(
@@ -447,6 +466,7 @@ def main(input_args: list[str] | None = None):
             args.gpus_per_node,
             args.gpu_type,
             args.use_init_locations,
+            args.dump_config_path,
         )
 
     logging.info(f"{args.worker_type.capitalize()} worker setup complete")
