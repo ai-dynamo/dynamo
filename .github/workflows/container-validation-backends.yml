@@ -547,6 +547,7 @@ jobs:
       timeout-minutes: 5
       env:
         NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+        PROFILE: ${{ matrix.profile }}
       run: |
         set -x
         export KUBECONFIG=$(pwd)/.kubeconfig
@@ -556,7 +557,8 @@ jobs:
         kubectl get all
 
         echo "Deleting DynamoGraphDeployments for this job in namespace $NAMESPACE..."
-        kubectl delete dynamographdeployments $FRAMEWORK-${{ matrix.profile }} -n $NAMESPACE
+        PROFILE_SANITIZED="${PROFILE/_/-}"
+        kubectl delete dynamographdeployments $FRAMEWORK-$PROFILE_SANITIZED -n $NAMESPACE
 
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
