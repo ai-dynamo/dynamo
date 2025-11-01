@@ -566,9 +566,14 @@ def test_xid79_nvsentinel_automated(cleanup_on_exit):
         print("PHASE 5: Inference Recovery")
         print("=" * 80)
 
-        print(f"\n[→] Waiting for pods to reschedule (up to {RECOVERY_TIMEOUT}s)...")
+        print(f"\n[→] Waiting for pods to reschedule and inference to stabilize (up to {RECOVERY_TIMEOUT}s)...")
+        print("    Step 1: Wait for 3 ready pods")
+        print("    Step 2: Measure 90%+ success rate after pods are ready (min 5 requests)")
         start_time = time.time()
         recovery_success = False
+        last_status_time = start_time
+        recovery_baseline_stats = None
+        recovery_baseline_set = False
 
         while time.time() - start_time < RECOVERY_TIMEOUT:
             # Check pod count
@@ -585,22 +590,43 @@ def test_xid79_nvsentinel_automated(cleanup_on_exit):
                 and p.status.container_statuses[0].ready
             ]
 
-            # Check inference success rate
+            # Set recovery baseline once pods are ready
+            if len(ready_pods) >= 3 and not recovery_baseline_set:
+                recovery_baseline_stats = load_tester.get_stats()
+                recovery_baseline_set = True
+                elapsed = time.time() - start_time
+                print(f"    [{elapsed:.0f}s] ✓ All pods ready - starting recovery validation...")
+
+            # Check inference success rate AFTER pods are ready
             stats = load_tester.get_stats()
-            recent_requests = stats["total"] - initial_stats["total"]
             
-            if len(ready_pods) >= 3 and recent_requests >= 10:
-                recent_success_rate = (
-                    (stats["success"] - initial_stats["success"]) / recent_requests * 100
-                )
-                
-                if recent_success_rate >= 70:
-                    elapsed = time.time() - start_time
-                    print(f"[✓] Recovery complete after {elapsed:.1f}s")
-                    print(f"    Ready pods: {len(ready_pods)}/3")
-                    print(f"    Recent success rate: {recent_success_rate:.1f}%")
-                    recovery_success = True
-                    break
+            if recovery_baseline_set:
+                # Measure only requests sent after pods became ready
+                recovery_requests = stats["total"] - recovery_baseline_stats["total"]
+                recovery_successes = stats["success"] - recovery_baseline_stats["success"]
+                recovery_success_rate = (recovery_successes / recovery_requests * 100) if recovery_requests > 0 else 0
+            else:
+                # Still waiting for pods
+                recovery_requests = 0
+                recovery_successes = 0
+                recovery_success_rate = 0
+            
+            # Print status update every 30s
+            elapsed = time.time() - start_time
+            if elapsed - (last_status_time - start_time) >= 30:
+                if recovery_baseline_set:
+                    print(f"    [{elapsed:.0f}s] Pods: {len(ready_pods)}/3 ready | Recovery requests: {recovery_requests} ({recovery_successes} success, {recovery_success_rate:.0f}%)")
+                else:
+                    print(f"    [{elapsed:.0f}s] Waiting for pods: {len(ready_pods)}/3 ready")
+                last_status_time = time.time()
+            
+            # Exit when: pods ready + 90%+ success rate over 5+ requests AFTER pods are ready
+            if recovery_baseline_set and recovery_requests >= 5 and recovery_success_rate >= 90:
+                print(f"[✓] Recovery complete after {elapsed:.1f}s")
+                print(f"    Ready pods: {len(ready_pods)}/3")
+                print(f"    Recovery success rate: {recovery_success_rate:.1f}% ({recovery_successes}/{recovery_requests} after pods ready)")
+                recovery_success = True
+                break
 
             time.sleep(10)
 
