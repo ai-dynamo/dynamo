@@ -64,6 +64,22 @@ sglang_configs = {
         models_port=8000,
         request_payloads=[chat_payload_default(), completion_payload_default()],
     ),
+    "disaggregated_same_gpu": SGLangConfig(
+        # Uses disagg_same_gpu.sh for single-GPU disaggregated testing
+        # Validates metrics from both prefill (port 8081) and decode (port 8082) workers
+        name="disaggregated_same_gpu",
+        directory=sglang_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[pytest.mark.gpu_1],
+        model="Qwen/Qwen3-0.6B",
+        env={},
+        models_port=8000,
+        request_payloads=[
+            chat_payload_default(),
+            metric_payload_default(min_num_requests=6, backend="sglang", port=8081),
+            metric_payload_default(min_num_requests=6, backend="sglang", port=8082),
+        ],
+    ),
     "kv_events": SGLangConfig(
         name="kv_events",
         directory=sglang_dir,
