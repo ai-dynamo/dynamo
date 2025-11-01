@@ -393,6 +393,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         }
     }
 
