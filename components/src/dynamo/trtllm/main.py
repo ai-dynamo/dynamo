@@ -241,18 +241,19 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
-        # Convert KvCacheConfig object to dict and add the parameter
+        # Add it to kv_cache_config while preserving cache_transceiver_config from YAML
         current_kv_config = arg_map["kv_cache_config"]
         if isinstance(current_kv_config, KvCacheConfig):
+            # Convert KvCacheConfig object to dict (no cache_transceiver_config to preserve)
             arg_map["kv_cache_config"] = {
                 "free_gpu_memory_fraction": config.free_gpu_memory_fraction,
                 "event_buffer_max_size": DEFAULT_KV_EVENT_BUFFER_MAX_SIZE,
             }
         elif isinstance(current_kv_config, dict):
-            if "event_buffer_max_size" not in current_kv_config:
-                current_kv_config[
-                    "event_buffer_max_size"
-                ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+            # Add event_buffer_max_size while preserving cache_transceiver_config and other YAML settings
+            current_kv_config[
+                "event_buffer_max_size"
+            ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
 
         # Only pytorch backend is supported for now to publish events and metrics.
         if "backend" not in arg_map:
