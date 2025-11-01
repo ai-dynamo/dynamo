@@ -6,7 +6,7 @@ aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@e46d9089ffe
 aiofiles
 aiperf @ git+https://github.com/ai-dynamo/aiperf.git@e8f69abf180ff9ea96de9f9a8c955df8c024625b
 av==15.0.0
-fastapi==0.115.12
+fastapi==0.120.1
 ftfy
 genai-perf==0.0.15
 grpcio-tools==1.66.0
