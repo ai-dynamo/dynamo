@@ -2413,15 +2413,15 @@ mod detect_parser_tests {
     }
 
     #[test]
-    fn test_e2e_detect_tool_call_start_deepseek_v3_1() {
+    fn test_e2e_detect_incomplete_tool_call_start_deepseek_v3_1() {
         let text =
             r#"<｜tool▁call▁begin｜>get_current_weather{"location": "Tokyo"}<｜tool▁call▁end｜>"#;
         let result = detect_tool_call_start(text, Some("deepseek_v3_1")).unwrap();
-        assert!(result);
+        assert!(!result);
     }
 
     #[test]
-    fn test_e2e_detect_tool_call_multiple_start_deepseek_v3_1() {
+    fn test_e2e_detect_tool_call_start_deepseek_v3_1() {
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather{"location": "Tokyo"}<｜tool▁call▁end｜>"#;
         let result = detect_tool_call_start(text, Some("deepseek_v3_1")).unwrap();
         assert!(result);
