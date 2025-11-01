@@ -395,25 +395,49 @@ def patch_deployment_env(
 
             # Apply the patch with retry logic for 409 Conflicts
             max_retries = 5
-            last_error = None
             for attempt in range(max_retries):
                 try:
                     if attempt > 0:
                         print(f"      → Retry attempt {attempt + 1}/{max_retries}")
-                        # On retry, refetch and reapply patches
                         time.sleep(0.5 * attempt)  # Exponential backoff
-                        # Re-execute the entire patching logic from the beginning
-                        # by recursively calling this function
-                        return _patch_deployment(
-                            deployment_name,
-                            namespace,
-                            enable,
-                            xid_type,
-                            lib_path,
-                            services_to_patch,
-                            use_configmap,
-                            node_name,
+                        # Re-fetch the latest version
+                        dgd = custom_api.get_namespaced_custom_object(
+                            group="nvidia.com",
+                            version="v1alpha1",
+                            namespace=namespace,
+                            plural="dynamographdeployments",
+                            name=deployment_name,
                         )
+                        # Re-apply the patches to fresh copy
+                        for service_name in patched_services:
+                            if service_name in dgd.get("spec", {}).get("services", {}):
+                                service = dgd["spec"]["services"][service_name]
+                                
+                                # Remove env vars
+                                if "extraPodSpec" in service and "mainContainer" in service["extraPodSpec"]:
+                                    if "env" in service["extraPodSpec"]["mainContainer"]:
+                                        service["extraPodSpec"]["mainContainer"]["env"] = [
+                                            env
+                                            for env in service["extraPodSpec"]["mainContainer"]["env"]
+                                            if env.get("name") not in ["LD_PRELOAD", "CUDA_FAULT_INJECTION_ENABLED", "CUDA_XID_TYPE"]
+                                        ]
+                                        if enable:
+                                            service["extraPodSpec"]["mainContainer"]["env"].extend(new_envs)
+                                
+                                # Remove volumes and init containers when disabling
+                                if not enable and "extraPodSpec" in service:
+                                    if "volumes" in service["extraPodSpec"]:
+                                        service["extraPodSpec"]["volumes"] = [
+                                            v for v in service["extraPodSpec"]["volumes"]
+                                            if v.get("name") not in ["cuda-fault-lib-source", "cuda-fault-lib"]
+                                        ]
+                                    if "initContainers" in service["extraPodSpec"]:
+                                        service["extraPodSpec"]["initContainers"] = [
+                                            c for c in service["extraPodSpec"]["initContainers"]
+                                            if c.get("name") != "cuda-lib-decoder"
+                                        ]
+                                    # Remove affinity
+                                    service["extraPodSpec"]["affinity"] = None
                     
                     custom_api.patch_namespaced_custom_object(
                         group="nvidia.com",
@@ -430,15 +454,10 @@ def patch_deployment_env(
                         print(
                             f"      ⚠ Conflict (409) - resource modified, retrying..."
                         )
-                        last_error = e
                         continue
                     else:
                         # Not a conflict or out of retries
                         raise
-            else:
-                # All retries exhausted
-                if last_error:
-                    raise last_error
 
             # Primary patch with affinity: None is sufficient
             # (Removed secondary JSON patch - caused 400 BadRequest)
