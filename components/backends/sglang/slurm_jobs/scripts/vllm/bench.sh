@@ -37,11 +37,12 @@ warmup_isl=$chosen_isl
 warmup_osl=$chosen_osl
 warmup_prompts=10
 warmup_req_rate=250
-warmup_concurrency_list=(2 4 16 32 128)
+warmup_concurrency_list=(1 2 4 8 16 32 64 128)
 
 for warmup_concurrency in "${warmup_concurrency_list[@]}"
 do
     echo "Warming up model with concurrency $warmup_concurrency"
+    echo "$(date '+%Y-%m-%d %H:%M:%S')"
     set -x
     python3 benchmark_serving.py \
         --model ${model_name} --tokenizer ${model_path} \
@@ -58,6 +59,7 @@ do
         --percentile-metrics ttft,tpot,itl,e2el \
         --max-concurrency "$warmup_concurrency"
     set +x
+    echo "$(date '+%Y-%m-%d %H:%M:%S')"
 done
 set +e
 
@@ -72,6 +74,7 @@ do
     result_filename="isl_${chosen_isl}_osl_${chosen_osl}_concurrency_${concurrency}_req_rate_${chosen_req_rate}_gpus${total_gpus}.json"
 
     set -x
+    echo "$(date '+%Y-%m-%d %H:%M:%S')"
     python3 benchmark_serving.py \
         --model ${model_name} --tokenizer ${model_path} \
         --host $head_node --port $head_port \
@@ -89,6 +92,7 @@ do
         --save-result --result-dir $result_dir --result-filename $result_filename
     set +x
 
+    echo "$(date '+%Y-%m-%d %H:%M:%S')"
     echo "Completed benchmark with concurrency: $concurrency"
     echo "-----------------------------------------"
 done
