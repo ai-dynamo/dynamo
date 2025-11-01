@@ -92,7 +92,7 @@ where
     let prefix = prefix.into();
 
     let prefix_watcher = client.kv_get_and_watch_prefix(&prefix).await?;
-    let (prefix_str, _watcher, mut events_rx) = prefix_watcher.dissolve();
+    let (prefix_str, mut events_rx) = prefix_watcher.dissolve();
 
     tokio::spawn(async move {
         let mut state: HashMap<K, V> = HashMap::new();
