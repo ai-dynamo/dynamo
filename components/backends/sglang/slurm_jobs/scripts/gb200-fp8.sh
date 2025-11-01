@@ -110,7 +110,8 @@ if [ "$mode" = "prefill" ]; then
         --disable-shared-experts-fusion \
         --ep-num-redundant-experts 32 \
         --eplb-algorithm deepseek \
-        --attention-backend cutlass_mla \
+        --attention-backend trtllm_mla \
+        --kv-cache-dtype fp8_e4m3 \
         --watchdog-timeout 1000000 \
         --disable-cuda-graph \
         --chunked-prefill-size 131072 \
@@ -172,7 +173,8 @@ elif [ "$mode" = "decode" ]; then
         --ep-num-redundant-experts 32 \
         --ep-dispatch-algorithm static \
         --eplb-algorithm deepseek \
-        --attention-backend cutlass_mla \
+        --attention-backend trtllm_mla \
+        --kv-cache-dtype fp8_e4m3 \
         --watchdog-timeout 1000000 \
         --chunked-prefill-size 36864 \
         --stream-interval 50 \
