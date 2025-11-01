@@ -393,48 +393,56 @@ def patch_deployment_env(
 
             print("    → Applying patch to DynamoGraphDeployment...")
 
-            # Apply the patch
-            custom_api.patch_namespaced_custom_object(
-                group="nvidia.com",
-                version="v1alpha1",
-                namespace=namespace,
-                plural="dynamographdeployments",
-                name=deployment_name,
-                body=dgd,
-            )
-
-            # For disable, use JSON patch to explicitly remove affinity (None doesn't always work)
-            if not enable and patched_services:
-                print("    → Applying JSON patch to ensure affinity removal...")
-                json_patches = []
-                for service_name in patched_services:
-                    json_patches.append(
-                        {
-                            "op": "replace",
-                            "path": f"/spec/services/{service_name}/extraPodSpec/affinity",
-                            "value": None,
-                        }
+            # Apply the patch with retry logic for 409 Conflicts
+            max_retries = 5
+            last_error = None
+            for attempt in range(max_retries):
+                try:
+                    if attempt > 0:
+                        print(f"      → Retry attempt {attempt + 1}/{max_retries}")
+                        # On retry, refetch and reapply patches
+                        time.sleep(0.5 * attempt)  # Exponential backoff
+                        # Re-execute the entire patching logic from the beginning
+                        # by recursively calling this function
+                        return _patch_deployment(
+                            deployment_name,
+                            namespace,
+                            enable,
+                            xid_type,
+                            lib_path,
+                            services_to_patch,
+                            use_configmap,
+                            node_name,
+                        )
+                    
+                    custom_api.patch_namespaced_custom_object(
+                        group="nvidia.com",
+                        version="v1alpha1",
+                        namespace=namespace,
+                        plural="dynamographdeployments",
+                        name=deployment_name,
+                        body=dgd,
                     )
-
-                if json_patches:
-                    try:
-                        # Note: Kubernetes Python client uses 'content_type' not '_content_type'
-
-                        custom_api.patch_namespaced_custom_object(
-                            group="nvidia.com",
-                            version="v1alpha1",
-                            namespace=namespace,
-                            plural="dynamographdeployments",
-                            name=deployment_name,
-                            body=json_patches,
-                            # content_type parameter not needed for json-patch, it's inferred from body type
-                        )
-                        print("      ✓ JSON patch applied for affinity removal")
-                    except Exception as e:
+                    break  # Success!
+                except ApiException as e:
+                    if e.status == 409 and attempt < max_retries - 1:
+                        # Conflict - resource was modified by controller
                         print(
-                            f"      ⚠ JSON patch failed (affinity may not exist): {e}"
+                            f"      ⚠ Conflict (409) - resource modified, retrying..."
                         )
+                        last_error = e
+                        continue
+                    else:
+                        # Not a conflict or out of retries
+                        raise
+            else:
+                # All retries exhausted
+                if last_error:
+                    raise last_error
 
+            # Primary patch with affinity: None is sufficient
+            # (Removed secondary JSON patch - caused 400 BadRequest)
+            
             action = "enabled" if enable else "disabled"
             print(f"[✓] DynamoGraphDeployment patched - CUDA fault injection {action}")
             print(f"    Services patched: {', '.join(patched_services)}")
