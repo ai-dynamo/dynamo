@@ -112,6 +112,11 @@ pub struct KvRouterConfig {
 
     /// Whether to reset the router state on startup (default: false)
     pub router_reset_states: bool,
+
+    /// Whether to track KV reuse during decode phase (default: false)
+    /// When false, random hashes are used to prevent deduplication
+    /// When true, actual sequence hashes are tracked for cascade attention
+    pub active_kv_reuse: bool,
 }
 
 impl Default for KvRouterConfig {
@@ -124,6 +129,7 @@ impl Default for KvRouterConfig {
             router_track_active_blocks: true,
             router_snapshot_threshold: Some(1000000),
             router_reset_states: false,
+            active_kv_reuse: false,
         }
     }
 }
@@ -140,6 +146,7 @@ impl KvRouterConfig {
         track_active_blocks: Option<bool>,
         router_snapshot_threshold: Option<Option<u32>>,
         router_reset_states: Option<bool>,
+        active_kv_reuse: Option<bool>,
     ) -> Self {
         let default = Self::default();
         Self {
@@ -152,6 +159,7 @@ impl KvRouterConfig {
             router_snapshot_threshold: router_snapshot_threshold
                 .unwrap_or(default.router_snapshot_threshold),
             router_reset_states: router_reset_states.unwrap_or(default.router_reset_states),
+            active_kv_reuse: active_kv_reuse.unwrap_or(default.active_kv_reuse),
         }
     }
 }
@@ -279,6 +287,7 @@ impl KvRouter {
             selector,
             kv_router_config.router_replica_sync,
             consumer_uuid.clone(),
+            kv_router_config.active_kv_reuse,
         )
         .await?;
 

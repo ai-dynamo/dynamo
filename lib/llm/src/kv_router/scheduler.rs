@@ -93,6 +93,7 @@ pub struct KvScheduler {
 }
 
 impl KvScheduler {
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         component: Component,
         block_size: u32,
@@ -101,6 +102,7 @@ impl KvScheduler {
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
         router_uuid: String,
+        active_kv_reuse: bool,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
         let instances: Vec<Instance> = instances_rx.borrow().clone();
@@ -127,6 +129,7 @@ impl KvScheduler {
             workers_with_configs.read().await.clone(), // this includes dp_size info
             replica_sync,
             router_uuid,
+            active_kv_reuse,
         ));
 
         // Spawn background task to monitor and update workers_with_configs
