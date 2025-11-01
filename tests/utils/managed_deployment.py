@@ -18,6 +18,8 @@ from kr8s.objects import Pod as kr8s_Pod
 from kr8s.objects import Service as kr8s_Service
 from kubernetes_asyncio import client, config
 
+from dynamo.common.utils.paths import get_workspace_dir
+
 
 class ServiceSpec:
     """Wrapper around a single service in the deployment spec."""
@@ -313,6 +315,59 @@ class DeploymentSpec:
 
     def spec(self):
         return self._deployment_spec
+
+    def add_arg_to_service(self, service_name: str, arg_name: str, arg_value: str):
+        """
+        Add or override a command-line argument for a specific service
+
+        Args:
+            service_name: Name of the service (e.g., "VllmDecodeWorker", "TRTLLMWorker")
+            arg_name: Argument name (e.g., "--max-model-len", "--max-seq-len")
+            arg_value: Argument value (e.g., "1024")
+        """
+        # Get the service
+        if service_name not in self._deployment_spec["spec"]["services"]:
+            raise ValueError(f"Service '{service_name}' not found in deployment spec")
+
+        service = self._deployment_spec["spec"]["services"][service_name]
+
+        # Ensure args list exists
+        if "extraPodSpec" not in service:
+            service["extraPodSpec"] = {"mainContainer": {}}
+        if "mainContainer" not in service["extraPodSpec"]:
+            service["extraPodSpec"]["mainContainer"] = {}
+        if "args" not in service["extraPodSpec"]["mainContainer"]:
+            service["extraPodSpec"]["mainContainer"]["args"] = []
+
+        args_list = service["extraPodSpec"]["mainContainer"]["args"]
+
+        # Convert to list if needed (sometimes it's a single string)
+        if isinstance(args_list, str):
+            import shlex
+
+            args_list = shlex.split(args_list)
+            service["extraPodSpec"]["mainContainer"]["args"] = args_list
+
+        # Find existing argument
+        arg_index = None
+        for i, arg in enumerate(args_list):
+            if arg == arg_name:
+                arg_index = i
+                break
+
+        if arg_index is not None:
+            # Argument found, check if it has a value
+            if arg_index + 1 < len(args_list) and not args_list[
+                arg_index + 1
+            ].startswith("-"):
+                # Has a value, replace it
+                args_list[arg_index + 1] = arg_value
+            else:
+                # No value after the argument, insert the value
+                args_list.insert(arg_index + 1, arg_value)
+        else:
+            # Add new argument
+            args_list.extend([arg_name, arg_value])
 
     def save(self, out_file: str):
         """Save updated deployment to file"""
@@ -822,8 +877,11 @@ async def main():
         datefmt=DATE_FORMAT,  # ISO 8601 UTC format
     )
 
+    # Get workspace directory using centralized logic
+    workspace_dir = get_workspace_dir()
+
     deployment_spec = DeploymentSpec(
-        "/workspace/components/backends/vllm/deploy/agg.yaml"
+        os.path.join(workspace_dir, "examples/backends/vllm/deploy/agg.yaml")
     )
 
     deployment_spec.disable_grove()

@@ -7,7 +7,7 @@ use crate::kv_router::{
     protocols::*,
     scoring::LoadEvent,
 };
-use dynamo_runtime::metrics::{MetricsRegistry, prometheus_names::kvstats};
+use dynamo_runtime::metrics::{MetricsHierarchy, prometheus_names::kvstats};
 use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
 use dynamo_runtime::{
     Result,
@@ -97,13 +97,15 @@ pub struct KvEventPublisher {
 impl KvEventPublisher {
     pub fn new(
         component: Component,
-        worker_id: u64,
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
     ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
 
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+
+        // Infer worker_id from component's connection
+        let worker_id = component.drt().connection_id();
 
         // Create our event source (if any)
         let mut source = None;
@@ -700,25 +702,25 @@ struct KvStatsPrometheusGauges {
 impl KvStatsPrometheusGauges {
     /// Create a new KvStatsPrometheusGauges instance with all metrics registered
     fn new(component: &Component) -> Result<Self> {
-        let kv_active_blocks_gauge = component.create_gauge(
+        let kv_active_blocks_gauge = component.metrics().create_gauge(
             kvstats::ACTIVE_BLOCKS,
             "Number of active KV cache blocks currently in use",
             &[],
         )?;
 
-        let kv_total_blocks_gauge = component.create_gauge(
+        let kv_total_blocks_gauge = component.metrics().create_gauge(
             kvstats::TOTAL_BLOCKS,
             "Total number of KV cache blocks available",
             &[],
         )?;
 
-        let gpu_cache_usage_gauge = component.create_gauge(
+        let gpu_cache_usage_gauge = component.metrics().create_gauge(
             kvstats::GPU_CACHE_USAGE_PERCENT,
             "GPU cache usage as a percentage (0.0-1.0)",
             &[],
         )?;
 
-        let gpu_prefix_cache_hit_rate_gauge = component.create_gauge(
+        let gpu_prefix_cache_hit_rate_gauge = component.metrics().create_gauge(
             kvstats::GPU_PREFIX_CACHE_HIT_RATE,
             "GPU prefix cache hit rate as a percentage (0.0-1.0)",
             &[],
@@ -784,15 +786,7 @@ impl WorkerMetricsPublisher {
     }
 
     pub async fn create_endpoint(&self, component: Component) -> Result<()> {
-        let worker_id = component
-            .drt()
-            .primary_lease()
-            .map(|lease| lease.id())
-            .unwrap_or_else(|| {
-                tracing::warn!("Component is static, assuming worker_id of 0");
-                0
-            });
-
+        let worker_id = component.drt().connection_id();
         self.start_nats_metrics_publishing(component.namespace().clone(), worker_id);
         Ok(())
     }
@@ -867,6 +861,12 @@ impl WorkerMetricsPublisher {
                                 tracing::warn!("Failed to publish metrics over NATS: {}", e);
                             }
                         }
+
+                        // Reset timer to pending state to avoid tight loop
+                        // It will be reset to 1ms when metrics actually change
+                        publish_timer.as_mut().reset(
+                            tokio::time::Instant::now() + tokio::time::Duration::from_secs(3600)
+                        );
                     }
                 }
             }
@@ -1333,7 +1333,6 @@ mod test_integration_publisher {
     #[ignore] // Mark as ignored as requested, because CI's integrations still don't have NATS
     async fn test_kvstats_prometheus_gauge_updates() {
         use crate::kv_router::publisher::kvstats;
-        use dynamo_runtime::metrics::MetricsRegistry;
 
         // Test that publish() updates Prometheus gauges correctly using real Component
         let publisher = WorkerMetricsPublisher::new().unwrap();
@@ -1388,7 +1387,7 @@ mod test_integration_publisher {
 
         // Test 4: Verify metrics are properly registered in the component's registry
         // Component implements MetricsRegistry trait which provides prometheus_expfmt()
-        let prometheus_output = component.prometheus_expfmt().unwrap();
+        let prometheus_output = component.metrics().prometheus_expfmt().unwrap();
 
         // Verify metric names are present
         assert!(prometheus_output.contains(kvstats::ACTIVE_BLOCKS));

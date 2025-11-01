@@ -46,11 +46,9 @@ To enable NIXL for KV cache transfer in disaggregated serving:
    **Build the container with NIXL support:**
    ```bash
    ./container/build.sh --framework trtllm \
-     --use-default-experimental-tensorrtllm-commit \
-     --trtllm-use-nixl-kvcache-experimental
+     --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM.git \
+     --tensorrtllm-commit main
    ```
-
-   **Note:** Both `--use-default-experimental-tensorrtllm-commit` and `--trtllm-use-nixl-kvcache-experimental` flags are required to enable NIXL support.
 
 2. **Run the containerized environment:**
    See [run container](./README.md#run-container) section to learn how to start the container image built in previous step.

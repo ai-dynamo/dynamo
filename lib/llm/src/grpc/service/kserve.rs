@@ -11,11 +11,12 @@ use crate::http::service::Metrics;
 use crate::http::service::metrics;
 
 use crate::discovery::ModelManager;
+use crate::local_model::runtime_config::ModelRuntimeConfig;
+use crate::protocols::tensor::TensorModelConfig;
 use crate::protocols::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
-use dynamo_runtime::transports::etcd;
 use futures::pin_mut;
 use tokio::task::JoinHandle;
 use tokio_stream::{Stream, StreamExt};
@@ -39,13 +40,14 @@ use inference::{
     ModelMetadataRequest, ModelMetadataResponse, ModelStreamInferResponse,
 };
 
+use prost::Message;
+
 /// [gluo TODO] 'metrics' are for HTTP service and there is HTTP endpoint
 /// for it as part of HTTP service. Should we always start HTTP service up
 /// for non-inference?
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
-    etcd_client: Option<etcd::Client>,
 }
 
 impl State {
@@ -53,15 +55,6 @@ impl State {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
-            etcd_client: None,
-        }
-    }
-
-    pub fn new_with_etcd(manager: Arc<ModelManager>, etcd_client: etcd::Client) -> Self {
-        Self {
-            manager,
-            metrics: Arc::new(Metrics::default()),
-            etcd_client: Some(etcd_client),
         }
     }
 
@@ -76,10 +69,6 @@ impl State {
 
     pub fn manager_clone(&self) -> Arc<ModelManager> {
         self.manager.clone()
-    }
-
-    pub fn etcd_client(&self) -> Option<&etcd::Client> {
-        self.etcd_client.as_ref()
     }
 
     fn is_tensor_model(&self, model: &String) -> bool {
@@ -108,9 +97,6 @@ pub struct KserveServiceConfig {
 
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
-
-    #[builder(default = "None")]
-    etcd_client: Option<etcd::Client>,
 }
 
 impl KserveService {
@@ -155,10 +141,7 @@ impl KserveServiceConfigBuilder {
         let config: KserveServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let state = match config.etcd_client {
-            Some(etcd_client) => Arc::new(State::new_with_etcd(model_manager, etcd_client)),
-            None => Arc::new(State::new(model_manager)),
-        };
+        let state = Arc::new(State::new(model_manager));
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
@@ -176,10 +159,26 @@ impl KserveServiceConfigBuilder {
         self.request_template = Some(request_template);
         self
     }
+}
 
-    pub fn with_etcd_client(mut self, etcd_client: Option<etcd::Client>) -> Self {
-        self.etcd_client = Some(etcd_client);
-        self
+#[allow(clippy::large_enum_variant)]
+enum Config {
+    Dynamo(TensorModelConfig),
+    Triton(ModelConfig),
+}
+
+impl Config {
+    fn from_runtime_config(runtime_config: &ModelRuntimeConfig) -> Result<Config, anyhow::Error> {
+        if let Some(tensor_model_config) = runtime_config.tensor_model_config.as_ref() {
+            if let Some(triton_model_config) = tensor_model_config.triton_model_config.as_ref() {
+                let model_config = ModelConfig::decode(triton_model_config.as_slice())?;
+                Ok(Config::Triton(model_config))
+            } else {
+                Ok(Config::Dynamo(tensor_model_config.clone()))
+            }
+        } else {
+            Err(anyhow::anyhow!("no model config is provided"))
+        }
     }
 }
 
@@ -416,38 +415,76 @@ impl GrpcInferenceService for KserveService {
             .find(|card| request_model_name == &card.display_name)
         {
             if card.model_type.supports_tensor() {
-                if let Some(tensor_model_config) = card.runtime_config.tensor_model_config.as_ref()
-                {
-                    return Ok(Response::new(ModelMetadataResponse {
-                        name: tensor_model_config.name.clone(),
-                        versions: vec!["1".to_string()],
-                        platform: "dynamo".to_string(),
-                        inputs: tensor_model_config
-                            .inputs
-                            .iter()
-                            .map(|input| inference::model_metadata_response::TensorMetadata {
-                                name: input.name.clone(),
-                                datatype: input.data_type.to_string(),
-                                shape: input.shape.clone(),
-                            })
-                            .collect(),
-                        outputs: tensor_model_config
-                            .outputs
-                            .iter()
-                            .map(
-                                |output| inference::model_metadata_response::TensorMetadata {
-                                    name: output.name.clone(),
-                                    datatype: output.data_type.to_string(),
-                                    shape: output.shape.clone(),
-                                },
-                            )
-                            .collect(),
-                    }));
+                let config = Config::from_runtime_config(&card.runtime_config).map_err(|e| {
+                    Status::invalid_argument(format!(
+                        "Model '{}' has type Tensor but: {}",
+                        request_model_name, e
+                    ))
+                })?;
+                match config {
+                    Config::Triton(model_config) => {
+                        return Ok(Response::new(ModelMetadataResponse {
+                            name: model_config.name,
+                            versions: vec!["1".to_string()],
+                            platform: model_config.platform,
+                            inputs: model_config
+                                .input
+                                .iter()
+                                .map(|input| inference::model_metadata_response::TensorMetadata {
+                                    name: input.name.clone(),
+                                    datatype: match inference::DataType::try_from(input.data_type) {
+                                        Ok(dt) => dt.as_str_name().to_string(),
+                                        Err(_) => "TYPE_INVALID".to_string(),
+                                    },
+                                    shape: input.dims.clone(),
+                                })
+                                .collect(),
+                            outputs: model_config
+                                .output
+                                .iter()
+                                .map(
+                                    |output| inference::model_metadata_response::TensorMetadata {
+                                        name: output.name.clone(),
+                                        datatype: match inference::DataType::try_from(
+                                            output.data_type,
+                                        ) {
+                                            Ok(dt) => dt.as_str_name().to_string(),
+                                            Err(_) => "TYPE_INVALID".to_string(),
+                                        },
+                                        shape: output.dims.clone(),
+                                    },
+                                )
+                                .collect(),
+                        }));
+                    }
+                    Config::Dynamo(model_config) => {
+                        return Ok(Response::new(ModelMetadataResponse {
+                            name: model_config.name.clone(),
+                            versions: vec!["1".to_string()],
+                            platform: "dynamo".to_string(),
+                            inputs: model_config
+                                .inputs
+                                .iter()
+                                .map(|input| inference::model_metadata_response::TensorMetadata {
+                                    name: input.name.clone(),
+                                    datatype: input.data_type.to_string(),
+                                    shape: input.shape.clone(),
+                                })
+                                .collect(),
+                            outputs: model_config
+                                .outputs
+                                .iter()
+                                .map(
+                                    |output| inference::model_metadata_response::TensorMetadata {
+                                        name: output.name.clone(),
+                                        datatype: output.data_type.to_string(),
+                                        shape: output.shape.clone(),
+                                    },
+                                )
+                                .collect(),
+                        }));
+                    }
                 }
-                Err(Status::invalid_argument(format!(
-                    "Model '{}' has type Tensor but no model config is provided",
-                    request_model_name
-                )))?
             } else if card.model_type.supports_completions() {
                 return Ok(Response::new(ModelMetadataResponse {
                     name: card.display_name,
@@ -497,42 +534,50 @@ impl GrpcInferenceService for KserveService {
             .find(|card| request_model_name == &card.display_name)
         {
             if card.model_type.supports_tensor() {
-                if let Some(tensor_model_config) = card.runtime_config.tensor_model_config.as_ref()
-                {
-                    let model_config = ModelConfig {
-                        name: tensor_model_config.name.clone(),
-                        platform: "dynamo".to_string(),
-                        backend: "dynamo".to_string(),
-                        input: tensor_model_config
-                            .inputs
-                            .iter()
-                            .map(|input| ModelInput {
-                                name: input.name.clone(),
-                                data_type: input.data_type.to_kserve(),
-                                dims: input.shape.clone(),
-                                ..Default::default()
-                            })
-                            .collect(),
-                        output: tensor_model_config
-                            .outputs
-                            .iter()
-                            .map(|output| ModelOutput {
-                                name: output.name.clone(),
-                                data_type: output.data_type.to_kserve(),
-                                dims: output.shape.clone(),
-                                ..Default::default()
-                            })
-                            .collect(),
-                        ..Default::default()
-                    };
-                    return Ok(Response::new(ModelConfigResponse {
-                        config: Some(model_config.clone()),
-                    }));
+                let config = Config::from_runtime_config(&card.runtime_config).map_err(|e| {
+                    Status::invalid_argument(format!(
+                        "Model '{}' has type Tensor but: {}",
+                        request_model_name, e
+                    ))
+                })?;
+                match config {
+                    Config::Triton(model_config) => {
+                        return Ok(Response::new(ModelConfigResponse {
+                            config: Some(model_config),
+                        }));
+                    }
+                    Config::Dynamo(tensor_model_config) => {
+                        let model_config = ModelConfig {
+                            name: tensor_model_config.name.clone(),
+                            platform: "dynamo".to_string(),
+                            backend: "dynamo".to_string(),
+                            input: tensor_model_config
+                                .inputs
+                                .iter()
+                                .map(|input| ModelInput {
+                                    name: input.name.clone(),
+                                    data_type: input.data_type.to_kserve(),
+                                    dims: input.shape.clone(),
+                                    ..Default::default()
+                                })
+                                .collect(),
+                            output: tensor_model_config
+                                .outputs
+                                .iter()
+                                .map(|output| ModelOutput {
+                                    name: output.name.clone(),
+                                    data_type: output.data_type.to_kserve(),
+                                    dims: output.shape.clone(),
+                                    ..Default::default()
+                                })
+                                .collect(),
+                            ..Default::default()
+                        };
+                        return Ok(Response::new(ModelConfigResponse {
+                            config: Some(model_config.clone()),
+                        }));
+                    }
                 }
-                Err(Status::invalid_argument(format!(
-                    "Model '{}' has type Tensor but no model config is provided",
-                    request_model_name
-                )))?
             } else if card.model_type.supports_completions() {
                 let config = ModelConfig {
                     name: card.display_name,

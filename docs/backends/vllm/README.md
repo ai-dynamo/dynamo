@@ -106,7 +106,7 @@ Note: The above architecture illustrates all the components. The final component
 
 ```bash
 # requires one gpu
-cd components/backends/vllm
+cd examples/backends/vllm
 bash launch/agg.sh
 ```
 
@@ -114,7 +114,7 @@ bash launch/agg.sh
 
 ```bash
 # requires two gpus
-cd components/backends/vllm
+cd examples/backends/vllm
 bash launch/agg_router.sh
 ```
 
@@ -122,7 +122,7 @@ bash launch/agg_router.sh
 
 ```bash
 # requires two gpus
-cd components/backends/vllm
+cd examples/backends/vllm
 bash launch/disagg.sh
 ```
 
@@ -130,7 +130,7 @@ bash launch/disagg.sh
 
 ```bash
 # requires three gpus
-cd components/backends/vllm
+cd examples/backends/vllm
 bash launch/disagg_router.sh
 ```
 
@@ -140,7 +140,7 @@ This example is not meant to be performant but showcases Dynamo routing to data 
 
 ```bash
 # requires four gpus
-cd components/backends/vllm
+cd examples/backends/vllm
 bash launch/dep.sh
 ```
 
@@ -153,7 +153,7 @@ Below we provide a selected list of advanced deployments. Please open up an issu
 
 ### Kubernetes Deployment
 
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](../../../components/backends/vllm/deploy/README.md)
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](../../../examples/backends/vllm/deploy/README.md)
 
 ## Configuration
 

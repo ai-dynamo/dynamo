@@ -3,7 +3,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: oss-gpt120b-bench
+  name: gpt-oss-120b-bench
 spec:
   backoffLimit: 1
   completions: 1
@@ -11,7 +11,7 @@ spec:
   template:
     metadata:
       labels:
-        app: oss-gpt120b-bench
+        app: gpt-oss-120b-bench
     spec:
       affinity:
         podAntiAffinity:

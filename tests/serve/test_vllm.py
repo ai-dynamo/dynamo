@@ -31,7 +31,7 @@ class VLLMConfig(EngineConfig):
 
 
 vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
-    WORKSPACE_DIR, "components", "backends", "vllm"
+    WORKSPACE_DIR, "examples/backends/vllm"
 )
 
 # vLLM test configurations
@@ -100,14 +100,14 @@ vllm_configs = {
         ],
         timeout=700,
         request_payloads=[
-            chat_payload_default(),
-            completion_payload_default(),
+            chat_payload_default(expected_response=["joke"]),
+            completion_payload_default(expected_response=["joke"]),
         ],
     ),
     "multimodal_agg_llava": VLLMConfig(
         name="multimodal_agg_llava",
-        directory=os.path.join(WORKSPACE_DIR, "examples", "multimodal"),
-        script_name="agg.sh",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
         marks=[pytest.mark.gpu_2],
         model="llava-hf/llava-1.5-7b-hf",
         script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
@@ -130,8 +130,8 @@ vllm_configs = {
     ),
     "multimodal_agg_qwen": VLLMConfig(
         name="multimodal_agg_qwen",
-        directory=os.path.join(WORKSPACE_DIR, "examples", "multimodal"),
-        script_name="agg.sh",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
         marks=[pytest.mark.gpu_2],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         delayed_start=0,
@@ -153,9 +153,10 @@ vllm_configs = {
             )
         ],
     ),
+    # TODO: Update this test case when we have video multimodal support in vllm official components
     "multimodal_video_agg": VLLMConfig(
         name="multimodal_video_agg",
-        directory=os.path.join(WORKSPACE_DIR, "examples", "multimodal"),
+        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
         script_name="video_agg.sh",
         marks=[pytest.mark.gpu_2],
         model="llava-hf/LLaVA-NeXT-Video-7B-hf",
@@ -182,7 +183,7 @@ vllm_configs = {
     # TODO: Enable this test case when we have 4 GPUs runners.
     # "multimodal_disagg": VLLMConfig(
     #     name="multimodal_disagg",
-    #     directory="/workspace/examples/multimodal",
+    #     directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
     #     script_name="disagg.sh",
     #     marks=[pytest.mark.gpu_4, pytest.mark.vllm],
     #     model="llava-hf/llava-1.5-7b-hf",
