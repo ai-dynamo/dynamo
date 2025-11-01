@@ -142,7 +142,12 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
     )
     parser.add_argument(
         "--gpu-type",
-        choices=["gb200-fp8", "gb200-fp8-prefill", "gb200-fp4-decode", "gb200-fp4-prefill"],
+        choices=[
+            "gb200-fp8",
+            "gb200-fp8-prefill",
+            "gb200-fp4-decode",
+            "gb200-fp4-prefill",
+        ],
         default="gb200-fp8",
         help="GPU type to use. You can choose between gb200-fp8, gb200-fp8-prefill, gb200-fp4-decode, and gb200-fp4-prefill.",
     )

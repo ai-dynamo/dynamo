@@ -1,6 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# ruff: noqa
+# pylint: skip-file
+
+import json
 import os
 import re
-import json
 
 ### Slurm configs
 SLURM_JOB_ID = "slurm id"
@@ -24,22 +29,37 @@ TPOT = "Mean TPOT (ms)"
 ### FORMAT PRINT ORDERS
 KEY_PRINT_ORDER = [
     SLURM_JOB_ID,
-    PREFILL_TP, PREFILL_DP, DECODE_TP, DECODE_DP, FRONTENDS,
-    PROFILER_TYPE, ISL, OSL, REQUEST_RATE, CONCURRENCIES,
-    OUTPUT_TPS, OUTPUT_TPS_PER_USER, ITL, TTFT, TPOT,
+    PREFILL_TP,
+    PREFILL_DP,
+    DECODE_TP,
+    DECODE_DP,
+    FRONTENDS,
+    PROFILER_TYPE,
+    ISL,
+    OSL,
+    REQUEST_RATE,
+    CONCURRENCIES,
+    OUTPUT_TPS,
+    OUTPUT_TPS_PER_USER,
+    ITL,
+    TTFT,
+    TPOT,
 ]
 
+
 def format_key_order():
-    report = f"================\nThe following log will be reported according to this order:\n----\n"
+    report = "================\nThe following log will be reported according to this order:\n----\n"
     for key in KEY_PRINT_ORDER:
         report += f"{key}\n"
     print(report[:-1])
 
+
 def format_print(result):
-    report = f"================\n"
+    report = "================\n"
     for key in KEY_PRINT_ORDER:
         report += f"{result.get(key, '')}\n"
     print(report[:-1])
+
 
 def analyze_sgl_out(folder):
     result = []
@@ -47,15 +67,15 @@ def analyze_sgl_out(folder):
         with open(f"{folder}/{file}", "r") as f:
             content = json.load(f)
             res = [
-                content['max_concurrency'],
-                content['output_throughput'],
-                content['mean_itl_ms'],
-                content['mean_ttft_ms'],
-                content['request_rate'],
+                content["max_concurrency"],
+                content["output_throughput"],
+                content["mean_itl_ms"],
+                content["mean_ttft_ms"],
+                content["request_rate"],
             ]
 
             if "mean_tpot_ms" in content:
-                res.append(content['mean_tpot_ms'])
+                res.append(content["mean_tpot_ms"])
             result.append(res)
     out = {
         REQUEST_RATE: [],
@@ -81,23 +101,21 @@ def analyze_sgl_out(folder):
 
     return out
 
-def analyze_gap_out(folder):
 
+def analyze_gap_out(folder):
     result = []
     for file in os.listdir(folder):
         with open(f"{folder}/{file}", "r") as f:
             content = json.load(f)
-            result.append((
-                content['input_config']['perf_analyzer']['stimulus']['concurrency'],
-                content['output_token_throughput_per_user']['avg'],
-                content['output_token_throughput']['avg'],
-            ))
+            result.append(
+                (
+                    content["input_config"]["perf_analyzer"]["stimulus"]["concurrency"],
+                    content["output_token_throughput_per_user"]["avg"],
+                    content["output_token_throughput"]["avg"],
+                )
+            )
 
-    out = {
-        CONCURRENCIES: [],
-        OUTPUT_TPS: [],
-        OUTPUT_TPS_PER_USER: []
-    }
+    out = {CONCURRENCIES: [], OUTPUT_TPS: [], OUTPUT_TPS_PER_USER: []}
 
     for con, tpspuser, tps in sorted(result, key=lambda x: x[0]):
         out[CONCURRENCIES].append(con)
@@ -105,6 +123,7 @@ def analyze_gap_out(folder):
         out[OUTPUT_TPS_PER_USER].append(tpspuser)
 
     return out
+
 
 def analyze(p):
     files = os.listdir(p)
@@ -116,7 +135,9 @@ def analyze(p):
     profile_result = {}
 
     for file in files:
-        p_re = re.search("([-_A-Za-z0-9]+)_(prefill|decode|nginx|frontend)_([a-zA-Z0-9]+).out", file)
+        p_re = re.search(
+            "([-_A-Za-z0-9]+)_(prefill|decode|nginx|frontend)_([a-zA-Z0-9]+).out", file
+        )
         if p_re is not None:
             _, node_type, number = p_re.groups()
             if node_type == "prefill":
@@ -157,10 +178,12 @@ def analyze(p):
     result = {**config}
     for key, value in profile_result.items():
         result[key] = (
-            value if type(value) != list
-            else ", ".join([str(x) for x in value])
+            value
+            if type(value) != list
+            else ", ".join([str(x) for x in value])  # ignore:
         )
     return result
+
 
 paths = [x for x in os.listdir(".") if ".py" not in x]
 format_key_order()

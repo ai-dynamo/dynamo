@@ -146,7 +146,7 @@ elif [ "$mode" = "decode" ]; then
     # --num-reserved-decode-tokens 128 \
     # --chunked-prefill-size 1572864
 
-    # even after removing above i hang at 1024...weird because warmup passes 
+    # even after removing above i hang at 1024...weird because warmup passes
     # warmup is much less prompts....
 
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
