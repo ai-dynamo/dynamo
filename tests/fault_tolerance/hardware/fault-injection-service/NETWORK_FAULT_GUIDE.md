@@ -1,6 +1,8 @@
-# Fault Injection API - User Guide
+# Network Fault Injection - User Guide
 
 Test network fault tolerance without Kubernetes expertise. Inject network partitions, validate recovery, and ensure your system handles failures gracefully.
+
+> **For GPU fault injection**, see [GPU_FAULT_GUIDE.md](GPU_FAULT_GUIDE.md)
 
 ## What You Can Do
 

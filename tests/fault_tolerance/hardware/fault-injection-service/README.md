@@ -116,7 +116,7 @@ cd examples && python3 test_nats_packet_loss_50_percent.py
 
 ## Write Your Own Test
 
-See [API_USER_GUIDE.md](API_USER_GUIDE.md) for detailed examples and instructions.
+See [NETWORK_FAULT_GUIDE.md](NETWORK_FAULT_GUIDE.md) for network fault injection and [GPU_FAULT_GUIDE.md](GPU_FAULT_GUIDE.md) for GPU fault injection.
 
 ---
 
@@ -131,4 +131,5 @@ kubectl delete namespace fault-injection-system
 
 ## Documentation
 
-- [API User Guide](API_USER_GUIDE.md) - Complete API reference and usage examples
+- [Network Fault Guide](NETWORK_FAULT_GUIDE.md) - Network partition testing (NetworkPolicy & ChaosMesh)
+- [GPU Fault Guide](GPU_FAULT_GUIDE.md) - GPU fault injection (XID errors & CUDA faults)
