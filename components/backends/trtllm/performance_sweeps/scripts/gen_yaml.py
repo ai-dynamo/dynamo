@@ -235,6 +235,7 @@ def gen_config_file(
         "attention_dp_config": {
             "enable_balance": True
         },
+        "disable_overlap_scheduler": False,
         "tensor_parallel_size": gen_tp_size,
         "moe_expert_parallel_size": gen_ep_size,
         "enable_attention_dp": gen_enable_attention_dp,

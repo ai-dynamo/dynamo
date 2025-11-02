@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import json
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 def load_data(directory: str):
     if not os.path.exists(directory):
@@ -12,7 +13,7 @@ def load_data(directory: str):
 
     base = Path(directory)
     
-    for subdir in base.iterdir():
+    for subdir in tqdm(base.iterdir()):
         if not subdir.is_dir():
             print(f"Warning: {subdir} is not a directory. Skipping...")
             continue
@@ -53,11 +54,27 @@ def load_data(directory: str):
 
     return results
 
+def get_pareto_optimal(x, y):
+    pareto_points = []
+
+    for (x_point, y_point) in zip(x, y):
+        if not any(x_val > x_point and y_val > y_point for x_val, y_val in zip(x, y)):
+            pareto_points.append((x_point, y_point))
+    
+    pareto_points.sort(key=lambda p: p[0])
+    return pareto_points
+    
+
 def plot_pareto(results, output_file):
     x = [result["per_user"] for result in results]
     y = [result["per_gpu"] for result in results]
 
-    plt.scatter(x, y)
+    pareto_points = get_pareto_optimal(x, y)
+    pareto_x, pareto_y = zip(*pareto_points)
+
+    plt.scatter(x, y, zorder=1, color='blue', marker='o', alpha=0.5, s=10)
+    plt.plot(pareto_x, pareto_y, zorder=2, color='red', marker='o')
+    
     plt.xlabel("tokens/s/user")
     plt.ylabel("tokens/s/gpu")
     plt.savefig(output_file)
