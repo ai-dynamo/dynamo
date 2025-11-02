@@ -6,10 +6,9 @@ name: Docker Build and Test
 on:
   push:
     branches:
-      - ops-1539-oidc
-#      - main
-#      - "pull-request/[0-9]+"
-#      - release/*.*.*
+      - main
+      - "pull-request/[0-9]+"
+      - release/*.*.*
 
 concurrency:
     group: ${{ github.workflow }}-build-test-${{ github.ref_name || github.run_id }}

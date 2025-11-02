@@ -1,5 +1,5 @@
-name: 'Azure Common Login Setups'
-description: 'A set of steps using Azure-GitHub OIDC connection for authenticatopn'
+name: 'Setup AKS Authentication'
+description: 'Sets up kubectl and kubelogin for Azure Kubernetes Service (AKS) authentication.'
 inputs:
   azure_aks_resource_group:
     description: 'Azure AKS resource group name, must be passed for AKS authentication'

@@ -12,7 +12,7 @@ inputs:
     required: false
     default: 'false'
   azure_push:
-    description: 'Push to Azure Container Registry (ACR) Boolean'
+    description: "Set to 'true' to push the image to Azure Container Registry (ACR)."
     required: false
     default: 'false'
   aws_account_id:
@@ -28,16 +28,16 @@ inputs:
     description: 'AWS Secret Access Key'
     required: false
   azure_acr_hostname:
-    description: 'Azure ACR hostname'
+    description: "Azure ACR hostname. Required if azure_push is 'true'."
     required: false
   azure_github_client_id:
-    description: 'Github identity client id on Azure'
+    description: "Github identity client id on Azure. Required if azure_push is 'true'."
     required: false
   azure_tenant_id:
-    description: 'Azure Tenant id'
+    description: "Azure Tenant id. Required if azure_push is 'true'."
     required: false
   azure_subscription_id:
-    description: 'Azure Subscription  id'
+    description: "Azure Subscription id. Required if azure_push is 'true'."
     required: false
 
 outputs:
