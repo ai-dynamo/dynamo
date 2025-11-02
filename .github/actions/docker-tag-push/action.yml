@@ -30,11 +30,14 @@ inputs:
   azure_acr_hostname:
     description: 'Azure ACR hostname'
     required: false
-  azure_acr_user:
-    description: 'Azure ACR user'
+  azure_github_client_id:
+    description: 'Github identity client id on Azure'
     required: false
-  azure_acr_password:
-    description: 'Azure ACR password'
+  azure_tenant_id:
+    description: 'Azure Tenant id'
+    required: false
+  azure_subscription_id:
+    description: 'Azure Subscription  id'
     required: false
 
 outputs:
@@ -47,11 +50,6 @@ runs:
   steps:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
-    - name: ACR Login
-      shell: bash
-      if: ${{ inputs.azure_push == 'true' }}
-      run: |
-        echo "${{ inputs.azure_acr_password }}" | docker login ${{ inputs.azure_acr_hostname }} --username ${{ inputs.azure_acr_user }} --password-stdin
     - name: ECR Tag and Push
       shell: bash
       if: ${{ inputs.aws_push == 'true' }}
@@ -62,6 +60,24 @@ runs:
       run: |
         docker tag ${LOCAL_IMAGE} ${ECR_HOSTNAME}/${PUSH_TAG}
         docker push ${ECR_HOSTNAME}/${PUSH_TAG}
+
+    - name: 'Az CLI login using OIDC'
+      uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+      if: ${{ inputs.azure_push == 'true' }}
+      with:
+        client-id: ${{ inputs.azure_github_client_id }}
+        tenant-id: ${{ inputs.azure_tenant_id }}
+        subscription-id: ${{ inputs.azure_subscription_id }}
+
+    - name: ACR Login
+      shell: bash
+      if: ${{ inputs.azure_push == 'true' }}
+      env:
+        AZURE_ACR_HOSTNAME: ${{ inputs.azure_acr_hostname }}
+      run: |
+        REGISTRY_NAME=$(echo "$AZURE_ACR_HOSTNAME" | cut -d "." -f1)
+        az acr login --name "$REGISTRY_NAME"
+
     - name: ACR Tag and Push
       shell: bash
       if: ${{ inputs.azure_push == 'true' }}

@@ -24,41 +24,50 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - name: 'Az CLI login using OIDC'
-        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+
+      - name: Setup aks and acr
+        uses: ./.github/actions/azure-auth-common
         with:
-          client-id: ${{ secrets.AZ_GHA_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZ_TENANT_ID }}
-          subscription-id: ${{ secrets.AZ_SUBSCRIPTION_ID }}
-
-      - name: 'Set up kubectl'
-        uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4.0.1
-
-      - name: 'Install kubelogin'
-        uses: azure/use-kubelogin@76597ae0fcbaace21b05e13a2cbf8daee2c6e820 # v1.2
-        with:
-          kubelogin-version: 'v0.1.5'
-
-      - name: 'Set AKS context'
-        uses: azure/aks-set-context@c7eb093e5a5d47caa333f64974d5fd1cd4bf069d # v4.0.3
-        with:
-          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
-          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
-          admin: 'false'
-          use-kubelogin: 'true'
-
-      - name: 'Convert kubeconfig for Azure CLI'
-        run: kubelogin convert-kubeconfig -l azurecli
-
-      - name: 'Login to ACR via OIDC'
-        run: az acr login --name dynamoci
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_github_client_id: ${{ secrets.AZ_GHA_CLIENT_ID }}
+          azure_tenant_id: ${{ secrets.AZ_TENANT_ID }}
+          azure_subscription_id: ${{ secrets.AZ_SUBSCRIPTION_ID }}
+          azure_aks_resource_group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          azure_aks_name: ${{ secrets.AKS_CLUSTER_NAME }}
+#      - name: 'Az CLI login using OIDC'
+#        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+#        with:
+#          client-id: ${{ secrets.AZ_GHA_CLIENT_ID }}
+#          tenant-id: ${{ secrets.AZ_TENANT_ID }}
+#          subscription-id: ${{ secrets.AZ_SUBSCRIPTION_ID }}
+#
+#      - name: 'Set up kubectl'
+#        uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4.0.1
+#
+#      - name: 'Install kubelogin'
+#        uses: azure/use-kubelogin@76597ae0fcbaace21b05e13a2cbf8daee2c6e820 # v1.2
+#        with:
+#          kubelogin-version: 'v0.1.5'
+#
+#      - name: 'Set AKS context'
+#        uses: azure/aks-set-context@c7eb093e5a5d47caa333f64974d5fd1cd4bf069d # v4.0.3
+#        with:
+#          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+#          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+#          admin: 'false'
+#          use-kubelogin: 'true'
+#
+#      - name: 'Convert kubeconfig for Azure CLI'
+#        run: kubelogin convert-kubeconfig -l azurecli
+#
+#      - name: 'Login to ACR via OIDC'
+#        run: az acr login --name dynamoci
 
       - name: test
-
         run: |
           set -x
           kubectl get nodes
-
+#
 #  changed-files:
 #    runs-on: ubuntu-latest
 #    outputs:
@@ -92,6 +101,9 @@ jobs:
 #          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
 #    name: operator (${{ matrix.platform.arch }})
 #    runs-on: ${{ matrix.platform.runner }}
+#    permissions:
+#      id-token: write
+#      contents: read
 #    steps:
 #      - name: Checkout code
 #        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -141,8 +153,9 @@ jobs:
 #          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
 #          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
 #          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-#          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-#          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+#          azure_github_client_id: ${{ secrets.AZ_GHA_CLIENT_ID }}
+#          azure_tenant_id: ${{ secrets.AZ_TENANT_ID }}
+#          azure_subscription_id: ${{ secrets.AZ_SUBSCRIPTION_ID }}
 #
 #  vllm:
 #    needs: changed-files
@@ -155,6 +168,9 @@ jobs:
 #          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
 #    name: vllm (${{ matrix.platform.arch }})
 #    runs-on: ${{ matrix.platform.runner }}
+#    permissions:
+#      id-token: write
+#      contents: read
 #    steps:
 #      - name: Checkout code
 #        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -187,8 +203,9 @@ jobs:
 #          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
 #          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
 #          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-#          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-#          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+#          azure_github_client_id: ${{ secrets.AZ_GHA_CLIENT_ID }}
+#          azure_tenant_id: ${{ secrets.AZ_TENANT_ID }}
+#          azure_subscription_id: ${{ secrets.AZ_SUBSCRIPTION_ID }}
 #
 #      - name: Run unit tests
 #        if: ${{ matrix.platform.arch != 'arm64' }}
@@ -220,6 +237,9 @@ jobs:
 #          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
 #    name: sglang (${{ matrix.platform.arch }})
 #    runs-on: ${{ matrix.platform.runner }}
+#    permissions:
+#      id-token: write
+#      contents: read
 #    steps:
 #      - name: Checkout repository
 #        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -250,8 +270,9 @@ jobs:
 #          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
 #          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
 #          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-#          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-#          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+#          azure_github_client_id: ${{ secrets.AZ_GHA_CLIENT_ID }}
+#          azure_tenant_id: ${{ secrets.AZ_TENANT_ID }}
+#          azure_subscription_id: ${{ secrets.AZ_SUBSCRIPTION_ID }}
 #
 #      - name: Run unit tests
 #        if: ${{ matrix.platform.arch != 'arm64' }}
@@ -283,6 +304,9 @@ jobs:
 #          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
 #    name: trtllm (${{ matrix.platform.arch }})
 #    runs-on: ${{ matrix.platform.runner }}
+#    permissions:
+#      id-token: write
+#      contents: read
 #    steps:
 #      - name: Checkout code
 #        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -313,8 +337,9 @@ jobs:
 #          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
 #          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
 #          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-#          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-#          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+#          azure_github_client_id: ${{ secrets.AZ_GHA_CLIENT_ID }}
+#          azure_tenant_id: ${{ secrets.AZ_TENANT_ID }}
+#          azure_subscription_id: ${{ secrets.AZ_SUBSCRIPTION_ID }}
 #
 #      - name: Run unit tests
 #        if: ${{ matrix.platform.arch != 'arm64' }}
@@ -393,8 +418,33 @@ jobs:
 #      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
 #    outputs:
 #      NAMESPACE: ${{ steps.deploy-operator-step.outputs.namespace }}
+#    permissions:
+#      id-token: write
+#      contents: read
 #    steps:
 #    - uses: actions/checkout@v4
+#    - name: 'Az CLI login using OIDC'
+#      uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+#      with:
+#        client-id: ${{ secrets.AZ_GHA_CLIENT_ID }}
+#        tenant-id: ${{ secrets.AZ_TENANT_ID }}
+#        subscription-id: ${{ secrets.AZ_SUBSCRIPTION_ID }}
+#    - name: 'Set up kubectl'
+#      uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4.0.1
+#    - name: 'Install kubelogin'
+#      uses: azure/use-kubelogin@76597ae0fcbaace21b05e13a2cbf8daee2c6e820 # v1.2
+#      with:
+#        kubelogin-version: 'v0.1.5'
+#    - name: 'Set AKS context'
+#      uses: azure/aks-set-context@c7eb093e5a5d47caa333f64974d5fd1cd4bf069d # v4.0.3
+#      with:
+#        resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+#        cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+#        admin: 'false'
+#        use-kubelogin: 'true'
+#    - name: 'Convert kubeconfig for Azure CLI'
+#      run: kubelogin convert-kubeconfig -l azurecli
+#
 #    - name: Deploy Operator
 #      id: deploy-operator-step
 #      env:
@@ -406,13 +456,6 @@ jobs:
 #        BRANCH_SANITIZED="${BRANCH/\//-}"
 #        NAMESPACE="gh-job-id-${{ github.run_id }}-${BRANCH_SANITIZED}-deploy-tests"
 #        echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
-#
-#        # Setup kubeconfig
-#        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-#        chmod 600 .kubeconfig
-#        export KUBECONFIG=$(pwd)/.kubeconfig
-#        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-#        kubectl config current-context
 #
 #        # Create a namespace for this job
 #        echo "Creating an ephemeral namespace..."
@@ -438,8 +481,6 @@ jobs:
 #
 #        # Install dynamo env secrets
 #        kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
-#        # Create docker pull secret for operator image
-#        kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
 #        # Install helm dependencies
 #        helm repo add bitnami https://charts.bitnami.com/bitnami
 #        cd deploy/cloud/helm/platform/
@@ -449,8 +490,7 @@ jobs:
 #          --set dynamo-operator.namespaceRestriction.enabled=true \
 #          --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
 #          --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
-#          --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
-#          --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
+#          --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64
 #        # Wait for all deployments to be ready
 #        timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
 #
@@ -459,6 +499,7 @@ jobs:
 #    if: needs.changed-files.outputs.has_code_changes == 'true'
 #    needs: [changed-files, deploy-operator, vllm]
 #    permissions:
+#      id-token: write
 #      contents: read
 #    strategy:
 #      fail-fast: false
@@ -476,23 +517,32 @@ jobs:
 #      MODEL_NAME: "Qwen/Qwen3-0.6B"
 #    steps: &deploy-test-steps
 #    - uses: actions/checkout@v4
-#    - name: Setup Kubeconfig
-#      env:
-#        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-#      run: |
-#        set -x
-#        # Setup kubeconfig
-#        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-#        chmod 600 .kubeconfig
-#        export KUBECONFIG=$(pwd)/.kubeconfig
-#        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-#        kubectl config get-contexts
+#    - name: 'Az CLI login using OIDC'
+#      uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+#      with:
+#        client-id: ${{ secrets.AZ_GHA_CLIENT_ID }}
+#        tenant-id: ${{ secrets.AZ_TENANT_ID }}
+#        subscription-id: ${{ secrets.AZ_SUBSCRIPTION_ID }}
+#    - name: 'Set up kubectl'
+#      uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4.0.1
+#    - name: 'Install kubelogin'
+#      uses: azure/use-kubelogin@76597ae0fcbaace21b05e13a2cbf8daee2c6e820 # v1.2
+#      with:
+#        kubelogin-version: 'v0.1.5'
+#    - name: 'Set AKS context'
+#      uses: azure/aks-set-context@c7eb093e5a5d47caa333f64974d5fd1cd4bf069d # v4.0.3
+#      with:
+#        resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+#        cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+#        admin: 'false'
+#        use-kubelogin: 'true'
+#    - name: 'Convert kubeconfig for Azure CLI'
+#      run: kubelogin convert-kubeconfig -l azurecli
 #    - name: Run Tests
 #      env:
 #        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
 #      run: |
 #        set -x
-#        export KUBECONFIG=$(pwd)/.kubeconfig
 #        kubectl config set-context --current --namespace=$NAMESPACE
 #
 #        cd examples/backends/$FRAMEWORK
@@ -594,7 +644,6 @@ jobs:
 #        PROFILE: ${{ matrix.profile }}
 #      run: |
 #        set -x
-#        export KUBECONFIG=$(pwd)/.kubeconfig
 #        kubectl config set-context --current --namespace=$NAMESPACE
 #
 #        # For debugging purposes, list all the resources before we delete
@@ -609,6 +658,7 @@ jobs:
 #    if: needs.changed-files.outputs.has_code_changes == 'true'
 #    needs: [changed-files, deploy-operator, sglang]
 #    permissions:
+#      id-token: write
 #      contents: read
 #    strategy:
 #      fail-fast: false
@@ -629,6 +679,7 @@ jobs:
 #    if: needs.changed-files.outputs.has_code_changes == 'true'
 #    needs: [changed-files, deploy-operator, trtllm]
 #    permissions:
+#      id-token: write
 #      contents: read
 #    strategy:
 #      fail-fast: false
@@ -650,6 +701,9 @@ jobs:
 #    runs-on: cpu-amd-m5-2xlarge
 #    if: always()
 #    needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
+#    permissions:
+#      id-token: write
+#      contents: read
 #    steps:
 #    - uses: actions/checkout@v4
 #    - name: Setup Kubeconfig

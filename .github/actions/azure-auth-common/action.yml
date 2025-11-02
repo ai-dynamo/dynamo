@@ -1,0 +1,43 @@
+name: 'Azure Common Login Setups'
+description: 'A set of steps using Azure-GitHub OIDC connection for authenticatopn'
+inputs:
+  azure_github_client_id:
+    description: 'Github identity client id on Azure'
+    required: true
+  azure_tenant_id:
+    description: 'Azure Tenant id'
+    required: true
+  azure_subscription_id:
+    description: 'Azure Subscription  id'
+    required: true
+  azure_aks_resource_group:
+    description: 'Azure AKS resource group name, must be passed for AKS authentication'
+    required: false
+  azure_aks_name:
+    description: 'Azure AKS cluster name, must be passed for AKS authentication'
+    required: false
+  azure_acr_registry_name:
+    description: 'Azure Subscription  id'
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+      - name: 'Az CLI login using OIDC'
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ inputs.azure_github_client_id }}
+          tenant-id: ${{ inputs.azure_tenant_id }}
+          subscription-id: ${{ inputs.azure_subscription_id }}
+
+      - name: 'Setting up connection with AKS'
+        if: ${{ inputs.azure_aks_name != '' && inputs.azure_aks_resource_group != '' }}
+        uses: ./.github/actions/aks-auth-setup
+        with:
+          azure_aks_resource_group: ${{ inputs.azure_aks_resource_group }}
+          azure_aks_name: ${{ inputs.azure_aks_name }}
+
+      - name: 'Login to ACR via OIDC'
+        shell: bash
+        if: ${{ inputs.azure_acr_registry_name }}
+        run: az acr login --name ${{ inputs.azure_acr_registry_name }}

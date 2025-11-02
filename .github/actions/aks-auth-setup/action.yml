@@ -1,0 +1,33 @@
+name: 'Azure Common Login Setups'
+description: 'A set of steps using Azure-GitHub OIDC connection for authenticatopn'
+inputs:
+  azure_aks_resource_group:
+    description: 'Azure AKS resource group name, must be passed for AKS authentication'
+    required: true
+  azure_aks_name:
+    description: 'Azure AKS cluster name, must be passed for AKS authentication'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: 'Set up kubectl'
+      uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4.0.1
+
+    - name: 'Install kubelogin'
+      uses: azure/use-kubelogin@76597ae0fcbaace21b05e13a2cbf8daee2c6e820 # v1.2
+      with:
+        kubelogin-version: 'v0.1.5'
+
+    - name: 'Set AKS context'
+      uses: azure/aks-set-context@c7eb093e5a5d47caa333f64974d5fd1cd4bf069d # v4.0.3
+      with:
+        resource-group: ${{ inputs.azure_aks_resource_group }}
+        cluster-name: ${{ inputs.azure_aks_name }}
+        admin: 'false'
+        use-kubelogin: 'true'
+
+    - name: 'Convert kubeconfig for Azure CLI'
+      shell: bash
+      run: kubelogin convert-kubeconfig -l azurecli
+
