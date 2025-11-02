@@ -290,10 +290,10 @@ impl KeyValueStoreManager {
         key: &Key,
         obj: &mut T,
     ) -> anyhow::Result<StoreOutcome> {
-        let obj_json = serde_json::to_string(obj)?;
+        let obj_json = serde_json::to_vec(obj)?;
         let bucket = self.0.get_or_create_bucket(bucket_name, bucket_ttl).await?;
 
-        let outcome = bucket.insert(key, &obj_json, obj.revision()).await?;
+        let outcome = bucket.insert(key, obj_json.into(), obj.revision()).await?;
 
         match outcome {
             StoreOutcome::Created(revision) | StoreOutcome::Exists(revision) => {
@@ -313,7 +313,7 @@ pub trait KeyValueBucket: Send + Sync {
     async fn insert(
         &self,
         key: &Key,
-        value: &str,
+        value: bytes::Bytes,
         revision: u64,
     ) -> Result<StoreOutcome, StoreError>;
 
@@ -434,14 +434,14 @@ mod tests {
         let s2 = Arc::clone(&s);
 
         let bucket = s.get_or_create_bucket(BUCKET_NAME, None).await?;
-        let res = bucket.insert(&"test1".into(), "value1", 0).await?;
+        let res = bucket.insert(&"test1".into(), "value1".into(), 0).await?;
         assert_eq!(res, StoreOutcome::Created(0));
 
         let mut expected = Vec::with_capacity(3);
         for i in 1..=3 {
             let item = WatchEvent::Put(KeyValue::new(
                 format!("test{i}"),
-                bytes::Bytes::from(format!("value{i}").into_bytes()),
+                format!("value{i}").into(),
             ));
             expected.push(item);
         }
@@ -472,18 +472,18 @@ mod tests {
         // wouldn't be testing the watch behavior.
         got_first_rx.await?;
 
-        let res = bucket.insert(&"test2".into(), "value2", 0).await?;
+        let res = bucket.insert(&"test2".into(), "value2".into(), 0).await?;
         assert_eq!(res, StoreOutcome::Created(0));
 
         // Repeat a key and revision. Ignored.
-        let res = bucket.insert(&"test2".into(), "value2", 0).await?;
+        let res = bucket.insert(&"test2".into(), "value2".into(), 0).await?;
         assert_eq!(res, StoreOutcome::Exists(0));
 
         // Increment revision
-        let res = bucket.insert(&"test2".into(), "value2", 1).await?;
+        let res = bucket.insert(&"test2".into(), "value2".into(), 1).await?;
         assert_eq!(res, StoreOutcome::Created(1));
 
-        let res = bucket.insert(&"test3".into(), "value3", 0).await?;
+        let res = bucket.insert(&"test3".into(), "value3".into(), 0).await?;
         assert_eq!(res, StoreOutcome::Created(0));
 
         // ingress exits once it has received all values
@@ -500,7 +500,7 @@ mod tests {
         let bucket: &'static _ =
             Box::leak(Box::new(s.get_or_create_bucket(BUCKET_NAME, None).await?));
 
-        let res = bucket.insert(&"test1".into(), "value1", 0).await?;
+        let res = bucket.insert(&"test1".into(), "value1".into(), 0).await?;
         assert_eq!(res, StoreOutcome::Created(0));
 
         let stream = bucket.watch().await?;
@@ -509,10 +509,7 @@ mod tests {
         let mut rx1 = tap.subscribe();
         let mut rx2 = tap.subscribe();
 
-        let item = WatchEvent::Put(KeyValue::new(
-            "test1".to_string(),
-            bytes::Bytes::from(b"GK".as_slice()),
-        ));
+        let item = WatchEvent::Put(KeyValue::new("test1".to_string(), "GK".into()));
         let item_clone = item.clone();
         let handle1 = tokio::spawn(async move {
             let b = rx1.recv().await.unwrap();
@@ -523,7 +520,7 @@ mod tests {
             assert_eq!(b, item);
         });
 
-        bucket.insert(&"test1".into(), "GK", 1).await?;
+        bucket.insert(&"test1".into(), "GK".into(), 1).await?;
 
         let _ = futures::join!(handle1, handle2);
         Ok(())

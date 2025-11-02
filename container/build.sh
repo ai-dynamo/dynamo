@@ -115,7 +115,7 @@ NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
-NIXL_REF=0.6.0
+NIXL_REF=0.7.0
 NIXL_UCX_REF=v1.19.0
 NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
 
@@ -491,6 +491,32 @@ if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
     BUILD_ARGS+=" --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64 "
 fi
 
+# Special handling for vLLM on ARM64 - set required defaults if not already specified by user
+if [[ $FRAMEWORK == "VLLM" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]]; then
+    # Set base image tag to CUDA 12.9 if using the default value (user didn't override)
+    if [ "$BASE_IMAGE_TAG" == "$VLLM_BASE_IMAGE_TAG" ]; then
+        BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
+        echo "INFO: Automatically setting base-image-tag to $BASE_IMAGE_TAG for vLLM ARM64"
+    fi
+
+    # Add required build args if not already present
+    if [[ "$BUILD_ARGS" != *"RUNTIME_IMAGE_TAG"* ]]; then
+        BUILD_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=12.9.0-runtime-ubuntu24.04 "
+        echo "INFO: Automatically setting RUNTIME_IMAGE_TAG=12.9.0-runtime-ubuntu24.04 for vLLM ARM64"
+    fi
+
+    if [[ "$BUILD_ARGS" != *"CUDA_VERSION"* ]]; then
+        BUILD_ARGS+=" --build-arg CUDA_VERSION=129 "
+        echo "INFO: Automatically setting CUDA_VERSION=129 for vLLM ARM64"
+    fi
+
+    if [[ "$BUILD_ARGS" != *"TORCH_BACKEND"* ]]; then
+        BUILD_ARGS+=" --build-arg TORCH_BACKEND=cu129 "
+        echo "INFO: Automatically setting TORCH_BACKEND=cu129 for vLLM ARM64"
+    fi
+
+fi
+
 # Update DOCKERFILE if framework is VLLM
 if [[ $FRAMEWORK == "VLLM" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
@@ -754,7 +780,7 @@ if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
 fi
 
 if [  ! -z ${ENABLE_KVBM} ]; then
-    echo "Enabling the KVBM in the ai-dynamo-runtime"
+    echo "Enabling the KVBM in the dynamo image"
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
 fi
 
