@@ -412,33 +412,58 @@ def patch_deployment_env(
                         for service_name in patched_services:
                             if service_name in dgd.get("spec", {}).get("services", {}):
                                 service = dgd["spec"]["services"][service_name]
-                                
+
                                 # Remove env vars
-                                if "extraPodSpec" in service and "mainContainer" in service["extraPodSpec"]:
-                                    if "env" in service["extraPodSpec"]["mainContainer"]:
-                                        service["extraPodSpec"]["mainContainer"]["env"] = [
+                                if (
+                                    "extraPodSpec" in service
+                                    and "mainContainer" in service["extraPodSpec"]
+                                ):
+                                    if (
+                                        "env"
+                                        in service["extraPodSpec"]["mainContainer"]
+                                    ):
+                                        service["extraPodSpec"]["mainContainer"][
+                                            "env"
+                                        ] = [
                                             env
-                                            for env in service["extraPodSpec"]["mainContainer"]["env"]
-                                            if env.get("name") not in ["LD_PRELOAD", "CUDA_FAULT_INJECTION_ENABLED", "CUDA_XID_TYPE"]
+                                            for env in service["extraPodSpec"][
+                                                "mainContainer"
+                                            ]["env"]
+                                            if env.get("name")
+                                            not in [
+                                                "LD_PRELOAD",
+                                                "CUDA_FAULT_INJECTION_ENABLED",
+                                                "CUDA_XID_TYPE",
+                                            ]
                                         ]
                                         if enable:
-                                            service["extraPodSpec"]["mainContainer"]["env"].extend(new_envs)
-                                
+                                            service["extraPodSpec"]["mainContainer"][
+                                                "env"
+                                            ].extend(new_envs)
+
                                 # Remove volumes and init containers when disabling
                                 if not enable and "extraPodSpec" in service:
                                     if "volumes" in service["extraPodSpec"]:
                                         service["extraPodSpec"]["volumes"] = [
-                                            v for v in service["extraPodSpec"]["volumes"]
-                                            if v.get("name") not in ["cuda-fault-lib-source", "cuda-fault-lib"]
+                                            v
+                                            for v in service["extraPodSpec"]["volumes"]
+                                            if v.get("name")
+                                            not in [
+                                                "cuda-fault-lib-source",
+                                                "cuda-fault-lib",
+                                            ]
                                         ]
                                     if "initContainers" in service["extraPodSpec"]:
                                         service["extraPodSpec"]["initContainers"] = [
-                                            c for c in service["extraPodSpec"]["initContainers"]
+                                            c
+                                            for c in service["extraPodSpec"][
+                                                "initContainers"
+                                            ]
                                             if c.get("name") != "cuda-lib-decoder"
                                         ]
                                     # Remove affinity
                                     service["extraPodSpec"]["affinity"] = None
-                    
+
                     custom_api.patch_namespaced_custom_object(
                         group="nvidia.com",
                         version="v1alpha1",
@@ -451,9 +476,7 @@ def patch_deployment_env(
                 except ApiException as e:
                     if e.status == 409 and attempt < max_retries - 1:
                         # Conflict - resource was modified by controller
-                        print(
-                            f"      ⚠ Conflict (409) - resource modified, retrying..."
-                        )
+                        print("      ⚠ Conflict (409) - resource modified, retrying...")
                         continue
                     else:
                         # Not a conflict or out of retries
@@ -461,7 +484,7 @@ def patch_deployment_env(
 
             # Primary patch with affinity: None is sufficient
             # (Removed secondary JSON patch - caused 400 BadRequest)
-            
+
             action = "enabled" if enable else "disabled"
             print(f"[✓] DynamoGraphDeployment patched - CUDA fault injection {action}")
             print(f"    Services patched: {', '.join(patched_services)}")
