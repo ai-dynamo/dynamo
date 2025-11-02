@@ -48,13 +48,11 @@ export TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER=1
 # can be removed. Keeping it here in case the script is ran with older commits.
 export TRTLLM_MOE_USE_LOW_PRECISION_COMBINE=1
 
-if [ "${enable_pdl}" = "true" ]; then
-    export TRTLLM_ENABLE_PDL=1
-fi
-
 # NOTE: Set (or unset) these depending on what cluster you're using
 export TRTLLM_UCX_INTERFACE=enP6p3s0f1np1
 export UCX_NET_DEVICES=enP6p3s0f1np1
+export OVERRIDE_QUANT_ALGO=W4A8_MXFP4_MXFP8
+export TRTLLM_ENABLE_PDL=1
 
 trtllm-llmapi-launch python3 -m dynamo.trtllm \
     --model-path ${model_path} \
