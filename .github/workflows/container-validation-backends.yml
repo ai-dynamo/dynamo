@@ -17,8 +17,8 @@ on:
 
 jobs:
   testing-oidc:
-#    runs-on: cpu-amd-m5-2xlarge
-    runs-on: ubuntu-latest
+    runs-on: cpu-amd-m5-2xlarge
+#    runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
