@@ -61,22 +61,14 @@ runs:
         docker tag ${LOCAL_IMAGE} ${ECR_HOSTNAME}/${PUSH_TAG}
         docker push ${ECR_HOSTNAME}/${PUSH_TAG}
 
-    - name: 'Az CLI login using OIDC'
-      uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+    - name: OIDC authentication with Azure and logging into ACR
+      uses: ./.github/actions/azure-auth-common
       if: ${{ inputs.azure_push == 'true' }}
       with:
-        client-id: ${{ inputs.azure_github_client_id }}
-        tenant-id: ${{ inputs.azure_tenant_id }}
-        subscription-id: ${{ inputs.azure_subscription_id }}
-
-    - name: ACR Login
-      shell: bash
-      if: ${{ inputs.azure_push == 'true' }}
-      env:
-        AZURE_ACR_HOSTNAME: ${{ inputs.azure_acr_hostname }}
-      run: |
-        REGISTRY_NAME=$(echo "$AZURE_ACR_HOSTNAME" | cut -d "." -f1)
-        az acr login --name "$REGISTRY_NAME"
+        azure_acr_hostname: ${{ inputs.azure_acr_hostname }}
+        azure_github_client_id: ${{ inputs.azure_github_client_id }}
+        azure_tenant_id: ${{ inputs.azure_tenant_id }}
+        azure_subscription_id: ${{ inputs.azure_subscription_id }}
 
     - name: ACR Tag and Push
       shell: bash
