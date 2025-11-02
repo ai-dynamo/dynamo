@@ -131,14 +131,24 @@ Found existing namespace-restricted Dynamo operators in namespaces: ...
 ```
 
 > [!TIP]
-> For multinode deployments, you need to enable Grove and KAI Scheduler.
-> You might chose to install them manually or through the dynamo-platform helm install command.
-> When using the dynamo-platform helm install command, Grove and KAI Scheduler are NOT installed by default. You can enable their installation by setting the following flags in the helm install command:
-
-```bash
---set "grove.enabled=true"
---set "kai-scheduler.enabled=true"
-```
+> For multinode deployments, you need to install multinode orchestration components:
+>
+> **Option 1 (Recommended): Grove + KAI Scheduler**
+> - Grove and KAI Scheduler can be installed manually or through the dynamo-platform helm install command.
+> - When using the dynamo-platform helm install command, Grove and KAI Scheduler are NOT installed by default. You can enable their installation by setting the following flags:
+>
+> ```bash
+> --set "grove.enabled=true"
+> --set "kai-scheduler.enabled=true"
+> ```
+>
+> **Option 2: LeaderWorkerSet (LWS) + Volcano**
+> - If using LWS for multinode deployments, you must also install Volcano (required dependency):
+>   - [LWS Installation](https://github.com/kubernetes-sigs/lws#installation)
+>   - [Volcano Installation](https://volcano.sh/en/docs/installation/) (required for gang scheduling with LWS)
+> - These must be installed manually before deploying multinode workloads with LWS.
+>
+> See the [Multinode Deployment Guide](./deployment/multinode-deployment.md) for details on orchestrator selection.
 
 > [!TIP]
 > By default, Model Express Server is not used.
@@ -233,7 +243,7 @@ kubectl get pods -n ${NAMESPACE}
 1. **Deploy Model/Workflow**
    ```bash
    # Example: Deploy a vLLM workflow with Qwen3-0.6B using aggregated serving
-   kubectl apply -f components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
+   kubectl apply -f examples/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
 
    # Port forward and test
    kubectl port-forward svc/agg-vllm-frontend 8000:8000 -n ${NAMESPACE}
@@ -241,9 +251,9 @@ kubectl get pods -n ${NAMESPACE}
    ```
 
 2. **Explore Backend Guides**
-   - [vLLM Deployments](../../components/backends/vllm/deploy/README.md)
-   - [SGLang Deployments](../../components/backends/sglang/deploy/README.md)
-   - [TensorRT-LLM Deployments](../../components/backends/trtllm/deploy/README.md)
+   - [vLLM Deployments](../../examples/backends/vllm/deploy/README.md)
+   - [SGLang Deployments](../../examples/backends/sglang/deploy/README.md)
+   - [TensorRT-LLM Deployments](../../examples/backends/trtllm/deploy/README.md)
 
 3. **Optional:**
    - [Set up Prometheus & Grafana](./observability/metrics.md)

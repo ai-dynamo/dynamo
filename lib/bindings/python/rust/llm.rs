@@ -33,6 +33,3 @@ pub mod kv;
 pub mod local_model;
 pub mod model_card;
 pub mod preprocessor;
-
-#[cfg(feature = "block-manager")]
-pub mod block_manager;

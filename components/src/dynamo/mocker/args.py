@@ -12,6 +12,7 @@ from . import __version__
 
 DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
 DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
+DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +86,8 @@ def parse_args():
     parser.add_argument(
         "--endpoint",
         type=str,
-        default=DEFAULT_ENDPOINT,
-        help=f"Dynamo endpoint string (default: {DEFAULT_ENDPOINT})",
+        default=None,
+        help=f"Dynamo endpoint string (default: {DEFAULT_ENDPOINT} for aggregated/decode, {DEFAULT_PREFILL_ENDPOINT} for prefill)",
     )
     parser.add_argument(
         "--model-name",
@@ -174,6 +175,13 @@ def parse_args():
         default=None,
         help="Simulated engine startup time in seconds (default: None)",
     )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=1,
+        help="Number of mocker workers to launch in the same process (default: 1). "
+        "All workers share the same tokio runtime and thread pool.",
+    )
 
     # Legacy support - allow direct JSON file specification
     parser.add_argument(
@@ -199,4 +207,18 @@ def parse_args():
 
     args = parser.parse_args()
     validate_worker_type_args(args)
+
+    # Validate num_workers
+    if args.num_workers < 1:
+        raise ValueError(f"--num-workers must be at least 1, got {args.num_workers}")
+
+    # Set endpoint default based on worker type if not explicitly provided
+    if args.endpoint is None:
+        if args.is_prefill_worker:
+            args.endpoint = DEFAULT_PREFILL_ENDPOINT
+            logger.debug(f"Using default prefill endpoint: {args.endpoint}")
+        else:
+            args.endpoint = DEFAULT_ENDPOINT
+            logger.debug(f"Using default endpoint: {args.endpoint}")
+
     return args

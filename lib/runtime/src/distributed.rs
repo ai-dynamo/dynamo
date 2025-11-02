@@ -84,6 +84,14 @@ impl DistributedRuntime {
 
         let nats_client_for_metrics = nats_client.clone();
 
+        // Initialize discovery client with mock implementation
+        // TODO: Replace MockDiscoveryClient with KeyValueStoreDiscoveryClient or KubeDiscoveryClient
+        let discovery_client = {
+            use crate::discovery::{MockDiscoveryClient, SharedMockRegistry};
+            let registry = SharedMockRegistry::new();
+            Arc::new(MockDiscoveryClient::new(None, registry)) as Arc<dyn DiscoveryClient>
+        };
+
         let distributed_runtime = Self {
             runtime,
             etcd_client,
@@ -91,6 +99,7 @@ impl DistributedRuntime {
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
+            discovery_client,
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
@@ -211,10 +220,8 @@ impl DistributedRuntime {
         self.runtime.primary_token()
     }
 
-    /// The etcd lease all our components will be attached to.
-    /// Not available for static workers.
-    pub fn primary_lease(&self) -> Option<etcd::Lease> {
-        self.etcd_client.as_ref().map(|c| c.primary_lease())
+    pub fn connection_id(&self) -> u64 {
+        self.store.connection_id()
     }
 
     pub fn shutdown(&self) {
@@ -226,25 +233,9 @@ impl DistributedRuntime {
         Namespace::new(self.clone(), name.into(), self.is_static)
     }
 
-    // /// Create a [`Component`]
-    // pub fn component(
-    //     &self,
-    //     name: impl Into<String>,
-    //     namespace: impl Into<String>,
-    // ) -> Result<Component> {
-    //     Ok(ComponentBuilder::from_runtime(self.clone())
-    //         .name(name.into())
-    //         .namespace(namespace.into())
-    //         .build()?)
-    // }
-
-    pub(crate) fn discovery_client(&self, namespace: impl Into<String>) -> DiscoveryClient {
-        DiscoveryClient::new(
-            namespace.into(),
-            self.etcd_client
-                .clone()
-                .expect("Attempt to get discovery_client on static DistributedRuntime"),
-        )
+    /// TODO: Return discovery client when KeyValueDiscoveryClient or KubeDiscoveryClient is implemented
+    pub fn discovery_client(&self) -> Result<Arc<dyn DiscoveryClient>> {
+        Err(error!("Discovery client not implemented!"))
     }
 
     pub(crate) fn service_client(&self) -> Option<ServiceClient> {

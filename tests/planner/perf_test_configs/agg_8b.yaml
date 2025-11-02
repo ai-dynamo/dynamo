@@ -39,7 +39,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
+          workingDir: /workspace/examples/backends/vllm
           command:
             - /bin/sh
             - -c
@@ -89,7 +89,7 @@ spec:
             periodSeconds: 10
             failureThreshold: 60
           image: my-registry/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
+          workingDir: /workspace/examples/backends/vllm
           command:
             - /bin/sh
             - -c

@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-disagg-multinode
+spec:
+  envs:
+  - name: HF_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: hf-token-secret
+        key: HF_TOKEN
+  - name: GLOO_SOCKET_IFNAME
+    value: "eth0"
+  backendFramework: sglang
+  services:
+    Frontend:
+      dynamoNamespace: sglang-disagg-multinode
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/sglang-runtime:my-tag
+    decode:
+      multinode:
+        nodeCount: 2
+      envFromSecret: hf-token-secret
+      dynamoNamespace: sglang-disagg-multinode
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/sglang-runtime:my-tag
+          workingDir: /workspace/examples/backends/sglang
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --tp-size
+            - "8"
+            - --trust-remote-code
+            - --skip-tokenizer-init
+            - --disaggregation-mode
+            - decode
+            - --disaggregation-transfer-backend
+            - nixl
+            - --disaggregation-bootstrap-port
+            - "30001"
+            - --host
+            - "0.0.0.0"
+            - --mem-fraction-static
+            - "0.82"
+    prefill:
+      multinode:
+        nodeCount: 2
+      envFromSecret: hf-token-secret
+      dynamoNamespace: sglang-disagg-multinode
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/sglang-runtime:my-tag
+          workingDir: /workspace/examples/backends/sglang
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --tp-size
+            - "8"
+            - --trust-remote-code
+            - --skip-tokenizer-init
+            - --disaggregation-mode
+            - prefill
+            - --disaggregation-transfer-backend
+            - nixl
+            - --disaggregation-bootstrap-port
+            - "30001"
+            - --mem-fraction-static
+            - "0.82"
+            - --host
+            - "0.0.0.0"

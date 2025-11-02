@@ -121,6 +121,12 @@ def create_profiler_parser() -> argparse.Namespace:
         default=config.get("deployment", {}).get("model", ""),
         help="Model to serve, can be HF model name or local model path",
     )
+    parser.add_argument(
+        "--dgd-image",
+        type=str,
+        default=config.get("deployment", {}).get("dgd_image", ""),
+        help="Container image to use for DGD components (frontend, planner, workers). Overrides images in config file.",
+    )
 
     # CLI arguments with config-aware defaults (using nested .get() for cleaner code)
     parser.add_argument(
@@ -152,13 +158,13 @@ def create_profiler_parser() -> argparse.Namespace:
     parser.add_argument(
         "--min-num-gpus-per-engine",
         type=int,
-        default=config.get("hardware", {}).get("min_num_gpus_per_engine", 0),
+        default=config.get("hardware", {}).get("min_num_gpus_per_engine", 1),
         help="minimum number of GPUs per engine",
     )
     parser.add_argument(
         "--max-num-gpus-per-engine",
         type=int,
-        default=config.get("hardware", {}).get("max_num_gpus_per_engine", 0),
+        default=config.get("hardware", {}).get("max_num_gpus_per_engine", 8),
         help="maximum number of GPUs per engine",
     )
     parser.add_argument(
@@ -239,8 +245,14 @@ def create_profiler_parser() -> argparse.Namespace:
     parser.add_argument(
         "--num-gpus-per-node",
         type=int,
-        default=config.get("hardware", {}).get("num_gpus_per_node", 0),
+        default=config.get("hardware", {}).get("num_gpus_per_node", 8),
         help="Number of GPUs per node for MoE models - this will be the granularity when searching for the best TEP/DEP size",
+    )
+    parser.add_argument(
+        "--enable-gpu-discovery",
+        action="store_true",
+        default=config.get("hardware", {}).get("enable_gpu_discovery", False),
+        help="Enable automatic GPU discovery from Kubernetes cluster nodes. When enabled, overrides any manually specified hardware configuration. Requires cluster-wide node access permissions.",
     )
 
     # Dynamically add all planner arguments from planner_argparse.py
@@ -295,11 +307,13 @@ def create_profiler_parser() -> argparse.Namespace:
         delattr(args, "profile_config")
 
     # Validate required arguments
-    if not args.config:
-        parser.error("--config is required (either via CLI or profile-config)")
+    # Either --model or --config (or both) must be provided
     if not args.model and not args.config:
-        parser.error("--model or --config is required")
+        parser.error("--model or --config is required (provide at least one)")
 
-    auto_generate_search_space(args)
+    # Run auto-generation if GPU discovery is enabled
+    # This will override any manually specified hardware parameters
+    if args.enable_gpu_discovery:
+        auto_generate_search_space(args)
 
     return args

@@ -87,12 +87,12 @@ spec:
         {{- if .Values.natsAddr }}
           - --natsAddr={{ .Values.natsAddr }}
         {{- else }}
-          - --natsAddr=nats://{{ .Release.Name }}-nats.{{ .Release.Namespace }}:4222
+          - --natsAddr=nats://{{ .Release.Name }}-nats.{{ .Release.Namespace }}.svc.cluster.local:4222
         {{- end }}
         {{- if .Values.etcdAddr }}
           - --etcdAddr={{ .Values.etcdAddr }}
         {{- else }}
-          - --etcdAddr={{ .Release.Name }}-etcd.{{ .Release.Namespace }}:2379
+          - --etcdAddr={{ .Release.Name }}-etcd.{{ .Release.Namespace }}.svc.cluster.local:2379
         {{- end }}
         {{- if and .Values.dynamo.istio.enabled .Values.dynamo.istio.gateway }}
           - --istio-virtual-service-gateway={{ .Values.dynamo.istio.gateway }}
@@ -124,13 +124,17 @@ spec:
           - --mpi-run-ssh-secret-name={{ .Values.dynamo.mpiRun.secretName }}
           - --mpi-run-ssh-secret-namespace={{ .Release.Namespace }}
         {{- end }}
-        {{- if .Values.dynamo.dgdr.profilerImage }}
-          - --profiler-image={{ .Values.dynamo.dgdr.profilerImage }}
-        {{- end }}
         {{- if not .Values.namespaceRestriction.enabled }}
           - --dgdr-profiling-cluster-role-name={{ include "dynamo-operator.fullname" . }}-dgdr-profiling
           - --planner-cluster-role-name={{ include "dynamo-operator.fullname" . }}-planner
         {{- end }}
+        {{- if .Values.namespaceRestriction.enabled }}
+        {{- if .Values.namespaceRestriction.lease }}
+          - --namespace-scope-lease-duration={{ .Values.namespaceRestriction.lease.duration }}
+          - --namespace-scope-lease-renew-interval={{ .Values.namespaceRestriction.lease.renewInterval }}
+        {{- end }}
+        {{- end }}
+          - --operator-version={{ .Values.controllerManager.manager.image.tag | default .Chart.AppVersion }}
         command:
         - /manager
         env:
