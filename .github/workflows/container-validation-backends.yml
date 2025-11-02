@@ -32,8 +32,8 @@ jobs:
           azure_github_client_id: ${{ secrets.AZ_GHA_CLIENT_ID }}
           azure_tenant_id: ${{ secrets.AZ_TENANT_ID }}
           azure_subscription_id: ${{ secrets.AZ_SUBSCRIPTION_ID }}
-          azure_aks_resource_group: ${{ secrets.AKS_RESOURCE_GROUP }}
-          azure_aks_name: ${{ secrets.AKS_CLUSTER_NAME }}
+#          azure_aks_resource_group: ${{ secrets.AKS_RESOURCE_GROUP }}
+#          azure_aks_name: ${{ secrets.AKS_CLUSTER_NAME }}
 #      - name: 'Az CLI login using OIDC'
 #        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
 #        with:

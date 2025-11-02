@@ -16,7 +16,7 @@ inputs:
   azure_aks_name:
     description: 'Azure AKS cluster name, must be passed for AKS authentication'
     required: false
-  azure_acr_registry_name:
+  azure_acr_hostname:
     description: 'Azure Subscription  id'
     required: false
 
@@ -37,7 +37,12 @@ runs:
           azure_aks_resource_group: ${{ inputs.azure_aks_resource_group }}
           azure_aks_name: ${{ inputs.azure_aks_name }}
 
+
       - name: 'Login to ACR via OIDC'
         shell: bash
-        if: ${{ inputs.azure_acr_registry_name }}
-        run: az acr login --name ${{ inputs.azure_acr_registry_name }}
+        if: ${{ inputs.azure_acr_hostname }}
+        env:
+          AZURE_ACR_HOSTNAME: ${{ inputs.azure_acr_hostname }}
+        run: |
+          REGISTRY_NAME=$(echo "$AZURE_ACR_HOSTNAME" | cut -d "." -f1)
+          az acr login --name "$REGISTRY_NAME"
