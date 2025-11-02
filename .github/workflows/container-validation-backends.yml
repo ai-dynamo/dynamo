@@ -407,7 +407,7 @@ jobs:
           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
           --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
           --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
-        # Wait for all deployments to be readyT
+        # Wait for all deployments to be ready
         timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
 
   deploy-test-vllm:
