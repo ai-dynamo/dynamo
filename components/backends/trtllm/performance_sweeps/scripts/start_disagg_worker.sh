@@ -53,8 +53,8 @@ if [ "${enable_pdl}" = "true" ]; then
 fi
 
 # NOTE: Set (or unset) these depending on what cluster you're using
-export TRTLLM_UCX_INTERFACE=enP6p9s0np0
-export UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,mlx5_3:1,mlx5_4:1,enP6p9s0np0
+export TRTLLM_UCX_INTERFACE=enP6p3s0f1np1
+export UCX_NET_DEVICES=enP6p3s0f1np1
 
 trtllm-llmapi-launch python3 -m dynamo.trtllm \
     --model-path ${model_path} \
