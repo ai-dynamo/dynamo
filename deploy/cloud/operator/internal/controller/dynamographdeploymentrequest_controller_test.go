@@ -1351,5 +1351,67 @@ spec:
 			Expect(dgd).NotTo(BeNil())
 			Expect(dgd.Name).Should(Equal("test-dgd-leading"))
 		})
+
+		It("Should extract DGD and additional resources correctly", func() {
+			// Multi-document YAML with ConfigMap and DGD
+			multiDocYAML := `---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-config
+  namespace: default
+data:
+  model.json: '{"name": "test-model"}'
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: test-dgd
+  namespace: default
+spec:
+  backendFramework: vllm
+  services: {}`
+
+			dgd, additionalResources, err := reconciler.extractResourcesFromYAML([]byte(multiDocYAML))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(dgd).NotTo(BeNil())
+			Expect(dgd.Name).Should(Equal("test-dgd"))
+			Expect(additionalResources).To(HaveLen(1))
+			Expect(additionalResources[0].GetKind()).Should(Equal("ConfigMap"))
+			Expect(additionalResources[0].GetName()).Should(Equal("model-config"))
+		})
+
+		It("Should handle multiple additional resources", func() {
+			// Multi-document YAML with multiple ConfigMaps and DGD
+			multiDocYAML := `---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config1
+data:
+  key1: value1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config2
+data:
+  key2: value2
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: test-dgd
+spec:
+  backendFramework: vllm
+  services: {}`
+
+			dgd, additionalResources, err := reconciler.extractResourcesFromYAML([]byte(multiDocYAML))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(dgd).NotTo(BeNil())
+			Expect(additionalResources).To(HaveLen(2))
+			Expect(additionalResources[0].GetName()).Should(Equal("config1"))
+			Expect(additionalResources[1].GetName()).Should(Equal("config2"))
+		})
 	})
 })

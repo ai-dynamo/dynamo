@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"text/template"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -30,8 +31,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -40,7 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"sigs.k8s.io/yaml"
+	sigsyaml "sigs.k8s.io/yaml"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
@@ -100,6 +103,12 @@ const (
 
 	// ConfigMap naming
 	ConfigMapOutputPrefix = "dgdr-output-"
+
+	// Annotation keys
+	AnnotationAdditionalResources = "dgdr.nvidia.com/additional-resources"
+
+	// Size limits
+	MaxAnnotationSize = 250000 // ~250KB, below K8s 256KB limit
 
 	// Sidecar image
 	SidecarImage = "bitnami/kubectl:latest"
@@ -690,42 +699,40 @@ func (r *DynamoGraphDeploymentRequestReconciler) createAdditionalResources(ctx c
 		return nil
 	}
 
-	resourcesYAML, exists := dgdr.Annotations["dgdr.nvidia.com/additional-resources"]
+	resourcesYAML, exists := dgdr.Annotations[AnnotationAdditionalResources]
 	if !exists || resourcesYAML == "" {
 		return nil
 	}
 
-	// Parse the additional resources YAML
-	documents := splitYAMLDocuments([]byte(resourcesYAML))
-	if len(documents) == 0 {
-		return nil
-	}
+	// Parse using standard Kubernetes YAML decoder
+	decoder := yaml.NewYAMLOrJSONDecoder(bytes.NewReader([]byte(resourcesYAML)), 4096)
+	resourceCount := 0
 
-	logger.Info("Deploying additional resources from profiling output", "count", len(documents))
-
-	for i, doc := range documents {
-		doc = bytes.TrimSpace(doc)
-		if len(doc) == 0 {
+	for {
+		obj := &unstructured.Unstructured{}
+		if err := decoder.Decode(obj); err != nil {
+			if err == io.EOF {
+				break
+			}
+			logger.Error(err, "Failed to decode resource, skipping")
 			continue
 		}
 
-		// Parse to check kind
-		var obj map[string]interface{}
-		if err := yaml.Unmarshal(doc, &obj); err != nil {
-			logger.Error(err, "Failed to parse resource document", "index", i)
+		if obj.GetKind() == "" {
 			continue
 		}
 
-		kind, _ := obj["kind"].(string)
-		if kind != "ConfigMap" {
-			logger.Info("Skipping non-ConfigMap resource from profiling output", "kind", kind)
+		resourceCount++
+
+		// Only support ConfigMap for now (what profiler actually generates)
+		if obj.GetKind() != "ConfigMap" {
+			logger.Info("Skipping non-ConfigMap resource from profiling output", "kind", obj.GetKind(), "name", obj.GetName())
 			continue
 		}
 
-		// Parse as ConfigMap and update metadata
 		cm := &corev1.ConfigMap{}
-		if err := yaml.Unmarshal(doc, cm); err != nil {
-			logger.Error(err, "Failed to parse ConfigMap", "index", i)
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, cm); err != nil {
+			logger.Error(err, "Failed to convert to ConfigMap", "name", obj.GetName())
 			continue
 		}
 
@@ -748,6 +755,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) createAdditionalResources(ctx c
 		} else {
 			logger.Info("Created ConfigMap from profiling output", "name", cm.Name, "namespace", targetNamespace)
 		}
+	}
+
+	if resourceCount > 0 {
+		logger.Info("Deploying additional resources from profiling output", "count", resourceCount)
 	}
 
 	return nil
@@ -960,7 +971,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 
 		// Serialize config to YAML for passing to profiler
-		configYAML, err := yaml.Marshal(config)
+		configYAML, err := sigsyaml.Marshal(config)
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to marshal profiling config to YAML: %w", err)
 		}
@@ -1290,14 +1301,19 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	return r.Status().Update(ctx, dgdr)
 }
 
-// storeAdditionalResources marshals additional resources to YAML and stores them in DGDR annotations
-func (r *DynamoGraphDeploymentRequestReconciler) storeAdditionalResources(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, resources []map[string]interface{}) error {
+// storeAdditionalResources marshals additional resources to YAML and stores them in DGDR annotations.
+// Validates annotation size and fails gracefully if too large.
+func (r *DynamoGraphDeploymentRequestReconciler) storeAdditionalResources(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, resources []*unstructured.Unstructured) error {
+	if len(resources) == 0 {
+		return nil
+	}
+
 	var resourcesYAML []byte
 
 	for i, res := range resources {
-		resYAML, err := yaml.Marshal(res)
+		resYAML, err := sigsyaml.Marshal(res.Object)
 		if err != nil {
-			return fmt.Errorf("failed to marshal resource %d: %w", i, err)
+			return fmt.Errorf("failed to marshal resource %s/%s: %w", res.GetKind(), res.GetName(), err)
 		}
 		if i > 0 {
 			resourcesYAML = append(resourcesYAML, []byte("\n---\n")...)
@@ -1305,42 +1321,48 @@ func (r *DynamoGraphDeploymentRequestReconciler) storeAdditionalResources(ctx co
 		resourcesYAML = append(resourcesYAML, resYAML...)
 	}
 
+	// Validate size before storing
+	if len(resourcesYAML) > MaxAnnotationSize {
+		return fmt.Errorf("additional resources YAML size (%d bytes) exceeds maximum annotation size (%d bytes); "+
+			"consider reducing the number of resources or storing them separately",
+			len(resourcesYAML), MaxAnnotationSize)
+	}
+
 	if dgdr.Annotations == nil {
 		dgdr.Annotations = make(map[string]string)
 	}
-	dgdr.Annotations["dgdr.nvidia.com/additional-resources"] = string(resourcesYAML)
+	dgdr.Annotations[AnnotationAdditionalResources] = string(resourcesYAML)
 
 	return r.Update(ctx, dgdr)
 }
 
 // extractResourcesFromYAML parses multi-document YAML from profiling output,
 // extracting the DynamoGraphDeployment and any ConfigMaps that should be deployed with it.
-func (r *DynamoGraphDeploymentRequestReconciler) extractResourcesFromYAML(yamlContent []byte) (*nvidiacomv1alpha1.DynamoGraphDeployment, []map[string]interface{}, error) {
-	documents := splitYAMLDocuments(yamlContent)
+func (r *DynamoGraphDeploymentRequestReconciler) extractResourcesFromYAML(yamlContent []byte) (*nvidiacomv1alpha1.DynamoGraphDeployment, []*unstructured.Unstructured, error) {
+	decoder := yaml.NewYAMLOrJSONDecoder(bytes.NewReader(yamlContent), 4096)
 
 	var dgd *nvidiacomv1alpha1.DynamoGraphDeployment
-	var additionalResources []map[string]interface{}
+	var additionalResources []*unstructured.Unstructured
 
-	for i, doc := range documents {
-		doc = bytes.TrimSpace(doc)
-		if len(doc) == 0 {
+	for {
+		obj := &unstructured.Unstructured{}
+		if err := decoder.Decode(obj); err != nil {
+			if err == io.EOF {
+				break
+			}
+			// Skip invalid documents and continue
 			continue
 		}
 
-		var obj map[string]interface{}
-		if err := yaml.Unmarshal(doc, &obj); err != nil {
+		// Skip empty objects
+		if obj.GetKind() == "" {
 			continue
 		}
 
-		kind, hasKind := obj["kind"].(string)
-		if !hasKind {
-			continue
-		}
-
-		if kind == "DynamoGraphDeployment" {
+		if obj.GetKind() == "DynamoGraphDeployment" {
 			dgd = &nvidiacomv1alpha1.DynamoGraphDeployment{}
-			if err := yaml.Unmarshal(doc, dgd); err != nil {
-				return nil, nil, fmt.Errorf("failed to parse DynamoGraphDeployment in document %d: %w", i, err)
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, dgd); err != nil {
+				return nil, nil, fmt.Errorf("failed to convert to DynamoGraphDeployment: %w", err)
 			}
 		} else {
 			// Store ConfigMaps or other resources for deployment
@@ -1349,7 +1371,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) extractResourcesFromYAML(yamlCo
 	}
 
 	if dgd == nil {
-		return nil, nil, fmt.Errorf("no DynamoGraphDeployment found in YAML content (%d documents)", len(documents))
+		return nil, nil, fmt.Errorf("no DynamoGraphDeployment found in YAML content")
 	}
 
 	return dgd, additionalResources, nil
@@ -1359,40 +1381,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) extractResourcesFromYAML(yamlCo
 func (r *DynamoGraphDeploymentRequestReconciler) extractDGDFromYAML(yamlContent []byte) (*nvidiacomv1alpha1.DynamoGraphDeployment, error) {
 	dgd, _, err := r.extractResourcesFromYAML(yamlContent)
 	return dgd, err
-}
-
-// splitYAMLDocuments splits multi-document YAML by the "---" separator
-func splitYAMLDocuments(yamlContent []byte) [][]byte {
-	var documents [][]byte
-	var currentDoc []byte
-
-	lines := bytes.Split(yamlContent, []byte("\n"))
-	for _, line := range lines {
-		trimmed := bytes.TrimSpace(line)
-
-		// Check if this line is a document separator
-		if bytes.Equal(trimmed, []byte("---")) {
-			// Save current document if not empty
-			if len(bytes.TrimSpace(currentDoc)) > 0 {
-				documents = append(documents, currentDoc)
-			}
-			// Start new document
-			currentDoc = []byte{}
-		} else {
-			// Add line to current document
-			if len(currentDoc) > 0 {
-				currentDoc = append(currentDoc, '\n')
-			}
-			currentDoc = append(currentDoc, line...)
-		}
-	}
-
-	// Add the last document if not empty
-	if len(bytes.TrimSpace(currentDoc)) > 0 {
-		documents = append(documents, currentDoc)
-	}
-
-	return documents
 }
 
 // updateStateAndRequeue updates the DGDR state and requeues
