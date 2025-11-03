@@ -97,17 +97,17 @@ type DynamoGraphDeploymentReconciler struct {
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.1/pkg/reconcile
-func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	logger := log.FromContext(ctx)
 
-	var err error
 	reason := Reason("undefined")
 	message := Message("")
 	state := PendingState
 	// retrieve the CRD
 	dynamoDeployment := &nvidiacomv1alpha1.DynamoGraphDeployment{}
 	if err = r.Get(ctx, req.NamespacedName, dynamoDeployment); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		err = client.IgnoreNotFound(err)
+		return
 	}
 
 	defer func() {
@@ -153,18 +153,18 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	if err != nil {
 		logger.Error(err, "failed to handle the finalizer")
 		reason = "failed_to_handle_the_finalizer"
-		return ctrl.Result{}, err
+		return
 	}
 	if deleted {
-		return ctrl.Result{}, nil
+		return
 	}
 	state, reason, message, err = r.reconcileResources(ctx, dynamoDeployment)
 	if err != nil {
 		logger.Error(err, "failed to reconcile the resources")
 		reason = "failed_to_reconcile_the_resources"
-		return ctrl.Result{}, err
+		return
 	}
-	return ctrl.Result{}, nil
+	return
 }
 
 type Resource interface {
