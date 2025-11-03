@@ -1,0 +1,175 @@
+name: 'Pytest K8s'
+description: 'Run pytest tests against Kubernetes clusters'
+inputs:
+  pytest_marks:
+    description: 'Pytest marks'
+    required: true
+    default: 'k8s and fault_tolerance'
+  test_selector:
+    description: 'Test selector pattern for -k flag'
+    required: false
+    default: ''
+  image_tag:
+    description: 'Image Tag to use for K8s deployments'
+    required: true
+  namespace:
+    description: 'Kubernetes namespace to use'
+    required: true
+  framework:
+    description: 'Framework name for test metrics'
+    required: false
+    default: 'unknown'
+  test_type:
+    description: 'Test type (fault_tolerance, integration, e2e)'
+    required: false
+    default: 'k8s'
+  platform_arch:
+    description: 'Platform architecture (amd64, arm64)'
+    required: false
+    default: 'amd64'
+  client_type:
+    description: 'Client type parameter for tests'
+    required: false
+    default: 'legacy'
+  kubeconfig_b64:
+    description: 'Base64-encoded kubeconfig'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Test Environment
+      shell: bash
+      run: |
+        set -x
+        # Setup kubeconfig
+        echo "${{ inputs.kubeconfig_b64 }}" | base64 -d > .kubeconfig
+        chmod 600 .kubeconfig
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=${{ inputs.namespace }}
+
+        # Install python3-venv package if not already installed
+        sudo apt-get update && sudo apt-get install -y python3-venv
+
+        # Set up Python virtual environment and install dependencies
+        python3 -m venv venv
+        source venv/bin/activate
+        pip install --upgrade pip
+
+        # Install core dependencies needed for tests
+        pip install -r container/deps/requirements.test.txt
+        pip install kubernetes==32.0.1 kubernetes_asyncio kr8s pyyaml requests tabulate pydantic
+
+        # Add project source to PYTHONPATH for test imports
+        echo "PYTHONPATH=$(pwd):$(pwd)/components/src:$PYTHONPATH" >> $GITHUB_ENV
+
+        # Setup test directories
+        mkdir -p test-results
+
+        # Set platform architecture from input
+        PLATFORM_ARCH="${{ inputs.platform_arch }}"
+        if [[ -z "${PLATFORM_ARCH}" ]]; then
+          PLATFORM_ARCH="amd64"
+        fi
+        echo "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV
+        echo "🏗️  Platform architecture: ${PLATFORM_ARCH}"
+
+        echo "🔧 Test environment setup complete"
+
+    - name: Run K8s Tests
+      shell: bash
+      env:
+        KUBECONFIG: .kubeconfig
+        PYTEST_XML_FILE: pytest_test_report.xml
+      run: |
+        set +e  # Don't exit on test failures
+        source venv/bin/activate
+
+        echo "Running K8s pytest tests"
+        echo "Framework: ${{ inputs.framework }}"
+        echo "Test type: ${{ inputs.test_type }}"
+        echo "Pytest marks: ${{ inputs.pytest_marks }}"
+        echo "Namespace: ${{ inputs.namespace }}"
+        echo "Image: ${{ inputs.image_tag }}"
+
+        # Build pytest command
+        PYTEST_CMD="pytest tests/fault_tolerance/ \
+          -m \"${{ inputs.pytest_marks }}\" \
+          -v -s \
+          --tb=short \
+          --durations=10 \
+          --junitxml=test-results/${{ env.PYTEST_XML_FILE }} \
+          --namespace ${{ inputs.namespace }} \
+          --image ${{ inputs.image_tag }} \
+          --client-type ${{ inputs.client_type }}"
+
+        # Add test selector if provided
+        if [[ -n "${{ inputs.test_selector }}" ]]; then
+          PYTEST_CMD="$PYTEST_CMD -k \"${{ inputs.test_selector }}\""
+        fi
+
+        echo "Running: $PYTEST_CMD"
+        eval $PYTEST_CMD
+
+        TEST_EXIT_CODE=$?
+        echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
+        echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
+
+        # Always continue to results processing
+        exit 0
+
+    - name: Process Test Results
+      shell: bash
+      run: |
+        # Sanitize test_type for filenames
+        STR_TEST_TYPE=$(echo "${{ inputs.test_type }}" | tr ', ' '_')
+        echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> $GITHUB_ENV
+
+        # Check for JUnit XML file and determine test status
+        JUNIT_FILE="test-results/pytest_test_report.xml"
+
+        if [[ -f "$JUNIT_FILE" ]]; then
+          echo "✅ JUnit XML generated successfully"
+          # Extract basic test counts for status determination
+          TOTAL_TESTS=$(grep -o 'tests="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+          FAILED_TESTS=$(grep -o 'failures="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+          ERROR_TESTS=$(grep -o 'errors="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+          echo "📊 ${TOTAL_TESTS} tests completed (${FAILED_TESTS} failed, ${ERROR_TESTS} errors)"
+
+          # Create uniquely named metadata file with step context information
+          METADATA_FILE="test-results/test_metadata_${{ inputs.framework }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}.json"
+          JUNIT_NAME="pytest_test_report_${{ inputs.framework }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}.xml"
+
+          # Rename XML file to unique name
+          mv "$JUNIT_FILE" "test-results/$JUNIT_NAME"
+
+          echo '{' > "$METADATA_FILE"
+          echo '  "job_name": "${{ github.job }}",' >> "$METADATA_FILE"
+          echo '  "framework": "${{ inputs.framework }}",' >> "$METADATA_FILE"
+          echo '  "test_type": "${{ inputs.test_type }}",' >> "$METADATA_FILE"
+          echo '  "platform_arch": "${{ inputs.platform_arch }}",' >> "$METADATA_FILE"
+          echo '  "junit_xml_file": "'"$JUNIT_NAME"'",' >> "$METADATA_FILE"
+          echo '  "step_name": "Run ${{ inputs.test_type }} tests"' >> "$METADATA_FILE"
+          echo '}' >> "$METADATA_FILE"
+          echo "📝 Created test metadata file: $METADATA_FILE"
+          echo "📝 Renamed XML file to: $JUNIT_NAME"
+        else
+          echo "⚠️  JUnit XML file not found - test results may not be available for upload"
+          TOTAL_TESTS=0
+          FAILED_TESTS=1  # Treat missing XML as failure
+          ERROR_TESTS=0
+        fi
+
+        # Exit with original test result to maintain workflow behavior
+        exit ${TEST_EXIT_CODE}
+
+    - name: Upload Test Results
+      uses: actions/upload-artifact@v4
+      if: always()  # Always upload test results, even if tests failed
+      with:
+        name: test-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}
+        path: |
+          test-results/pytest_test_report_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}.xml
+          test-results/test_metadata_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}.json
+        retention-days: 7
+
