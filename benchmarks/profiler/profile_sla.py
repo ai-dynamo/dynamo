@@ -97,18 +97,16 @@ async def run_profile(args):
             config = config_modifier.update_image(config, args.dgd_image)
             logger.info(f"Using DGD image: {args.dgd_image}")
 
-        if args.is_moe_model:
-            # For MoE models, use range with stride of num_gpus_per_node
-            profile_num_gpus = list(
-                range(
-                    args.min_num_gpus_per_engine,
-                    args.max_num_gpus_per_engine + 1,
-                    args.num_gpus_per_node,
-                )
-            )
 
+        profile_num_gpus = [
+            2**i
+            for i in range(int(math.log2(args.max_num_gpus_per_engine)) + 1)
+            if args.min_num_gpus_per_engine
+            <= 2**i
+            <= args.max_num_gpus_per_engine
+        ]
+        if args.is_moe_model:
             # Filter GPU counts to only include divisors of num_experts
-            # SGLang/deepseek requires num_physical_experts % ep_size == 0
             if hasattr(args, "num_experts") and args.num_experts is not None:
                 original_counts = profile_num_gpus.copy()
                 profile_num_gpus = [
@@ -129,17 +127,8 @@ async def run_profile(args):
                         f"Filtered GPU counts from {original_counts} to {profile_num_gpus} "
                         f"(only divisors of num_experts={args.num_experts})"
                     )
-
             logger.info(f"Profiling MoE GPU counts (TEP/DEP): {profile_num_gpus}")
         else:
-            # For dense models, use powers of 2
-            profile_num_gpus = [
-                2**i
-                for i in range(int(math.log2(args.max_num_gpus_per_engine)) + 1)
-                if args.min_num_gpus_per_engine
-                <= 2**i
-                <= args.max_num_gpus_per_engine
-            ]
             logger.info(f"Profiling dense model GPU counts (TP): {profile_num_gpus}")
 
         os.makedirs(args.output_dir, exist_ok=True)
