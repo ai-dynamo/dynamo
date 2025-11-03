@@ -94,7 +94,7 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
             "out" => {
                 if val == "sglang" || val == "trtllm" || val == "vllm" {
                     tracing::error!(
-                        "To run the {val} engine please use the Python interface, see root README or look in directory `components/backends/`."
+                        "To run the {val} engine please use the Python interface, see root README or look in directory `examples/backends/`."
                     );
                     std::process::exit(1);
                 }

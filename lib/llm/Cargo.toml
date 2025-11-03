@@ -140,6 +140,10 @@ minijinja = { version = "2.10.2", features = ["loader"] }
 minijinja-contrib = { version = "2.10.2", features = ["pycompat"] }
 json-five = { version = "0.3" }
 
+# media loading in the preprocessor
+reqwest = { workspace = true }
+base64 = { version = "0.22" }
+
 # Publishers
 zeromq = "0.4.1"
 rmp-serde = "1.3"
@@ -167,6 +171,7 @@ insta = { version = "1.41", features = [
 ] }
 
 lazy_static = "1.4"
+mockito = "1.7.0"
 
 [build-dependencies]
 tonic-build = { version = "0.13.1" }

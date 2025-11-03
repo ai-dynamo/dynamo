@@ -31,7 +31,7 @@ class VLLMConfig(EngineConfig):
 
 
 vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
-    WORKSPACE_DIR, "components/backends/vllm"
+    WORKSPACE_DIR, "examples/backends/vllm"
 )
 
 # vLLM test configurations
@@ -100,8 +100,8 @@ vllm_configs = {
         ],
         timeout=700,
         request_payloads=[
-            chat_payload_default(),
-            completion_payload_default(),
+            chat_payload_default(expected_response=["joke"]),
+            completion_payload_default(expected_response=["joke"]),
         ],
     ),
     "multimodal_agg_llava": VLLMConfig(
