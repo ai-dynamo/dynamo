@@ -109,26 +109,24 @@ def submit_job(job_script_path, extra_slurm_args=[]):
 
 
 def _get_available_gpu_types() -> list[str]:
-    """Discover available GPU types by scanning scripts directory for .sh files."""
+    """Discover available GPU types by scanning scripts directory structure.
+    
+    Looks for scripts in: scripts/{gpu_type}/{agg,disagg}/*.sh
+    """
     script_dir = pathlib.Path(__file__).parent / "scripts"
     gpu_types = set()
     
-    # Find all .sh files that are GPU scripts (not utility scripts)
-    excluded = {"monitor_gpu_utilization.sh", "worker_setup.py", "check_server_health.py", "sglang_bench_serving.sh", "benchmark_utils.sh"}
-    
-    for script_file in script_dir.glob("*.sh"):
-        script_name = script_file.name
-        if script_name in excluded:
+    # Scan for GPU type directories (directories that contain agg/ or disagg/)
+    for gpu_dir in script_dir.iterdir():
+        if not gpu_dir.is_dir():
             continue
         
-        # For aggregated scripts (ending with -agg.sh), extract base type
-        if script_name.endswith("-agg.sh"):
-            base_name = script_name[:-7]  # Remove "-agg.sh"
-            gpu_types.add(base_name)
-        else:
-            # For regular scripts, remove .sh extension
-            base_name = script_name[:-3]  # Remove ".sh"
-            gpu_types.add(base_name)
+        # Check if this directory has agg/ or disagg/ subdirectories
+        has_agg = (gpu_dir / "agg").is_dir()
+        has_disagg = (gpu_dir / "disagg").is_dir()
+        
+        if has_agg or has_disagg:
+            gpu_types.add(gpu_dir.name)
     
     return sorted(list(gpu_types))
 
@@ -179,6 +177,12 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
         choices=available_gpu_types,
         default=available_gpu_types[0] if available_gpu_types else None,
         help=f"GPU type to use. Available types: {', '.join(available_gpu_types)}",
+    )
+    parser.add_argument(
+        "--script-variant",
+        type=str,
+        default="default",
+        help="Script variant to use (e.g., 'default', 'optim', 'decode-optim'). Defaults to 'default.sh'",
     )
 
     parser.add_argument(
@@ -275,10 +279,13 @@ def _validate_args(args: argparse.Namespace) -> None:
             )
         # Validate GPU script exists for disaggregated mode
         script_dir = pathlib.Path(__file__).parent / "scripts"
-        gpu_script = script_dir / f"{args.gpu_type}.sh"
+        disagg_dir = script_dir / args.gpu_type / "disagg"
+        # Use script variant (defaults to "default")
+        script_name = f"{args.script_variant}.sh"
+        gpu_script = disagg_dir / script_name
         if not gpu_script.exists():
             raise ValueError(
-                f"GPU script not found: {gpu_script}. Available GPU types: {', '.join(_get_available_gpu_types())}"
+                f"Disaggregated GPU script not found: {gpu_script}. Available GPU types: {', '.join(_get_available_gpu_types())}"
             )
 
     if has_agg_args:
@@ -293,9 +300,12 @@ def _validate_args(args: argparse.Namespace) -> None:
             )
         # Validate aggregated GPU script exists
         script_dir = pathlib.Path(__file__).parent / "scripts"
-        # Remove any -prefill or -decode suffix for aggregated mode
+        # Remove any -prefill or -decode suffix if present
         base_gpu_type = args.gpu_type.replace("-prefill", "").replace("-decode", "")
-        agg_gpu_script = script_dir / f"{base_gpu_type}-agg.sh"
+        agg_dir = script_dir / base_gpu_type / "agg"
+        # Use script variant (defaults to "default")
+        script_name = f"{args.script_variant}.sh"
+        agg_gpu_script = agg_dir / script_name
         if not agg_gpu_script.exists():
             raise ValueError(
                 f"Aggregated GPU script not found: {agg_gpu_script}. Available GPU types: {', '.join(_get_available_gpu_types())}"
@@ -399,6 +409,7 @@ def main(input_args: list[str] | None = None):
         "gpus_per_node": args.gpus_per_node,
         "network_interface": args.network_interface,
         "gpu_type": args.gpu_type,
+        "script_variant": args.script_variant,
         "partition": args.partition,
         "enable_multiple_frontends": args.enable_multiple_frontends,
         "num_additional_frontends": args.num_additional_frontends,

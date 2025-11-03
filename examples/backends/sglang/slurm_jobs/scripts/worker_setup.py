@@ -178,6 +178,12 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
         default="gb200-fp8",
         help="Type of GPU to use (script will be validated at runtime)",
     )
+    parser.add_argument(
+        "--script-variant",
+        type=str,
+        default="default",
+        help="Script variant to use (e.g., 'default', 'optim', 'decode-optim'). Defaults to 'default'",
+    )
 
     parser.add_argument(
         "--nginx_config",
@@ -266,21 +272,26 @@ def setup_env_vars_for_gpu_script(
         logging.info(f"Set DUMP_CONFIG_PATH: {dump_config_path}")
 
 
-def get_gpu_command(worker_type: str, gpu_type: str) -> str:
-    """Generate command to run the appropriate GPU script"""
+def get_gpu_command(worker_type: str, gpu_type: str, script_variant: str = "default") -> str:
+    """Generate command to run the appropriate GPU script.
+    
+    Scripts are organized as: scripts/{gpu_type}/{agg,disagg}/{script_variant}.sh
+    """
+    script_base = Path(__file__).parent
+    script_name = f"{script_variant}.sh"
+    
     if worker_type == "aggregated":
-        # For aggregated, use -agg.sh scripts and remove any prefill/decode suffix
+        # Remove any -prefill or -decode suffix if present
         base_gpu_type = gpu_type.replace("-prefill", "").replace("-decode", "")
-        script_name = f"{base_gpu_type}-agg.sh"
-        script_path = Path(__file__).parent / script_name
+        script_path = script_base / base_gpu_type / "agg" / script_name
         if not script_path.exists():
             raise ValueError(f"Aggregated GPU script not found: {script_path}")
         return f"bash {script_path}"
     else:
-        script_name = f"{gpu_type}.sh"
-        script_path = Path(__file__).parent / script_name
+        # Disaggregated mode: scripts/{gpu_type}/disagg/{script_variant}.sh {prefill|decode}
+        script_path = script_base / gpu_type / "disagg" / script_name
         if not script_path.exists():
-            raise ValueError(f"GPU script not found: {script_path}")
+            raise ValueError(f"Disaggregated GPU script not found: {script_path}")
         mode = worker_type  # "prefill" or "decode"
         return f"bash {script_path} {mode}"
 
@@ -347,6 +358,7 @@ def setup_prefill_worker(
     multiple_frontends_enabled: bool = False,
     use_init_locations: bool = True,
     dump_config_path: str | None = None,
+    script_variant: str = "default",
 ) -> int:
     """
     Setup the prefill worker.
@@ -371,7 +383,7 @@ def setup_prefill_worker(
     )
 
     # Use appropriate GPU script instead of generating command directly
-    cmd_to_run = get_gpu_command("prefill", gpu_type)
+    cmd_to_run = get_gpu_command("prefill", gpu_type, script_variant)
     return run_command(cmd_to_run)
 
 
@@ -385,6 +397,7 @@ def setup_decode_worker(
     gpu_type: str,
     use_init_locations: bool = True,
     dump_config_path: str | None = None,
+    script_variant: str = "default",
 ) -> int:
     """
     Setup the decode worker.
@@ -406,7 +419,7 @@ def setup_decode_worker(
     )
 
     # Use appropriate GPU script instead of generating command directly
-    cmd_to_run = get_gpu_command("decode", gpu_type)
+    cmd_to_run = get_gpu_command("decode", gpu_type, script_variant)
     return run_command(cmd_to_run)
 
 
@@ -420,6 +433,7 @@ def setup_aggregated_worker(
     gpu_type: str,
     multiple_frontends_enabled: bool = False,
     dump_config_path: str | None = None,
+    script_variant: str = "default",
 ) -> int:
     """
     Setup the aggregated worker.
@@ -445,7 +459,7 @@ def setup_aggregated_worker(
     )
 
     # Use appropriate aggregated GPU script
-    cmd_to_run = get_gpu_command("aggregated", gpu_type)
+    cmd_to_run = get_gpu_command("aggregated", gpu_type, script_variant)
     return run_command(cmd_to_run)
 
 
@@ -498,6 +512,7 @@ def main(input_args: list[str] | None = None):
             args.multiple_frontends_enabled,
             args.use_init_locations,
             args.dump_config_path,
+            args.script_variant,
         )
     elif args.worker_type == "decode":
         setup_decode_worker(
@@ -510,6 +525,7 @@ def main(input_args: list[str] | None = None):
             args.gpu_type,
             args.use_init_locations,
             args.dump_config_path,
+            args.script_variant,
         )
     elif args.worker_type == "aggregated":
         setup_aggregated_worker(
@@ -522,6 +538,7 @@ def main(input_args: list[str] | None = None):
             args.gpu_type,
             args.multiple_frontends_enabled,
             args.dump_config_path,
+            args.script_variant,
         )
 
     logging.info(f"{args.worker_type.capitalize()} worker setup complete")
