@@ -277,7 +277,7 @@ impl ApproxKvIndexer {
                 let mut prune_fut = if let Some(prune_config) = &prune_config {
                     tokio::time::interval(prune_config.prune_interval)
                 } else {
-                    // If there is no prune config, sleep forever.
+                    // If there is no prune config, never tick.
                     tokio::time::interval(Duration::MAX)
                 };
 
