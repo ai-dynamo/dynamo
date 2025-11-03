@@ -96,6 +96,20 @@ pub const MAX_REPETITION_PENALTY: f32 = 2.0;
 // Shared Fields
 //
 
+/// Validates that no unsupported fields are present in the request
+pub fn validate_no_unsupported_fields(
+    unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
+) -> Result<(), anyhow::Error> {
+    if !unsupported_fields.is_empty() {
+        let fields: Vec<_> = unsupported_fields
+            .keys()
+            .map(|s| format!("`{}`", s))
+            .collect();
+        anyhow::bail!("Unsupported parameter(s): {}", fields.join(", "));
+    }
+    Ok(())
+}
+
 /// Validates the temperature parameter
 pub fn validate_temperature(temperature: Option<f32>) -> Result<(), anyhow::Error> {
     if let Some(temp) = temperature
