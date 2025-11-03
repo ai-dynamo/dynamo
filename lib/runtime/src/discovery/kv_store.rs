@@ -27,14 +27,14 @@ impl KVStoreDiscoveryClient {
         }
     }
 
-    /// Build the key path for an endpoint
+    /// Build the key path for an endpoint (relative to bucket, not absolute)
     fn endpoint_key(namespace: &str, component: &str, endpoint: &str, instance_id: u64) -> String {
-        format!("{}/{}/{}/{}/{:x}", INSTANCES_BUCKET, namespace, component, endpoint, instance_id)
+        format!("{}/{}/{}/{:x}", namespace, component, endpoint, instance_id)
     }
 
-    /// Build the key path for a model card
+    /// Build the key path for a model card (relative to bucket, not absolute)
     fn model_card_key(namespace: &str, component: &str, endpoint: &str, instance_id: u64) -> String {
-        format!("{}/{}/{}/{}/{:x}", MODEL_CARDS_BUCKET, namespace, component, endpoint, instance_id)
+        format!("{}/{}/{}/{:x}", namespace, component, endpoint, instance_id)
     }
 
     /// Extract prefix for querying based on discovery key
@@ -93,6 +93,14 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
                     &inst.endpoint,
                     inst.instance_id,
                 );
+                tracing::debug!(
+                    "KVStoreDiscoveryClient::register: Registering endpoint instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                    inst.instance_id,
+                    inst.namespace,
+                    inst.component,
+                    inst.endpoint,
+                    key
+                );
                 (INSTANCES_BUCKET, key)
             }
             DiscoveryInstance::ModelCard {
@@ -103,22 +111,51 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
                 ..
             } => {
                 let key = Self::model_card_key(namespace, component, endpoint, *instance_id);
+                tracing::debug!(
+                    "KVStoreDiscoveryClient::register: Registering model card instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                    instance_id,
+                    namespace,
+                    component,
+                    endpoint,
+                    key
+                );
                 (MODEL_CARDS_BUCKET, key)
             }
         };
 
         // Serialize the instance
         let instance_json = serde_json::to_vec(&instance)?;
+        tracing::debug!(
+            "KVStoreDiscoveryClient::register: Serialized instance to {} bytes for key={}",
+            instance_json.len(),
+            key_path
+        );
 
         // Store in the KV store with no TTL (instances persist until explicitly removed)
+        tracing::debug!(
+            "KVStoreDiscoveryClient::register: Getting/creating bucket={} for key={}",
+            bucket_name,
+            key_path
+        );
         let bucket = self
             .store
             .get_or_create_bucket(bucket_name, None)
             .await?;
-        let key = crate::storage::key_value_store::Key::from_raw(key_path);
+        let key = crate::storage::key_value_store::Key::from_raw(key_path.clone());
         
+        tracing::debug!(
+            "KVStoreDiscoveryClient::register: Inserting into bucket={}, key={}",
+            bucket_name,
+            key_path
+        );
         // Use revision 0 for initial registration
-        bucket.insert(&key, instance_json.into(), 0).await?;
+        let outcome = bucket.insert(&key, instance_json.into(), 0).await?;
+        tracing::info!(
+            "KVStoreDiscoveryClient::register: Successfully registered instance_id={}, key={}, outcome={:?}",
+            instance_id,
+            key_path,
+            outcome
+        );
 
         Ok(instance)
     }
@@ -163,6 +200,13 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
             MODEL_CARDS_BUCKET
         };
 
+        tracing::debug!(
+            "KVStoreDiscoveryClient::list_and_watch: Starting watch for key={:?}, prefix={}, bucket={}",
+            key,
+            prefix,
+            bucket_name
+        );
+
         // Use the KeyValueStoreManager's watch mechanism
         let (_, mut rx) = self.store.clone().watch(
             bucket_name,
@@ -170,18 +214,49 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
             self.cancel_token.clone(),
         );
 
+        tracing::debug!(
+            "KVStoreDiscoveryClient::list_and_watch: Got watch receiver for bucket={}",
+            bucket_name
+        );
+
         // Create a stream that filters and transforms WatchEvents to DiscoveryEvents
         let stream = async_stream::stream! {
+            let mut event_count = 0;
+            tracing::debug!("KVStoreDiscoveryClient::list_and_watch: Stream started, waiting for events on prefix={}", prefix);
             while let Some(event) = rx.recv().await {
+                event_count += 1;
+                tracing::debug!(
+                    "KVStoreDiscoveryClient::list_and_watch: Received event #{} for prefix={}",
+                    event_count,
+                    prefix
+                );
                 let discovery_event = match event {
                     WatchEvent::Put(kv) => {
+                        tracing::debug!(
+                            "KVStoreDiscoveryClient::list_and_watch: Put event, key={}, prefix={}, matches={}",
+                            kv.key_str(),
+                            prefix,
+                            Self::matches_prefix(kv.key_str(), &prefix)
+                        );
                         // Check if this key matches our prefix
                         if !Self::matches_prefix(kv.key_str(), &prefix) {
+                            tracing::debug!(
+                                "KVStoreDiscoveryClient::list_and_watch: Skipping key {} (doesn't match prefix {})",
+                                kv.key_str(),
+                                prefix
+                            );
                             continue;
                         }
 
                         match Self::parse_instance(kv.value()) {
-                            Ok(instance) => Some(DiscoveryEvent::Added(instance)),
+                            Ok(instance) => {
+                                tracing::info!(
+                                    "KVStoreDiscoveryClient::list_and_watch: Emitting Added event for instance_id={}, key={}",
+                                    instance.instance_id(),
+                                    kv.key_str()
+                                );
+                                Some(DiscoveryEvent::Added(instance))
+                            },
                             Err(e) => {
                                 tracing::warn!(
                                     key = %kv.key_str(),
@@ -193,19 +268,50 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
                         }
                     }
                     WatchEvent::Delete(kv) => {
+                        tracing::debug!(
+                            "KVStoreDiscoveryClient::list_and_watch: Delete event, key={}, prefix={}",
+                            kv.key_str(),
+                            prefix
+                        );
                         // Check if this key matches our prefix
                         if !Self::matches_prefix(kv.key_str(), &prefix) {
+                            tracing::debug!(
+                                "KVStoreDiscoveryClient::list_and_watch: Skipping deleted key {} (doesn't match prefix {})",
+                                kv.key_str(),
+                                prefix
+                            );
                             continue;
                         }
 
-                        // Extract instance_id from the deleted entry
-                        match Self::parse_instance(kv.value()) {
-                            Ok(instance) => Some(DiscoveryEvent::Removed(instance.instance_id())),
-                            Err(e) => {
+                        // Extract instance_id from the key path, not the value
+                        // Delete events have empty values in etcd, so we parse the instance_id from the key
+                        // Key format: "v1/instances/namespace/component/endpoint/{instance_id:x}"
+                        let key_parts: Vec<&str> = kv.key_str().split('/').collect();
+                        match key_parts.last() {
+                            Some(instance_id_hex) => {
+                                match u64::from_str_radix(instance_id_hex, 16) {
+                                    Ok(instance_id) => {
+                                        tracing::info!(
+                                            "KVStoreDiscoveryClient::list_and_watch: Emitting Removed event for instance_id={}, key={}",
+                                            instance_id,
+                                            kv.key_str()
+                                        );
+                                        Some(DiscoveryEvent::Removed(instance_id))
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            key = %kv.key_str(),
+                                            error = %e,
+                                            "Failed to parse instance_id hex from deleted key"
+                                        );
+                                        None
+                                    }
+                                }
+                            }
+                            None => {
                                 tracing::warn!(
                                     key = %kv.key_str(),
-                                    error = %e,
-                                    "Failed to parse instance_id from deleted discovery instance"
+                                    "Delete event key has no path components"
                                 );
                                 None
                             }
@@ -214,11 +320,19 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
                 };
 
                 if let Some(event) = discovery_event {
+                    tracing::debug!("KVStoreDiscoveryClient::list_and_watch: Yielding event: {:?}", event);
                     yield Ok(event);
+                } else {
+                    tracing::debug!("KVStoreDiscoveryClient::list_and_watch: Event was filtered out (None)");
                 }
             }
+            tracing::debug!("KVStoreDiscoveryClient::list_and_watch: Stream ended after {} events for prefix={}", event_count, prefix);
         };
 
+        tracing::debug!(
+            "KVStoreDiscoveryClient::list_and_watch: Returning stream for key={:?}",
+            key
+        );
         Ok(Box::pin(stream))
     }
 }
