@@ -44,7 +44,7 @@ use std::{
     collections::{HashMap, VecDeque},
     iter,
     rc::Rc,
-    sync::{Arc, OnceLock},
+    sync::{Arc, OnceLock, RwLock},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -235,6 +235,8 @@ pub struct RadixTree {
     lookup: HashMap<WorkerWithDpRank, HashMap<ExternalSequenceBlockHash, SharedRadixBlock>>,
     /// The time buffer the radix tree should check when considering frequence of block accesses
     expiration_duration: Option<Duration>,
+    /// The tree current size.
+    current_size: RwLock<usize>,
 }
 
 impl Default for RadixTree {
@@ -254,6 +256,7 @@ impl RadixTree {
             root: Rc::new(RefCell::new(RadixBlock::new())),
             lookup: HashMap::new(),
             expiration_duration,
+            current_size: RwLock::new(0),
         }
     }
 
@@ -380,6 +383,10 @@ impl RadixTree {
                                 .children
                                 .insert(block_id.tokens_hash, new_block.clone());
 
+                            // increment the current size when creating a new block
+                            let mut size = self.current_size.write().unwrap();
+                            *size = size.saturating_add(1);
+
                             new_block
                         }
                     };
@@ -428,6 +435,10 @@ impl RadixTree {
                     if guard.workers.is_empty() {
                         // if no workers are using this block, that is true for all children
                         guard.children.clear();
+
+                        // Decrement the current size when removing the last worker from a node
+                        let mut size = self.current_size.write().unwrap();
+                        *size = size.saturating_sub(1);
                     }
                     // remove the block from the lookup table
                     worker_lookup.remove(&block);
@@ -436,6 +447,8 @@ impl RadixTree {
             }
             KvCacheEventData::Cleared => {
                 self.clear_all_blocks(worker.worker_id);
+                // reset the current size
+                *self.current_size.write().unwrap() = 0; // TODO: better error handling
                 Ok(())
             }
         }
@@ -559,6 +572,10 @@ impl RadixTree {
         }
 
         events
+    }
+
+    pub fn current_size(&self) -> usize {
+        *self.current_size.read().unwrap() // TODO: better error handling
     }
 }
 

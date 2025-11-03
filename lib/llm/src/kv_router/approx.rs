@@ -13,6 +13,8 @@
 //!
 //! - The thinking behind this is that if we send a request to a worker, and shortly after get a request with a similar prefix, odds
 //!   are that routing to the same worker will result in a large cache hit.
+//! - Another benefit is the ability to bound the size of the radix tree, which is not possible if we were trying to accurately represent
+//!   the state of each worker.
 
 use async_trait::async_trait;
 use std::cmp::Reverse;
@@ -54,45 +56,82 @@ struct RouterResult {
     sequence_hashes: Vec<u64>,
 }
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-struct TimerEntry {
-    /// The key of the timer.
+/// Block entry to be inserted in the [`PruneManager::expirations`] heap.
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+struct BlockEntry {
+    /// The key of the block entry.
     key: ExternalSequenceBlockHash,
     /// The worker (with dp_rank) that stored this block.
     worker: WorkerWithDpRank,
+    /// The position of this block in the sequence (0-indexed).
+    seq_position: usize,
+}
+
+impl PartialOrd for BlockEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for BlockEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // The heap is (Reverse<Instant>, BlockEntry), so:
+        // - Reverse<Instant> handles earliest-first ordering
+        // - BlockEntry uses natural ordering: larger seq_position = popped first from max-heap
+        self.seq_position
+            .cmp(&other.seq_position)
+            .then_with(|| self.key.cmp(&other.key))
+            .then_with(|| self.worker.cmp(&other.worker))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PruneConfig {
+    /// The maximum tree size before pruning is considered.
+    pub max_tree_size: usize,
+    /// The target size ratio to prune down to when max_tree_size is exceeded.
+    /// For example, if max_tree_size is 100 and target_size_ratio is 0.5,
+    /// we will prune down to 50 nodes when max_tree_size is exceeded.
+    pub prune_target_ratio: f64,
+    /// Interval at which to prune the tree, so that it stays within the max_tree_size.
+    pub prune_interval: Duration,
 }
 
 /// A data structure to manage a collection of timers, addressable by a key.
 /// This is structured as a sort of "priority queue" of keys, where the priority is the expiration time.
 /// It supports insertion as well as updating the expiration time of a key.
-/// The [`TimerManager::expirations`] heap is lazily updated to reflect the true expiration times in [`TimerManager::timers`]
+/// The [`PruneManager::expirations`] heap is lazily updated to reflect the true expiration times in [`PruneManager::timers`]
 /// For now, we have a fixed expiration time for all keys.
 #[derive(Debug)]
-struct TimerManager<K: Clone + Hash + Eq + Ord> {
+struct PruneManager<K: Clone + Hash + Eq + Ord> {
     /// The source of truth. Maps a key to its current expiration instant.
     timers: HashMap<K, Instant>,
 
-    /// A min-heap of (expiration_instant, key) used to efficiently find the
-    /// next expiring timer. An entry in this heap is "stale" if the instant
-    /// does not match the one in the `timers` map.
-    expirations: BinaryHeap<Reverse<(Instant, K)>>,
-
-    /// The expiration duration of the timers.
-    ttl: Duration,
+    /// A max-heap of (Reverse<expiration_instant>, key) used to efficiently find the
+    /// next expiring timer. Reverse<Instant> makes earlier times pop first.
+    /// An entry in this heap is "stale" if the instant does not match the one in the `timers` map.
+    expirations: BinaryHeap<(Reverse<Instant>, K)>,
 
     /// Threshold for rebuilding the heap.
     /// The heap will be rebuilt from scratch to remove stale entries.
     threshold: usize,
+
+    /// The expiration duration of the timers.
+    ttl: Duration,
+
+    /// The configuration for tree-size pruning.
+    prune_config: Option<PruneConfig>,
 }
 
-impl<K: Clone + Hash + Eq + Ord> TimerManager<K> {
-    /// Creates a new, empty TimerManager.
-    pub fn new(ttl: Duration, threshold: usize) -> Self {
-        TimerManager {
+impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
+    /// Creates a new, empty PruneManager.
+    pub fn new(ttl: Duration, threshold: usize, prune_config: Option<PruneConfig>) -> Self {
+        PruneManager {
             timers: HashMap::new(),
             expirations: BinaryHeap::new(),
             ttl,
             threshold,
+            prune_config,
         }
     }
 
@@ -101,7 +140,7 @@ impl<K: Clone + Hash + Eq + Ord> TimerManager<K> {
         self.expirations = self
             .timers
             .iter()
-            .map(|(key, &expiry)| Reverse((expiry, key.clone())))
+            .map(|(key, &expiry)| (Reverse(expiry), key.clone()))
             .collect();
     }
 
@@ -120,7 +159,7 @@ impl<K: Clone + Hash + Eq + Ord> TimerManager<K> {
             // Push the new expiration onto the heap. If the key was updated,
             // this leaves a "stale" entry on the heap for the old time,
             // which will be ignored when it's popped.
-            self.expirations.push(Reverse((expiry_time, key)));
+            self.expirations.push((Reverse(expiry_time), key));
         }
 
         // Check if we should rebuild the heap to remove stale entries
@@ -135,14 +174,14 @@ impl<K: Clone + Hash + Eq + Ord> TimerManager<K> {
         let mut expired_keys = Vec::new();
         let now = Instant::now();
 
-        while let Some(Reverse((expiry_time, _))) = self.expirations.peek() {
+        while let Some((Reverse(expiry_time), _)) = self.expirations.peek() {
             // If the next timer in the heap is not yet expired, we can stop.
             if *expiry_time > now {
                 break;
             }
 
             // The timer might be expired, so pop it from the heap.
-            let Reverse((expiry_time, key)) = self.expirations.pop().unwrap();
+            let (Reverse(expiry_time), key) = self.expirations.pop().unwrap();
 
             if self.timers.get(&key) == Some(&expiry_time) {
                 // This is a valid, non-stale, expired timer.
@@ -158,7 +197,37 @@ impl<K: Clone + Hash + Eq + Ord> TimerManager<K> {
     pub fn peek_next_expiry(&self) -> Option<Instant> {
         self.expirations
             .peek()
-            .map(|Reverse((expiry_time, _))| *expiry_time)
+            .map(|(Reverse(expiry_time), _)| *expiry_time)
+    }
+
+    /// Prunes the tree if the current size is greater than the max tree size.
+    pub fn prune(&mut self, current_size: usize) -> Result<Vec<K>, KvRouterError> {
+        let target_size: usize;
+        if let Some(prune_config) = &self.prune_config {
+            target_size =
+                (prune_config.max_tree_size as f64 * prune_config.prune_target_ratio) as usize;
+        } else {
+            tracing::error!("Prune was called but prune config is None");
+            return Err(KvRouterError::BlockNotFound); // TODO: better error handling
+        }
+
+        let mut pruned_keys = Vec::new();
+
+        let mut num_pruned = 0;
+        while num_pruned < (current_size - target_size) {
+            if let Some((Reverse(expiry_time), key)) = self.expirations.pop() {
+                if self.timers.get(&key) == Some(&expiry_time) {
+                    // This is a valid, non-stale timer.
+                    self.timers.remove(&key);
+                    pruned_keys.push(key);
+                    num_pruned += 1;
+                }
+            } else {
+                break;
+            }
+        }
+
+        Ok(pruned_keys)
     }
 }
 
@@ -180,7 +249,12 @@ pub struct ApproxKvIndexer {
 }
 
 impl ApproxKvIndexer {
-    pub fn new(token: CancellationToken, kv_block_size: u32, ttl: Duration) -> Self {
+    pub fn new(
+        token: CancellationToken,
+        kv_block_size: u32,
+        ttl: Duration,
+        prune_config: Option<PruneConfig>,
+    ) -> Self {
         let (match_tx, mut match_rx) = mpsc::channel::<MatchRequest>(2048);
         let (route_tx, mut route_rx) = mpsc::channel::<RouterResult>(2048);
         let (remove_worker_tx, mut remove_worker_rx) = mpsc::channel::<WorkerId>(16);
@@ -198,11 +272,20 @@ impl ApproxKvIndexer {
             runtime.block_on(async move {
                 let mut trie = RadixTree::new();
                 // Use a reasonable threshold - can be made configurable if needed
-                let mut timer_manager: TimerManager<TimerEntry> = TimerManager::new(ttl, 50);
+                let mut prune_manager: PruneManager<BlockEntry> = PruneManager::new(ttl, 50, prune_config.clone());
                 let mut event_id = 0;
+                
+                // Create a future that periodically checks the current size of the tree and prunes if necessary.
+                let mut prune_fut = if let Some(prune_config) = &prune_config {
+                    tokio::time::interval(prune_config.prune_interval)
+                } else {
+                    // If there is no prune config, sleep forever.
+                    tokio::time::interval(Duration::MAX)
+                };
+                
                 loop {
                     // Create a future that sleeps until the next expiration time.
-                    let expiry_fut = if let Some(next_expiry) = timer_manager.peek_next_expiry() {
+                    let expiry_fut = if let Some(next_expiry) = prune_manager.peek_next_expiry() {
                         tokio::time::sleep_until(next_expiry)
                     } else {
                         // If there are no timers, sleep forever.
@@ -245,11 +328,13 @@ impl ApproxKvIndexer {
                                 }
                             );
 
+                            // TODO: we should condition on the result of this method before inserting into the prune manager
                             let _ = trie.apply_event(event);
 
-                            timer_manager.insert(result.sequence_hashes.iter().map(|h| TimerEntry {
+                            prune_manager.insert(result.sequence_hashes.iter().enumerate().map(|(idx, h)| BlockEntry {
                                 key: ExternalSequenceBlockHash(*h),
                                 worker: result.worker,
+                                seq_position: idx,
                             }).collect());
                         }
 
@@ -264,7 +349,7 @@ impl ApproxKvIndexer {
                         }
 
                         _ = expiry_fut => {
-                            let expired = timer_manager.pop_expired();
+                            let expired = prune_manager.pop_expired();
 
                             expired.iter().for_each(|e| {
                                 event_id += 1;
@@ -282,6 +367,33 @@ impl ApproxKvIndexer {
 
                                 let _ = trie.apply_event(event);
                             });
+                        }
+
+                        _ = prune_fut.tick() => {
+                            if let Some(prune_config) = &prune_config {
+                                if trie.current_size() > prune_config.max_tree_size {
+                                tracing::info!("Pruning: tree size ({}) exceeded max tree size ({}), starting pruning", trie.current_size(), prune_config.max_tree_size);
+                                let pruned = prune_manager.prune(trie.current_size()).unwrap(); // TODO: better error handling
+                                pruned.iter().for_each(|p| {
+                                    event_id += 1;
+
+                                    let event = RouterEvent::new(
+                                        p.worker.worker_id,
+                                        KvCacheEvent {
+                                            event_id,
+                                            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                                                block_hashes: vec![p.key],
+                                            }),
+                                            dp_rank: p.worker.dp_rank,
+                                        }
+                                    );
+                                    let _ = trie.apply_event(event);
+                                });
+                                tracing::info!("Pruning: pruned ({}) blocks from tree", pruned.len());
+                                }
+                            } else {
+                                tracing::error!("Pruning: no prune config found, but prune future ticked. This should never happen.");
+                            }
                         }
                     }
                 }
@@ -424,7 +536,7 @@ mod tests {
 
     const KV_BLOCK_SIZE: u32 = 4;
 
-    impl<T: Clone + Hash + Eq + Ord> TimerManager<T> {
+    impl<T: Clone + Hash + Eq + Ord> PruneManager<T> {
         pub fn get_expiry(&self, key: &T) -> Option<&Instant> {
             self.timers.get(key)
         }
@@ -449,43 +561,43 @@ mod tests {
         }
     }
 
-    /// Validate basic insert / expiry behaviour of [`TimerManager`].
+    /// Validate basic insert / expiry behaviour of [`PruneManager`].
     #[tokio::test]
-    async fn test_timer_manager_expiry() {
+    async fn test_prune_manager_expiry() {
         const TTL: Duration = Duration::from_millis(50);
-        let mut tm: TimerManager<u32> = TimerManager::new(TTL, 50);
+        let mut pm: PruneManager<u32> = PruneManager::new(TTL, 50, None);
 
-        tm.insert(vec![1, 2, 3]);
-        assert!(tm.get_expiry(&1).is_some());
-        assert!(tm.get_expiry(&2).is_some());
-        assert!(tm.get_expiry(&3).is_some());
+        pm.insert(vec![1, 2, 3]);
+        assert!(pm.get_expiry(&1).is_some());
+        assert!(pm.get_expiry(&2).is_some());
+        assert!(pm.get_expiry(&3).is_some());
 
         // Wait until after the TTL
         time::sleep(TTL + Duration::from_millis(20)).await;
-        let expired = tm.pop_expired();
+        let expired = pm.pop_expired();
         assert_eq!(expired.len(), 3);
-        assert!(tm.get_expiry(&1).is_none());
-        assert!(tm.get_expiry(&2).is_none());
-        assert!(tm.get_expiry(&3).is_none());
+        assert!(pm.get_expiry(&1).is_none());
+        assert!(pm.get_expiry(&2).is_none());
+        assert!(pm.get_expiry(&3).is_none());
     }
 
     /// Validate that reinserting an existing key extends its TTL and prevents premature expiry.
     #[tokio::test]
-    async fn test_timer_manager_update_resets_ttl() {
+    async fn test_prune_manager_update_resets_ttl() {
         // Validate that reinserting an existing key extends its TTL and prevents premature expiry.
         const TTL: Duration = Duration::from_millis(50);
-        let mut tm: TimerManager<u32> = TimerManager::new(TTL, 50);
+        let mut pm: PruneManager<u32> = PruneManager::new(TTL, 50, None);
 
         // Initial insert and capture the original expiry.
-        tm.insert(vec![42]);
-        let first_expiry = *tm
+        pm.insert(vec![42]);
+        let first_expiry = *pm
             .get_expiry(&42)
             .expect("expiry missing after first insert");
 
         // Wait for half of the original TTL before reinserting.
         time::sleep(Duration::from_millis(25)).await;
-        tm.insert(vec![42]);
-        let second_expiry = *tm
+        pm.insert(vec![42]);
+        let second_expiry = *pm
             .get_expiry(&42)
             .expect("expiry missing after reinsertion");
 
@@ -494,7 +606,7 @@ mod tests {
 
         // Wait until *after* the first expiry would have fired, but *before* the new expiry.
         time::sleep(Duration::from_millis(30)).await; // 25ms already elapsed, +30ms = 55ms > first TTL
-        let expired = tm.pop_expired();
+        let expired = pm.pop_expired();
         assert!(
             expired.is_empty(),
             "key expired prematurely despite TTL refresh"
@@ -502,7 +614,7 @@ mod tests {
 
         // Now wait until after the second expiry should have occurred.
         time::sleep(Duration::from_millis(30)).await; // Ensure we pass the refreshed TTL
-        let expired_after = tm.pop_expired();
+        let expired_after = pm.pop_expired();
         assert_eq!(expired_after, vec![42]);
     }
 
@@ -514,7 +626,7 @@ mod tests {
     async fn test_approx_kv_indexer_basic_flow() {
         const TTL: Duration = Duration::from_millis(200);
         let cancel = CancellationToken::new();
-        let indexer = ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, TTL);
+        let indexer = ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, TTL, None);
 
         let tokens: Vec<u32> = vec![1, 2, 3, 4]; // Exactly one KV block
         let worker_id: WorkerId = 0;
@@ -556,7 +668,7 @@ mod tests {
     async fn test_remove_worker() {
         const TTL: Duration = Duration::from_secs(5); // Large enough to avoid expiry during test
         let cancel = CancellationToken::new();
-        let mut indexer = ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, TTL);
+        let mut indexer = ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, TTL, None);
 
         let tokens: Vec<u32> = vec![10, 11, 12, 13];
         let worker_id: WorkerId = 7;
@@ -595,7 +707,7 @@ mod tests {
         const TTL: Duration = Duration::from_secs(5); // Large enough to avoid expiry during test
 
         let cancel = CancellationToken::new();
-        let mut indexer = ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, TTL);
+        let mut indexer = ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, TTL, None);
 
         let tokens: Vec<u32> = vec![100, 101, 102, 103];
         let worker_0: WorkerId = 30;
@@ -653,7 +765,7 @@ mod tests {
         const TTL: Duration = Duration::from_secs(5);
 
         let cancel = CancellationToken::new();
-        let indexer = ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, TTL);
+        let indexer = ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, TTL, None);
 
         // Sequence A : single block
         let seq_a: Vec<u32> = vec![1, 2, 3, 4];
@@ -699,7 +811,7 @@ mod tests {
         const TTL: Duration = Duration::from_secs(5);
 
         let cancel = CancellationToken::new();
-        let indexer = ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, TTL);
+        let indexer = ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, TTL, None);
 
         let tokens: Vec<u32> = vec![9, 8, 7, 6];
         let worker_0: WorkerId = 21;
