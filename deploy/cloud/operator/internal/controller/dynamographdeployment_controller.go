@@ -106,8 +106,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	// retrieve the CRD
 	dynamoDeployment := &nvidiacomv1alpha1.DynamoGraphDeployment{}
 	if err = r.Get(ctx, req.NamespacedName, dynamoDeployment); err != nil {
-		err = client.IgnoreNotFound(err)
-		return
+		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	defer func() {
@@ -153,18 +152,18 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	if err != nil {
 		logger.Error(err, "failed to handle the finalizer")
 		reason = "failed_to_handle_the_finalizer"
-		return
+		return ctrl.Result{}, err
 	}
 	if deleted {
-		return
+		return ctrl.Result{}, nil
 	}
 	state, reason, message, err = r.reconcileResources(ctx, dynamoDeployment)
 	if err != nil {
 		logger.Error(err, "failed to reconcile the resources")
 		reason = "failed_to_reconcile_the_resources"
-		return
+		return ctrl.Result{}, err
 	}
-	return
+	return ctrl.Result{}, nil
 }
 
 type Resource interface {
