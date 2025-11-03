@@ -16,6 +16,8 @@ AGG_WORKERS={{ agg_workers }}
 TOTAL_NODES={{ total_nodes }}
 GPUS_PER_NODE={{ gpus_per_node }}
 TOTAL_GPUS=$((AGG_NODES * GPUS_PER_NODE))
+PREFILL_GPUS=0
+DECODE_GPUS=$TOTAL_GPUS
 AGG_NODES_PER_WORKER=$((AGG_NODES / AGG_WORKERS))
 LOG_DIR="${SLURM_SUBMIT_DIR}/logs/${SLURM_JOB_ID}_{{ agg_workers }}A_{{ timestamp }}"
 SCRIPT_DIR="${SLURM_SUBMIT_DIR}/scripts"
@@ -277,7 +279,7 @@ PROFILER_ARGS="{{ profiler_arg }}"
 
 {% if do_profile %}
 {% raw %}
-srun --nodes=1 --ntasks=1 $ENROOT_ARGS --jobid $SLURM_JOB_ID -w ${nodes[0]} --output=${LOG_DIR}/profile.out --error=${LOG_DIR}/profile.err --overlap bash /scripts/${PROFILER_TYPE}/bench.sh 0 $AGG_WORKERS $TOTAL_GPUS ${PROFILER_ARGS} &
+srun --nodes=1 --ntasks=1 $ENROOT_ARGS --jobid $SLURM_JOB_ID -w ${nodes[0]} --output=${LOG_DIR}/profile.out --error=${LOG_DIR}/profile.err --overlap bash /scripts/${PROFILER_TYPE}/bench.sh 0 $AGG_WORKERS $PREFILL_GPUS $DECODE_GPUS $TOTAL_GPUS ${PROFILER_ARGS} &
 {% endraw %}
 {% endif %}
 
