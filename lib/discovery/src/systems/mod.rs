@@ -13,6 +13,9 @@ mod p2p;
 #[cfg(feature = "p2p")]
 pub use p2p::{P2pConfig, P2pConfigBuilder};
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 mod validation;
 
 use std::sync::Arc;

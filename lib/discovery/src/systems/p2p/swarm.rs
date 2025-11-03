@@ -141,6 +141,14 @@ impl std::fmt::Debug for P2pDiscovery {
 }
 
 impl P2pDiscovery {
+    fn decode_peer(value: &[u8]) -> Result<PeerInfo, GetRecordError> {
+        if value.is_empty() {
+            return Err(GetRecordError::NotFound);
+        }
+
+        serde_json::from_slice(value).map_err(|err| GetRecordError::Backend(err.into()))
+    }
+
     fn create_behaviour(
         key: &identity::Keypair,
         replication_factor: usize,
@@ -557,8 +565,7 @@ impl PeerDiscovery for P2pDiscovery {
                 .await
                 .map_err(DiscoveryQueryError::from)?;
 
-            let peer_info: PeerInfo = serde_json::from_slice(&value)
-                .map_err(|err| DiscoveryQueryError::Backend(Arc::new(err.into())))?;
+            let peer_info = Self::decode_peer(&value).map_err(DiscoveryQueryError::from)?;
 
             Ok(peer_info)
         })
@@ -576,8 +583,7 @@ impl PeerDiscovery for P2pDiscovery {
                 .await
                 .map_err(DiscoveryQueryError::from)?;
 
-            let peer_info: PeerInfo = serde_json::from_slice(&value)
-                .map_err(|err| DiscoveryQueryError::Backend(Arc::new(err.into())))?;
+            let peer_info = Self::decode_peer(&value).map_err(DiscoveryQueryError::from)?;
 
             Ok(peer_info)
         })
@@ -596,25 +602,31 @@ impl PeerDiscovery for P2pDiscovery {
             // Collision detection on worker_id
             let worker_key = RecordKey::new(&worker_id.as_u64().to_be_bytes());
             match this.get_record(worker_key.clone()).await {
-                Ok(existing) => {
-                    let stored: PeerInfo = serde_json::from_slice(&existing)
-                        .map_err(|err| DiscoveryError::Backend(err.into()))?;
-                    if stored.instance_id != instance_id {
-                        return Err(DiscoveryError::WorkerIdCollision(
-                            worker_id,
-                            stored.instance_id,
-                            instance_id,
-                        ));
-                    }
+                Ok(existing) => match Self::decode_peer(&existing) {
+                    Ok(stored) => {
+                        if stored.instance_id != instance_id {
+                            return Err(DiscoveryError::WorkerIdCollision(
+                                worker_id,
+                                stored.instance_id,
+                                instance_id,
+                            ));
+                        }
 
-                    if stored.address_checksum() != desired_peer.address_checksum() {
-                        return Err(DiscoveryError::ChecksumMismatch(
-                            instance_id,
-                            stored.address_checksum(),
-                            desired_peer.address_checksum(),
-                        ));
+                        if stored.address_checksum() != desired_peer.address_checksum() {
+                            return Err(DiscoveryError::ChecksumMismatch(
+                                instance_id,
+                                stored.address_checksum(),
+                                desired_peer.address_checksum(),
+                            ));
+                        }
+
+                        return Err(DiscoveryError::Backend(anyhow!(
+                            "Instance {instance_id} already registered"
+                        )));
                     }
-                }
+                    Err(GetRecordError::NotFound) => {}
+                    Err(GetRecordError::Backend(err)) => return Err(DiscoveryError::Backend(err)),
+                },
                 Err(GetRecordError::NotFound) => {}
                 Err(GetRecordError::Backend(err)) => return Err(DiscoveryError::Backend(err)),
             }
@@ -622,17 +634,23 @@ impl PeerDiscovery for P2pDiscovery {
             // Check existing instance record for checksum mismatch
             let instance_key = RecordKey::new(instance_id.as_bytes());
             match this.get_record(instance_key.clone()).await {
-                Ok(existing) => {
-                    let stored: PeerInfo = serde_json::from_slice(&existing)
-                        .map_err(|err| DiscoveryError::Backend(err.into()))?;
-                    if stored.address_checksum() != desired_peer.address_checksum() {
-                        return Err(DiscoveryError::ChecksumMismatch(
-                            instance_id,
-                            stored.address_checksum(),
-                            desired_peer.address_checksum(),
-                        ));
+                Ok(existing) => match Self::decode_peer(&existing) {
+                    Ok(stored) => {
+                        if stored.address_checksum() != desired_peer.address_checksum() {
+                            return Err(DiscoveryError::ChecksumMismatch(
+                                instance_id,
+                                stored.address_checksum(),
+                                desired_peer.address_checksum(),
+                            ));
+                        }
+
+                        return Err(DiscoveryError::Backend(anyhow!(
+                            "Instance {instance_id} already registered"
+                        )));
                     }
-                }
+                    Err(GetRecordError::NotFound) => {}
+                    Err(GetRecordError::Backend(err)) => return Err(DiscoveryError::Backend(err)),
+                },
                 Err(GetRecordError::NotFound) => {}
                 Err(GetRecordError::Backend(err)) => return Err(DiscoveryError::Backend(err)),
             }
@@ -654,11 +672,26 @@ impl PeerDiscovery for P2pDiscovery {
 
     fn unregister_instance(
         &self,
-        _instance_id: InstanceId,
+        instance_id: InstanceId,
     ) -> BoxFuture<'static, Result<(), DiscoveryError>> {
+        let this = self.clone();
         Box::pin(async move {
-            // Kademlia records expire via TTL; explicit deletion is not available.
-            debug!("P2P unregister_instance is a no-op; records expire via TTL");
+            let worker_key = RecordKey::new(&instance_id.worker_id().as_u64().to_be_bytes());
+            let instance_key = RecordKey::new(instance_id.as_bytes());
+
+            this.put_record(worker_key, Vec::new())
+                .await
+                .map_err(DiscoveryError::Backend)?;
+            this.put_record(instance_key, Vec::new())
+                .await
+                .map_err(DiscoveryError::Backend)?;
+
+            debug!(
+                "Published tombstone for instance {} (worker_id {})",
+                instance_id,
+                instance_id.worker_id()
+            );
+
             Ok(())
         })
     }

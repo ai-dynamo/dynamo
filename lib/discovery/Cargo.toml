@@ -39,7 +39,7 @@ futures-util = { version = "0.3", optional = true }
 etcd-client = { version = "0.17", optional = true }
 
 # Libp2p dependencies (optional) - Match am-core versions
-libp2p = { version = "0.54", default-features = false, features = [
+libp2p = { version = "0.56", default-features = false, features = [
     "tcp",
     "noise",
     "yamux",
@@ -47,9 +47,9 @@ libp2p = { version = "0.54", default-features = false, features = [
     "tokio",
     "pnet",
 ], optional = true }
-libp2p-kad = { version = "0.46", optional = true }
-libp2p-mdns = { version = "0.46", features = ["tokio"], optional = true }
-libp2p-swarm = { version = "0.45", optional = true }
+libp2p-kad = { version = "0.48", optional = true }
+libp2p-mdns = { version = "0.48", features = ["tokio"], optional = true }
+libp2p-swarm = { version = "0.47", optional = true }
 libp2p-identity = { version = "0.2", optional = true }
 blake2 = { version = "0.10", optional = true }
 
@@ -58,7 +58,7 @@ tokio = { version = "1.43", features = ["full", "test-util"] }
 clap = { version = "4", features = ["derive"] }
 tracing-subscriber = "0.3"
 tempfile = "3"
-testcontainers = "0.23"
+testcontainers = "0.25"
 
 [dependencies.tracing-subscriber]
 version = "0.3"
@@ -66,11 +66,12 @@ features = ["env-filter"]
 optional = true
 
 [features]
-default = ["p2p", "etcd"]
+default = ["p2p", "etcd", "testing-etcd"]
 etcd = ["dep:etcd-client"]
 p2p = ["dep:libp2p", "dep:libp2p-kad", "dep:libp2p-mdns", "dep:libp2p-swarm", "dep:libp2p-identity", "dep:blake2", ]
 http-service = ["dep:axum", "dep:tower", "dep:tower-http", "dep:hyper", "dep:reqwest", "dep:tracing-subscriber", "dep:tokio-stream", "dep:futures-util"]
 full = ["etcd", "p2p", "http-service"]
+testing-etcd = []  # Enable etcd tests (default on, disable with --no-default-features)
 integration-etcd = []  # Feature flag for integration tests with real etcd (requires Docker)
 
 #[[bin]]

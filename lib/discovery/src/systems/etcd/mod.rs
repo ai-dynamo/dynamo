@@ -292,6 +292,12 @@ impl Drop for EtcdDiscoverySystem {
 mod tests {
     use super::*;
     use crate::peer::{InstanceId, WorkerAddress};
+    use crate::systems::DiscoverySystem;
+    use crate::systems::test_support::{
+        checksum_validation, collision_detection, not_found_errors,
+        register_and_discover_by_instance_id, register_and_discover_by_worker_id,
+    };
+    use std::sync::Arc;
 
     // Note: These tests require a running etcd instance
     //
@@ -300,227 +306,79 @@ mod tests {
     //     /usr/local/bin/etcd --advertise-client-urls http://0.0.0.0:2379 \
     //     --listen-client-urls http://0.0.0.0:2379
     //
-    // Run tests:
-    //   cargo test --package dynamo-discovery --features etcd -- --ignored
+    // Run tests (enabled by default with 'testing-etcd' feature):
+    //   cargo test --package dynamo-discovery --lib --features etcd
+    //
+    // To skip these tests, disable the feature:
+    //   cargo test --package dynamo-discovery --lib --features etcd --no-default-features
 
     /// Helper function to get etcd endpoint for tests
     fn etcd_endpoint() -> String {
-        std::env::var("ETCD_ENDPOINT").unwrap_or_else(|_| "http://172.17.0.4:2379".to_string())
+        std::env::var("ETCD_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:2379".to_string())
     }
 
-    /// Helper function to create a test address
     fn make_test_address() -> WorkerAddress {
         WorkerAddress::from_bytes(b"127.0.0.1:8080".as_slice())
     }
 
-    #[ignore]
+    fn system_factory(
+        cluster_id: String,
+    ) -> impl std::future::Future<Output = anyhow::Result<Arc<dyn DiscoverySystem>>> {
+        let endpoint = etcd_endpoint();
+        async move {
+            EtcdConfigBuilder::default()
+                .cluster_id(cluster_id)
+                .endpoints(vec![endpoint])
+                .ttl(Duration::from_secs(30))
+                .build()
+                .await
+        }
+    }
+
+    #[cfg_attr(not(feature = "testing-etcd"), ignore)]
     #[tokio::test]
     async fn test_etcd_register_and_discover_by_worker_id() {
-        let system = EtcdConfigBuilder::default()
-            .cluster_id("test-worker-id")
-            .endpoints(vec![etcd_endpoint()])
-            .ttl(Duration::from_secs(30))
-            .build()
+        register_and_discover_by_worker_id(system_factory)
             .await
-            .expect("Failed to build discovery system");
-
-        let peer_discovery = system
-            .peer_discovery()
-            .expect("Peer discovery should be available");
-
-        let instance_id = InstanceId::new_v4();
-        let address = make_test_address();
-        let worker_id = instance_id.worker_id();
-
-        peer_discovery
-            .register_instance(instance_id, address.clone())
-            .await
-            .unwrap();
-
-        // Discover by worker_id
-        let found = peer_discovery
-            .discover_by_worker_id(worker_id)
-            .await
-            .unwrap();
-        assert_eq!(found.instance_id(), instance_id);
-        assert_eq!(&found.worker_address, &address);
-
-        // Cleanup
-        peer_discovery
-            .unregister_instance(instance_id)
-            .await
-            .unwrap();
-        system.shutdown();
+            .expect("worker_id discovery test failed");
     }
 
-    #[ignore]
+    #[cfg_attr(not(feature = "testing-etcd"), ignore)]
     #[tokio::test]
     async fn test_etcd_register_and_discover_by_instance_id() {
-        let system = EtcdConfigBuilder::default()
-            .cluster_id("test-instance-id")
-            .endpoints(vec![etcd_endpoint()])
-            .ttl(Duration::from_secs(30))
-            .build()
+        register_and_discover_by_instance_id(system_factory)
             .await
-            .expect("Failed to build discovery system");
-
-        let peer_discovery = system
-            .peer_discovery()
-            .expect("Peer discovery should be available");
-
-        let instance_id = InstanceId::new_v4();
-        let address = make_test_address();
-
-        peer_discovery
-            .register_instance(instance_id, address.clone())
-            .await
-            .unwrap();
-
-        // Discover by instance_id
-        let found = peer_discovery
-            .discover_by_instance_id(instance_id)
-            .await
-            .unwrap();
-        assert_eq!(found.instance_id(), instance_id);
-        assert_eq!(&found.worker_address, &address);
-
-        // Cleanup
-        peer_discovery
-            .unregister_instance(instance_id)
-            .await
-            .unwrap();
-        system.shutdown();
+            .expect("instance_id discovery test failed");
     }
 
-    #[ignore]
+    #[cfg_attr(not(feature = "testing-etcd"), ignore)]
     #[tokio::test]
     async fn test_etcd_collision_detection() {
-        let system = EtcdConfigBuilder::default()
-            .cluster_id("test-collision")
-            .endpoints(vec![etcd_endpoint()])
-            .ttl(Duration::from_secs(30))
-            .build()
+        collision_detection(system_factory)
             .await
-            .expect("Failed to build discovery system");
-
-        let peer_discovery = system
-            .peer_discovery()
-            .expect("Peer discovery should be available");
-
-        // Register first peer
-        let instance_id1 = InstanceId::new_v4();
-        let address1 = make_test_address();
-
-        peer_discovery
-            .register_instance(instance_id1, address1.clone())
-            .await
-            .unwrap();
-
-        // Since worker_id is derived from instance_id deterministically,
-        // we can't create a real collision without UUID collision.
-        // This test verifies that re-registration is detected and rejected.
-        //
-        // Note: Currently, even idempotent re-registration with the same address
-        // is rejected. Future enhancement could allow idempotent re-registration.
-
-        // Re-register same peer - currently fails with "already registered"
-        let result = peer_discovery
-            .register_instance(instance_id1, address1.clone())
-            .await;
-        assert!(
-            result.is_err(),
-            "Re-registration should currently be rejected (even with same address)"
-        );
-
-        // Cleanup
-        peer_discovery
-            .unregister_instance(instance_id1)
-            .await
-            .unwrap();
-        system.shutdown();
+            .expect("collision detection test failed");
     }
 
-    #[ignore]
+    #[cfg_attr(not(feature = "testing-etcd"), ignore)]
     #[tokio::test]
     async fn test_etcd_checksum_validation() {
-        let system = EtcdConfigBuilder::default()
-            .cluster_id("test-checksum")
-            .endpoints(vec![etcd_endpoint()])
-            .ttl(Duration::from_secs(30))
-            .build()
+        checksum_validation(system_factory)
             .await
-            .expect("Failed to build discovery system");
-
-        let peer_discovery = system
-            .peer_discovery()
-            .expect("Peer discovery should be available");
-
-        let instance_id = InstanceId::new_v4();
-        let address1 = WorkerAddress::from_bytes(&b"tcp://127.0.0.1:5555"[..]);
-        let address2 = WorkerAddress::from_bytes(&b"tcp://127.0.0.1:6666"[..]);
-
-        // Register with first address
-        peer_discovery
-            .register_instance(instance_id, address1.clone())
-            .await
-            .unwrap();
-
-        // Try to re-register with different address - should fail
-        let result = peer_discovery
-            .register_instance(instance_id, address2)
-            .await;
-        assert!(result.is_err(), "Should fail with checksum mismatch");
-
-        // Cleanup
-        peer_discovery
-            .unregister_instance(instance_id)
-            .await
-            .unwrap();
-        system.shutdown();
+            .expect("checksum validation test failed");
     }
 
-    #[ignore]
+    #[cfg_attr(not(feature = "testing-etcd"), ignore)]
     #[tokio::test]
     async fn test_etcd_not_found_errors() {
-        let system = EtcdConfigBuilder::default()
-            .cluster_id("test-not-found")
-            .endpoints(vec![etcd_endpoint()])
-            .ttl(Duration::from_secs(30))
-            .build()
+        not_found_errors(system_factory)
             .await
-            .expect("Failed to build discovery system");
-
-        let peer_discovery = system
-            .peer_discovery()
-            .expect("Peer discovery should be available");
-
-        // Try to discover non-existent worker_id
-        let fake_worker_id = InstanceId::new_v4().worker_id();
-        let result = peer_discovery.discover_by_worker_id(fake_worker_id).await;
-        assert!(
-            result.is_err(),
-            "Should return error for non-existent worker_id"
-        );
-
-        // Try to discover non-existent instance_id
-        let fake_instance = InstanceId::new_v4();
-        let result = peer_discovery.discover_by_instance_id(fake_instance).await;
-        assert!(
-            result.is_err(),
-            "Should return error for non-existent instance_id"
-        );
-
-        system.shutdown();
+            .expect("not found error test failed");
     }
 
-    #[ignore]
+    #[cfg_attr(not(feature = "testing-etcd"), ignore)]
     #[tokio::test]
     async fn test_etcd_unregister_revokes_lease() {
-        let system = EtcdConfigBuilder::default()
-            .cluster_id("test-revoke")
-            .endpoints(vec![etcd_endpoint()])
-            .ttl(Duration::from_secs(30))
-            .build()
+        let system = system_factory("test-revoke".to_string())
             .await
             .expect("Failed to build discovery system");
 
@@ -560,23 +418,16 @@ mod tests {
         system.shutdown();
     }
 
-    #[ignore]
+    #[cfg_attr(not(feature = "testing-etcd"), ignore)]
     #[tokio::test]
     async fn test_etcd_multiple_discovery_instances() {
         // Test that multiple discovery instances can share the same etcd
-        let system1 = EtcdConfigBuilder::default()
-            .cluster_id("test-shared")
-            .endpoints(vec![etcd_endpoint()])
-            .ttl(Duration::from_secs(30))
-            .build()
+        let cluster_id = "test-shared".to_string();
+        let system1 = system_factory(cluster_id.clone())
             .await
             .expect("Failed to build discovery system 1");
 
-        let system2 = EtcdConfigBuilder::default()
-            .cluster_id("test-shared")
-            .endpoints(vec![etcd_endpoint()])
-            .ttl(Duration::from_secs(30))
-            .build()
+        let system2 = system_factory(cluster_id)
             .await
             .expect("Failed to build discovery system 2");
 

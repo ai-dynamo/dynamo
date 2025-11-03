@@ -10,10 +10,7 @@ use std::sync::Arc;
 
 use local::LocalPeerDiscovery;
 
-use crate::peer::{
-    DiscoveryError, DiscoveryQueryError, InstanceId, PeerDiscovery, PeerInfo, WorkerAddress,
-    WorkerId,
-};
+use crate::peer::{DiscoveryQueryError, InstanceId, PeerDiscovery, PeerInfo, WorkerId};
 
 type QueryResult = Result<PeerInfo, DiscoveryQueryError>;
 type MaybeAsyncQuery = Either<Ready<QueryResult>, Shared<BoxFuture<'static, QueryResult>>>;
@@ -58,6 +55,10 @@ impl PeerDiscoveryManager {
                     .await?;
             }
         }
+
+        // TODO: Unregister local peer and remotes when the manager is dropped
+        // Since drop is not async, we'll need to create a task to unregister the remote instances and
+        // trigger that task during the drop implementation.
 
         Ok(Self {
             local,
@@ -185,6 +186,23 @@ impl PeerDiscoveryManager {
     }
 }
 
+// TODO: Implement Drop for PeerDiscoveryManager
+// impl Drop for PeerDiscoveryManager {
+//     fn drop(&mut self) {
+//         if let Some(instance_id) = self.instance_id.take() {
+//             if self.local.unregister_instance(instance_id).is_err() {
+//                 tracing::error!("Failed to unregister local peer: {}", instance_id);
+//             }
+
+//             for remote in &self.remotes {
+//                 if remote.unregister_instance(instance_id).await.is_err() {
+//                     tracing::error!("Failed to unregister local peer: {}", instance_id);
+//                 }
+//             }
+//         }
+//     }
+// }
+
 // /// Simple in-memory discovery implementation for testing and single-node deployments.
 // ///
 // /// This is a thin async wrapper around `LocalPeerDiscovery` that implements the
@@ -253,6 +271,8 @@ impl PeerDiscoveryManager {
 
 #[cfg(test)]
 mod tests {
+    use crate::peer::{DiscoveryError, WorkerAddress};
+
     use super::*;
     use bytes::Bytes;
     use parking_lot::Mutex as StdMutex;

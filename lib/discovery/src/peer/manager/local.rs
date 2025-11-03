@@ -85,6 +85,7 @@ impl LocalPeerDiscovery {
         Ok(())
     }
 
+    #[expect(dead_code)]
     pub fn unregister_instance(&self, instance_id: InstanceId) -> Result<(), DiscoveryError> {
         let mut state = self.inner.lock();
         state.by_worker_id.remove(&instance_id.worker_id());
