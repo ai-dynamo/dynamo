@@ -15,7 +15,7 @@ ARG DEV_BASE=""
 FROM ${DEV_BASE} AS local-dev
 
 # Don't want ubuntu to be editable, just change uid and gid.
-ENV USERNAME=ubuntu
+ENV USERNAME=dynamo
 ARG USER_UID
 ARG USER_GID
 ARG WORKSPACE_DIR=/workspace
