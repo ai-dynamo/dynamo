@@ -768,9 +768,9 @@ class NetworkFaultInjectorClient:
             }
 
             # Build target selector (where the packets are going TO)
-            target_spec = None
+            target_spec: dict[str, Any] | None = None
             if target_nats or target_specific_pods:
-                target_selector = {"mode": "all"}  # Default to all matching pods
+                target_selector: dict[str, Any] = {"mode": "all"}  # Default to all matching pods
 
                 # Build label selector for target
                 target_match_labels: dict[str, str] = {}
@@ -859,7 +859,7 @@ class NetworkFaultInjectorClient:
                 }
 
             # Build the full NetworkChaos resource
-            chaos_resource = {
+            chaos_resource: dict[str, Any] = {
                 "apiVersion": "chaos-mesh.org/v1alpha1",
                 "kind": "NetworkChaos",
                 "metadata": {
@@ -881,11 +881,15 @@ class NetworkFaultInjectorClient:
 
             # Add target if specified
             if target_spec:
-                chaos_resource["spec"]["target"] = target_spec
+                spec_dict = chaos_resource["spec"]
+                if isinstance(spec_dict, dict):
+                    spec_dict["target"] = target_spec
 
             # Add duration if specified
             if duration:
-                chaos_resource["spec"]["duration"] = f"{duration}s"
+                spec_dict = chaos_resource["spec"]
+                if isinstance(spec_dict, dict):
+                    spec_dict["duration"] = f"{duration}s"
 
             # Add port targeting if specified
             if target_ports:
