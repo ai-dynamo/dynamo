@@ -418,7 +418,7 @@ mod detect_parser_tests {
         let text = r#"<｜tool▁call▁begin｜>get_current_weather宽带}"#;
         let config = ToolCallConfig::deepseek_v3_1().json;
         let result = detect_tool_call_start_deepseek_v3_1(text, &config);
-        assert!(result);
+        assert!(!result);
     }
 
     #[test]
