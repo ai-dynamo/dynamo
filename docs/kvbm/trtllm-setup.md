@@ -87,7 +87,7 @@ kv_cache_config:
   enable_partial_reuse: false
   free_gpu_memory_fraction: 0.80
 kv_connector_config:
-  connector_module: dynamo.llm.trtllm_integration.connector
+  connector_module: kvbm.trtllm_integration.connector
   connector_scheduler_class: DynamoKVBMConnectorLeader
   connector_worker_class: DynamoKVBMConnectorWorker
 EOF
