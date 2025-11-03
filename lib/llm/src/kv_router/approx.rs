@@ -75,9 +75,7 @@ impl PartialOrd for BlockEntry {
 
 impl Ord for BlockEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // The heap is (Reverse<Instant>, BlockEntry), so:
-        // - Reverse<Instant> handles earliest-first ordering
-        // - BlockEntry uses natural ordering: larger seq_position = popped first from max-heap
+        // Break ties by sequence position (important for pruning), then by key, then by worker.
         self.seq_position
             .cmp(&other.seq_position)
             .then_with(|| self.key.cmp(&other.key))
