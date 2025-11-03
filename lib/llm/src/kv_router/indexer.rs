@@ -447,8 +447,6 @@ impl RadixTree {
             }
             KvCacheEventData::Cleared => {
                 self.clear_all_blocks(worker.worker_id);
-                // reset the current size
-                *self.current_size.write().unwrap() = 0; // TODO: better error handling
                 Ok(())
             }
         }
@@ -473,6 +471,10 @@ impl RadixTree {
                     // If no workers are using this block, that is true for all children
                     if block.borrow().workers.is_empty() {
                         block.borrow_mut().children.clear();
+
+                        // Decrement the current size when removing the last worker from a node
+                        let mut size = self.current_size.write().unwrap();
+                        *size = size.saturating_sub(1);
                     }
                 });
 
