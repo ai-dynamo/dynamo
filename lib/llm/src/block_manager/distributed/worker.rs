@@ -125,6 +125,7 @@ async fn perform_allocation_and_build_handler(
         .unwrap_or(false);
 
     if use_v2_transfer {
+        tracing::warn!("Using V2 transfer handler. This is experimental. Use at your own risk.");
         let backends = if leader_meta.num_disk_blocks > 0 {
             vec!["POSIX", "GDS_MT"]
         } else {
