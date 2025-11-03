@@ -150,7 +150,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Endpoint>()?;
     m.add_class::<Client>()?;
     m.add_class::<AsyncResponseStream>()?;
-    m.add_class::<llm::disagg_router::DisaggregatedRouter>()?;
     m.add_class::<llm::entrypoint::EntrypointArgs>()?;
     m.add_class::<llm::entrypoint::EngineConfig>()?;
     m.add_class::<llm::entrypoint::EngineType>()?;
