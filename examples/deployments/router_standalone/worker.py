@@ -20,7 +20,13 @@ import uuid
 from typing import AsyncGenerator, Optional
 
 import zmq
-from vllm.config import CacheConfig, ModelConfig, ObservabilityConfig, SchedulerConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    ObservabilityConfig,
+    SchedulerConfig,
+    VllmConfig,
+)
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.inputs.data import TokensPrompt
 from vllm.outputs import RequestOutput
@@ -132,7 +138,7 @@ class VllmWorkers:
                     stat_loggers=[LoggerFactory(port=metrics_port)],
                 )
             )
-        
+
         logger.info(f"All {self.num_workers} workers initialized")
 
     async def direct(

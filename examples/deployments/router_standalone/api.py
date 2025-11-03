@@ -79,7 +79,11 @@ class ServiceAPI:
                 or self.http_client is None
             ):
                 return ErrorResponse(
-                    error={"message": "Service not ready", "type": "service_unavailable", "code": 503}
+                    error={
+                        "message": "Service not ready",
+                        "type": "service_unavailable",
+                        "code": 503,
+                    },
                 )
 
             try:
@@ -94,7 +98,11 @@ class ServiceAPI:
                     max_tokens_value = request.max_tokens
                 else:
                     return ErrorResponse(
-                        error={"message": "Either max_tokens or max_completion_tokens must be specified", "type": "invalid_request_error", "code": 400}
+                        error={
+                            "message": "Either max_tokens or max_completion_tokens must be specified",
+                            "type": "invalid_request_error",
+                            "code": 400,
+                        },
                     )
 
                 # Use vLLM's preprocessing to convert chat to prompt
@@ -126,7 +134,11 @@ class ServiceAPI:
                 num_tokens = len(tokens)
                 if num_tokens == 0:
                     return ErrorResponse(
-                        error={"message": "Input prompt is empty", "type": "invalid_request_error", "code": 400}
+                        error={
+                            "message": "Input prompt is empty",
+                            "type": "invalid_request_error",
+                            "code": 400,
+                        }
                     )
 
                 # It is much preferred to communicate block hashes to the router instead of
@@ -156,7 +168,11 @@ class ServiceAPI:
                 except (httpx.RequestError, httpx.HTTPStatusError) as e:
                     logger.error(f"Router request failed: {e}")
                     return ErrorResponse(
-                        error={"message": "Router service unavailable", "type": "service_unavailable", "code": 503}
+                        error={
+                            "message": "Router service unavailable",
+                            "type": "service_unavailable",
+                            "code": 503,
+                        }
                     )
 
                 logger.info(f"Selected worker {best_worker_id} for request")
@@ -331,7 +347,7 @@ def main():
         try:
             # Initialize API services first
             await api.initialize_services()
-            
+
             # Now start both servers concurrently
             await asyncio.gather(
                 api.start(), router_api.start(), return_exceptions=True
