@@ -390,7 +390,7 @@ impl ApproxKvIndexer {
                             if let Ok(pruned) = prune_manager.prune(trie.current_size()) {
                                 pruned.iter().for_each(|p| {
                                     event_id += 1;
-    
+
                                     let event = RouterEvent::new(
                                         p.worker.worker_id,
                                         KvCacheEvent {
