@@ -30,15 +30,17 @@ num_gen_servers=${3}
 concurrency_list=${4}
 streaming=${5}
 log_path=${6}
-total_gpus=${7}
-model_path=${8}
-isl=${9}
-osl=${10}
-kind=${11}
+prefill_gpus=${7}
+decode_gpus=${8}
+total_gpus=$((prefill_gpus+decode_gpus))
+model_path=${9}
+isl=${10}
+osl=${11}
+kind=${12}
 
-if [ "$#" -ne 11 ]; then
-    echo "Error: Expected 11 arguments, got $#"
-    echo "Usage: $0 <model> <multi_round> <num_gen_servers> <concurrency_list> <streaming> <log_path> <total_gpus> <model_path> <isl> <osl> <kind>"
+if [ "$#" -ne 12 ]; then
+    echo "Error: Expected 12 arguments, got $#"
+    echo "Usage: $0 <model> <multi_round> <num_gen_servers> <concurrency_list> <streaming> <log_path> <prefill_gpus> <decode_gpus> <model_path> <isl> <osl> <kind>"
     exit 1
 fi
 
@@ -49,6 +51,8 @@ echo "  num_gen_servers: $num_gen_servers"
 echo "  concurrency_list: $concurrency_list"
 echo "  streaming: $streaming"
 echo "  log_path: $log_path"
+echo "  prefill_gpus: $prefill_gpus"
+echo "  decode_gpus: $decode_gpus"
 echo "  total_gpus: $total_gpus"
 echo "  model_path: $model_path"
 echo "  isl: $isl"
@@ -191,7 +195,7 @@ for concurrency in ${concurrency_list}; do
         --port ${port} \
         --save-result \
         --result-dir "${log_path}/results" \
-        --result-filename "results_concurrency_${original_concurrency}_gpus_${total_gpus}.json"
+        --result-filename "results_concurrency_${original_concurrency}_ctx${prefill_gpus}_gen${decode_gpus}.json"
 
     echo "Benchmark with concurrency ${concurrency} done"
 done
