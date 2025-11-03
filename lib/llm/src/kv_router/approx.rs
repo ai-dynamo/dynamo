@@ -293,7 +293,7 @@ impl ApproxKvIndexer {
                 let mut prune_manager: PruneManager<BlockEntry> = PruneManager::new(ttl, 50, prune_config.clone());
                 let mut event_id = 0;
 
-                // Create a future that periodically checks the current size of the tree and prunes if necessary.
+                // Create a future that periodically tries to prune the tree if necessary.
                 let mut prune_fut = if let Some(prune_config) = &prune_config {
                     tokio::time::interval(prune_config.prune_interval)
                 } else {
