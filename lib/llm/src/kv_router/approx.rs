@@ -200,18 +200,36 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
 
     /// Prunes the tree if the current size is greater than the max tree size.
     pub fn prune(&mut self, current_size: usize) -> Result<Vec<K>, KvRouterError> {
-        let target_size: usize;
+        let max_tree_size: usize;
+        let prune_target_ratio: f64;
+
         if let Some(prune_config) = &self.prune_config {
-            target_size =
-                (prune_config.max_tree_size as f64 * prune_config.prune_target_ratio) as usize;
+            max_tree_size = prune_config.max_tree_size;
+            prune_target_ratio = prune_config.prune_target_ratio;
         } else {
             tracing::error!("Prune was called but prune config is None");
-            return Err(KvRouterError::BlockNotFound); // TODO: better error handling
+            return Err(KvRouterError::PruneFailed(
+                "prune config is missing".to_string(),
+            ));
         }
 
-        let mut pruned_keys = Vec::new();
+        if current_size <= max_tree_size {
+            // Tree size within bounds, no pruning needed.
+            return Ok(Vec::new());
+        }
 
+        tracing::info!(
+            "Pruning: tree size ({}) exceeded max tree size ({}), starting pruning",
+            current_size,
+            max_tree_size
+        );
+
+        // Number of blocks that will be kept after pruning.
+        let target_size = (max_tree_size as f64 * prune_target_ratio) as usize;
+
+        let mut pruned_keys = Vec::new();
         let mut num_pruned = 0;
+
         while num_pruned < (current_size - target_size) {
             if let Some((Reverse(expiry_time), key)) = self.expirations.pop() {
                 if self.timers.get(&key) == Some(&expiry_time) {
@@ -224,6 +242,8 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
                 break;
             }
         }
+
+        tracing::info!("Pruning: pruned ({}) blocks from tree", num_pruned);
 
         Ok(pruned_keys)
     }
@@ -367,13 +387,10 @@ impl ApproxKvIndexer {
                         }
 
                         _ = prune_fut.tick() => {
-                            if let Some(prune_config) = &prune_config {
-                                if trie.current_size() > prune_config.max_tree_size {
-                                tracing::info!("Pruning: tree size ({}) exceeded max tree size ({}), starting pruning", trie.current_size(), prune_config.max_tree_size);
-                                let pruned = prune_manager.prune(trie.current_size()).unwrap(); // TODO: better error handling
+                            if let Ok(pruned) = prune_manager.prune(trie.current_size()) {
                                 pruned.iter().for_each(|p| {
                                     event_id += 1;
-
+    
                                     let event = RouterEvent::new(
                                         p.worker.worker_id,
                                         KvCacheEvent {
@@ -386,10 +403,6 @@ impl ApproxKvIndexer {
                                     );
                                     let _ = trie.apply_event(event);
                                 });
-                                tracing::info!("Pruning: pruned ({}) blocks from tree", pruned.len());
-                                }
-                            } else {
-                                tracing::error!("Pruning: no prune config found, but prune future ticked. This should never happen.");
                             }
                         }
                     }

@@ -68,6 +68,9 @@ pub enum KvRouterError {
 
     #[error("Indexer is dropped request")]
     IndexerDroppedRequest,
+
+    #[error("Prune operation failed: {0}")]
+    PruneFailed(String),
 }
 
 /// Errors that can occur during KV Cache Event processing.
