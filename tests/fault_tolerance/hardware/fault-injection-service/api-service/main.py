@@ -770,7 +770,9 @@ class NetworkFaultInjectorClient:
             # Build target selector (where the packets are going TO)
             target_spec: dict[str, Any] | None = None
             if target_nats or target_specific_pods:
-                target_selector: dict[str, Any] = {"mode": "all"}  # Default to all matching pods
+                target_selector: dict[str, Any] = {
+                    "mode": "all"
+                }  # Default to all matching pods
 
                 # Build label selector for target
                 target_match_labels: dict[str, str] = {}
