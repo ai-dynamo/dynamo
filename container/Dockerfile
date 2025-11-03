@@ -401,3 +401,21 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/l
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
+
+FROM nvcr.io/nvidia/distroless/python:3.12-v3.5.0 as frontend
+
+COPY --from=dev /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+
+RUN pip install /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl /opt/dynamo/wheelhouse/ai_dynamo*any.whl /opt/dynamo/wheelhouse/nixl/nixl*.whl
+RUN if [ "$ENABLE_KVBM" = "true" ]; then \
+        pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
+    fi
+
+COPY benchmarks/ /opt/dynamo/benchmarks/
+RUN pip install /opt/dynamo/benchmarks/
+
+COPY launch/ /opt/dynamo/launch/
+COPY lib/ /opt/dynamo/lib/
+COPY components/ /opt/dynamo/components/
+
+CMD []
