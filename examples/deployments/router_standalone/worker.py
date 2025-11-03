@@ -20,7 +20,7 @@ import uuid
 from typing import AsyncGenerator, Optional
 
 import zmq
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, ObservabilityConfig, SchedulerConfig, VllmConfig
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.inputs.data import TokensPrompt
 from vllm.outputs import RequestOutput
@@ -50,7 +50,7 @@ class MetricsPublisher(StatLoggerBase):
         # Send metrics over ZMQ
         metrics_data = {
             "num_waiting_reqs": scheduler_stats.num_waiting_reqs,
-            "gpu_cache_usage": scheduler_stats.gpu_cache_usage,
+            "kv_cache_usage": scheduler_stats.kv_cache_usage,
         }
 
         self.socket.send_json(metrics_data)
@@ -80,21 +80,29 @@ class VllmWorkers:
     ):
         os.environ["VLLM_NO_USAGE_STATS"] = "1"
 
+        self.model = model
+        self.block_size = block_size
+        self.base_kv_events_port = base_kv_events_port
+        self.base_metrics_port = base_metrics_port
         self.num_workers = num_workers
         self.llms: list[AsyncLLM] = []
 
-        for worker_id in range(num_workers):
+    async def initialize(self):
+        """Async initialization of workers"""
+        logger.info(f"Starting initialization of {self.num_workers} workers")
+        for worker_id in range(self.num_workers):
+            logger.info(f"Initializing worker {worker_id} on GPU {worker_id}")
             os.environ["CUDA_VISIBLE_DEVICES"] = str(worker_id)
-            zmq_port = base_kv_events_port + worker_id
-            metrics_port = base_metrics_port + worker_id
+            zmq_port = self.base_kv_events_port + worker_id
+            metrics_port = self.base_metrics_port + worker_id
 
             model_config = ModelConfig(
-                model=model,
+                model=self.model,
                 enforce_eager=True,
             )
 
             cache_config = CacheConfig(
-                block_size=block_size,
+                block_size=self.block_size,
                 enable_prefix_caching=True,
             )
 
@@ -108,11 +116,14 @@ class VllmWorkers:
                 scheduler_cls="vllm.v1.core.sched.scheduler.Scheduler"
             )
 
+            observability_config = ObservabilityConfig()
+
             vllm_config = VllmConfig(
                 model_config=model_config,
                 cache_config=cache_config,
                 kv_events_config=kv_events_config,
                 scheduler_config=scheduler_config,
+                observability_config=observability_config,
             )
 
             self.llms.append(
@@ -121,6 +132,8 @@ class VllmWorkers:
                     stat_loggers=[LoggerFactory(port=metrics_port)],
                 )
             )
+        
+        logger.info(f"All {self.num_workers} workers initialized")
 
     async def direct(
         self, prompt: TokensPrompt, worker_id: int, sampling_params: SamplingParams
