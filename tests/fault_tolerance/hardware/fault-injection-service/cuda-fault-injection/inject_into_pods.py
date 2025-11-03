@@ -183,6 +183,9 @@ def patch_deployment_env(
     if is_dgd:
         # Process DynamoGraphDeployment
         try:
+            # Mypy type narrowing: ensure dgd is not None
+            assert dgd is not None
+
             print("    → Processing DynamoGraphDeployment...")
 
             # Determine library path based on ConfigMap usage
