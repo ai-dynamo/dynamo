@@ -1027,7 +1027,7 @@ mod tests {
             );
         }
 
-        // Verify the 2 newest blocks are definitively present
+        // Verify the 2 newest blocks are present
         for i in 4..6 {
             let tokens: Vec<u32> = vec![i * 10, i * 10 + 1, i * 10 + 2, i * 10 + 3];
             let scores = indexer.find_matches_for_request(&tokens).await.unwrap();
