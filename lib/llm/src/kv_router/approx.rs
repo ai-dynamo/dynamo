@@ -326,14 +326,13 @@ impl ApproxKvIndexer {
                                 }
                             );
 
-                            // TODO: we should condition on the result of this method before inserting into the prune manager
-                            let _ = trie.apply_event(event);
-
-                            prune_manager.insert(result.sequence_hashes.iter().enumerate().map(|(idx, h)| BlockEntry {
-                                key: ExternalSequenceBlockHash(*h),
-                                worker: result.worker,
-                                seq_position: idx,
-                            }).collect());
+                            if trie.apply_event(event).is_ok() {
+                                prune_manager.insert(result.sequence_hashes.iter().enumerate().map(|(idx, h)| BlockEntry {
+                                    key: ExternalSequenceBlockHash(*h),
+                                    worker: result.worker,
+                                    seq_position: idx,
+                                }).collect());
+                            }
                         }
 
                         Some(dump_req) = dump_rx.recv() => {
