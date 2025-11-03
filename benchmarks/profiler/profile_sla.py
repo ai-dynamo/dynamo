@@ -106,6 +106,30 @@ async def run_profile(args):
                     args.num_gpus_per_node,
                 )
             )
+
+            # Filter GPU counts to only include divisors of num_experts
+            # SGLang/deepseek requires num_physical_experts % ep_size == 0
+            if hasattr(args, "num_experts") and args.num_experts is not None:
+                original_counts = profile_num_gpus.copy()
+                profile_num_gpus = [
+                    gpu_count
+                    for gpu_count in profile_num_gpus
+                    if args.num_experts % gpu_count == 0
+                ]
+                if not profile_num_gpus:
+                    error_msg = (
+                        f"No valid GPU counts found that divide evenly into num_experts={args.num_experts}. "
+                        f"Original candidates were {original_counts}. "
+                        f"Valid divisors in range would be: {[d for d in range(args.min_num_gpus_per_engine, args.max_num_gpus_per_engine + 1) if args.num_experts % d == 0]}"
+                    )
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+                if len(profile_num_gpus) < len(original_counts):
+                    logger.info(
+                        f"Filtered GPU counts from {original_counts} to {profile_num_gpus} "
+                        f"(only divisors of num_experts={args.num_experts})"
+                    )
+
             logger.info(f"Profiling MoE GPU counts (TEP/DEP): {profile_num_gpus}")
         else:
             # For dense models, use powers of 2
