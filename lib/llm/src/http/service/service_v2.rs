@@ -18,7 +18,7 @@ use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
-use dynamo_runtime::discovery::{DiscoveryClient, MockDiscoveryClient, SharedMockRegistry};
+use dynamo_runtime::discovery::{DiscoveryClient, KVStoreDiscoveryClient};
 use dynamo_runtime::logging::make_request_span;
 use dynamo_runtime::metrics::prometheus_names::name_prefix;
 use dynamo_runtime::storage::key_value_store::KeyValueStoreManager;
@@ -74,9 +74,14 @@ impl StateFlags {
 
 impl State {
     pub fn new(manager: Arc<ModelManager>, store: KeyValueStoreManager) -> Self {
+        // Initialize discovery client backed by KV store
+        // Create a cancellation token for the discovery client's watch streams
         let discovery_client = {
-            let registry = SharedMockRegistry::new();
-            Arc::new(MockDiscoveryClient::new(None, registry)) as Arc<dyn DiscoveryClient>
+            let cancel_token = CancellationToken::new();
+            Arc::new(KVStoreDiscoveryClient::new(
+                store.clone(),
+                cancel_token,
+            )) as Arc<dyn DiscoveryClient>
         };
 
         Self {

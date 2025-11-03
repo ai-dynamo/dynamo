@@ -84,12 +84,13 @@ impl DistributedRuntime {
 
         let nats_client_for_metrics = nats_client.clone();
 
-        // Initialize discovery client with mock implementation
-        // TODO: Replace MockDiscoveryClient with KeyValueStoreDiscoveryClient or KubeDiscoveryClient
+        // Initialize discovery client backed by KV store
         let discovery_client = {
-            use crate::discovery::{MockDiscoveryClient, SharedMockRegistry};
-            let registry = SharedMockRegistry::new();
-            Arc::new(MockDiscoveryClient::new(None, registry)) as Arc<dyn DiscoveryClient>
+            use crate::discovery::KVStoreDiscoveryClient;
+            Arc::new(KVStoreDiscoveryClient::new(
+                store.clone(),
+                runtime.primary_token(),
+            )) as Arc<dyn DiscoveryClient>
         };
 
         let distributed_runtime = Self {
