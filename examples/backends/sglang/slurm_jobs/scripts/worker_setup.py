@@ -272,14 +272,16 @@ def setup_env_vars_for_gpu_script(
         logging.info(f"Set DUMP_CONFIG_PATH: {dump_config_path}")
 
 
-def get_gpu_command(worker_type: str, gpu_type: str, script_variant: str = "default") -> str:
+def get_gpu_command(
+    worker_type: str, gpu_type: str, script_variant: str = "default"
+) -> str:
     """Generate command to run the appropriate GPU script.
-    
+
     Scripts are organized as: scripts/{gpu_type}/{agg,disagg}/{script_variant}.sh
     """
     script_base = Path(__file__).parent
     script_name = f"{script_variant}.sh"
-    
+
     if worker_type == "aggregated":
         # Remove any -prefill or -decode suffix if present
         base_gpu_type = gpu_type.replace("-prefill", "").replace("-decode", "")
@@ -443,7 +445,9 @@ def setup_aggregated_worker(
     if not multiple_frontends_enabled and worker_idx == 0 and local_rank == 0:
         setup_head_prefill_node(master_ip)
     else:
-        logging.info(f"Setting up aggregated worker {worker_idx}, local rank {local_rank}")
+        logging.info(
+            f"Setting up aggregated worker {worker_idx}, local rank {local_rank}"
+        )
         if not wait_for_etcd(f"http://{master_ip}:{ETCD_CLIENT_PORT}"):
             raise RuntimeError("Failed to connect to etcd")
 

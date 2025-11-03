@@ -31,7 +31,7 @@ from jinja2 import Template
 def print_welcome_message(job_ids: list[str], log_dir_name: str):
     """Print a clean welcome message with job information."""
 
-    job_id = f"{', '.join(job_ids)}"
+    _ = f"{', '.join(job_ids)}"
     print(
         f"""
 🚀 Welcome! We hope you enjoy your time on our GB200 NVL72.
@@ -110,24 +110,24 @@ def submit_job(job_script_path, extra_slurm_args=[]):
 
 def _get_available_gpu_types() -> list[str]:
     """Discover available GPU types by scanning scripts directory structure.
-    
+
     Looks for scripts in: scripts/{gpu_type}/{agg,disagg}/*.sh
     """
     script_dir = pathlib.Path(__file__).parent / "scripts"
     gpu_types = set()
-    
+
     # Scan for GPU type directories (directories that contain agg/ or disagg/)
     for gpu_dir in script_dir.iterdir():
         if not gpu_dir.is_dir():
             continue
-        
+
         # Check if this directory has agg/ or disagg/ subdirectories
         has_agg = (gpu_dir / "agg").is_dir()
         has_disagg = (gpu_dir / "disagg").is_dir()
-        
+
         if has_agg or has_disagg:
             gpu_types.add(gpu_dir.name)
-    
+
     return sorted(list(gpu_types))
 
 
@@ -135,7 +135,7 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
     parser = argparse.ArgumentParser(
         description="Generate and submit SLURM job scripts"
     )
-    
+
     # Get available GPU types dynamically
     available_gpu_types = _get_available_gpu_types()
 
@@ -242,16 +242,20 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
 
 def _validate_args(args: argparse.Namespace) -> None:
     """Validate arguments and ensure aggregated and disaggregated args are mutually exclusive."""
-    has_disagg_args = any([
-        args.prefill_nodes is not None,
-        args.decode_nodes is not None,
-        args.prefill_workers is not None,
-        args.decode_workers is not None,
-    ])
-    has_agg_args = any([
-        args.agg_nodes is not None,
-        args.agg_workers is not None,
-    ])
+    has_disagg_args = any(
+        [
+            args.prefill_nodes is not None,
+            args.decode_nodes is not None,
+            args.prefill_workers is not None,
+            args.decode_workers is not None,
+        ]
+    )
+    has_agg_args = any(
+        [
+            args.agg_nodes is not None,
+            args.agg_workers is not None,
+        ]
+    )
 
     if has_disagg_args and has_agg_args:
         raise ValueError(
@@ -427,7 +431,9 @@ def main(input_args: list[str] | None = None):
     temp_file.close()
 
     try:
-        _, rendered_script = generate_job_script(template_path, temp_path, **template_vars)
+        _, rendered_script = generate_job_script(
+            template_path, temp_path, **template_vars
+        )
 
         submitted_job_ids = []
         job_id = submit_job(temp_path, args.extra_slurm_args)
@@ -454,7 +460,9 @@ def main(input_args: list[str] | None = None):
                 x for x in args.extra_slurm_args if "dependency" not in x
             ]
             for _ in range(args.retries):
-                dependencies = ",".join([f"afternotok:{job}" for job in submitted_job_ids])
+                dependencies = ",".join(
+                    [f"afternotok:{job}" for job in submitted_job_ids]
+                )
                 slurm_args = extra_slurm_args_without_dependencies + [
                     f"dependency={dependencies}"
                 ]
@@ -465,13 +473,19 @@ def main(input_args: list[str] | None = None):
                 if is_aggregated:
                     retry_log_dir_name = f"{job_id}_{agg_workers}A_{timestamp}"
                 else:
-                    retry_log_dir_name = f"{job_id}_{prefill_workers}P_{decode_workers}D_{timestamp}"
+                    retry_log_dir_name = (
+                        f"{job_id}_{prefill_workers}P_{decode_workers}D_{timestamp}"
+                    )
                 retry_log_dir_path = os.path.join("logs", retry_log_dir_name)
                 os.makedirs(retry_log_dir_path, exist_ok=True)
-                retry_sbatch_script_path = os.path.join(retry_log_dir_path, "sbatch_script.sh")
+                retry_sbatch_script_path = os.path.join(
+                    retry_log_dir_path, "sbatch_script.sh"
+                )
                 with open(retry_sbatch_script_path, "w") as f:
                     f.write(rendered_script)
-                logging.info(f"Saved rendered sbatch script to {retry_sbatch_script_path}")
+                logging.info(
+                    f"Saved rendered sbatch script to {retry_sbatch_script_path}"
+                )
 
         print_welcome_message(submitted_job_ids, log_dir_name)
     finally:
