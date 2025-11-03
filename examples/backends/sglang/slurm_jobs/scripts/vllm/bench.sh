@@ -11,17 +11,19 @@ head_port=8000
 
 n_prefill=$1
 n_decode=$2
-total_gpus=$3
+prefill_gpus=$3
+decode_gpus=$4
+total_gpus=$((prefill_gpus+decode_gpus))
 
 source /scripts/benchmark_utils.sh
 work_dir="/scripts/vllm/"
 cd $work_dir
 
-chosen_isl=$4
-chosen_osl=$5
-concurrency_list=$6
+chosen_isl=$5
+chosen_osl=$6
+concurrency_list=$7
 IFS='x' read -r -a chosen_concurrencies <<< "$concurrency_list"
-chosen_req_rate=$7
+chosen_req_rate=$8
 
 echo "Config ${chosen_isl}; ${chosen_osl}; ${chosen_concurrencies[@]}; ${chosen_req_rate}"
 
@@ -71,7 +73,7 @@ for concurrency in "${chosen_concurrencies[@]}"
 do
     num_prompts=$((concurrency * 5))
     echo "Running benchmark with concurrency: $concurrency and num-prompts: $num_prompts, writing to file ${result_dir}"
-    result_filename="isl_${chosen_isl}_osl_${chosen_osl}_concurrency_${concurrency}_req_rate_${chosen_req_rate}_gpus${total_gpus}.json"
+    result_filename="isl_${chosen_isl}_osl_${chosen_osl}_concurrency_${concurrency}_req_rate_${chosen_req_rate}_ctx${prefill_gpus}_gen${decode_gpus}.json"
 
     set -x
     echo "$(date '+%Y-%m-%d %H:%M:%S')"
