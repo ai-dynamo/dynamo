@@ -302,7 +302,14 @@ impl Leader for KvConnectorLeader {
         Ok(num_matched_tokens)
     }
 
+    fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> anyhow::Result<()> {
+        self.slot_manager()
+            .create_slot(&request.request_id, tokens, request.salt_hash)?;
 
+        self.inflight_requests.insert(request.request_id);
+
+        Ok(())
+    }
 }
 
 #[pyclass]
@@ -344,7 +351,46 @@ impl PySglangKvConnectorLeader {
             .map_err(to_pyerr)
     }
 
+    fn create_slot(
+        &mut self,
+        request_id: String,
+        token_ids: Vec<u32>,
+        salt_hash: Option<u64>,
+    ) -> PyResult<()> {
+        let salt = SaltHash::from(salt_hash.unwrap_or(0));
+        let request = KvbmRequest {
+            request_id: request_id.clone(),
+            salt_hash: salt,
+        };
+        self.connector_leader
+            .create_slot(request, token_ids)
+            .map_err(to_pyerr)
+    }
 
+    fn has_slot(&self, request_id: String) -> bool {
+        self.connector_leader.has_slot(request_id)
+    }
+
+    fn update_state_after_alloc(
+        &mut self,
+        request_id: String,
+        block_ids: Vec<BlockId>,
+        num_external_tokens: usize,
+    ) -> PyResult<()> {
+        self.connector_leader
+            .update_state_after_alloc(request_id, block_ids, num_external_tokens)
+            .map_err(to_pyerr)
+    }
+
+    fn request_finished(
+        &mut self,
+        request_id: String,
+        block_ids: Vec<BlockId>,
+    ) -> PyResult<bool> {
+        self.connector_leader
+            .request_finished(request_id, block_ids)
+            .map_err(to_pyerr)
+    }
 }
 
 pub fn kvbm_metrics_endpoint_enabled() -> bool {
