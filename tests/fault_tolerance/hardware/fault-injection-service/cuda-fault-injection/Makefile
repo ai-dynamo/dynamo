@@ -5,7 +5,9 @@
 
 # Compiler settings
 CC = gcc
-CFLAGS = -shared -fPIC -Wall -Wextra -ldl
+CFLAGS = -fPIC -Wall -Wextra
+LDFLAGS = -shared
+LDLIBS = -ldl
 TARGET = fake_cuda_xid79.so
 SOURCE = fake_cuda_xid79.c
 
@@ -13,7 +15,7 @@ all: $(TARGET)
 
 $(TARGET): $(SOURCE)
 	@echo "Building CUDA fault injection library..."
-	$(CC) $(CFLAGS) $(SOURCE) -o $(TARGET)
+	$(CC) $(CFLAGS) $(SOURCE) $(LDFLAGS) -o $(TARGET) $(LDLIBS)
 	@echo "✓ Built: $(TARGET)"
 	@echo ""
 	@echo "Usage:"
