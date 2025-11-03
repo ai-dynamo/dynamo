@@ -872,4 +872,211 @@ mod tests {
             Some(&1)
         );
     }
+
+    /// Test that pruning returns empty when tree size is within the max tree size.
+    #[tokio::test]
+    async fn test_prune_manager_no_prune_when_within_bounds() {
+        const TTL: Duration = Duration::from_secs(10);
+        let prune_config = PruneConfig {
+            max_tree_size: 100,
+            prune_target_ratio: 0.5,
+            prune_interval: Duration::from_secs(1),
+        };
+
+        let mut pm: PruneManager<u32> = PruneManager::new(TTL, 50, Some(prune_config));
+
+        // Insert 50 keys (well below max_tree_size of 100)
+        pm.insert((0..50).collect());
+
+        // Pruning should return empty vec when size is within bounds
+        let pruned = pm.prune(50).unwrap();
+        assert!(pruned.is_empty());
+
+        // All keys should still be present
+        for i in 0..50 {
+            assert!(pm.get_expiry(&i).is_some());
+        }
+    }
+
+    /// Test that pruning removes the oldest entries first.
+    #[tokio::test]
+    async fn test_prune_manager_prune_removes_oldest_first() {
+        const TTL: Duration = Duration::from_secs(10);
+        let prune_config = PruneConfig {
+            max_tree_size: 10,
+            prune_target_ratio: 0.5,
+            prune_interval: Duration::from_secs(1),
+        };
+
+        let mut pm: PruneManager<u32> = PruneManager::new(TTL, 50, Some(prune_config));
+
+        // Insert keys one at a time with delays to ensure different timestamps
+        for i in 1..=15 {
+            pm.insert(vec![i]);
+            time::sleep(Duration::from_millis(1)).await;
+        }
+
+        // Total: 15 keys. Trigger pruning with current_size = 15
+        let pruned = pm.prune(15).unwrap();
+
+        // Should prune down to 5 (10 * 0.5), so 10 keys should be pruned (15 - 5)
+        assert_eq!(pruned.len(), 10);
+
+        // The oldest keys should be pruned first
+        for i in 1..=10 {
+            assert!(pruned.contains(&i));
+        }
+
+        // The newer keys should still be present
+        for i in 11..=15 {
+            assert!(pm.get_expiry(&i).is_some());
+        }
+    }
+
+    /// Test that pruning fails gracefully when config is None.
+    #[tokio::test]
+    async fn test_prune_manager_prune_fails_without_config() {
+        const TTL: Duration = Duration::from_secs(10);
+        let mut pm: PruneManager<u32> = PruneManager::new(TTL, 50, None);
+
+        pm.insert(vec![1, 2, 3]);
+
+        // Pruning should fail when prune_config is None
+        let result = pm.prune(150);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(KvRouterError::PruneFailed(_))));
+    }
+
+    /// Test that BlockEntry ordering prioritizes sequence position.
+    #[test]
+    fn test_block_entry_ordering() {
+        let worker = WorkerWithDpRank::from_worker_id(0);
+
+        let entry1 = BlockEntry {
+            key: ExternalSequenceBlockHash(100),
+            worker,
+            seq_position: 0,
+        };
+        let entry2 = BlockEntry {
+            key: ExternalSequenceBlockHash(50),
+            worker,
+            seq_position: 1,
+        };
+
+        // entry1 < entry2 because seq_position 0 < 1
+        assert!(entry1 < entry2);
+    }
+
+    /// End-to-end test for [`ApproxKvIndexer`] with periodic pruning
+    ///   0. Max tree size is 5, target size is 2, prune interval is 100ms.
+    ///   1. Insert 6 blocks (exceeding max_tree_size of 5)
+    ///   2. Verify all 6 blocks are initially present
+    ///   3. Wait for periodic pruning to kick in
+    ///   4. Verify the 4 oldest blocks are pruned
+    ///   5. Verify the 2 newest blocks remain
+    #[tokio::test]
+    async fn test_approx_indexer_periodic_pruning() {
+        const TTL: Duration = Duration::from_secs(60); // Long TTL to avoid expiry
+        let prune_config = PruneConfig {
+            max_tree_size: 5,                           // Very small to trigger pruning quickly
+            prune_target_ratio: 0.4,                    // target size is 5 * 0.4 = 2
+            prune_interval: Duration::from_millis(100), // Frequent pruning
+        };
+
+        let cancel = CancellationToken::new();
+        let indexer = ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, TTL, Some(prune_config));
+
+        let worker = WorkerWithDpRank::from_worker_id(42);
+
+        // Insert 6 sequences (6 blocks total, exceeding max_tree_size of 5)
+        for i in 0..6 {
+            let tokens: Vec<u32> = vec![i * 10, i * 10 + 1, i * 10 + 2, i * 10 + 3];
+            indexer
+                .process_routing_decision_for_request(&tokens, worker)
+                .await
+                .unwrap();
+            time::sleep(Duration::from_millis(1)).await; // Ensure different timestamps
+        }
+
+        // First, verify all 6 blocks are registered
+        let mut all_present = true;
+        for i in 0..6 {
+            let tokens: Vec<u32> = vec![i * 10, i * 10 + 1, i * 10 + 2, i * 10 + 3];
+            let scores = indexer.find_matches_for_request(&tokens).await.unwrap();
+            if scores.scores.get(&worker).copied() != Some(1) {
+                all_present = false;
+                break;
+            }
+        }
+        assert!(all_present);
+
+        // Wait for periodic pruning to kick in (prune_interval = 100ms)
+        time::sleep(Duration::from_millis(150)).await;
+
+        // After pruning, we will have exactly 2 blocks (5 * 0.4 = 2)
+        // The 2 newest blocks (i=4, i=5) will remain, oldest 4 blocks (i=0,1,2,3) will be pruned
+
+        // Verify that the 4 oldest blocks are pruned
+        for i in 0..4 {
+            let tokens: Vec<u32> = vec![i * 10, i * 10 + 1, i * 10 + 2, i * 10 + 3];
+            let scores = indexer.find_matches_for_request(&tokens).await.unwrap();
+            assert!(
+                scores.scores.get(&worker).copied().unwrap_or(0) == 0,
+                "Block {} should have been pruned but is still present",
+                i
+            );
+        }
+
+        // Verify the 2 newest blocks are definitively present
+        for i in 4..6 {
+            let tokens: Vec<u32> = vec![i * 10, i * 10 + 1, i * 10 + 2, i * 10 + 3];
+            let scores = indexer.find_matches_for_request(&tokens).await.unwrap();
+            assert_eq!(
+                scores.scores.get(&worker).copied(),
+                Some(1),
+                "Block {} should have been present but was pruned",
+                i
+            );
+        }
+    }
+
+    /// Test that re-inserting a key updates its position in the pruning queue.
+    #[tokio::test]
+    async fn test_prune_manager_prune_reinsertion_updates_position() {
+        const TTL: Duration = Duration::from_secs(10);
+        let prune_config = PruneConfig {
+            max_tree_size: 5,
+            prune_target_ratio: 0.8,
+            prune_interval: Duration::from_secs(1),
+        };
+
+        let mut pm: PruneManager<u32> = PruneManager::new(TTL, 50, Some(prune_config));
+
+        // Insert keys
+        for i in 1..=10 {
+            pm.insert(vec![i]);
+            time::sleep(Duration::from_millis(1)).await;
+        }
+
+        // Re-insert key 1 (should move it to the back of the queue)
+        pm.insert(vec![1]);
+
+        // Total: 10 unique keys. Trigger pruning: current_size = 10, target = 4, so prune 6 keys
+        // Order by expiry (oldest first): 2, 3, 4, 5, 6, 7, 8, 9, 10, 1 (re-inserted)
+        let pruned = pm.prune(10).unwrap();
+        assert_eq!(pruned.len(), 6);
+
+        // The oldest keys (2-7) should be pruned
+        for i in 2..=7 {
+            assert!(pruned.contains(&i));
+        }
+
+        // The newest keys (8-10) should still be present
+        for i in 8..=10 {
+            assert!(pm.get_expiry(&i).is_some());
+        }
+
+        // Key 1 should still be present (it was refreshed and is now near the end)
+        assert!(pm.get_expiry(&1).is_some());
+    }
 }
