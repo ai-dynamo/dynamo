@@ -44,7 +44,7 @@ use std::{
     collections::{HashMap, VecDeque},
     iter,
     rc::Rc,
-    sync::{Arc, OnceLock, RwLock},
+    sync::{Arc, OnceLock},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
