@@ -286,7 +286,7 @@ $NIXL_PLUGIN_DIR:\
 $LD_LIBRARY_PATH
 ENV OPAL_PREFIX=/opt/hpcx/ompi
 
-# Copy pre-built venv with PyTorch and TensorRT-LLM from framework stage 
+# Copy pre-built venv with PyTorch and TensorRT-LLM from framework stage
 COPY --chown=dynamo:dynamo --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 ENV TENSORRT_LIB_DIR=/usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu/lib
