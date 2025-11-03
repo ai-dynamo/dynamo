@@ -77,7 +77,6 @@ fi
 command=(
     python3 submit_job_script.py
     --account $SLURM_ACCOUNT --partition $SLURM_PARTITION --time-limit $TIME_LIMIT
-    --template job_script_template.j2
     --model-dir $MODEL_PATH --config-dir $CONFIG_DIR
     --container-image $CONTAINER_IMAGE
 

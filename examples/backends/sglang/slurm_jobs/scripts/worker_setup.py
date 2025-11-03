@@ -155,7 +155,7 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
     )
     parser.add_argument(
         "--worker_type",
-        choices=["decode", "prefill", "frontend", "nginx"],
+        choices=["decode", "prefill", "frontend", "nginx", "aggregated"],
         required=True,
         help="Type of worker to run",
     )
@@ -175,14 +175,14 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
     parser.add_argument(
         "--gpu_type",
         type=str,
-        choices=[
-            "gb200-fp8",
-            "gb200-fp8-prefill",
-            "gb200-fp4-decode",
-            "gb200-fp4-prefill",
-        ],
         default="gb200-fp8",
-        help="Type of GPU to use. You can choose between gb200-fp8, gb200-fp8-prefill, gb200-fp4-decode, and gb200-fp4-prefill.",
+        help="Type of GPU to use (script will be validated at runtime)",
+    )
+    parser.add_argument(
+        "--script-variant",
+        type=str,
+        default="default",
+        help="Script variant to use (e.g., 'default', 'optim', 'decode-optim'). Defaults to 'default'",
     )
 
     parser.add_argument(
@@ -272,13 +272,30 @@ def setup_env_vars_for_gpu_script(
         logging.info(f"Set DUMP_CONFIG_PATH: {dump_config_path}")
 
 
-def get_gpu_command(worker_type: str, gpu_type: str) -> str:
-    """Generate command to run the appropriate GPU script"""
-    script_name = f"{gpu_type}.sh"
-    script_path = Path(__file__).parent / script_name
-    mode = worker_type  # "prefill" or "decode"
+def get_gpu_command(
+    worker_type: str, gpu_type: str, script_variant: str = "default"
+) -> str:
+    """Generate command to run the appropriate GPU script.
 
-    return f"bash {script_path} {mode}"
+    Scripts are organized as: scripts/{gpu_type}/{agg,disagg}/{script_variant}.sh
+    """
+    script_base = Path(__file__).parent
+    script_name = f"{script_variant}.sh"
+
+    if worker_type == "aggregated":
+        # Remove any -prefill or -decode suffix if present
+        base_gpu_type = gpu_type.replace("-prefill", "").replace("-decode", "")
+        script_path = script_base / base_gpu_type / "agg" / script_name
+        if not script_path.exists():
+            raise ValueError(f"Aggregated GPU script not found: {script_path}")
+        return f"bash {script_path}"
+    else:
+        # Disaggregated mode: scripts/{gpu_type}/disagg/{script_variant}.sh {prefill|decode}
+        script_path = script_base / gpu_type / "disagg" / script_name
+        if not script_path.exists():
+            raise ValueError(f"Disaggregated GPU script not found: {script_path}")
+        mode = worker_type  # "prefill" or "decode"
+        return f"bash {script_path} {mode}"
 
 
 def setup_head_prefill_node(prefill_host_ip: str) -> None:
@@ -343,6 +360,7 @@ def setup_prefill_worker(
     multiple_frontends_enabled: bool = False,
     use_init_locations: bool = True,
     dump_config_path: str | None = None,
+    script_variant: str = "default",
 ) -> int:
     """
     Setup the prefill worker.
@@ -367,7 +385,7 @@ def setup_prefill_worker(
     )
 
     # Use appropriate GPU script instead of generating command directly
-    cmd_to_run = get_gpu_command("prefill", gpu_type)
+    cmd_to_run = get_gpu_command("prefill", gpu_type, script_variant)
     return run_command(cmd_to_run)
 
 
@@ -381,6 +399,7 @@ def setup_decode_worker(
     gpu_type: str,
     use_init_locations: bool = True,
     dump_config_path: str | None = None,
+    script_variant: str = "default",
 ) -> int:
     """
     Setup the decode worker.
@@ -402,7 +421,49 @@ def setup_decode_worker(
     )
 
     # Use appropriate GPU script instead of generating command directly
-    cmd_to_run = get_gpu_command("decode", gpu_type)
+    cmd_to_run = get_gpu_command("decode", gpu_type, script_variant)
+    return run_command(cmd_to_run)
+
+
+def setup_aggregated_worker(
+    worker_idx: int,
+    local_rank: int,
+    leader_ip: str,
+    master_ip: str,
+    nodes_per_worker: int,
+    gpus_per_node: int,
+    gpu_type: str,
+    multiple_frontends_enabled: bool = False,
+    dump_config_path: str | None = None,
+    script_variant: str = "default",
+) -> int:
+    """
+    Setup the aggregated worker.
+    """
+    total_gpus = nodes_per_worker * gpus_per_node
+    # Only setup infrastructure in traditional mode (not multiple frontends) on first worker, first node
+    if not multiple_frontends_enabled and worker_idx == 0 and local_rank == 0:
+        setup_head_prefill_node(master_ip)
+    else:
+        logging.info(
+            f"Setting up aggregated worker {worker_idx}, local rank {local_rank}"
+        )
+        if not wait_for_etcd(f"http://{master_ip}:{ETCD_CLIENT_PORT}"):
+            raise RuntimeError("Failed to connect to etcd")
+
+    # Setup environment variables for GPU script - use leader_ip as dist-init-addr
+    # Aggregated mode doesn't use init locations
+    setup_env_vars_for_gpu_script(
+        leader_ip,
+        local_rank,
+        total_gpus,
+        nodes_per_worker,
+        use_init_locations=False,
+        dump_config_path=dump_config_path,
+    )
+
+    # Use appropriate aggregated GPU script
+    cmd_to_run = get_gpu_command("aggregated", gpu_type, script_variant)
     return run_command(cmd_to_run)
 
 
@@ -455,6 +516,7 @@ def main(input_args: list[str] | None = None):
             args.multiple_frontends_enabled,
             args.use_init_locations,
             args.dump_config_path,
+            args.script_variant,
         )
     elif args.worker_type == "decode":
         setup_decode_worker(
@@ -467,6 +529,20 @@ def main(input_args: list[str] | None = None):
             args.gpu_type,
             args.use_init_locations,
             args.dump_config_path,
+            args.script_variant,
+        )
+    elif args.worker_type == "aggregated":
+        setup_aggregated_worker(
+            args.worker_idx,
+            args.local_rank,
+            args.leader_ip,
+            args.master_ip,
+            args.nodes_per_worker,
+            args.gpus_per_node,
+            args.gpu_type,
+            args.multiple_frontends_enabled,
+            args.dump_config_path,
+            args.script_variant,
         )
 
     logging.info(f"{args.worker_type.capitalize()} worker setup complete")
