@@ -168,7 +168,9 @@ ENROOT_ARGS="\
 "
 
 # Build common worker arguments
+{% endraw %}
 SCRIPT_VARIANT="{{ script_variant | default('default') }}"
+{% raw %}
 WORKER_ARGS="--gpu_type ${GPU_TYPE} --script-variant ${SCRIPT_VARIANT} --gpus_per_node ${GPUS_PER_NODE} --master_ip ${MASTER_IP}"
 {% endraw %}
 {% if enable_multiple_frontends %}
