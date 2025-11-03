@@ -566,9 +566,9 @@ class NetworkFaultInjectorClient:
             # Build NetworkPolicy
             from kubernetes import client as k8s_client
 
-            policy_types = []
-            egress_rules = []
-            ingress_rules = []
+            policy_types: list[str] = []
+            egress_rules: list[k8s_client.V1NetworkPolicyEgressRule] = []
+            ingress_rules: list[k8s_client.V1NetworkPolicyIngressRule] = []
 
             # === EGRESS RULES ===
             if not block_all_egress:
@@ -773,8 +773,8 @@ class NetworkFaultInjectorClient:
                 target_selector = {"mode": "all"}  # Default to all matching pods
 
                 # Build label selector for target
-                target_match_labels = {}
-                target_match_expressions = []
+                target_match_labels: dict[str, str] = {}
+                target_match_expressions: list[dict[str, Any]] = []
 
                 if target_nats:
                     # Target NATS services
@@ -801,15 +801,12 @@ class NetworkFaultInjectorClient:
                         )
 
                 if target_match_labels or target_match_expressions:
-                    target_selector["labelSelectors"] = {}
+                    label_selectors: dict[str, Any] = {}
                     if target_match_labels:
-                        target_selector["labelSelectors"][
-                            "matchLabels"
-                        ] = target_match_labels
+                        label_selectors["matchLabels"] = target_match_labels
                     if target_match_expressions:
-                        target_selector["labelSelectors"][
-                            "matchExpressions"
-                        ] = target_match_expressions
+                        label_selectors["matchExpressions"] = target_match_expressions
+                    target_selector["labelSelectors"] = label_selectors
                     target_selector["namespaces"] = [namespace]
 
                 target_spec = target_selector
@@ -840,8 +837,8 @@ class NetworkFaultInjectorClient:
                 action_spec = {
                     "bandwidth": {
                         "rate": bandwidth_limit,
-                        "limit": 20480,
-                        "buffer": 10000,
+                        "limit": "20480",
+                        "buffer": "10000",
                     }
                 }
             elif corrupt_percent > 0:
@@ -892,7 +889,9 @@ class NetworkFaultInjectorClient:
 
             # Add port targeting if specified
             if target_ports:
-                chaos_resource["spec"]["externalTargets"] = []
+                spec_dict = chaos_resource["spec"]
+                if isinstance(spec_dict, dict):
+                    spec_dict["externalTargets"] = []
                 # Note: For port-specific targeting, you may need to adjust based on your requirements
 
             # Create the NetworkChaos resource
@@ -1304,7 +1303,7 @@ async def inject_network_fault(request: NetworkFaultRequest):
     )
 
     # Inject partition via agent (pass fault_id in parameters for tracking)
-    parameters_with_id = {**request.parameters, "fault_id": fault_id}
+    parameters_with_id = {**(request.parameters or {}), "fault_id": fault_id}
     success, message = await app.state.network_client.inject_partition(
         partition_type=request.partition_type,
         source=request.source,
