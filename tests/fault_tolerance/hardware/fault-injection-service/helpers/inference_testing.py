@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
 """
 Inference load testing utilities for fault tolerance tests.
 
@@ -10,7 +14,7 @@ Supports both local (port-forwarded) and in-cluster execution.
 import os
 import threading
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import requests
 
@@ -57,7 +61,7 @@ class InferenceLoadTester:
         self.model_name = model_name
         self.timeout = timeout
         self.running = False
-        self.thread = None
+        self.thread: Optional[threading.Thread] = None
         self.results: List[Dict] = []
         self.lock = threading.Lock()
 

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
 """
 Kubernetes operations helpers for fault tolerance testing.
 
@@ -271,7 +275,7 @@ class PodOperations:
                 namespace=namespace, label_selector=label_selector
             )
 
-            distribution = {}
+            distribution: Dict[str, int] = {}
             for pod in pods.items:
                 if pod.status.phase == "Running":
                     node = pod.spec.node_name
