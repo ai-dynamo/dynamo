@@ -63,7 +63,7 @@ static void
 get_fault_config(int* inject, int* xid_type, cudaError_t* error_code)
 {
   static int initialized = 0;
-  static int cached_inject = 1;
+  static int cached_inject = 0;
   static int cached_xid = 79;  // Default to XID 79
   static cudaError_t cached_error = cudaErrorNoDevice;
 
