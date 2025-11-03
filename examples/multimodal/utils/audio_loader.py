@@ -42,10 +42,9 @@ class AudioLoader:
 
         # For HTTP(S) URLs, check cache first
         if parsed_url.scheme in ("http", "https"):
-            audio_url_lower = audio_url.lower()
-            if audio_url_lower in self._audio_cache:
+            if audio_url in self._audio_cache:
                 logger.debug(f"Audio found in cache for URL: {audio_url}")
-                return self._audio_cache[audio_url_lower]
+                return self._audio_cache[audio_url]
 
         try:
             if parsed_url.scheme in ("http", "https"):
@@ -70,14 +69,13 @@ class AudioLoader:
 
             # Cache HTTP(S) URLs
             if parsed_url.scheme in ("http", "https"):
-                audio_url_lower = audio_url.lower()
                 # Cache the audio for future use, and evict the oldest audio if the cache is full
                 if self._cache_queue.full():
                     oldest_audio_url = await self._cache_queue.get()
                     del self._audio_cache[oldest_audio_url]
 
-                self._audio_cache[audio_url_lower] = (audio_data, sr)
-                await self._cache_queue.put(audio_url_lower)
+                self._audio_cache[audio_url] = (audio_data, sr)
+                await self._cache_queue.put(audio_url)
 
             return audio_data, sr
 
