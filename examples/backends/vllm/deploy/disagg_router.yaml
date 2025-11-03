@@ -36,11 +36,12 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
+            - --is-decode-worker
     VllmPrefillWorker:
       dynamoNamespace: vllm-v1-disagg-router
       envFromSecret: hf-token-secret
       componentType: worker
-      replicas: 1
+      replicas: 2
       resources:
         limits:
           gpu: "1"
