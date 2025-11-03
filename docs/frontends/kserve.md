@@ -21,7 +21,7 @@ Similar to HTTP frontend, the registered backend will be auto-discovered and add
 * `ModelType:Completions` and `ModelInput::Token`: Combination for LLM backend that uses Dynamo preprocessor (i.e. Dynamo vLLM / SGLang / TRTLLM backend)
 * `ModelType:TensorBased` and `ModelInput::Tensor`: Combination for backend that is used for generic tensor based inference
 
-The first two combinations are backed by OpenAI Completions API, see [OpenAI Completions section](#openai-completions) for more detail. Whereas the last combination is most algined with KServe API and the users can replace existing deployment with Dynamo once their backends implements adaptor for `NvCreateTensorRequest/NvCreateTensorResponse`, see [Tensor section](#tensor) for more detail:
+The first two combinations are backed by OpenAI Completions API, see [OpenAI Completions section](#openai-completions) for more detail. Whereas the last combination is most aligned with KServe API and the users can replace existing deployment with Dynamo once their backends implements adaptor for `NvCreateTensorRequest/NvCreateTensorResponse`, see [Tensor section](#tensor) for more detail:
 
 ### OpenAI Completions
 Most of the Dynamo features are tailored for LLM inference and the combinations that are backed by OpenAI API can enable those features and are best suited for exploring those Dynamo features. However, this implies specific conversion between generic tensor based messages and OpenAI message and imposes specific structure of the KServe request message.
