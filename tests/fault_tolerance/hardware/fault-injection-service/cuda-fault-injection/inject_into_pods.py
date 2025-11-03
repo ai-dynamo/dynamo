@@ -39,7 +39,7 @@ def get_library_path():
     lib_path = script_dir / "fake_cuda_xid79.so"
 
     if not lib_path.exists():
-        print(f"❌ Library not found: {lib_path}")
+        print(f"  Library not found: {lib_path}")
         print("   Run: make")
         sys.exit(1)
 
@@ -78,7 +78,7 @@ def create_cuda_fault_configmap(namespace, lib_path=None):
         source_file = os.path.join(lib_dir, "fake_cuda_xid79.c")
 
         if not os.path.exists(source_file):
-            print(f"❌ Source file not found: {source_file}")
+            print(f"  Source file not found: {source_file}")
             return False
 
         # Read source code
@@ -111,7 +111,7 @@ def create_cuda_fault_configmap(namespace, lib_path=None):
         return True
 
     except Exception as e:
-        print(f"❌ Failed to create ConfigMap: {e}")
+        print(f"  Failed to create ConfigMap: {e}")
         import traceback
 
         traceback.print_exc()
@@ -174,10 +174,10 @@ def patch_deployment_env(
             )
             is_dgd = False
         else:
-            print(f"❌ Failed to get DynamoGraphDeployment: {e}")
+            print(f"  Failed to get DynamoGraphDeployment: {e}")
             return False
     except Exception as e:
-        print(f"❌ Unexpected error getting DynamoGraphDeployment: {e}")
+        print(f"  Unexpected error getting DynamoGraphDeployment: {e}")
         return False
 
     if is_dgd:
@@ -330,7 +330,7 @@ def patch_deployment_env(
                             }
                         )
 
-                        print("      ✓ Added init container to decode library")
+                        print("      ✓ Added init container to compile library")
                         print("      ✓ Added ConfigMap volume mount")
 
                     # Add node affinity to pin pods to target node (simulates real XID 79 behavior)
@@ -466,7 +466,11 @@ def patch_deployment_env(
                                             for c in service["extraPodSpec"][
                                                 "initContainers"
                                             ]
-                                            if c.get("name") != "cuda-lib-decoder"
+                                            if c.get("name")
+                                            not in [
+                                                "decode-cuda-fault-lib",
+                                                "compile-cuda-fault-lib",
+                                            ]
                                         ]
                                     # Remove affinity
                                     service["extraPodSpec"]["affinity"] = None
@@ -489,9 +493,6 @@ def patch_deployment_env(
                         # Not a conflict or out of retries
                         raise
 
-            # Primary patch with affinity: None is sufficient
-            # (Removed secondary JSON patch - caused 400 BadRequest)
-
             action = "enabled" if enable else "disabled"
             print(f"[✓] DynamoGraphDeployment patched - CUDA fault injection {action}")
             print(f"    Services patched: {', '.join(patched_services)}")
@@ -500,13 +501,13 @@ def patch_deployment_env(
             return True
 
         except ApiException as e:
-            print(f"❌ Failed to patch DynamoGraphDeployment (ApiException): {e}")
+            print(f"  Failed to patch DynamoGraphDeployment (ApiException): {e}")
             print(f"    Status: {e.status}")
             print(f"    Reason: {e.reason}")
             return False
         except Exception as e:
             print(
-                f"❌ Failed to patch DynamoGraphDeployment (Exception): {type(e).__name__}: {e}"
+                f"  Failed to patch DynamoGraphDeployment (Exception): {type(e).__name__}: {e}"
             )
             import traceback
 
@@ -519,7 +520,7 @@ def patch_deployment_env(
     try:
         deployment = apps_api.read_namespaced_deployment(deployment_name, namespace)
     except ApiException as e:
-        print(f"❌ Failed to read deployment {deployment_name}: {e}")
+        print(f"  Failed to read deployment {deployment_name}: {e}")
         return False
 
     # Find all containers and patch their env
@@ -553,7 +554,7 @@ def patch_deployment_env(
         print(f"[✓] Deployment patched - CUDA fault injection {action}")
         return True
     except ApiException as e:
-        print(f"❌ Failed to patch deployment: {e}")
+        print(f"  Failed to patch deployment: {e}")
         return False
 
 
@@ -572,7 +573,7 @@ def get_worker_pods(deployment_name, namespace, node_name=None):
         )
         return pods.items
     except ApiException as e:
-        print(f"❌ Failed to list pods: {e}")
+        print(f"  Failed to list pods: {e}")
         return []
 
 
@@ -589,7 +590,7 @@ def inject_into_running_pods(deployment_name, namespace, node_name=None):
     pods = get_worker_pods(deployment_name, namespace, node_name)
 
     if not pods:
-        print(f"❌ No worker pods found for deployment {deployment_name}")
+        print(f"  No worker pods found for deployment {deployment_name}")
         return False
 
     print(f"[→] Found {len(pods)} worker pods")
@@ -633,7 +634,7 @@ def inject_via_deployment_patch(deployment_name, namespace):
     pods = get_worker_pods(deployment_name, namespace)
 
     if not pods:
-        print("❌ No worker pods found")
+        print("  No worker pods found")
         return False
 
     for pod in pods:
@@ -737,7 +738,7 @@ def verify_injection(deployment_name, namespace):
     pods = get_worker_pods(deployment_name, namespace)
 
     if not pods:
-        print("❌ No pods found")
+        print("  No pods found")
         return
 
     for pod in pods[:3]:  # Check first 3 pods
@@ -840,7 +841,7 @@ Examples:
     try:
         config.load_kube_config()
     except Exception:
-        print("❌ Failed to load kubeconfig")
+        print("  Failed to load kubeconfig")
         sys.exit(1)
 
     print("=" * 80)
