@@ -384,6 +384,9 @@ jobs:
           export FRAMEWORK=${{ matrix.framework.name }}
           export IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
 
+          # Install python3-venv package if not already installed
+          sudo apt-get update && sudo apt-get install -y python3-venv
+
           # Set up Python virtual environment and install dependencies
           python3 -m venv venv
           source venv/bin/activate
