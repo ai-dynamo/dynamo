@@ -18,6 +18,7 @@ use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
+use dynamo_runtime::discovery::{DiscoveryClient, MockDiscoveryClient, SharedMockRegistry};
 use dynamo_runtime::logging::make_request_span;
 use dynamo_runtime::metrics::prometheus_names::name_prefix;
 use dynamo_runtime::storage::key_value_store::KeyValueStoreManager;
@@ -31,6 +32,7 @@ pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
     store: KeyValueStoreManager,
+    discovery_client: Arc<dyn DiscoveryClient>,
     flags: StateFlags,
 }
 
@@ -72,10 +74,16 @@ impl StateFlags {
 
 impl State {
     pub fn new(manager: Arc<ModelManager>, store: KeyValueStoreManager) -> Self {
+        let discovery_client = {
+            let registry = SharedMockRegistry::new();
+            Arc::new(MockDiscoveryClient::new(None, registry)) as Arc<dyn DiscoveryClient>
+        };
+
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
             store,
+            discovery_client,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
@@ -100,6 +108,10 @@ impl State {
 
     pub fn store(&self) -> &KeyValueStoreManager {
         &self.store
+    }
+
+    pub fn discovery_client(&self) -> Arc<dyn DiscoveryClient> {
+        self.discovery_client.clone()
     }
 
     // TODO

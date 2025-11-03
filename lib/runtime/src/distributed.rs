@@ -233,9 +233,10 @@ impl DistributedRuntime {
         Namespace::new(self.clone(), name.into(), self.is_static)
     }
 
-    /// TODO: Return discovery client when KeyValueDiscoveryClient or KubeDiscoveryClient is implemented
-    pub fn discovery_client(&self) -> Result<Arc<dyn DiscoveryClient>> {
-        Err(error!("Discovery client not implemented!"))
+    /// Returns the discovery client for service registration and discovery
+    /// Currently uses MockDiscoveryClient, will be replaced with KeyValueDiscoveryClient or KubeDiscoveryClient
+    pub fn discovery_client(&self) -> Arc<dyn DiscoveryClient> {
+        self.discovery_client.clone()
     }
 
     pub(crate) fn service_client(&self) -> Option<ServiceClient> {

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::component::TransportType;
 use crate::Result;
 use async_trait::async_trait;
 use futures::Stream;
@@ -38,13 +39,15 @@ pub enum DiscoveryKey {
 
 /// Specification for registering objects in the discovery plane
 /// Represents the input to the register() operation
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscoverySpec {
     /// Endpoint specification for registration
     Endpoint {
         namespace: String,
         component: String,
         endpoint: String,
+        /// Transport type and routing information
+        transport: TransportType,
     },
     // TODO: Add ModelCard variant:
     // - ModelCard { namespace, component, model_name, card: ModelDeploymentCard }
@@ -58,30 +61,27 @@ impl DiscoverySpec {
                 namespace,
                 component,
                 endpoint,
-            } => DiscoveryInstance::Endpoint {
+                transport,
+            } => DiscoveryInstance::Endpoint(crate::component::Instance {
                 namespace,
                 component,
                 endpoint,
                 instance_id,
-            },
+                transport,
+            }),
         }
     }
 }
 
 /// Registered instances in the discovery plane
 /// Represents objects that have been successfully registered with an instance ID
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type")]
 pub enum DiscoveryInstance {
-    /// Registered endpoint instance
-    Endpoint {
-        namespace: String,
-        component: String,
-        endpoint: String,
-        instance_id: u64,
-    },
+    /// Registered endpoint instance - wraps the component::Instance directly
+    Endpoint(crate::component::Instance),
     // TODO: Add ModelCard variant:
-    // - ModelCard { namespace, component, model_name, instance_id, card: ModelDeploymentCard }
+    // - ModelCard(ModelDeploymentCard) or similar
 }
 
 /// Events emitted by the discovery client watch stream
@@ -105,6 +105,10 @@ pub trait DiscoveryClient: Send + Sync {
 
     /// Registers an object in the discovery plane with the instance id
     async fn register(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance>;
+
+    /// Returns a list of currently registered instances for the given discovery key
+    /// This is a one-time snapshot without watching for changes
+    async fn list(&self, key: DiscoveryKey) -> Result<Vec<DiscoveryInstance>>;
 
     /// Returns a stream of discovery events (Added/Removed) for the given discovery key
     async fn list_and_watch(&self, key: DiscoveryKey) -> Result<DiscoveryStream>;

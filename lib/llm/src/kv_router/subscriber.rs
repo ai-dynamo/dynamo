@@ -8,6 +8,7 @@ use std::{collections::HashSet, time::Duration};
 use anyhow::Result;
 use dynamo_runtime::{
     component::Component,
+    discovery::DiscoveryKey,
     prelude::*,
     traits::events::EventPublisher,
     transports::{
@@ -15,6 +16,7 @@ use dynamo_runtime::{
         nats::{NatsQueue, Slug},
     },
 };
+use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -248,10 +250,13 @@ pub async fn start_kv_router_background(
 
     // Get the generate endpoint and watch for instance deletions
     let generate_endpoint = component.endpoint("generate");
-    let (_instance_prefix, _instance_watcher, mut instance_event_rx) = etcd_client
-        .kv_get_and_watch_prefix(generate_endpoint.etcd_root())
-        .await?
-        .dissolve();
+    let discovery_client = component.drt().discovery_client();
+    let discovery_key = DiscoveryKey::Endpoint {
+        namespace: component.namespace().name().to_string(),
+        component: component.name().to_string(),
+        endpoint: "generate".to_string(),
+    };
+    let mut instance_event_stream = discovery_client.list_and_watch(discovery_key).await?;
 
     // Get instances_rx for tracking current workers
     let client = generate_endpoint.client().await?;
@@ -299,21 +304,12 @@ pub async fn start_kv_router_background(
                 }
 
                 // Handle generate endpoint instance deletion events
-                Some(event) = instance_event_rx.recv() => {
-                    let WatchEvent::Delete(kv) = event else {
+                Some(discovery_event_result) = instance_event_stream.next() => {
+                    let Ok(discovery_event) = discovery_event_result else {
                         continue;
                     };
 
-                    let key = String::from_utf8_lossy(kv.key());
-
-                    let Some(worker_id_str) = key.split(&['/', ':'][..]).next_back() else {
-                        tracing::warn!("Could not extract worker ID from instance key: {key}");
-                        continue;
-                    };
-
-                    // Parse as hexadecimal (base 16)
-                    let Ok(worker_id) = u64::from_str_radix(worker_id_str, 16) else {
-                        tracing::warn!("Could not parse worker ID from instance key: {key}");
+                    let dynamo_runtime::discovery::DiscoveryEvent::Removed(worker_id) = discovery_event else {
                         continue;
                     };
 
