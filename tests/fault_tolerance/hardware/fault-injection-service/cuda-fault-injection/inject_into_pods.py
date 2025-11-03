@@ -101,9 +101,9 @@ def create_cuda_fault_configmap(namespace, lib_path=None):
             core_api.delete_namespaced_config_map("cuda-fault-injection-lib", namespace)
             print("    → Deleted existing ConfigMap")
             time.sleep(2)
-        except Exception:
-            pass
-
+        except ApiException as e:
+            if e.status != 404:
+                print(f"    ⚠ Failed to delete existing ConfigMap: {e}")
         # Create new
         core_api.create_namespaced_config_map(namespace, configmap)
         print("[✓] ConfigMap created: cuda-fault-injection-lib")
