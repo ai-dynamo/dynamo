@@ -86,7 +86,7 @@ helm install dynamo-platform ./platform/ \
 Your pods should be running like below
 
 ```
-ubuntu@ip-192-168-83-157:~/dynamo/components/backends/vllm/deploy$ kubectl get pods -A
+ubuntu@ip-192-168-83-157:~/dynamo/examples/backends/vllm/deploy$ kubectl get pods -A
 NAMESPACE      NAME                                                              READY   STATUS    RESTARTS   AGE
 dynamo-cloud   dynamo-platform-dynamo-operator-controller-manager-86795c5f4j4k   2/2     Running   0          4h17m
 dynamo-cloud   dynamo-platform-etcd-0                                            1/1     Running   0          4h17m

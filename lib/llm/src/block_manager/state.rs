@@ -100,7 +100,7 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
 {
     pub async fn new(config: KvBlockManagerConfig, logical_resources: R) -> Result<Arc<Self>> {
         let model_config = config.model.clone();
-        let mut resources = Resources::new(config)?;
+        let mut resources = Resources::new(config).await?;
         let block_data_factories =
             logical::LogicalBlockFactories::new(&mut resources, logical_resources)?;
 
@@ -142,6 +142,9 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
             }
         };
 
+        // Determine if we should bypass CPU memory (G2) and offload directly from GPU (G1) to Disk (G3)
+        let bypass_cpu_mem = config::should_bypass_cpu_cache();
+
         let offload_filters = OffloadFilters::builder()
             .device(device_offload_filter)
             .host(host_offload_filter)
@@ -154,6 +157,7 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
             cancellation_token: resources.cancellation_token.clone(),
             model_config,
             kvbm_metrics: resources.config.kvbm_metrics.clone(),
+            bypass_cpu_mem,
         };
 
         let offload_manager = OffloadManager::new(
@@ -216,7 +220,7 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
 impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
     pub async fn new(config: KvBlockManagerConfig) -> Result<Arc<Self>> {
         let model_config = config.model.clone();
-        let mut resources = Resources::new(config)?;
+        let mut resources = Resources::new(config).await?;
         let block_data_factories = local::LocalBlockDataFactories::new(&mut resources)?;
 
         let (mut local_block_set, disk_factory, host_factory, device_factory) =
@@ -270,12 +274,16 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
             .disk(disk_offload_filter)
             .build()?;
 
+        // Determine if we should bypass CPU memory (G2) and offload directly from GPU (G1) to Disk (G3)
+        let bypass_cpu_mem = config::should_bypass_cpu_cache();
+
         let offload_config = OffloadManagerConfig {
             nixl_agent: resources.nixl_agent.clone(),
             async_rt_handle: resources.async_rt_handle.clone(),
             cancellation_token: resources.cancellation_token.clone(),
             model_config,
             kvbm_metrics: resources.config.kvbm_metrics.clone(),
+            bypass_cpu_mem,
         };
 
         let offload_manager = OffloadManager::new(

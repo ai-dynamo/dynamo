@@ -27,19 +27,19 @@ To use KVBM in vLLM, you can follow the steps below:
 
 ### Docker Setup
 ```bash
-# start up etcd for KVBM leader/worker registration and discovery
+# Start up etcd for KVBM leader/worker registration and discovery
 docker compose -f deploy/docker-compose.yml up -d
 
-# build a container containing vllm and kvbm
-./container/build.sh --framework vllm --enable-kvbm
+# Build a dynamo vLLM container (KVBM is built in by default)
+./container/build.sh --framework vllm
 
-# launch the container
+# Launch the container
 ./container/run.sh --framework vllm -it --mount-workspace --use-nixl-gds
 ```
 
 ### Aggregated Serving with KVBM
 ```bash
-cd $DYNAMO_HOME/components/backends/vllm
+cd $DYNAMO_HOME/examples/backends/vllm
 ./launch/agg_kvbm.sh
 ```
 
@@ -47,19 +47,35 @@ cd $DYNAMO_HOME/components/backends/vllm
 ```bash
 # 1P1D - one prefill worker and one decode worker
 # NOTE: need at least 2 GPUs
-cd $DYNAMO_HOME/components/backends/vllm
+cd $DYNAMO_HOME/examples/backends/vllm
 ./launch/disagg_kvbm.sh
 
 # 2P2D - two prefill workers and two decode workers
 # NOTE: need at least 4 GPUs
-cd $DYNAMO_HOME/components/backends/vllm
+cd $DYNAMO_HOME/examples/backends/vllm
 ./launch/disagg_kvbm_2p2d.sh
 ```
-> [!NOTE]
-> To tune the size of CPU or disk cache, set `DYN_KVBM_CPU_CACHE_GB` and `DYN_KVBM_DISK_CACHE_GB` accordingly. We only set `DYN_KVBM_CPU_CACHE_GB=20` in both scripts above.
 
 > [!NOTE]
-> `DYN_KVBM_CPU_CACHE_GB` must be set and `DYN_KVBM_DISK_CACHE_GB` is optional.
+> Configure or tune KVBM cache tiers (choose one of the following options):
+> ```bash
+> # Option 1: CPU cache only (GPU -> CPU offloading)
+> # 4 means 4GB of pinned CPU memory would be used
+> export DYN_KVBM_CPU_CACHE_GB=4
+>
+> # Option 2: Both CPU and Disk cache (GPU -> CPU -> Disk tiered offloading)
+> export DYN_KVBM_CPU_CACHE_GB=4
+> # 8 means 8GB of disk would be used
+> export DYN_KVBM_DISK_CACHE_GB=8
+>
+> # [Experimental] Option 3: Disk cache only (GPU -> Disk direct offloading, bypassing CPU)
+> # NOTE: this option is only experimental and it might not give out the best performance.
+> # NOTE: disk offload filtering is not support when using this option.
+> export DYN_KVBM_DISK_CACHE_GB=8
+> ```
+>
+> You can also use "DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS" or
+> "DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS" to specify exact block counts instead of GB
 
 > [!NOTE]
 > When disk offloading is enabled, to extend SSD lifespan, disk offload filtering would be enabled by default. The current policy is only offloading KV blocks from CPU to disk if the blocks have frequency equal or more than `2`. Frequency is determined via doubling on cache hit (init with 1) and decrement by 1 on each time decay step.
@@ -68,7 +84,7 @@ cd $DYNAMO_HOME/components/backends/vllm
 
 ### Sample Request
 ```bash
-# make a request to verify vLLM with KVBM is started up correctly
+# Make a request to verify vLLM with KVBM is started up correctly
 # NOTE: change the model name if served with a different one
 curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
     "model": "Qwen/Qwen3-0.6B",
@@ -85,7 +101,7 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 Alternatively, can use `vllm serve` directly to use KVBM for aggregated serving:
 ```bash
-vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "dynamo.llm.vllm_integration.connector"}' Qwen/Qwen3-0.6B
+vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"}' Qwen/Qwen3-0.6B
 ```
 
 ## Enable and View KVBM Metrics
@@ -95,7 +111,7 @@ Follow below steps to enable metrics collection and view via Grafana dashboard:
 # Start the basic services (etcd & natsd), along with Prometheus and Grafana
 docker compose -f deploy/docker-compose.yml --profile metrics up -d
 
-# set env var DYN_KVBM_METRICS to true, when launch via dynamo
+# Set env var DYN_KVBM_METRICS to true, when launch via dynamo
 # Optionally set DYN_KVBM_METRICS_PORT to choose the /metrics port (default: 6880).
 # NOTE: update launch/disagg_kvbm.sh or launch/disagg_kvbm_2p2d.sh as needed
 DYN_KVBM_METRICS=true \
@@ -104,7 +120,7 @@ python -m dynamo.vllm \
     --enforce-eager \
     --connector kvbm
 
-# optional if firewall blocks KVBM metrics ports to send prometheus metrics
+# Optional, if firewall blocks KVBM metrics ports to send prometheus metrics
 sudo ufw allow 6880/tcp
 ```
 
@@ -116,8 +132,8 @@ Once the model is loaded ready, follow below steps to use LMBenchmark to benchma
 ```bash
 git clone https://github.com/LMCache/LMBenchmark.git
 
-# show case of running the synthetic multi-turn chat dataset.
-# we are passing model, endpoint, output file prefix and qps to the sh script.
+# Show case of running the synthetic multi-turn chat dataset.
+# We are passing model, endpoint, output file prefix and qps to the sh script.
 cd LMBenchmark/synthetic-multi-round-qa
 ./long_input_short_output_run.sh \
     "Qwen/Qwen3-0.6B" \

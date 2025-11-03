@@ -652,28 +652,28 @@ impl Histogram {
 #[pyclass]
 #[derive(Clone)]
 pub struct RuntimeMetrics {
-    metricsregistry: Arc<dyn rs::metrics::MetricsRegistry>,
+    hierarchy: Arc<dyn rs::metrics::MetricsHierarchy>,
 }
 
 impl RuntimeMetrics {
     /// Create from Endpoint
     pub fn from_endpoint(endpoint: dynamo_runtime::component::Endpoint) -> Self {
         Self {
-            metricsregistry: Arc::new(endpoint),
+            hierarchy: Arc::new(endpoint),
         }
     }
 
     /// Create from Component
     pub fn from_component(component: dynamo_runtime::component::Component) -> Self {
         Self {
-            metricsregistry: Arc::new(component),
+            hierarchy: Arc::new(component),
         }
     }
 
     /// Create from Namespace
     pub fn from_namespace(namespace: dynamo_runtime::component::Namespace) -> Self {
         Self {
-            metricsregistry: Arc::new(namespace),
+            hierarchy: Arc::new(namespace),
         }
     }
 
@@ -690,29 +690,23 @@ impl RuntimeMetrics {
         names.iter().map(|s| s.as_str()).collect()
     }
 
-    /// Generic helper to register metrics callbacks for any type implementing MetricsRegistry
+    /// Generic helper to register metrics callbacks for any type implementing MetricsHierarchy
     /// This allows Endpoint, Component, and Namespace to share the same callback registration logic
     pub fn register_callback_for<T>(registry_item: &T, callback: PyObject) -> PyResult<()>
     where
-        T: rs::metrics::MetricsRegistry + rs::traits::DistributedRuntimeProvider + ?Sized,
+        T: rs::metrics::MetricsHierarchy + ?Sized,
     {
-        let hierarchy = registry_item.hierarchy();
-
-        // Store the callback in the DRT's metrics callback registry using the registry_item's hierarchy
-        // TODO: rename this to register_callback, once we move the the MetricsRegistry trait
-        //       out of the runtime, and make it into a composed module.
-        registry_item.drt().register_prometheus_update_callback(
-            vec![hierarchy.clone()],
-            Arc::new(move || {
-                // Execute the Python callback in the Python event loop
-                Python::with_gil(|py| {
-                    if let Err(e) = callback.call0(py) {
-                        tracing::error!("Metrics callback failed: {}", e);
-                    }
-                });
-                Ok(())
-            }),
-        );
+        // Get the metrics registry from the hierarchy and register the callback directly
+        let metrics_registry = registry_item.get_metrics_registry();
+        metrics_registry.add_update_callback(Arc::new(move || {
+            // Execute the Python callback in the Python event loop
+            Python::with_gil(|py| {
+                if let Err(e) = callback.call0(py) {
+                    tracing::error!("Metrics callback failed: {}", e);
+                }
+            });
+            Ok(())
+        }));
 
         Ok(())
     }
@@ -723,40 +717,52 @@ impl RuntimeMetrics {
     /// Register a Python callback to be invoked before metrics are scraped
     /// This callback will be called for this endpoint's metrics hierarchy
     fn register_callback(&self, callback: PyObject, _py: Python) -> PyResult<()> {
-        Self::register_callback_for(self.metricsregistry.as_ref(), callback)
+        Self::register_callback_for(self.hierarchy.as_ref(), callback)
     }
 
     /// Register a Python callback that returns Prometheus exposition text
     /// The returned text will be appended to the /metrics endpoint output
     /// The callback should return a string in Prometheus text exposition format
     fn register_prometheus_expfmt_callback(&self, callback: PyObject, _py: Python) -> PyResult<()> {
-        let hierarchy = self.metricsregistry.hierarchy();
-
-        // Store the callback in the DRT's metrics exposition text callback registry
-        self.metricsregistry.drt().register_prometheus_expfmt_callback(
-            vec![hierarchy.clone()],
-            Arc::new(move || {
-                // Execute the Python callback in the Python event loop
-                Python::with_gil(|py| {
-                    match callback.call0(py) {
-                        Ok(result) => {
-                            // Try to extract a string from the result
-                            match result.extract::<String>(py) {
-                                Ok(text) => Ok(text),
-                                Err(e) => {
-                                    tracing::error!("Metrics exposition text callback must return a string: {}", e);
-                                    Ok(String::new())
-                                }
+        // Create the callback once (Arc allows sharing across registries)
+        let callback_arc = Arc::new(move || {
+            // Execute the Python callback in the Python event loop
+            Python::with_gil(|py| {
+                match callback.call0(py) {
+                    Ok(result) => {
+                        // Try to extract a string from the result
+                        match result.extract::<String>(py) {
+                            Ok(text) => Ok(text),
+                            Err(e) => {
+                                tracing::error!(
+                                    "Metrics exposition text callback must return a string: {}",
+                                    e
+                                );
+                                Ok(String::new())
                             }
                         }
-                        Err(e) => {
-                            tracing::error!("Metrics exposition text callback failed: {}", e);
-                            Ok(String::new())
-                        }
                     }
-                })
-            }),
-        );
+                    Err(e) => {
+                        tracing::error!("Metrics exposition text callback failed: {}", e);
+                        Ok(String::new())
+                    }
+                }
+            })
+        });
+
+        // Register the callback at this hierarchy level
+        self.hierarchy
+            .get_metrics_registry()
+            .add_expfmt_callback(callback_arc.clone());
+
+        // Also register at all parent hierarchy levels so the callback is accessible
+        // when prometheus_expfmt() is called on any parent (e.g., DRT)
+        let parents = self.hierarchy.parent_hierarchies();
+        for parent in parents.iter() {
+            parent
+                .get_metrics_registry()
+                .add_expfmt_callback(callback_arc.clone());
+        }
 
         Ok(())
     }
@@ -774,10 +780,15 @@ impl RuntimeMetrics {
         py: Python,
     ) -> PyResult<Py<Counter>> {
         let labels_vec = Self::convert_py_to_rust_labels(&labels);
-        let counter = self
-            .metricsregistry
-            .create_counter(&name, &description, &labels_vec)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let counter: prometheus::Counter = rs::metrics::create_metric(
+            self.hierarchy.as_ref(),
+            &name,
+            &description,
+            &labels_vec,
+            None,
+            None,
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         let metric = Counter::from_prometheus(counter);
         Py::new(py, metric)
@@ -795,10 +806,15 @@ impl RuntimeMetrics {
     ) -> PyResult<Py<CounterVec>> {
         let label_names_str = Self::convert_py_to_rust_label_names(&label_names);
         let const_labels_vec = Self::convert_py_to_rust_labels(&const_labels);
-        let counter_vec = self
-            .metricsregistry
-            .create_countervec(&name, &description, &label_names_str, &const_labels_vec)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let counter_vec: prometheus::CounterVec = rs::metrics::create_metric(
+            self.hierarchy.as_ref(),
+            &name,
+            &description,
+            &const_labels_vec,
+            None,
+            Some(&label_names_str),
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         let metric = CounterVec::from_prometheus(counter_vec);
         Py::new(py, metric)
@@ -815,10 +831,15 @@ impl RuntimeMetrics {
     ) -> PyResult<Py<Gauge>> {
         let labels_vec = Self::convert_py_to_rust_labels(&labels);
 
-        let gauge = self
-            .metricsregistry
-            .create_gauge(&name, &description, &labels_vec)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let gauge: prometheus::Gauge = rs::metrics::create_metric(
+            self.hierarchy.as_ref(),
+            &name,
+            &description,
+            &labels_vec,
+            None,
+            None,
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         let metric = Gauge::from_prometheus(gauge);
         Py::new(py, metric)
@@ -836,10 +857,15 @@ impl RuntimeMetrics {
     ) -> PyResult<Py<GaugeVec>> {
         let label_names_str = Self::convert_py_to_rust_label_names(&label_names);
         let const_labels_vec = Self::convert_py_to_rust_labels(&const_labels);
-        let gauge_vec = self
-            .metricsregistry
-            .create_gaugevec(&name, &description, &label_names_str, &const_labels_vec)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let gauge_vec: prometheus::GaugeVec = rs::metrics::create_metric(
+            self.hierarchy.as_ref(),
+            &name,
+            &description,
+            &const_labels_vec,
+            None,
+            Some(&label_names_str),
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         let metric = GaugeVec::from_prometheus(gauge_vec);
         Py::new(py, metric)
@@ -856,10 +882,15 @@ impl RuntimeMetrics {
     ) -> PyResult<Py<Histogram>> {
         let labels_vec = Self::convert_py_to_rust_labels(&labels);
 
-        let histogram = self
-            .metricsregistry
-            .create_histogram(&name, &description, &labels_vec, None)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let histogram: prometheus::Histogram = rs::metrics::create_metric(
+            self.hierarchy.as_ref(),
+            &name,
+            &description,
+            &labels_vec,
+            None,
+            None,
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         let metric = Histogram::from_prometheus(histogram);
         Py::new(py, metric)
@@ -876,10 +907,15 @@ impl RuntimeMetrics {
     ) -> PyResult<Py<IntCounter>> {
         let labels_vec = Self::convert_py_to_rust_labels(&labels);
 
-        let counter = self
-            .metricsregistry
-            .create_intcounter(&name, &description, &labels_vec)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let counter: prometheus::IntCounter = rs::metrics::create_metric(
+            self.hierarchy.as_ref(),
+            &name,
+            &description,
+            &labels_vec,
+            None,
+            None,
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         let metric = IntCounter::from_prometheus(counter);
         Py::new(py, metric)
@@ -897,10 +933,15 @@ impl RuntimeMetrics {
     ) -> PyResult<Py<IntCounterVec>> {
         let label_names_str = Self::convert_py_to_rust_label_names(&label_names);
         let const_labels_vec = Self::convert_py_to_rust_labels(&const_labels);
-        let counter_vec = self
-            .metricsregistry
-            .create_intcountervec(&name, &description, &label_names_str, &const_labels_vec)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let counter_vec: prometheus::IntCounterVec = rs::metrics::create_metric(
+            self.hierarchy.as_ref(),
+            &name,
+            &description,
+            &const_labels_vec,
+            None,
+            Some(&label_names_str),
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         let metric = IntCounterVec::from_prometheus(counter_vec);
         Py::new(py, metric)
@@ -917,10 +958,15 @@ impl RuntimeMetrics {
     ) -> PyResult<Py<IntGauge>> {
         let labels_vec = Self::convert_py_to_rust_labels(&labels);
 
-        let gauge = self
-            .metricsregistry
-            .create_intgauge(&name, &description, &labels_vec)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let gauge: prometheus::IntGauge = rs::metrics::create_metric(
+            self.hierarchy.as_ref(),
+            &name,
+            &description,
+            &labels_vec,
+            None,
+            None,
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         let metric = IntGauge::from_prometheus(gauge);
         Py::new(py, metric)
@@ -938,10 +984,15 @@ impl RuntimeMetrics {
     ) -> PyResult<Py<IntGaugeVec>> {
         let label_names_str = Self::convert_py_to_rust_label_names(&label_names);
         let const_labels_vec = Self::convert_py_to_rust_labels(&const_labels);
-        let gauge_vec = self
-            .metricsregistry
-            .create_intgaugevec(&name, &description, &label_names_str, &const_labels_vec)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let gauge_vec: prometheus::IntGaugeVec = rs::metrics::create_metric(
+            self.hierarchy.as_ref(),
+            &name,
+            &description,
+            &const_labels_vec,
+            None,
+            Some(&label_names_str),
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         let metric = IntGaugeVec::from_prometheus(gauge_vec);
         Py::new(py, metric)

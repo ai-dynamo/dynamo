@@ -30,7 +30,7 @@ This guide demonstrates how to deploy Llama 4 Maverick Instruct with Eagle Specu
 For advanced control over how requests are routed between prefill and decode workers in disaggregated mode, refer to the [Disaggregation Strategy](./README.md#disaggregation-strategy) section.
 
 ## Notes
-* Make sure the (`eagle3_one_model: true`) is set in the LLM API config inside the `engine_configs/llama4/eagle` folder.
+* Make sure the (`eagle3_one_model: true`) is set in the LLM API config inside the `recipes/llama4/trtllm/eagle` folder.
 
 ## Setup
 
@@ -39,7 +39,7 @@ inside an interactive shell on one of the allocated nodes, set the
 following environment variables based:
 
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 
 export IMAGE="<dynamo_trtllm_image>"
 # export MOUNTS="${PWD}/:/mnt,/lustre:/lustre"
@@ -54,7 +54,7 @@ See [this](./multinode/multinode-examples.md#setup) section from multinode guide
 ## Aggregated Serving
 ```bash
 export NUM_NODES=1
-export ENGINE_CONFIG="/mnt/engine_configs/llama4/eagle/eagle_agg.yaml"
+export ENGINE_CONFIG="/mnt/recipes/llama4/trtllm/eagle/eagle_agg.yml"
 ./multinode/srun_aggregated.sh
 ```
 
@@ -62,9 +62,9 @@ export ENGINE_CONFIG="/mnt/engine_configs/llama4/eagle/eagle_agg.yaml"
 
 ```bash
 export NUM_PREFILL_NODES=1
-export PREFILL_ENGINE_CONFIG="/mnt/engine_configs/llama4/eagle/eagle_prefill.yaml"
+export PREFILL_ENGINE_CONFIG="/mnt/recipes/llama4/trtllm/eagle/eagle_prefill.yaml"
 export NUM_DECODE_NODES=1
-export DECODE_ENGINE_CONFIG="/mnt/engine_configs/llama4/eagle/eagle_decode.yaml"
+export DECODE_ENGINE_CONFIG="/mnt/recipes/llama4/trtllm/eagle/eagle_decode.yaml"
 ./multinode/srun_disaggregated.sh
 ```
 

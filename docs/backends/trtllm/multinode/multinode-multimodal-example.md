@@ -34,7 +34,7 @@ limitations under the License.
 >
 > Before running the deployment, you must update the engine configuration files to change `backend: DEFAULT` to `backend: default` (lowercase). Run the following command:
 > ```bash
-> sed -i 's/backend: DEFAULT/backend: default/g' /mnt/engine_configs/multimodal/llama4/prefill.yaml /mnt/engine_configs/multimodal/llama4/decode.yaml
+> sed -i 's/backend: DEFAULT/backend: default/g' /mnt/recipes/llama4/trtllm/multimodal/prefill.yaml /mnt/recipes/llama4/trtllm/multimodal/decode.yaml
 > ```
 
 
@@ -52,7 +52,7 @@ following environment variables based:
 ```bash
 # NOTE: IMAGE must be set manually for now
 # To build an iamge, see the steps here:
-# https://github.com/ai-dynamo/dynamo/tree/main/components/backends/trtllm#build-docker
+# https://github.com/ai-dynamo/dynamo/tree/main/docs/backends/trtllm/README.md#build-container
 export IMAGE="<dynamo_trtllm_image>"
 
 # MOUNTS are the host:container path pairs that are mounted into the containers
@@ -100,8 +100,8 @@ deployment across 4 nodes:
 
 ```bash
 # Defaults set in srun_disaggregated.sh, but can customize here.
-# export PREFILL_ENGINE_CONFIG="/mnt/engine_configs/multimodal/llama4/prefill.yaml"
-# export DECODE_ENGINE_CONFIG="/mnt/engine_configs/multimodal/llama4/decode.yaml"
+# export PREFILL_ENGINE_CONFIG="/mnt/recipes/llama4/trtllm/multimodal/prefill.yaml"
+# export DECODE_ENGINE_CONFIG="/mnt/recipes/llama4/trtllm/multimodal/decode.yaml"
 
 # Customize NUM_PREFILL_NODES to match the desired parallelism in PREFILL_ENGINE_CONFIG
 # Customize NUM_DECODE_NODES to match the desired parallelism in DECODE_ENGINE_CONFIG

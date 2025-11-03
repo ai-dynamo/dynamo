@@ -44,7 +44,7 @@ docker run \
     dynamo-wideep:latest
 ```
 
-In each container, you should be in the `/sgl-workspace/dynamo/components/backends/sglang` directory.
+In each container, you should be in the `/sgl-workspace/dynamo/examples/backends/sglang` directory.
 
 3. Run the ingress and prefill worker
 

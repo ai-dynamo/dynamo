@@ -38,8 +38,7 @@ pub async fn run(
 
     // We can only make the NATS service if we have NATS
     if distributed_runtime.nats_client().is_some() {
-        // TODO fix in next PR, ServiceConfigBuilder is silly
-        component = component.service_builder().create().await?;
+        component.add_stats_service().await?;
     }
     let endpoint = component.endpoint(&endpoint_id.name);
 
@@ -68,6 +67,7 @@ pub async fn run(
             engine: inner_engine,
             mut model,
             is_static,
+            is_prefill,
         } => {
             // Pre-processing is done ingress-side, so it should be already done.
             let frontend = SegmentSource::<
@@ -84,8 +84,11 @@ pub async fn run(
             let ingress = Ingress::for_pipeline(pipeline)?;
 
             if !is_static {
-                // Default to supporting both Chat and Completions endpoints
-                let model_type = ModelType::Chat | ModelType::Completions;
+                let model_type = if is_prefill {
+                    ModelType::Prefill
+                } else {
+                    ModelType::Chat | ModelType::Completions
+                };
                 model
                     .attach(&endpoint, model_type, ModelInput::Tokens)
                     .await?;
