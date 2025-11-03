@@ -290,8 +290,9 @@ impl Component {
         // Extract Instance from DiscoveryInstance::Endpoint wrapper
         let mut instances: Vec<Instance> = discovery_instances
             .into_iter()
-            .map(|di| match di {
-                crate::discovery::DiscoveryInstance::Endpoint(instance) => instance,
+            .filter_map(|di| match di {
+                crate::discovery::DiscoveryInstance::Endpoint(instance) => Some(instance),
+                _ => None, // Ignore all other variants (ModelCard, etc.)
             })
             .collect();
         

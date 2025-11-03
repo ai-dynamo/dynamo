@@ -244,6 +244,9 @@ impl Client {
                             crate::discovery::DiscoveryInstance::Endpoint(instance) => {
                                 map.insert(instance.instance_id, instance);
                             }
+                            _ => {
+                                // Ignore all other variants (ModelCard, etc.) when watching for endpoints
+                            }
                         }
                     }
                     crate::discovery::DiscoveryEvent::Removed(instance_id) => {

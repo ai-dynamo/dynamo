@@ -19,8 +19,9 @@ pub async fn list_all_instances(
 
     let mut instances: Vec<Instance> = discovery_instances
         .into_iter()
-        .map(|di| match di {
-            crate::discovery::DiscoveryInstance::Endpoint(instance) => instance,
+        .filter_map(|di| match di {
+            crate::discovery::DiscoveryInstance::Endpoint(instance) => Some(instance),
+            _ => None, // Ignore all other variants (ModelCard, etc.)
         })
         .collect();
 

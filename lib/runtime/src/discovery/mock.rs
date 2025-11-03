@@ -46,6 +46,7 @@ impl MockDiscoveryClient {
 /// Helper function to check if an instance matches a discovery key query
 fn matches_key(instance: &DiscoveryInstance, key: &DiscoveryKey) -> bool {
     match (instance, key) {
+        // Endpoint matching
         (DiscoveryInstance::Endpoint(_), DiscoveryKey::AllEndpoints) => true,
         (
             DiscoveryInstance::Endpoint(inst),
@@ -66,6 +67,25 @@ fn matches_key(instance: &DiscoveryInstance, key: &DiscoveryKey) -> bool {
                 endpoint,
             },
         ) => &inst.namespace == namespace && &inst.component == component && &inst.endpoint == endpoint,
+        
+        // ModelCard matching
+        (DiscoveryInstance::ModelCard { .. }, DiscoveryKey::AllModelCards) => true,
+        (
+            DiscoveryInstance::ModelCard { namespace: inst_ns, .. },
+            DiscoveryKey::NamespacedModelCards { namespace },
+        ) => inst_ns == namespace,
+        (
+            DiscoveryInstance::ModelCard { namespace: inst_ns, component: inst_comp, .. },
+            DiscoveryKey::ComponentModelCards { namespace, component },
+        ) => inst_ns == namespace && inst_comp == component,
+        (
+            DiscoveryInstance::ModelCard { namespace: inst_ns, component: inst_comp, endpoint: inst_ep, .. },
+            DiscoveryKey::EndpointModelCards { namespace, component, endpoint },
+        ) => inst_ns == namespace && inst_comp == component && inst_ep == endpoint,
+        
+        // Cross-type matches return false
+        (DiscoveryInstance::Endpoint(_), DiscoveryKey::AllModelCards | DiscoveryKey::NamespacedModelCards { .. } | DiscoveryKey::ComponentModelCards { .. } | DiscoveryKey::EndpointModelCards { .. }) => false,
+        (DiscoveryInstance::ModelCard { .. }, DiscoveryKey::AllEndpoints | DiscoveryKey::NamespacedEndpoints { .. } | DiscoveryKey::ComponentEndpoints { .. } | DiscoveryKey::Endpoint { .. }) => false,
     }
 }
 
@@ -117,6 +137,7 @@ impl DiscoveryClient for MockDiscoveryClient {
                 let current_ids: HashSet<_> = current.iter().map(|i| {
                     match i {
                         DiscoveryInstance::Endpoint(inst) => inst.instance_id,
+                        DiscoveryInstance::ModelCard { instance_id, .. } => *instance_id,
                     }
                 }).collect();
 
@@ -124,6 +145,7 @@ impl DiscoveryClient for MockDiscoveryClient {
                 for instance in current {
                     let id = match &instance {
                         DiscoveryInstance::Endpoint(inst) => inst.instance_id,
+                        DiscoveryInstance::ModelCard { instance_id, .. } => *instance_id,
                     };
                     if known_instances.insert(id) {
                         yield Ok(DiscoveryEvent::Added(instance));
@@ -196,6 +218,7 @@ mod tests {
         // Remove first instance
         registry.instances.lock().unwrap().retain(|i| match i {
             DiscoveryInstance::Endpoint(inst) => inst.instance_id != 1,
+            DiscoveryInstance::ModelCard { instance_id, .. } => *instance_id != 1,
         });
 
         let event = stream.next().await.unwrap().unwrap();
