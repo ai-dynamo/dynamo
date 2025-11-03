@@ -1,3 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
 """
 XID 79 E2E Test - Fully Automated NVSentinel Workflow
 
@@ -5,7 +10,7 @@ This test validates the complete NVSentinel automated fault tolerance pipeline:
 1. Inject XID 79 via API → syslog-health-monitor detects it
 2. Inject CUDA faults → pods crash naturally (simulates real GPU failure)
 3. fault-quarantine-module cordons the node automatically
-4. node-drainer-module drains pods automatically  
+4. node-drainer-module drains pods automatically
 5. fault-remediation-module restarts GPU driver automatically (optional)
 6. Node is uncordoned automatically
 7. Pods reschedule and inference recovers
@@ -18,7 +23,6 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Optional
 
 import pytest
 import requests
@@ -125,9 +129,6 @@ class NVSentinelMonitor:
             # Check for drain-related annotations
             drain_annotations = {k: v for k, v in annotations.items() 
                                if "drain" in k.lower() or "evict" in k.lower()}
-            
-            # Check node status
-            status = self.get_node_quarantine_status(node_name)
             
             if drain_annotations or any("NoExecute" in str(t.effect) for t in taints):
                 elapsed = time.time() - start_time
