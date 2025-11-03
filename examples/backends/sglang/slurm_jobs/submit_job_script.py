@@ -433,7 +433,8 @@ def main(input_args: list[str] | None = None):
         job_id = submit_job(temp_path, args.extra_slurm_args)
         submitted_job_ids.append(job_id)
 
-        # Create log directory with new naming format
+        # Create log directory with new naming format IMMEDIATELY after submission
+        # SLURM will write log.out/log.err to this directory when job starts
         if is_aggregated:
             log_dir_name = f"{job_id}_{agg_workers}A_{timestamp}"
         else:

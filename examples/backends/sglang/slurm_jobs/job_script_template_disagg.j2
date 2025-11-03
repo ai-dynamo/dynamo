@@ -5,8 +5,8 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --account={{ account }}
 #SBATCH --time={{ time_limit }}
-#SBATCH --output=logs/%j/log.out
-#SBATCH --error=logs/%j/log.err
+#SBATCH --output=logs/%j_{{ prefill_workers }}P_{{ decode_workers }}D_{{ timestamp }}/log.out
+#SBATCH --error=logs/%j_{{ prefill_workers }}P_{{ decode_workers }}D_{{ timestamp }}/log.err
 #SBATCH --partition={{ partition }}
 
 # Constants
