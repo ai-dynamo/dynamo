@@ -11,9 +11,9 @@ metadata:
   name: chaos-mesh
 ---
 # This is a placeholder - use Helm to install ChaosMesh
-# 
+#
 # Installation commands:
-# 
+#
 # helm repo add chaos-mesh https://charts.chaos-mesh.org
 # helm install chaos-mesh chaos-mesh/chaos-mesh -n chaos-mesh \
 #   --set chaosDaemon.runtime=containerd \
@@ -36,36 +36,37 @@ metadata:
 data:
   README.md: |
     # ChaosMesh GPU Fault Injection
-    
+
     ChaosMesh provides the following chaos types for GPU fault injection:
-    
+
     ## PodChaos
     - **pod-kill**: Kill GPU pods (simulates XID 79)
     - **container-kill**: Kill GPU containers
     - **pod-failure**: Make GPU pods unavailable
-    
+
     ## StressChaos
     - **memory-stress**: Stress GPU node memory (simulates XID 48, 94, 95)
     - **cpu-stress**: Stress GPU node CPU (can trigger thermal issues)
-    
+
     ## IOChaos
     - **fault**: Inject I/O errors on GPU devices
     - **latency**: Add I/O latency
-    
+
     ## TimeChaos
     - **time-offset**: Offset system time (can trigger XID 119, 120 timeouts)
-    
+
     ## NetworkChaos (for multi-GPU scenarios)
     - **partition**: Isolate GPU nodes
     - **loss**: Packet loss between GPU nodes (NVLink errors)
     - **delay**: Network delay
-    
+
     ## Usage Examples
-    
+
     See gpu_chaos_mesh.py for programmatic injection via API.
-    
+
     Or use kubectl:
-    
+
+
     ```bash
     # Kill GPU pod
     kubectl apply -f - <<EOF
@@ -86,7 +87,7 @@ data:
       duration: 60s
     EOF
     ```
-    
+
     ```bash
     # Memory stress on GPU node
     kubectl apply -f - <<EOF
