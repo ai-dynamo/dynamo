@@ -97,13 +97,10 @@ async def run_profile(args):
             config = config_modifier.update_image(config, args.dgd_image)
             logger.info(f"Using DGD image: {args.dgd_image}")
 
-
         profile_num_gpus = [
             2**i
             for i in range(int(math.log2(args.max_num_gpus_per_engine)) + 1)
-            if args.min_num_gpus_per_engine
-            <= 2**i
-            <= args.max_num_gpus_per_engine
+            if args.min_num_gpus_per_engine <= 2**i <= args.max_num_gpus_per_engine
         ]
         if args.is_moe_model:
             # Filter GPU counts to only include divisors of num_experts
