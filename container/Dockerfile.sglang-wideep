@@ -87,4 +87,4 @@ ENV PATH=/usr/local/bin/etcd:$PATH
 # Enable forceful shutdown of inflight requests
 ENV SGL_FORCE_SHUTDOWN=1
 
-WORKDIR /sgl-workspace/dynamo/components/backends/sglang
+WORKDIR /sgl-workspace/dynamo/examples/backends/sglang
