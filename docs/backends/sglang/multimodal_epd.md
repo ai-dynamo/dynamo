@@ -47,7 +47,7 @@ flowchart LR
 ```
 
 ```bash
-cd $DYNAMO_HOME/components/backends/sglang
+cd $DYNAMO_HOME/examples/backends/sglang
 ./launch/multimodal_agg.sh
 ```
 
@@ -133,7 +133,7 @@ flowchart LR
 
 
 ```bash
-cd $DYNAMO_HOME/components/backends/sglang
+cd $DYNAMO_HOME/examples/backends/sglang
 ./launch/multimodal_disagg.sh
 ```
 

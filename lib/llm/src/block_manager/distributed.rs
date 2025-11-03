@@ -115,12 +115,6 @@ mod tests {
         }
     }
 
-    fn get_unique_barrier_id() -> String {
-        static COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-        COUNTER.fetch_add(1, Ordering::Relaxed).to_string()
-    }
-
     async fn build_leader_and_workers(num_workers: usize) -> Result<(KvbmLeader, Vec<KvbmWorker>)> {
         let mut workers = Vec::new();
 
