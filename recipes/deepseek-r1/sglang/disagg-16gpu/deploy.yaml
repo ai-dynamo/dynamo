@@ -7,7 +7,7 @@ metadata:
   name: sgl-dsr1-16gpu
 spec:
   pvcs:
-    - name: model-cache
+    - name: model-cache-pvc
       create: false
   services:
     Frontend:
@@ -34,8 +34,8 @@ spec:
         limits:
           gpu: "8"
       volumeMounts:
-        - name: model-cache
-          mountPoint: /root/.cache/huggingface
+        - name: model-cache-pvc
+          mountPoint: /model-cache
       sharedMemory:
         size: 80Gi
       extraPodSpec:
@@ -55,7 +55,7 @@ spec:
             - dynamo.sglang
           args:
             - --model-path
-            - deepseek-ai/DeepSeek-R1
+            - /model-cache/deepseek-r1
             - --served-model-name
             - deepseek-ai/DeepSeek-R1
             - --tp
@@ -87,8 +87,8 @@ spec:
         limits:
           gpu: "8"
       volumeMounts:
-        - name: model-cache
-          mountPoint: /root/.cache/huggingface
+        - name: model-cache-pvc
+          mountPoint: /model-cache
       sharedMemory:
         size: 80Gi
       extraPodSpec:
@@ -108,7 +108,7 @@ spec:
             - dynamo.sglang
           args:
             - --model-path
-            - deepseek-ai/DeepSeek-R1
+            - /model-cache/deepseek-r1
             - --served-model-name
             - deepseek-ai/DeepSeek-R1
             - --tp
