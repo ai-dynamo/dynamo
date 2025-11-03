@@ -5,15 +5,7 @@
 
 import logging
 
-try:
-    from dynamo._core import BlockManager as BlockManager
-    from dynamo._core import KvbmLeader as KvbmLeader
-    from dynamo._core import KvbmWorker as KvbmWorker
-except ImportError:
-    pass  # BlockManager is not enabled by default
-
 from dynamo._core import ApproxKvIndexer as ApproxKvIndexer
-from dynamo._core import DisaggregatedRouter as DisaggregatedRouter
 from dynamo._core import EngineType
 from dynamo._core import EntrypointArgs as EntrypointArgs
 from dynamo._core import ForwardPassMetrics as ForwardPassMetrics
