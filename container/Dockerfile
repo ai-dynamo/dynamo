@@ -52,7 +52,7 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 # Redeclare ARGs for this stage
 ARG ARCH
 ARG ARCH_ALT
-ARG PYTHON_VERSION
+ARG PYTHON_VERSION=3.12
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET
 ARG SCCACHE_REGION
@@ -251,7 +251,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 ##################################
 
 # Create and activate virtual environment
-ARG PYTHON_VERSION
+ARG PYTHON_VERSION=3.12
 RUN mkdir -p /opt/dynamo/venv && \
     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
 
@@ -304,7 +304,7 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
     PATH=/usr/local/cargo/bin:/opt/dynamo/venv/bin:$PATH
 
 # Install system dependencies
-ARG PYTHON_VERSION
+ARG PYTHON_VERSION=3.12
 RUN dnf update -y \
     && dnf install -y llvm-toolset protobuf-compiler python${PYTHON_VERSION}-devel wget unzip \
     && dnf clean all \
@@ -384,10 +384,8 @@ COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 # Install Python packages
 COPY benchmarks/ /opt/dynamo/benchmarks/
 RUN uv pip list
-RUN uv pip install --dry-run /opt/dynamo/wheelhouse/ai_dynamo_runtime*cp312*.whl &&\
-    uv pip install --dry-run /opt/dynamo/wheelhouse/ai_dynamo*any.whl &&\
-    uv pip install --dry-run /opt/dynamo/wheelhouse/nixl/nixl*.whl
-RUN uv pip install \
+RUN ls -lah /opt/dynamo/wheelhouse/ &&\
+    uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
