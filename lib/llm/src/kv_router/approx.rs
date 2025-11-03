@@ -274,7 +274,7 @@ impl ApproxKvIndexer {
                 // Use a reasonable threshold - can be made configurable if needed
                 let mut prune_manager: PruneManager<BlockEntry> = PruneManager::new(ttl, 50, prune_config.clone());
                 let mut event_id = 0;
-                
+
                 // Create a future that periodically checks the current size of the tree and prunes if necessary.
                 let mut prune_fut = if let Some(prune_config) = &prune_config {
                     tokio::time::interval(prune_config.prune_interval)
@@ -282,7 +282,7 @@ impl ApproxKvIndexer {
                     // If there is no prune config, sleep forever.
                     tokio::time::interval(Duration::MAX)
                 };
-                
+
                 loop {
                     // Create a future that sleeps until the next expiration time.
                     let expiry_fut = if let Some(next_expiry) = prune_manager.peek_next_expiry() {
