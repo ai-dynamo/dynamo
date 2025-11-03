@@ -18,7 +18,7 @@ import logging
 import os
 import subprocess
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Optional, Type
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -31,14 +31,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Import kernel-level XID injector (for XID 79 via nsenter+kmsg)
+GPUXIDInjectorKernel: Optional[Type[Any]] = None
 try:
-    from gpu_xid_injector import GPUXIDInjectorKernel
+    from gpu_xid_injector import GPUXIDInjectorKernel  # type: ignore[assignment]
 
     KERNEL_XID_AVAILABLE = True
 except ImportError:
     logger.warning("Kernel-level XID injector not available")
     KERNEL_XID_AVAILABLE = False
-    GPUXIDInjectorKernel = None
 
 
 # ============================================================================
@@ -72,7 +72,7 @@ class GPUFaultInjector:
         # Initialize kernel-level XID injector (XID 79 via nsenter+kmsg)
         self.kernel_xid_injector = None
         self.kernel_xid_available = False
-        if KERNEL_XID_AVAILABLE and GPUXIDInjectorKernel:
+        if KERNEL_XID_AVAILABLE and GPUXIDInjectorKernel is not None:
             try:
                 self.kernel_xid_injector = GPUXIDInjectorKernel()
                 self.kernel_xid_available = self.kernel_xid_injector.privileged
