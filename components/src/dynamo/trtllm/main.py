@@ -332,6 +332,9 @@ async def init(runtime: DistributedRuntime, config: Config):
         runtime_config.max_num_batched_tokens = config.max_num_tokens
         runtime_config.reasoning_parser = config.reasoning_parser
         runtime_config.tool_call_parser = config.tool_call_parser
+        runtime_config.set_engine_specific(
+            "disaggregation_mode", json.dumps(config.disaggregation_mode.value)
+        )
 
         logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
         logging.info(
