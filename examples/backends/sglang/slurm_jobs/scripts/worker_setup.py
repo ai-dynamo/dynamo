@@ -155,7 +155,7 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
     )
     parser.add_argument(
         "--worker_type",
-        choices=["decode", "prefill", "frontend", "nginx"],
+        choices=["decode", "prefill", "frontend", "nginx", "aggregated"],
         required=True,
         help="Type of worker to run",
     )
@@ -175,14 +175,8 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
     parser.add_argument(
         "--gpu_type",
         type=str,
-        choices=[
-            "gb200-fp8",
-            "gb200-fp8-prefill",
-            "gb200-fp4-decode",
-            "gb200-fp4-prefill",
-        ],
         default="gb200-fp8",
-        help="Type of GPU to use. You can choose between gb200-fp8, gb200-fp8-prefill, gb200-fp4-decode, and gb200-fp4-prefill.",
+        help="Type of GPU to use (script will be validated at runtime)",
     )
 
     parser.add_argument(
@@ -274,11 +268,21 @@ def setup_env_vars_for_gpu_script(
 
 def get_gpu_command(worker_type: str, gpu_type: str) -> str:
     """Generate command to run the appropriate GPU script"""
-    script_name = f"{gpu_type}.sh"
-    script_path = Path(__file__).parent / script_name
-    mode = worker_type  # "prefill" or "decode"
-
-    return f"bash {script_path} {mode}"
+    if worker_type == "aggregated":
+        # For aggregated, use -agg.sh scripts and remove any prefill/decode suffix
+        base_gpu_type = gpu_type.replace("-prefill", "").replace("-decode", "")
+        script_name = f"{base_gpu_type}-agg.sh"
+        script_path = Path(__file__).parent / script_name
+        if not script_path.exists():
+            raise ValueError(f"Aggregated GPU script not found: {script_path}")
+        return f"bash {script_path}"
+    else:
+        script_name = f"{gpu_type}.sh"
+        script_path = Path(__file__).parent / script_name
+        if not script_path.exists():
+            raise ValueError(f"GPU script not found: {script_path}")
+        mode = worker_type  # "prefill" or "decode"
+        return f"bash {script_path} {mode}"
 
 
 def setup_head_prefill_node(prefill_host_ip: str) -> None:
@@ -406,6 +410,45 @@ def setup_decode_worker(
     return run_command(cmd_to_run)
 
 
+def setup_aggregated_worker(
+    worker_idx: int,
+    local_rank: int,
+    leader_ip: str,
+    master_ip: str,
+    nodes_per_worker: int,
+    gpus_per_node: int,
+    gpu_type: str,
+    multiple_frontends_enabled: bool = False,
+    dump_config_path: str | None = None,
+) -> int:
+    """
+    Setup the aggregated worker.
+    """
+    total_gpus = nodes_per_worker * gpus_per_node
+    # Only setup infrastructure in traditional mode (not multiple frontends) on first worker, first node
+    if not multiple_frontends_enabled and worker_idx == 0 and local_rank == 0:
+        setup_head_prefill_node(master_ip)
+    else:
+        logging.info(f"Setting up aggregated worker {worker_idx}, local rank {local_rank}")
+        if not wait_for_etcd(f"http://{master_ip}:{ETCD_CLIENT_PORT}"):
+            raise RuntimeError("Failed to connect to etcd")
+
+    # Setup environment variables for GPU script - use leader_ip as dist-init-addr
+    # Aggregated mode doesn't use init locations
+    setup_env_vars_for_gpu_script(
+        leader_ip,
+        local_rank,
+        total_gpus,
+        nodes_per_worker,
+        use_init_locations=False,
+        dump_config_path=dump_config_path,
+    )
+
+    # Use appropriate aggregated GPU script
+    cmd_to_run = get_gpu_command("aggregated", gpu_type)
+    return run_command(cmd_to_run)
+
+
 def setup_env(master_ip: str):
     nats_server = f"nats://{master_ip}:{NATS_PORT}"
     etcd_endpoints = f"http://{master_ip}:{ETCD_CLIENT_PORT}"
@@ -466,6 +509,18 @@ def main(input_args: list[str] | None = None):
             args.gpus_per_node,
             args.gpu_type,
             args.use_init_locations,
+            args.dump_config_path,
+        )
+    elif args.worker_type == "aggregated":
+        setup_aggregated_worker(
+            args.worker_idx,
+            args.local_rank,
+            args.leader_ip,
+            args.master_ip,
+            args.nodes_per_worker,
+            args.gpus_per_node,
+            args.gpu_type,
+            args.multiple_frontends_enabled,
             args.dump_config_path,
         )
 

@@ -20,6 +20,7 @@ Script to generate SLURM job scripts from Jinja2 templates.
 import argparse
 import logging
 import os
+import pathlib
 import subprocess
 import tempfile
 from datetime import datetime
@@ -107,13 +108,38 @@ def submit_job(job_script_path, extra_slurm_args=[]):
         raise
 
 
+def _get_available_gpu_types() -> list[str]:
+    """Discover available GPU types by scanning scripts directory for .sh files."""
+    script_dir = pathlib.Path(__file__).parent / "scripts"
+    gpu_types = set()
+    
+    # Find all .sh files that are GPU scripts (not utility scripts)
+    excluded = {"monitor_gpu_utilization.sh", "worker_setup.py", "check_server_health.py", "sglang_bench_serving.sh", "benchmark_utils.sh"}
+    
+    for script_file in script_dir.glob("*.sh"):
+        script_name = script_file.name
+        if script_name in excluded:
+            continue
+        
+        # For aggregated scripts (ending with -agg.sh), extract base type
+        if script_name.endswith("-agg.sh"):
+            base_name = script_name[:-7]  # Remove "-agg.sh"
+            gpu_types.add(base_name)
+        else:
+            # For regular scripts, remove .sh extension
+            base_name = script_name[:-3]  # Remove ".sh"
+            gpu_types.add(base_name)
+    
+    return sorted(list(gpu_types))
+
+
 def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate and submit SLURM job scripts"
     )
-    parser.add_argument(
-        "--template", required=True, help="Path to Jinja2 template file"
-    )
+    
+    # Get available GPU types dynamically
+    available_gpu_types = _get_available_gpu_types()
 
     # Template parameters
     parser.add_argument("--job-name", default="dynamo_setup", help="SLURM job name")
@@ -125,16 +151,22 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
         "--time-limit", default="04:00:00", help="Time limit (HH:MM:SS)"
     )
     parser.add_argument(
-        "--prefill-nodes", type=int, default=2, help="Number of prefill nodes"
+        "--prefill-nodes", type=int, default=None, help="Number of prefill nodes"
     )
     parser.add_argument(
-        "--decode-nodes", type=int, default=2, help="Number of decode nodes"
+        "--decode-nodes", type=int, default=None, help="Number of decode nodes"
     )
     parser.add_argument(
-        "--prefill-workers", type=int, default=1, help="Number of prefill workers"
+        "--prefill-workers", type=int, default=None, help="Number of prefill workers"
     )
     parser.add_argument(
-        "--decode-workers", type=int, default=1, help="Number of decode workers"
+        "--decode-workers", type=int, default=None, help="Number of decode workers"
+    )
+    parser.add_argument(
+        "--agg-nodes", type=int, default=None, help="Number of aggregated worker nodes"
+    )
+    parser.add_argument(
+        "--agg-workers", type=int, default=None, help="Number of aggregated workers"
     )
     parser.add_argument(
         "--gpus-per-node", type=int, default=8, help="Number of GPUs per node"
@@ -144,14 +176,9 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
     )
     parser.add_argument(
         "--gpu-type",
-        choices=[
-            "gb200-fp8",
-            "gb200-fp8-prefill",
-            "gb200-fp4-decode",
-            "gb200-fp4-prefill",
-        ],
-        default="gb200-fp8",
-        help="GPU type to use. You can choose between gb200-fp8, gb200-fp8-prefill, gb200-fp4-decode, and gb200-fp4-prefill.",
+        choices=available_gpu_types,
+        default=available_gpu_types[0] if available_gpu_types else None,
+        help=f"GPU type to use. Available types: {', '.join(available_gpu_types)}",
     )
 
     parser.add_argument(
@@ -209,27 +236,109 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
     return parser.parse_args(args)
 
 
+def _validate_args(args: argparse.Namespace) -> None:
+    """Validate arguments and ensure aggregated and disaggregated args are mutually exclusive."""
+    has_disagg_args = any([
+        args.prefill_nodes is not None,
+        args.decode_nodes is not None,
+        args.prefill_workers is not None,
+        args.decode_workers is not None,
+    ])
+    has_agg_args = any([
+        args.agg_nodes is not None,
+        args.agg_workers is not None,
+    ])
+
+    if has_disagg_args and has_agg_args:
+        raise ValueError(
+            "Cannot specify both aggregated (--agg-nodes, --agg-workers) and "
+            "disaggregated (--prefill-nodes, --decode-nodes, --prefill-workers, --decode-workers) arguments"
+        )
+
+    if has_disagg_args:
+        # Validate disaggregated args
+        if args.prefill_nodes is None or args.decode_nodes is None:
+            raise ValueError(
+                "Disaggregated mode requires both --prefill-nodes and --decode-nodes"
+            )
+        if args.prefill_workers is None or args.decode_workers is None:
+            raise ValueError(
+                "Disaggregated mode requires both --prefill-workers and --decode-workers"
+            )
+        if args.prefill_nodes % args.prefill_workers != 0:
+            raise ValueError(
+                f"Prefill nodes ({args.prefill_nodes}) must be divisible by prefill workers ({args.prefill_workers})"
+            )
+        if args.decode_nodes % args.decode_workers != 0:
+            raise ValueError(
+                f"Decode nodes ({args.decode_nodes}) must be divisible by decode workers ({args.decode_workers})"
+            )
+        # Validate GPU script exists for disaggregated mode
+        script_dir = pathlib.Path(__file__).parent / "scripts"
+        gpu_script = script_dir / f"{args.gpu_type}.sh"
+        if not gpu_script.exists():
+            raise ValueError(
+                f"GPU script not found: {gpu_script}. Available GPU types: {', '.join(_get_available_gpu_types())}"
+            )
+
+    if has_agg_args:
+        # Validate aggregated args
+        if args.agg_nodes is None or args.agg_workers is None:
+            raise ValueError(
+                "Aggregated mode requires both --agg-nodes and --agg-workers"
+            )
+        if args.agg_nodes % args.agg_workers != 0:
+            raise ValueError(
+                f"Aggregated nodes ({args.agg_nodes}) must be divisible by aggregated workers ({args.agg_workers})"
+            )
+        # Validate aggregated GPU script exists
+        script_dir = pathlib.Path(__file__).parent / "scripts"
+        # Remove any -prefill or -decode suffix for aggregated mode
+        base_gpu_type = args.gpu_type.replace("-prefill", "").replace("-decode", "")
+        agg_gpu_script = script_dir / f"{base_gpu_type}-agg.sh"
+        if not agg_gpu_script.exists():
+            raise ValueError(
+                f"Aggregated GPU script not found: {agg_gpu_script}. Available GPU types: {', '.join(_get_available_gpu_types())}"
+            )
+
+    if not has_disagg_args and not has_agg_args:
+        raise ValueError(
+            "Must specify either aggregated (--agg-nodes, --agg-workers) or "
+            "disaggregated (--prefill-nodes, --decode-nodes, --prefill-workers, --decode-workers) arguments"
+        )
+
+
 def main(input_args: list[str] | None = None):
     setup_logging()
     args = _parse_command_line_args(input_args)
 
-    # Validation
-    if args.prefill_nodes % args.prefill_workers != 0:
-        raise ValueError(
-            f"Prefill nodes ({args.prefill_nodes}) must be divisible by prefill workers ({args.prefill_workers})"
-        )
+    # Validate arguments
+    _validate_args(args)
 
-    if args.decode_nodes % args.decode_workers != 0:
-        raise ValueError(
-            f"Decode nodes ({args.decode_nodes}) must be divisible by decode workers ({args.decode_workers})"
-        )
+    # Determine mode and set defaults
+    is_aggregated = args.agg_nodes is not None
+
+    if is_aggregated:
+        agg_nodes = args.agg_nodes
+        agg_workers = args.agg_workers
+        prefill_nodes = 0
+        decode_nodes = 0
+        prefill_workers = 0
+        decode_workers = 0
+        total_nodes = agg_nodes
+    else:
+        prefill_nodes = args.prefill_nodes
+        decode_nodes = args.decode_nodes
+        prefill_workers = args.prefill_workers
+        decode_workers = args.decode_workers
+        agg_nodes = 0
+        agg_workers = 0
+        total_nodes = prefill_nodes + decode_nodes
 
     # Validation for multiple frontends
     if args.enable_multiple_frontends:
         if args.num_additional_frontends < 0:
             raise ValueError("Number of additional frontends cannot be negative")
-
-    total_nodes = args.prefill_nodes + args.decode_nodes
 
     # parse profiler configs
     profiler_config = {}
@@ -266,15 +375,24 @@ def main(input_args: list[str] | None = None):
     # Generate timestamp for log directory naming
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    # Select template based on mode
+    if is_aggregated:
+        template_path = "job_script_template_agg.j2"
+    else:
+        template_path = "job_script_template_disagg.j2"
+
     template_vars = {
         "job_name": args.job_name,
         "total_nodes": total_nodes,
         "account": args.account,
         "time_limit": args.time_limit,
-        "prefill_nodes": args.prefill_nodes,
-        "decode_nodes": args.decode_nodes,
-        "prefill_workers": args.prefill_workers,
-        "decode_workers": args.decode_workers,
+        "prefill_nodes": prefill_nodes,
+        "decode_nodes": decode_nodes,
+        "prefill_workers": prefill_workers,
+        "decode_workers": decode_workers,
+        "agg_nodes": agg_nodes,
+        "agg_workers": agg_workers,
+        "is_aggregated": is_aggregated,
         "model_dir": args.model_dir,
         "config_dir": args.config_dir,
         "container_image": args.container_image,
@@ -298,14 +416,17 @@ def main(input_args: list[str] | None = None):
     temp_file.close()
 
     try:
-        _, rendered_script = generate_job_script(args.template, temp_path, **template_vars)
+        _, rendered_script = generate_job_script(template_path, temp_path, **template_vars)
 
         submitted_job_ids = []
         job_id = submit_job(temp_path, args.extra_slurm_args)
         submitted_job_ids.append(job_id)
 
         # Create log directory with new naming format
-        log_dir_name = f"{job_id}_{args.prefill_workers}P_{args.decode_workers}D_{timestamp}"
+        if is_aggregated:
+            log_dir_name = f"{job_id}_{agg_workers}A_{timestamp}"
+        else:
+            log_dir_name = f"{job_id}_{prefill_workers}P_{decode_workers}D_{timestamp}"
         log_dir_path = os.path.join("logs", log_dir_name)
         os.makedirs(log_dir_path, exist_ok=True)
 
@@ -329,7 +450,10 @@ def main(input_args: list[str] | None = None):
                 submitted_job_ids.append(job_id)
 
                 # Save script for retry job as well
-                retry_log_dir_name = f"{job_id}_{args.prefill_workers}P_{args.decode_workers}D_{timestamp}"
+                if is_aggregated:
+                    retry_log_dir_name = f"{job_id}_{agg_workers}A_{timestamp}"
+                else:
+                    retry_log_dir_name = f"{job_id}_{prefill_workers}P_{decode_workers}D_{timestamp}"
                 retry_log_dir_path = os.path.join("logs", retry_log_dir_name)
                 os.makedirs(retry_log_dir_path, exist_ok=True)
                 retry_sbatch_script_path = os.path.join(retry_log_dir_path, "sbatch_script.sh")
