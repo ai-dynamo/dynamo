@@ -29,12 +29,12 @@ impl KVStoreDiscoveryClient {
 
     /// Build the key path for an endpoint
     fn endpoint_key(namespace: &str, component: &str, endpoint: &str, instance_id: u64) -> String {
-        format!("{}/{}/{}/{}/{:016x}", INSTANCES_BUCKET, namespace, component, endpoint, instance_id)
+        format!("{}/{}/{}/{}/{:x}", INSTANCES_BUCKET, namespace, component, endpoint, instance_id)
     }
 
     /// Build the key path for a model card
     fn model_card_key(namespace: &str, component: &str, endpoint: &str, instance_id: u64) -> String {
-        format!("{}/{}/{}/{}/{:016x}", MODEL_CARDS_BUCKET, namespace, component, endpoint, instance_id)
+        format!("{}/{}/{}/{}/{:x}", MODEL_CARDS_BUCKET, namespace, component, endpoint, instance_id)
     }
 
     /// Extract prefix for querying based on discovery key
