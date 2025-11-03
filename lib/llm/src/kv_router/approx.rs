@@ -207,7 +207,7 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
             max_tree_size = prune_config.max_tree_size;
             prune_target_ratio = prune_config.prune_target_ratio;
         } else {
-            tracing::error!("Prune was called but prune config is None");
+            tracing::error!("Prune was called but prune config is None. This should never happen");
             return Err(KvRouterError::PruneFailed(
                 "prune config is missing".to_string(),
             ));
