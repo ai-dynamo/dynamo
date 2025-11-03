@@ -15,7 +15,7 @@
 
 import re
 from dataclasses import dataclass
-from typing import Dict, Optional, Pattern
+from typing import Callable, Dict, Optional, Pattern
 
 from tests.utils.managed_deployment import DeploymentSpec
 
@@ -120,6 +120,7 @@ class Scenario:
     failures: list[Failure]
     model: Optional[str] = None
     backend: str = "vllm"  # Backend type for tracking
+    validation: Optional[Callable] = None  # Optional custom validation function
 
 
 # Helper functions to create deployment specs
@@ -474,10 +475,20 @@ for deployment_name, deployment_info in deployment_specs.items():
         # Get model from deployment info or use the global model
         scenario_model = deployment_info.get("model", model)
 
+        # Determine custom validation if needed
+        # For now, let pattern matching handle it, but you can override here
+        custom_validation = None
+
+        # Example: Add custom validation for specific scenario
+        # if scenario_name == "vllm-agg-tp-1-dp-1-decode_worker_pod":
+        #     from tests.fault_tolerance.deploy.validations import validate_decode_worker_pod_deletion
+        #     custom_validation = validate_decode_worker_pod_deletion
+
         scenarios[scenario_name] = Scenario(
             deployment=deployment_info["spec"],
             load=load_config,
             failures=failure,
             model=scenario_model,
             backend=backend,
+            validation=custom_validation,
         )

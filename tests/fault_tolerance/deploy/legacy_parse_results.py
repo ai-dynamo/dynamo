@@ -556,6 +556,68 @@ def main(logs_dir, tablefmt, log_paths=None, sla=None):
         )
         print("\n" + "=" * 80)
 
+    # Return results for programmatic use (e.g., validation)
+    # Transform legacy format to validation-compatible format
+    if results and len(results) == 1:
+        # Single test result - return in validation-compatible format
+        r = results[0]
+        return {
+            "log_dir": log_paths[0] if log_paths else logs_dir,
+            "num_clients": 10,  # Default from Load config
+            "startup_time": r.get("start_time"),
+            "recovery_time": r.get("recovery_time"),
+            "metrics": {
+                "total_requests": (
+                    r.get("success_before_requests", 0)
+                    + r.get("failed_before_requests", 0)
+                    + r.get("success_after_requests", 0)
+                    + r.get("failed_after_requests", 0)
+                ),
+                "successful_requests": (
+                    r.get("success_before_requests", 0)
+                    + r.get("success_after_requests", 0)
+                ),
+                "failed_requests": (
+                    r.get("failed_before_requests", 0) + r.get("failed_after_requests", 0)
+                ),
+                "latencies": [],  # Legacy doesn't track per-client latencies
+                "p50_latencies": [],
+                "p90_latencies": [],
+                "p99_latencies": [],
+                "ttft": [],
+                "itl": [],
+                "throughputs": [],
+                "num_clients": 10,
+            },
+        }
+    elif results:
+        # Multiple test results - return list
+        return [
+            {
+                "log_dir": r.get("test", ""),
+                "metrics": {
+                    "total_requests": (
+                        r.get("success_before_requests", 0)
+                        + r.get("failed_before_requests", 0)
+                        + r.get("success_after_requests", 0)
+                        + r.get("failed_after_requests", 0)
+                    ),
+                    "successful_requests": (
+                        r.get("success_before_requests", 0)
+                        + r.get("success_after_requests", 0)
+                    ),
+                    "failed_requests": (
+                        r.get("failed_before_requests", 0)
+                        + r.get("failed_after_requests", 0)
+                    ),
+                },
+                "recovery_time": r.get("recovery_time"),
+            }
+            for r in results
+        ]
+
+    return None
+
 
 if __name__ == "__main__":
     # Configure logging

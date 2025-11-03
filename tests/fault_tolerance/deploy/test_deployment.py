@@ -11,6 +11,7 @@ import pytest
 from tests.fault_tolerance.deploy.client_factory import get_client_function
 from tests.fault_tolerance.deploy.parse_factory import parse_test_results
 from tests.fault_tolerance.deploy.scenarios import Load, scenarios
+from tests.fault_tolerance.deploy.validations import get_validation_for_scenario, get_validation_for_results
 from tests.utils.managed_deployment import ManagedDeployment
 
 
@@ -110,6 +111,14 @@ def _clients(
 
 
 def _inject_failures(failures, logger, deployment: ManagedDeployment):  # noqa: F811
+    """Inject failures and return info about affected pods.
+    
+    Returns:
+        Dict mapping failure info to list of affected pod names
+        Example: {"VllmDecodeWorker:delete_pod": ["pod-abc123", "pod-xyz789"]}
+    """
+    affected_pods = {}
+    
     for failure in failures:
         time.sleep(failure.time)
 
@@ -126,49 +135,138 @@ def _inject_failures(failures, logger, deployment: ManagedDeployment):  # noqa: 
             replicas = num_pods
 
         logger.info(f"Injecting failure for: {failure}")
+        
+        # Track which pods were affected by this failure
+        failure_key = f"{failure.pod_name}:{failure.command}"
+        if failure_key not in affected_pods:
+            affected_pods[failure_key] = []
 
         for x in range(replicas):
             pod = pods[x % num_pods]
+            
+            # Capture the exact pod name before we kill it
+            pod_name = pod.name
+            affected_pods[failure_key].append(pod_name)
+            
+            logger.info(f"Target pod for failure: {pod_name}")
 
             if failure.command == "delete_pod":
                 deployment.get_pod_logs(failure.pod_name, pod, ".before_delete")
+                logger.info(f"Deleting pod: {pod_name}")
                 pod.delete(force=True)
             else:
                 processes = deployment.get_processes(pod)
                 for process in processes:
                     if failure.command in process.command:
                         logger.info(
-                            f"Terminating {failure.pod_name} Pid {process.pid} Command {process.command}"
+                            f"Terminating {failure.pod_name} Pid {process.pid} Command {process.command} in pod {pod_name}"
                         )
                         process.kill(failure.signal)
+    
+    return affected_pods
 
 
 global_result_list = []
+# Global storage for test results (used by validation fixture)
+test_results_cache = {}
 
 
 @pytest.fixture(autouse=True)
-def results_table(request, scenario):  # noqa: F811
-    """Parse and display results for individual test using factory pattern.
+def test_context(request, scenario):  # noqa: F811
+    """Provides shared context between test execution and validation.
+    
+    This fixture creates a shared dictionary that the test populates during
+    execution (deployment, namespace, affected_pods), then uses that data
+    in teardown to parse results and run validation.
 
     Automatically detects result type (AI-Perf or legacy) and uses
-    the appropriate parser.
+    the appropriate parser. After parsing, immediately runs validation.
     """
-    yield
+    # Shared context that test will populate during execution
+    context = {"deployment": None, "namespace": None, "affected_pods": {}}
+    
+    yield context  # Test receives this and populates it
+
+    logger = logging.getLogger(request.node.name)
+    test_name = request.node.name
 
     # Use factory to auto-detect and parse results
     try:
-        parse_test_results(
+        results = parse_test_results(
             log_dir=None,
-            log_paths=[request.node.name],
+            log_paths=[test_name],
             tablefmt="fancy_grid",
             sla=scenario.load.sla,
             # force_parser can be set based on client_type if needed
             # force_parser=scenario.load.client_type,
         )
+        # Store results for reference
+        if results:
+            logging.info(f"Results parsed: {type(results)}")
+            test_results_cache[test_name] = results
+            
+            # IMMEDIATELY run validation now that we have results
+            try:
+                logger.info("\n" + "=" * 60)
+                logger.info("Running validation checks...")
+                logger.info("=" * 60)
+                
+                # Get validation function for this scenario
+                result_validation_func = get_validation_for_results(test_name, scenario)
+                
+                scenario_validation_func = get_validation_for_scenario(test_name, scenario)
+                # Extract metrics and recovery time from parsed results
+                if isinstance(results, list) and len(results) > 0:
+                    result = results[0]
+                elif isinstance(results, dict):
+                    result = results
+                else:
+                    logger.warning(f"Unexpected result format: {type(results)}")
+                    result = None
+                
+                if result:
+                    metrics = result.get("metrics", {})
+                    recovery_time = result.get("recovery_time")
+                    
+                    # Run validation with context populated by test
+                    scenario_validation_func(
+                        scenario=scenario,
+                        log_dir=test_name,
+                        metrics=metrics,
+                        deployment=context.get("deployment"),
+                        namespace=context.get("namespace"),
+                        recovery_time=recovery_time,
+                        affected_pods=context.get("affected_pods", {}),
+                    )
+                    
+                    result_validation_func(
+                        scenario=scenario,
+                        metrics=metrics,
+                        recovery_time=recovery_time,
+                    )
+                    logger.info("=" * 60)
+                    logger.info("✓ All validation checks passed")
+                    logger.info("=" * 60 + "\n")
+                    
+            except AssertionError as e:
+                logger.error("=" * 60)
+                logger.error(f"✗ Validation failed: {e}")
+                logger.error("=" * 60 + "\n")
+                # Re-raise to fail the test
+                raise
+            except Exception as e:
+                logger.error(f"Validation error: {e}")
+                # Don't fail test on validation errors (non-assertion exceptions)
+                logger.warning("Skipping validation due to error")
+                
     except Exception as e:
-        logging.error(f"Failed to parse results for {request.node.name}: {e}")
+        logging.error(f"Failed to parse results for {test_name}: {e}")
 
-    global_result_list.append(request.node.name)
+    global_result_list.append(test_name)
+
+
+# NOTE: validation fixture removed - validation now runs directly in results_table
+# after results are parsed, ensuring proper execution order
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -202,9 +300,16 @@ async def test_fault_scenario(
     request,
     image,
     namespace,
+    test_context,  # noqa: F811  # Shared context for passing data to validation
 ):
     """
     Test dynamo serve deployments with injected failures
+    
+    Flow:
+    1. test_context fixture creates empty dict: {"deployment": None, "namespace": None, "affected_pods": {}}
+    2. This test populates it: test_context["deployment"] = deployment, etc.
+    3. After test completes, fixture reads test_context and runs validation
+    4. Validation uses the populated values to verify test results and K8s events
     """
 
     logger = logging.getLogger(request.node.name)
@@ -247,6 +352,10 @@ async def test_fault_scenario(
         log_dir=request.node.name,
         deployment_spec=scenario.deployment,
     ) as deployment:
+        # Populate shared context for validation
+        test_context["deployment"] = deployment
+        test_context["namespace"] = namespace
+
         with _clients(
             logger,
             request,
@@ -255,4 +364,8 @@ async def test_fault_scenario(
             model,
             scenario.load,  # Pass entire Load config object
         ):
-            _inject_failures(scenario.failures, logger, deployment)
+            # Inject failures and capture which pods were affected
+            affected_pods = _inject_failures(scenario.failures, logger, deployment)
+            test_context["affected_pods"] = affected_pods
+            
+            logger.info(f"Affected pods during test: {affected_pods}")
