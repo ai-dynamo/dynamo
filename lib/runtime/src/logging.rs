@@ -1279,11 +1279,11 @@ pub mod tests {
 
                 // 1. Extract the dynamically generated trace ID and validate consistency
                 // All logs should have the same trace_id since they're part of the same trace
+                // Skip any initialization logs that don't have trace_id (e.g., OTLP setup messages)
                 let trace_id = lines
-                    .first()
-                    .and_then(|log_line| log_line.get("trace_id"))
-                    .and_then(|v| v.as_str())
-                    .expect("First log line should have a trace_id")
+                    .iter()
+                    .find_map(|log_line| log_line.get("trace_id").and_then(|v| v.as_str()))
+                    .expect("At least one log line should have a trace_id")
                     .to_string();
 
                 // Verify trace_id is not a zero/invalid ID
