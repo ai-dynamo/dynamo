@@ -99,6 +99,8 @@ spec:
             value: "true"
           - name: USE_STREAMING
             value: "true"
+          - name: MODEL_SERVER_METRICS_PORT
+            value: "9090"
         {{- end }}
         {{- range .Values.epp.extraEnv }}
           - name: {{ .name }}

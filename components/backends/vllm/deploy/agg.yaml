@@ -15,8 +15,19 @@ spec:
       resources:
         limits:
           gpu: "1"
+      livenessProbe:
+        httpGet: { path: /live, port: 9090 }
+        periodSeconds: 5
+        timeoutSeconds: 30
+        failureThreshold: 1
+      readinessProbe:
+        httpGet: { path: /health, port: 9090 }
+        periodSeconds: 10
+        timeoutSeconds: 30
+        failureThreshold: 60
       extraPodSpec:
         mainContainer:
+          name: worker
           image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:vllm-1029
           workingDir: /workspace/components/backends/vllm
           command:
@@ -28,46 +39,65 @@ spec:
             - Qwen/Qwen3-0.6B
           ports:
             - containerPort: 9090
-              name: worker
+              name: system
         containers:
-          - name: Frontend
+          - name: frontend
             image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:vllm-1029
-            args: []
+            command: ["python3", "-m", "dynamo.frontend"]
+            args: ["--http-port", "8000"]
             env:
-              - name: BACKEND_URL
-                value: "http://localhost:9090" # talk to worker in same Pod
+              - name: ETCD_ENDPOINTS
+                value: "dynamo-platform-etcd.my-model.svc.cluster.local:2379"
+              - name: NATS_SERVER
+                value: "nats://dynamo-platform-nats.my-model.svc.cluster.local:4222"
             ports:
               - containerPort: 8000
                 name: frontend
-    vllm-decodeWorker-2:
-      envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-agg
-      componentType: worker
-      replicas: 1
-      resources:
-        limits:
-          gpu: "1"
-      extraPodSpec:
-        mainContainer:
-          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:vllm-1029
-          workingDir: /workspace/components/backends/vllm
-          command:
-            - python3
-            - -m
-            - dynamo.vllm
-          args:
-            - --model
-            - Qwen/Qwen3-0.6B
-          ports:
-            - containerPort: 9090
-              name: worker
-        containers:
-          - name: Frontend
-            image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:vllm-1029
-            args: []
-            ports:
-              - containerPort: 8000
-                name: frontend
-            env:
-              - name: BACKEND_URL
-                value: "http://localhost:9090" # talk to worker in same Pod
+    # vllm-decodeWorker-2:
+    #   envFromSecret: hf-token-secret
+    #   dynamoNamespace: vllm-agg
+    #   componentType: worker
+    #   replicas: 1
+    #   resources:
+    #     limits:
+    #       cpu: "2"
+    #       memory: "8Gi"
+    #   #   gpu: "1"
+    #   livenessProbe:
+    #     httpGet: { path: /live, port: 9090 }
+    #     periodSeconds: 5
+    #     timeoutSeconds: 30
+    #     failureThreshold: 1
+    #   readinessProbe:
+    #     httpGet: { path: /health, port: 9090 }
+    #     periodSeconds: 10
+    #     timeoutSeconds: 30
+    #     failureThreshold: 60
+    #   extraPodSpec:
+    #     mainContainer:
+    #       name: worker
+    #       image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:vllm-1029
+    #       workingDir: /workspace/components/backends/vllm
+    #       command:
+    #         - python3
+    #         - -m
+    #         - dynamo.vllm
+    #       args:
+    #         - --model
+    #         - Qwen/Qwen3-0.6B
+    #       ports:
+    #         - containerPort: 9090
+    #           name: system
+    #     containers:
+    #       - name: frontend
+    #         image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:vllm-1029
+    #         command: ["python3", "-m", "dynamo.frontend"]
+    #         args: ["--http-port", "8000"]
+    #         ports:
+    #           - containerPort: 8000
+    #             name: frontend
+    #         env:
+    #           - name: ETCD_ENDPOINTS
+    #             value: "dynamo-platform-etcd.my-model.svc.cluster.local:2379"
+    #           - name: NATS_SERVER
+    #             value: "nats://dynamo-platform-nats.my-model.svc.cluster.local:4222"

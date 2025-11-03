@@ -20,7 +20,7 @@ metadata:
 spec:
   targetPortNumber: {{ .Values.inferencePool.port }}
   selector:
-    nvidia.com/dynamo-component: Frontend
+    # nvidia.com/dynamo-component: Frontend
     nvidia.com/dynamo-namespace: {{ .Values.dynamoNamespace }}
   extensionRef:
     failureMode: FailOpen
