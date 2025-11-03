@@ -151,7 +151,7 @@ impl<LeaderData: Serialize + DeserializeOwned, WorkerData: Serialize + Deseriali
         data: &LeaderData,
     ) -> anyhow::Result<HashMap<String, WorkerData>, LeaderWorkerBarrierError> {
         let etcd_client = rt
-            .deprecated_etcd_client()
+            .etcd_client()
             .ok_or(LeaderWorkerBarrierError::EtcdClientNotFound)?;
 
         let lease_id = etcd_client.lease_id();
@@ -245,7 +245,7 @@ impl<LeaderData: Serialize + DeserializeOwned, WorkerData: Serialize + Deseriali
         data: &WorkerData,
     ) -> anyhow::Result<LeaderData, LeaderWorkerBarrierError> {
         let etcd_client = rt
-            .deprecated_etcd_client()
+            .etcd_client()
             .ok_or(LeaderWorkerBarrierError::EtcdClientNotFound)?;
 
         let lease_id = etcd_client.lease_id();
