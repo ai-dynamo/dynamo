@@ -38,7 +38,7 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-DEFAULT_TRTLLM_CONFIG_PATH = "components/backends/trtllm/deploy/disagg.yaml"
+DEFAULT_TRTLLM_CONFIG_PATH = "examples/backends/trtllm/deploy/disagg.yaml"
 
 
 class TrtllmConfigModifier:

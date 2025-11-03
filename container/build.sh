@@ -780,7 +780,7 @@ if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
 fi
 
 if [  ! -z ${ENABLE_KVBM} ]; then
-    echo "Enabling the KVBM in the ai-dynamo-runtime"
+    echo "Enabling the KVBM in the dynamo image"
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
 fi
 

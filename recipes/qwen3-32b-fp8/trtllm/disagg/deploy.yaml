@@ -270,7 +270,7 @@ spec:
           - mountPath: /opt/dynamo/configs
             name: llm-config-prefill
             readOnly: true
-          workingDir: /workspace/components/backends/trtllm
+          workingDir: /workspace/examples/backends/trtllm
         volumes:
         - configMap:
             name: llm-config-prefill
@@ -330,7 +330,7 @@ spec:
           - mountPath: /opt/dynamo/configs
             name: llm-config-decode
             readOnly: true
-          workingDir: /workspace/components/backends/trtllm
+            workingDir: /workspace/examples/backends/trtllm
         volumes:
         - configMap:
             name: llm-config-decode

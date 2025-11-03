@@ -305,7 +305,6 @@ impl KeyValueStoreManager {
 }
 
 /// An online storage for key-value config values.
-/// Usually backed by `nats-server`.
 #[async_trait]
 pub trait KeyValueBucket: Send + Sync {
     /// A bucket is a collection of key/value pairs.
