@@ -236,7 +236,7 @@ pub struct RadixTree {
     /// The time buffer the radix tree should check when considering frequence of block accesses
     expiration_duration: Option<Duration>,
     /// The tree current size.
-    current_size: RwLock<usize>,
+    current_size: usize,
 }
 
 impl Default for RadixTree {
@@ -256,7 +256,7 @@ impl RadixTree {
             root: Rc::new(RefCell::new(RadixBlock::new())),
             lookup: HashMap::new(),
             expiration_duration,
-            current_size: RwLock::new(0),
+            current_size: 0,
         }
     }
 
@@ -384,8 +384,7 @@ impl RadixTree {
                                 .insert(block_id.tokens_hash, new_block.clone());
 
                             // increment the current size when creating a new block
-                            let mut size = self.current_size.write().unwrap();
-                            *size = size.saturating_add(1);
+                            self.current_size = self.current_size.saturating_add(1);
 
                             new_block
                         }
@@ -437,8 +436,7 @@ impl RadixTree {
                         guard.children.clear();
 
                         // Decrement the current size when removing the last worker from a node
-                        let mut size = self.current_size.write().unwrap();
-                        *size = size.saturating_sub(1);
+                        self.current_size = self.current_size.saturating_sub(1);
                     }
                     // remove the block from the lookup table
                     worker_lookup.remove(&block);
@@ -473,8 +471,7 @@ impl RadixTree {
                         block.borrow_mut().children.clear();
 
                         // Decrement the current size when removing the last worker from a node
-                        let mut size = self.current_size.write().unwrap();
-                        *size = size.saturating_sub(1);
+                        self.current_size = self.current_size.saturating_sub(1);
                     }
                 });
 
@@ -577,7 +574,7 @@ impl RadixTree {
     }
 
     pub fn current_size(&self) -> usize {
-        *self.current_size.read().unwrap() // TODO: better error handling
+        self.current_size
     }
 }
 
