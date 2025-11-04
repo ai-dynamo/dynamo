@@ -9,26 +9,34 @@
 
 use std::sync::Arc;
 
-use crate::component::{INSTANCE_ROOT_PATH, Instance};
-use crate::storage::key_value_store::{KeyValueStore, KeyValueStoreManager};
-use crate::transports::etcd::Client as EtcdClient;
+use crate::component::Instance;
+use crate::discovery::{DiscoveryClient, DiscoveryKey};
 
-pub async fn list_all_instances(client: &KeyValueStoreManager) -> anyhow::Result<Vec<Instance>> {
-    let Some(bucket) = client.get_bucket(INSTANCE_ROOT_PATH).await? else {
-        return Ok(vec![]);
-    };
+pub async fn list_all_instances(
+    discovery_client: Arc<dyn DiscoveryClient>,
+) -> anyhow::Result<Vec<Instance>> {
+    let discovery_instances = discovery_client.list(DiscoveryKey::AllEndpoints).await?;
 
-    let entries = bucket.entries().await?;
-    let mut instances = Vec::with_capacity(entries.len());
-    for (name, bytes) in entries.into_iter() {
-        match serde_json::from_slice::<Instance>(&bytes) {
-            Ok(instance) => instances.push(instance),
-            Err(err) => {
-                tracing::warn!(%err, key = name, "Failed to parse instance from storage");
-            }
-        }
-    }
+    let mut instances: Vec<Instance> = discovery_instances
+        .into_iter()
+        .filter_map(|di| match di {
+            crate::discovery::DiscoveryInstance::Endpoint(instance) => Some(instance),
+            _ => None, // Ignore all other variants (ModelCard, etc.)
+        })
+        .collect();
+
     instances.sort();
-
+    
+    // Log all instances found for comparison
+    let instance_details: Vec<(u64, &str, &str, &str)> = instances
+        .iter()
+        .map(|inst| (inst.instance_id, inst.namespace.as_str(), inst.component.as_str(), inst.endpoint.as_str()))
+        .collect();
+    tracing::warn!(
+        "DISCOVERY_VALIDATION: all_instances_found: count={}, instances={:?}",
+        instances.len(),
+        instance_details
+    );
+    
     Ok(instances)
 }

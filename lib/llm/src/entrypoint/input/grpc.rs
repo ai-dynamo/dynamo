@@ -9,14 +9,13 @@ use crate::{
     entrypoint::{self, EngineConfig, input::common},
     grpc::service::kserve,
     kv_router::KvRouterConfig,
-    model_card,
     namespace::is_global_namespace,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
-use dynamo_runtime::{DistributedRuntime, Runtime, storage::key_value_store::KeyValueStoreManager};
+use dynamo_runtime::{DistributedRuntime, Runtime};
 use dynamo_runtime::{distributed::DistributedConfig, pipeline::RouterMode};
 
 /// Build and run an KServe gRPC service
@@ -28,7 +27,6 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
     let grpc_service = match engine_config {
         EngineConfig::Dynamic(_) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
-            let store = Arc::new(distributed_runtime.store().clone());
             let grpc_service = grpc_service_builder.build()?;
             let router_config = engine_config.local_model().router_config();
             // Listen for models registering themselves, add them to gRPC service
@@ -41,7 +39,6 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             run_watcher(
                 distributed_runtime,
                 grpc_service.state().manager_clone(),
-                store,
                 router_config.router_mode,
                 Some(router_config.kv_router_config),
                 router_config.busy_threshold,
@@ -164,34 +161,32 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
 
 /// Spawns a task that watches for new models in store,
 /// and registers them with the ModelManager so that the HTTP service can use them.
-#[allow(clippy::too_many_arguments)]
 async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
-    store: Arc<KeyValueStoreManager>,
     router_mode: RouterMode,
     kv_router_config: Option<KvRouterConfig>,
     busy_threshold: Option<f64>,
     target_namespace: Option<String>,
 ) -> anyhow::Result<()> {
-    let cancellation_token = runtime.primary_token();
     let watch_obj = ModelWatcher::new(
-        runtime,
+        runtime.clone(),
         model_manager,
         router_mode,
         kv_router_config,
         busy_threshold,
     );
     tracing::debug!("Waiting for remote model");
-    let (_, receiver) = store.watch(model_card::ROOT_PATH, None, cancellation_token);
+    let discovery = runtime.discovery_client();
+    let discovery_stream = discovery.list_and_watch(dynamo_runtime::discovery::DiscoveryKey::AllModelCards).await?;
 
     // [gluo NOTE] This is different from http::run_watcher where it alters the HTTP service
     // endpoint being exposed, gRPC doesn't have the same concept as the KServe service
     // only has one kind of inference endpoint.
 
-    // Pass the sender to the watcher
+    // Pass the discovery stream to the watcher
     let _watcher_task = tokio::spawn(async move {
-        watch_obj.watch(receiver, target_namespace.as_deref()).await;
+        watch_obj.watch(discovery_stream, target_namespace.as_deref()).await;
     });
 
     Ok(())
