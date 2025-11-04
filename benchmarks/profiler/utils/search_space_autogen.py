@@ -23,7 +23,7 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 MODEL_GPU_MEM_FRAC_MAX = 0.9
-MOE_MODEL_MAX_NUM_GPUS = 32
+MOE_MODEL_MAX_NUM_GPUS = 16
 
 
 def auto_generate_search_space(args: argparse.Namespace) -> None:
