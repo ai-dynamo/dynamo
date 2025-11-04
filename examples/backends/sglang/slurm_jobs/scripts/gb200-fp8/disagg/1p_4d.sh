@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Low Latency Config
+
 # Function to print usage
 print_usage() {
     echo "Usage: $0 <mode>"
@@ -94,45 +96,35 @@ if [ "$mode" = "prefill" ]; then
     SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
     PYTHONUNBUFFERED=1 \
     python3 -m dynamo.sglang \
-        --served-model-name deepseek-ai/DeepSeek-R1 \
-        --model-path /model/ \
-        --skip-tokenizer-init \
+        --tokenizer-path deepseek-ai/DeepSeek-R1-0528 \
         --trust-remote-code \
-        --disaggregation-mode prefill \
-        --dist-init-addr "$HOST_IP_MACHINE:$PORT" \
-        --disaggregation-bootstrap-port 30001 \
-        --nnodes "$TOTAL_NODES" \
-        --node-rank "$RANK" \
-        --tp-size "$TOTAL_GPUS" \
-        --dp-size "$TOTAL_GPUS" \
-        --enable-dp-attention \
-        --host 0.0.0.0 \
-        --max-running-requests 512 \
-        --context-length 2200 \
         --disable-radix-cache \
-        --moe-a2a-backend deepep \
-        --load-balance-method round_robin \
-        --deepep-mode normal \
-        --ep-dispatch-algorithm dynamic \
         --moe-dense-tp-size 1 \
-        --enable-dp-lm-head \
-        --disable-shared-experts-fusion \
-        --ep-num-redundant-experts 32 \
-        --eplb-algorithm deepseek \
-        --attention-backend trtllm_mla \
+        --max-running-requests 512 \
+        --chunked-prefill-size 8192 \
+        --mem-fraction-static 0.95 \
+        --cuda-graph-max-bs 128 \
+        --context-length 2200 \
         --kv-cache-dtype fp8_e4m3 \
         --quantization fp8 \
-        --watchdog-timeout 1000000 \
-        --cuda-graph-max-bs 128 \
-        --chunked-prefill-size 8192 \
-        --max-total-tokens 8192 \
-        --deepep-config /configs/deepep_config.json \
+        --attention-backend trtllm_mla \
         --stream-interval 10 \
+        --max-total-tokens 8192 \
         --enable-flashinfer-allreduce-fusion \
         --moe-runner-backend flashinfer_trtllm \
+        --load-balance-method round_robin \
         --scheduler-recv-interval 10 \
         --enable-symm-mem \
-        --mem-fraction-static 0.95 ${command_suffix}
+        --dist-init-addr "$HOST_IP_MACHINE:$PORT" \
+        --nnodes "$TOTAL_NODES" \
+        --node-rank "$RANK" \
+        --base-gpu-id 0 \
+        --disaggregation-mode prefill \
+        --model-path /model/ \
+        --host 0.0.0.0 \
+        --tensor-parallel-size "$TOTAL_GPUS" \
+        --data-parallel-size 1 \
+        --expert-parallel-size 1 ${command_suffix}
 
 elif [ "$mode" = "decode" ]; then
     set -x
@@ -163,43 +155,32 @@ elif [ "$mode" = "decode" ]; then
     SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
     PYTHONUNBUFFERED=1 \
     python3 -m dynamo.sglang \
-        --served-model-name deepseek-ai/DeepSeek-R1 \
-        --model-path /model/ \
-        --skip-tokenizer-init \
+        --tokenizer-path deepseek-ai/DeepSeek-R1-0528 \
         --trust-remote-code \
-        --disaggregation-mode decode \
-        --dist-init-addr "$HOST_IP_MACHINE:$PORT" \
-        --disaggregation-bootstrap-port 30001 \
-        --nnodes "$TOTAL_NODES" \
-        --node-rank "$RANK" \
-        --tp-size "$TOTAL_GPUS" \
-        --dp-size "$TOTAL_GPUS" \
-        --enable-dp-attention \
-        --host 0.0.0.0 \
-        --decode-log-interval 1000 \
-        --max-running-requests 512 \
-        --context-length 2200 \
         --disable-radix-cache \
-        --moe-a2a-backend deepep \
-        --prefill-round-robin-balance \
-        --deepep-mode low_latency \
         --moe-dense-tp-size 1 \
-        --enable-dp-lm-head \
+        --max-running-requests 512 \
+        --chunked-prefill-size 8192 \
+        --mem-fraction-static 0.95 \
         --cuda-graph-max-bs 128 \
-        --disable-shared-experts-fusion \
-        --ep-num-redundant-experts 32 \
-        --ep-dispatch-algorithm static \
-        --eplb-algorithm deepseek \
-        --attention-backend trtllm_mla \
+        --context-length 2200 \
         --kv-cache-dtype fp8_e4m3 \
         --quantization fp8 \
-        --watchdog-timeout 1000000 \
-        --chunked-prefill-size 8192 \
+        --attention-backend trtllm_mla \
         --stream-interval 10 \
         --enable-flashinfer-allreduce-fusion \
         --moe-runner-backend flashinfer_trtllm \
+        --prefill-round-robin-balance \
         --scheduler-recv-interval 10 \
         --enable-symm-mem \
-        --deepep-config /configs/deepep_config.json \
-        --mem-fraction-static 0.95 ${command_suffix}
+        --dist-init-addr "$HOST_IP_MACHINE:$PORT" \
+        --nnodes "$TOTAL_NODES" \
+        --node-rank "$RANK" \
+        --base-gpu-id 0 \
+        --disaggregation-mode decode \
+        --model-path /model/ \
+        --host 0.0.0.0 \
+        --tensor-parallel-size "$TOTAL_GPUS" \
+        --data-parallel-size 1 \
+        --expert-parallel-size 1 ${command_suffix}
 fi
