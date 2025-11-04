@@ -46,10 +46,10 @@ docker run \
 
 In each container, you should be in the `/sgl-workspace/dynamo/examples/backends/sglang` directory.
 
-3. Run the ingress and prefill worker
-
 > [!IMPORTANT]
 > We recommend precompiling the DeepGemm kernels once before starting the workers. Doing so significantly reduces initialization delays and helps avoid timeout errors when starting the SGLang engine. To precompile DeepGemm kernels, please execute the following commands:
+
+3. Run the ingress and prefill worker
 
 ```bash
 # run ingress
