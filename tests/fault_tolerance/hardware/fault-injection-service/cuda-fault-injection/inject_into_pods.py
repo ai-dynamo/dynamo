@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# SPDX-License-Identifier: Apache-2.0
-#
 """
 Inject CUDA Fault Library into Running vLLM Pods
 
@@ -125,8 +121,195 @@ def delete_cuda_fault_configmap(namespace):
         core_api.delete_namespaced_config_map("cuda-fault-injection-lib", namespace)
         print("[✓] ConfigMap deleted: cuda-fault-injection-lib")
         return True
-    except Exception:
+    except ApiException as e:
+        if e.status == 404:
+            # ConfigMap doesn't exist - treat as success
+            print("    ℹ ConfigMap not found (already deleted or never created)")
+            return True
+        else:
+            print(f"  ⚠ Failed to delete ConfigMap: {e.reason}")
+            return False
+    except Exception as e:
+        print(f"  ⚠ Unexpected error deleting ConfigMap: {e}")
         return False
+
+
+def _patch_service_for_injection(
+    service, enable, new_envs, use_configmap, target_node, lib_path
+):
+    """Apply injection patches to a single service.
+
+    Args:
+        service: The service object to patch
+        enable: Whether to enable or disable injection
+        new_envs: List of environment variables to add when enabling
+        use_configmap: Whether to use ConfigMap for library distribution
+        target_node: Node to pin pods to (or None)
+        lib_path: Path to the library in the container
+    """
+    # Ensure extraPodSpec exists
+    if "extraPodSpec" not in service:
+        service["extraPodSpec"] = {}
+    if "mainContainer" not in service["extraPodSpec"]:
+        service["extraPodSpec"]["mainContainer"] = {}
+    if "env" not in service["extraPodSpec"]["mainContainer"]:
+        service["extraPodSpec"]["mainContainer"]["env"] = []
+
+    # Remove existing LD_PRELOAD, CUDA_FAULT_INJECTION_ENABLED, and CUDA_XID_TYPE if present
+    service["extraPodSpec"]["mainContainer"]["env"] = [
+        env
+        for env in service["extraPodSpec"]["mainContainer"]["env"]
+        if env.get("name")
+        not in [
+            "LD_PRELOAD",
+            "CUDA_FAULT_INJECTION_ENABLED",
+            "CUDA_XID_TYPE",
+        ]
+    ]
+
+    # Add new environment variables if enabling
+    if enable:
+        service["extraPodSpec"]["mainContainer"]["env"].extend(new_envs)
+
+    # Handle ConfigMap volume mount
+    if use_configmap and enable:
+        # Add emptyDir volume for decoded library
+        if "volumes" not in service["extraPodSpec"]:
+            service["extraPodSpec"]["volumes"] = []
+
+        # Remove existing volumes if present
+        service["extraPodSpec"]["volumes"] = [
+            v
+            for v in service["extraPodSpec"]["volumes"]
+            if v.get("name") not in ["cuda-fault-lib-source", "cuda-fault-lib"]
+        ]
+
+        # Add ConfigMap volume (source - base64 encoded)
+        service["extraPodSpec"]["volumes"].append(
+            {
+                "name": "cuda-fault-lib-source",
+                "configMap": {"name": "cuda-fault-injection-lib"},
+            }
+        )
+
+        # Add emptyDir volume (destination - decoded binary)
+        service["extraPodSpec"]["volumes"].append(
+            {"name": "cuda-fault-lib", "emptyDir": {}}
+        )
+
+        # Add init container to decode base64
+        if "initContainers" not in service["extraPodSpec"]:
+            service["extraPodSpec"]["initContainers"] = []
+
+        # Remove existing init container if present
+        service["extraPodSpec"]["initContainers"] = [
+            ic
+            for ic in service["extraPodSpec"]["initContainers"]
+            if ic.get("name") not in ["decode-cuda-fault-lib", "compile-cuda-fault-lib"]
+        ]
+
+        # Add init container to compile the library
+        service["extraPodSpec"]["initContainers"].append(
+            {
+                "name": "compile-cuda-fault-lib",
+                "image": "gcc:latest",
+                "command": ["sh", "-c"],
+                "args": [
+                    "gcc -shared -fPIC -Wall -Wextra /source/fake_cuda_xid79.c -o /dest/fake_cuda_xid79.so -ldl && "
+                    "chmod 755 /dest/fake_cuda_xid79.so && "
+                    "echo 'Compiled CUDA fault library for Linux' && "
+                    "ls -lh /dest/fake_cuda_xid79.so && "
+                    "file /dest/fake_cuda_xid79.so"
+                ],
+                "volumeMounts": [
+                    {
+                        "name": "cuda-fault-lib-source",
+                        "mountPath": "/source",
+                        "readOnly": True,
+                    },
+                    {"name": "cuda-fault-lib", "mountPath": "/dest"},
+                ],
+            }
+        )
+
+        # Add volume mount to main container
+        if "volumeMounts" not in service["extraPodSpec"]["mainContainer"]:
+            service["extraPodSpec"]["mainContainer"]["volumeMounts"] = []
+
+        # Remove existing mount if present
+        service["extraPodSpec"]["mainContainer"]["volumeMounts"] = [
+            vm
+            for vm in service["extraPodSpec"]["mainContainer"]["volumeMounts"]
+            if vm.get("name") != "cuda-fault-lib"
+        ]
+
+        # Add mount
+        service["extraPodSpec"]["mainContainer"]["volumeMounts"].append(
+            {
+                "name": "cuda-fault-lib",
+                "mountPath": "/cuda-fault",
+                "readOnly": True,
+            }
+        )
+
+        print("      ✓ Added init container to compile library")
+        print("      ✓ Added ConfigMap volume mount")
+
+    # Add node affinity to pin pods to target node (simulates real XID 79 behavior)
+    if target_node and enable:
+        if "affinity" not in service["extraPodSpec"]:
+            service["extraPodSpec"]["affinity"] = {}
+
+        service["extraPodSpec"]["affinity"]["nodeAffinity"] = {
+            "requiredDuringSchedulingIgnoredDuringExecution": {
+                "nodeSelectorTerms": [
+                    {
+                        "matchExpressions": [
+                            {
+                                "key": "kubernetes.io/hostname",
+                                "operator": "In",
+                                "values": [target_node],
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+        print(f"      ✓ Added node affinity to pin pods to {target_node}")
+
+    elif not enable:
+        # Remove ConfigMap volume and mount when disabling
+        if "volumes" in service["extraPodSpec"]:
+            service["extraPodSpec"]["volumes"] = [
+                v
+                for v in service["extraPodSpec"]["volumes"]
+                if v.get("name") not in ["cuda-fault-lib", "cuda-fault-lib-source"]
+            ]
+
+        if "volumeMounts" in service["extraPodSpec"].get("mainContainer", {}):
+            service["extraPodSpec"]["mainContainer"]["volumeMounts"] = [
+                vm
+                for vm in service["extraPodSpec"]["mainContainer"]["volumeMounts"]
+                if vm.get("name") != "cuda-fault-lib"
+            ]
+
+        # Remove init container
+        if "initContainers" in service["extraPodSpec"]:
+            service["extraPodSpec"]["initContainers"] = [
+                ic
+                for ic in service["extraPodSpec"]["initContainers"]
+                if ic.get("name")
+                not in [
+                    "decode-cuda-fault-lib",
+                    "compile-cuda-fault-lib",
+                ]
+            ]
+
+        # Remove node affinity
+        # Must explicitly set to None and ensure it's in the patch
+        # (simply deleting the key doesn't remove it from K8s)
+        service["extraPodSpec"]["affinity"] = None
+        print("      ✓ Removed node affinity")
 
 
 def patch_deployment_env(
@@ -183,9 +366,6 @@ def patch_deployment_env(
     if is_dgd:
         # Process DynamoGraphDeployment
         try:
-            # Mypy type narrowing: ensure dgd is not None
-            assert dgd is not None
-
             print("    → Processing DynamoGraphDeployment...")
 
             # Determine library path based on ConfigMap usage
@@ -215,187 +395,9 @@ def patch_deployment_env(
                 if service_name in dgd.get("spec", {}).get("services", {}):
                     print(f"    → Patching service: {service_name}")
                     service = dgd["spec"]["services"][service_name]
-
-                    # Ensure extraPodSpec exists
-                    if "extraPodSpec" not in service:
-                        service["extraPodSpec"] = {}
-                    if "mainContainer" not in service["extraPodSpec"]:
-                        service["extraPodSpec"]["mainContainer"] = {}
-                    if "env" not in service["extraPodSpec"]["mainContainer"]:
-                        service["extraPodSpec"]["mainContainer"]["env"] = []
-
-                    # Remove existing LD_PRELOAD, CUDA_FAULT_INJECTION_ENABLED, and CUDA_XID_TYPE if present
-                    service["extraPodSpec"]["mainContainer"]["env"] = [
-                        env
-                        for env in service["extraPodSpec"]["mainContainer"]["env"]
-                        if env.get("name")
-                        not in [
-                            "LD_PRELOAD",
-                            "CUDA_FAULT_INJECTION_ENABLED",
-                            "CUDA_XID_TYPE",
-                        ]
-                    ]
-
-                    # Add new environment variables if enabling
-                    if enable:
-                        service["extraPodSpec"]["mainContainer"]["env"].extend(new_envs)
-
-                    # Handle ConfigMap volume mount
-                    if use_configmap and enable:
-                        # Add emptyDir volume for decoded library
-                        if "volumes" not in service["extraPodSpec"]:
-                            service["extraPodSpec"]["volumes"] = []
-
-                        # Remove existing volumes if present
-                        service["extraPodSpec"]["volumes"] = [
-                            v
-                            for v in service["extraPodSpec"]["volumes"]
-                            if v.get("name")
-                            not in ["cuda-fault-lib-source", "cuda-fault-lib"]
-                        ]
-
-                        # Add ConfigMap volume (source - base64 encoded)
-                        service["extraPodSpec"]["volumes"].append(
-                            {
-                                "name": "cuda-fault-lib-source",
-                                "configMap": {"name": "cuda-fault-injection-lib"},
-                            }
-                        )
-
-                        # Add emptyDir volume (destination - decoded binary)
-                        service["extraPodSpec"]["volumes"].append(
-                            {"name": "cuda-fault-lib", "emptyDir": {}}
-                        )
-
-                        # Add init container to decode base64
-                        if "initContainers" not in service["extraPodSpec"]:
-                            service["extraPodSpec"]["initContainers"] = []
-
-                        # Remove existing init container if present
-                        service["extraPodSpec"]["initContainers"] = [
-                            ic
-                            for ic in service["extraPodSpec"]["initContainers"]
-                            if ic.get("name")
-                            not in ["decode-cuda-fault-lib", "compile-cuda-fault-lib"]
-                        ]
-
-                        # Add init container to compile the library
-                        service["extraPodSpec"]["initContainers"].append(
-                            {
-                                "name": "compile-cuda-fault-lib",
-                                "image": "gcc:latest",
-                                "command": ["sh", "-c"],
-                                "args": [
-                                    "gcc -shared -fPIC -Wall -Wextra /source/fake_cuda_xid79.c -o /dest/fake_cuda_xid79.so -ldl && "
-                                    "chmod 755 /dest/fake_cuda_xid79.so && "
-                                    "echo 'Compiled CUDA fault library for Linux' && "
-                                    "ls -lh /dest/fake_cuda_xid79.so && "
-                                    "file /dest/fake_cuda_xid79.so"
-                                ],
-                                "volumeMounts": [
-                                    {
-                                        "name": "cuda-fault-lib-source",
-                                        "mountPath": "/source",
-                                        "readOnly": True,
-                                    },
-                                    {"name": "cuda-fault-lib", "mountPath": "/dest"},
-                                ],
-                            }
-                        )
-
-                        # Add volume mount to main container
-                        if (
-                            "volumeMounts"
-                            not in service["extraPodSpec"]["mainContainer"]
-                        ):
-                            service["extraPodSpec"]["mainContainer"][
-                                "volumeMounts"
-                            ] = []
-
-                        # Remove existing mount if present
-                        service["extraPodSpec"]["mainContainer"]["volumeMounts"] = [
-                            vm
-                            for vm in service["extraPodSpec"]["mainContainer"][
-                                "volumeMounts"
-                            ]
-                            if vm.get("name") != "cuda-fault-lib"
-                        ]
-
-                        # Add mount
-                        service["extraPodSpec"]["mainContainer"]["volumeMounts"].append(
-                            {
-                                "name": "cuda-fault-lib",
-                                "mountPath": "/cuda-fault",
-                                "readOnly": True,
-                            }
-                        )
-
-                        print("      ✓ Added init container to compile library")
-                        print("      ✓ Added ConfigMap volume mount")
-
-                    # Add node affinity to pin pods to target node (simulates real XID 79 behavior)
-                    if target_node and enable:
-                        if "affinity" not in service["extraPodSpec"]:
-                            service["extraPodSpec"]["affinity"] = {}
-
-                        service["extraPodSpec"]["affinity"]["nodeAffinity"] = {
-                            "requiredDuringSchedulingIgnoredDuringExecution": {
-                                "nodeSelectorTerms": [
-                                    {
-                                        "matchExpressions": [
-                                            {
-                                                "key": "kubernetes.io/hostname",
-                                                "operator": "In",
-                                                "values": [target_node],
-                                            }
-                                        ]
-                                    }
-                                ]
-                            }
-                        }
-                        print(
-                            f"      ✓ Added node affinity to pin pods to {target_node}"
-                        )
-
-                    elif not enable:
-                        # Remove ConfigMap volume and mount when disabling
-                        if "volumes" in service["extraPodSpec"]:
-                            service["extraPodSpec"]["volumes"] = [
-                                v
-                                for v in service["extraPodSpec"]["volumes"]
-                                if v.get("name")
-                                not in ["cuda-fault-lib", "cuda-fault-lib-source"]
-                            ]
-
-                        if "volumeMounts" in service["extraPodSpec"].get(
-                            "mainContainer", {}
-                        ):
-                            service["extraPodSpec"]["mainContainer"]["volumeMounts"] = [
-                                vm
-                                for vm in service["extraPodSpec"]["mainContainer"][
-                                    "volumeMounts"
-                                ]
-                                if vm.get("name") != "cuda-fault-lib"
-                            ]
-
-                        # Remove init container
-                        if "initContainers" in service["extraPodSpec"]:
-                            service["extraPodSpec"]["initContainers"] = [
-                                ic
-                                for ic in service["extraPodSpec"]["initContainers"]
-                                if ic.get("name")
-                                not in [
-                                    "decode-cuda-fault-lib",
-                                    "compile-cuda-fault-lib",
-                                ]
-                            ]
-
-                        # Remove node affinity
-                        # Must explicitly set to None and ensure it's in the patch
-                        # (simply deleting the key doesn't remove it from K8s)
-                        service["extraPodSpec"]["affinity"] = None
-                        print("      ✓ Removed node affinity")
-
+                    _patch_service_for_injection(
+                        service, enable, new_envs, use_configmap, target_node, lib_path
+                    )
                     patched_services.append(service_name)
 
             print("    → Applying patch to DynamoGraphDeployment...")
@@ -419,61 +421,14 @@ def patch_deployment_env(
                         for service_name in patched_services:
                             if service_name in dgd.get("spec", {}).get("services", {}):
                                 service = dgd["spec"]["services"][service_name]
-
-                                # Remove env vars
-                                if (
-                                    "extraPodSpec" in service
-                                    and "mainContainer" in service["extraPodSpec"]
-                                ):
-                                    if (
-                                        "env"
-                                        in service["extraPodSpec"]["mainContainer"]
-                                    ):
-                                        service["extraPodSpec"]["mainContainer"][
-                                            "env"
-                                        ] = [
-                                            env
-                                            for env in service["extraPodSpec"][
-                                                "mainContainer"
-                                            ]["env"]
-                                            if env.get("name")
-                                            not in [
-                                                "LD_PRELOAD",
-                                                "CUDA_FAULT_INJECTION_ENABLED",
-                                                "CUDA_XID_TYPE",
-                                            ]
-                                        ]
-                                        if enable:
-                                            service["extraPodSpec"]["mainContainer"][
-                                                "env"
-                                            ].extend(new_envs)
-
-                                # Remove volumes and init containers when disabling
-                                if not enable and "extraPodSpec" in service:
-                                    if "volumes" in service["extraPodSpec"]:
-                                        service["extraPodSpec"]["volumes"] = [
-                                            v
-                                            for v in service["extraPodSpec"]["volumes"]
-                                            if v.get("name")
-                                            not in [
-                                                "cuda-fault-lib-source",
-                                                "cuda-fault-lib",
-                                            ]
-                                        ]
-                                    if "initContainers" in service["extraPodSpec"]:
-                                        service["extraPodSpec"]["initContainers"] = [
-                                            c
-                                            for c in service["extraPodSpec"][
-                                                "initContainers"
-                                            ]
-                                            if c.get("name")
-                                            not in [
-                                                "decode-cuda-fault-lib",
-                                                "compile-cuda-fault-lib",
-                                            ]
-                                        ]
-                                    # Remove affinity
-                                    service["extraPodSpec"]["affinity"] = None
+                                _patch_service_for_injection(
+                                    service,
+                                    enable,
+                                    new_envs,
+                                    use_configmap,
+                                    target_node,
+                                    lib_path,
+                                )
 
                     custom_api.patch_namespaced_custom_object(
                         group="nvidia.com",
@@ -492,6 +447,9 @@ def patch_deployment_env(
                     else:
                         # Not a conflict or out of retries
                         raise
+
+            # Primary patch with affinity: None is sufficient
+            # (Removed secondary JSON patch - caused 400 BadRequest)
 
             action = "enabled" if enable else "disabled"
             print(f"[✓] DynamoGraphDeployment patched - CUDA fault injection {action}")
@@ -559,22 +517,63 @@ def patch_deployment_env(
 
 
 def get_worker_pods(deployment_name, namespace, node_name=None):
-    """Get worker pods for a deployment."""
-    core_api = client.CoreV1Api()
+    """Get worker pods for a deployment.
 
-    label_selector = f"nvidia.com/dynamo-graph-deployment-name={deployment_name},nvidia.com/dynamo-component-type=worker"
+    Supports both DynamoGraphDeployment and standard Kubernetes Deployments.
+    First tries DynamoGraphDeployment-specific labels, then falls back to
+    standard Deployment labels.
+
+    Args:
+        deployment_name: Name of the deployment
+        namespace: Kubernetes namespace
+        node_name: Optional node name to filter by
+
+    Returns:
+        List of pod objects
+    """
+    core_api = client.CoreV1Api()
+    apps_api = client.AppsV1Api()
     field_selector = f"spec.nodeName={node_name}" if node_name else None
+
+    # Try DynamoGraphDeployment-specific labels first
+    dgd_label_selector = f"nvidia.com/dynamo-graph-deployment-name={deployment_name},nvidia.com/dynamo-component-type=worker"
 
     try:
         pods = core_api.list_namespaced_pod(
             namespace=namespace,
-            label_selector=label_selector,
+            label_selector=dgd_label_selector,
             field_selector=field_selector,
         )
-        return pods.items
+        if pods.items:
+            return pods.items
     except ApiException as e:
-        print(f"  Failed to list pods: {e}")
-        return []
+        print(f"  Warning: Failed to list pods with DynamoGraphDeployment labels: {e}")
+
+    # Fallback: Try standard Deployment
+    # Get the deployment to find its label selector
+    try:
+        deployment = apps_api.read_namespaced_deployment(deployment_name, namespace)
+
+        # Extract match labels from deployment spec
+        if deployment.spec.selector and deployment.spec.selector.match_labels:
+            label_parts = [
+                f"{k}={v}" for k, v in deployment.spec.selector.match_labels.items()
+            ]
+            std_label_selector = ",".join(label_parts)
+
+            pods = core_api.list_namespaced_pod(
+                namespace=namespace,
+                label_selector=std_label_selector,
+                field_selector=field_selector,
+            )
+            if pods.items:
+                return pods.items
+    except ApiException as e:
+        print(f"  Warning: Failed to list pods with standard Deployment labels: {e}")
+
+    # If both methods failed, return empty list
+    print(f"  No pods found for deployment {deployment_name}")
+    return []
 
 
 def inject_into_running_pods(deployment_name, namespace, node_name=None):
@@ -615,22 +614,38 @@ def inject_into_running_pods(deployment_name, namespace, node_name=None):
     return success_count > 0
 
 
-def inject_via_deployment_patch(deployment_name, namespace):
-    """Inject by patching deployment and rolling restart (persistent)."""
+def inject_via_deployment_patch(
+    deployment_name, namespace, target_node=None, xid_type=79
+):
+    """Inject by patching deployment and rolling restart (persistent).
+
+    Args:
+        deployment_name: Name of the deployment
+        namespace: Kubernetes namespace
+        target_node: Optional node to pin pods to (simulates real XID behavior)
+        xid_type: XID error type to simulate (79, 48, 94, 95, 43, 74)
+    """
     print("\n" + "=" * 80)
     print("Method 2: Patch Deployment (Persistent)")
     print("=" * 80)
     print("This method:")
-    print("  1. Copies library to existing pods")
-    print("  2. Patches deployment to set LD_PRELOAD")
-    print("  3. Triggers rolling restart")
-    print("  4. New pods will have CUDA fault injection enabled")
+    print("  1. Creates ConfigMap with library source")
+    print("  2. Copies library to existing pods")
+    print("  3. Patches deployment to set LD_PRELOAD")
+    print("  4. Triggers rolling restart")
+    print("  5. New pods will have CUDA fault injection enabled")
     print()
 
     lib_path = get_library_path()
 
-    # Step 1: Copy library to all current pods
-    print("[1/3] Copying library to existing pods...")
+    # Step 1: Create ConfigMap with library source
+    print("[1/4] Creating ConfigMap with library source...")
+    if not create_cuda_fault_configmap(namespace, lib_path):
+        print("  Failed to create ConfigMap")
+        return False
+
+    # Step 2: Copy library to all current pods
+    print("\n[2/4] Copying library to existing pods...")
     pods = get_worker_pods(deployment_name, namespace)
 
     if not pods:
@@ -640,13 +655,19 @@ def inject_via_deployment_patch(deployment_name, namespace):
     for pod in pods:
         copy_library_to_pod(pod.metadata.name, namespace, lib_path)
 
-    # Step 2: Patch deployment
-    print("\n[2/3] Patching deployment to enable CUDA fault injection...")
-    if not patch_deployment_env(deployment_name, namespace, enable=True):
+    # Step 3: Patch deployment
+    print("\n[3/4] Patching deployment to enable CUDA fault injection...")
+    if not patch_deployment_env(
+        deployment_name,
+        namespace,
+        enable=True,
+        target_node=target_node,
+        xid_type=xid_type,
+    ):
         return False
 
-    # Step 3: Trigger rolling restart
-    print("\n[3/3] Triggering pod restart...")
+    # Step 4: Trigger rolling restart
+    print("\n[4/4] Triggering pod restart...")
 
     # For DynamoGraphDeployment, we need to delete pods to trigger restart
     # (kubectl rollout restart doesn't work with custom resources)
@@ -704,6 +725,9 @@ def remove_injection(deployment_name, namespace):
     if not patch_deployment_env(deployment_name, namespace, enable=False):
         return False
 
+    print("\n[→] Deleting ConfigMap...")
+    delete_cuda_fault_configmap(namespace)
+
     print("\n[→] Deleting pods to restore normal operation...")
 
     # Get current pods
@@ -745,32 +769,39 @@ def verify_injection(deployment_name, namespace):
         pod_name = pod.metadata.name
         print(f"\n[→] Checking pod: {pod_name}")
 
-        # Check if library exists
-        cmd = [
-            "kubectl",
-            "exec",
-            "-n",
-            namespace,
-            pod_name,
-            "--",
-            "ls",
-            "-lh",
-            "/tmp/fake_cuda_xid79.so",
-        ]
+        # Check if library exists (try both /tmp and /cuda-fault paths)
+        found_lib = False
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        for lib_path in ["/tmp/fake_cuda_xid79.so", "/cuda-fault/fake_cuda_xid79.so"]:
+            cmd = [
+                "kubectl",
+                "exec",
+                "-n",
+                namespace,
+                pod_name,
+                "--",
+                "ls",
+                "-lh",
+                lib_path,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                print(f"    ✓ Library present at {lib_path}: {result.stdout.strip()}")
+                found_lib = True
+                break
 
-        if result.returncode == 0:
-            print(f"    ✓ Library present: {result.stdout.strip()}")
-        else:
-            print("    ✗ Library not found")
+        if not found_lib:
+            print("    ✗ Library not found at /tmp or /cuda-fault")
 
-        # Check environment variables
+        # Check environment variables (check for both paths)
         cmd = ["kubectl", "exec", "-n", namespace, pod_name, "--", "env"]
 
         result = subprocess.run(cmd, capture_output=True, text=True)
 
-        if "LD_PRELOAD=/tmp/fake_cuda_xid79.so" in result.stdout:
+        if (
+            "LD_PRELOAD=/tmp/fake_cuda_xid79.so" in result.stdout
+            or "LD_PRELOAD=/cuda-fault/fake_cuda_xid79.so" in result.stdout
+        ):
             print("    ✓ LD_PRELOAD set correctly")
         else:
             print("    ✗ LD_PRELOAD not set")
@@ -809,6 +840,13 @@ Examples:
   # Patch deployment (persistent, recommended)
   python inject_into_pods.py --deployment vllm-v1-disagg-router --namespace dynamo-oviya --patch-deployment
 
+  # Simulate different XID error types
+  python inject_into_pods.py --deployment vllm-v1-disagg-router --patch-deployment --xid-type 48
+  python inject_into_pods.py --deployment vllm-v1-disagg-router --patch-deployment --xid-type 94
+
+  # Pin to specific node (simulates real XID behavior)
+  python inject_into_pods.py --deployment vllm-v1-disagg-router --patch-deployment --node aks-a100a-36888584-vmss000003
+
   # Inject into running pods on specific node (temporary)
   python inject_into_pods.py --deployment vllm-v1-disagg-router --node aks-a100a-36888584-vmss000003
 
@@ -832,6 +870,13 @@ Examples:
     parser.add_argument(
         "--patch-deployment", action="store_true", help="Patch deployment (persistent)"
     )
+    parser.add_argument(
+        "--xid-type",
+        type=int,
+        default=79,
+        choices=[79, 48, 94, 95, 43, 74],
+        help="XID error type to simulate (default: 79)",
+    )
     parser.add_argument("--remove", action="store_true", help="Remove injection")
     parser.add_argument("--verify", action="store_true", help="Verify injection status")
 
@@ -851,6 +896,8 @@ Examples:
     print(f"Namespace:  {args.namespace}")
     if args.node:
         print(f"Node:       {args.node}")
+    if not args.remove and not args.verify:
+        print(f"XID Type:   {args.xid_type}")
     print()
 
     if args.verify:
@@ -858,7 +905,9 @@ Examples:
     elif args.remove:
         remove_injection(args.deployment, args.namespace)
     elif args.patch_deployment:
-        inject_via_deployment_patch(args.deployment, args.namespace)
+        inject_via_deployment_patch(
+            args.deployment, args.namespace, args.node, args.xid_type
+        )
     else:
         inject_into_running_pods(args.deployment, args.namespace, args.node)
 
