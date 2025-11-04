@@ -17,6 +17,13 @@ This directory contains scripts for benchmarking the Dynamo router with prefix c
   - `matplotlib` for plotting results
   - `data-generator` package (install with `pip install -e ./benchmarks` from repo root)
 
+> [!Note]
+> If running outside a container, set `DYNAMO_HOME` to the root path of your Dynamo repository:
+> ```bash
+> export DYNAMO_HOME=/path/to/dynamo
+> ```
+> When running in a container, this defaults to `/workspace`.
+
 ### Setting up etcd and NATS
 
 This benchmark requires etcd and NATS. To quickly set them up, run:
