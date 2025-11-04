@@ -61,8 +61,11 @@ runs:
         pip install --upgrade pip
 
         # Install core dependencies needed for tests
+        # Note: requirements.txt contains prometheus_client, kubernetes, kr8s, pyyaml and other runtime deps
+        pip install -r container/deps/requirements.txt
         pip install -r container/deps/requirements.test.txt
-        pip install kubernetes==32.0.1 kubernetes_asyncio kr8s pyyaml requests tabulate pydantic
+        # Install additional packages not in requirements files but needed for K8s tests
+        pip install requests tabulate
 
         # Add project source to PYTHONPATH for test imports
         echo "PYTHONPATH=$(pwd):$(pwd)/components/src:$PYTHONPATH" >> $GITHUB_ENV
