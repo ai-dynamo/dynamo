@@ -1403,6 +1403,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
         assert!(result.is_err());
@@ -1431,6 +1432,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
         assert!(result.is_ok());
@@ -1451,7 +1453,7 @@ mod tests {
     // 11. Repetition Penalty: Should be a float between 0.0 and 2.0 : Done
     // 12. Logprobs: Should be a positive integer between 0 and 5 : Done
     // invalid or non existing user : Only empty string is not allowed validation is there. How can we check non-extisting user ?
-    // add_special_tokens null or invalid : Not Done
+    // Unknown fields : Done (rejected via extra_fields catch-all)
     // guided_whitespace_pattern null or invalid : Not Done
     // "response_format": { "type": "invalid_format" } : Not Done
     // "logit_bias": { "invalid_token": "not_a_number" }, : Partial Validation is already there
@@ -1638,6 +1640,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
 
         let result = validate_chat_completion_fields_generic(&request);
@@ -1666,6 +1669,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1693,6 +1697,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1720,6 +1725,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1749,6 +1755,7 @@ mod tests {
                 .unwrap(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1776,6 +1783,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1785,6 +1793,48 @@ mod tests {
                 error_response.1.message,
                 "Top_logprobs must be between 0 and 20, got 25"
             );
+        }
+    }
+
+    #[test]
+    fn test_unknown_fields_rejected() {
+        // Test that all known unsupported fields are rejected and all shown in error message
+        let json = r#"{
+            "messages": [{"role": "user", "content": "Hello"}],
+            "model": "test-model",
+            "add_special_tokens": true,
+            "documents": ["doc1"],
+            "chat_template": "custom",
+            "chat_template_kwargs": {"key": "val"}
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json).unwrap();
+
+        // Verify all unsupported fields were captured
+        assert!(
+            request
+                .unsupported_fields
+                .contains_key("add_special_tokens")
+        );
+        assert!(request.unsupported_fields.contains_key("documents"));
+        assert!(request.unsupported_fields.contains_key("chat_template"));
+        assert!(
+            request
+                .unsupported_fields
+                .contains_key("chat_template_kwargs")
+        );
+
+        let result = validate_chat_completion_fields_generic(&request);
+        assert!(result.is_err());
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+            let msg = &error_response.1.message;
+            assert!(msg.contains("Unsupported parameter"));
+            // Verify all fields appear in the error message
+            assert!(msg.contains("add_special_tokens"));
+            assert!(msg.contains("documents"));
+            assert!(msg.contains("chat_template"));
+            assert!(msg.contains("chat_template_kwargs"));
         }
     }
 }
