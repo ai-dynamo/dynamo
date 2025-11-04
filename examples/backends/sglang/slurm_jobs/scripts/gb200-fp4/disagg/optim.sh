@@ -68,7 +68,7 @@ fi
 if [ "$mode" = "prefill" ]; then
     set -x
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
-    export SGLANG_DG_CACHE_DIR="/configs/deepgemm-kernels-10212025-ddcba74b"
+    export SGLANG_DG_CACHE_DIR="/configs/dg-10212025"
     export FLASHINFER_WORKSPACE_BASE="/configs/flashinfer-cache"
 
     # temp we need to install newest cutedsl
@@ -143,7 +143,7 @@ elif [ "$mode" = "decode" ]; then
     if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix=" "; fi
 
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
-    export SGLANG_DG_CACHE_DIR="/configs/deepgemm-kernels-10212025-ddcba74b"
+    export SGLANG_DG_CACHE_DIR="/configs/dg-10212025"
     export FLASHINFER_WORKSPACE_BASE="/configs/flashinfer-cache"
 
     # temp we need to install newest cutedsl

@@ -76,7 +76,7 @@ if [ "$mode" = "prefill" ]; then
 
     # set your own cache variables here
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
-    export SGLANG_DG_CACHE_DIR="/configs/deepgemm-kernels-10212025-ddcba74b"
+    export SGLANG_DG_CACHE_DIR="/configs/dg-10212025"
     export FLASHINFER_WORKSPACE_BASE="/configs/flashinfer-cache"
 
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
@@ -147,7 +147,7 @@ elif [ "$mode" = "decode" ]; then
 
     # set your own cache variables here
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
-    export SGLANG_DG_CACHE_DIR="/configs/deepgemm-kernels-10212025-ddcba74b"
+    export SGLANG_DG_CACHE_DIR="/configs/dg-10212025"
     export FLASHINFER_WORKSPACE_BASE="/configs/flashinfer-cache"
 
     # we have to install pre-release cutedsl for a integer overflow fix

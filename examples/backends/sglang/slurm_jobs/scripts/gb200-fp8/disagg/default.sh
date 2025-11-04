@@ -135,7 +135,7 @@ elif [ "$mode" = "decode" ]; then
         python3 -m pip install /configs/ai_dynamo-0.6.0-py3-none-any.whl
     fi
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
-    export SGLANG_DG_CACHE_DIR="/configs/deepgemm-kernels-10212025-ddcba74b"
+    export SGLANG_DG_CACHE_DIR="/configs/dg-10212025"
     export FLASHINFER_WORKSPACE_BASE="/configs/flashinfer-cache"
 
     command_suffix=""
