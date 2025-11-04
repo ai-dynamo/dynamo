@@ -7,7 +7,18 @@ use super::common::EncodedMediaData;
 use ndarray::{ArrayBase, Dimension, OwnedRepr};
 mod image;
 
-pub use image::ImageDecoder;
+pub use image::{ImageDecoder, ImageMetadata};
+
+#[derive(Debug)]
+pub enum DecodedMediaMetadata {
+    #[allow(dead_code)] // used in followup MR
+    Image(ImageMetadata),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum DataType {
+    UINT8,
+}
 
 // Decoded media data (image RGB, video frames pixels, ...)
 #[derive(Debug)]
@@ -17,7 +28,9 @@ pub struct DecodedMediaData {
     #[allow(dead_code)] // used in followup MR
     pub(crate) shape: Vec<usize>,
     #[allow(dead_code)] // used in followup MR
-    pub(crate) dtype: String,
+    pub(crate) dtype: DataType,
+    #[allow(dead_code)] // used in followup MR
+    pub(crate) metadata: Option<DecodedMediaMetadata>,
 }
 
 // convert Array{N}<u8> to DecodedMediaData
@@ -29,7 +42,8 @@ impl<D: Dimension> From<ArrayBase<OwnedRepr<u8>, D>> for DecodedMediaData {
         Self {
             data,
             shape,
-            dtype: "uint8".to_string(),
+            dtype: DataType::UINT8,
+            metadata: None,
         }
     }
 }

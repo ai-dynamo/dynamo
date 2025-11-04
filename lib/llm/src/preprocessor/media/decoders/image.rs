@@ -1,52 +1,96 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::io::Cursor;
+
 use anyhow::Result;
-use image::GenericImageView;
+use image::{ColorType, GenericImageView, ImageFormat, ImageReader};
 use ndarray::Array3;
 
 use super::super::common::EncodedMediaData;
-use super::super::decoders::DecodedMediaData;
+use super::super::decoders::{DecodedMediaData, DecodedMediaMetadata};
 use super::Decoder;
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+const DEFAULT_MAX_ALLOC: u64 = 128 * 1024 * 1024; // 128 MB
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageDecoder {
-    // maximum total size of the image in pixels
     #[serde(default)]
-    pub max_pixels: Option<usize>,
+    pub(crate) max_image_width: Option<u32>,
+    #[serde(default)]
+    pub(crate) max_image_height: Option<u32>,
+    // maximum allowed total allocation of the decoder in bytes
+    #[serde(default)]
+    pub(crate) max_alloc: Option<u64>,
+}
+
+impl Default for ImageDecoder {
+    fn default() -> Self {
+        Self {
+            max_image_width: None,
+            max_image_height: None,
+            max_alloc: Some(DEFAULT_MAX_ALLOC),
+        }
+    }
+}
+
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Debug)]
+pub enum ImageLayout {
+    HWC,
+}
+
+#[derive(Debug)]
+pub struct ImageMetadata {
+    #[allow(dead_code)] // used in followup MR
+    pub(crate) format: Option<ImageFormat>,
+    #[allow(dead_code)] // used in followup MR
+    pub(crate) color_type: ColorType,
+    #[allow(dead_code)] // used in followup MR
+    pub(crate) layout: ImageLayout,
 }
 
 impl Decoder for ImageDecoder {
     fn decode(&self, data: EncodedMediaData) -> Result<DecodedMediaData> {
         let bytes = data.into_bytes()?;
-        let img = image::load_from_memory(&bytes)?;
-        let (width, height) = img.dimensions();
+
+        let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+        let mut limits = image::Limits::no_limits();
+        limits.max_image_width = self.max_image_width;
+        limits.max_image_height = self.max_image_height;
+        limits.max_alloc = self.max_alloc;
+        reader.limits(limits);
+
+        let format = reader.format();
+
+        let img = reader.decode()?;
         let n_channels = img.color().channel_count();
 
-        let max_pixels = self.max_pixels.unwrap_or(usize::MAX);
-        let pixel_count = (width as usize)
-            .checked_mul(height as usize)
-            .ok_or_else(|| anyhow::anyhow!("Image dimensions {width}x{height} overflow usize"))?;
-        anyhow::ensure!(
-            pixel_count <= max_pixels,
-            "Image dimensions {width}x{height} exceed max pixels {max_pixels}"
-        );
-        let data = match n_channels {
-            1 => img.to_luma8().into_raw(),
-            2 => img.to_luma_alpha8().into_raw(),
-            3 => img.to_rgb8().into_raw(),
-            4 => img.to_rgba8().into_raw(),
+        let (data, color_type) = match n_channels {
+            1 => (img.to_luma8().into_raw(), ColorType::L8),
+            2 => (img.to_luma_alpha8().into_raw(), ColorType::La8),
+            3 => (img.to_rgb8().into_raw(), ColorType::Rgb8),
+            4 => (img.to_rgba8().into_raw(), ColorType::Rgba8),
             other => anyhow::bail!("Unsupported channel count {other}"),
         };
+
+        let (width, height) = img.dimensions();
         let shape = (height as usize, width as usize, n_channels as usize);
         let array = Array3::from_shape_vec(shape, data)?;
-        Ok(array.into())
+        let mut decoded: DecodedMediaData = array.into();
+        decoded.metadata = Some(DecodedMediaMetadata::Image(ImageMetadata {
+            format,
+            color_type,
+            layout: ImageLayout::HWC,
+        }));
+        Ok(decoded)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::decoders::DataType;
     use super::*;
     use image::{DynamicImage, ImageBuffer};
     use rstest::rstest;
@@ -115,22 +159,30 @@ mod tests {
             decoded.shape,
             vec![height as usize, width as usize, expected_channels as usize]
         );
-        assert_eq!(decoded.dtype, "uint8");
+        assert_eq!(decoded.dtype, DataType::UINT8);
     }
 
     #[rstest]
-    #[case(Some(200), 10, 10, image::ImageFormat::Png, true, "within limit")]
-    #[case(Some(50), 10, 10, image::ImageFormat::Jpeg, false, "exceeds limit")]
-    #[case(None, 200, 300, image::ImageFormat::Png, true, "no limit")]
-    fn test_pixel_limits(
-        #[case] max_pixels: Option<usize>,
+    #[case(Some(100), None, 50, 50, ImageFormat::Png, true, "width ok")]
+    #[case(Some(50), None, 100, 50, ImageFormat::Jpeg, false, "width too large")]
+    #[case(None, Some(100), 50, 100, ImageFormat::Png, true, "height ok")]
+    #[case(None, Some(50), 50, 100, ImageFormat::Png, false, "height too large")]
+    #[case(None, None, 2000, 2000, ImageFormat::Png, true, "no limits")]
+    #[case(None, None, 8000, 8000, ImageFormat::Png, false, "alloc too large")]
+    fn test_limits(
+        #[case] max_width: Option<u32>,
+        #[case] max_height: Option<u32>,
         #[case] width: u32,
         #[case] height: u32,
         #[case] format: image::ImageFormat,
         #[case] should_succeed: bool,
         #[case] test_case: &str,
     ) {
-        let decoder = ImageDecoder { max_pixels };
+        let decoder = ImageDecoder {
+            max_image_width: max_width,
+            max_image_height: max_height,
+            max_alloc: Some(DEFAULT_MAX_ALLOC),
+        };
         let image_bytes = create_test_image(width, height, 3, format); // RGB
         let encoded_data = create_encoded_media_data(image_bytes);
 
@@ -146,7 +198,8 @@ mod tests {
             let decoded = result.unwrap();
             assert_eq!(decoded.shape, vec![height as usize, width as usize, 3]);
             assert_eq!(
-                decoded.dtype, "uint8",
+                decoded.dtype,
+                DataType::UINT8,
                 "dtype should be uint8 for case: {}",
                 test_case
             );
@@ -159,8 +212,9 @@ mod tests {
             );
             let error_msg = result.unwrap_err().to_string();
             assert!(
-                error_msg.contains("exceed max pixels"),
-                "Error should mention exceeding max pixels for case: {}",
+                error_msg.contains("dimensions") || error_msg.contains("limit"),
+                "Error should mention dimension limits, got: {} for case: {}",
+                error_msg,
                 test_case
             );
         }
@@ -186,9 +240,11 @@ mod tests {
         assert_eq!(decoded.shape[0], 1, "Height should be 1");
         assert_eq!(decoded.shape[1], 1, "Width should be 1");
         assert_eq!(
-            decoded.dtype, "uint8",
+            decoded.dtype,
+            DataType::UINT8,
             "dtype should be uint8 for {} channels {:?}",
-            input_channels, format
+            input_channels,
+            format
         );
     }
 }

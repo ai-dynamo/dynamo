@@ -12,6 +12,7 @@ use super::common::EncodedMediaData;
 use super::decoders::{DecodedMediaData, Decoder, MediaDecoder};
 
 const DEFAULT_HTTP_USER_AGENT: &str = "dynamo-ai/dynamo";
+const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MediaFetcher {
@@ -29,7 +30,7 @@ impl Default for MediaFetcher {
             allow_direct_ip: false,
             allow_direct_port: false,
             allowed_media_domains: None,
-            timeout: None,
+            timeout: Some(DEFAULT_HTTP_TIMEOUT),
         }
     }
 }
@@ -117,6 +118,7 @@ impl MediaLoader {
 
 #[cfg(test)]
 mod tests {
+    use super::super::decoders::DataType;
     use super::*;
     use dynamo_async_openai::types::{ChatCompletionRequestMessageContentPartImage, ImageUrl};
 
@@ -156,7 +158,7 @@ mod tests {
         );
 
         let data = result.unwrap();
-        assert_eq!(data.dtype, "uint8");
+        assert_eq!(data.dtype, DataType::UINT8);
 
         // Verify image dimensions: 1,999px × 1,125px (width × height)
         // Shape format is [height, width, channels]
