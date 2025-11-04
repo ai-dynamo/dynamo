@@ -89,6 +89,8 @@ command=(
     --profiler "${profiler_args}"
 
     --retries $RETRIES
+
+    --run-in-ci
 )
 
 "${command[@]}"

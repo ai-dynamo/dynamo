@@ -237,6 +237,12 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
         help="Disable dumping config to file on each node (default: config dump is enabled)",
     )
 
+    parser.add_argument(
+        "--run-in-ci",
+        action="store_true",
+        help="Run in CI mode - use binaries from /configs/ for nats/etcd and install dynamo wheel",
+    )
+
     return parser.parse_args(args)
 
 
@@ -423,6 +429,7 @@ def main(input_args: list[str] | None = None):
         "profiler_arg": parsable_config,
         "timestamp": timestamp,
         "enable_config_dump": args.enable_config_dump,
+        "run_in_ci": args.run_in_ci,
     }
 
     # Create temporary file for sbatch script

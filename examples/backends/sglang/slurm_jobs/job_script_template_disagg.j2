@@ -187,6 +187,12 @@ WORKER_ARGS="$WORKER_ARGS --multiple-frontends-enabled"
 WORKER_ARGS="$WORKER_ARGS --use_init_locations"
 {% endraw %}
 {% endif %}
+{% if run_in_ci %}
+{% raw %}
+# Add CI mode flag for worker setup
+WORKER_ARGS="$WORKER_ARGS --run-in-ci"
+{% endraw %}
+{% endif %}
 {% raw %}
 
 {% endraw %}

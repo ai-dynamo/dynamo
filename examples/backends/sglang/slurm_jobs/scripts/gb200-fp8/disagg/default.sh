@@ -62,9 +62,17 @@ if [ -z "$USE_INIT_LOCATIONS" ]; then
     exit 1
 fi
 
+if [ -z "$RUN_IN_CI" ]; then
+    echo "Error: RUN_IN_CI environment variable is not set"
+    exit 1
+fi
+
 # Construct command based on mode
 if [ "$mode" = "prefill" ]; then
     set -x
+    if [[ "${RUN_IN_CI,,}" == "true" ]]; then
+        python3 -m pip install /configs/ai-dynamo/dynamo-0.6.0.whl
+    fi
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
     export SGLANG_DG_CACHE_DIR="/configs/deepgemm-kernels-10212025-ddcba74b"
     export FLASHINFER_WORKSPACE_BASE="/configs/flashinfer-cache"
@@ -123,6 +131,9 @@ if [ "$mode" = "prefill" ]; then
 
 elif [ "$mode" = "decode" ]; then
     set -x
+    if [[ "${RUN_IN_CI,,}" == "true" ]]; then
+        python3 -m pip install /configs/ai-dynamo/dynamo-0.6.0.whl
+    fi
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
     export SGLANG_DG_CACHE_DIR="/configs/deepgemm-kernels-10212025-ddcba74b"
     export FLASHINFER_WORKSPACE_BASE="/configs/flashinfer-cache"

@@ -210,6 +210,12 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
         help="Path to dump config file (e.g., /logs/node_config.json)",
     )
 
+    parser.add_argument(
+        "--run-in-ci",
+        action="store_true",
+        help="Run in CI mode - use binaries from /configs/ for nats/etcd",
+    )
+
     return parser.parse_args(args)
 
 
@@ -249,6 +255,7 @@ def setup_env_vars_for_gpu_script(
     port: int = DIST_INIT_PORT,
     use_init_locations: bool = True,
     dump_config_path: str | None = None,
+    run_in_ci: bool = False,
 ):
     """Setup environment variables required by GPU scripts (gb200-fp8.sh)"""
     os.environ["HOST_IP_MACHINE"] = host_ip
@@ -257,6 +264,7 @@ def setup_env_vars_for_gpu_script(
     os.environ["RANK"] = str(local_rank)
     os.environ["TOTAL_NODES"] = str(total_nodes)
     os.environ["USE_INIT_LOCATIONS"] = str(use_init_locations)
+    os.environ["RUN_IN_CI"] = str(run_in_ci)
     if dump_config_path:
         os.environ["DUMP_CONFIG_PATH"] = dump_config_path
     else:
@@ -268,6 +276,7 @@ def setup_env_vars_for_gpu_script(
     logging.info(f"Set RANK: {local_rank}")
     logging.info(f"Set TOTAL_NODES: {total_nodes}")
     logging.info(f"Set USE_INIT_LOCATIONS: {use_init_locations}")
+    logging.info(f"Set RUN_IN_CI: {run_in_ci}")
     if dump_config_path:
         logging.info(f"Set DUMP_CONFIG_PATH: {dump_config_path}")
 
@@ -298,19 +307,30 @@ def get_gpu_command(
         return f"bash {script_path} {mode}"
 
 
-def setup_head_prefill_node(prefill_host_ip: str) -> None:
+def setup_head_prefill_node(prefill_host_ip: str, run_in_ci: bool = False) -> None:
     """
     Setup NATS, etcd, ingress, and http servers on the prefill host node.
     """
-    logging.info(f"Starting nats server on node {prefill_host_ip}")
-
-    nats_process = run_command("nats-server -js", background=True)
+    if run_in_ci:
+        logging.info(f"Starting nats server on node {prefill_host_ip} (CI mode - using /configs/nats-server)")
+        nats_cmd = "/configs/nats-server -js"
+    else:
+        logging.info(f"Starting nats server on node {prefill_host_ip}")
+        nats_cmd = "nats-server -js"
+    
+    nats_process = run_command(nats_cmd, background=True)
     if not nats_process:
         raise RuntimeError("Failed to start nats-server")
 
-    logging.info(f"Starting etcd server on node {prefill_host_ip}")
+    if run_in_ci:
+        logging.info(f"Starting etcd server on node {prefill_host_ip} (CI mode - using /configs/etcd)")
+        etcd_binary = "/configs/etcd"
+    else:
+        logging.info(f"Starting etcd server on node {prefill_host_ip}")
+        etcd_binary = "etcd"
+    
     etcd_cmd = (
-        f"etcd --listen-client-urls {ETCD_LISTEN_ADDR}:{ETCD_CLIENT_PORT} "
+        f"{etcd_binary} --listen-client-urls {ETCD_LISTEN_ADDR}:{ETCD_CLIENT_PORT} "
         f"--advertise-client-urls {ETCD_LISTEN_ADDR}:{ETCD_CLIENT_PORT} "
         f"--listen-peer-urls {ETCD_LISTEN_ADDR}:{ETCD_PEER_PORT} "
         f"--initial-cluster default=http://{prefill_host_ip}:{ETCD_PEER_PORT}"
@@ -332,13 +352,13 @@ def setup_nginx_worker(master_ip: str, nginx_config: str) -> int:
     return run_command(nginx_cmd)
 
 
-def setup_frontend_worker(worker_idx: int, master_ip: str) -> int:
+def setup_frontend_worker(worker_idx: int, master_ip: str, run_in_ci: bool = False) -> int:
     """Setup a frontend worker"""
     logging.info(f"Setting up frontend worker {worker_idx}")
 
     # First frontend (worker_idx 0) also sets up NATS/ETCD
     if worker_idx == 0:
-        setup_head_prefill_node(master_ip)
+        setup_head_prefill_node(master_ip, run_in_ci)
     else:
         logging.info(f"Setting up additional frontend worker {worker_idx}")
         if not wait_for_etcd(f"http://{master_ip}:{ETCD_CLIENT_PORT}"):
@@ -361,6 +381,7 @@ def setup_prefill_worker(
     use_init_locations: bool = True,
     dump_config_path: str | None = None,
     script_variant: str = "default",
+    run_in_ci: bool = False,
 ) -> int:
     """
     Setup the prefill worker.
@@ -368,7 +389,7 @@ def setup_prefill_worker(
     total_gpus = nodes_per_worker * gpus_per_node
     # Only setup infrastructure in traditional mode (not multiple frontends)
     if not multiple_frontends_enabled and worker_idx == 0 and local_rank == 0:
-        setup_head_prefill_node(master_ip)
+        setup_head_prefill_node(master_ip, run_in_ci)
     else:
         logging.info(f"Setting up prefill worker {worker_idx}, local rank {local_rank}")
         if not wait_for_etcd(f"http://{master_ip}:{ETCD_CLIENT_PORT}"):
@@ -382,6 +403,7 @@ def setup_prefill_worker(
         nodes_per_worker,
         use_init_locations=use_init_locations,
         dump_config_path=dump_config_path,
+        run_in_ci=run_in_ci,
     )
 
     # Use appropriate GPU script instead of generating command directly
@@ -400,6 +422,7 @@ def setup_decode_worker(
     use_init_locations: bool = True,
     dump_config_path: str | None = None,
     script_variant: str = "default",
+    run_in_ci: bool = False,
 ) -> int:
     """
     Setup the decode worker.
@@ -418,6 +441,7 @@ def setup_decode_worker(
         nodes_per_worker,
         use_init_locations=use_init_locations,
         dump_config_path=dump_config_path,
+        run_in_ci=run_in_ci,
     )
 
     # Use appropriate GPU script instead of generating command directly
@@ -436,6 +460,7 @@ def setup_aggregated_worker(
     multiple_frontends_enabled: bool = False,
     dump_config_path: str | None = None,
     script_variant: str = "default",
+    run_in_ci: bool = False,
 ) -> int:
     """
     Setup the aggregated worker.
@@ -443,7 +468,7 @@ def setup_aggregated_worker(
     total_gpus = nodes_per_worker * gpus_per_node
     # Only setup infrastructure in traditional mode (not multiple frontends) on first worker, first node
     if not multiple_frontends_enabled and worker_idx == 0 and local_rank == 0:
-        setup_head_prefill_node(master_ip)
+        setup_head_prefill_node(master_ip, run_in_ci)
     else:
         logging.info(
             f"Setting up aggregated worker {worker_idx}, local rank {local_rank}"
@@ -460,6 +485,7 @@ def setup_aggregated_worker(
         nodes_per_worker,
         use_init_locations=False,
         dump_config_path=dump_config_path,
+        run_in_ci=run_in_ci,
     )
 
     # Use appropriate aggregated GPU script
@@ -503,7 +529,7 @@ def main(input_args: list[str] | None = None):
             raise ValueError("--nginx_config is required for nginx worker type")
         setup_nginx_worker(args.master_ip, args.nginx_config)
     elif args.worker_type == "frontend":
-        setup_frontend_worker(args.worker_idx, args.master_ip)
+        setup_frontend_worker(args.worker_idx, args.master_ip, args.run_in_ci)
     elif args.worker_type == "prefill":
         setup_prefill_worker(
             args.worker_idx,
@@ -517,6 +543,7 @@ def main(input_args: list[str] | None = None):
             args.use_init_locations,
             args.dump_config_path,
             args.script_variant,
+            args.run_in_ci,
         )
     elif args.worker_type == "decode":
         setup_decode_worker(
@@ -530,6 +557,7 @@ def main(input_args: list[str] | None = None):
             args.use_init_locations,
             args.dump_config_path,
             args.script_variant,
+            args.run_in_ci,
         )
     elif args.worker_type == "aggregated":
         setup_aggregated_worker(
@@ -543,6 +571,7 @@ def main(input_args: list[str] | None = None):
             args.multiple_frontends_enabled,
             args.dump_config_path,
             args.script_variant,
+            args.run_in_ci,
         )
 
     logging.info(f"{args.worker_type.capitalize()} worker setup complete")
