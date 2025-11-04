@@ -123,6 +123,7 @@ python3 -m dynamo.frontend <ServerArgs>
 > [!NOTE]
 > There's a known issue where the compile request may fail due to missing bootstrap information, but the kernels are still successfully cached.
 > Using a gradual warm-up phase and enabling caching for FlashInfer (similar to DeepGEMM) can further improve stability and reduce startup time.
+> See https://github.com/sgl-project/sglang/issues/9867#issuecomment-3336551174 for more details.
 
 4. Run the decode worker on the head decode node
 
