@@ -366,6 +366,8 @@ def setup_frontend_worker(worker_idx: int, master_ip: str, run_in_ci: bool = Fal
 
     # All frontends run the ingress server
     frontend_cmd = "python3 -m dynamo.frontend --http-port=8000"
+    if run_in_ci:
+        frontend_cmd = "python3 -m pip install /configs/ai-dynamo/dynamo-0.6.0.whl && python3 -m dynamo.frontend --http-port=8000"
     return run_command(frontend_cmd)
 
 
@@ -520,6 +522,7 @@ def main(input_args: list[str] | None = None):
     logging.info(f"Leader IP: {args.leader_ip}")
     logging.info(f"Master IP: {args.master_ip}")
     logging.info(f"Nodes per worker: {args.nodes_per_worker}")
+    logging.info(f"Run in CI mode?: {args.run_in_ci}")
     logging.info(f"Use init locations?: {args.use_init_locations}")
 
     setup_env(args.master_ip)
