@@ -377,17 +377,39 @@ jobs:
           export KUBECONFIG=$(pwd)/.kubeconfig
           kubectl config set-context --current --namespace=$NAMESPACE
       - name: Run Fault Tolerance Tests
-        uses: ./.github/actions/pytest-k8s
-        with:
-          pytest_marks: "k8s and fault_tolerance"
-          test_selector: "${{ matrix.framework.test_scenario }}"
-          image_tag: "${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-amd64"
-          namespace: ${{ env.NAMESPACE }}
-          framework: ${{ matrix.framework.name }}
-          test_type: "fault_tolerance"
-          platform_arch: "amd64"
-          client_type: "legacy"
-          kubeconfig_b64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+        run: |
+          set -x
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          export NAMESPACE=$NAMESPACE
+          export FRAMEWORK=${{ matrix.framework.name }}
+          export IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
+
+          # Install python3-venv package if not already installed
+          sudo apt-get update && sudo apt-get install -y python3-venv
+
+          # Set up Python virtual environment and install dependencies
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install --upgrade pip
+
+          # Install test dependencies only (don't install dynamo package to avoid Rust build requirement)
+          pip install -r container/deps/requirements.test.txt
+          pip install kubernetes==32.0.1 kubernetes_asyncio kr8s pyyaml requests tabulate pydantic prometheus_client
+
+          echo "Running fault tolerance test: ${{ matrix.framework.test_scenario }}"
+          echo "Using namespace: $NAMESPACE"
+          echo "Using image: $IMAGE"
+
+          # Run the pytest command with marks similar to other e2e tests
+          pytest tests/fault_tolerance/deploy/ \
+            -m "k8s and fault_tolerance and e2e and not slow" \
+            -k "${{ matrix.framework.test_scenario }}" \
+            -v -s \
+            --tb=short \
+            --durations=10 \
+            --namespace ${NAMESPACE} \
+            --image ${IMAGE} \
+            --client-type legacy
       - name: Cleanup
         if: always()
         timeout-minutes: 5
