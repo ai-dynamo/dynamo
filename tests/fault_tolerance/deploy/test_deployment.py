@@ -285,7 +285,7 @@ def test_context(request, scenario):  # noqa: F811
     else:
         # Standard test with single directory
         log_paths = [request.node.name]
-    
+
     # Use factory to auto-detect and parse results
     try:
         results = parse_test_results(
@@ -312,7 +312,9 @@ def test_context(request, scenario):  # noqa: F811
                 # Get validation function for this scenario
                 result_validation_func = get_validation_for_results(test_name, scenario)
 
-                scenario_validation_func = get_validation_for_scenario(test_name, scenario)
+                scenario_validation_func = get_validation_for_scenario(
+                    test_name, scenario
+                )
                 # Extract metrics and recovery time from parsed results
                 if isinstance(results, list) and len(results) > 0:
                     result = results[0]
