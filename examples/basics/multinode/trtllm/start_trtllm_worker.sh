@@ -27,8 +27,9 @@ if [[ -n ${DISAGGREGATION_MODE} ]]; then
   EXTRA_ARGS+="--disaggregation-mode ${DISAGGREGATION_MODE} "
 fi
 
-if [[ -n ${DISAGGREGATION_STRATEGY} ]]; then
-  EXTRA_ARGS+="--disaggregation-strategy ${DISAGGREGATION_STRATEGY} "
+# Only publish KV events if using KV-aware routing (not needed for round-robin)
+if [[ -n ${PUBLISH_KV_EVENTS} ]] && [[ ${PUBLISH_KV_EVENTS} == "true" ]]; then
+  EXTRA_ARGS+="--publish-events-and-metrics "
 fi
 
 if [[ -n ${MODALITY} ]]; then
