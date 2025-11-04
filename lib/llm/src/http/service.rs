@@ -19,6 +19,7 @@
 //! The [`service_v2::HttpService`] can be further extended to host any [`axum::Router`] using the [`service_v2::HttpServiceConfigBuilder`].
 
 mod openai;
+mod json_path;
 
 pub mod custom_backend_metrics;
 pub mod disconnect;
