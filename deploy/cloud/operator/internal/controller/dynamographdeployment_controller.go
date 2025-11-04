@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -96,10 +97,9 @@ type DynamoGraphDeploymentReconciler struct {
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.1/pkg/reconcile
-func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	logger := log.FromContext(ctx)
 
-	var err error
 	reason := Reason("undefined")
 	message := Message("")
 	state := PendingState
@@ -110,6 +110,12 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	}
 
 	defer func() {
+		// Skip status update if DGD is being deleted
+		if !dynamoDeployment.GetDeletionTimestamp().IsZero() {
+			logger.Info("Reconciliation done - skipping status update for deleted resource")
+			return
+		}
+
 		if err != nil {
 			state = FailedState
 			message = Message(err.Error())
@@ -131,9 +137,13 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			LastTransitionTime: metav1.Now(),
 		})
 
-		err = r.Status().Update(ctx, dynamoDeployment)
-		if err != nil {
-			logger.Error(err, "Unable to update the CRD status", "crd", req.NamespacedName, "state", state, "reason", reason, "message", message)
+		updateErr := r.Status().Update(ctx, dynamoDeployment)
+		if updateErr != nil {
+			logger.Error(updateErr, "Unable to update the CRD status", "crd", req.NamespacedName, "state", state, "reason", reason, "message", message)
+			// Set err to trigger requeue
+			if err == nil {
+				err = updateErr
+			}
 		}
 		logger.Info("Reconciliation done")
 	}()
@@ -539,11 +549,59 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
-		}))
+		})).
+			// Watch PodClique resources - only on status changes
+			// Note: We don't need to watch PodCliqueScalingGroup because it's just a container
+			// for PodCliques. The actual status changes happen at the PodClique level.
+			Watches(
+				&grovev1alpha1.PodClique{},
+				handler.EnqueueRequestsFromMapFunc(r.mapPodCliqueToRequests),
+				builder.WithPredicates(predicate.Funcs{
+					CreateFunc: func(ce event.CreateEvent) bool { return false },
+					DeleteFunc: func(de event.DeleteEvent) bool { return false },
+					UpdateFunc: func(ue event.UpdateEvent) bool {
+						// Only trigger on status changes (readyReplicas or replicas)
+						oldPC, okOld := ue.ObjectOld.(*grovev1alpha1.PodClique)
+						newPC, okNew := ue.ObjectNew.(*grovev1alpha1.PodClique)
+						if !okOld || !okNew {
+							return false
+						}
+						// Trigger if readyReplicas or replicas changed
+						return oldPC.Status.ReadyReplicas != newPC.Status.ReadyReplicas ||
+							oldPC.Spec.Replicas != newPC.Spec.Replicas
+					},
+					GenericFunc: func(ge event.GenericEvent) bool { return false },
+				}),
+			)
 	}
 	return ctrlBuilder.Complete(r)
 }
 
 func (r *DynamoGraphDeploymentReconciler) GetRecorder() record.EventRecorder {
 	return r.Recorder
+}
+
+// mapPodCliqueToRequests maps a PodClique to reconcile requests for its owning DGD
+// Uses the nvidia.com/dynamo-graph-deployment-name label for direct lookup - no API calls needed!
+func (r *DynamoGraphDeploymentReconciler) mapPodCliqueToRequests(ctx context.Context, obj client.Object) []ctrl.Request {
+	podClique, ok := obj.(*grovev1alpha1.PodClique)
+	if !ok {
+		return nil
+	}
+
+	// PodCliques are labeled with the DGD name and live in the same namespace
+	dgdName, hasLabel := podClique.GetLabels()[consts.KubeLabelDynamoGraphDeploymentName]
+	if !hasLabel || dgdName == "" {
+		log.FromContext(ctx).V(1).Info("PodClique missing DGD label",
+			"podClique", podClique.Name,
+			"namespace", podClique.Namespace)
+		return nil
+	}
+
+	return []ctrl.Request{{
+		NamespacedName: types.NamespacedName{
+			Name:      dgdName,
+			Namespace: podClique.Namespace,
+		},
+	}}
 }
