@@ -245,7 +245,7 @@ For details on hardware configuration and GPU discovery options, see [Hardware C
 
 #### Using Existing DGD Configs (Recommended for Custom Setups)
 
-If you have an existing DynamoGraphDeployment config (e.g., from `components/backends/*/deploy/disagg.yaml` or custom recipes), you can reference it via ConfigMap:
+If you have an existing DynamoGraphDeployment config (e.g., from `examples/backends/*/deploy/disagg.yaml` or custom recipes), you can reference it via ConfigMap:
 
 **Step 1: Create ConfigMap from your DGD config file:**
 

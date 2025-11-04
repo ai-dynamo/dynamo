@@ -128,6 +128,13 @@ spec:
           - --dgdr-profiling-cluster-role-name={{ include "dynamo-operator.fullname" . }}-dgdr-profiling
           - --planner-cluster-role-name={{ include "dynamo-operator.fullname" . }}-planner
         {{- end }}
+        {{- if .Values.namespaceRestriction.enabled }}
+        {{- if .Values.namespaceRestriction.lease }}
+          - --namespace-scope-lease-duration={{ .Values.namespaceRestriction.lease.duration }}
+          - --namespace-scope-lease-renew-interval={{ .Values.namespaceRestriction.lease.renewInterval }}
+        {{- end }}
+        {{- end }}
+          - --operator-version={{ .Values.controllerManager.manager.image.tag | default .Chart.AppVersion }}
         command:
         - /manager
         env:

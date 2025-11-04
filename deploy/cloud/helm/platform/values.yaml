@@ -35,6 +35,13 @@ dynamo-operator:
     enabled: false
     # -- Target namespace for operator deployment (leave empty for current namespace)
     targetNamespace:
+    # Namespace scope marker lease configuration (used to prevent conflicts when running both cluster-wide and namespace-restricted operators)
+    lease:
+      # Duration before the namespace scope marker lease expires if not renewed (namespace-restricted mode only). When a namespace-restricted operator is running, it creates a lease in its namespace. The cluster-wide operator detects this lease and excludes that namespace from processing. If the namespace operator stops renewing the lease (e.g., crashes), the lease expires and the cluster-wide operator automatically resumes processing that namespace.
+      duration: 30s
+      # Interval for renewing the namespace scope marker lease (namespace-restricted mode only). The namespace-restricted operator renews its lease at this interval to signal it's still running.
+      renewInterval: 10s
+
 
   # Controller manager configuration
   controllerManager:

@@ -435,7 +435,7 @@ def create_kv_transfer_config(config: Config) -> Optional[KVTransferConfig]:
         elif connector == "kvbm":
             connector_cfg = {
                 "kv_connector": "DynamoConnector",
-                "kv_connector_module_path": "dynamo.llm.vllm_integration.connector",
+                "kv_connector_module_path": "kvbm.vllm_integration.connector",
                 "kv_role": "kv_both",
             }
         multi_connectors.append(connector_cfg)
@@ -450,7 +450,7 @@ def create_kv_transfer_config(config: Config) -> Optional[KVTransferConfig]:
         kv_connector="PdConnector",
         kv_role="kv_both",
         kv_connector_extra_config={"connectors": multi_connectors},
-        kv_connector_module_path="dynamo.llm.vllm_integration.connector",
+        kv_connector_module_path="kvbm.vllm_integration.connector",
     )
 
 

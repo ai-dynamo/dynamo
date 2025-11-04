@@ -39,7 +39,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ### Aggregated Serving with KVBM
 ```bash
-cd $DYNAMO_HOME/components/backends/vllm
+cd $DYNAMO_HOME/examples/backends/vllm
 ./launch/agg_kvbm.sh
 ```
 
@@ -47,12 +47,12 @@ cd $DYNAMO_HOME/components/backends/vllm
 ```bash
 # 1P1D - one prefill worker and one decode worker
 # NOTE: need at least 2 GPUs
-cd $DYNAMO_HOME/components/backends/vllm
+cd $DYNAMO_HOME/examples/backends/vllm
 ./launch/disagg_kvbm.sh
 
 # 2P2D - two prefill workers and two decode workers
 # NOTE: need at least 4 GPUs
-cd $DYNAMO_HOME/components/backends/vllm
+cd $DYNAMO_HOME/examples/backends/vllm
 ./launch/disagg_kvbm_2p2d.sh
 ```
 
@@ -101,7 +101,7 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 Alternatively, can use `vllm serve` directly to use KVBM for aggregated serving:
 ```bash
-vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "dynamo.llm.vllm_integration.connector"}' Qwen/Qwen3-0.6B
+vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"}' Qwen/Qwen3-0.6B
 ```
 
 ## Enable and View KVBM Metrics

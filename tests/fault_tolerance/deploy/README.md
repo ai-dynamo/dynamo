@@ -141,10 +141,16 @@ The combined results of these two phases demonstrate both the system's ability t
 
 #### Example Scenario Execution:
 
-Run all deployments and failure scenarios
+Run standard deployments and failure scenarios (excludes custom builds by default):
 
 ```bash
 pytest tests/fault_tolerance/deploy/test_deployment.py -s -v --namespace ${NAMESPACE}
+```
+
+To include all scenarios including custom builds (e.g., MoE models):
+
+```bash
+pytest tests/fault_tolerance/deploy/test_deployment.py -s -v --namespace ${NAMESPACE} --include-custom-build
 ```
 
 ### Test Results Directory
@@ -490,9 +496,53 @@ Then run the development container mounting the workspace and your kube config.
 
 ### Run the tests
 
+#### Default: Run Standard Tests Only
+
+By default, tests requiring custom builds (e.g., MoE models) are **automatically excluded**:
+
 ```bash
-pytest tests/fault_tolerance/deploy/test_deployment.py -s -v --namespace ${NAMESPACE} --image ${IMAGE}
+# Standard tests only
+pytest tests/fault_tolerance/deploy/test_deployment.py -s -v \
+  --namespace ${NAMESPACE} \
+  --image ${IMAGE}
 ```
+
+#### Include Custom Build Tests
+
+To run ALL tests including those requiring custom builds (e.g., MoE models):
+
+```bash
+pytest tests/fault_tolerance/deploy/test_deployment.py -s -v \
+  --namespace ${NAMESPACE} \
+  --image ${IMAGE} \
+  --include-custom-build
+```
+
+#### Run Only Custom Build Tests
+
+To run ONLY tests that require custom builds:
+
+```bash
+pytest tests/fault_tolerance/deploy/test_deployment.py -s -v \
+  --namespace ${NAMESPACE} \
+  --image ${IMAGE} \
+  -m "custom_build"
+```
+
+#### List Available Tests
+
+```bash
+# See which tests will run by default (excludes custom_build)
+pytest tests/fault_tolerance/deploy/test_deployment.py --collect-only -q
+
+# See which tests are excluded
+pytest tests/fault_tolerance/deploy/test_deployment.py --collect-only -m "custom_build" -q
+```
+
+> **Note:** Tests requiring custom builds are marked with `@pytest.mark.custom_build` and include:
+> - MoE (Mixture-of-Experts) models like DeepSeek-V2-Lite
+> - Tests requiring special Docker image configurations
+> - Any scenario with `requires_custom_build=True` in scenarios.py
 
 
 ### Note on Running with Additional Credentials
