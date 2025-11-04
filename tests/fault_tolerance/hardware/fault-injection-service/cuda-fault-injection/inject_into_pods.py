@@ -372,6 +372,9 @@ def patch_deployment_env(
         try:
             print("    → Processing DynamoGraphDeployment...")
 
+            # Type guard: ensure dgd is not None
+            assert dgd is not None, "dgd should not be None when is_dgd is True"
+
             # Determine library path based on ConfigMap usage
             lib_path = (
                 "/cuda-fault/fake_cuda_xid79.so"
@@ -392,13 +395,15 @@ def patch_deployment_env(
             services_to_patch = ["VllmDecodeWorker", "VllmPrefillWorker"]
             patched_services = []
 
-            available_services = list(dgd.get("spec", {}).get("services", {}).keys())
+            spec = dgd.get("spec", {})
+            services = spec.get("services", {}) if spec else {}
+            available_services = list(services.keys())
             print(f"    → Available services: {available_services}")
 
             for service_name in services_to_patch:
-                if service_name in dgd.get("spec", {}).get("services", {}):
+                if service_name in services:
                     print(f"    → Patching service: {service_name}")
-                    service = dgd["spec"]["services"][service_name]
+                    service = services[service_name]
                     _patch_service_for_injection(
                         service, enable, new_envs, use_configmap, target_node, lib_path
                     )
