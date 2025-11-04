@@ -76,6 +76,9 @@
 
    benchmarks/kv-router-ab-testing.md
 
+   frontends/kserve.md
 
 ..   TODO: architecture/distributed_runtime.md and architecture/dynamo_flow.md
      have some outdated names/references and need a refresh.
+..   TODO: Add an OpenAI frontend doc and then add top-level Frontends section
+     to index.rst pointing to both OpenAI HTTP and KServe GRPC docs.
