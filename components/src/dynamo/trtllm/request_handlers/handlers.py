@@ -1,15 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import copy
 import logging
 
 from dynamo._core import Context
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.encode_helper import EncodeHelper
 from dynamo.trtllm.request_handlers.handler_base import (
-    DisaggregationMode,
-    DisaggregationStrategy,
     HandlerBase,
     RequestHandlerConfig,
 )
@@ -26,32 +23,11 @@ class RequestHandlerFactory:
             "prefill_and_decode": AggregatedHandler,
         }
 
-    def _validate_config(self, config: RequestHandlerConfig):
+    def get_request_handler(self, config: RequestHandlerConfig) -> HandlerBase:
         if config.disaggregation_mode.value not in self.handlers:
             raise ValueError(
                 f"Invalid disaggregation_mode '{config.disaggregation_mode.value}'"
             )
-
-        if not config.next_client:
-            if (
-                config.disaggregation_mode == DisaggregationMode.PREFILL
-                and config.disaggregation_strategy
-                == DisaggregationStrategy.PREFILL_FIRST
-            ):
-                raise ValueError(
-                    "Next client is required for the main worker when disaggregation_mode='prefill' and disaggregation_strategy='prefill_first'."
-                )
-            if (
-                config.disaggregation_mode == DisaggregationMode.DECODE
-                and config.disaggregation_strategy
-                == DisaggregationStrategy.DECODE_FIRST
-            ):
-                raise ValueError(
-                    "Next client is required for the decode worker when disaggregation_mode='decode' and disaggregation_strategy='decode_first'."
-                )
-
-    def get_request_handler(self, config: RequestHandlerConfig) -> HandlerBase:
-        self._validate_config(config)
         return self.handlers[config.disaggregation_mode.value](config)
 
 
@@ -104,14 +80,14 @@ class EncodeHandler(HandlerBase):
 
 class PrefillHandler(HandlerBase):
     """
-    Handler for the prefill mode.
+    Handler for prefill-only workers in disaggregated serving.
     """
 
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
 
     async def remote_encode_with_nixl(self, request: dict):
-        # 2. Get response with shape info and readable metadata
+        # Get response with shape info and readable metadata
         encode_response = None
         async for res in await self.encode_client.round_robin(request):
             encode_response = res.data()
@@ -125,12 +101,12 @@ class PrefillHandler(HandlerBase):
             encode_response, self.connector
         )
 
-    async def remote_decode(self, request: dict, context: Context):
-        async for res in await self.next_client.round_robin(request, context=context):
-            yield res.data()
-
     async def generate(self, request: dict, context: Context):
-        logging.debug(f"New Request ID: {context.id()}")
+        """
+        Prefill worker: process prompt and return disaggregated_params.
+        Frontend routes to decode workers automatically.
+        """
+        logging.debug(f"Prefill Request ID: {context.id()}")
         logging.debug(f"PrefillHandler.generate received request: {request}")
         embeddings_tensor = None
 
@@ -138,119 +114,48 @@ class PrefillHandler(HandlerBase):
             _, _, embedding_paths = self.multimodal_processor.extract_prompt_and_media(
                 request.get("messages", [])
             )
-            # This check will be removed once TRTLLM Encoder is integrated.
             if embedding_paths:
                 if self.encode_client and self.connector:
                     logging.debug(
                         "PrefillHandler calling Encode Worker via remote_encode_with_nixl"
                     )
                     embeddings_tensor = await self.remote_encode_with_nixl(request)
-        # Generate the prefill response locally
-        prefill_request = copy.deepcopy(request)
-        prefill_response = None
+
+        # Generate prefill response locally and return disaggregated_params
         response_count = 0
-        async for res in self.generate_locally(
-            prefill_request, context, embeddings_tensor
-        ):
-            prefill_response = res
+        async for res in self.generate_locally(request, context, embeddings_tensor):
             response_count += 1
             if response_count > 1:
                 raise ValueError("Prefill response should be generated only once.")
 
-        if context.is_stopped() or context.is_killed():
-            # Local generate abort monitor will print debug log, so only returning here.
-            return
-
-        if (
-            self.disaggregation_strategy == DisaggregationStrategy.PREFILL_FIRST
-            and not self.check_error(prefill_response)
-        ):
-            # If operating under prefill_first strategy, the prefill handler needs to trigger
-            # the decode handler.
-            if prefill_response is not None:
-                request["disaggregated_params"] = prefill_response[
-                    "disaggregated_params"
-                ]
-            async for res in self.remote_decode(request, context):
-                yield res
-
             if context.is_stopped() or context.is_killed():
-                logging.debug(f"Aborted Remote Request ID: {context.id()}")
                 return
-        else:
-            # Return response to the decode handler.
-            yield prefill_response
+
+            # Return response with disaggregated_params to frontend
+            yield res
 
 
 class DecodeHandler(HandlerBase):
     """
-    Handler for the decode mode.
+    Handler for decode-only workers in disaggregated serving.
     """
 
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
 
-    async def remote_prefill(self, request: dict, context: Context):
-        """
-        Send request to prefill. Try router first if available, fallback to direct worker.
-        """
-        # Format request in PreprocessedRequest format with extra_args
-        prefill_request = copy.deepcopy(request)
-
-        # Try router first if available, fallback to worker
-        if (
-            self.next_router_client is not None
-            and self.next_router_client.instance_ids()
-        ):
-            try:
-                # Call router's generate endpoint which returns LLMEngineOutput
-                async for res in await self.next_router_client.generate(
-                    prefill_request, context=context
-                ):
-                    yield res
-                return
-            except Exception as e:
-                logging.warning(
-                    f"Prefill router call failed: {e}. Falling back to direct worker."
-                )
-
-        # Fallback to direct worker
-        if self.next_client is not None:
-            async for res in await self.next_client.round_robin(
-                prefill_request, context=context
-            ):
-                yield res
-        else:
-            raise ValueError("No prefill router or worker available")
-
     async def generate(self, request: dict, context: Context):
-        logging.debug(f"New Request ID: {context.id()}")
-        if self.disaggregation_strategy == DisaggregationStrategy.DECODE_FIRST:
-            prefill_response = None
-            # If operating under decode_first strategy, the decode handler needs to trigger
-            # the prefill handler.
-            response_count = 0
-            # Do not yield the prefill response directly.
-            # Instead, capture it and extract the state.
-            async for res in self.remote_prefill(request, context):
-                prefill_response = res
-                response_count += 1
-                if response_count > 1:
-                    raise ValueError("Prefill response should be generated only once.")
+        """
+        Decode worker: generate tokens using disaggregated_params from prefill.
+        If disaggregated_params is present, prefill was done. Otherwise generate normally.
+        """
+        logging.debug(f"Decode Request ID: {context.id()}")
 
-            if context.is_stopped() or context.is_killed():
-                logging.debug(f"Aborted Remote Request ID: {context.id()}")
-                return
-
-            response_data = (
-                prefill_response.data() if prefill_response is not None else None
+        disaggregated_params = request.get("disaggregated_params")
+        if disaggregated_params:
+            logging.debug(
+                f"Using disaggregated params from prefill for request {context.id()}"
             )
-            if prefill_response is not None and self.check_error(response_data):
-                yield response_data
-                return
 
-            if prefill_response is not None and response_data is not None:
-                request["disaggregated_params"] = response_data["disaggregated_params"]
-
+        # Generate tokens locally (with or without disaggregated_params)
         async for res in self.generate_locally(request, context):
             yield res
