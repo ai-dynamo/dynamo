@@ -77,6 +77,7 @@
    benchmarks/kv-router-ab-testing.md
 
    frontends/kserve.md
+   _sections/frontends.rst
 
 ..   TODO: architecture/distributed_runtime.md and architecture/dynamo_flow.md
      have some outdated names/references and need a refresh.
