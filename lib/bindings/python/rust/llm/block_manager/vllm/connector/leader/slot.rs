@@ -542,36 +542,51 @@ impl Slot for VllmConnectorSlot {
         );
 
         if num_candidate_blocks != 0 {
-            // do we have a mechanism for skipping gpu cache hit blocks?  not sure yet.
-            // for now, offload all the blocks to the host
-            let offload_block_ids: Vec<usize> = self
-                .device_blocks
-                .iter()
-                .skip(self.evaluated_blocks)
-                .take(num_candidate_blocks)
-                .copied()
-                .collect::<Vec<_>>();
+            // Calculate the actual number of available blocks in device_blocks after skipping evaluated_blocks
+            let available_blocks = self.device_blocks.len().saturating_sub(self.evaluated_blocks);
+            
+            // Clamp num_candidate_blocks to the actual available blocks to prevent overflow
+            let actual_blocks_to_process = num_candidate_blocks.min(available_blocks);
+            
+            if actual_blocks_to_process == 0 {
+                tracing::debug!(
+                    "no blocks available to offload: evaluated_blocks={}, device_blocks.len()={}, num_candidate_blocks={}",
+                    self.evaluated_blocks,
+                    self.device_blocks.len(),
+                    num_candidate_blocks
+                );
+            } else {
+                // do we have a mechanism for skipping gpu cache hit blocks?  not sure yet.
+                // for now, offload all the blocks to the host
+                let offload_block_ids: Vec<usize> = self
+                    .device_blocks
+                    .iter()
+                    .skip(self.evaluated_blocks)
+                    .take(actual_blocks_to_process)
+                    .copied()
+                    .collect::<Vec<_>>();
 
-            assert_eq!(
-                offload_block_ids.len(),
-                num_candidate_blocks,
-                "device block overflow - candidate blocks exceed block count at offset {}",
-                self.evaluated_blocks
-            );
+                debug_assert_eq!(
+                    offload_block_ids.len(),
+                    actual_blocks_to_process,
+                    "device block overflow - candidate blocks exceed block count at offset {}",
+                    self.evaluated_blocks
+                );
 
-            let offload_token_blocks: Vec<TokenBlock> = self
-                .sequence
-                .blocks()
-                .iter()
-                .skip(self.evaluated_blocks)
-                .take(num_candidate_blocks)
-                .cloned()
-                .collect::<Vec<_>>();
+                let offload_token_blocks: Vec<TokenBlock> = self
+                    .sequence
+                    .blocks()
+                    .iter()
+                    .skip(self.evaluated_blocks)
+                    .take(actual_blocks_to_process)
+                    .cloned()
+                    .collect::<Vec<_>>();
 
-            self.offload_blocks(&offload_block_ids, &offload_token_blocks)
-                .expect("failed to offload blocks");
+                self.offload_blocks(&offload_block_ids, &offload_token_blocks)
+                    .expect("failed to offload blocks");
 
-            self.evaluated_blocks += num_candidate_blocks;
+                self.evaluated_blocks += actual_blocks_to_process;
+            }
         }
 
         // done applying policy
@@ -647,19 +662,35 @@ impl Slot for VllmConnectorSlot {
             ((computed_position + 1) / self.block_size).saturating_sub(self.evaluated_blocks);
 
         if num_candidate_blocks > 0 {
+            // Calculate the actual number of available blocks in device_blocks after skipping evaluated_blocks
+            let available_blocks = self.device_blocks.len().saturating_sub(self.evaluated_blocks);
+            
+            // Clamp num_candidate_blocks to the actual available blocks to prevent overflow
+            let actual_blocks_to_process = num_candidate_blocks.min(available_blocks);
+            
+            if actual_blocks_to_process == 0 {
+                tracing::debug!(
+                    "no blocks available to offload: evaluated_blocks={}, device_blocks.len()={}, num_candidate_blocks={}",
+                    self.evaluated_blocks,
+                    self.device_blocks.len(),
+                    num_candidate_blocks
+                );
+                return Ok(());
+            }
+            
             // do we have a mechanism for skipping gpu cache hit blocks?  not sure yet.
             // for now, offload all the blocks to the host
             let offload_block_ids: Vec<usize> = self
                 .device_blocks
                 .iter()
                 .skip(self.evaluated_blocks)
-                .take(num_candidate_blocks)
+                .take(actual_blocks_to_process)
                 .copied()
                 .collect::<Vec<_>>();
 
-            assert_eq!(
+            debug_assert_eq!(
                 offload_block_ids.len(),
-                num_candidate_blocks,
+                actual_blocks_to_process,
                 "device block overflow - candidate blocks exceed block count at offset {}",
                 self.evaluated_blocks
             );
@@ -669,14 +700,14 @@ impl Slot for VllmConnectorSlot {
                 .blocks()
                 .iter()
                 .skip(self.evaluated_blocks)
-                .take(num_candidate_blocks)
+                .take(actual_blocks_to_process)
                 .cloned()
                 .collect::<Vec<_>>();
 
             self.offload_blocks(&offload_block_ids, &offload_token_blocks)
                 .expect("failed to offload blocks");
 
-            self.evaluated_blocks += num_candidate_blocks;
+            self.evaluated_blocks += actual_blocks_to_process;
         }
 
         // done applying policy
@@ -1497,3 +1528,4 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> AnyBlocks for AnyImmutab
         self.block_ids()
     }
 }
+
