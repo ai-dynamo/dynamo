@@ -14,31 +14,24 @@ spec:
         app: model-download
     spec:
       restartPolicy: Never
+      tolerations: []
       containers:
         - name: model-download
           image: python:3.10-slim
           command: ["sh", "-c"]
-          envFrom:
-            - secretRef:
-                name: hf-token-secret
           env:
-            - name: MODEL_NAME
-              value: deepseek-ai/DeepSeek-R1
-            - name: HF_HOME
-              value: /model-store
             - name: HF_HUB_ENABLE_HF_TRANSFER
               value: "1"
-            - name: MODEL_REVISION
-              value: 56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad
           args:
             - |
               set -eux
               pip install --no-cache-dir huggingface_hub hf_transfer
-              hf download $MODEL_NAME --revision $MODEL_REVISION
+              hf download nvidia/DeepSeek-R1-FP4 --local-dir /model-cache/deepseek-r1-fp4
+              hf download deepseek-ai/DeepSeek-R1 --local-dir /model-cache/deepseek-r1
           volumeMounts:
             - name: model-cache
-              mountPath: /model-store
+              mountPath: /model-cache
       volumes:
       - name: model-cache
         persistentVolumeClaim:
-          claimName: model-cache
+          claimName: model-cache-pvc

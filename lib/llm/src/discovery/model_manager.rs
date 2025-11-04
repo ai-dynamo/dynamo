@@ -9,8 +9,11 @@ use std::{
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::oneshot;
 
-use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::prelude::DistributedRuntimeProvider;
+use dynamo_runtime::{
+    component::{Component, Endpoint},
+    storage::key_value_store::Key,
+};
 
 use crate::{
     discovery::KV_ROUTERS_ROOT_PATH,
@@ -309,24 +312,15 @@ impl ModelManager {
             return Ok(kv_chooser);
         }
 
-        // Create new KV router with etcd registration
-        let etcd_client = component
-            .drt()
-            .etcd_client()
-            .ok_or_else(|| anyhow::anyhow!("KV routing requires etcd (dynamic mode)"))?;
+        let store = component.drt().store();
+        let router_bucket = store
+            .get_or_create_bucket(KV_ROUTERS_ROOT_PATH, None)
+            .await?;
         let router_uuid = uuid::Uuid::new_v4();
-        let router_key = format!(
-            "{}/{}/{}",
-            KV_ROUTERS_ROOT_PATH,
-            component.path(),
-            router_uuid
-        );
-        etcd_client
-            .kv_create(
-                &router_key,
-                serde_json::to_vec_pretty(&kv_router_config.unwrap_or_default())?,
-                None, // use primary lease
-            )
+        let router_key = Key::from_raw(format!("{}/{router_uuid}", component.path()));
+        let json_router_config = serde_json::to_vec_pretty(&kv_router_config.unwrap_or_default())?;
+        router_bucket
+            .insert(&router_key, json_router_config.into(), 0)
             .await?;
 
         let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));

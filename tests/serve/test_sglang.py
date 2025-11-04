@@ -34,7 +34,7 @@ class SGLangConfig(EngineConfig):
 
 
 sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
-    WORKSPACE_DIR, "components/backends/sglang"
+    WORKSPACE_DIR, "examples/backends/sglang"
 )
 
 sglang_configs = {

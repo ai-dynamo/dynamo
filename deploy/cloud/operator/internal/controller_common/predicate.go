@@ -30,6 +30,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
+// ExcludedNamespacesInterface defines the interface for checking namespace exclusions
+type ExcludedNamespacesInterface interface {
+	Contains(namespace string) bool
+}
+
 type GroveConfig struct {
 	// Enabled is automatically determined by checking if Grove CRDs are installed in the cluster
 	Enabled bool
@@ -68,6 +73,8 @@ type Config struct {
 	MpiRun             MpiRunConfig
 	// RBAC configuration for cross-namespace resource management
 	RBAC RBACConfig
+	// ExcludedNamespaces is a thread-safe set of namespaces to exclude (cluster-wide mode only)
+	ExcludedNamespaces ExcludedNamespacesInterface
 }
 
 // RBACConfig holds configuration for RBAC management
@@ -158,6 +165,16 @@ func EphemeralDeploymentEventFilter(config Config) predicate.Predicate {
 			// in case of a restricted namespace, we only want to process the events that are in the restricted namespace
 			return objMeta.GetNamespace() == config.RestrictedNamespace
 		}
+
+		// Cluster-wide mode: check if namespace is excluded
+		if config.ExcludedNamespaces != nil && config.ExcludedNamespaces.Contains(objMeta.GetNamespace()) {
+			l.V(1).Info("Skipping resource - namespace is excluded",
+				"namespace", objMeta.GetNamespace(),
+				"resource", objMeta.GetName(),
+				"kind", o.GetObjectKind().GroupVersionKind().Kind)
+			return false
+		}
+
 		// in all other cases, discard the event if it is destined to an ephemeral deployment
 		if strings.Contains(objMeta.GetNamespace(), "ephemeral") {
 			return false

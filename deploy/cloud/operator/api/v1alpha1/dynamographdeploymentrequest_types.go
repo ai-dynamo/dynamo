@@ -114,6 +114,15 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
 	Backend string `json:"backend"`
 
+	// EnableGpuDiscovery controls whether the profiler should automatically discover GPU
+	// resources from the Kubernetes cluster nodes. When enabled, the profiler will override
+	// any manually specified hardware configuration (min_num_gpus_per_engine, max_num_gpus_per_engine,
+	// num_gpus_per_node) with values detected from the cluster.
+	// Requires cluster-wide node access permissions - only available with cluster-scoped operators.
+	// +kubebuilder:default=false
+	// +kubebuilder:validation:Optional
+	EnableGpuDiscovery bool `json:"enableGpuDiscovery,omitempty"`
+
 	// ProfilingConfig provides the complete configuration for the profiling job.
 	// This configuration is passed directly to the profiler.
 	// The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).

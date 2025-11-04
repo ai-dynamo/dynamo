@@ -60,8 +60,14 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
     if args.model:
         logger.info(f"Getting model info for {args.model}...")
         model_info = get_model_info(args.model)
+
+        num_experts_str = (
+            f", num_experts={model_info['num_experts']}"
+            if model_info.get("num_experts")
+            else ""
+        )
         logger.info(
-            f"Model {args.model} has size {model_info['model_size']}, is_moe={model_info['is_moe']}, and max_context_length={model_info['max_context_length']}"
+            f"Model {args.model} has size {model_info['model_size']}, is_moe={model_info['is_moe']}, and max_context_length={model_info['max_context_length']}{num_experts_str}"
         )
         args.is_moe_model = model_info["is_moe"]  # type: ignore[assignment]
         args.max_context_length = model_info["max_context_length"]  # type: ignore[assignment]
@@ -105,5 +111,6 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
         args.min_num_gpus_per_engine = min_gpu
         args.max_num_gpus_per_engine = max_gpu
         args.num_gpus_per_node = gpu_info["gpus_per_node"]  # type: ignore[assignment]
+        args.num_experts = model_info.get("num_experts")  # type: ignore[assignment]
 
     return
