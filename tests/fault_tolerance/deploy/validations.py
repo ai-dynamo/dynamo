@@ -753,7 +753,7 @@ def validate_sglang_decode_scheduler(
     **kwargs,
 ) -> None:
     """Validation for SGLang decode scheduler process termination.
-    
+
     Args:
         scenario: Scenario object
         log_dir: Test log directory
@@ -794,7 +794,7 @@ def validate_sglang_decode_detokenizer(
     **kwargs,
 ) -> None:
     """Validation for SGLang decode detokenizer process termination.
-    
+
     Args:
         scenario: Scenario object
         log_dir: Test log directory
@@ -820,7 +820,9 @@ def validate_sglang_decode_detokenizer(
 
     logger.info("\n")
     logger.info("=" * 80)
-    logger.info(" ALL VALIDATION PASSED: SGLang decode detokenizer termination scenario")
+    logger.info(
+        " ALL VALIDATION PASSED: SGLang decode detokenizer termination scenario"
+    )
     logger.info("=" * 80)
 
 
