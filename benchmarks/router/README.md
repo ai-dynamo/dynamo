@@ -118,6 +118,16 @@ python -m dynamo.frontend --help
 
 For detailed explanations of router arguments (especially KV cache routing parameters), see the [KV Cache Routing documentation](../../docs/router/kv_cache_routing.md).
 
+> [!Note]
+> If you're unsure whether your backend engines correctly emit KV events for certain models (e.g., hybrid models like gpt-oss or nemotron nano 2), use the `--no-kv-events` flag to disable KV event tracking and use approximate KV indexing instead:
+>
+> ```bash
+> python -m dynamo.frontend \
+>     --router-mode kv \
+>     --http-port 8000 \
+>     --no-kv-events
+> ```
+
 #### Disaggregated Serving with Automatic Prefill Routing
 
 When you launch prefill workers using `run_engines.sh --prefill`, the frontend automatically detects them and activates an internal prefill router. This prefill router:
@@ -127,14 +137,10 @@ When you launch prefill workers using `run_engines.sh --prefill`, the frontend a
 
 No additional configuration is needed - simply launch both decode and prefill workers, and the system handles the rest. See the [KV Cache Routing documentation](../../docs/router/kv_cache_routing.md#disaggregated-serving-prefill-and-decode) for more details.
 
-**Note**: If you're unsure whether your backend engines correctly emit KV events for certain models (e.g., hybrid models like gpt-oss or nemotron nano 2), use the `--no-kv-events` flag to disable KV event tracking and use approximate KV indexing instead:
-
-```bash
-python -m dynamo.frontend \
-    --router-mode kv \
-    --http-port 8000 \
-    --no-kv-events
-```
+> [!Note]
+> The unified frontend with automatic prefill routing is currently only enabled for vLLM backends. For SGLang and TensorRT-LLM (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. See example scripts:
+> - SGLang: [`examples/backends/sglang/launch/disagg_router.sh`](../../examples/backends/sglang/launch/disagg_router.sh)
+> - TensorRT-LLM: [`examples/backends/trtllm/launch/disagg_router.sh`](../../examples/backends/trtllm/launch/disagg_router.sh)
 
 ### Step 3: Verify Setup
 
