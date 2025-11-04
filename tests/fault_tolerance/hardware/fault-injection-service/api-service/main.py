@@ -231,8 +231,10 @@ class KubernetesHelper:
 
         try:
             # List NetworkPolicies with our label selector
-            policies = self.networking_v1.list_namespaced_network_policy(
-                namespace=namespace, label_selector="managed-by=fault-injection-api"
+            policies = await asyncio.to_thread(
+                self.networking_v1.list_namespaced_network_policy,
+                namespace=namespace,
+                label_selector="managed-by=fault-injection-api",
             )
 
             for policy in policies.items:
@@ -243,15 +245,17 @@ class KubernetesHelper:
 
                 try:
                     # Delete the policy
-                    self.networking_v1.delete_namespaced_network_policy(
-                        name=policy_name, namespace=namespace
+                    await asyncio.to_thread(
+                        self.networking_v1.delete_namespaced_network_policy,
+                        name=policy_name,
+                        namespace=namespace,
                     )
                     deleted_policies.append(policy_name)
                     logger.info(f"Deleted orphaned NetworkPolicy: {policy_name}")
 
                 except ApiException as e:
                     if e.status != 404:  # Ignore if already deleted
-                        logger.error(
+                        logger.exception(
                             f"Failed to delete NetworkPolicy {policy_name}: {e}"
                         )
 
@@ -266,8 +270,10 @@ class KubernetesHelper:
     ) -> Optional[str]:
         """Get a pod from DaemonSet by label"""
         try:
-            pods = self.core_v1.list_namespaced_pod(
-                namespace=namespace, label_selector=label_selector
+            pods = await asyncio.to_thread(
+                self.core_v1.list_namespaced_pod,
+                namespace=namespace,
+                label_selector=label_selector,
             )
             if pods.items:
                 return pods.items[0].metadata.name
@@ -303,8 +309,10 @@ class KubernetesHelper:
     ) -> Optional[str]:
         """Get node name where a pod is running"""
         try:
-            pods = self.core_v1.list_namespaced_pod(
-                namespace=namespace, label_selector=pod_selector
+            pods = await asyncio.to_thread(
+                self.core_v1.list_namespaced_pod,
+                namespace=namespace,
+                label_selector=pod_selector,
             )
             if pods.items:
                 return pods.items[0].spec.node_name
@@ -313,10 +321,10 @@ class KubernetesHelper:
             logger.error(f"Failed to get node for pod: {e}")
             return None
 
-    def get_pod_by_prefix(self, namespace: str, pod_prefix: str) -> Optional[str]:
+    async def get_pod_by_prefix(self, namespace: str, pod_prefix: str) -> Optional[str]:
         """Get full pod name by prefix"""
         try:
-            pods = self.core_v1.list_namespaced_pod(namespace)
+            pods = await asyncio.to_thread(self.core_v1.list_namespaced_pod, namespace)
             for pod in pods.items:
                 if pod.metadata.name.startswith(pod_prefix):
                     return pod.metadata.name
@@ -324,10 +332,12 @@ class KubernetesHelper:
             logger.error(f"Error listing pods: {e}")
         return None
 
-    def get_pod_labels(self, namespace: str, pod_name: str) -> dict:
+    async def get_pod_labels(self, namespace: str, pod_name: str) -> dict:
         """Get labels from a pod"""
         try:
-            pod = self.core_v1.read_namespaced_pod(pod_name, namespace)
+            pod = await asyncio.to_thread(
+                self.core_v1.read_namespaced_pod, pod_name, namespace
+            )
             return pod.metadata.labels or {}
         except ApiException as e:
             logger.error(f"Error reading pod {pod_name}: {e}")
@@ -360,7 +370,8 @@ class GPUFaultInjectorClient:
         """Inject GPU fault via agent on target node"""
 
         # Find agent pod on target node
-        pods = self.k8s.core_v1.list_namespaced_pod(
+        pods = await asyncio.to_thread(
+            self.k8s.core_v1.list_namespaced_pod,
             namespace=self.namespace,
             label_selector="app=gpu-fault-injector",
             field_selector=f"spec.nodeName={node_name}",
@@ -400,7 +411,8 @@ class GPUFaultInjectorClient:
         logger.info(f"[CLIENT-DEBUG] Step A: Looking for agent pod on node {node_name}")
 
         # Find agent pod on target node (use kernel agent label)
-        pods = self.k8s.core_v1.list_namespaced_pod(
+        pods = await asyncio.to_thread(
+            self.k8s.core_v1.list_namespaced_pod,
             namespace=self.namespace,
             label_selector="app=gpu-fault-injector-kernel",
             field_selector=f"spec.nodeName={node_name}",
@@ -446,7 +458,8 @@ class GPUFaultInjectorClient:
     async def recover_fault(self, node_name: str, fault_id: str) -> tuple[bool, str]:
         """Recover from GPU fault"""
 
-        pods = self.k8s.core_v1.list_namespaced_pod(
+        pods = await asyncio.to_thread(
+            self.k8s.core_v1.list_namespaced_pod,
             namespace=self.namespace,
             label_selector="app=gpu-fault-injector",
             field_selector=f"spec.nodeName={node_name}",
@@ -549,14 +562,14 @@ class NetworkFaultInjectorClient:
         if not target_pod_prefix:
             return False, "target_pod_prefix parameter is required"
 
-        target_pod_name = self.k8s.get_pod_by_prefix(namespace, target_pod_prefix)
+        target_pod_name = await self.k8s.get_pod_by_prefix(namespace, target_pod_prefix)
         if not target_pod_name:
             return (
                 False,
                 f"Could not find pod with prefix '{target_pod_prefix}' in namespace '{namespace}'",
             )
 
-        target_labels = self.k8s.get_pod_labels(namespace, target_pod_name)
+        target_labels = await self.k8s.get_pod_labels(namespace, target_pod_name)
         if not target_labels:
             return False, f"Could not get labels for pod '{target_pod_name}'"
 
@@ -691,8 +704,10 @@ class NetworkFaultInjectorClient:
             )
 
             # Create the NetworkPolicy
-            self.k8s.networking_v1.create_namespaced_network_policy(
-                namespace=namespace, body=policy
+            await asyncio.to_thread(
+                self.k8s.networking_v1.create_namespaced_network_policy,
+                namespace=namespace,
+                body=policy,
             )
 
             # Store for cleanup
@@ -743,14 +758,14 @@ class NetworkFaultInjectorClient:
             return False, "target_pod_prefix parameter is required"
 
         # Get the actual pod
-        target_pod_name = self.k8s.get_pod_by_prefix(namespace, target_pod_prefix)
+        target_pod_name = await self.k8s.get_pod_by_prefix(namespace, target_pod_prefix)
         if not target_pod_name:
             return (
                 False,
                 f"Could not find pod with prefix '{target_pod_prefix}' in namespace '{namespace}'",
             )
 
-        target_labels = self.k8s.get_pod_labels(namespace, target_pod_name)
+        target_labels = await self.k8s.get_pod_labels(namespace, target_pod_name)
         if not target_labels:
             return False, f"Could not get labels for pod '{target_pod_name}'"
 
@@ -901,7 +916,8 @@ class NetworkFaultInjectorClient:
                 # Note: For port-specific targeting, you may need to adjust based on your requirements
 
             # Create the NetworkChaos resource
-            self.custom_api.create_namespaced_custom_object(
+            await asyncio.to_thread(
+                self.custom_api.create_namespaced_custom_object,
                 group="chaos-mesh.org",
                 version="v1alpha1",
                 namespace=namespace,
@@ -959,8 +975,10 @@ class NetworkFaultInjectorClient:
         namespace = policy_info["namespace"]
 
         try:
-            self.k8s.networking_v1.delete_namespaced_network_policy(
-                name=policy_name, namespace=namespace
+            await asyncio.to_thread(
+                self.k8s.networking_v1.delete_namespaced_network_policy,
+                name=policy_name,
+                namespace=namespace,
             )
 
             # Remove from tracking
@@ -986,7 +1004,8 @@ class NetworkFaultInjectorClient:
         namespace = chaos_info["namespace"]
 
         try:
-            self.custom_api.delete_namespaced_custom_object(
+            await asyncio.to_thread(
+                self.custom_api.delete_namespaced_custom_object,
                 group="chaos-mesh.org",
                 version="v1alpha1",
                 namespace=namespace,
@@ -1022,8 +1041,10 @@ class MonitoringAgentClient:
     ) -> dict[str, Any]:
         """Collect metrics from all monitoring agents"""
 
-        pods = self.k8s.core_v1.list_namespaced_pod(
-            namespace=self.namespace, label_selector="app=monitoring-agent"
+        pods = await asyncio.to_thread(
+            self.k8s.core_v1.list_namespaced_pod,
+            namespace=self.namespace,
+            label_selector="app=monitoring-agent",
         )
 
         if not pods.items:
@@ -1215,15 +1236,30 @@ async def lifespan(app: FastAPI):
     # Recover all active faults
     active_faults = await app.state.fault_tracker.list_active_faults()
     for fault in active_faults:
-        logger.warning(f"Recovering active fault on shutdown: {fault['id']}")
-        # Also clean up any NetworkPolicies
+        fault_type = fault.get("type", "")
+        fault_id = fault["id"]
+        logger.warning(
+            f"Recovering active fault on shutdown: {fault_id} (type: {fault_type})"
+        )
         try:
-            if fault.get("type") == "network_partition":
-                await app.state.k8s.cleanup_orphaned_network_policies()
-        except Exception as e:
-            logger.error(
-                f"Failed to cleanup NetworkPolicy for fault {fault['id']}: {e}"
-            )
+            if fault_type == "network":
+                # Recover network partition
+                await app.state.network_client.recover_partition(fault_id)
+            elif fault_type.startswith("gpu"):
+                # Recover GPU fault - extract node name from target
+                target = fault.get("target", "")
+                # Target format is "node_name" or "node_name/gpu0"
+                node_name = target.split("/")[0] if "/" in target else target
+                if node_name:
+                    await app.state.gpu_client.recover_fault(
+                        node_name=node_name, fault_id=fault_id
+                    )
+                else:
+                    logger.error(
+                        f"Cannot recover GPU fault {fault_id}: invalid target '{target}'"
+                    )
+        except Exception as exc:
+            logger.exception(f"Failed to recover fault {fault_id} during shutdown")
 
 
 app = FastAPI(
