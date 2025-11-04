@@ -46,9 +46,9 @@ mkdir -p ${LOG_DIR}
 echo "trying to submit job"
 
 prefix="dep"
-if [ "${gen_enable_attention_dp}" = "false" && "${gen_ep_size}" == "1" ]; then
+if [[ "${gen_enable_attention_dp}" == "false" && "${gen_ep_size}" == "1" ]]; then
     prefix="tep"
-elif [ "${gen_enable_attention_dp}" = "false" && "${gen_ep_size}" != "1" ]; then
+elif [[ "${gen_enable_attention_dp}" == "false" && "${gen_ep_size}" != "1" ]]; then
     prefix="tp"
 fi
 
