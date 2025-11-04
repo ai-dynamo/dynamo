@@ -46,11 +46,13 @@ def load_data(directory: str):
 
                 throughput_per_gpu = result_data["total_token_throughput"] / total_gpus
                 throughput_per_user = 1000 / result_data["mean_tpot_ms"]
+
                 
                 results.append({
                     "per_gpu": throughput_per_gpu,
                     "per_user": throughput_per_user,
                     "ttft": result_data["mean_ttft_ms"] / 1000,
+                    "concurrency": int(result_data["max_concurrency"]),
                     "config": deployment_config,
                 })
     print(f"Gathered results from {len(results)} benchmarks")
@@ -115,6 +117,7 @@ def plot_pareto(results, output_file):
                 f"tokens/s/user: {result['per_user']:.2f}<br>"
                 f"tokens/s/gpu: {result['per_gpu']:.2f}<br>"
                 f"ttft: {result['ttft']:.3f}s<br>"
+                f"concurrency: {result['concurrency']}<br>"
                 f"<br>Config:<br>{config_text}"
             )
             hover_texts.append(hover_text)
