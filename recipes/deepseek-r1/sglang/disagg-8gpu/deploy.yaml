@@ -46,7 +46,7 @@ spec:
             timeoutSeconds: 10
             failureThreshold: 600
           image: my-registry/sglang-wideep-runtime:my-tag
-          workingDir: /workspace/examples/backends/sglang
+          workingDir: /sgl-workspace/dynamo
           command:
             - python3
             - -m
@@ -73,6 +73,7 @@ spec:
             - "30001"
             - --host
             - 0.0.0.0
+            - --prefill-round-robin-balance
     prefill:
       dynamoNamespace: sgl-dsr1-8gpu
       componentType: worker
@@ -95,7 +96,7 @@ spec:
             timeoutSeconds: 10
             failureThreshold: 600
           image: my-registry/sglang-wideep-runtime:my-tag
-          workingDir: /workspace/examples/backends/sglang
+          workingDir: /sgl-workspace/dynamo
           command:
             - python3
             - -m
@@ -119,3 +120,5 @@ spec:
             - "30001"
             - --host
             - 0.0.0.0
+            - --load-balance-method
+            - round_robin
