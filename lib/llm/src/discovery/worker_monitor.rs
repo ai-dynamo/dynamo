@@ -109,6 +109,21 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                     // Handle runtime config updates
                     _ = config_events_rx.changed() => {
                         let runtime_configs = config_events_rx.borrow().clone();
+                        
+                        tracing::warn!(
+                            worker_count = runtime_configs.len(),
+                            "DISCOVERY: Runtime config updates received"
+                        );
+
+                        // Log detailed config state for comparison
+                        let config_details: Vec<(u64, Option<u64>)> = runtime_configs
+                            .iter()
+                            .map(|(&lease_id, config)| (lease_id, config.total_kv_blocks))
+                            .collect();
+                        tracing::warn!(
+                            "DISCOVERY_VALIDATION: config_state: configs={:?}",
+                            config_details
+                        );
 
                         let mut states = worker_load_states.write().unwrap();
                         states.retain(|lease_id, _| runtime_configs.contains_key(lease_id));

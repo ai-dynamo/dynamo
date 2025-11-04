@@ -313,7 +313,12 @@ pub async fn start_kv_router_background(
                         continue;
                     };
 
-                    tracing::info!("Generate endpoint instance deleted, removing worker {worker_id}");
+                    tracing::warn!(
+                        worker_id = worker_id,
+                        "DISCOVERY: Generate endpoint instance removed, removing worker"
+                    );
+
+                    tracing::warn!("DISCOVERY_VALIDATION: remove_worker_tx: worker_id={}", worker_id);
                     if let Err(e) = remove_worker_tx.send(worker_id).await {
                         tracing::warn!("Failed to send worker removal for worker {worker_id}: {e}");
                     }

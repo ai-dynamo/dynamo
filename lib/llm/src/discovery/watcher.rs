@@ -231,6 +231,8 @@ impl ModelWatcher {
         target_namespace: Option<&str>,
         is_global_namespace: bool,
     ) -> anyhow::Result<Option<String>> {
+        tracing::warn!("DISCOVERY_VALIDATION: handle_delete: key={}", key);
+        
         let card = match self.manager.remove_model_card(key) {
             Some(card) => card,
             None => {
@@ -322,6 +324,8 @@ impl ModelWatcher {
         endpoint_id: &EndpointId,
         card: &mut ModelDeploymentCard,
     ) -> anyhow::Result<()> {
+        tracing::warn!("DISCOVERY_VALIDATION: handle_put: key={}", key);
+        
         card.download_config().await?;
 
         let component = self

@@ -218,7 +218,14 @@ impl Client {
 
                 // TODO: this resets both tracked available and free instances
                 client.instance_avail.store(Arc::new(instance_ids.clone()));
-                client.instance_free.store(Arc::new(instance_ids));
+                client.instance_free.store(Arc::new(instance_ids.clone()));
+
+                tracing::warn!(
+                    "DISCOVERY_VALIDATION: endpoint={}, instance_avail={:?}, instance_free={:?}",
+                    endpoint_path,
+                    instance_ids,
+                    instance_ids
+                );
 
                 tracing::debug!("monitor_instance_source: instance source updated, endpoint={}", endpoint_path);
 
