@@ -373,7 +373,7 @@ The generated DGD includes optimized configurations and the SLA planner componen
 
 #### Option 2: Use Standalone Planner Templates (Advanced)
 
-For advanced use cases, you can manually deploy using the standalone planner templates in `components/backends/*/deploy/disagg_planner.yaml`:
+For advanced use cases, you can manually deploy using the standalone planner templates in `examples/backends/*/deploy/disagg_planner.yaml`:
 
 ```bash
 # After profiling completes, profiling data is stored on the PVC at /data
@@ -385,7 +385,7 @@ python3 -m deploy.utils.download_pvc_results \
   --folder /data
 
 # Update backend planner manifest as needed, then deploy
-kubectl apply -f components/backends/<backend>/deploy/disagg_planner.yaml -n $NAMESPACE
+kubectl apply -f examples/backends/<backend>/deploy/disagg_planner.yaml -n $NAMESPACE
 ```
 
 > **Note**: The standalone templates are provided as examples and may need customization for your model and requirements. The DGDR-generated configuration (Option 1) is recommended as it's automatically tuned to your profiling results and SLA targets.
