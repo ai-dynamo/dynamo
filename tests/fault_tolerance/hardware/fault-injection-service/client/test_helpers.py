@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
 """
 Test helper utilities for fault injection tests.
 
@@ -120,7 +124,9 @@ def get_config_from_env() -> Dict[str, str]:
     }
 
 
-def check_frontend_reachable(frontend_url: Optional[str] = None, timeout: int = 5) -> bool:
+def check_frontend_reachable(
+    frontend_url: Optional[str] = None, timeout: int = 5
+) -> bool:
     """
     Check if frontend is reachable via health endpoint.
 
@@ -188,7 +194,9 @@ def send_completion_request(
             f"{Colors.GRAY}Sending completion request: model='{model}', prompt='{prompt}', max_tokens={max_tokens}{Colors.RESET}"
         )
 
-    return requests.post(f"{frontend_url}/v1/completions", json=payload, timeout=timeout)
+    return requests.post(
+        f"{frontend_url}/v1/completions", json=payload, timeout=timeout
+    )
 
 
 def validate_completion_response(
@@ -225,7 +233,9 @@ def validate_completion_response(
     completion_text = data["choices"][0]["text"]
 
     if verbose:
-        print(f"{Colors.GRAY}Received valid completion: {completion_text[:50]}...{Colors.RESET}")
+        print(
+            f"{Colors.GRAY}Received valid completion: {completion_text[:50]}...{Colors.RESET}"
+        )
 
     return completion_text
 
@@ -278,7 +288,9 @@ def print_status(status: str, message: str):
         "cleanup": (Colors.YELLOW, "[CLEANUP]"),
     }
 
-    color, prefix = status_map.get(status.lower(), (Colors.WHITE, f"[{status.upper()}]"))
+    color, prefix = status_map.get(
+        status.lower(), (Colors.WHITE, f"[{status.upper()}]")
+    )
     print(f"{color}{prefix}{Colors.RESET} {message}")
 
 
@@ -319,4 +331,3 @@ __all__ = [
     "print_status",
     "print_test_result",
 ]
-
