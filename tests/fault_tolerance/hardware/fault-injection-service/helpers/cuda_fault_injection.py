@@ -23,6 +23,8 @@ from kubernetes.client.rest import ApiException
 class CUDAFaultInjector:
     """Manages CUDA fault injection library and deployment patching."""
 
+    VALID_XID_TYPES = {79, 48, 94, 95, 43, 74}
+
     def __init__(self, lib_dir: Optional[Path] = None):
         """
         Initialize CUDA fault injector.
@@ -125,6 +127,12 @@ class CUDAFaultInjector:
         Returns:
             True if patch succeeded
         """
+        if xid_type not in self.VALID_XID_TYPES:
+            print(
+                f"    ✗ Invalid xid_type: {xid_type}. Valid values: {sorted(self.VALID_XID_TYPES)}"
+            )
+            return False
+
         print(
             f"\n[→] Patching deployment to enable CUDA fault injection (XID {xid_type})..."
         )
@@ -151,7 +159,11 @@ class CUDAFaultInjector:
             return False
 
     def cleanup_cuda_fault_injection(
-        self, deployment_name: str, namespace: str, force_delete_pods: bool = True
+        self,
+        deployment_name: str,
+        namespace: str,
+        force_delete_pods: bool = True,
+        service_names: Optional[List[str]] = None,
     ) -> bool:
         """
         Remove CUDA fault injection from deployment.
@@ -167,10 +179,13 @@ class CUDAFaultInjector:
             deployment_name: Name of the deployment
             namespace: Kubernetes namespace
             force_delete_pods: If True, force delete pods to apply clean spec
+            service_names: Service names to check (default: ["VllmDecodeWorker", "VllmPrefillWorker"])
 
         Returns:
             True if cleanup succeeded
         """
+        if service_names is None:
+            service_names = ["VllmDecodeWorker", "VllmPrefillWorker"]
         print("\n[→] Cleaning up CUDA fault injection...")
 
         sys.path.insert(0, str(self.lib_dir))
@@ -211,7 +226,7 @@ class CUDAFaultInjector:
                     has_artifacts = False
                     artifact_details = []
 
-                    for service_name in ["VllmDecodeWorker", "VllmPrefillWorker"]:
+                    for service_name in service_names:
                         service = (
                             dgd.get("spec", {})
                             .get("services", {})
@@ -309,7 +324,7 @@ class CUDAFaultInjector:
                     if deleted_count > 0:
                         print(f"    ✓ Deleted {deleted_count} pod(s)")
                     else:
-                        print("    ℹ No pods to delete")
+                        print("    [i] No pods to delete")
 
                 except Exception as e:
                     print(f"    ⚠ Pod deletion: {e}")
@@ -324,7 +339,7 @@ class CUDAFaultInjector:
             traceback.print_exc()
             return False
 
-    def trigger_pod_restart(self, pods: List, namespace: str):
+    def trigger_pod_restart(self, pods: List[client.V1Pod], namespace: str):
         """
         Delete pods to trigger restart with new env vars.
 
