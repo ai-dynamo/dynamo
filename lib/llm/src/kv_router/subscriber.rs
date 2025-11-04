@@ -8,6 +8,7 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 use anyhow::Result;
 use dynamo_runtime::{
     component::Component,
+    config::environment_names::nats as env_nats,
     discovery::DiscoveryQuery,
     prelude::*,
     storage::key_value_store::WatchEvent,
@@ -229,8 +230,8 @@ pub async fn start_kv_router_background(
     let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
         .to_string()
         .replace("_", "-");
-    let nats_server =
-        std::env::var("NATS_SERVER").unwrap_or_else(|_| "nats://localhost:4222".to_string());
+    let nats_server = std::env::var(env_nats::NATS_SERVER)
+        .unwrap_or_else(|_| "nats://localhost:4222".to_string());
 
     // Create NatsQueue for event consumption
     let mut nats_queue = NatsQueue::new_with_consumer(
