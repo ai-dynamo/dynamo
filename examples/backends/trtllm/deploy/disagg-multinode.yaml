@@ -62,17 +62,6 @@ data:
     cache_transceiver_config:
       backend: DEFAULT
 ---
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: models
-spec:
-  accessModes:
-    - ReadWriteMany
-  resources:
-    requests:
-      storage: 100Gi
----
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -80,14 +69,13 @@ metadata:
 spec:
   backendFramework: trtllm
   pvcs:
-    - name: models
+    - name: model-cache-pvc
+      create: false
   envs:
     - name: OMPI_ALLOW_RUN_AS_ROOT
       value: "1"
     - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
       value: "1"
-    - name: HF_HOME
-      value: "/models"
   services:
     Frontend:
       dynamoNamespace: trtllm-disagg
@@ -104,10 +92,66 @@ spec:
           args:
             - --http-port
             - "8000"
+    ModelExpress:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: trtllm-disagg
+      componentType: frontend
+      readinessProbe:
+        tcpSocket:
+          port: 8000
+        initialDelaySeconds: 10
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 3
+      replicas: 1
+      resources:
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+        limits:
+          cpu: "4"
+          memory: "16Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/modelexpress-server:my-tag
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODEL_EXPRESS_SERVER_PORT
+              value: "8000"
+            - name: MODEL_EXPRESS_LOGGING_LEVEL
+              value: "info"
+            - name: MODEL_EXPRESS_DATABASE_PATH
+              value: "/model/models.db"
+            - name: MODEL_EXPRESS_CACHE_DIRECTORY
+              value: "/model/.model-express/cache"
+            - name: HF_HUB_CACHE
+              value: "/model/.model-express/cache"
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              echo "Setting up Model Express configuration..."
+
+              mkdir -p $MODEL_EXPRESS_CACHE_DIRECTORY
+              cat > $MODEL_EXPRESS_CACHE_DIRECTORY/config.yaml << EOF
+              local_path: $MODEL_EXPRESS_CACHE_DIRECTORY
+              server_endpoint: http://localhost:8000
+              timeout_secs: null
+              EOF
+
+              ./modelexpress-server &
+
+              SERVER_PID=$!
+              echo "Server started with PID: $SERVER_PID"
+              wait $SERVER_PID
+      volumeMounts:
+        - name: model-cache-pvc
+          mountPoint: /model
     prefill:
       volumeMounts:
-        - name: models
-          mountPoint: /models
+        - name: model-cache-pvc
+          mountPoint: /model
       dynamoNamespace: trtllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
@@ -123,6 +167,13 @@ spec:
             configMap:
               name: nvidia-config
         mainContainer:
+          env:
+            - name: MODEL_EXPRESS_URL
+              value: http://trtllm-disagg-modelexpress:8000
+            - name: MODEL_EXPRESS_CACHE_DIRECTORY
+              value: "/model/.model-express/cache"
+            - name: HF_HUB_CACHE
+              value: "/model/.model-express/cache"
           volumeMounts:
             - name: nvidia-config
               mountPath: /workspace/
@@ -146,8 +197,8 @@ spec:
             - decode_first
     decode:
       volumeMounts:
-        - name: models
-          mountPoint: /models
+        - name: model-cache-pvc
+          mountPoint: /model
       dynamoNamespace: trtllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
@@ -163,6 +214,13 @@ spec:
             configMap:
               name: nvidia-config
         mainContainer:
+          env:
+            - name: MODEL_EXPRESS_URL
+              value: http://trtllm-disagg-modelexpress:8000
+            - name: MODEL_EXPRESS_CACHE_DIRECTORY
+              value: "/model/.model-express/cache"
+            - name: HF_HUB_CACHE
+              value: "/model/.model-express/cache"
           volumeMounts:
             - name: nvidia-config
               mountPath: /workspace/

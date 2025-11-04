@@ -9,6 +9,8 @@ spec:
   pvcs:
     - name: dynamo-pvc
       create: false
+    - name: model-cache-pvc
+      create: false
   services:
     Frontend:
       dynamoNamespace: trtllm-disagg-planner
@@ -34,6 +36,62 @@ spec:
             - --router-temperature
             - "0.0"
             - --no-kv-events
+    ModelExpress:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: trtllm-disagg-planner
+      componentType: frontend
+      readinessProbe:
+        tcpSocket:
+          port: 8000
+        initialDelaySeconds: 10
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 3
+      replicas: 1
+      resources:
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+        limits:
+          cpu: "4"
+          memory: "16Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/modelexpress-server:my-tag
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODEL_EXPRESS_SERVER_PORT
+              value: "8000"
+            - name: MODEL_EXPRESS_LOGGING_LEVEL
+              value: "info"
+            - name: MODEL_EXPRESS_DATABASE_PATH
+              value: "/model/models.db"
+            - name: MODEL_EXPRESS_CACHE_DIRECTORY
+              value: "/model/.model-express/cache"
+            - name: HF_HUB_CACHE
+              value: "/model/.model-express/cache"
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              echo "Setting up Model Express configuration..."
+
+              mkdir -p $MODEL_EXPRESS_CACHE_DIRECTORY
+              cat > $MODEL_EXPRESS_CACHE_DIRECTORY/config.yaml << EOF
+              local_path: $MODEL_EXPRESS_CACHE_DIRECTORY
+              server_endpoint: http://localhost:8000
+              timeout_secs: null
+              EOF
+
+              ./modelexpress-server &
+
+              SERVER_PID=$!
+              echo "Server started with PID: $SERVER_PID"
+              wait $SERVER_PID
+      volumeMounts:
+        - name: model-cache-pvc
+          mountPoint: /model
     Planner:
       dynamoNamespace: trtllm-disagg-planner
       envFromSecret: hf-token-secret
@@ -87,6 +145,13 @@ spec:
         mainContainer:
           image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/
+          env:
+            - name: MODEL_EXPRESS_URL
+              value: http://trtllm-disagg-planner-modelexpress:8000
+            - name: MODEL_EXPRESS_CACHE_DIRECTORY
+              value: "/model/.model-express/cache"
+            - name: HF_HUB_CACHE
+              value: "/model/.model-express/cache"
           command:
             - python3
           args:
@@ -102,6 +167,9 @@ spec:
             - decode
             - --disaggregation-strategy
             - decode_first
+      volumeMounts:
+        - name: model-cache-pvc
+          mountPoint: /model
     TRTLLMPrefillWorker:
       dynamoNamespace: trtllm-disagg-planner
       envFromSecret: hf-token-secret
@@ -116,6 +184,13 @@ spec:
         mainContainer:
           image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/
+          env:
+            - name: MODEL_EXPRESS_URL
+              value: http://trtllm-disagg-planner-modelexpress:8000
+            - name: MODEL_EXPRESS_CACHE_DIRECTORY
+              value: "/model/.model-express/cache"
+            - name: HF_HUB_CACHE
+              value: "/model/.model-express/cache"
           command:
             - python3
           args:
@@ -131,3 +206,6 @@ spec:
             - prefill
             - --disaggregation-strategy
             - decode_first
+      volumeMounts:
+        - name: model-cache-pvc
+          mountPoint: /model
