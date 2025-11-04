@@ -50,6 +50,7 @@ if [ "${gen_enable_attention_dp}" = "false" && "${gen_ep_size}" == "1" ]; then
     prefix="tep"
 elif [ "${gen_enable_attention_dp}" = "false" && "${gen_ep_size}" != "1" ]; then
     prefix="tp"
+fi
 
 sub_dir=${LOG_DIR}/ctx${num_ctx_servers}_gen${num_gen_servers}_${prefix}${gen_tp_size}_batch${gen_batch_size}_eplb${eplb_num_slots}_mtp${mtp_size}
 
