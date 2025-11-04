@@ -150,7 +150,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Endpoint>()?;
     m.add_class::<Client>()?;
     m.add_class::<AsyncResponseStream>()?;
-    m.add_class::<llm::disagg_router::DisaggregatedRouter>()?;
     m.add_class::<llm::entrypoint::EntrypointArgs>()?;
     m.add_class::<llm::entrypoint::EngineConfig>()?;
     m.add_class::<llm::entrypoint::EngineType>()?;
@@ -428,16 +427,25 @@ enum ModelInput {
 impl DistributedRuntime {
     #[new]
     fn new(event_loop: PyObject, is_static: bool) -> PyResult<Self> {
-        let worker = rs::Worker::from_settings().map_err(to_pyerr)?;
-        INIT.get_or_try_init(|| {
-            let primary = worker.tokio_runtime()?;
-            pyo3_async_runtimes::tokio::init_with_runtime(primary)
-                .map_err(|e| rs::error!("failed to initialize pyo3 static runtime: {:?}", e))?;
-            rs::OK(())
-        })
-        .map_err(to_pyerr)?;
+        // Try to get existing runtime first, create new Worker only if needed
+        // This allows multiple DistributedRuntime instances to share the same tokio runtime
+        let runtime = rs::Worker::runtime_from_existing()
+            .or_else(|_| {
+                // No existing Worker, create new one
+                let worker = rs::Worker::from_settings()?;
 
-        let runtime = worker.runtime().clone();
+                // Initialize pyo3 bridge (only happens once per process)
+                INIT.get_or_try_init(|| {
+                    let primary = worker.tokio_runtime()?;
+                    pyo3_async_runtimes::tokio::init_with_runtime(primary).map_err(|e| {
+                        rs::error!("failed to initialize pyo3 static runtime: {:?}", e)
+                    })?;
+                    rs::OK(())
+                })?;
+
+                rs::OK(worker.runtime().clone())
+            })
+            .map_err(to_pyerr)?;
 
         // Initialize logging in context where tokio runtime is available
         // otel exporter requires it

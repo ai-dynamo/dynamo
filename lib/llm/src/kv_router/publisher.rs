@@ -860,13 +860,13 @@ impl WorkerMetricsPublisher {
                             {
                                 tracing::warn!("Failed to publish metrics over NATS: {}", e);
                             }
-
-                            // Reset timer to pending state to avoid tight loop
-                            // It will be reset to 1ms when metrics actually change
-                            publish_timer.as_mut().reset(
-                                tokio::time::Instant::now() + tokio::time::Duration::from_secs(3600)
-                            );
                         }
+
+                        // Reset timer to pending state to avoid tight loop
+                        // It will be reset to 1ms when metrics actually change
+                        publish_timer.as_mut().reset(
+                            tokio::time::Instant::now() + tokio::time::Duration::from_secs(3600)
+                        );
                     }
                 }
             }
