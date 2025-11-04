@@ -358,18 +358,20 @@ async def init(runtime: DistributedRuntime, config: Config):
         )
 
         # Register the model with runtime config
-        # All workers register - frontend detects their role via ModelType
-        await register_llm(
-            model_input,
-            model_type,
-            endpoint,
-            config.model_path,
-            config.served_model_name,
-            kv_cache_block_size=config.kv_block_size,
-            migration_limit=config.migration_limit,
-            runtime_config=runtime_config,
-            custom_template_path=config.custom_jinja_template,
-        )
+        # Encode workers do NOT register - they're internal workers only
+        # Prefill and decode workers register - frontend detects their role via ModelType
+        if config.disaggregation_mode != DisaggregationMode.ENCODE:
+            await register_llm(
+                model_input,
+                model_type,
+                endpoint,
+                config.model_path,
+                config.served_model_name,
+                kv_cache_block_size=config.kv_block_size,
+                migration_limit=config.migration_limit,
+                runtime_config=runtime_config,
+                custom_template_path=config.custom_jinja_template,
+            )
 
         # Get health check payload (checks env var and falls back to TensorRT-LLM default)
         health_check_payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
