@@ -25,6 +25,11 @@ from benchmarks.profiler.utils.aiperf import benchmark_decode, benchmark_prefill
 from benchmarks.profiler.utils.config import generate_dgd_config_with_planner
 from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
+from benchmarks.profiler.utils.gpu_count_filters import (
+    FP8_BLOCK_SIZE,
+    filter_gpu_counts_by_expert_divisibility,
+    filter_gpu_counts_by_fp8_alignment,
+)
 from benchmarks.profiler.utils.plot import (
     plot_decode_performance,
     plot_prefill_performance,
@@ -105,25 +110,41 @@ async def run_profile(args):
         if args.is_moe_model:
             # Filter GPU counts to only include divisors of num_experts
             if hasattr(args, "num_experts") and args.num_experts is not None:
-                original_counts = profile_num_gpus.copy()
-                profile_num_gpus = [
-                    gpu_count
-                    for gpu_count in profile_num_gpus
-                    if args.num_experts % gpu_count == 0
-                ]
-                if not profile_num_gpus:
-                    error_msg = (
-                        f"No valid GPU counts found that divide evenly into num_experts={args.num_experts}. "
-                        f"Original candidates were {original_counts}. "
-                        f"Valid divisors in range would be: {[d for d in range(args.min_num_gpus_per_engine, args.max_num_gpus_per_engine + 1) if args.num_experts % d == 0]}"
-                    )
+                (
+                    profile_num_gpus,
+                    info_msg,
+                    error_msg,
+                ) = filter_gpu_counts_by_expert_divisibility(
+                    profile_num_gpus,
+                    args.num_experts,
+                    args.min_num_gpus_per_engine,
+                    args.max_num_gpus_per_engine,
+                )
+                if error_msg:
                     logger.error(error_msg)
                     raise ValueError(error_msg)
-                if len(profile_num_gpus) < len(original_counts):
-                    logger.info(
-                        f"Filtered GPU counts from {original_counts} to {profile_num_gpus} "
-                        f"(only divisors of num_experts={args.num_experts})"
-                    )
+                if info_msg:
+                    logger.info(info_msg)
+
+            # Filter GPU counts for FP8 quantization alignment
+            if (
+                hasattr(args, "intermediate_size")
+                and args.intermediate_size is not None
+            ):
+                (
+                    profile_num_gpus,
+                    info_msg,
+                    warning_msg,
+                ) = filter_gpu_counts_by_fp8_alignment(
+                    profile_num_gpus,
+                    args.intermediate_size,
+                    block_size=FP8_BLOCK_SIZE,
+                )
+                if warning_msg:
+                    logger.warning(warning_msg)
+                if info_msg:
+                    logger.info(info_msg)
+
             logger.info(f"Profiling MoE GPU counts (TEP/DEP): {profile_num_gpus}")
         else:
             logger.info(f"Profiling dense model GPU counts (TP): {profile_num_gpus}")

@@ -145,11 +145,15 @@ def get_model_info(
                     num_experts = value
                     break
 
+    # Extract intermediate_size for FP8 quantization alignment check that partition sizes are compatible with FP8 block sizes
+    intermediate_size = getattr(config, "intermediate_size", None)
+
     return {
         "model_size": model_size,
         "is_moe": config.is_moe,
         "max_context_length": max_context_length,
         "num_experts": num_experts,
+        "intermediate_size": intermediate_size,
     }
 
 
