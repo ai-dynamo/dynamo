@@ -54,14 +54,14 @@ trtllm =[
 
 vllm = [
     "uvloop",
-    "nixl<=0.6.0",
+    "nixl<=0.7.0",
     "vllm[flashinfer]==0.10.2",
 ]
 
 sglang = [
     "uvloop",
-    "nixl<=0.6.0",
-    "sglang[all]==0.5.4.post1",
+    "nixl<=0.7.0",
+    "sglang[all]==0.5.3.post2",
 ]
 
 [dependency-groups]
@@ -147,6 +147,7 @@ addopts = [
     "--ignore-glob=*model.py",
     "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*trtllm_integration*",
+    "--ignore-glob=*kvbm/python/kvbm*",
     "--ignore-glob=*_inc.py",
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
@@ -154,7 +155,7 @@ addopts = [
     "--ignore-glob=components/src/dynamo/sglang/multimodal_utils/*",
     "--ignore-glob=components/src/dynamo/vllm/multimodal_utils/*",
     "--ignore-glob=components/src/dynamo/vllm/multimodal_handlers/*",
-    "--ignore-glob=components/backends/sglang/slurm_jobs/*",
+    "--ignore-glob=examples/backends/sglang/slurm_jobs/*",
     # FIXME: Get relative/generic blob paths to work here
 ]
 xfail_strict = true
@@ -198,7 +199,8 @@ markers = [
     "slow: marks tests as known to be slow",
     "h100: marks tests to run on H100",
     "kvbm: marks tests for KV behavior and model determinism",
-    "model: model id used by a test or parameter"
+    "model: model id used by a test or parameter",
+    "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)"
 ]
 
 # Linting/formatting
