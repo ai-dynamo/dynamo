@@ -575,7 +575,10 @@ def main(logs_dir, tablefmt, log_paths=None, sla=None, print_output=True):
             "startup_time": r.get("start_time"),
             "recovery_time": r.get("recovery_time"),
             "metrics": {
-                "total_requests": success_before + failed_before + success_after + failed_after,
+                "total_requests": success_before
+                + failed_before
+                + success_after
+                + failed_after,
                 "successful_requests": success_before + success_after,
                 "failed_requests": failed_before + failed_after,
                 "latencies": [],  # Legacy doesn't track per-client latencies
