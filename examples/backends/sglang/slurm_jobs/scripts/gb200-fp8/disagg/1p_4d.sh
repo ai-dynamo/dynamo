@@ -97,7 +97,8 @@ if [ "$mode" = "prefill" ]; then
     SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
     PYTHONUNBUFFERED=1 \
     python3 -m dynamo.sglang \
-        --tokenizer-path deepseek-ai/DeepSeek-R1-0528 \
+        --served-model-name deepseek-ai/DeepSeek-R1 \
+        --model-path /model/ \
         --trust-remote-code \
         --disable-radix-cache \
         --moe-dense-tp-size 1 \
@@ -121,7 +122,6 @@ if [ "$mode" = "prefill" ]; then
         --node-rank "$RANK" \
         --base-gpu-id 0 \
         --disaggregation-mode prefill \
-        --model-path /model/ \
         --host 0.0.0.0 \
         --tensor-parallel-size "$TOTAL_GPUS" \
         --data-parallel-size 1 \
@@ -156,7 +156,8 @@ elif [ "$mode" = "decode" ]; then
     SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
     PYTHONUNBUFFERED=1 \
     python3 -m dynamo.sglang \
-        --tokenizer-path deepseek-ai/DeepSeek-R1-0528 \
+        --served-model-name deepseek-ai/DeepSeek-R1 \
+        --model-path /model/ \
         --trust-remote-code \
         --disable-radix-cache \
         --moe-dense-tp-size 1 \
@@ -179,7 +180,6 @@ elif [ "$mode" = "decode" ]; then
         --node-rank "$RANK" \
         --base-gpu-id 0 \
         --disaggregation-mode decode \
-        --model-path /model/ \
         --host 0.0.0.0 \
         --tensor-parallel-size "$TOTAL_GPUS" \
         --data-parallel-size 1 \
