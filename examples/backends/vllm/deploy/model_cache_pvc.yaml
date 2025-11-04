@@ -8,9 +8,9 @@ metadata:
 spec:
   accessModes:
     - ReadWriteMany
+  storageClassName: csi-mounted-fs-path-sc
   resources:
     requests:
       storage: 256Gi
     limits:
       storage: 256Gi
-
