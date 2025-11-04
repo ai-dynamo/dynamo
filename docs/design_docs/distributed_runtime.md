@@ -28,7 +28,7 @@ Dynamo's `DistributedRuntime` is the core infrastructure in the framework that e
 
 While theoretically each `DistributedRuntime` can have multiple `Namespace`s as long as their names are unique (similar logic also applies to `Component/Namespace` and `Endpoint/Component`), in practice, each dynamo components typically are deployed with its own process and thus has its own `DistributedRuntime` object. However, they share the same namespace to discover each other.
 
-For example, a typical deployment configuration (like `components/backends/vllm/deploy/agg.yaml` or `components/backends/sglang/deploy/agg.yaml`) has multiple workers:
+For example, a typical deployment configuration (like `examples/backends/vllm/deploy/agg.yaml` or `examples/backends/sglang/deploy/agg.yaml`) has multiple workers:
 
 - `Frontend`: Starts an HTTP server and handles incoming requests. The HTTP server routes all requests to the `Processor`.
 - `Processor`: When a new request arrives, `Processor` applies the chat template and performs the tokenization.
@@ -75,6 +75,6 @@ After selecting which endpoint to hit, the `Client` sends the serialized request
 We provide native rust and python (through binding) examples for basic usage of `DistributedRuntime`:
 
 - Rust: `/lib/runtime/examples/`
-- Python: We also provide complete examples of using `DistributedRuntime`. Please refer to the engines in `/components/backends` for full implementation details.
+- Python: We also provide complete examples of using `DistributedRuntime`. Please refer to the engines in `components/src/dynamo` for full implementation details.
 
 

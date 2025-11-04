@@ -881,7 +881,7 @@ async def main():
     workspace_dir = get_workspace_dir()
 
     deployment_spec = DeploymentSpec(
-        os.path.join(workspace_dir, "components/backends/vllm/deploy/agg.yaml")
+        os.path.join(workspace_dir, "examples/backends/vllm/deploy/agg.yaml")
     )
 
     deployment_spec.disable_grove()

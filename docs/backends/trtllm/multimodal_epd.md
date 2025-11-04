@@ -21,7 +21,7 @@ To enable it build the dynamo container with the `--tensorrtllm-commit` flag, fo
 ## How to use
 
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 
 # Launch 3-worker EPD flow with NIXL
 ./launch/epd_disagg.sh
