@@ -9,6 +9,7 @@ Basic deployment pattern with frontend and a single decode worker.
 
 **Architecture:**
 - `Frontend`: OpenAI-compatible API server
+- `ModelExpress`: Shared model caching service across workers
 - `SGLangDecodeWorker`: Single worker handling both prefill and decode
 
 ### 2. **Aggregated Router Deployment** (`agg_router.yaml`)
@@ -16,13 +17,15 @@ Enhanced aggregated deployment with KV cache routing capabilities.
 
 **Architecture:**
 - `Frontend`: OpenAI-compatible API server with router mode enabled (`--router-mode kv`)
+- `ModelExpress`: Shared model caching service across workers
 - `SGLangDecodeWorker`: Single worker handling both prefill and decode
 
-### 3. **Disaggregated Deployment** (`disagg.yaml`)**
+### 3. **Disaggregated Deployment** (`disagg.yaml`)
 High-performance deployment with separated prefill and decode workers.
 
 **Architecture:**
 - `Frontend`: HTTP API server coordinating between workers
+- `ModelExpress`: Shared model caching service across workers
 - `SGLangDecodeWorker`: Specialized decode-only worker (`--disaggregation-mode decode`)
 - `SGLangPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 - Communication via NIXL transfer backend (`--disaggregation-transfer-backend nixl`)
@@ -79,6 +82,28 @@ Before using these templates, ensure you have:
 3. **Container registry access** for SGLang runtime images
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
 
+### Persistent Volume Claim (PVC)
+
+All templates expect a pre-created PVC named `model-cache-pvc` for the shared model cache used by ModelExpress and SGLang workers.
+
+Apply the shared PVC once per namespace before deploying any graph:
+
+```bash
+kubectl apply -f model_cache_pvc.yaml -n $NAMESPACE
+```
+
+Note: If your cluster requires a specific storage class, edit `model_cache_pvc.yaml` to set `storageClassName` accordingly.
+
+### Container Images
+
+We have public images available on [NGC Catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts). If you'd prefer to use your own registry, build and push your own image:
+
+```bash
+./container/build.sh --framework SGLANG
+# Tag and push to your container registry
+# Update the image references in the YAML files
+```
+
 ## Usage
 
 ### 1. Choose Your Template
@@ -118,6 +143,11 @@ Then, deploy the model using the deployment file.
 
 ```bash
 export DEPLOYMENT_FILE=agg.yaml
+
+# Create the shared model cache PVC (run once per namespace)
+kubectl apply -f model_cache_pvc.yaml -n $NAMESPACE
+
+# Apply the SGLang deployment
 kubectl apply -f $DEPLOYMENT_FILE -n ${NAMESPACE}
 ```
 
@@ -135,7 +165,7 @@ kubectl apply -f $DEPLOYMENT_FILE.generated -n $NAMESPACE
 
 ## Model Configuration
 
-All templates use **DeepSeek-R1-Distill-Llama-8B** as the default model. But you can use any sglang argument and configuration. Key parameters:
+All templates use **Qwen/Qwen3-0.6B** as the default model. You can use any SGLang arguments and configuration. Key parameters include `--model-path`, `--served-model-name`, and disaggregation flags (see YAMLs for examples).
 
 ## Monitoring and Health
 
