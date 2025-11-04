@@ -1258,7 +1258,7 @@ async def lifespan(app: FastAPI):
                     logger.error(
                         f"Cannot recover GPU fault {fault_id}: invalid target '{target}'"
                     )
-        except Exception as exc:
+        except Exception:
             logger.exception(f"Failed to recover fault {fault_id} during shutdown")
 
 
