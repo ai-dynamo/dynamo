@@ -9,6 +9,7 @@ use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
     ErrorContext,
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
+    discovery::DiscoveryClient,
     metrics::PrometheusUpdateCallback,
     metrics::{MetricsHierarchy, MetricsRegistry},
     service::ServiceClient,
@@ -51,12 +52,20 @@ impl DistributedRuntime {
 
         let runtime_clone = runtime.clone();
 
+        // TODO: Here is where we will later select the KeyValueStore impl
         let (etcd_client, store) = if is_static {
             (None, KeyValueStoreManager::memory())
         } else {
-            let etcd_client = etcd::Client::new(etcd_config.clone(), runtime_clone).await?;
-            let store = KeyValueStoreManager::etcd(etcd_client.clone());
-            (Some(etcd_client), store)
+            match etcd::Client::new(etcd_config.clone(), runtime_clone).await {
+                Ok(etcd_client) => {
+                    let store = KeyValueStoreManager::etcd(etcd_client.clone());
+                    (Some(etcd_client), store)
+                }
+                Err(err) => {
+                    tracing::info!(%err, "Did not connect to etcd. Using memory storage.");
+                    (None, KeyValueStoreManager::memory())
+                }
+            }
         };
 
         let nats_client = Some(nats_config.clone().connect().await?);
@@ -83,6 +92,14 @@ impl DistributedRuntime {
 
         let nats_client_for_metrics = nats_client.clone();
 
+        // Initialize discovery client with mock implementation
+        // TODO: Replace MockDiscoveryClient with KeyValueStoreDiscoveryClient or KubeDiscoveryClient
+        let discovery_client = {
+            use crate::discovery::{MockDiscoveryClient, SharedMockRegistry};
+            let registry = SharedMockRegistry::new();
+            Arc::new(MockDiscoveryClient::new(None, registry)) as Arc<dyn DiscoveryClient>
+        };
+
         let distributed_runtime = Self {
             runtime,
             etcd_client,
@@ -90,6 +107,7 @@ impl DistributedRuntime {
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
+            discovery_client,
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
@@ -223,6 +241,11 @@ impl DistributedRuntime {
         Namespace::new(self.clone(), name.into(), self.is_static)
     }
 
+    /// TODO: Return discovery client when KeyValueDiscoveryClient or KubeDiscoveryClient is implemented
+    pub fn discovery_client(&self) -> Result<Arc<dyn DiscoveryClient>> {
+        Err(error!("Discovery client not implemented!"))
+    }
+
     pub(crate) fn service_client(&self) -> Option<ServiceClient> {
         self.nats_client().map(|nc| ServiceClient::new(nc.clone()))
     }
@@ -251,13 +274,10 @@ impl DistributedRuntime {
     }
 
     // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers
+    //
+    // Try to use `store()` instead of this. Only use this if you have not been able to migrate
+    // yet, or if you require etcd-specific features like distributed locking (rare).
     pub fn etcd_client(&self) -> Option<etcd::Client> {
-        self.etcd_client.clone()
-    }
-
-    // Deprecated but our CI blocks us using the feature currently.
-    //#[deprecated(note = "Use KeyValueStoreManager via store(); this will be removed")]
-    pub fn deprecated_etcd_client(&self) -> Option<etcd::Client> {
         self.etcd_client.clone()
     }
 

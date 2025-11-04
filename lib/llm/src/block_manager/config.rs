@@ -203,6 +203,15 @@ pub struct KvBlockManagerConfig {
     /// Optional KVBM-level metrics for tracking offload/onboard operations
     #[builder(default)]
     pub kvbm_metrics: Option<crate::block_manager::metrics_kvbm::KvbmMetrics>,
+
+    /// Optional KV Event Consolidator Configuration
+    ///
+    /// If provided, KVBM will create a KV Event Consolidator that deduplicates
+    /// KV cache events from vLLM (G1) and KVBM (G2/G3) before sending to the router.
+    /// This is used when `--connector kvbm` is enabled with prefix caching.
+    #[builder(default, setter(strip_option))]
+    pub consolidator_config:
+        Option<crate::block_manager::kv_consolidator::KvEventConsolidatorConfig>,
 }
 
 impl KvBlockManagerConfig {

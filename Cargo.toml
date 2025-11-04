@@ -12,6 +12,7 @@ members = [
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "lib/engines/*",
+    "lib/kvbm",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
 # features from default build, but keep them in workspace for convenience.
@@ -64,6 +65,7 @@ chrono = { version = "0.4", default-features = false, features = [
     "serde",
 ] }
 cudarc = { version = "0.17.1", features = ["cuda-12020"] }
+dashmap = { version = "6.1" }
 derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
 either = { version = "1.13", features = ["serde"] }
@@ -120,7 +122,7 @@ insta.opt-level = 3
 
 [profile.dev]
 # release level optimizations otherwise everything feels slow
-opt-level = 3
+# opt-level = 3
 
 [profile.release]
 # These make the build much slower but shrink the binary, and could help performance
