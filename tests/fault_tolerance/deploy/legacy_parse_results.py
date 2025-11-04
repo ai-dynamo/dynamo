@@ -581,7 +581,8 @@ def main(logs_dir, tablefmt, log_paths=None, sla=None, print_output=True):
                     + r.get("success_after_requests", 0)
                 ),
                 "failed_requests": (
-                    r.get("failed_before_requests", 0) + r.get("failed_after_requests", 0)
+                    r.get("failed_before_requests", 0)
+                    + r.get("failed_after_requests", 0)
                 ),
                 "latencies": [],  # Legacy doesn't track per-client latencies
                 "p50_latencies": [],

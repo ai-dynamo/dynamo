@@ -30,12 +30,12 @@ logger = logging.getLogger(__name__)
 
 def get_pod_restart_count(deployment, pod_name: str, namespace: str) -> dict:
     """Get container restart counts for a pod.
-    
+
     Args:
         deployment: ManagedDeployment instance
         pod_name: Name of the pod
         namespace: Kubernetes namespace
-        
+
     Returns:
         Dict with container names as keys and restart counts as values
         Example: {"main": 2, "sidecar": 0}
@@ -51,22 +51,20 @@ def get_pod_restart_count(deployment, pod_name: str, namespace: str) -> dict:
             "-o",
             "json",
         ]
-        
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=10
-        )
-        
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+
         if result.returncode == 0:
             pod_data = json.loads(result.stdout)
             restart_counts = {}
-            
+
             # Get restart counts from container statuses
             container_statuses = pod_data.get("status", {}).get("containerStatuses", [])
             for container in container_statuses:
                 container_name = container.get("name", "unknown")
                 restart_count = container.get("restartCount", 0)
                 restart_counts[container_name] = restart_count
-                
+
                 # Also log if container recently restarted
                 state = container.get("state", {})
                 if "running" in state and restart_count > 0:
@@ -75,11 +73,11 @@ def get_pod_restart_count(deployment, pod_name: str, namespace: str) -> dict:
                         f"Container {container_name} restarted {restart_count} times, "
                         f"last started at {started_at}"
                     )
-            
+
             return restart_counts
     except Exception as e:
         logger.debug(f"Could not get pod restart count: {e}")
-    
+
     return {}
 
 
@@ -107,56 +105,58 @@ def get_k8s_events_for_pod(deployment, pod_name: str, namespace: str) -> list:
             "-o",
             "json",
         ]
-        
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=10
-        )
-        
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+
         if result.returncode == 0:
             events_data = json.loads(result.stdout)
             events = []
             for item in events_data.get("items", []):
-                events.append({
-                    "type": item.get("type", ""),
-                    "reason": item.get("reason", ""),
-                    "message": item.get("message", ""),
-                    "timestamp": item.get("lastTimestamp", item.get("eventTime", "")),
-                    "count": item.get("count", 1),
-                })
+                events.append(
+                    {
+                        "type": item.get("type", ""),
+                        "reason": item.get("reason", ""),
+                        "message": item.get("message", ""),
+                        "timestamp": item.get(
+                            "lastTimestamp", item.get("eventTime", "")
+                        ),
+                        "count": item.get("count", 1),
+                    }
+                )
             return events
     except Exception as e:
         logger.debug(f"Could not get K8s events: {e}")
-    
+
     return []
 
 
 def check_container_restart_events(deployment, pod_name: str, namespace: str) -> bool:
     """Check if there are container restart/crash events for a pod.
-    
+
     This looks for events like:
     - BackOff, CrashLoopBackOff: Container keeps crashing
     - Killing: Container was terminated
     - Started: Container was restarted
-    
+
     Args:
         deployment: ManagedDeployment instance
         pod_name: Name of the pod
         namespace: Kubernetes namespace
-        
+
     Returns:
         True if restart/crash events found, False otherwise
     """
     events = get_k8s_events_for_pod(deployment, pod_name, namespace)
-    
+
     restart_related_reasons = [
         "BackOff",
-        "CrashLoopBackOff", 
+        "CrashLoopBackOff",
         "Killing",
         "Started",
         "Unhealthy",
         "FailedMount",
     ]
-    
+
     found_restart = False
     for event in events:
         if event["reason"] in restart_related_reasons:
@@ -165,6 +165,5 @@ def check_container_restart_events(deployment, pod_name: str, namespace: str) ->
                 f"{event['message']} (count: {event.get('count', 1)})"
             )
             found_restart = True
-    
-    return found_restart
 
+    return found_restart
