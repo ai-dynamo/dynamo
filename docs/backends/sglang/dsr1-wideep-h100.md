@@ -47,7 +47,24 @@ docker run \
 In each container, you should be in the `/sgl-workspace/dynamo/examples/backends/sglang` directory.
 
 > [!IMPORTANT]
-> We recommend precompiling the DeepGemm kernels once before starting the workers. Doing so significantly reduces initialization delays and helps avoid timeout errors when starting the SGLang engine. To precompile DeepGemm kernels, please execute the following commands:
+> If you encounter random CPU recv timeout issues during the warm-up phase in multi-GPU or multi-node setups, they are likely caused by DeepGEMM kernel compilation overhead.
+> To avoid these non-deterministic timeouts, it's strongly recommended to precompile the DeepGEMM kernels before launching the SGLang engine. This ensures all kernels are cached and ready, preventing long initialization delays or distributed timeout errors.
+
+> Steps to precompile and use cached kernels:
+
+```bash
+# 1. Precompile DeepGEMM kernels
+export SGLANG_DG_CACHE_DIR="/configs/dgcache/3p1dcache"
+python3 -m sglang.compile_deep_gemm <ServerArgs>
+
+# 2. Launch the engine with the same cache directory
+export SGLANG_DG_CACHE_DIR="/configs/dgcache/3p1dcache"
+python3 -m dynamo.frontend <ServerArgs>
+```
+
+> [!NOTE]
+> There's a known issue where the compile request may fail due to missing bootstrap information, but the kernels are still successfully cached.
+> Using a gradual warm-up phase and enabling caching for FlashInfer (similar to DeepGEMM) can further improve stability and reduce startup time.
 
 3. Run the ingress and prefill worker
 
