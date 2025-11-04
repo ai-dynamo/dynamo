@@ -525,7 +525,7 @@ async fn completions_batch(
         let remapped_stream = stream.map(move |mut response| {
             if let Some(ref mut data) = response.data {
                 for choice in &mut data.inner.choices {
-                    choice.index = prompt_idx_u32 * n_u32 + choice.index;
+                    choice.index += prompt_idx_u32 * n_u32;
                 }
             }
             response
