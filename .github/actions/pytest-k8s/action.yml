@@ -1,6 +1,10 @@
 name: 'Pytest K8s'
 description: 'Run pytest tests against Kubernetes clusters'
 inputs:
+  test_directory:
+    description: 'Test directory path to run pytest on'
+    required: false
+    default: 'tests/fault_tolerance/deploy/'
   pytest_marks:
     description: 'Pytest marks'
     required: true
@@ -86,6 +90,7 @@ runs:
         source venv/bin/activate
 
         echo "Running K8s pytest tests"
+        echo "Test directory: ${{ inputs.test_directory }}"
         echo "Framework: ${{ inputs.framework }}"
         echo "Test type: ${{ inputs.test_type }}"
         echo "Pytest marks: ${{ inputs.pytest_marks }}"
@@ -93,7 +98,7 @@ runs:
         echo "Image: ${{ inputs.image_tag }}"
 
         # Build pytest command
-        PYTEST_CMD="pytest tests/fault_tolerance/ \
+        PYTEST_CMD="pytest ${{ inputs.test_directory }} \
           -m \"${{ inputs.pytest_marks }}\" \
           -v -s \
           --tb=short \
