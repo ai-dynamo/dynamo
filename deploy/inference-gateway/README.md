@@ -66,12 +66,12 @@ kubectl get gateway inference-gateway -n my-model
 
 ### 3. Deploy Your Model ###
 
-Follow the steps in [model deployment](../../components/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../components/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
+Follow the steps in [model deployment](../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
 
 Sample commands to deploy model:
 
 ```bash
-cd <dynamo-source-root>/components/backends/vllm/deploy
+cd <dynamo-source-root>/examples/backends/vllm/deploy
 kubectl apply -f agg.yaml -n my-model
 ```
 
@@ -97,7 +97,7 @@ kubectl create secret generic hf-token-secret \
 ```
 
 Create a model configuration file similar to the vllm_agg_qwen.yaml for your model.
-This file demonstrates the values needed for the Vllm Agg setup in [agg.yaml](../../components/backends/vllm/deploy/agg.yaml)
+This file demonstrates the values needed for the Vllm Agg setup in [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml)
 Take a note of the model's block size provided in the model card.
 
 ### 4. Install Dynamo GAIE helm chart ###
