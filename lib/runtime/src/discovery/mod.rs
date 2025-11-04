@@ -11,6 +11,9 @@ use std::pin::Pin;
 mod mock;
 pub use mock::{MockDiscoveryClient, SharedMockRegistry};
 
+mod kv_store;
+pub use kv_store::KVStoreDiscoveryClient;
+
 pub mod utils;
 pub use utils::watch_and_extract_field;
 
