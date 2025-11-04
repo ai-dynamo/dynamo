@@ -50,6 +50,13 @@ docker run \
 
 3. Run the ingress and prefill worker
 
+> [!IMPORTANT]
+> We recommend precompiling the DeepGemm kernels once before starting the workers. Doing so significantly reduces initialization delays and helps avoid timeout errors when starting the SGLang engine. To precompile DeepGemm kernels, please execute the following commands:
+```bash
+export SGLANG_DG_CACHE_DIR="/configs/dgcache/3p1dcache"
+python3 -m sglang.compile_deep_gemm <ServerArgs>
+````
+
 ```bash
 # run ingress
 python3 -m dynamo.frontend --http-port=8000 &
