@@ -161,7 +161,14 @@ class InferenceLoadTester:
         """
         with self.lock:
             if not self.results:
-                return {"total": 0, "success": 0, "failed": 0, "success_rate": 0.0}
+                return {
+                    "total": 0,
+                    "success": 0,
+                    "failed": 0,
+                    "success_rate": 0.0,
+                    "avg_latency": 0.0,
+                    "errors": [],
+                }
 
             total = len(self.results)
             success = sum(1 for r in self.results if r["success"])

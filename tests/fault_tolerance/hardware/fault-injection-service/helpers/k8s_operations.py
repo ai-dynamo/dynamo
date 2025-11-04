@@ -27,10 +27,15 @@ class NodeOperations:
             k8s_core: Kubernetes CoreV1Api client
         """
         self.k8s_core = k8s_core
+        # Track original schedulable state for each node before cordoning
+        self._original_node_states: Dict[str, bool] = {}
 
     def cordon_node(self, node_name: str, reason: str = "fault-injection-test") -> bool:
         """
         Cordon a node (make it unschedulable).
+
+        Stores the node's original schedulable state before cordoning,
+        which can be restored later with uncordon_node.
 
         Args:
             node_name: Name of the node to cordon
@@ -40,6 +45,11 @@ class NodeOperations:
             True if successful, False otherwise
         """
         try:
+            # Read and store the original state before cordoning
+            node = self.k8s_core.read_node(node_name)
+            original_unschedulable = node.spec.unschedulable or False
+            self._original_node_states[node_name] = original_unschedulable
+
             self.k8s_core.patch_node(
                 node_name,
                 {
@@ -69,16 +79,28 @@ class NodeOperations:
 
         Args:
             node_name: Name of the node to uncordon
-            restore_previous_state: If True, restore to previous schedulable state
+            restore_previous_state: If True, restore the node to its original
+                schedulable state before cordoning. If False (default), always
+                make the node schedulable (unschedulable=False).
 
         Returns:
             True if successful, False otherwise
         """
         try:
+            # Determine the target unschedulable state
+            if restore_previous_state and node_name in self._original_node_states:
+                # Restore to the state before we cordoned it
+                target_unschedulable = self._original_node_states[node_name]
+                # Clean up stored state
+                del self._original_node_states[node_name]
+            else:
+                # Default behavior: make node schedulable
+                target_unschedulable = False
+
             self.k8s_core.patch_node(
                 node_name,
                 {
-                    "spec": {"unschedulable": restore_previous_state},
+                    "spec": {"unschedulable": target_unschedulable},
                     "metadata": {
                         "labels": {
                             "test.fault-injection/cordoned": None,
@@ -154,36 +176,51 @@ class NodeOperations:
 
             while time.time() - start_time < wait_timeout:
                 try:
-                    pod = self.k8s_core.read_namespaced_pod(
-                        name=target_pod, namespace="gpu-operator"
+                    # List pods again since DaemonSet creates a new pod with a different name
+                    pods = self.k8s_core.list_namespaced_pod(
+                        namespace="gpu-operator",
+                        label_selector="app=nvidia-driver-daemonset",
                     )
 
-                    # Check if it's a new pod (different creation timestamp)
-                    if pod.metadata.creation_timestamp > old_creation_time:
-                        # Check if pod is ready
-                        if pod.status.phase == "Running":
-                            # Check all containers are ready
-                            all_ready = True
-                            if pod.status.container_statuses:
-                                for container in pod.status.container_statuses:
-                                    if not container.ready:
-                                        all_ready = False
-                                        break
+                    # Find the new pod on this node
+                    pod = None
+                    for p in pods.items:
+                        if (
+                            p.spec.node_name == node_name
+                            and p.metadata.creation_timestamp > old_creation_time
+                        ):
+                            pod = p
+                            break
 
-                            if all_ready:
-                                elapsed = int(time.time() - start_time)
-                                print(
-                                    f"    ✓ New driver pod ready: {pod.metadata.name} (took {elapsed}s)"
-                                )
+                    if not pod:
+                        # New pod not yet created
+                        time.sleep(5)
+                        continue
 
-                                # Wait a bit more for GPU initialization
-                                print(
-                                    "    → Waiting additional 30s for GPU initialization..."
-                                )
-                                time.sleep(30)
+                    # Check if pod is ready
+                    if pod.status.phase == "Running":
+                        # Check all containers are ready
+                        all_ready = True
+                        if pod.status.container_statuses:
+                            for container in pod.status.container_statuses:
+                                if not container.ready:
+                                    all_ready = False
+                                    break
 
-                                print("[✓] GPU driver restarted successfully")
-                                return True
+                        if all_ready:
+                            elapsed = int(time.time() - start_time)
+                            print(
+                                f"    ✓ New driver pod ready: {pod.metadata.name} (took {elapsed}s)"
+                            )
+
+                            # Wait a bit more for GPU initialization
+                            print(
+                                "    → Waiting additional 30s for GPU initialization..."
+                            )
+                            time.sleep(30)
+
+                            print("[✓] GPU driver restarted successfully")
+                            return True
                 except Exception:
                     pass
 
@@ -322,13 +359,15 @@ class PodOperations:
                     if exclude_node and pod.spec.node_name == exclude_node:
                         continue
 
-                    # Check if ready
-                    if (
-                        pod.status.phase == "Running"
-                        and pod.status.container_statuses
-                        and pod.status.container_statuses[0].ready
-                    ):
-                        ready_count += 1
+                    # Check if ready (all containers must be ready)
+                    if pod.status.phase == "Running" and pod.status.container_statuses:
+                        # Check all containers are ready
+                        all_ready = all(
+                            container.ready
+                            for container in pod.status.container_statuses
+                        )
+                        if all_ready:
+                            ready_count += 1
 
                 elapsed = int(time.time() - start_time)
                 print(f"    ... {elapsed}s: {ready_count}/{expected_count} ready")
