@@ -10,7 +10,7 @@ use crate::{
     entrypoint::{self, EngineConfig},
     kv_router::{KvPushRouter, KvRouter, PrefillRouter},
     migration::Migration,
-    model_card::{self, ModelDeploymentCard},
+    model_card::ModelDeploymentCard,
     preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
@@ -62,19 +62,19 @@ pub async fn prepare_engine(
         EngineConfig::Dynamic(local_model) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
 
-            let store = Arc::new(distributed_runtime.store().clone());
             let model_manager = Arc::new(ModelManager::new());
             let watch_obj = Arc::new(ModelWatcher::new(
-                distributed_runtime,
+                distributed_runtime.clone(),
                 model_manager.clone(),
                 dynamo_runtime::pipeline::RouterMode::RoundRobin,
                 None,
                 None,
             ));
-            let (_, receiver) = store.watch(model_card::ROOT_PATH, None, runtime.primary_token());
+            let discovery = distributed_runtime.discovery_client();
+            let discovery_stream = discovery.list_and_watch(dynamo_runtime::discovery::DiscoveryKey::AllModelCards).await?;
             let inner_watch_obj = watch_obj.clone();
             let _watcher_task = tokio::spawn(async move {
-                inner_watch_obj.watch(receiver, None).await;
+                inner_watch_obj.watch(discovery_stream, None).await;
             });
             tracing::info!("Waiting for remote model..");
 

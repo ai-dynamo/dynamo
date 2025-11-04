@@ -3,12 +3,12 @@
 
 use crate::kv_router::KV_METRICS_SUBJECT;
 use crate::kv_router::scoring::LoadEvent;
-use crate::model_card::{self, ModelDeploymentCard};
+use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::component::Client;
+use dynamo_runtime::discovery::{watch_and_extract_field, DiscoveryKey};
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::traits::events::EventSubscriber;
-use dynamo_runtime::utils::typed_prefix_watcher::{key_extractors, watch_prefix_with_extraction};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio_stream::StreamExt;
@@ -79,21 +79,13 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         let endpoint = &self.client.endpoint;
         let component = endpoint.component();
 
-        let Some(etcd_client) = component.drt().etcd_client() else {
-            // Static mode, no monitoring needed
-            return Ok(());
-        };
-
-        // Watch for runtime config updates from model deployment cards
-        let runtime_configs_watcher = watch_prefix_with_extraction(
-            etcd_client,
-            model_card::ROOT_PATH,
-            key_extractors::lease_id,
-            |card: ModelDeploymentCard| Some(card.runtime_config),
-            component.drt().child_token(),
-        )
-        .await?;
-        let mut config_events_rx = runtime_configs_watcher.receiver();
+        // Watch for runtime config updates from model deployment cards via discovery interface
+        let discovery = component.drt().discovery_client();
+        let discovery_stream = discovery.list_and_watch(DiscoveryKey::AllModelCards).await?;
+        let mut config_events_rx = watch_and_extract_field(
+            discovery_stream,
+            |card: ModelDeploymentCard| card.runtime_config,
+        );
 
         // Subscribe to KV metrics events
         let mut kv_metrics_rx = component.namespace().subscribe(KV_METRICS_SUBJECT).await?;
