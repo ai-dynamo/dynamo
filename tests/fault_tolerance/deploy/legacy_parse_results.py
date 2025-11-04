@@ -564,26 +564,20 @@ def main(logs_dir, tablefmt, log_paths=None, sla=None, print_output=True):
     if results and len(results) == 1:
         # Single test result - return in validation-compatible format
         r = results[0]
+        success_before = r.get("success_before_requests") or 0
+        failed_before = r.get("failed_before_requests") or 0
+        success_after = r.get("success_after_requests") or 0
+        failed_after = r.get("failed_after_requests") or 0
+
         return {
             "log_dir": log_paths[0] if log_paths else logs_dir,
             "num_clients": 10,  # Default from Load config
             "startup_time": r.get("start_time"),
             "recovery_time": r.get("recovery_time"),
             "metrics": {
-                "total_requests": (
-                    r.get("success_before_requests", 0)
-                    + r.get("failed_before_requests", 0)
-                    + r.get("success_after_requests", 0)
-                    + r.get("failed_after_requests", 0)
-                ),
-                "successful_requests": (
-                    r.get("success_before_requests", 0)
-                    + r.get("success_after_requests", 0)
-                ),
-                "failed_requests": (
-                    r.get("failed_before_requests", 0)
-                    + r.get("failed_after_requests", 0)
-                ),
+                "total_requests": success_before + failed_before + success_after + failed_after,
+                "successful_requests": success_before + success_after,
+                "failed_requests": failed_before + failed_after,
                 "latencies": [],  # Legacy doesn't track per-client latencies
                 "p50_latencies": [],
                 "p90_latencies": [],
@@ -601,18 +595,18 @@ def main(logs_dir, tablefmt, log_paths=None, sla=None, print_output=True):
                 "log_dir": r.get("test", ""),
                 "metrics": {
                     "total_requests": (
-                        r.get("success_before_requests", 0)
-                        + r.get("failed_before_requests", 0)
-                        + r.get("success_after_requests", 0)
-                        + r.get("failed_after_requests", 0)
+                        (r.get("success_before_requests") or 0)
+                        + (r.get("failed_before_requests") or 0)
+                        + (r.get("success_after_requests") or 0)
+                        + (r.get("failed_after_requests") or 0)
                     ),
                     "successful_requests": (
-                        r.get("success_before_requests", 0)
-                        + r.get("success_after_requests", 0)
+                        (r.get("success_before_requests") or 0)
+                        + (r.get("success_after_requests") or 0)
                     ),
                     "failed_requests": (
-                        r.get("failed_before_requests", 0)
-                        + r.get("failed_after_requests", 0)
+                        (r.get("failed_before_requests") or 0)
+                        + (r.get("failed_after_requests") or 0)
                     ),
                 },
                 "recovery_time": r.get("recovery_time"),

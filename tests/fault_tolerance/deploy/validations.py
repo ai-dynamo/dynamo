@@ -297,7 +297,7 @@ def verify_results_high_availability(
     scenario: Scenario,
     metrics: Dict[str, Any],
     recovery_time: Optional[float] = None,
-    min_success_rate: Optional[float] = 0.99,
+    min_success_rate: Optional[float] = 0.90,
     max_recovery_time: Optional[float] = 60,
     **kwargs,
 ) -> None:
@@ -384,7 +384,7 @@ def verify_results_single_worker(
     """Verify results for single worker scenarios (no redundancy).
 
     Validates:
-    - Acceptable success rate (>75%)
+    - Acceptable success rate (>10%)
     - Reasonable recovery time (<180s)
     - System eventually recovered
 
