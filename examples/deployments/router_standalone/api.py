@@ -223,7 +223,6 @@ class ServiceAPI:
             base_metrics_port=self.init_params.base_metrics_port,
             num_workers=self.init_params.num_workers,
         )
-        await self.workers.initialize()
 
         # Initialize HTTP client for router communication
         self.http_client = httpx.AsyncClient()
@@ -267,6 +266,10 @@ class ServiceAPI:
 
     async def start(self):
         """Start the API server"""
+        # Initialize services first
+        await self.initialize_services()
+
+        # Start the API server
         logger.info(f"Starting API server on port {self.init_params.http_port}")
         config = uvicorn.Config(
             self.app, host="0.0.0.0", port=self.init_params.http_port, log_level="info"
@@ -345,10 +348,7 @@ def main():
 
     async def run_with_shutdown():
         try:
-            # Initialize API services first
-            await api.initialize_services()
-
-            # Now start both servers concurrently
+            # Start both services concurrently
             await asyncio.gather(
                 api.start(), router_api.start(), return_exceptions=True
             )

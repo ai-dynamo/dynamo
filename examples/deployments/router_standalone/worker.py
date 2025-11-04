@@ -86,29 +86,21 @@ class VllmWorkers:
     ):
         os.environ["VLLM_NO_USAGE_STATS"] = "1"
 
-        self.model = model
-        self.block_size = block_size
-        self.base_kv_events_port = base_kv_events_port
-        self.base_metrics_port = base_metrics_port
         self.num_workers = num_workers
         self.llms: list[AsyncLLM] = []
 
-    async def initialize(self):
-        """Async initialization of workers"""
-        logger.info(f"Starting initialization of {self.num_workers} workers")
-        for worker_id in range(self.num_workers):
-            logger.info(f"Initializing worker {worker_id} on GPU {worker_id}")
+        for worker_id in range(num_workers):
             os.environ["CUDA_VISIBLE_DEVICES"] = str(worker_id)
-            zmq_port = self.base_kv_events_port + worker_id
-            metrics_port = self.base_metrics_port + worker_id
+            zmq_port = base_kv_events_port + worker_id
+            metrics_port = base_metrics_port + worker_id
 
             model_config = ModelConfig(
-                model=self.model,
+                model=model,
                 enforce_eager=True,
             )
 
             cache_config = CacheConfig(
-                block_size=self.block_size,
+                block_size=block_size,
                 enable_prefix_caching=True,
             )
 
@@ -138,8 +130,6 @@ class VllmWorkers:
                     stat_loggers=[LoggerFactory(port=metrics_port)],
                 )
             )
-
-        logger.info(f"All {self.num_workers} workers initialized")
 
     async def direct(
         self, prompt: TokensPrompt, worker_id: int, sampling_params: SamplingParams
