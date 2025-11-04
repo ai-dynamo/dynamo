@@ -112,6 +112,7 @@ async fn main_loop(
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
 
         // Call the model

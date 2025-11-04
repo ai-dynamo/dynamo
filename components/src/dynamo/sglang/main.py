@@ -145,6 +145,9 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     engine = sgl.Engine(server_args=server_args)
 
+    # Perform dummy warmup for prefill worker to avoid initial TTFT hit
+    await _warmup_prefill_engine(engine, server_args)
+
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
@@ -403,6 +406,41 @@ async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Co
         raise
     finally:
         handler.cleanup()
+
+
+async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
+    """Perform warmup request for prefill engine to reduce initial TTFT."""
+    logging.info("Start of prefill disaggregation warmup ...")
+    try:
+        from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
+        from sglang.srt.sampling.sampling_params import SamplingParams
+
+        sampling_params = SamplingParams(
+            temperature=0.0,
+            max_new_tokens=8,
+            ignore_eos=True,
+        )
+
+        # Timeout: 1800s (30 min) for deep gemm precache
+        async def _do_warmup():
+            results = await engine.async_generate(
+                input_ids=[0, 1, 2, 3],
+                sampling_params=sampling_params,
+                stream=True,
+                bootstrap_host=FAKE_BOOTSTRAP_HOST,
+                bootstrap_port=server_args.disaggregation_bootstrap_port,
+                bootstrap_room=999999,
+            )
+            # Consume the stream
+            async for _ in results:
+                pass
+
+        await asyncio.wait_for(_do_warmup(), timeout=1800)
+        logging.info("Prefill warmup completed")
+    except asyncio.TimeoutError:
+        logging.warning("Prefill warmup timed out after 1800s")
+    except Exception as e:
+        logging.warning(f"Prefill warmup failed: {e}")
 
 
 async def graceful_shutdown(runtime):
