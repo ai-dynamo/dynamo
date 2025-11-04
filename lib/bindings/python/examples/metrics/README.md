@@ -379,19 +379,18 @@ maturin develop
 
 ```bash
 cd ~/dynamo/lib/bindings/python/examples/metrics
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 ./server_with_loop.py
+DYN_SYSTEM_PORT=8081 ./server_with_loop.py
 ```
 
 #### Run Example B: Callback-based Updates
 
 ```bash
 cd ~/dynamo/lib/bindings/python/examples/metrics
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 ./server_with_callback.py
+DYN_SYSTEM_PORT=8081 ./server_with_callback.py
 ```
 
-**Note:** The environment variables are required:
-- `DYN_SYSTEM_ENABLED=true` - Enables the system status server
-- `DYN_SYSTEM_PORT=8081` - Sets the port for the metrics endpoint
+**Note:** The environment variable is required:
+- `DYN_SYSTEM_PORT=8081` - Sets the port for the metrics endpoint (automatically enables the system status server)
 
 #### Check the Metrics
 

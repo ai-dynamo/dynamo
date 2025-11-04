@@ -1814,10 +1814,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "1",
 													},
 													{
-														Name:  "DYN_SYSTEM_ENABLED",
-														Value: "true",
-													},
-													{
 														Name:  "DYN_SYSTEM_PORT",
 														Value: "9090",
 													},
@@ -1965,10 +1961,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
-													},
-													{
-														Name:  "DYN_SYSTEM_ENABLED",
-														Value: "true",
 													},
 													{
 														Name:  "DYN_SYSTEM_PORT",
@@ -2619,10 +2611,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "1",
 													},
 													{
-														Name:  "DYN_SYSTEM_ENABLED",
-														Value: "true",
-													},
-													{
 														Name:  "DYN_SYSTEM_PORT",
 														Value: "9090",
 													},
@@ -2757,10 +2745,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
-													},
-													{
-														Name:  "DYN_SYSTEM_ENABLED",
-														Value: "true",
 													},
 													{
 														Name:  "DYN_SYSTEM_PORT",
@@ -4531,7 +4515,6 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							{Name: "DYN_NAMESPACE", Value: ""},
 							{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-deployment"},
 							{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
-							{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
 							{Name: "DYN_SYSTEM_PORT", Value: "9090"},
 							{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "[\"generate\"]"},
 						},
