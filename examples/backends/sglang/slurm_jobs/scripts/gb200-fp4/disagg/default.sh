@@ -133,10 +133,11 @@ if [ "$mode" = "prefill" ]; then
         --stream-interval 50 \
         --log-level debug ${command_suffix}
 
-# For now we must keep SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK and cuda-graph-bs at 384 until
-# nvidia-cutlass-dsl fixes https://github.com/flashinfer-ai/flashinfer/issues/1830#issuecomment-3380074018
-# and the version bump is included in sglang
-# Use 12 nodes for fp4 since flashinfer_cutedsl requires experts per gpu < 8
+# For now we must keep SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK and cuda-graph-bs at 1024 until
+# DeepEP merges in https://github.com/deepseek-ai/DeepEP/pull/440
+# the nvidia-cutlass-dsl install fixes https://github.com/flashinfer-ai/flashinfer/issues/1830#issuecomment-3380074018
+# which was previously limiting us to DISPATCH_TOKENS and cuda-graph-bs == 384
+# For now use 12 nodes for fp4 since flashinfer_cutedsl requires experts per gpu < 8
 # We have 288 (256 + 32 redundant) => 288/48 = 6
 
 elif [ "$mode" = "decode" ]; then
