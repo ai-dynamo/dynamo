@@ -58,6 +58,22 @@ jobs:
           curl -LO "https://dl.k8s.io/release/${KUBECTL_VER}/bin/linux/amd64/kubectl"
           sudo install -m 0755 kubectl /usr/local/bin/kubectl
 
+      - name: Show runner arch & docker info TODO-RM
+        run: |
+          echo "runner.os=${{ runner.os }}  runner.arch=${{ runner.arch }}"
+          uname -a
+          uname -m
+          dpkg --print-architecture || true
+          docker version
+          docker info --format '{{json .OSType}} {{json .Architecture}}'
+          docker buildx ls || true
+
+      - name: Compute PLATFORM TODO-RM
+        id: plat
+        run: |
+          m=$(uname -m); case "$m" in x86_64) a=amd64;; aarch64) a=arm64;; *) echo "bad $m"; exit 1;; esac
+          echo "platform=linux/$a" >> $GITHUB_OUTPUT
+
       - name: Login to NGC
         if: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
         run: |
@@ -106,10 +122,13 @@ jobs:
       - name: Build vllm runtime image (amd64)
         id: build-vllm
         uses: ./.github/actions/docker-build
+        env:
+          BUILDKIT_PROGRESS: plain
         with:
           framework: vllm
           target: runtime
-          platform: linux/amd64
+          # platform: linux/amd64
+          platform: ${{ steps.plat.outputs.platform }}
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}

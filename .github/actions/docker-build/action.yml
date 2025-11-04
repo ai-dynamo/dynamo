@@ -122,7 +122,7 @@ runs:
           EXTRA_ARGS+=" --build-arg TORCH_BACKEND=${{ inputs.torch_backend }}"
         fi
 
-        ./container/build.sh --tag "$IMAGE_TAG" \
+        BUILDKIT_PROGRESS=plain ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \
           --vllm-max-jobs 10 \
           --framework ${{ inputs.framework }} \
