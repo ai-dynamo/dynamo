@@ -141,7 +141,6 @@ elif [ "$mode" = "decode" ]; then
     if [[ -n "${DUMP_CONFIG_PATH}" ]]; then command_suffix="${command_suffix} --dump-config-to ${DUMP_CONFIG_PATH}"; fi
 
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
-    
     MC_TE_METRIC=true \
     SGLANG_ENABLE_FLASHINFER_GEMM=1 \
     SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \

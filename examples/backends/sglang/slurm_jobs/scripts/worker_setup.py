@@ -312,23 +312,27 @@ def setup_head_prefill_node(prefill_host_ip: str, run_in_ci: bool = False) -> No
     Setup NATS, etcd, ingress, and http servers on the prefill host node.
     """
     if run_in_ci:
-        logging.info(f"Starting nats server on node {prefill_host_ip} (CI mode - using /configs/nats-server)")
+        logging.info(
+            f"Starting nats server on node {prefill_host_ip} (CI mode - using /configs/nats-server)"
+        )
         nats_cmd = "/configs/nats-server -js"
     else:
         logging.info(f"Starting nats server on node {prefill_host_ip}")
         nats_cmd = "nats-server -js"
-    
+
     nats_process = run_command(nats_cmd, background=True)
     if not nats_process:
         raise RuntimeError("Failed to start nats-server")
 
     if run_in_ci:
-        logging.info(f"Starting etcd server on node {prefill_host_ip} (CI mode - using /configs/etcd)")
+        logging.info(
+            f"Starting etcd server on node {prefill_host_ip} (CI mode - using /configs/etcd)"
+        )
         etcd_binary = "/configs/etcd"
     else:
         logging.info(f"Starting etcd server on node {prefill_host_ip}")
         etcd_binary = "etcd"
-    
+
     etcd_cmd = (
         f"{etcd_binary} --listen-client-urls {ETCD_LISTEN_ADDR}:{ETCD_CLIENT_PORT} "
         f"--advertise-client-urls {ETCD_LISTEN_ADDR}:{ETCD_CLIENT_PORT} "
@@ -352,7 +356,9 @@ def setup_nginx_worker(master_ip: str, nginx_config: str) -> int:
     return run_command(nginx_cmd)
 
 
-def setup_frontend_worker(worker_idx: int, master_ip: str, run_in_ci: bool = False) -> int:
+def setup_frontend_worker(
+    worker_idx: int, master_ip: str, run_in_ci: bool = False
+) -> int:
     """Setup a frontend worker"""
     logging.info(f"Setting up frontend worker {worker_idx}")
 
