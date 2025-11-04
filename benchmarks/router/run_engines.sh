@@ -225,28 +225,6 @@ else
 
             if [ "$USE_TRTLLM" = true ]; then
                 echo "[$MODE_CAPITALIZED Worker-$i] Using GPUs: $GPU_DEVICES"
-
-                # Find a free port for this worker's IPC communication
-                BASE_PORT=$((50000 + i * 10))
-                FREE_PORT=$(python3 -c "
-                    import socket
-                    port = $BASE_PORT
-                    while True:
-                        try:
-                            s = socket.socket()
-                            s.bind(('', port))
-                            s.close()
-                            print(port)
-                            break
-                        except OSError:
-                            port += 1
-                    ")
-
-                # Set unique IPC address and HMAC key for this worker
-                export TLLM_SPAWN_PROXY_PROCESS_IPC_ADDR="tcp://127.0.0.1:${FREE_PORT}"
-                export TLLM_SPAWN_PROXY_PROCESS_IPC_HMAC_KEY=$(openssl rand -hex 32)
-                echo "[$MODE_CAPITALIZED Worker-$i] IPC Address: $TLLM_SPAWN_PROXY_PROCESS_IPC_ADDR"
-
                 # Run TensorRT-LLM engine
                 TRTLLM_ARGS=()
                 TRTLLM_ARGS+=("--model-path" "$MODEL_PATH")
@@ -256,10 +234,8 @@ else
                 fi
                 TRTLLM_ARGS+=("${EXTRA_ARGS[@]}")
 
-                exec env CUDA_VISIBLE_DEVICES=$GPU_DEVICES \
-                TLLM_SPAWN_PROXY_PROCESS_IPC_ADDR="$TLLM_SPAWN_PROXY_PROCESS_IPC_ADDR" \
-                TLLM_SPAWN_PROXY_PROCESS_IPC_HMAC_KEY="$TLLM_SPAWN_PROXY_PROCESS_IPC_HMAC_KEY" \
-                python3 -m dynamo.trtllm "${TRTLLM_ARGS[@]}"
+                exec env CUDA_VISIBLE_DEVICES=$GPU_DEVICES trtllm-llmapi-launch python3 -m dynamo.trtllm \
+                    "${TRTLLM_ARGS[@]}"
             else
                 echo "[$MODE_CAPITALIZED Worker-$i] Using GPUs: $GPU_DEVICES"
                 # Run vLLM engine with PYTHONHASHSEED=0 for deterministic event IDs in KV-aware routing
@@ -282,6 +258,12 @@ else
         } &
         PIDS+=($!)
         echo "Started $MODE worker $i (PID: $!)"
+
+        # Add delay between TensorRT-LLM worker launches to avoid MPI initialization conflicts
+        if [ "$USE_TRTLLM" = true ] && [ "$i" -lt "$NUM_WORKERS" ]; then
+            echo "Waiting 2 seconds before launching next TensorRT-LLM worker..."
+            sleep 2
+        fi
     done
 fi
 
