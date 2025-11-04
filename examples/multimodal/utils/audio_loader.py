@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import functools
 import logging
 from io import BytesIO
 from typing import Tuple
@@ -31,54 +32,46 @@ class AudioLoader:
 
     def __init__(self, cache_size: int = CACHE_SIZE_MAXIMUM):
         self._http_timeout = 30.0
-        self._http_client = httpx.AsyncClient(timeout=self._http_timeout)
-        self._audio_cache: dict[str, Tuple[np.ndarray, float]] = {}
-        self._cache_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=cache_size)
+        # functools.lru_cache is not directly compatible with async methods.
+        # We create a synchronous method for fetching and processing audio,
+        # and then apply lru_cache to it. This cached synchronous method
+        # is then called from our async method using asyncio.to_thread.
+        self._load_and_process_audio_cached = functools.lru_cache(maxsize=cache_size)(
+            self._load_and_process_audio
+        )
+
+    def _load_and_process_audio(
+        self, audio_url: str, sampling_rate: int
+    ) -> Tuple[np.ndarray, float]:
+        """
+        Synchronously loads and processes audio from a URL.
+        This method is memoized using lru_cache.
+        """
+        with httpx.Client(timeout=self._http_timeout) as client:
+            response = client.get(audio_url)
+            response.raise_for_status()
+
+            if not response.content:
+                raise ValueError("Empty response content from audio URL")
+
+            audio_data_stream = BytesIO(response.content)
+            audio_data, sr = librosa.load(audio_data_stream, sr=sampling_rate)
+            return audio_data, sr
 
     async def load_audio(
         self, audio_url: str, sampling_rate: int = 16000
     ) -> Tuple[np.ndarray, float]:
         parsed_url = urlparse(audio_url)
 
-        # For HTTP(S) URLs, check cache first
-        if parsed_url.scheme in ("http", "https"):
-            if audio_url in self._audio_cache:
-                logger.debug(f"Audio found in cache for URL: {audio_url}")
-                return self._audio_cache[audio_url]
+        if parsed_url.scheme not in ("http", "https"):
+            raise ValueError(f"Invalid audio source scheme: {parsed_url.scheme}")
 
         try:
-            if parsed_url.scheme in ("http", "https"):
-                if not self._http_client:
-                    raise RuntimeError("HTTP client not initialized")
-
-                response = await self._http_client.get(audio_url)
-                response.raise_for_status()
-
-                if not response.content:
-                    raise ValueError("Empty response content from audio URL")
-
-                audio_data_stream = BytesIO(response.content)
-            else:
-                raise ValueError(f"Invalid audio source scheme: {parsed_url.scheme}")
-
-            # librosa.load is sync, so offload to a thread to avoid blocking the event loop
-            def _load_audio():
-                return librosa.load(audio_data_stream, sr=16000)
-
-            audio_data, sr = await asyncio.to_thread(_load_audio)
-
-            # Cache HTTP(S) URLs
-            if parsed_url.scheme in ("http", "https"):
-                # Cache the audio for future use, and evict the oldest audio if the cache is full
-                if self._cache_queue.full():
-                    oldest_audio_url = await self._cache_queue.get()
-                    del self._audio_cache[oldest_audio_url]
-
-                self._audio_cache[audio_url] = (audio_data, sr)
-                await self._cache_queue.put(audio_url)
-
-            return audio_data, sr
-
+            # Offload the synchronous, cached function to a separate thread
+            # to avoid blocking the asyncio event loop.
+            return await asyncio.to_thread(
+                self._load_and_process_audio_cached, audio_url, sampling_rate
+            )
         except httpx.HTTPError as e:
             logger.error(f"HTTP error loading audio: {e}")
             raise
