@@ -90,7 +90,6 @@ runs:
       env:
         GITHUB_TOKEN: ${{ inputs.ci_token }}
         AWS_DEFAULT_REGION: ${{ inputs.aws_default_region }}
-        SCCACHE_S3_BUCKET: ${{ inputs.sccache_s3_bucket }}
         AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
         PLATFORM: ${{ inputs.platform }}
