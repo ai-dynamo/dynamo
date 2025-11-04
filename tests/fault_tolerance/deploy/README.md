@@ -236,6 +236,174 @@ test_fault_scenario[sglang-agg-tp-1-dp-1-frontend]
 {"time": "2025-10-03T10:30:47", "results": [{"status": 200, "request_elapsed_time": 1.18, "url": "http://localhost:8000/v1/chat/completions", "pod": "frontend-pod"}], "total_time": 1.20}
 ```
 
+## Validation Framework
+
+### Overview
+
+The fault tolerance test suite includes an automated validation framework that verifies both the test execution and the results. Validation runs automatically after each test completes, ensuring that:
+
+1. **The failure was actually injected** (Stage 1: Scenario Verification)
+2. **The system recovered appropriately** (Stage 2: Results Verification)
+
+### Two-Stage Validation Approach
+
+#### Stage 1: Scenario Verification
+
+Verifies that the test scenario executed correctly by checking Kubernetes events and pod states:
+
+**For Pod Deletions (`*_pod` failures):**
+- Confirms specific pods were deleted via K8s events (`Killing`, `Terminating`)
+- Validates pod recreation and lifecycle transitions
+- Logs deletion confirmation with timestamps
+
+**For Process Terminations (non-`*_pod` failures):**
+- Checks container restart counts (`restartCount` field)
+- Looks for container restart events (`Started`, `BackOff`, `CrashLoopBackOff`)
+- Distinguishes between subprocess termination (no container restart) and main process crashes
+
+**Example Stage 1 Output:**
+```
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    STAGE 1: SCENARIO VERIFICATION                            ║
+║          (Verify test scenario executed correctly)                           ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+────────────────────────────────────────────────────────────────────────────────
+1.1 Verifying Specific Pod Deletion via K8s Events
+────────────────────────────────────────────────────────────────────────────────
+Target pod(s) for deletion: ['fault-tolerance-test-0-vllmdecodeworker-abc123']
+
+✓ DELETION CONFIRMED: [Normal] Killing - Stopping container main
+✓ Pod fault-tolerance-test-0-vllmdecodeworker-abc123 deletion verified via K8s events
+✓ STAGE 1.1 PASSED: Pod deletion confirmed via K8s events
+```
+
+#### Stage 2: Results Verification
+
+Validates system behavior based on deployment redundancy:
+
+**High Availability (DP > 1):**
+- Success rate: ≥99%
+- Recovery time: <60 seconds
+- Minimal impact on ongoing requests
+
+**Single Worker (DP = 1):**
+- Success rate: ≥10% (allows for failures during recovery)
+- Recovery time: <180 seconds
+- System eventually recovers
+
+**Baseline (No Failures):**
+- Success rate: 100%
+- No failed requests
+
+**Example Stage 2 Output:**
+```
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    STAGE 2: RESULTS VERIFICATION                             ║
+║                 (Single worker - no redundancy)                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+────────────────────────────────────────────────────────────────────────────────
+2.1 Basic Recovery Check
+────────────────────────────────────────────────────────────────────────────────
+✓ System recovered: 1470 requests succeeded
+
+────────────────────────────────────────────────────────────────────────────────
+2.2 Success Rate Validation (Single Worker)
+────────────────────────────────────────────────────────────────────────────────
+Success rate: 98.00% (1470/1500 requests)
+✓ STAGE 2.2 PASSED: Success rate meets threshold (10%)
+
+────────────────────────────────────────────────────────────────────────────────
+2.3 Recovery Time Validation
+────────────────────────────────────────────────────────────────────────────────
+Recovery time: 150.52 seconds
+✓ STAGE 2.3 PASSED: Recovery time within acceptable range (180s max)
+```
+
+### Validation Architecture
+
+The validation system uses a **factory pattern** for flexible, extensible validation:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│              test_deployment.py                              │
+│           (test_context fixture)                             │
+└──────────────────────┬───────────────────────────────────────┘
+                       │
+                       │ After test completes
+                       │
+          ┌────────────▼─────────────┐
+          │   validations.py         │
+          │   (Validation Factory)   │
+          └──────┬───────────┬───────┘
+                 │           │
+    ┌────────────▼───┐  ┌───▼────────────────┐
+    │ Scenario       │  │ Results            │
+    │ Validation     │  │ Validation         │
+    │ (Stage 1)      │  │ (Stage 2)          │
+    └────────┬───────┘  └───┬────────────────┘
+             │              │
+    ┌────────▼───────┐  ┌───▼────────────────┐
+    │ k8s_utils.py   │  │ validation_checks  │
+    │ - Pod events   │  │ - Success rate     │
+    │ - Restart cnt  │  │ - Recovery time    │
+    └────────────────┘  └────────────────────┘
+```
+
+### Factory Functions
+
+#### `get_validation_for_scenario(scenario_name, scenario)`
+
+Selects scenario validation (Stage 1) based on:
+
+1. **Explicit validation** in `scenario.validation` (highest priority)
+2. **Pattern matching** on scenario name:
+   - `*-none` → No failure validation
+   - `*-frontend*` → Frontend failure validation
+   - `*-decode_worker_pod` → Decode worker pod deletion
+   - `*-prefill_worker_pod` → Prefill worker pod deletion
+   - `*-decode_worker` (non-pod) → Decode worker process termination
+   - `*-sglang_decode_scheduler` → SGLang scheduler subprocess
+   - `*-sglang_decode_detokenizer` → SGLang detokenizer subprocess
+3. **Default validation** (fallback)
+
+#### `get_validation_for_results(test_name, scenario)`
+
+Selects results validation (Stage 2) based on deployment redundancy:
+
+- **DP > 1**: High availability validation (strict thresholds)
+- **DP = 1**: Single worker validation (lenient thresholds)
+
+### Backend-Specific Validations
+
+#### SGLang Subprocess Limitations
+
+SGLang has a **known limitation** where subprocess termination leads to zombie processes without automatic recovery:
+
+**Affected Failures:**
+- `sglang_decode_scheduler` - Scheduler subprocess becomes `<defunct>`
+- `sglang_decode_detokenizer` - Detokenizer subprocess becomes `<defunct>`
+
+**Expected Behavior:**
+```
+Process killed → becomes zombie (PID exists with Z state, <defunct>)
+Container does NOT restart (main process PID 1 still running)
+No new subprocess spawned
+System does NOT recover automatically
+```
+
+**Validation Approach:**
+- Confirms container restart count = 0 (subprocess kill, not container crash)
+- Documents limitation in test output
+- Does not expect recovery
+
+#### vLLM Disaggregated Prefill Worker Resilience
+
+vLLM decode workers use `--kv-connector-role kv_both` by default, allowing them to handle both prefill and decode operations. When a prefill worker fails, decode workers automatically take over prefill requests, resulting in 100% success rate with minimal impact.
+
+**Expected Behavior:** Prefill worker failures don't cause request failures - this is vLLM's built-in fault tolerance, not a test issue.
+
 ### Summary Results
 
 Results are parsed from AI-Perf metrics and presented in table format after each test. The parsing script (`parse_results.py`) extracts comprehensive metrics for each scenario:
