@@ -144,6 +144,7 @@ def gen_config_file(
     ctx_enable_attention_dp: bool,
     num_gen_servers: int,
     gen_tp_size: int,
+    gen_ep_size: int,
     gen_batch_size: int,
     gen_max_num_tokens: int,
     gen_max_seq_len: int,
@@ -170,6 +171,7 @@ def gen_config_file(
         ctx_enable_attention_dp: Enable attention DP for context servers
         num_gen_servers: Number of generation servers
         gen_tp_size: Tensor parallel size for generation servers
+        gen_ep_size: Expert parallel size for generation servers
         gen_batch_size: Batch size for generation servers
         gen_max_num_tokens: Max number of tokens for generation servers
         gen_enable_attention_dp: Enable attention DP for generation servers
@@ -218,15 +220,25 @@ def gen_config_file(
             "free_gpu_memory_fraction": ctx_free_gpu_memory_fraction,
             "dtype": "fp8",
         },
+        "cuda_graph_config": {
+            "enable_padding": True,
+            "max_batch_size": 30,
+        },
+        "num_postprocess_workers": 4,
         "cache_transceiver_config": {
             "max_tokens_in_buffer": cache_transceiver_max_num_tokens,
-            "backend": "DEFAULT",
+            "backend": "UCX",
         },
     }
 
     decode_config: Dict[str, Any] = {
+        "allreduce_strategy": "AUTO",
+        "attention_dp_config": {
+            "enable_balance": True
+        },
+        "disable_overlap_scheduler": False,
         "tensor_parallel_size": gen_tp_size,
-        "moe_expert_parallel_size": gen_tp_size,
+        "moe_expert_parallel_size": gen_ep_size,
         "enable_attention_dp": gen_enable_attention_dp,
         "pipeline_parallel_size": 1,
         "max_batch_size": gen_batch_size,
@@ -244,13 +256,13 @@ def gen_config_file(
         },
         "moe_config": {
             "backend": gen_moe_backend,
-            "use_low_precision_moe_combine": True,
         },
         "cache_transceiver_config": {
             "max_tokens_in_buffer": cache_transceiver_max_num_tokens,
-            "backend": "DEFAULT",
+            "backend": "UCX",
         },
         "stream_interval": 20,
+        "num_postprocess_workers": 4
     }
 
     if gen_tp_size == 8 and not gen_enable_attention_dp:
@@ -352,6 +364,12 @@ if __name__ == "__main__":
         help="Tensor parallel size for generation servers",
     )
     parser.add_argument(
+        "--gen_ep_size",
+        type=int,
+        required=True,
+        help="Expert parallel size for generation servers",
+    )
+    parser.add_argument(
         "--gen_batch_size",
         type=int,
         required=True,
@@ -418,6 +436,7 @@ if __name__ == "__main__":
         args.ctx_enable_attention_dp,
         args.num_gen_servers,
         args.gen_tp_size,
+        args.gen_ep_size,
         args.gen_batch_size,
         args.gen_max_num_tokens,
         args.gen_max_seq_len,

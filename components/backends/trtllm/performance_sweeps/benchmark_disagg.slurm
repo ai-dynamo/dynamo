@@ -19,20 +19,21 @@ ctx_max_num_tokens=$4
 ctx_enable_attention_dp=$5
 num_gen_servers=$6
 gen_tp_size=$7
-gen_batch_size=$8
-gen_max_num_tokens=$9
-gen_enable_attention_dp=${10}
-gen_gpu_memory_fraction=${11}
-eplb_num_slots=${12}
-mtp_size=${13}
-concurrency_list=${14}
-gen_nodes=${15}
-kind=${16}
-model_path=${17}
-served_model_name=${18}
-image=${19}
-isl=${20}
-osl=${21}
+gen_ep_size=$8
+gen_batch_size=$9
+gen_max_num_tokens=${10}
+gen_enable_attention_dp=${11}
+gen_gpu_memory_fraction=${12}
+eplb_num_slots=${13}
+mtp_size=${14}
+concurrency_list=${15}
+gen_nodes=${16}
+kind=${17}
+model_path=${18}
+served_model_name=${19}
+image=${20}
+isl=${21}
+osl=${22}
 
 ctx_max_seq_len=$((${isl} + 203))
 gen_max_seq_len=$((${isl} + ${osl} + 203))
@@ -44,7 +45,13 @@ set_clock_cmd="bash ${SCRIPTS_DIR}/set_clock.sh"
 mkdir -p ${LOG_DIR}
 echo "trying to submit job"
 
-sub_dir=${LOG_DIR}/ctx${num_ctx_servers}_gen${num_gen_servers}_dep${gen_tp_size}_batch${gen_batch_size}_eplb${eplb_num_slots}_mtp${mtp_size}
+prefix="dep"
+if [ "${gen_enable_attention_dp}" = "false" && "${gen_ep_size}" == "1" ]; then
+    prefix="tep"
+elif [ "${gen_enable_attention_dp}" = "false" && "${gen_ep_size}" != "1" ]; then
+    prefix="tp"
+
+sub_dir=${LOG_DIR}/ctx${num_ctx_servers}_gen${num_gen_servers}_${prefix}${gen_tp_size}_batch${gen_batch_size}_eplb${eplb_num_slots}_mtp${mtp_size}
 
 echo "concurrency_list: ${concurrency_list}"
 
@@ -52,13 +59,6 @@ ctx_gpus=$((num_ctx_servers * ctx_tp_size))
 gen_gpus=$((num_gen_servers * gen_tp_size))
 
 echo "enable_attention_dp: ${ctx_enable_attention_dp}, ${gen_enable_attention_dp}, gpu_memory_fraction: ${gen_gpu_memory_fraction}"
-
-enable_pdl=false
-if [ "${gen_enable_attention_dp}" = "false" ]; then
-    enable_pdl=true
-    echo "enable_pdl: ${enable_pdl}"
-    sub_dir=${LOG_DIR}/ctx${num_ctx_servers}_gen${num_gen_servers}_tep${gen_tp_size}_batch${gen_batch_size}_eplb${eplb_num_slots}_mtp${mtp_size}
-fi
 
 full_logdir=${sub_dir}
 mkdir -p ${full_logdir}
@@ -91,6 +91,7 @@ srun -l --container-name=${CONTAINER_NAME} \
             --cache_transceiver_max_num_tokens ${CACHE_TRANSCEIVER_MAX_NUM_TOKENS} \
             --num_gen_servers ${num_gen_servers} \
             --gen_tp_size ${gen_tp_size} \
+            --gen_ep_size ${gen_ep_size} \
             --gen_batch_size ${gen_batch_size} \
             --gen_max_num_tokens ${gen_max_num_tokens} \
             --gen_max_seq_len ${gen_max_seq_len} \
@@ -200,7 +201,7 @@ for ((i=1; i<=PREFILL_COUNT; i++)); do
         --mpi=pmix --overlap -w ${nodes[node_idx]} \
         --oversubscribe \
         --overlap \
-        --ntasks 4 \
+        --ntasks ${ctx_tp_size} \
         --nodes 1 \
         bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/prefill_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${served_model_name} ${model_path} 'prefill' &> ${full_logdir}/output_prefill_worker_${i}.log &
   prefill_pids+=($!)

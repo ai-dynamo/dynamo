@@ -43,7 +43,7 @@ fi
 
 # Usage Instructions
 usage() {
-    echo "Usage: $0 <mtp_mode> <mode> [ctx_num] [gen_num] [gen_tp_size] [gen_batch_size] [gen_max_num_tokens] [gen_gpu_memory_fraction] [gen_eplb_num_slots] [gen_mtp_size] [gen_concurrency_list]"
+    echo "Usage: $0 <mtp_mode> <mode> [ctx_num] [gen_num] [gen_tp_size] [gen_ep_size] [gen_batch_size] [gen_max_num_tokens] [gen_gpu_memory_fraction] [gen_eplb_num_slots] [gen_mtp_size] [gen_concurrency_list]"
     echo ""
     echo "MTP Modes:"
     echo "  mtp=off - Run without Multi-Token Prediction (gen_mtp_size=0)"
@@ -59,6 +59,7 @@ usage() {
     echo "  ctx_num: Number of context nodes"
     echo "  gen_num: Number of generation nodes"
     echo "  gen_tp_size: Generation tensor parallel size"
+    echo "  gen_ep_size: Generation expert parallel size"
     echo "  gen_batch_size: Generation batch size"
     echo "  gen_max_num_tokens: Generation max number of tokens"
     echo "  gen_gpu_memory_fraction: GPU memory fraction (0.7-0.95)"
@@ -79,13 +80,14 @@ run_single() {
     local ctx_num=$1
     local gen_num=$2
     local gen_tp_size=$3
-    local gen_batch_size=$4
-    local gen_max_num_tokens=$5
-    local gen_enable_attention_dp=$6
-    local gen_gpu_memory_fraction=$7
-    local gen_mtp_size=$8
-    local gen_eplb_num_slots=$9
-    local gen_concurrency_list=${10}
+    local gen_ep_size=$4
+    local gen_batch_size=$5
+    local gen_max_num_tokens=$6
+    local gen_enable_attention_dp=$7
+    local gen_gpu_memory_fraction=$8
+    local gen_mtp_size=$9
+    local gen_eplb_num_slots=${10}
+    local gen_concurrency_list=${11}
 
     # TODO: expose kind to the command line
     local kind="dynamo_disagg"
@@ -95,9 +97,9 @@ run_single() {
     total_tasks=$((total_nodes * 4))
     set -x
     if (( ISL == OSL )); then
-        sbatch --nodes=${total_nodes} --ntasks=${total_tasks} --ntasks-per-node=${NTASKS_PER_NODE} --segment=${total_nodes} ${slurm_args} benchmark_disagg.slurm ${ctx_num} 4 4 4608 true ${gen_num} ${gen_tp_size} ${gen_batch_size} ${gen_max_num_tokens} ${gen_enable_attention_dp} ${gen_gpu_memory_fraction} ${gen_eplb_num_slots} ${gen_mtp_size} "${gen_concurrency_list}" ${gen_nodes} ${kind} ${MODEL_PATH} ${SERVED_MODEL_NAME} ${IMAGE} ${ISL} ${OSL}
+        sbatch --nodes=${total_nodes} --ntasks=${total_tasks} --ntasks-per-node=${NTASKS_PER_NODE} --segment=${total_nodes} ${slurm_args} benchmark_disagg.slurm ${ctx_num} 4 4 4608 true ${gen_num} ${gen_tp_size} ${gen_ep_size} ${gen_batch_size} ${gen_max_num_tokens} ${gen_enable_attention_dp} ${gen_gpu_memory_fraction} ${gen_eplb_num_slots} ${gen_mtp_size} "${gen_concurrency_list}" ${gen_nodes} ${kind} ${MODEL_PATH} ${SERVED_MODEL_NAME} ${IMAGE} ${ISL} ${OSL}
     else
-        sbatch --nodes=${total_nodes} --ntasks=${total_tasks} --ntasks-per-node=${NTASKS_PER_NODE} --segment=${total_nodes} ${slurm_args} benchmark_disagg.slurm ${ctx_num} 4 1 8448 true ${gen_num} ${gen_tp_size} ${gen_batch_size} ${gen_max_num_tokens} ${gen_enable_attention_dp} ${gen_gpu_memory_fraction} ${gen_eplb_num_slots} ${gen_mtp_size} "${gen_concurrency_list}" ${gen_nodes} ${kind} ${MODEL_PATH} ${SERVED_MODEL_NAME} ${IMAGE} ${ISL} ${OSL}
+        sbatch --nodes=${total_nodes} --ntasks=${total_tasks} --ntasks-per-node=${NTASKS_PER_NODE} --segment=${total_nodes} ${slurm_args} benchmark_disagg.slurm ${ctx_num} 4 1 8448 true ${gen_num} ${gen_tp_size} ${gen_ep_size} ${gen_batch_size} ${gen_max_num_tokens} ${gen_enable_attention_dp} ${gen_gpu_memory_fraction} ${gen_eplb_num_slots} ${gen_mtp_size} "${gen_concurrency_list}" ${gen_nodes} ${kind} ${MODEL_PATH} ${SERVED_MODEL_NAME} ${IMAGE} ${ISL} ${OSL}
     fi
     set +x
 }
@@ -267,6 +269,19 @@ run_32_gpus_mtp() {
     fi
 }
 
+run_gpt_oss() {
+    echo "Running GPT-OSS sweeps..."
+
+    run_single 1 1 1 1 512 20000 false "0.9" 0 0 "128 256 512" # TP1
+
+    run_single 1 1 2 1 1024 20000 false "0.9" 0 0 "64 128 256" # TP2
+    run_single 1 1 2 2 1024 20000 false "0.9" 0 0 "64 256" # TEP2
+
+    run_single 1 1 4 1 2048 20000 false "0.9" 0 0 "8 16 32 64 128" # TP4
+
+    run_single 1 1 8 1 2048 20000 false "0.9" 0 0 "1 2 4 8 16" # TP8
+}
+
 # Main function
 main() {
     local mtp_mode=$1
@@ -412,6 +427,10 @@ main() {
             echo "Running DEP mode ($mtp_mode) with ctx_num=$ctx_num, gen_num=$gen_num, gen_tp_size=$gen_tp_size, gen_batch_size=$gen_batch_size, gen_max_num_tokens=$gen_max_num_tokens, gen_gpu_memory_fraction=$gen_gpu_memory_fraction, gen_mtp_size=$gen_mtp_size, gen_eplb_num_slots=$gen_eplb_num_slots, gen_concurrency_list=\"$gen_concurrency_list\""
 
             run_single $ctx_num $gen_num $gen_tp_size $gen_batch_size $gen_max_num_tokens true $gen_gpu_memory_fraction $gen_mtp_size $gen_eplb_num_slots "$gen_concurrency_list"
+            ;;
+        "gpt-oss")
+            echo "Running GPT-OSS sweeps..."
+            run_gpt_oss
             ;;
         *)
             echo "Error: Unknown mode '$mode'"
