@@ -260,10 +260,16 @@ def test_context(request, scenario):  # noqa: F811
     Automatically detects result type (AI-Perf or legacy) and uses
     the appropriate parser. After parsing, immediately runs validation.
     """
-    yield
+    # Shared context that test will populate during execution
+    context = {"deployment": None, "namespace": None, "affected_pods": {}}
+    
+    yield context  # Test receives this and populates it
 
     # Determine log paths based on whether this is a mixed token test
     log_paths = []
+    test_name = request.node.name
+    logger = logging.getLogger(test_name)
+
     if hasattr(scenario.load, "mixed_token_test") and scenario.load.mixed_token_test:
         # For mixed token tests, we have separate overflow and recovery directories
         overflow_dir = f"{request.node.name}{OVERFLOW_SUFFIX}"
@@ -276,89 +282,83 @@ def test_context(request, scenario):  # noqa: F811
     else:
         # Standard test with single directory
         log_paths = [request.node.name]
-
-    # Use factory to auto-detect and parse results
-    try:
-        results = parse_test_results(
-            log_dir=None,
-            log_paths=log_paths,
-            log_paths=[test_name],
-            tablefmt="fancy_grid",
-            sla=scenario.load.sla,
-            success_threshold=scenario.load.success_threshold,
-            print_output=True,
-            # force_parser can be set based on client_type if needed
-            # force_parser=scenario.load.client_type,
-        )
-        # Store results for reference
-        if results:
-            logging.info(f"Results parsed: {type(results)}")
-            test_results_cache[test_name] = results
-            
-            # IMMEDIATELY run validation now that we have results
-            try:
-                logger.info("\n" + "=" * 60)
-                logger.info("Running validation checks...")
-                logger.info("=" * 60)
+        # Use factory to auto-detect and parse results
+        try:
+            results = parse_test_results(
+                log_dir=None,
+                log_paths=log_paths,
+                tablefmt="fancy_grid",
+                sla=scenario.load.sla,
+                success_threshold=scenario.load.success_threshold,
+                print_output=True,
+                # force_parser can be set based on client_type if needed
+                # force_parser=scenario.load.client_type,
+            )
+            # Store results for reference
+            if results:
+                logging.info(f"Results parsed: {type(results)}")
+                test_results_cache[test_name] = results
                 
-                # Get validation function for this scenario
-                result_validation_func = get_validation_for_results(test_name, scenario)
-                
-                scenario_validation_func = get_validation_for_scenario(test_name, scenario)
-                # Extract metrics and recovery time from parsed results
-                if isinstance(results, list) and len(results) > 0:
-                    result = results[0]
-                elif isinstance(results, dict):
-                    result = results
-                else:
-                    logger.warning(f"Unexpected result format: {type(results)}")
-                    result = None
-                
-                if result:
-                    metrics = result.get("metrics", {})
-                    recovery_time = result.get("recovery_time")
-                    
-                    # Run validation with context populated by test
-                    scenario_validation_func(
-                        scenario=scenario,
-                        log_dir=test_name,
-                        metrics=metrics,
-                        deployment=context.get("deployment"),
-                        namespace=context.get("namespace"),
-                        recovery_time=recovery_time,
-                        affected_pods=context.get("affected_pods", {}),
-                    )
-                    
-                    result_validation_func(
-                        scenario=scenario,
-                        metrics=metrics,
-                        recovery_time=recovery_time,
-                    )
+                # IMMEDIATELY run validation now that we have results
+                try:
+                    logger.info("\n" + "=" * 60)
+                    logger.info("Running validation checks...")
                     logger.info("=" * 60)
-                    logger.info("✓ All validation checks passed")
-                    logger.info("=" * 60 + "\n")
                     
-            except AssertionError as e:
-                logger.error("=" * 60)
-                logger.error(f"✗ Validation failed: {e}")
-                logger.error("=" * 60 + "\n")
-                # Re-raise to fail the test
-                raise
-            except Exception as e:
-                logger.error(f"Validation error: {e}")
-                # Don't fail test on validation errors (non-assertion exceptions)
-                logger.warning("Skipping validation due to error")
+                    # Get validation function for this scenario
+                    result_validation_func = get_validation_for_results(test_name, scenario)
+                    
+                    scenario_validation_func = get_validation_for_scenario(test_name, scenario)
+                    # Extract metrics and recovery time from parsed results
+                    if isinstance(results, list) and len(results) > 0:
+                        result = results[0]
+                    elif isinstance(results, dict):
+                        result = results
+                    else:
+                        logger.warning(f"Unexpected result format: {type(results)}")
+                        result = None
+                    
+                    if result:
+                        metrics = result.get("metrics", {})
+                        recovery_time = result.get("recovery_time")
+                        
+                        if scenario_validation_func:
+                            scenario_validation_func(
+                                scenario=scenario,
+                                log_dir=test_name,
+                                metrics=metrics,
+                                deployment=context.get("deployment"),
+                                namespace=context.get("namespace"),
+                                recovery_time=recovery_time,
+                                affected_pods=context.get("affected_pods", {}),
+                            )
+                        # Run validation with context populated by test
+                        if result_validation_func:
+                            result_validation_func(
+                                scenario=scenario,
+                                metrics=metrics,
+                                recovery_time=recovery_time,
+                            )
+                        logger.info("=" * 60)
+                        logger.info("✓ All validation checks passed")
+                        logger.info("=" * 60 + "\n")
+                        
+                except AssertionError as e:
+                    logger.error("=" * 60)
+                    logger.error(f"✗ Validation failed: {e}")
+                    logger.error("=" * 60 + "\n")
+                    # Re-raise to fail the test
+                    raise
+                except Exception as e:
+                    logger.error(f"Validation error: {e}")
+                    # Don't fail test on validation errors (non-assertion exceptions)
+                    logger.warning("Skipping validation due to error")
                 
     except Exception:
         logging.exception("Failed to parse results for %s", test_name)
 
-    global_result_list.append(test_name)
-
-
     # Add all directories to global list for session summary
     global_result_list.extend(log_paths)
-# NOTE: validation fixture removed - validation now runs directly in results_table
-# after results are parsed, ensuring proper execution order
 
 
 @pytest.fixture(autouse=True, scope="session")
