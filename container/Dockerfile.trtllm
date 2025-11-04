@@ -1,20 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-ARG BASE_IMAGE="nvcr.io/nvidia/tensorrt-llm/release"
-ARG BASE_IMAGE_TAG="1.2.0rc1" # TODO: check for 1.2.0rc2
+ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
+ARG BASE_IMAGE_TAG="25.08-py3" # TODO: test on 25.09-py3
 ARG RELEASE_BUILD
 ARG ENABLE_KVBM=false
 # ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 # ARG RUNTIME_IMAGE_TAG="13.0.0-runtime-ubuntu24.04" # TODO: test on 13.0.1
-ARG RUNTIME_IMAGE=${BASE_IMAGE}
-ARG RUNTIME_IMAGE_TAG=${BASE_IMAGE_TAG}
-
-# TensorRT-LLM specific configuration
-ARG HAS_TRTLLM_CONTEXT=0
-ARG TENSORRTLLM_PIP_WHEEL="tensorrt-llm"
-ARG TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
-ARG GITHUB_TRTLLM_COMMIT
+ARG RUNTIME_IMAGE="nvcr.io/nvidia/tensorrt-llm/release"
+ARG RUNTIME_IMAGE_TAG="1.2.0rc1" # TODO: check for 1.2.0rc2
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -63,7 +57,10 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 ARG PYTHON_VERSION=3.12
 WORKDIR /workspace
-ENV VIRTUAL_ENV=/opt/dynamo/venv
+# ENV VIRTUAL_ENV=/opt/dynamo/venv
+
+# probably not going to work - TODO test this
+# ENV VIRTUAL_ENV=/usr/local/lib/python3.12/dist-packages
 
 ARG ARCH_ALT
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
@@ -89,7 +86,8 @@ RUN apt-get update && \
 ### COPY NATS & ETCD ###
 # Copy nats and etcd from dynamo_base image
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
-COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+# etcd is already in the base trtllm image
+# COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 # Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
 ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 
@@ -108,19 +106,19 @@ $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib/ucx:\
 /opt/hpcx/ompi/lib:\
 $LD_LIBRARY_PATH
-ENV PATH="${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
+# ENV PATH="${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
 ENV OPAL_PREFIX=/opt/hpcx/ompi
 
 ### VIRTUAL ENVIRONMENT SETUP ###
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 # Create virtual environment
-RUN mkdir -p /opt/dynamo/venv && \
-    uv venv /opt/dynamo/venv --python $PYTHON_VERSION
+# RUN mkdir -p /opt/dynamo/venv && \
+#     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
 
 # Activate virtual environment
-ENV VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH="/opt/dynamo/venv/bin:${PATH}"
+# ENV VIRTUAL_ENV=/opt/dynamo/venv \
+#     PATH="/opt/dynamo/venv/bin:${PATH}"
 
 ENV ENV=${ENV:-/etc/shinit_v2}
 
@@ -131,34 +129,33 @@ ENV LD_LIBRARY_PATH=${TENSORRT_LIB_DIR}:${LD_LIBRARY_PATH}
 # Install dynamo, NIXL, and dynamo-specific dependencies
 COPY benchmarks/ /opt/dynamo/benchmarks/
 COPY --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
-RUN uv pip list && \
-    ls -lah /opt/dynamo/wheelhouse/ && \
-    # ai_dynamo-0.6.0-py3-none-any.whl
-    # 0.217 -rw-r--r-- 1 root root  26M Oct 31 22:30 ai_dynamo_runtime-0.6.0-cp310-abi3-manylinux_2_28_x86_64.whl
-    ls -lah /opt/dynamo/wheelhouse/nixl/ && \
-    # nixl-0.6.0-cp312-cp312-linux_x86_64.whl
-    uv pip install --system --break-system-packages --no-cache \
-    /opt/dynamo/wheelhouse/ai_dynamo_runtime-0.6.0-cp310-abi3-manylinux_2_28_x86_64.whl \
-    /opt/dynamo/wheelhouse/ai_dynamo-0.6.0-py3-none-any.whl \
+RUN cd /opt/dynamo/wheelhouse/ && \
+    ls -lah  && \
+    ls -lah nixl/ && \
+    pip list &&\
+    pip install --break-system-packages --no-cache \
+        ai_dynamo_runtime-0.6.0-cp310-abi3-manylinux_2_28_x86_64.whl \
+        ai_dynamo-0.6.0-py3-none-any.whl \
+        nixl/nixl-0.7.0-cp312-cp312-linux_x86_64.whl &&\
     # TRTLLM has its own NIXL
     # /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-    && uv pip list \
-    && cd /opt/dynamo/benchmarks \
-    && UV_GIT_LFS=1 uv pip install --no-cache --system --break-system-packages . \
-    && uv pip list \
-    && cd - \
-    && rm -rf /opt/dynamo/benchmarks
+    pip list
+    # && cd /opt/dynamo/benchmarks \
+    # && UV_GIT_LFS=1 uv pip install --no-cache --system --break-system-packages . \
+    # && uv pip list \
+    # && cd - \
+    # && rm -rf /opt/dynamo/benchmarks
 
 # Install common and test dependencies
-RUN uv pip list
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    UV_GIT_LFS=1 uv pip install \
-        --system --break-system-packages \
-        --no-cache \
-        --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt
-RUN uv pip list
+# RUN uv pip list
+# RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+#     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+#     UV_GIT_LFS=1 uv pip install \
+#         --system --break-system-packages \
+#         --no-cache \
+#         --requirement /tmp/requirements.txt \
+#         --requirement /tmp/requirements.test.txt
+# RUN uv pip list
 # This is needed to make libucc.so visible so pytorch can use it.
 ENV LD_LIBRARY_PATH="/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
 
@@ -174,8 +171,8 @@ COPY ATTRIBUTION* LICENSE /workspace/
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
-    echo "cat ~/.launch_screen" >> ~/.bashrc && \
-    echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
+    echo "cat ~/.launch_screen" >> ~/.bashrc
+    # echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
