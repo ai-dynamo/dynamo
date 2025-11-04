@@ -122,7 +122,7 @@ For detailed explanations of router arguments (especially KV cache routing param
 
 When you launch prefill workers using `run_engines.sh --prefill`, the frontend automatically detects them and activates an internal prefill router. This prefill router:
 - Automatically routes initial token processing to dedicated prefill workers
-- Uses KV-aware routing regardless of the frontend's `--router-mode` setting
+- Uses the same routing mode as the frontend's `--router-mode` setting
 - Seamlessly integrates with your decode workers for token generation
 
 No additional configuration is needed - simply launch both decode and prefill workers, and the system handles the rest. See the [KV Cache Routing documentation](../../docs/router/kv_cache_routing.md#disaggregated-serving-prefill-and-decode) for more details.
