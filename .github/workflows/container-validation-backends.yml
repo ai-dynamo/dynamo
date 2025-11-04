@@ -428,8 +428,8 @@ jobs:
           echo "Using namespace: $NAMESPACE"
           echo "Using image: $IMAGE"
 
-          # Run the pytest command
-          pytest tests/fault_tolerance/ -m "k8s and fault_tolerance" -k "${{ matrix.framework.test_scenario }}" \
+          # Run the pytest command (note: must run from deploy/ directory where conftest.py is located)
+          pytest tests/fault_tolerance/deploy/ -m "k8s and fault_tolerance" -k "${{ matrix.framework.test_scenario }}" \
             -s -v \
             --namespace ${NAMESPACE} \
             --image ${IMAGE} \
