@@ -25,8 +25,6 @@ This module provides atomic validation primitives:
 import logging
 from typing import Any, Dict, Optional
 
-from tests.fault_tolerance.deploy.scenarios import Scenario
-
 logger = logging.getLogger(__name__)
 
 
@@ -101,4 +99,3 @@ def check_no_failures(metrics: Dict[str, Any]) -> None:
         )
 
     logger.info(f"All {total_requests} requests succeeded")
-
