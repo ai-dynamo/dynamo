@@ -39,14 +39,14 @@ warmup_isl=$chosen_isl
 warmup_osl=$chosen_osl
 warmup_prompts=10
 warmup_req_rate=250
-warmup_concurrency_list=(1 2 4 8 16 32 64 128)
+warmup_concurrency_list=(1 4 8 32 64 128)
 
 for warmup_concurrency in "${warmup_concurrency_list[@]}"
 do
     echo "Warming up model with concurrency $warmup_concurrency"
     echo "$(date '+%Y-%m-%d %H:%M:%S')"
     set -x
-    python3 benchmark_serving.py \
+    python3 -u benchmark_serving.py \
         --model ${model_name} --tokenizer ${model_path} \
         --host $head_node --port $head_port \
         --backend "dynamo" --endpoint /v1/completions \
@@ -77,7 +77,7 @@ do
 
     set -x
     echo "$(date '+%Y-%m-%d %H:%M:%S')"
-    python3 benchmark_serving.py \
+    python3 -u benchmark_serving.py \
         --model ${model_name} --tokenizer ${model_path} \
         --host $head_node --port $head_port \
         --backend "dynamo" --endpoint /v1/completions \
