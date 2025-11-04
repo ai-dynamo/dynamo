@@ -258,6 +258,12 @@ else
         } &
         PIDS+=($!)
         echo "Started $MODE worker $i (PID: $!)"
+
+        # Add delay between TensorRT-LLM worker launches to avoid MPI initialization conflicts
+        if [ "$USE_TRTLLM" = true ] && [ "$i" -lt "$NUM_WORKERS" ]; then
+            echo "Waiting 5 seconds before launching next TensorRT-LLM worker..."
+            sleep 2
+        fi
     done
 fi
 
