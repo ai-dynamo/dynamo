@@ -48,6 +48,7 @@ docker run \
     dynamo-wideep-gb200:latest
 ```
 
+In each container, you should be in the /sgl-workspace/dynamo/examples/backends/sglang directory.
 > [!IMPORTANT]
 > We recommend precompiling the DeepGemm kernels once before starting the workers. Doing so significantly reduces initialization delays and helps avoid timeout errors when starting the SGLang engine. To precompile DeepGemm kernels, please execute the following commands:
 ```bash
