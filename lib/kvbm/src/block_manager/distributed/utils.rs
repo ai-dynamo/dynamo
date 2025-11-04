@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::env;
 
+use dynamo_runtime::config::environment_names::kvbm::leader as env_kvbm_leader;
+
 const DEFAULT_LEADER_ZMQ_HOST: &str = "127.0.0.1";
 const DEFAULT_LEADER_ZMQ_PUB_PORT: u16 = 56001;
 const DEFAULT_LEADER_ZMQ_ACK_PORT: u16 = 56002;
@@ -35,16 +37,24 @@ fn validated_port_from_env(key: &str, default_port: u16) -> u16 {
 }
 
 fn get_leader_zmq_host() -> String {
-    read_env_trimmed("DYN_KVBM_LEADER_ZMQ_HOST")
+    read_env_trimmed(env_kvbm_leader::DYN_KVBM_LEADER_ZMQ_HOST)
         .unwrap_or_else(|| DEFAULT_LEADER_ZMQ_HOST.to_string())
 }
 
 fn get_leader_zmq_pub_port() -> String {
-    validated_port_from_env("DYN_KVBM_LEADER_ZMQ_PUB_PORT", DEFAULT_LEADER_ZMQ_PUB_PORT).to_string()
+    validated_port_from_env(
+        env_kvbm_leader::DYN_KVBM_LEADER_ZMQ_PUB_PORT,
+        DEFAULT_LEADER_ZMQ_PUB_PORT,
+    )
+    .to_string()
 }
 
 fn get_leader_zmq_ack_port() -> String {
-    validated_port_from_env("DYN_KVBM_LEADER_ZMQ_ACK_PORT", DEFAULT_LEADER_ZMQ_ACK_PORT).to_string()
+    validated_port_from_env(
+        env_kvbm_leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
+        DEFAULT_LEADER_ZMQ_ACK_PORT,
+    )
+    .to_string()
 }
 
 pub fn get_leader_zmq_pub_url() -> String {

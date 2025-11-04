@@ -9,13 +9,15 @@ use llm_rs::block_manager::distributed::{
 };
 use utils::{get_leader_zmq_ack_url, get_leader_zmq_pub_url};
 
-const CPU_CACHE: &str = "DYN_KVBM_CPU_CACHE_GB";
-const CPU_CACHE_OVERRIDE: &str = "DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS";
+use dynamo_runtime::config::environment_names::kvbm::cpu_cache as env_cpu_cache;
+use dynamo_runtime::config::environment_names::kvbm::disk_cache as env_disk_cache;
+use dynamo_runtime::config::environment_names::kvbm::leader as env_kvbm_leader;
 
-const DISK_CACHE: &str = "DYN_KVBM_DISK_CACHE_GB";
-const DISK_CACHE_OVERRIDE: &str = "DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS";
+const CPU_CACHE: &str = env_cpu_cache::DYN_KVBM_CPU_CACHE_GB;
+const CPU_CACHE_OVERRIDE: &str = env_cpu_cache::DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS;
 
-const LEADER_WORKER_INIT_TIMEOUT_SECS: &str = "DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS";
+const DISK_CACHE: &str = env_disk_cache::DYN_KVBM_DISK_CACHE_GB;
+const DISK_CACHE_OVERRIDE: &str = env_disk_cache::DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS;
 const DEFAULT_INIT_TIMEOUT_SECS: u64 = 120;
 
 fn read_env_usize(key: &str) -> Option<usize> {
@@ -81,7 +83,7 @@ impl KvbmLeader {
         })?;
 
         let leader_init_timeout_sec: u64 =
-            get_leader_init_timeout_secs(LEADER_WORKER_INIT_TIMEOUT_SECS);
+            get_leader_init_timeout_secs(env_kvbm_leader::DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS);
 
         let config = KvbmLeaderConfig::builder()
             .world_size(world_size)

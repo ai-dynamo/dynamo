@@ -20,6 +20,7 @@ use axum::{
     },
     routing::{get, post},
 };
+use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::{
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
@@ -59,7 +60,7 @@ pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
 /// Can be configured at compile time using the DYN_FRONTEND_BODY_LIMIT_MB environment variable
 fn get_body_limit() -> usize {
-    std::env::var("DYN_HTTP_BODY_LIMIT_MB")
+    std::env::var(env_llm::DYN_HTTP_BODY_LIMIT_MB)
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .map(|mb| mb * 1024 * 1024)

@@ -62,7 +62,10 @@ sglang_configs = {
         model="Qwen/Qwen3-0.6B",
         env={},
         models_port=8000,
-        request_payloads=[chat_payload_default(), completion_payload_default()],
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
     ),
     "disaggregated_same_gpu": SGLangConfig(
         # Uses disagg_same_gpu.sh for single-GPU disaggregated testing

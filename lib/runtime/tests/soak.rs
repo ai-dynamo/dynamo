@@ -18,7 +18,9 @@ mod integration {
     pub const DEFAULT_NAMESPACE: &str = "dynamo";
 
     use dynamo_runtime::{
-        DistributedRuntime, Runtime, Worker, logging,
+        DistributedRuntime, ErrorContext, Result, Runtime, Worker,
+        config::environment_names::testing as env_testing,
+        logging,
         pipeline::{
             AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
             SingleIn, async_trait, network::Ingress,
@@ -109,7 +111,7 @@ mod integration {
     async fn backend(runtime: DistributedRuntime) -> Result<Arc<RequestHandler>> {
         // get the queued up processing setting from env (not delayed)
         let queued_up_processing =
-            std::env::var("DYN_QUEUED_UP_PROCESSING").unwrap_or("false".to_string());
+            std::env::var(env_testing::DYN_QUEUED_UP_PROCESSING).unwrap_or("false".to_string());
         let queued_up_processing: bool = queued_up_processing.parse().unwrap_or(false);
 
         // attach an ingress to an engine
@@ -132,11 +134,13 @@ mod integration {
 
     async fn client(runtime: DistributedRuntime) -> Result<()> {
         // get the run duration from env
-        let run_duration = std::env::var("DYN_SOAK_RUN_DURATION").unwrap_or("3s".to_string());
+        let run_duration =
+            std::env::var(env_testing::DYN_SOAK_RUN_DURATION).unwrap_or("3s".to_string());
         let run_duration =
             humantime::parse_duration(&run_duration).unwrap_or(Duration::from_secs(3));
 
-        let batch_load = std::env::var("DYN_SOAK_BATCH_LOAD").unwrap_or("100".to_string());
+        let batch_load =
+            std::env::var(env_testing::DYN_SOAK_BATCH_LOAD).unwrap_or("100".to_string());
         let batch_load: usize = batch_load.parse().unwrap_or(100);
 
         let client = runtime
