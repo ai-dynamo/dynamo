@@ -1352,8 +1352,7 @@ pub mod tests {
                     .iter()
                     .find(|log_line| {
                         log_line.get("span_name")
-                            .and_then(|v| v.as_str())
-                            .map_or(false, |s| s == "parent")
+                            .and_then(|v| v.as_str()) == Some("parent")
                     })
                     .and_then(|log_line| {
                         log_line.get("span_id")
@@ -1366,8 +1365,7 @@ pub mod tests {
                     .iter()
                     .find(|log_line| {
                         log_line.get("span_name")
-                            .and_then(|v| v.as_str())
-                            .map_or(false, |s| s == "child")
+                            .and_then(|v| v.as_str()) == Some("child")
                     })
                     .and_then(|log_line| {
                         log_line.get("span_id")
@@ -1380,8 +1378,7 @@ pub mod tests {
                     .iter()
                     .find(|log_line| {
                         log_line.get("span_name")
-                            .and_then(|v| v.as_str())
-                            .map_or(false, |s| s == "grandchild")
+                            .and_then(|v| v.as_str()) == Some("grandchild")
                     })
                     .and_then(|log_line| {
                         log_line.get("span_id")
