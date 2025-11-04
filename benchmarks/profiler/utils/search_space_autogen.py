@@ -60,8 +60,13 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
         model_info = get_model_info(args.model)
         gpu_info = get_gpu_summary()
 
+        num_experts_str = (
+            f", num_experts={model_info['num_experts']}"
+            if model_info.get("num_experts")
+            else ""
+        )
         logger.info(
-            f"Model {args.model} has size {model_info['model_size']}, is_moe={model_info['is_moe']}, and max_context_length={model_info['max_context_length']}"
+            f"Model {args.model} has size {model_info['model_size']}, is_moe={model_info['is_moe']}, and max_context_length={model_info['max_context_length']}{num_experts_str}"
         )
         logger.info(
             f"Cluster has {gpu_info['gpus_per_node']}x{gpu_info['model']} GPUs per node with {gpu_info['vram']} VRAM"
@@ -88,5 +93,6 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
         args.is_moe_model = model_info["is_moe"]  # type: ignore[assignment]
         args.max_context_length = model_info["max_context_length"]  # type: ignore[assignment]
         args.num_gpus_per_node = gpu_info["gpus_per_node"]  # type: ignore[assignment]
+        args.num_experts = model_info.get("num_experts")  # type: ignore[assignment]
 
     return
