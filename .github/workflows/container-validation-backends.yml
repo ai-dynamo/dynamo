@@ -480,7 +480,7 @@ jobs:
         echo ""
 
         kubectl get all -n $KUBE_NS
-        export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep ${GRAPH_NAME}-frontend | sort -k1 | tail -n1 | awk '{print $1}')
+        export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} -l nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME} | tail -n1 | awk '{print $1}')
         export CONTAINER_PORT=$(kubectl get pod $FRONTEND_POD -n ${KUBE_NS} -o jsonpath='{.spec.containers[0].ports[?(@.name=="http")].containerPort}')
         echo "Container port is ${CONTAINER_PORT}"
         kubectl port-forward pod/$FRONTEND_POD 8000:${CONTAINER_PORT} -n ${KUBE_NS} &
