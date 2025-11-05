@@ -129,10 +129,27 @@ def get_model_info(
                 max_context_length = value
                 break
 
+    # Detect number of experts for MoE models
+    # Different models use different attribute names
+    num_experts = None
+    if config.is_moe:
+        expert_attrs = [
+            "n_routed_experts",  # DeepSeek V3/R1
+            "num_local_experts",  # Mixtral, Qwen
+            "num_experts",  # Generic
+        ]
+        for attr in expert_attrs:
+            if hasattr(config, attr):
+                value = getattr(config, attr)
+                if value is not None:
+                    num_experts = value
+                    break
+
     return {
         "model_size": model_size,
         "is_moe": config.is_moe,
         "max_context_length": max_context_length,
+        "num_experts": num_experts,
     }
 
 

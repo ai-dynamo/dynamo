@@ -1793,6 +1793,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_deepseek_v3_1() {
+        // DeepSeek v3.1 format with two tool calls encoded in special tags
+        let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Berlin", "units": "metric"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_weather_forecast<｜tool▁sep｜>{"location": "Berlin", "days": 7, "units": "imperial"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_air_quality<｜tool▁sep｜>{"location": "Berlin", "radius": 50}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
+
+        let chunks = vec![create_mock_response_chunk(text.to_string(), 0)];
+
+        let input_stream = stream::iter(chunks);
+
+        let jail = JailedStream::builder()
+            .tool_call_parser("deepseek_v3_1")
+            .build();
+        let jailed_stream = jail.apply(input_stream);
+        let results: Vec<_> = jailed_stream.collect().await;
+
+        // Should have at least one output containing both analysis text and parsed tool call
+        assert!(!results.is_empty());
+
+        // Verify a tool call was parsed with expected name and args
+        let tool_call_idx = results
+            .iter()
+            .position(test_utils::has_tool_call)
+            .expect("Should have a tool call result");
+        test_utils::assert_tool_call(
+            &results[tool_call_idx],
+            "get_current_weather",
+            json!({"location": "Berlin", "units": "metric"}),
+        );
+        for result in results {
+            let Some(data) = result.data else {
+                continue;
+            };
+            for choice in data.choices {
+                if let Some(content) = choice.delta.content {
+                    assert!(
+                        !content.contains("<｜tool▁calls▁end｜>"),
+                        "Should not contain deepseek special tokens in content"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_v3_1_chunk() {
+        // DeepSeek v3.1 format with two tool calls encoded in special tags
+        let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Berlin", "units": "metric"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_weather_forecast<｜tool▁sep｜>{"location": "Berlin", "days": 7, "units": "imperial"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_air_quality<｜tool▁sep｜>{"location": "Berlin", "radius": 50}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
+
+        // Split text into words, treating angle-bracketed tokens as one word
+        let mut words = Vec::new();
+        let mut i = 0;
+        let chars: Vec<char> = text.chars().collect();
+        while i < chars.len() {
+            if chars[i] == '<' {
+                // Find the next '>'
+                if let Some(end) = chars[i..].iter().position(|&c| c == '>') {
+                    let word: String = chars[i..=i + end].iter().collect();
+                    words.push(word);
+                    i += end + 1;
+                } else {
+                    // Malformed, just push the rest
+                    words.push(chars[i..].iter().collect());
+                    break;
+                }
+            } else if chars[i].is_whitespace() {
+                i += 1;
+            } else {
+                // Collect until next whitespace or '<'
+                let start = i;
+                while i < chars.len() && !chars[i].is_whitespace() && chars[i] != '<' {
+                    i += 1;
+                }
+                words.push(chars[start..i].iter().collect());
+            }
+        }
+
+        let chunks = words
+            .into_iter()
+            .map(|word| create_mock_response_chunk(word, 0))
+            .collect::<Vec<_>>();
+
+        let input_stream = stream::iter(chunks);
+
+        let jail = JailedStream::builder()
+            .tool_call_parser("deepseek_v3_1")
+            .build();
+        let jailed_stream = jail.apply(input_stream);
+        let results: Vec<_> = jailed_stream.collect().await;
+
+        // Should have at least one output containing both analysis text and parsed tool call
+        assert!(!results.is_empty());
+
+        // Verify a tool call was parsed with expected name and args
+        let tool_call_idx = results
+            .iter()
+            .position(test_utils::has_tool_call)
+            .expect("Should have a tool call result");
+        test_utils::assert_tool_call(
+            &results[tool_call_idx],
+            "get_current_weather",
+            json!({"location": "Berlin", "units": "metric"}),
+        );
+        for result in results {
+            let Some(data) = result.data else {
+                continue;
+            };
+            for choice in data.choices {
+                if let Some(content) = choice.delta.content {
+                    assert!(
+                        !content.contains("<｜tool▁calls▁end｜>"),
+                        "Should not contain deepseek special tokens in content"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_jailed_stream_mistral_false_positive_curly() {
         // Curly brace in normal text should not trigger tool call detection for mistral
         let chunks = vec![

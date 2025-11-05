@@ -1034,7 +1034,7 @@ def test_indexers_sync(request, runtime_services, predownload_tokenizers):
 
             # Wait for a second before creating the second router
             logger.info("Waiting for 1 second before creating second router")
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
 
             # Launch second router - will automatically sync with the first router's state
             logger.info("Creating second KV router")

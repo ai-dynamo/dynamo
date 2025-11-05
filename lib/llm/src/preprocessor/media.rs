@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod common;
+mod decoders;
 mod loader;
 
 pub use common::EncodedMediaData;
+pub use decoders::{Decoder, ImageDecoder, MediaDecoder};
 pub use loader::MediaLoader;
