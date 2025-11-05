@@ -22,8 +22,8 @@ import numpy as np
 import yaml
 
 from benchmarks.profiler.utils.aiperf import benchmark_decode, benchmark_prefill
-from benchmarks.profiler.utils.config import generate_dgd_config_with_planner
 from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+from benchmarks.profiler.utils.dgd_generation import generate_dgd_config_with_planner
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from benchmarks.profiler.utils.plot import (
     plot_decode_performance,
@@ -92,7 +92,6 @@ async def run_profile(args):
         with open(args.config, "r") as f:
             config = yaml.safe_load(f)
 
-        config = config_modifier.update_model(config, args.model)
         if args.dgd_image:
             config = config_modifier.update_image(config, args.dgd_image)
             logger.info(f"Using DGD image: {args.dgd_image}")
@@ -741,9 +740,12 @@ async def run_profile(args):
         )
         logger.info(f"Final DGD config with planner: {config}")
 
-        # save DGD config with planner
+        # save DGD config with planner; support multi-document output when a ConfigMap is included
         with open(f"{args.output_dir}/config_with_planner.yaml", "w") as f:
-            yaml.dump(config, f)
+            if isinstance(config, list):
+                yaml.dump_all(config, f)
+            else:
+                yaml.dump(config, f)
 
     except Exception as e:
         logger.error(f"Profile job failed with error: {e}")
