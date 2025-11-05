@@ -100,8 +100,6 @@ spec:
             - ./recipes/qwen3/trtllm/decode.yaml
             - --disaggregation-mode
             - decode
-            - --disaggregation-strategy
-            - decode_first
     TRTLLMPrefillWorker:
       dynamoNamespace: trtllm-disagg-planner
       envFromSecret: hf-token-secret
@@ -129,5 +127,3 @@ spec:
             - ./recipes/qwen3/trtllm/prefill.yaml
             - --disaggregation-mode
             - prefill
-            - --disaggregation-strategy
-            - decode_first

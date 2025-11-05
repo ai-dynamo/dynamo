@@ -38,7 +38,6 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 - [Quick Start](#quick-start)
 - [Single Node Examples](#single-node-examples)
 - [Advanced Examples](#advanced-examples)
-- [Disaggregation Strategy](#disaggregation-strategy)
 - [KV Cache Transfer](#kv-cache-transfer-in-disaggregated-serving)
 - [Client](#client)
 - [Benchmarking](#benchmarking)
@@ -124,7 +123,7 @@ This figure shows an overview of the major components to deploy:
                                  +------------------+
 ```
 
-**Note:** The diagram above shows all possible components in a deployment. Depending on the chosen disaggregation strategy, you can configure whether Worker1 handles prefill and Worker2 handles decode, or vice versa. For more information on how to select and configure these strategies, see the [Disaggregation Strategy](#disaggregation-strategy) section below.
+**Note:** The diagram above shows all possible components in a deployment. In disaggregated serving, Worker1 acts as the decode worker and Worker2 as the prefill worker, with the unified frontend coordinating request routing between them.
 
 ### Aggregated
 ```bash
@@ -140,9 +139,6 @@ cd $DYNAMO_HOME/examples/backends/trtllm
 
 ### Disaggregated
 
-> [!IMPORTANT]
-> Disaggregated serving supports two strategies for request flow: `"prefill_first"` and `"decode_first"`. By default, the script below uses the `"decode_first"` strategy, which can reduce response latency by minimizing extra hops in the return path. You can switch strategies by setting the `DISAGGREGATION_STRATEGY` environment variable.
-
 ```bash
 cd $DYNAMO_HOME/examples/backends/trtllm
 ./launch/disagg.sh
@@ -151,7 +147,7 @@ cd $DYNAMO_HOME/examples/backends/trtllm
 ### Disaggregated with KV Routing
 
 > [!IMPORTANT]
-> Disaggregated serving with KV routing uses a "prefill first" workflow by default. Currently, Dynamo supports KV routing to only one endpoint per model. In disaggregated workflow, it is generally more effective to route requests to the prefill worker. If you wish to use a "decode first" workflow instead, you can simply set the `DISAGGREGATION_STRATEGY` environment variable accordingly.
+> In disaggregated workflow, requests are routed to the prefill worker to maximize KV cache reuse.
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/trtllm
@@ -199,20 +195,6 @@ NOTE: To send a request to a multi-node deployment, target the node which is run
 To benchmark your deployment with AIPerf, see this utility script, configuring the
 `model` name and `host` based on your deployment: [perf.sh](../../../benchmarks/llm/perf.sh)
 
-
-## Disaggregation Strategy
-
-The disaggregation strategy controls how requests are distributed between the prefill and decode workers in a disaggregated deployment.
-
-By default, Dynamo uses a `decode first` strategy: incoming requests are initially routed to the decode worker, which then forwards them to the prefill worker in round-robin fashion. The prefill worker processes the request and returns results to the decode worker for any remaining decode operations.
-
-When using KV routing, however, Dynamo switches to a `prefill first` strategy. In this mode, requests are routed directly to the prefill worker, which can help maximize KV cache reuse and improve overall efficiency for certain workloads. Choosing the appropriate strategy can have a significant impact on performance, depending on your use case.
-
-The disaggregation strategy can be set using the `DISAGGREGATION_STRATEGY` environment variable. You can set the strategy before launching your deployment, for example:
-```bash
-DISAGGREGATION_STRATEGY="prefill_first" ./launch/disagg.sh
-```
-
 ## KV Cache Transfer in Disaggregated Serving
 
 Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disaggregated serving: UCX (default) and NIXL (experimental). For detailed information and configuration instructions for each method, see the [KV cache transfer guide](./kv-cache-transfer.md).
@@ -223,10 +205,14 @@ Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disag
 You can enable [request migration](../../../docs/fault_tolerance/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
 
 ```bash
+# For decode and aggregated workers
 python3 -m dynamo.trtllm ... --migration-limit=3
 ```
 
-This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../../../docs/fault_tolerance/request_migration.md) documentation for details on how this works.
+> [!IMPORTANT]
+> **Prefill workers do not support request migration** and must use `--migration-limit=0` (the default). Prefill workers only process prompts and return KV cache state - they don't maintain long-running generation requests that would benefit from migration.
+
+See the [Request Migration Architecture](../../../docs/fault_tolerance/request_migration.md) documentation for details on how this works.
 
 ## Request Cancellation
 
@@ -237,8 +223,7 @@ When a user cancels a request (e.g., by disconnecting from the frontend), the re
 | | Prefill | Decode |
 |-|---------|--------|
 | **Aggregated** | ✅ | ✅ |
-| **Disaggregated (Decode-First)** | ✅ | ✅ |
-| **Disaggregated (Prefill-First)** | ✅ | ✅ |
+| **Disaggregated** | ✅ | ✅ |
 
 For more details, see the [Request Cancellation Architecture](../../fault_tolerance/request_cancellation.md) documentation.
 
