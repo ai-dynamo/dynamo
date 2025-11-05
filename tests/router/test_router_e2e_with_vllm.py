@@ -16,9 +16,6 @@ from tests.router.common import (  # utilities
 )
 from tests.utils.managed_process import ManagedProcess
 
-pytestmark = pytest.mark.pre_merge
-
-
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
@@ -259,6 +256,7 @@ class VLLMProcess:
         time.sleep(2)
 
 
+@pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.vllm
 @pytest.mark.model(MODEL_NAME)
@@ -316,6 +314,7 @@ def test_vllm_kv_router_basic(request, runtime_services, predownload_tokenizers)
             vllm_workers.__exit__(None, None, None)
 
 
+@pytest.mark.e2e
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.model(MODEL_NAME)
@@ -366,6 +365,7 @@ def test_router_decisions_vllm_multiple_workers(
             vllm_workers.__exit__(None, None, None)
 
 
+@pytest.mark.e2e
 @pytest.mark.vllm
 @pytest.mark.gpu_2
 @pytest.mark.skip(
