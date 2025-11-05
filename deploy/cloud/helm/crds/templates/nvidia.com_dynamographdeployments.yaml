@@ -814,12 +814,9 @@ spec:
                         type: string
                       dynamoNamespace:
                         description: |-
-                          Deprecated: DynamoNamespace is deprecated and will be removed in a future version.
+                          DynamoNamespace is deprecated and will be removed in a future version.
                           The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component
                         type: string
-                        x-kubernetes-validations:
-                          - message: dynamoNamespace is deprecated and will be removed in a future version; avoid using this field
-                            rule: self == oldSelf
                       envFromSecret:
                         description: |-
                           EnvFromSecret references a Secret whose key/value pairs will be exposed as
