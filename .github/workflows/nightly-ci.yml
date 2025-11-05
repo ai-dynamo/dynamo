@@ -55,7 +55,7 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: nightly-vllm-${{ matrix.platform.arch }}
-          pytest_marks: "nightly and vllm and unit"
+          pytest_marks: "vllm and unit"
           framework: "vllm"
           test_type: "unit"
           platform_arch: ${{ matrix.platform.arch }}
