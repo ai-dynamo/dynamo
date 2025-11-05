@@ -8,12 +8,14 @@ import logging
 import os
 import signal
 import sys
+from collections import defaultdict
 from typing import Tuple
 
 import torch
 import uvloop
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.inputs.data import TokensPrompt
+from vllm.lora.request import LoRARequest
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -110,6 +112,8 @@ class VllmBaseWorker:
         self.engine_args = config.engine_args
         self.config = config
         self.setup_vllm_engine(component, endpoint)
+        # todo (bis): use globally unique id for lora name using blake3 hash of lora name
+        self.lora_name_to_id = defaultdict(lambda: len(self.lora_name_to_id) + 1)
 
     async def async_init(self, runtime: DistributedRuntime):
         pass
@@ -188,6 +192,69 @@ class VllmBaseWorker:
     def cleanup(self):
         """Override in subclasses if cleanup is needed."""
         pass
+
+    async def load_lora(self, request=None):
+        """
+        Load a LoRA adapter dynamically into the vLLM's AsyncLLM engine.
+        Expected request format:
+        {
+            "lora_name": str,
+            "lora_path": str,
+        }
+        Note: Requires VLLM_ALLOW_RUNTIME_LORA_UPDATING=True environment variable and vLLM started with --enable-lora flag.
+        """
+        try:
+            if request is None:
+                yield {
+                    "status": "error",
+                    "message": "Request is required with 'lora_name' and 'lora_path' fields",
+                }
+                return
+            lora_name = request.get("lora_name")
+            lora_path = request.get("lora_path")
+            if not lora_name or not lora_path:
+                yield {
+                    "status": "error",
+                    "message": "Both 'lora_name' and 'lora_path' are required in request",
+                }
+                return
+            logger.info(f"Loading LoRA adapter: {lora_name} from {lora_path}")
+            lora_id = self.lora_name_to_id[lora_name]
+            await self.engine_client.add_lora(
+                LoRARequest(
+                    lora_name=lora_name, lora_int_id=lora_id, lora_path=lora_path
+                )
+            )
+            logger.info(
+                f"Successfully loaded LoRA adapter: {lora_name} with ID {lora_id}"
+            )
+            yield {
+                "status": "success",
+                "message": f"LoRA adapter '{lora_name}' loaded successfully",
+                "lora_name": lora_name,
+                "lora_path": lora_path,
+                "lora_id": lora_id,
+            }
+        except Exception as e:
+            logger.error(f"Failed to load LoRA adapter: {e}")
+            yield {"status": "error", "message": str(e)}
+
+    async def list_loras(self, request=None):
+        """
+        List all loaded LoRA adapters.
+        Returns a dictionary of lora_name -> lora_id mappings.
+        """
+        try:
+            # Convert defaultdict to regular dict for JSON serialization
+            loras = dict(self.lora_name_to_id)
+            yield {
+                "status": "success",
+                "loras": loras,
+                "count": len(loras),
+            }
+        except Exception as e:
+            logger.error(f"Failed to list LoRA adapters: {e}")
+            yield {"status": "error", "message": str(e)}
 
 
 class VllmDecodeWorker(VllmBaseWorker):
@@ -441,7 +508,8 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
 
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
-
+    load_lora_endpoint = component.endpoint("load_lora")
+    list_loras_endpoint = component.endpoint("list_loras")
     if args.worker_type in ["prefill", "encode_prefill"]:
         handler: VllmBaseWorker = VllmPDWorker(
             args, component, generate_endpoint, config
@@ -461,6 +529,12 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks, metrics_labels=metrics_labels
+            ),
+            load_lora_endpoint.serve_endpoint(
+                handler.load_lora, metrics_labels=metrics_labels
+            ),
+            list_loras_endpoint.serve_endpoint(
+                handler.list_loras, metrics_labels=metrics_labels
             ),
         )
     except Exception as e:
