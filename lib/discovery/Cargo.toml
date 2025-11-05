@@ -59,14 +59,9 @@ blake2 = { version = "0.10", optional = true }
 [dev-dependencies]
 tokio = { version = "1.43", features = ["full", "test-util"] }
 clap = { version = "4", features = ["derive"] }
-tracing-subscriber = "0.3"
 tempfile = "3"
 testcontainers = "0.25"
-
-[dependencies.tracing-subscriber]
-version = "0.3"
-features = ["env-filter"]
-optional = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
 default = ["p2p", "etcd"]
