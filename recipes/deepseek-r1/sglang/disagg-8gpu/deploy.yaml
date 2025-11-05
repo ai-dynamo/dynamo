@@ -67,8 +67,6 @@ spec:
             - --skip-tokenizer-init
             - --disaggregation-mode
             - decode
-            - --disaggregation-transfer-backend
-            - nixl
             - --disaggregation-bootstrap-port
             - "30001"
             - --host
@@ -114,8 +112,6 @@ spec:
             - --skip-tokenizer-init
             - --disaggregation-mode
             - prefill
-            - --disaggregation-transfer-backend
-            - nixl
             - --disaggregation-bootstrap-port
             - "30001"
             - --host

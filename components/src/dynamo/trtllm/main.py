@@ -45,6 +45,7 @@ from dynamo.trtllm.engine import TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import get_publisher
+from dynamo.trtllm.request_handlers.handler_base import DisaggregationMode
 from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
@@ -53,7 +54,6 @@ from dynamo.trtllm.utils.trtllm_utils import (
     Config,
     cmd_line_args,
     deep_update,
-    is_first_worker,
     parse_endpoint,
 )
 
@@ -125,37 +125,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     Instantiate and serve
     """
     logging.info(f"Initializing the worker with config: {config}")
-
-    next_client = None
-    if config.next_endpoint:
-        logging.info(
-            f"Initializing next worker client for endpoint: {config.next_endpoint}"
-        )
-        parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
-            config.next_endpoint
-        )
-        next_client = (
-            await runtime.namespace(parsed_namespace)
-            .component(parsed_component_name)
-            .endpoint(parsed_endpoint_name)
-            .client()
-        )
-
-    # Set up prefill router client for decode workers
-    next_router_client = None
-    if config.disaggregation_mode.value == "decode":
-        try:
-            logging.info("Initializing prefill router client")
-            next_router_client = (
-                await runtime.namespace(config.namespace)
-                .component("router")  # Standalone router for prefill workers
-                .endpoint("generate")
-                .client()
-            )
-            logging.info("Prefill router client initialized successfully")
-        except Exception as e:
-            logging.warning(f"Failed to initialize prefill router client: {e}")
-            logging.info("Will use direct prefill worker client only")
 
     encode_client = None
     if config.encode_endpoint:
@@ -273,7 +242,13 @@ async def init(runtime: DistributedRuntime, config: Config):
     default_sampling_params._setup(tokenizer)
     default_sampling_params.stop = None
     model_input = ModelInput.Tokens
-    model_type = ModelType.Chat | ModelType.Completions
+
+    # Set model type based on disaggregation mode for unified frontend support
+    if config.disaggregation_mode == DisaggregationMode.PREFILL:
+        model_type = ModelType.Prefill
+    else:
+        model_type = ModelType.Chat | ModelType.Completions
+
     multimodal_processor = None
 
     if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
@@ -376,9 +351,6 @@ async def init(runtime: DistributedRuntime, config: Config):
             default_sampling_params=default_sampling_params,
             publisher=None,
             disaggregation_mode=config.disaggregation_mode,
-            disaggregation_strategy=config.disaggregation_strategy,
-            next_client=next_client,
-            next_router_client=next_router_client,
             encode_client=encode_client,
             multimodal_processor=multimodal_processor,
             connector=connector,
@@ -386,14 +358,10 @@ async def init(runtime: DistributedRuntime, config: Config):
             metrics_collector=metrics_collector,
         )
 
-        if next_client:
-            logging.info(
-                f"Waiting for the next endpoint to be ready: {config.next_endpoint}"
-            )
-            await next_client.wait_for_instances()
-
-        if is_first_worker(config):
-            # Register the model with runtime config
+        # Register the model with runtime config
+        # Encode workers do NOT register - they're internal workers only
+        # Prefill and decode workers register - frontend detects their role via ModelType
+        if config.disaggregation_mode != DisaggregationMode.ENCODE:
             await register_llm(
                 model_input,
                 model_type,
