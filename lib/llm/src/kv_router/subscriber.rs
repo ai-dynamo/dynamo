@@ -32,8 +32,6 @@ use crate::{
 const SNAPSHOT_STABILITY_DELAY: Duration = Duration::from_millis(100);
 const MAX_SNAPSHOT_STABILITY_ATTEMPTS: usize = 10;
 
-/// Jitter range for snapshot writes (±SNAPSHOT_THRESHOLD_JITTER)
-const SNAPSHOT_THRESHOLD_JITTER: i64 = 1000;
 const CHECK_INTERVAL_BASE: Duration = Duration::from_secs(1);
 const CHECK_INTERVAL_JITTER_MS: i64 = 100;
 
@@ -405,10 +403,7 @@ pub async fn start_kv_router_background(
                         continue;
                     };
 
-                    // Add jitter to threshold to probabilistically avoid concurrent snapshots
-                    let base_threshold = router_snapshot_threshold.unwrap_or(u32::MAX) as i64;
-                    let jitter = rand::rng().random_range(-SNAPSHOT_THRESHOLD_JITTER..=SNAPSHOT_THRESHOLD_JITTER);
-                    let threshold = (base_threshold + jitter).max(10) as u64;
+                    let threshold = router_snapshot_threshold.unwrap_or(u32::MAX) as u64;
 
                     if message_count <= threshold {
                         continue;
