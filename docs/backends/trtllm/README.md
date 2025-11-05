@@ -219,8 +219,7 @@ When a user cancels a request (e.g., by disconnecting from the frontend), the re
 | | Prefill | Decode |
 |-|---------|--------|
 | **Aggregated** | ✅ | ✅ |
-| **Disaggregated (Decode-First)** | ✅ | ✅ |
-| **Disaggregated (Prefill-First)** | ✅ | ✅ |
+| **Disaggregated** | ✅ | ✅ |
 
 For more details, see the [Request Cancellation Architecture](../../fault_tolerance/request_cancellation.md) documentation.
 
