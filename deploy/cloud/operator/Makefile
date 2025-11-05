@@ -44,6 +44,19 @@ help: ## Display this help.
 
 ##@ Development
 
+.PHONY: check
+check: generate manifests generate-api-docs
+	@echo "> Checking for uncommitted changes"
+	@if [ -n "$$(git status --porcelain)" ]; then \
+		echo "ERROR: Git tree is dirty after running validation steps."; \
+		echo "Please check the diff to identify the step that dirtied the tree."; \
+		git --no-pager status; \
+		git --no-pager diff; \
+		exit 1; \
+	fi
+	@echo "> Check complete"
+
+
 .PHONY: ensure-yq
 ensure-yq:
 	@if ! command -v yq &> /dev/null; then \
